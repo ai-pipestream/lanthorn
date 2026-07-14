@@ -1164,6 +1164,69 @@ pub(crate) struct MapRenderCache {
     pub rm: mapper::render::RenderMap,
 }
 
+/// Modal / overlay UI state carved off `AppState` (SQ-0307). Each field's
+/// presence (`true` / `Some`) means the corresponding modal, dialog, or
+/// full-screen overlay is open; `dialog_focus` is the shared button-focus
+/// index for the currently-open modal. Grouping only — no behaviour change.
+#[derive(Debug, Default)]
+pub struct OverlayState {
+    /// When true, show the hotkey dialog overlay. Opened by the prefix key (Ctrl+K),
+    /// closed by the prefix key again or 'q'.
+    pub hotkey_dialog: bool,
+    /// Active symbol gallery modal state. `None` means the gallery is closed.
+    pub gallery: Option<GalleryState>,
+    /// Active saves-manager modal state. `None` means the modal is closed.
+    pub saves: Option<SavesState>,
+    /// Active file-browser modal state. `None` means the browser is closed.
+    pub file_browser: Option<FileBrowserState>,
+    /// Active VFS file-picker modal state (read-mode `create_by_prompt`).
+    /// `None` means the picker is closed.
+    pub file_picker: Option<FilePickerState>,
+    /// Active verb/item token-palette modal state. `None` means the modal is closed.
+    pub verb_menu: Option<VerbMenuState>,
+    /// Active config-screen modal state. `None` means the screen is closed.
+    pub config_screen: Option<ConfigScreenState>,
+    /// Active style-editor full-screen state. `None` means the editor is closed.
+    pub style_editor: Option<StyleEditorState>,
+    /// Active glyph-picker modal state. `None` means the picker is closed.
+    /// Opened over the style editor; closes on pick/clear/cancel.
+    pub glyph_picker: Option<GlyphPickerState>,
+    /// Active rewind/replay modal state. `None` means the modal is closed.
+    pub replay: Option<ReplayState>,
+    /// When true, the reset-confirmation dialog is open.
+    pub reset_dialog: bool,
+    /// When true, the "Also clear the map" checkbox is checked in the reset dialog.
+    pub reset_clear_map: bool,
+    /// When true, the "Delete saved progress" checkbox is checked in the reset
+    /// dialog: on confirm, the game's auto persistent data (VFS cache + aux + auto
+    /// Save State) is deleted so the game re-initializes from scratch.
+    pub reset_delete_data: bool,
+    /// When `Some`, the save-name modal is open (host Save State slot or in-game
+    /// `@save`). Replaces the old bottom-bar `PromptKind::SaveAs` overlay so the
+    /// prompt renders in the graphics-free dialog area instead of hiding behind a
+    /// Glulx graphics window.
+    pub save_name_dialog: Option<SaveNameDialog>,
+    /// Active single-field text-entry dialog (rename room / edit notes / relabel
+    /// edge / rename layer / config path / create-file), if any. A modal drawn in
+    /// the graphics-free dialog area; its run-loop intercept owns key/mouse input
+    /// while open. (SQ-0307)
+    pub text_entry: Option<TextEntryDialog>,
+    /// When `Some`, the two-button "delete this save?" confirm dialog is open for
+    /// the named save at this path. Confirm deletes it; cancel keeps it. (SQ-0307)
+    pub confirm_delete_save: Option<std::path::PathBuf>,
+    /// When true, the first-use aux-storage prompt is open.
+    pub aux_prompt: bool,
+    /// When true, the "Save state before quitting?" confirmation dialog is open.
+    pub quit_dialog: bool,
+    /// When true, the "Resume saved game?" dialog is shown at startup.
+    pub launch_dialog: bool,
+    /// Active Hints panel session. `None` means the panel is closed.
+    pub hints: Option<HintSession>,
+    /// Index of the currently focused button in an open modal dialog. Reset to
+    /// a button index when a modal opens; cycled by Tab/Shift-Tab.
+    pub dialog_focus: usize,
+}
+
 #[derive(Debug)]
 pub struct AppState {
     pub focus: Focus,
@@ -1223,14 +1286,10 @@ pub struct AppState {
     pub input: String,
     /// Transient status message shown on the status line (cleared on next keypress/turn).
     pub status_msg: Option<String>,
-    /// Active single-field text-entry dialog (rename room / edit notes / relabel
-    /// edge / rename layer / config path / create-file), if any. A modal drawn in
-    /// the graphics-free dialog area; its run-loop intercept owns key/mouse input
-    /// while open. (SQ-0307)
-    pub text_entry: Option<TextEntryDialog>,
-    /// When `Some`, the two-button "delete this save?" confirm dialog is open for
-    /// the named save at this path. Confirm deletes it; cancel keeps it. (SQ-0307)
-    pub confirm_delete_save: Option<std::path::PathBuf>,
+    /// Modal / overlay UI cluster: every field whose presence means a
+    /// modal, dialog, or full-screen overlay is open, plus the shared
+    /// modal button-focus index. Grouped off `AppState` in SQ-0307.
+    pub overlays: OverlayState,
     /// When true, draw each chained room's alignment code (`R{id}` / `C{id}`) in
     /// its box interior (Boxes zoom only).  Toggled by `Ctrl+A`.
     pub show_alignment: bool,
@@ -1298,9 +1357,6 @@ pub struct AppState {
     /// Allows 1-character precision drag panning without changing the cell-unit scroll.
     /// Cleared by `recenter_on`.
     pub char_pan: (i32, i32),
-    /// When true, show the hotkey dialog overlay. Opened by the prefix key (Ctrl+K),
-    /// closed by the prefix key again or 'q'.
-    pub hotkey_dialog: bool,
 
     /// Resolved glyph set for the map renderer.  Defaults to today's hardcoded glyphs;
     /// overwritten at startup (and on `/reload`) from `style.toml` via `style::resolve`.
@@ -1318,11 +1374,7 @@ pub struct AppState {
     /// Defaults to the built-in layout; overwritten at startup from config.
     pub hotkeys: crate::keymap::HotkeyLayout,
 
-    /// Active symbol gallery modal state. `None` means the gallery is closed.
-    pub gallery: Option<GalleryState>,
 
-    /// Active saves-manager modal state. `None` means the modal is closed.
-    pub saves: Option<SavesState>,
 
     /// Set while a game-initiated (v4+) `@save`/`@restore` is awaiting the host's
     /// file I/O. The saves dialog runs in "in-game" mode: its confirm/cancel call
@@ -1334,15 +1386,8 @@ pub struct AppState {
     /// the VM resume + recenter. `Some(true)` = file written. Cleared on resume.
     pub ingame_resume_save: Option<bool>,
 
-    /// Active file-browser modal state. `None` means the browser is closed.
-    pub file_browser: Option<FileBrowserState>,
 
-    /// Active VFS file-picker modal state (read-mode `create_by_prompt`).
-    /// `None` means the picker is closed.
-    pub file_picker: Option<FilePickerState>,
 
-    /// Active verb/item token-palette modal state. `None` means the modal is closed.
-    pub verb_menu: Option<VerbMenuState>,
 
     /// The resolved runtime config. Set at startup; updated on config-screen Save.
     pub config: crate::config::Config,
@@ -1363,15 +1408,8 @@ pub struct AppState {
     /// Which visible pane resize mode is currently adjusting.
     pub resize_target: ResizeTarget,
 
-    /// Active config-screen modal state. `None` means the screen is closed.
-    pub config_screen: Option<ConfigScreenState>,
 
-    /// Active style-editor full-screen state. `None` means the editor is closed.
-    pub style_editor: Option<StyleEditorState>,
 
-    /// Active glyph-picker modal state. `None` means the picker is closed.
-    /// Opened over the style editor; closes on pick/clear/cancel.
-    pub glyph_picker: Option<GlyphPickerState>,
 
     /// Session turn counter; incremented on each non-empty `SubmitCommand`.
     /// Written into `Meta` on every save (quick-save and named).
@@ -1387,8 +1425,6 @@ pub struct AppState {
     /// is on; persisted into the `.babelmap` archive. Empty otherwise.
     pub history: Vec<crate::history::TurnRecord>,
 
-    /// Active rewind/replay modal state. `None` means the modal is closed.
-    pub replay: Option<ReplayState>,
 
     /// A game `create_by_prompt` awaiting a host filename (its modal is open).
     pub pending_filename: Option<crate::session::FilenameReq>,
@@ -1458,37 +1494,18 @@ pub struct AppState {
 
     // ── Reset dialog state ────────────────────────────────────────────────────
 
-    /// When true, the reset-confirmation dialog is open.
-    pub reset_dialog: bool,
-    /// When true, the "Also clear the map" checkbox is checked in the reset dialog.
-    pub reset_clear_map: bool,
-    /// When true, the "Delete saved progress" checkbox is checked in the reset
-    /// dialog: on confirm, the game's auto persistent data (VFS cache + aux + auto
-    /// Save State) is deleted so the game re-initializes from scratch.
-    pub reset_delete_data: bool,
 
     // ── Save-name dialog state ────────────────────────────────────────────────
 
-    /// When `Some`, the save-name modal is open (host Save State slot or in-game
-    /// `@save`). Replaces the old bottom-bar `PromptKind::SaveAs` overlay so the
-    /// prompt renders in the graphics-free dialog area instead of hiding behind a
-    /// Glulx graphics window.
-    pub save_name_dialog: Option<SaveNameDialog>,
 
     // ── Aux-storage prompt state ──────────────────────────────────────────────
 
-    /// When true, the first-use aux-storage prompt is open.
-    pub aux_prompt: bool,
 
     // ── Quit dialog state ─────────────────────────────────────────────────────
 
-    /// When true, the "Save state before quitting?" confirmation dialog is open.
-    pub quit_dialog: bool,
 
     // ── Launch dialog state ───────────────────────────────────────────────────
 
-    /// When true, the "Resume saved game?" dialog is shown at startup.
-    pub launch_dialog: bool,
     /// Stashed restore data shown while the launch dialog is open.
     /// Tuple is (engine-tagged save, transcript lines, transcript kinds, screen).
     pub pending_resume: PendingResume,
@@ -1509,8 +1526,6 @@ pub struct AppState {
 
     // ── Hints panel state ─────────────────────────────────────────────────────
 
-    /// Active Hints panel session. `None` means the panel is closed.
-    pub hints: Option<HintSession>,
 
     // ── Search state ──────────────────────────────────────────────────────────
 
@@ -1523,9 +1538,6 @@ pub struct AppState {
 
     // ── Dialog focus state ────────────────────────────────────────────────────
 
-    /// Index of the currently focused button in an open modal dialog. Reset to
-    /// a button index when a modal opens; cycled by Tab/Shift-Tab.
-    pub dialog_focus: usize,
 
     // ── Char-input mode ───────────────────────────────────────────────────────
 
@@ -1597,8 +1609,7 @@ impl Default for AppState {
             modal_list_viewport: 0,
             input: String::new(),
             status_msg: None,
-            text_entry: None,
-            confirm_delete_save: None,
+            overlays: OverlayState::default(),
             show_alignment: false,
             show_portal_labels: false,
             tidy_anim: None,
@@ -1623,30 +1634,20 @@ impl Default for AppState {
             transcript_geom: std::cell::Cell::new(None),
             selection_text: std::cell::RefCell::new(None),
             char_pan: (0, 0),
-            hotkey_dialog: false,
             symbols: crate::symbols::SymbolSet::default(),
             colors: crate::colors::ColorScheme::terminal_default(),
             keymap: crate::keymap::KeyMap::default(),
             hotkeys: crate::keymap::HotkeyLayout::default(),
-            gallery: None,
-            saves: None,
             ingame_io: None,
             ingame_resume_save: None,
-            file_browser: None,
-            file_picker: None,
-            verb_menu: None,
             config: crate::config::Config::default(),
             pane_sizes: PaneSizes { split_ratio: 50, verb_dock_pct: 32, inv_dock_pct: 33 },
             pending_config_write: false,
             resize_mode: false,
             resize_target: ResizeTarget::StoryMap,
-            config_screen: None,
-            style_editor: None,
-            glyph_picker: None,
             turns: 0,
             unsaved_progress: false,
             history: Vec::new(),
-            replay: None,
             pending_filename: None,
             filename_submitted: None,
             dict_words: Vec::new(),
@@ -1663,24 +1664,15 @@ impl Default for AppState {
             inventory_fallback: Vec::new(),
             prev_location: None,
             prev_objects_here: std::collections::BTreeSet::new(),
-            reset_dialog: false,
-            save_name_dialog: None,
-            reset_clear_map: false,
-            reset_delete_data: false,
-            aux_prompt: false,
-            quit_dialog: false,
-            launch_dialog: false,
             pending_resume: None,
             show_room_numbers: false,
             loc_method: None,
             current_room_name: None,
             show_loc_method: false,
             show_status_bar: true,
-            hints: None,
             search_query: None,
             search_matches: Vec::new(),
             search_idx: 0,
-            dialog_focus: 0,
             char_mode: false,
             event_wait: false,
             input_deadline: None,
@@ -1704,16 +1696,16 @@ impl AppState {
             || self.anim_build_job.is_some()
             || self.sound_pulse.is_some()
             || self.scroll_anim.is_some()
-            || self.saves.as_ref().is_some_and(|s| s.scroll.has_active_animation())
-            || self.file_browser.as_ref().is_some_and(|fb| fb.scroll.has_active_animation())
-            || self.config_screen.as_ref().is_some_and(|cs| cs.scroll.has_active_animation())
-            || self.verb_menu.as_ref().is_some_and(|vm| {
+            || self.overlays.saves.as_ref().is_some_and(|s| s.scroll.has_active_animation())
+            || self.overlays.file_browser.as_ref().is_some_and(|fb| fb.scroll.has_active_animation())
+            || self.overlays.config_screen.as_ref().is_some_and(|cs| cs.scroll.has_active_animation())
+            || self.overlays.verb_menu.as_ref().is_some_and(|vm| {
                 vm.verb_scroll.has_active_animation()
                     || vm.noun_scroll.has_active_animation()
                     || vm.prep_scroll.has_active_animation()
             })
-            || self.replay.as_ref().is_some_and(|r| r.scroll.has_active_animation())
-            || self.hints.as_ref().is_some_and(|h| h.has_active_animation())
+            || self.overlays.replay.as_ref().is_some_and(|r| r.scroll.has_active_animation())
+            || self.overlays.hints.as_ref().is_some_and(|h| h.has_active_animation())
             || self.inv_dock.active()
             || self.verb_dock.active()
     }
@@ -1723,8 +1715,8 @@ impl AppState {
     /// the panel visibly slides out instead of vanishing instantly), and is
     /// only dropped once the slide is done and it's logically closed.
     pub fn settle_verb_dock(&mut self) {
-        if self.verb_menu.is_some() && !self.verb_dock.open && !self.verb_dock.active() {
-            self.verb_menu = None;
+        if self.overlays.verb_menu.is_some() && !self.verb_dock.open && !self.verb_dock.active() {
+            self.overlays.verb_menu = None;
         }
     }
 
@@ -1859,26 +1851,26 @@ impl AppState {
     ///
     /// Used to suppress the story input cursor while an overlay is covering the pane.
     pub fn any_overlay_open(&self) -> bool {
-        self.gallery.is_some()
-            || self.saves.is_some()
-            || self.file_browser.is_some()
-            || self.file_picker.is_some()
-            || self.config_screen.is_some()
-            || self.style_editor.is_some()
-            || self.glyph_picker.is_some()
-            || self.verb_menu.is_some()
-            || self.hotkey_dialog
+        self.overlays.gallery.is_some()
+            || self.overlays.saves.is_some()
+            || self.overlays.file_browser.is_some()
+            || self.overlays.file_picker.is_some()
+            || self.overlays.config_screen.is_some()
+            || self.overlays.style_editor.is_some()
+            || self.overlays.glyph_picker.is_some()
+            || self.overlays.verb_menu.is_some()
+            || self.overlays.hotkey_dialog
             || self.room_panel.is_some()
             || self.tidy_anim.is_some()
-            || self.text_entry.is_some()
-            || self.confirm_delete_save.is_some()
-            || self.reset_dialog
-            || self.save_name_dialog.is_some()
-            || self.aux_prompt
-            || self.quit_dialog
-            || self.launch_dialog
-            || self.hints.is_some()
-            || self.replay.is_some()
+            || self.overlays.text_entry.is_some()
+            || self.overlays.confirm_delete_save.is_some()
+            || self.overlays.reset_dialog
+            || self.overlays.save_name_dialog.is_some()
+            || self.overlays.aux_prompt
+            || self.overlays.quit_dialog
+            || self.overlays.launch_dialog
+            || self.overlays.hints.is_some()
+            || self.overlays.replay.is_some()
             || self.resize_mode
     }
 
@@ -2794,7 +2786,7 @@ mod tests {
     fn replay_counts_as_overlay() {
         let mut s = AppState::default();
         assert!(!s.any_overlay_open());
-        s.replay = Some(ReplayState::new(0));
+        s.overlays.replay = Some(ReplayState::new(0));
         assert!(s.any_overlay_open(), "replay open => any_overlay_open true");
     }
 
@@ -3259,9 +3251,9 @@ mod tests {
         };
         cs.scroll.len(100);
         cs.scroll.move_by(40, 5, &cfg); // arms a scroll animation
-        s.config_screen = Some(cs);
+        s.overlays.config_screen = Some(cs);
         assert!(s.has_active_animation(), "an open modal's list scroll anim counts as active");
-        s.config_screen = None;
+        s.overlays.config_screen = None;
         assert!(!s.has_active_animation());
     }
 
@@ -3377,32 +3369,32 @@ mod tests {
         assert!(!s.any_overlay_open(), "default AppState must have no overlay open");
 
         // gallery
-        s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+        s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
         assert!(s.any_overlay_open(), "gallery open => any_overlay_open true");
-        s.gallery = None;
+        s.overlays.gallery = None;
 
         // saves
-        s.saves = Some(SavesState { entries: vec![], scroll: Default::default() });
+        s.overlays.saves = Some(SavesState { entries: vec![], scroll: Default::default() });
         assert!(s.any_overlay_open(), "saves open => any_overlay_open true");
-        s.saves = None;
+        s.overlays.saves = None;
 
         // file_browser
-        s.file_browser = Some(FileBrowserState::build(
+        s.overlays.file_browser = Some(FileBrowserState::build(
             std::path::PathBuf::from("/tmp"),
             FbMode::PickFile));
         assert!(s.any_overlay_open(), "file_browser open => any_overlay_open true");
-        s.file_browser = None;
+        s.overlays.file_browser = None;
 
         // config_screen
-        s.config_screen = Some(ConfigScreenState {
+        s.overlays.config_screen = Some(ConfigScreenState {
             working: crate::config::Config::default(),
             scroll: Default::default(),
         });
         assert!(s.any_overlay_open(), "config_screen open => any_overlay_open true");
-        s.config_screen = None;
+        s.overlays.config_screen = None;
 
         // verb_menu
-        s.verb_menu = Some(VerbMenuState {
+        s.overlays.verb_menu = Some(VerbMenuState {
             pane: VerbMenuPane::Verbs,
             verb_scroll: Default::default(),
             noun_scroll: Default::default(),
@@ -3411,12 +3403,12 @@ mod tests {
             story_focused: false,
         });
         assert!(s.any_overlay_open(), "verb_menu open => any_overlay_open true");
-        s.verb_menu = None;
+        s.overlays.verb_menu = None;
 
         // hotkey_dialog
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(s.any_overlay_open(), "hotkey_dialog true => any_overlay_open true");
-        s.hotkey_dialog = false;
+        s.overlays.hotkey_dialog = false;
 
         // room_panel
         s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
@@ -3436,19 +3428,19 @@ mod tests {
         s.tidy_anim = None;
 
         // text_entry
-        s.text_entry = Some(TextEntryDialog::new(TextEntryKind::CreateFile, ""));
+        s.overlays.text_entry = Some(TextEntryDialog::new(TextEntryKind::CreateFile, ""));
         assert!(s.any_overlay_open(), "text_entry active => any_overlay_open true");
-        s.text_entry = None;
+        s.overlays.text_entry = None;
 
         // confirm_delete_save
-        s.confirm_delete_save = Some(std::path::PathBuf::from("/x.babelmap"));
+        s.overlays.confirm_delete_save = Some(std::path::PathBuf::from("/x.babelmap"));
         assert!(s.any_overlay_open(), "confirm_delete_save active => any_overlay_open true");
-        s.confirm_delete_save = None;
+        s.overlays.confirm_delete_save = None;
 
         // launch_dialog
-        s.launch_dialog = true;
+        s.overlays.launch_dialog = true;
         assert!(s.any_overlay_open(), "launch_dialog true => any_overlay_open true");
-        s.launch_dialog = false;
+        s.overlays.launch_dialog = false;
 
         assert!(!s.any_overlay_open(), "all cleared => any_overlay_open false again");
     }
@@ -3791,7 +3783,7 @@ mod tests {
     fn reset_dialog_counts_as_overlay() {
         let mut s = AppState::default();
         assert!(!s.any_overlay_open());
-        s.reset_dialog = true;
+        s.overlays.reset_dialog = true;
         assert!(s.any_overlay_open(), "reset_dialog open => any_overlay_open true");
     }
 
@@ -3799,9 +3791,9 @@ mod tests {
     fn quit_dialog_counts_as_overlay() {
         let mut s = AppState::default();
         assert!(!s.any_overlay_open());
-        s.quit_dialog = true;
+        s.overlays.quit_dialog = true;
         assert!(s.any_overlay_open(), "quit_dialog open => any_overlay_open true");
-        s.quit_dialog = false;
+        s.overlays.quit_dialog = false;
         assert!(!s.any_overlay_open(), "quit_dialog false => any_overlay_open false");
     }
 
@@ -3819,7 +3811,7 @@ mod tests {
         }
         let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
         let session = crate::session::GameSession::new(story_bytes, true, false, None).expect("GameSession::new");
-        s.hints = Some(HintSession {
+        s.overlays.hints = Some(HintSession {
             source: HintSource::Zcode(session),
             transcript: vec![],
             scroll: 0,
@@ -3829,7 +3821,7 @@ mod tests {
             builtin_hint: false,
         });
         assert!(s.any_overlay_open(), "hints open => any_overlay_open true");
-        s.hints = None;
+        s.overlays.hints = None;
         assert!(!s.any_overlay_open(), "hints closed => any_overlay_open false");
     }
 

@@ -3,7 +3,7 @@
 //! Renders a centered bordered box over the terminal area listing the hotkey
 //! groups from state.hotkeys. Each group has a title and a list of
 //! "KEY  label" rows. A footer shows how to close the dialog.
-//! Only drawn when state.hotkey_dialog == true.
+//! Only drawn when state.overlays.hotkey_dialog == true.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -141,7 +141,7 @@ mod tests {
     #[test]
     fn draw_hotkey_dialog_shows_group_title_and_command() {
         let mut state = AppState::default();
-        state.hotkey_dialog = true;
+        state.overlays.hotkey_dialog = true;
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         draw_hotkey_dialog(&state, area, &mut buf);
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn draw_hotkey_dialog_shows_authored_letter() {
         let mut state = AppState::default();
-        state.hotkey_dialog = true;
+        state.overlays.hotkey_dialog = true;
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         let rects = draw_hotkey_dialog(&state, area, &mut buf).expect("dialog should draw");
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn draw_hotkey_dialog_shows_close_hint() {
         let mut state = AppState::default();
-        state.hotkey_dialog = true;
+        state.overlays.hotkey_dialog = true;
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         draw_hotkey_dialog(&state, area, &mut buf);
@@ -212,7 +212,7 @@ mod tests {
     fn draw_hotkey_dialog_shows_dialog_chrome() {
         // Render test: dialog shows [X] close button and [Done] button.
         let mut state = AppState::default();
-        state.hotkey_dialog = true;
+        state.overlays.hotkey_dialog = true;
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);
         let rects_opt = draw_hotkey_dialog(&state, area, &mut buf);
@@ -234,7 +234,7 @@ mod tests {
         // map cell (no bleed — the underlying cell's bg/REVERSED is replaced).
         // This verifies fix for issue #17 (command-panel current-room color bleed).
         let mut state = AppState::default();
-        state.hotkey_dialog = true;
+        state.overlays.hotkey_dialog = true;
 
         let area = Rect::new(0, 0, 80, 40);
         let mut buf = Buffer::empty(area);

@@ -32,14 +32,14 @@ pub struct ConfirmDeleteDialogRects {
 
 /// Draw the delete-confirmation dialog centered over `area`.
 ///
-/// Returns `None` when `state.confirm_delete_save` is `None` or the area is too
+/// Returns `None` when `state.overlays.confirm_delete_save` is `None` or the area is too
 /// small. Focus starts on Cancel (the safe default); Delete is reachable by Tab.
 pub fn draw_confirm_delete_dialog(
     state: &AppState,
     area: Rect,
     buf: &mut Buffer,
 ) -> Option<ConfirmDeleteDialogRects> {
-    let path = state.confirm_delete_save.as_ref()?;
+    let path = state.overlays.confirm_delete_save.as_ref()?;
 
     let modal_w = DIALOG_W.min(area.width.saturating_sub(4));
     let modal_h = DIALOG_H.min(area.height.saturating_sub(2));
@@ -59,7 +59,7 @@ pub fn draw_confirm_delete_dialog(
         buttons,
         show_close: true,
         default: Some(ButtonId::Cancel),
-        focus: Some(state.dialog_focus),
+        focus: Some(state.overlays.dialog_focus),
         field: None,
     };
 
@@ -130,8 +130,8 @@ mod tests {
     fn confirm_delete_renders_title_body_and_buttons() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut state = AppState::default();
-        state.confirm_delete_save = Some(std::path::PathBuf::from("/saves/zork-hero.babelmap"));
-        state.dialog_focus = 1;
+        state.overlays.confirm_delete_save = Some(std::path::PathBuf::from("/saves/zork-hero.babelmap"));
+        state.overlays.dialog_focus = 1;
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut rects = None;

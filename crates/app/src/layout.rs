@@ -69,7 +69,7 @@ pub fn compute_pane_layout(area: Rect, state: &AppState, inv_item_count: usize) 
     // ── Verb dock: reserve a left band (full height of main_area) that
     // slides in when toggled, sized from a fixed target width + slide
     // fraction (mirrors the inventory dock's bottom-slide, but on the left).
-    let verb_visible = state.verb_menu.is_some() || state.verb_dock.active();
+    let verb_visible = state.overlays.verb_menu.is_some() || state.verb_dock.active();
     let verb_target_w =
         verb_dock_target_width(verb_visible, main_area.width, state.pane_sizes.verb_dock_pct);
     let verb_dock_w = verb_dock_width(verb_target_w, state.verb_dock.fraction());
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn verb_dock_open_reserves_left_band() {
         let mut state = AppState::default();
-        state.verb_menu = Some(VerbMenuState {
+        state.overlays.verb_menu = Some(VerbMenuState {
             pane: VerbMenuPane::Verbs,
             verb_scroll: Default::default(),
             noun_scroll: Default::default(),

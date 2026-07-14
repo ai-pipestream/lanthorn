@@ -265,9 +265,9 @@ pub(crate) fn expire_sound_and_settle_dock(state: &mut AppState) -> bool {
 
     // Clear the verb-menu content once its slide-out has fully settled
     // (drawer pattern: content persists during the close animation).
-    let had_verb_menu = state.verb_menu.is_some();
+    let had_verb_menu = state.overlays.verb_menu.is_some();
     state.settle_verb_dock();
-    if had_verb_menu && state.verb_menu.is_none() {
+    if had_verb_menu && state.overlays.verb_menu.is_none() {
         redraw = true; // drawer content dropped → repaint the cleared pane
     }
 

@@ -23,7 +23,7 @@ const GALLERY_MIN_H: u16 = 18;
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` when
 /// the gallery is closed or the area is too small.
 pub fn draw_gallery(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<DialogRects> {
-    let Some(gallery) = &state.gallery else { return None };
+    let Some(gallery) = &state.overlays.gallery else { return None };
 
     // Compute dialog size: as wide as the area allows (up to 70), tall enough
     // for the content. Bail if the available area is too small.
@@ -45,7 +45,7 @@ pub fn draw_gallery(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<Di
         buttons,
         show_close: true,
         default: Some(ButtonId::Ok),
-        focus: Some(state.dialog_focus),
+        focus: Some(state.overlays.dialog_focus),
         field: None,
     };
 
@@ -283,7 +283,7 @@ mod tests {
 
     fn make_state_with_gallery() -> AppState {
         let mut s = AppState::default();
-        s.gallery = Some(crate::state::GalleryState {
+        s.overlays.gallery = Some(crate::state::GalleryState {
             category_idx: 0,
             selections: [0, 0, 0, 0],
         });
@@ -393,7 +393,7 @@ mod tests {
         // Select the ascii box style (look up its index so preset reordering can't break this).
         let ascii_idx = crate::symbols::BoxStyle::preset_names()
             .iter().position(|&n| n == "ascii").expect("ascii preset exists");
-        state.gallery = Some(crate::state::GalleryState {
+        state.overlays.gallery = Some(crate::state::GalleryState {
             category_idx: 0,
             selections: [ascii_idx, 0, 0, 0],
         });
@@ -449,7 +449,7 @@ mod tests {
         // PortalGlyphs preset_names: ["ascii","nerdfont","nerdfont-stairs"]          => nerdfont-stairs=2
         // PathGlyphs preset_names:   ["light","heavy","dotted"]                      => heavy=1
         let mut state = AppState::default();
-        state.gallery = Some(GalleryState {
+        state.overlays.gallery = Some(GalleryState {
             // Sit on the Arrows category (1) so the preview shows arrows (they are hidden
             // on the Box category so the box corners stay visible while picking a box).
             category_idx: 1,

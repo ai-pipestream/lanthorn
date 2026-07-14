@@ -292,7 +292,7 @@ fn draw_frame(
         // The engine-neutral screen model for this frame (status + window tree).
         let screen_model = engine.screen();
         // During replay the map shows the reconstructed snapshot for the selected turn.
-        let replay_graph: Option<mapper::graph::MapGraph> = state.replay.as_ref().map(|r| {
+        let replay_graph: Option<mapper::graph::MapGraph> = state.overlays.replay.as_ref().map(|r| {
             let snap = state
                 .history
                 .get(r.idx)
@@ -565,15 +565,15 @@ fn draw_frame(
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
         let help_style = state.colors.help_bar;
-        let help_text = if state.config_screen.is_some() {
+        let help_text = if state.overlays.config_screen.is_some() {
             "\u{2191}\u{2193} move  \u{2190}\u{2192}/Space change  s save  Esc cancel".to_string()
-        } else if state.verb_menu.is_some() {
+        } else if state.overlays.verb_menu.is_some() {
             "Verb Menu | Tab/\u{2190}\u{2192}: pane | \u{2191}\u{2193}: move | Enter/Space: pick | Esc: close".to_string()
-        } else if state.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
+        } else if state.overlays.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
             "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc: cancel".to_string()
-        } else if state.saves.is_some() {
+        } else if state.overlays.saves.is_some() {
             "Saves | \u{2191}\u{2193}: select | Enter: load | s: save-as | d: delete | i: import | Esc: close".to_string()
-        } else if state.gallery.is_some() {
+        } else if state.overlays.gallery.is_some() {
             "Symbol Gallery | \u{2191}\u{2193}: preset | \u{2190}\u{2192}: category | Esc/Enter: close".to_string()
         } else if let Some(anim) = &state.tidy_anim {
             // Playback status: stage progress + the transport controls.
@@ -870,7 +870,7 @@ fn main() {
                 // isn't restarted each frame; select() is a no-op once settled.
                 let anim = state.config.animation.clone();
                 let hist_len = state.history.len();
-                if let Some(r) = &mut state.replay {
+                if let Some(r) = &mut state.overlays.replay {
                     if !r.scroll.has_active_animation() {
                         r.scroll.len(hist_len);
                         r.scroll.select(r.idx, state.modal_list_viewport, &anim);
@@ -1028,7 +1028,7 @@ fn main() {
                     needs_redraw = true;
                 }
             }
-            if let Some(r) = &mut state.replay {
+            if let Some(r) = &mut state.overlays.replay {
                 // Likewise: redraw only when the auto-play cursor advanced a turn.
                 if r.tick(Duration::from_millis(700), state.history.len()) {
                     needs_redraw = true;
@@ -1052,16 +1052,16 @@ fn main() {
             // the `has_active_animation()` check earlier this iteration already
             // read false — without this the settle frame would be gated off and
             // the list would land ~1 row short (or a dock leave a sliver). (SQ-0305)
-            if let Some(s) = &mut state.saves { needs_redraw |= s.scroll.finalize_if_done(); }
-            if let Some(fb) = &mut state.file_browser { needs_redraw |= fb.scroll.finalize_if_done(); }
-            if let Some(cs) = &mut state.config_screen { needs_redraw |= cs.scroll.finalize_if_done(); }
-            if let Some(vm) = &mut state.verb_menu {
+            if let Some(s) = &mut state.overlays.saves { needs_redraw |= s.scroll.finalize_if_done(); }
+            if let Some(fb) = &mut state.overlays.file_browser { needs_redraw |= fb.scroll.finalize_if_done(); }
+            if let Some(cs) = &mut state.overlays.config_screen { needs_redraw |= cs.scroll.finalize_if_done(); }
+            if let Some(vm) = &mut state.overlays.verb_menu {
                 needs_redraw |= vm.verb_scroll.finalize_if_done();
                 needs_redraw |= vm.noun_scroll.finalize_if_done();
                 needs_redraw |= vm.prep_scroll.finalize_if_done();
             }
-            if let Some(r) = &mut state.replay { needs_redraw |= r.scroll.finalize_if_done(); }
-            if let Some(h) = &mut state.hints { needs_redraw |= h.finalize_scroll_if_done(); }
+            if let Some(r) = &mut state.overlays.replay { needs_redraw |= r.scroll.finalize_if_done(); }
+            if let Some(h) = &mut state.overlays.hints { needs_redraw |= h.finalize_scroll_if_done(); }
             // Docks slide via a Tween that goes inactive (not dropped) at done();
             // finalize drops the finished tween and forces the settle frame so a
             // just-opened dock paints fully and a closing inv_dock loses its last
@@ -1095,18 +1095,18 @@ fn main() {
         // ── Aux-storage prompt intercept — before normal action routing ───────
         // When the first-use aux-storage prompt is open, route events here and
         // continue (swallowing events the dialog does not handle).
-        if state.aux_prompt {
+        if state.overlays.aux_prompt {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     match k.code {
                         crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, 1),
                         crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
-                        code => match aux_dialog_key_focused(code, state.dialog_focus) {
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, -1),
+                        code => match aux_dialog_key_focused(code, state.overlays.dialog_focus) {
                             AuxDialogAction::Archive => {
                                 let mode = app::config::AuxStorage::Archive;
-                                state.aux_prompt = false;
+                                state.overlays.aux_prompt = false;
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
@@ -1114,7 +1114,7 @@ fn main() {
                             }
                             AuxDialogAction::Global => {
                                 let mode = app::config::AuxStorage::Global;
-                                state.aux_prompt = false;
+                                state.overlays.aux_prompt = false;
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
@@ -1139,21 +1139,21 @@ fn main() {
                             if in_close || (!in_archive && !in_global && !in_dialog) {
                                 // Close button or click outside → Archive (conservative default).
                                 let mode = app::config::AuxStorage::Archive;
-                                state.aux_prompt = false;
+                                state.overlays.aux_prompt = false;
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
                                 session.clear_aux_dirty();
                             } else if in_archive {
                                 let mode = app::config::AuxStorage::Archive;
-                                state.aux_prompt = false;
+                                state.overlays.aux_prompt = false;
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
                                 session.clear_aux_dirty();
                             } else if in_global {
                                 let mode = app::config::AuxStorage::Global;
-                                state.aux_prompt = false;
+                                state.overlays.aux_prompt = false;
                                 state.config.aux_storage = mode;
                                 let user_dir = state.config.user_dir.clone();
                                 let _ = app::config::write_config(&user_dir, &state.config);
@@ -1172,29 +1172,29 @@ fn main() {
         // ── Reset dialog intercept — before normal action routing ─────────────
         // When the reset dialog is open, route keyboard/mouse directly here and
         // continue (swallowing events the dialog does not handle).
-        if state.reset_dialog {
+        if state.overlays.reset_dialog {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     match k.code {
                         crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 4, 1),
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 4, 1),
                         crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 4, -1),
-                        code => match reset_dialog_key_focused(code, state.dialog_focus) {
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 4, -1),
+                        code => match reset_dialog_key_focused(code, state.overlays.dialog_focus) {
                             ResetDialogAction::Confirm => {
-                                let clear = state.reset_clear_map;
-                                let delete = state.reset_delete_data;
-                                state.reset_dialog = false;
+                                let clear = state.overlays.reset_clear_map;
+                                let delete = state.overlays.reset_delete_data;
+                                state.overlays.reset_dialog = false;
                                 reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, clear, delete);
                             }
                             ResetDialogAction::Cancel => {
-                                state.reset_dialog = false;
+                                state.overlays.reset_dialog = false;
                             }
                             ResetDialogAction::ToggleClearMap => {
-                                state.reset_clear_map = !state.reset_clear_map;
+                                state.overlays.reset_clear_map = !state.overlays.reset_clear_map;
                             }
                             ResetDialogAction::ToggleDeleteData => {
-                                state.reset_delete_data = !state.reset_delete_data;
+                                state.overlays.reset_delete_data = !state.overlays.reset_delete_data;
                             }
                             ResetDialogAction::None => {}
                         },
@@ -1215,16 +1215,16 @@ fn main() {
                             let in_checkbox_data = rd.checkbox_data.contains(pt);
                             let in_dialog = rd.area.contains(pt);
                             if in_close || in_cancel {
-                                state.reset_dialog = false;
+                                state.overlays.reset_dialog = false;
                             } else if in_reset {
-                                let clear = state.reset_clear_map;
-                                let delete = state.reset_delete_data;
-                                state.reset_dialog = false;
+                                let clear = state.overlays.reset_clear_map;
+                                let delete = state.overlays.reset_delete_data;
+                                state.overlays.reset_dialog = false;
                                 reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, clear, delete);
                             } else if in_checkbox {
-                                state.reset_clear_map = !state.reset_clear_map;
+                                state.overlays.reset_clear_map = !state.overlays.reset_clear_map;
                             } else if in_checkbox_data {
-                                state.reset_delete_data = !state.reset_delete_data;
+                                state.overlays.reset_delete_data = !state.overlays.reset_delete_data;
                             } else if !in_dialog {
                                 // Click outside the dialog: swallow (do nothing, keep dialog open).
                             }
@@ -1243,7 +1243,7 @@ fn main() {
         // (active = false); Tab/→/edit-keys adopt it for editing, typing starts
         // fresh, Enter on the untouched placeholder saves the default. Submit reuses
         // the handle_save_as save path (the retired bottom-bar prompt is gone).
-        if state.save_name_dialog.is_some() {
+        if state.overlays.save_name_dialog.is_some() {
             let mut do_save = false;
             let mut do_cancel = false;
             match &event {
@@ -1254,10 +1254,10 @@ fn main() {
                     let ctrl_char = matches!(k.code, KeyCode::Char(_))
                         && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
                     if !ctrl_char {
-                        let focus = state.dialog_focus;
-                        let dlg = state.save_name_dialog.as_mut().unwrap();
+                        let focus = state.overlays.dialog_focus;
+                        let dlg = state.overlays.save_name_dialog.as_mut().unwrap();
                         let (act, new_focus) = save_name_dialog_key(k.code, dlg, focus);
-                        state.dialog_focus = new_focus;
+                        state.overlays.dialog_focus = new_focus;
                         match act {
                             SaveNameAction::Save => do_save = true,
                             SaveNameAction::Cancel => do_cancel = true,
@@ -1281,8 +1281,8 @@ fn main() {
                                 do_save = true;
                             } else if in_field {
                                 // Focus + activate the field (caret to end).
-                                state.dialog_focus = 0;
-                                if let Some(dlg) = state.save_name_dialog.as_mut() {
+                                state.overlays.dialog_focus = 0;
+                                if let Some(dlg) = state.overlays.save_name_dialog.as_mut() {
                                     dlg.active = true;
                                     dlg.field.end();
                                 }
@@ -1300,15 +1300,15 @@ fn main() {
             // rejected (the dialog stays open); valid names go through handle_save_as.
             if do_save {
                 let value = state
-                    .save_name_dialog
+                    .overlays.save_name_dialog
                     .as_ref()
                     .map(|d| d.field.value.clone())
                     .unwrap_or_default();
                 if value.trim().is_empty() {
-                    if let Some(d) = state.save_name_dialog.as_mut() { d.active = false; }
+                    if let Some(d) = state.overlays.save_name_dialog.as_mut() { d.active = false; }
                     state.push_notice("[Save name cannot be empty]");
                 } else {
-                    state.save_name_dialog = None;
+                    state.overlays.save_name_dialog = None;
                     handle_save_as(
                         value, &game_dir, &ifid, &mut mapper, &mut *session, &mut state,
                     );
@@ -1319,7 +1319,7 @@ fn main() {
                     if quit { break; }
                 }
             } else if do_cancel {
-                state.save_name_dialog = None;
+                state.overlays.save_name_dialog = None;
                 let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
                     || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
                 turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
@@ -1334,7 +1334,7 @@ fn main() {
         // rename layer / config path / create-file). Focus ring: 0 = field, 1 = OK,
         // 2 = Cancel. The field opens active, prefilled; Enter submits (each kind
         // decides empty semantics — see apply_text_entry), Esc cancels. (SQ-0307)
-        if state.text_entry.is_some() {
+        if state.overlays.text_entry.is_some() {
             let mut do_submit = false;
             let mut do_cancel = false;
             match &event {
@@ -1345,10 +1345,10 @@ fn main() {
                     let ctrl_char = matches!(k.code, KeyCode::Char(_))
                         && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
                     if !ctrl_char {
-                        let focus = state.dialog_focus;
-                        let dlg = state.text_entry.as_mut().unwrap();
+                        let focus = state.overlays.dialog_focus;
+                        let dlg = state.overlays.text_entry.as_mut().unwrap();
                         let (act, new_focus) = text_entry_dialog_key(k.code, &mut dlg.field, focus);
-                        state.dialog_focus = new_focus;
+                        state.overlays.dialog_focus = new_focus;
                         match act {
                             TextEntryAction::Submit => do_submit = true,
                             TextEntryAction::Cancel => do_cancel = true,
@@ -1372,8 +1372,8 @@ fn main() {
                                 do_submit = true;
                             } else if in_field {
                                 // Focus the field (caret to end).
-                                state.dialog_focus = 0;
-                                if let Some(dlg) = state.text_entry.as_mut() { dlg.field.end(); }
+                                state.overlays.dialog_focus = 0;
+                                if let Some(dlg) = state.overlays.text_entry.as_mut() { dlg.field.end(); }
                             } else if !in_dialog {
                                 // Click outside: swallow, keep the dialog open.
                             }
@@ -1385,7 +1385,7 @@ fn main() {
             }
 
             if do_submit {
-                if let Some(dlg) = state.text_entry.take() {
+                if let Some(dlg) = state.overlays.text_entry.take() {
                     apply_text_entry(dlg, &mut state, &mut mapper);
                 }
                 // A CreateFile submit hops through filename_submitted → resume here;
@@ -1396,7 +1396,7 @@ fn main() {
                 turn::persist_vfs_after_turn(&mut *session, &game_dir);
                 if quit { break; }
             } else if do_cancel {
-                state.text_entry = None;
+                state.overlays.text_entry = None;
                 // A cancelled CreateFile leaves pending_filename set with no dialog
                 // open → resolve_filename_request treats it as a NULL fileref.
                 let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
@@ -1411,17 +1411,17 @@ fn main() {
         // ── Confirm-delete dialog intercept — before normal action routing ────
         // A two-button confirm over the saves manager. Confirm deletes the save,
         // Cancel keeps it; focus starts on Cancel (the safe default). (SQ-0307)
-        if state.confirm_delete_save.is_some() {
+        if state.overlays.confirm_delete_save.is_some() {
             let mut outcome: Option<bool> = None; // Some(true)=delete, Some(false)=keep
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     use crossterm::event::KeyCode;
                     match k.code {
                         KeyCode::Tab | KeyCode::Right =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, 1),
                         KeyCode::BackTab | KeyCode::Left =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
-                        code => match confirm_delete_key_focused(code, state.dialog_focus) {
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, -1),
+                        code => match confirm_delete_key_focused(code, state.overlays.dialog_focus) {
                             ConfirmDeleteAction::Confirm => outcome = Some(true),
                             ConfirmDeleteAction::Cancel => outcome = Some(false),
                             ConfirmDeleteAction::None => {}
@@ -1449,11 +1449,11 @@ fn main() {
             }
 
             if let Some(confirmed) = outcome {
-                if let Some(path) = state.confirm_delete_save.take() {
+                if let Some(path) = state.overlays.confirm_delete_save.take() {
                     delete_save_confirmed(&path, confirmed, &game_dir, &mut state);
                 }
                 // Return the saves manager (still open behind us) to its default focus.
-                state.dialog_focus = 0;
+                state.overlays.dialog_focus = 0;
             }
             continue;
         }
@@ -1461,17 +1461,17 @@ fn main() {
         // ── Quit dialog intercept — before normal action routing ──────────────
         // When the quit dialog is open, route keyboard/mouse directly here and
         // continue (swallowing events the dialog does not handle).
-        if state.quit_dialog {
+        if state.overlays.quit_dialog {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     match k.code {
                         crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 3, 1),
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 3, 1),
                         crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 3, -1),
-                        code => match quit_dialog_key_focused(code, state.dialog_focus) {
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 3, -1),
+                        code => match quit_dialog_key_focused(code, state.overlays.dialog_focus) {
                             QuitDialogAction::Save => {
-                                state.quit_dialog = false;
+                                state.overlays.quit_dialog = false;
                                 lifecycle::quit_dialog_save(&*session, &mapper, &state, &ifid, &arc_file);
                                 break;
                             }
@@ -1479,7 +1479,7 @@ fn main() {
                                 break;
                             }
                             QuitDialogAction::Cancel => {
-                                state.quit_dialog = false;
+                                state.overlays.quit_dialog = false;
                             }
                             QuitDialogAction::None => {}
                         },
@@ -1496,13 +1496,13 @@ fn main() {
                             let in_cancel = qd.cancel.is_some_and(|r| r.contains(pt));
                             let in_dialog = qd.area.contains(pt);
                             if in_save {
-                                state.quit_dialog = false;
+                                state.overlays.quit_dialog = false;
                                 lifecycle::quit_dialog_save(&*session, &mapper, &state, &ifid, &arc_file);
                                 break;
                             } else if in_quit {
                                 break;
                             } else if in_close || in_cancel {
-                                state.quit_dialog = false;
+                                state.overlays.quit_dialog = false;
                             } else if !in_dialog {
                                 // Click outside: swallow (keep dialog open).
                             }
@@ -1518,23 +1518,23 @@ fn main() {
         // ── Launch dialog intercept — before normal action routing ────────────
         // When the launch dialog is open, route keyboard/mouse directly here and
         // continue (swallowing events the dialog does not handle).
-        if state.launch_dialog {
+        if state.overlays.launch_dialog {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     match k.code {
                         crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, 1),
                         crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
-                        code => match launch_dialog_key_focused(code, state.dialog_focus) {
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, -1),
+                        code => match launch_dialog_key_focused(code, state.overlays.dialog_focus) {
                             LaunchDialogAction::Resume => {
                                 if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
-                                    state.launch_dialog = false;
+                                    state.overlays.launch_dialog = false;
                                     turn::apply_launch_resume(&save, lines, kinds, screen, &mut *session, &mut mapper, &mut state, &last_panes, &arc_file);
                                 }
                             }
                             LaunchDialogAction::NewGame => {
-                                state.launch_dialog = false;
+                                state.overlays.launch_dialog = false;
                                 state.pending_resume = None;
                             }
                             LaunchDialogAction::None => {}
@@ -1552,12 +1552,12 @@ fn main() {
                             let in_dialog = ld.area.contains(pt);
                             if in_resume {
                                 if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
-                                    state.launch_dialog = false;
+                                    state.overlays.launch_dialog = false;
                                     turn::apply_launch_resume(&save, lines, kinds, screen, &mut *session, &mut mapper, &mut state, &last_panes, &arc_file);
                                 }
                             } else if in_new_game || in_close {
                                 // [X] (close) and [New game] both discard the save.
-                                state.launch_dialog = false;
+                                state.overlays.launch_dialog = false;
                                 state.pending_resume = None;
                             } else if !in_dialog {
                                 // Click outside: swallow (keep dialog open).
@@ -1574,18 +1574,18 @@ fn main() {
         // ── Hints panel intercept — before normal action routing ──────────────
         // When the hints panel is open, route keyboard/mouse directly here and
         // continue (swallowing events the panel does not handle).
-        if state.hints.is_some() {
+        if state.overlays.hints.is_some() {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     use crossterm::event::KeyCode;
                     match hint_key_routes(k.code) {
                         HintKeyKind::Close => {
-                            state.hints = None;
+                            state.overlays.hints = None;
                         }
                         HintKeyKind::ToSession => {
                             match k.code {
                                 KeyCode::Enter => {
-                                    if let Some(ref mut hs) = state.hints {
+                                    if let Some(ref mut hs) = state.overlays.hints {
                                         let line = std::mem::take(&mut hs.input);
                                         let app::state::HintSource::Zcode(ref mut vm) = hs.source;
                                         let result = vm.submit(&line);
@@ -1597,12 +1597,12 @@ fn main() {
                                     }
                                 }
                                 KeyCode::Backspace => {
-                                    if let Some(ref mut hs) = state.hints {
+                                    if let Some(ref mut hs) = state.overlays.hints {
                                         hs.input.pop();
                                     }
                                 }
                                 KeyCode::Char(c) => {
-                                    if let Some(ref mut hs) = state.hints {
+                                    if let Some(ref mut hs) = state.overlays.hints {
                                         hs.input.push(c);
                                     }
                                 }
@@ -1618,7 +1618,7 @@ fn main() {
                         if let Some(hp) = &last_panes.hints_panel {
                             let in_close = hp.close.is_some_and(|r| r.contains(pt));
                             if in_close {
-                                state.hints = None;
+                                state.overlays.hints = None;
                             }
                             // Clicks inside the dialog but not on close: swallow.
                         }
@@ -1628,7 +1628,7 @@ fn main() {
                         // direction (and mouse_wheel_invert) via the shared helper.
                         let max = last_panes.hints_panel.as_ref().map_or(0, |hp| hp.max_scroll);
                         let anim = state.config.animation.clone();
-                        if let Some(hs) = &mut state.hints {
+                        if let Some(hs) = &mut state.overlays.hints {
                             // Wheel up (d < 0) → older content (increase scroll),
                             // matching the story transcript's wheel direction.
                             hs.scroll_by(if d < 0 { 1 } else { -1 }, max, &anim);
@@ -1692,15 +1692,15 @@ fn main() {
         // ── Glyph-picker intercept — modal over the style editor ─────────────
         // When the glyph picker is open, route all keyboard events here and
         // continue (swallowing events the picker doesn't handle).
-        if state.glyph_picker.is_some() {
+        if state.overlays.glyph_picker.is_some() {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
                     use crossterm::event::KeyCode;
                     match k.code {
                         KeyCode::Esc => {
                             // In custom-entry focus: exit focus only; otherwise cancel picker.
-                            if state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
-                                if let Some(p) = &mut state.glyph_picker {
+                            if state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
+                                if let Some(p) = &mut state.overlays.glyph_picker {
                                     p.custom_focus = false;
                                 }
                             } else {
@@ -1710,8 +1710,8 @@ fn main() {
                         KeyCode::Enter => {
                             // In custom-entry focus: commit the typed range (custom_start already
                             // updated on each digit) and exit focus so the grid is browsable.
-                            if state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
-                                if let Some(p) = &mut state.glyph_picker {
+                            if state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
+                                if let Some(p) = &mut state.overlays.glyph_picker {
                                     p.custom_focus = false;
                                 }
                             } else {
@@ -1719,32 +1719,32 @@ fn main() {
                             }
                         }
                         KeyCode::Delete | KeyCode::Backspace => {
-                            if state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
+                            if state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 apply_action(Action::GlyphPickerCustomBackspace, &mut state, &mut mapper);
                             } else {
                                 // Clear the pending selection (revert to grid cursor).
-                                if let Some(p) = &mut state.glyph_picker {
+                                if let Some(p) = &mut state.overlays.glyph_picker {
                                     p.pending = None;
                                 }
                             }
                         }
                         KeyCode::Left => {
-                            if !state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
+                            if !state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 apply_action(Action::GlyphPickerNav(-1), &mut state, &mut mapper);
                             }
                         }
                         KeyCode::Right => {
-                            if !state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
+                            if !state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 apply_action(Action::GlyphPickerNav(1), &mut state, &mut mapper);
                             }
                         }
                         KeyCode::Up => {
-                            if !state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
+                            if !state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 apply_action(Action::GlyphPickerNav(-(app::input::GLYPH_GRID_COLS as i32)), &mut state, &mut mapper);
                             }
                         }
                         KeyCode::Down => {
-                            if !state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
+                            if !state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 apply_action(Action::GlyphPickerNav(app::input::GLYPH_GRID_COLS as i32), &mut state, &mut mapper);
                             }
                         }
@@ -1755,7 +1755,7 @@ fn main() {
                             apply_action(Action::GlyphPickerBlock(1), &mut state, &mut mapper);
                         }
                         KeyCode::Char(c) => {
-                            if state.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
+                            if state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
                                 // In custom-entry mode: only hex digits are accepted.
                                 if c.is_ascii_hexdigit() {
                                     apply_action(Action::GlyphPickerCustomChar(c), &mut state, &mut mapper);
@@ -1821,14 +1821,14 @@ fn main() {
 
         // ── Config-screen Tab focus intercept ────────────────────────────────
         // Ring length 2: [Save(0), Cancel(1)].
-        if state.config_screen.is_some() {
+        if state.overlays.config_screen.is_some() {
             if let Event::Key(k) = &event {
                 if k.kind == KeyEventKind::Press {
                     match k.code {
                         crossterm::event::KeyCode::Tab =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, 1),
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, 1),
                         crossterm::event::KeyCode::BackTab =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 2, -1),
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, -1),
                         _ => {}
                     }
                 }
@@ -1837,14 +1837,14 @@ fn main() {
 
         // ── Saves Tab focus intercept ─────────────────────────────────────────
         // Ring length 1: [Done(0)].
-        if state.saves.is_some() {
+        if state.overlays.saves.is_some() {
             if let Event::Key(k) = &event {
                 if k.kind == KeyEventKind::Press {
                     match k.code {
                         crossterm::event::KeyCode::Tab =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 1, 1),
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 1, 1),
                         crossterm::event::KeyCode::BackTab =>
-                            state.dialog_focus = app::input::cycle_focus(state.dialog_focus, 1, -1),
+                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 1, -1),
                         _ => {}
                     }
                 }
@@ -1934,7 +1934,7 @@ fn main() {
                 match key_to_command(&state, k) {
                     KeyResolve::Action(a) => a,
                     KeyResolve::Command(s, ctx) => {
-                        let close_leader = state.hotkey_dialog;
+                        let close_leader = state.overlays.hotkey_dialog;
                         let outcome = slash::parse_in_context(&s, state.config.command_prefix, ctx);
                         let should_break = dispatch_slash_outcome(
                             outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
@@ -1942,7 +1942,7 @@ fn main() {
                             last_panes.map, last_panes.story, true,
                         );
                         if close_leader {
-                            state.hotkey_dialog = false;
+                            state.overlays.hotkey_dialog = false;
                         }
                         lifecycle::flush_pending_config_write(&mut state);
                         if should_break {
@@ -2037,7 +2037,7 @@ fn main() {
                 }
                 // Verb dock: click a token to insert it; click a header to focus that section; click the
                 // story pane to return keyboard focus there (then fall through to normal story handling).
-                if state.verb_menu.is_some() {
+                if state.overlays.verb_menu.is_some() {
                     if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = m.kind {
                         let inside = |r: &ratatui::layout::Rect| {
                             r.width > 0 && r.height > 0 && m.column >= r.x && m.column < r.right() && m.row >= r.y && m.row < r.bottom()
@@ -2051,13 +2051,13 @@ fn main() {
                             continue 'event_loop;
                         }
                         if inside(&last_panes.story) {
-                            if let Some(vm) = &mut state.verb_menu { vm.story_focused = true; }
+                            if let Some(vm) = &mut state.overlays.verb_menu { vm.story_focused = true; }
                             // fall through: normal story-pane click handling (selection) still runs below.
                         }
                     }
                 }
                 // Style-editor board: intercept left-clicks on sample rows and property pane.
-                if state.style_editor.is_some() {
+                if state.overlays.style_editor.is_some() {
                     // Holds a dialog-button action that must flow through the normal
                     // run-loop path (so the style_save flag fires save_style_and_repoint).
                     let mut click_action = Action::None;
@@ -2073,7 +2073,7 @@ fn main() {
                             // Sample board: set active selector.
                             for (idx, rect) in &rects.samples {
                                 if hit(rect) {
-                                    if let Some(ed) = &mut state.style_editor {
+                                    if let Some(ed) = &mut state.overlays.style_editor {
                                         ed.active = *idx;
                                     }
                                     continue 'event_loop;
@@ -2092,7 +2092,7 @@ fn main() {
                             // Fg swatch row (17 rects: 0-15 = ANSI, 16 = default).
                             for (i, rect) in rects.fg_swatches.iter().enumerate() {
                                 if hit(rect) {
-                                    if let Some(ed) = &mut state.style_editor { ed.color_target = false; }
+                                    if let Some(ed) = &mut state.overlays.style_editor { ed.color_target = false; }
                                     let value = if i < app::style_mru::ANSI_NAMES.len() {
                                         Some(app::style_mru::ANSI_NAMES[i].to_string())
                                     } else {
@@ -2106,7 +2106,7 @@ fn main() {
                             // Bg swatch row.
                             for (i, rect) in rects.bg_swatches.iter().enumerate() {
                                 if hit(rect) {
-                                    if let Some(ed) = &mut state.style_editor { ed.color_target = true; }
+                                    if let Some(ed) = &mut state.overlays.style_editor { ed.color_target = true; }
                                     let value = if i < app::style_mru::ANSI_NAMES.len() {
                                         Some(app::style_mru::ANSI_NAMES[i].to_string())
                                     } else {
@@ -2120,10 +2120,10 @@ fn main() {
                             // MRU row.
                             for (i, rect) in rects.mru_rects.iter().enumerate() {
                                 if hit(rect) {
-                                    let hex = state.style_editor.as_ref()
+                                    let hex = state.overlays.style_editor.as_ref()
                                         .and_then(|ed| ed.mru.get(i).cloned());
                                     if let Some(hex) = hex {
-                                        let is_bg = state.style_editor.as_ref().is_some_and(|e| e.color_target);
+                                        let is_bg = state.overlays.style_editor.as_ref().is_some_and(|e| e.color_target);
                                         apply_action(Action::StyleSetColor { is_bg, value: Some(hex) }, &mut state, &mut mapper);
                                     }
                                     continue 'event_loop;
@@ -2134,7 +2134,7 @@ fn main() {
                             if let Some(rect) = &rects.custom_rect {
                                 if hit(rect) {
                                     use app::state::StyleFocus;
-                                    if let Some(ed) = &mut state.style_editor {
+                                    if let Some(ed) = &mut state.overlays.style_editor {
                                         ed.focus = StyleFocus::Custom;
                                         if ed.custom_buf.is_empty() {
                                             ed.custom_buf = "#".to_string();
@@ -2223,7 +2223,7 @@ fn main() {
 
         // Snapshot working config before apply_action clears it on ConfigSave.
         let config_to_save = if matches!(action, Action::ConfigSave) {
-            state.config_screen.as_ref().map(|cs| cs.working.clone())
+            state.overlays.config_screen.as_ref().map(|cs| cs.working.clone())
         } else {
             None
         };
@@ -2240,8 +2240,8 @@ fn main() {
 
             Action::Quit => {
                 if should_prompt_save_on_quit(&state) {
-                    state.quit_dialog = true;
-                    state.dialog_focus = 0;
+                    state.overlays.quit_dialog = true;
+                    state.overlays.dialog_focus = 0;
                 } else {
                     break;
                 }
@@ -2416,15 +2416,15 @@ fn main() {
                 // Populate the saves list (both .babelmap Save States and .qzl
                 // game saves — SQ-0227 Task 3) and open the modal.
                 let entries = combined_saves(&game_dir);
-                state.saves = Some(SavesState { entries, scroll: Default::default() });
-                state.dialog_focus = 0;
+                state.overlays.saves = Some(SavesState { entries, scroll: Default::default() });
+                state.overlays.dialog_focus = 0;
             }
 
             Action::SavesImport => {
                 // Close saves modal and open file browser in PickFile mode.
                 // Start in this story's per-game dir (where its saves live, honoring
                 // --data-dir), falling back to the data base then the user dir.
-                state.saves = None;
+                state.overlays.saves = None;
                 let start_dir = if game_dir.is_dir() {
                     game_dir.clone()
                 } else if data_base.is_dir() {
@@ -2432,12 +2432,12 @@ fn main() {
                 } else {
                     state.config.user_dir.clone()
                 };
-                state.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickFile));
+                state.overlays.file_browser = Some(FileBrowserState::build(start_dir, FbMode::PickFile));
             }
 
             Action::FbEnter => {
                 // Handle file-browser Enter: cd into dir or import file.
-                let fb_action = state.file_browser.as_ref().and_then(|fb| {
+                let fb_action = state.overlays.file_browser.as_ref().and_then(|fb| {
                     fb.entries.get(fb.scroll.selected).map(|e| {
                         if e.is_dir {
                             let new_path = if e.name == ".." {
@@ -2453,12 +2453,12 @@ fn main() {
                 });
                 match fb_action {
                     Some(FbEntryAction::CdInto(path)) => {
-                        if let Some(fb) = &mut state.file_browser {
+                        if let Some(fb) = &mut state.overlays.file_browser {
                             fb.cd(path);
                         }
                     }
                     Some(FbEntryAction::ImportFile(path)) => {
-                        state.file_browser = None;
+                        state.overlays.file_browser = None;
                         if !engine_supports_save(&*session) {
                             state.set_status("Restore is not supported for Glulx games yet");
                             continue;
@@ -2480,8 +2480,8 @@ fn main() {
 
             Action::SavesLoad => {
                 // Load the selected save (archive → mapper + machine restore).
-                // Clone path and name to release the borrow on state.saves before mutating state.
-                let load_info = state.saves.as_ref().and_then(|s| {
+                // Clone path and name to release the borrow on state.overlays.saves before mutating state.
+                let load_info = state.overlays.saves.as_ref().and_then(|s| {
                     s.entries.get(s.scroll.selected).map(|e| (e.path.clone(), e.name.clone()))
                 });
 
@@ -2493,7 +2493,7 @@ fn main() {
                     && load_info.as_ref().is_some_and(|(path, _)| app::persist_files::is_game_save(path))
                 {
                     let Some((path, entry_name)) = load_info else { continue };
-                    state.saves = None;
+                    state.overlays.saves = None;
                     state.ingame_io = None;
                     let result = match app::archive::read_quetzal_from_file(&path) {
                         Ok(bytes) => {
@@ -2524,7 +2524,7 @@ fn main() {
                 if let Some((path, entry_name)) = load_info {
                     match restore_from_file(&path, &mut *session) {
                         Ok(RestoreOutcome::DescriptorCompleted) => {
-                            state.saves = None;
+                            state.overlays.saves = None;
                             reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
                             state.push_notice(&format!("[Game restored from {}]", entry_name));
                         }
@@ -2553,12 +2553,12 @@ fn main() {
                             // Re-observe current location.
                             reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
                             state.push_notice(&format!("[Loaded save: {}]", entry_name));
-                            state.saves = None;
+                            state.overlays.saves = None;
                         }
                         Err(e) => {
                             state.push_notice(&format!("[Load failed: {}]", e));
                             if ingame_restore_pending {
-                                state.saves = None;
+                                state.overlays.saves = None;
                                 state.ingame_io = None;
                                 let result = session.resume_restore(None);
                                 let quit = turn::finish_resumed_turn(result, &mut mapper, &mut state, &*session, &game_dir, &ifid, last_panes.map);
@@ -2577,7 +2577,7 @@ fn main() {
 
             // ── Replay/rewind: linear resume from the selected turn ────────────
             Action::ReplayResume => {
-                if let Some(r) = state.replay.take() {
+                if let Some(r) = state.overlays.replay.take() {
                     if r.idx < state.history.len() {
                         let plan = app::history::resume_plan(&state.history, r.idx);
                         // History snapshots come from the running engine; wrap them
@@ -2699,7 +2699,7 @@ fn main() {
         // live gallery selections, then write_style_full + repoint on demand (gallery
         // stays open).
         if export_style_now {
-            if let Some(g) = state.gallery.as_ref() {
+            if let Some(g) = state.overlays.gallery.as_ref() {
                 state.symbols = app::symbols::SymbolSet::resolve(&g.symbol_config());
             }
             let user_dir = state.config.user_dir.clone();
@@ -2928,7 +2928,7 @@ fn open_hints(
     ifid: &str,
     user_dir: &std::path::Path,
 ) {
-    if state.hints.is_some() {
+    if state.overlays.hints.is_some() {
         return;
     }
 
@@ -2954,7 +2954,7 @@ fn open_hints(
                                 .and_then(|n| n.to_str())
                                 .unwrap_or("Hints")
                                 .to_owned();
-                            state.hints = Some(app::state::HintSession {
+                            state.overlays.hints = Some(app::state::HintSession {
                                 source: app::state::HintSource::Zcode(vm),
                                 transcript,
                                 scroll: 0,
@@ -2985,7 +2985,7 @@ fn open_hints(
                             let transcript: Vec<String> =
                                 opening.split('\n').map(|l| l.to_owned()).collect();
                             let label = entry.rsplit('/').next().unwrap_or(&entry).to_owned();
-                            state.hints = Some(app::state::HintSession {
+                            state.overlays.hints = Some(app::state::HintSession {
                                 source: app::state::HintSource::Zcode(vm),
                                 transcript,
                                 scroll: 0,
@@ -3391,7 +3391,7 @@ mod tests {
             "Ctrl+K should produce OpenHotkeyDialog"
         );
         apply_action(action, &mut s, &mut Mapper::default());
-        assert!(s.hotkey_dialog, "hotkey_dialog should be true after OpenHotkeyDialog");
+        assert!(s.overlays.hotkey_dialog, "hotkey_dialog should be true after OpenHotkeyDialog");
     }
 
     #[test]
@@ -3401,7 +3401,7 @@ mod tests {
         use app::state::AppState;
         use mapper::mapper::Mapper;
         let mut s = AppState::default();
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         let ctrlk = KeyEvent {
             code: KeyCode::Char('k'),
             modifiers: KeyModifiers::CONTROL,
@@ -3414,7 +3414,7 @@ mod tests {
             "Ctrl+K when dialog open should produce CloseHotkeyDialog"
         );
         apply_action(action, &mut s, &mut Mapper::default());
-        assert!(!s.hotkey_dialog, "hotkey_dialog should be false after CloseHotkeyDialog");
+        assert!(!s.overlays.hotkey_dialog, "hotkey_dialog should be false after CloseHotkeyDialog");
     }
 
     #[test]
@@ -3423,10 +3423,10 @@ mod tests {
         use app::state::AppState;
         use mapper::mapper::Mapper;
         let mut s = AppState::default();
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         apply_action(Action::OpenGallery, &mut s, &mut Mapper::default());
-        assert!(!s.hotkey_dialog, "OpenGallery should clear hotkey_dialog");
-        assert!(s.gallery.is_some(), "gallery should be open");
+        assert!(!s.overlays.hotkey_dialog, "OpenGallery should clear hotkey_dialog");
+        assert!(s.overlays.gallery.is_some(), "gallery should be open");
     }
 
     // ── dim_area ──────────────────────────────────────────────────────────────
@@ -3697,9 +3697,9 @@ mod tests {
     fn launch_dialog_counts_as_overlay() {
         let mut s = app::state::AppState::default();
         assert!(!s.any_overlay_open(), "default state has no overlay");
-        s.launch_dialog = true;
+        s.overlays.launch_dialog = true;
         assert!(s.any_overlay_open(), "launch_dialog true => any_overlay_open true");
-        s.launch_dialog = false;
+        s.overlays.launch_dialog = false;
         assert!(!s.any_overlay_open(), "launch_dialog false => any_overlay_open false");
     }
 
@@ -3779,7 +3779,7 @@ mod tests {
             "char_mode gate must NOT fire for the prefix key Ctrl+K");
 
         // If an overlay is open, the gate must not fire.
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(s.any_overlay_open(), "hotkey_dialog open => overlay open");
         assert!(!s.char_mode || s.any_overlay_open(),
             "char_mode gate must not fire when overlay is open");

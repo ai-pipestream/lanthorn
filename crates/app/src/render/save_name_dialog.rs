@@ -39,7 +39,7 @@ pub fn draw_save_name_dialog(
     area: Rect,
     buf: &mut Buffer,
 ) -> Option<SaveNameDialogRects> {
-    let dlg = state.save_name_dialog.as_ref()?;
+    let dlg = state.overlays.save_name_dialog.as_ref()?;
 
     let modal_w = DIALOG_W.min(area.width.saturating_sub(4));
     let modal_h = DIALOG_H.min(area.height.saturating_sub(2));
@@ -54,11 +54,11 @@ pub fn draw_save_name_dialog(
         DialogButton { id: ButtonId::Cancel, label: "Cancel" },
     ];
     // Buttons occupy focus slots 1 and 2; slot 0 is the field.
-    let button_focus = state.dialog_focus.checked_sub(1);
+    let button_focus = state.overlays.dialog_focus.checked_sub(1);
 
     // The caret shows only while the field is focused and being edited; the
     // placeholder (default) is dimmed until adopted.
-    let field_focused = state.dialog_focus == 0;
+    let field_focused = state.overlays.dialog_focus == 0;
     let field = DialogField {
         label: "Name: ",
         value: &dlg.field.value,
@@ -216,9 +216,9 @@ mod tests {
     fn save_name_dialog_renders_field_and_buttons_in_area() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut state = crate::state::AppState::default();
-        state.save_name_dialog =
+        state.overlays.save_name_dialog =
             Some(crate::state::SaveNameDialog::new("2026-07-13 1432".to_string(), false));
-        state.dialog_focus = 0;
+        state.overlays.dialog_focus = 0;
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut rects = None;

@@ -64,7 +64,7 @@ pub fn draw_text_entry_dialog(
     area: Rect,
     buf: &mut Buffer,
 ) -> Option<TextEntryDialogRects> {
-    let dlg = state.text_entry.as_ref()?;
+    let dlg = state.overlays.text_entry.as_ref()?;
 
     let modal_w = DIALOG_W.min(area.width.saturating_sub(4));
     let modal_h = DIALOG_H.min(area.height.saturating_sub(2));
@@ -80,10 +80,10 @@ pub fn draw_text_entry_dialog(
         DialogButton { id: ButtonId::Cancel, label: "Cancel" },
     ];
     // Buttons occupy focus slots 1 and 2; slot 0 is the field.
-    let button_focus = state.dialog_focus.checked_sub(1);
+    let button_focus = state.overlays.dialog_focus.checked_sub(1);
 
     // The field is always active; the caret shows while it is focused.
-    let field_focused = state.dialog_focus == 0;
+    let field_focused = state.overlays.dialog_focus == 0;
     let field = DialogField {
         label,
         value: &dlg.field.value,
@@ -190,9 +190,9 @@ mod tests {
     fn text_entry_dialog_renders_field_and_buttons_in_area() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut state = AppState::default();
-        state.text_entry =
+        state.overlays.text_entry =
             Some(TextEntryDialog::new(TextEntryKind::RenameLayer(1), "Ground floor"));
-        state.dialog_focus = 0;
+        state.overlays.dialog_focus = 0;
         let backend = TestBackend::new(70, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut rects = None;

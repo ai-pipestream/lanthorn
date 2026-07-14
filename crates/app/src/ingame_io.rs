@@ -27,7 +27,7 @@ pub(crate) fn delete_save_confirmed(
         match delete_save(path) {
             Ok(()) => {
                 state.push_notice("[Save deleted]");
-                if let Some(s) = &mut state.saves {
+                if let Some(s) = &mut state.overlays.saves {
                     s.entries = list_saves(dir);
                     // Re-clamp the selection/offset to the new entry count.
                     s.scroll.len(s.entries.len());
@@ -60,7 +60,7 @@ pub(crate) fn handle_save_as(
         state.push_notice("[Save name cannot be empty]".to_string().as_str());
         // In-game: stay pending — re-open the dialog so the user can retry.
         if ingame {
-            state.save_name_dialog = Some(app::state::SaveNameDialog::new(
+            state.overlays.save_name_dialog = Some(app::state::SaveNameDialog::new(
                 app::persist_files::default_save_name(),
                 true,
             ));
@@ -92,7 +92,7 @@ pub(crate) fn handle_save_as(
                 state.unsaved_progress = false;
             }
             // Refresh saves list.
-            if let Some(s) = &mut state.saves {
+            if let Some(s) = &mut state.overlays.saves {
                 s.entries = list_saves(dir);
             }
             // In-game SAVE: flag-hop so the run loop resumes the VM
@@ -105,7 +105,7 @@ pub(crate) fn handle_save_as(
             state.push_notice(&format!("[Save failed: {}]", e));
             // In-game: stay pending — re-open the dialog so the user can retry.
             if ingame {
-                state.save_name_dialog = Some(app::state::SaveNameDialog::new(
+                state.overlays.save_name_dialog = Some(app::state::SaveNameDialog::new(
                     app::persist_files::default_save_name(),
                     true,
                 ));
@@ -124,13 +124,13 @@ pub(crate) fn open_ingame_saves(
 ) {
     use app::session::PendingIo;
     state.ingame_io = Some(io);
-    state.dialog_focus = 0;
+    state.overlays.dialog_focus = 0;
     match io {
         PendingIo::Save => {
             // The game asked to SAVE: ask where via the save-name dialog. On submit
             // -> resume_save(true); on cancel -> resume_save(false) (handled in the
             // cancel resolver, which now watches save_name_dialog).
-            state.save_name_dialog = Some(app::state::SaveNameDialog::new(
+            state.overlays.save_name_dialog = Some(app::state::SaveNameDialog::new(
                 app::persist_files::default_save_name(),
                 true,
             ));
@@ -138,7 +138,7 @@ pub(crate) fn open_ingame_saves(
         PendingIo::Restore => {
             // The game asked to RESTORE: list babelmap saves + plain .qzl files.
             let entries = combined_saves(game_dir);
-            state.saves = Some(SavesState { entries, scroll: Default::default() });
+            state.overlays.saves = Some(SavesState { entries, scroll: Default::default() });
         }
     }
 }
@@ -171,8 +171,8 @@ pub(crate) fn resolve_ingame_dialog(
     // (2) Cancel: an in-game overlay closed without a confirm.
     if let Some(io) = state.ingame_io {
         let overlay_open = match io {
-            PendingIo::Save => state.save_name_dialog.is_some(),
-            PendingIo::Restore => state.saves.is_some(),
+            PendingIo::Save => state.overlays.save_name_dialog.is_some(),
+            PendingIo::Restore => state.overlays.saves.is_some(),
         };
         if !overlay_open {
             state.ingame_io = None;
@@ -200,12 +200,12 @@ pub(crate) fn open_filename_modal(req: app::session::FilenameReq, session: &dyn 
     state.pending_filename = Some(req);
     match app::state::filename_modal_for(req, session.file_names().len()) {
         app::state::FilenameModal::NamePrompt => {
-            state.dialog_focus = 0;
-            state.text_entry =
+            state.overlays.dialog_focus = 0;
+            state.overlays.text_entry =
                 Some(app::state::TextEntryDialog::new(app::state::TextEntryKind::CreateFile, ""));
         }
         app::state::FilenameModal::Picker => {
-            state.file_picker = Some(app::state::FilePickerState::new(session.file_names()));
+            state.overlays.file_picker = Some(app::state::FilePickerState::new(session.file_names()));
         }
         app::state::FilenameModal::AutoCancel => {
             state.pending_filename = None;
@@ -237,8 +237,8 @@ pub(crate) fn resolve_filename_request(
     }
     // Modal closed without a submit (Esc) while a request is still pending -> cancel.
     if state.pending_filename.is_some()
-        && !matches!(&state.text_entry, Some(d) if d.kind == app::state::TextEntryKind::CreateFile)
-        && state.file_picker.is_none()
+        && !matches!(&state.overlays.text_entry, Some(d) if d.kind == app::state::TextEntryKind::CreateFile)
+        && state.overlays.file_picker.is_none()
     {
         state.pending_filename = None;
         let result = session.resume_filename(None);

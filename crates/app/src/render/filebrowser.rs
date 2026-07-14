@@ -12,7 +12,7 @@ use crate::state::AppState;
 /// Shows the current directory, a list of entries (".." parent, dirs, then
 /// matching files in PickFile mode), and a footer with key hints.
 ///
-/// Does nothing when `state.file_browser` is `None`.
+/// Does nothing when `state.overlays.file_browser` is `None`.
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` otherwise.
 pub fn draw_file_browser(
     state: &AppState,
@@ -20,7 +20,7 @@ pub fn draw_file_browser(
     buf: &mut Buffer,
     vp_out: &mut usize,
 ) -> Option<DialogRects> {
-    let Some(fb) = &state.file_browser else { return None };
+    let Some(fb) = &state.overlays.file_browser else { return None };
 
     // ── Modal geometry ────────────────────────────────────────────────────────
 
@@ -173,7 +173,7 @@ mod tests {
 
     fn state_with_browser(cwd: PathBuf, mode: FbMode) -> AppState {
         let mut s = AppState::default();
-        s.file_browser = Some(FileBrowserState::build(cwd, mode));
+        s.overlays.file_browser = Some(FileBrowserState::build(cwd, mode));
         s
     }
 
@@ -185,7 +185,7 @@ mod tests {
         let entries: Vec<FbEntry> =
             (0..50).map(|i| FbEntry { name: format!("file-{i}.qzl"), is_dir: false }).collect();
         let mut state = AppState::default();
-        state.file_browser = Some(FileBrowserState {
+        state.overlays.file_browser = Some(FileBrowserState {
             cwd: PathBuf::from("/tmp"),
             entries,
             scroll: Default::default(),
@@ -203,7 +203,7 @@ mod tests {
 
         state.modal_list_viewport = vp;
         apply_action(Action::FbPage(1), &mut state, &mut Mapper::default());
-        let sel = state.file_browser.as_ref().unwrap().scroll.selected;
+        let sel = state.overlays.file_browser.as_ref().unwrap().scroll.selected;
         assert!(sel >= vp.saturating_sub(1), "PageDown should advance ~one viewport, got {sel}");
     }
 

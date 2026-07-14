@@ -13,7 +13,7 @@ use crate::state::AppState;
 /// (distinct from the on-disk `file_browser`). The currently-selected row is
 /// highlighted. A footer shows the available key actions.
 ///
-/// Does nothing when `state.file_picker` is `None`.
+/// Does nothing when `state.overlays.file_picker` is `None`.
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` otherwise.
 pub fn draw_file_picker(
     state: &AppState,
@@ -21,7 +21,7 @@ pub fn draw_file_picker(
     buf: &mut Buffer,
     vp_out: &mut usize,
 ) -> Option<DialogRects> {
-    let Some(picker) = &state.file_picker else { return None };
+    let Some(picker) = &state.overlays.file_picker else { return None };
 
     // ── Modal geometry ────────────────────────────────────────────────────────
 
@@ -48,7 +48,7 @@ pub fn draw_file_picker(
         buttons,
         show_close: true,
         default: Some(ButtonId::Done),
-        focus: Some(state.dialog_focus),
+        focus: Some(state.overlays.dialog_focus),
         field: None,
     };
 
@@ -146,7 +146,7 @@ mod tests {
         let mut s = AppState::default();
         let mut fp = FilePickerState::new(names.into_iter().map(|s| s.to_string()).collect());
         fp.scroll.selected = selected;
-        s.file_picker = Some(fp);
+        s.overlays.file_picker = Some(fp);
         s
     }
 

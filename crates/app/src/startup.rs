@@ -416,8 +416,8 @@ pub(crate) fn boot() -> BootResult {
     // open the launch dialog so the user can choose to resume or start fresh.
     if let Some(stash) = pending_resume_stash {
         state.pending_resume = Some(stash);
-        state.launch_dialog = true;
-        state.dialog_focus = 0;
+        state.overlays.launch_dialog = true;
+        state.overlays.dialog_focus = 0;
     }
 
     // If the game quit immediately (e.g. czech.z5 test suite), bail without

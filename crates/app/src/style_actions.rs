@@ -18,14 +18,14 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
 
         Action::StyleEditorCancel => {
             let dir = state.config.user_dir.clone();
-            if let Some(ed) = &state.style_editor {
+            if let Some(ed) = &state.overlays.style_editor {
                 let _ = crate::style_mru::save_mru(&dir, &ed.mru);
             }
-            state.style_editor = None;
+            state.overlays.style_editor = None;
         }
 
         Action::StyleNav(d) => {
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 let n = ed.selectors.len() as i32;
                 ed.active = ((ed.active as i32 + d).rem_euclid(n.max(1))) as usize;
                 if ed.focus == crate::state::StyleFocus::Border
@@ -38,7 +38,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
 
         Action::StyleToggleAttr(kind) => {
             let dir = state.config.user_dir.clone();
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 let sel = ed.selectors[ed.active].to_string();
                 let decl = ed.doc.colors.selectors.entry(sel).or_default();
                 let slot = match kind {
@@ -64,7 +64,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
                 Button(usize),
             }
             let ed_info = state
-                .style_editor
+                .overlays.style_editor
                 .as_ref()
                 .map(|ed| (is_bordered_selector(ed.selectors[ed.active]), ed.focus));
             if let Some((bordered, cur_focus)) = ed_info {
@@ -85,13 +85,13 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
                     .iter()
                     .position(|s| match s {
                         Stop::Body(f) => *f == cur_focus,
-                        Stop::Button(b) => cur_focus == StyleFocus::Buttons && *b == state.dialog_focus,
+                        Stop::Button(b) => cur_focus == StyleFocus::Buttons && *b == state.overlays.dialog_focus,
                     })
                     .unwrap_or(0) as i32;
                 let n = stops.len() as i32;
                 match &stops[((cur + d).rem_euclid(n)) as usize] {
                     Stop::Body(f) => {
-                        if let Some(ed) = &mut state.style_editor {
+                        if let Some(ed) = &mut state.overlays.style_editor {
                             ed.focus = *f;
                             match f {
                                 StyleFocus::Fg => ed.color_target = false,
@@ -105,17 +105,17 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
                         }
                     }
                     Stop::Button(b) => {
-                        if let Some(ed) = &mut state.style_editor {
+                        if let Some(ed) = &mut state.overlays.style_editor {
                             ed.focus = StyleFocus::Buttons;
                         }
-                        state.dialog_focus = *b;
+                        state.overlays.dialog_focus = *b;
                     }
                 }
             }
         }
 
         Action::StyleAttrChipNav(d) => {
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 let n = 5i32;
                 ed.attr_cursor = ((ed.attr_cursor as i32 + d).rem_euclid(n)) as usize;
             }
@@ -127,26 +127,26 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
         }
 
         Action::StyleCommitCustom => {
-            if let Some(ed) = &state.style_editor {
+            if let Some(ed) = &state.overlays.style_editor {
                 if crate::style_mru::is_valid_color_token(&ed.custom_buf) {
                     let is_bg = ed.color_target;
                     let value = if ed.custom_buf == "default" { Some("reset".to_string()) } else { Some(ed.custom_buf.clone()) };
                     let dir = state.config.user_dir.clone();
                     apply_style_set_color(state, is_bg, value, &dir);
-                    if let Some(ed) = &mut state.style_editor { ed.custom_buf.clear(); }
+                    if let Some(ed) = &mut state.overlays.style_editor { ed.custom_buf.clear(); }
                 }
             }
         }
 
         Action::StyleSwatchNav(d) => {
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 let n = crate::style_mru::ANSI_NAMES.len() as i32 + 1; // +1 for default cell
                 ed.swatch_cursor = ((ed.swatch_cursor as i32 + d).rem_euclid(n)) as usize;
             }
         }
 
         Action::StyleSwatchPick => {
-            if let Some(ed) = &state.style_editor {
+            if let Some(ed) = &state.overlays.style_editor {
                 let is_bg = ed.color_target;
                 let cur = ed.swatch_cursor;
                 let value = if cur == crate::style_mru::ANSI_NAMES.len() {
@@ -160,13 +160,13 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
         }
 
         Action::StyleCustomChar(c) => {
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 ed.custom_buf.push(c);
             }
         }
 
         Action::StyleCustomBackspace => {
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 if ed.custom_buf.len() > 1 {
                     ed.custom_buf.pop();
                 }
@@ -174,7 +174,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
         }
 
         Action::StyleSave => {
-            if let Some(ed) = state.style_editor.take() {
+            if let Some(ed) = state.overlays.style_editor.take() {
                 let dir = state.config.user_dir.clone();
                 let _ = crate::style_mru::save_mru(&dir, &ed.mru);
                 let (cs, set, _w) = crate::style::resolve(&ed.doc, &dir);
@@ -186,7 +186,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
         Action::StyleSaveGame => {
             if state.ifid.is_empty() {
                 state.set_status("no game loaded");
-            } else if let Some(ed) = state.style_editor.take() {
+            } else if let Some(ed) = state.overlays.style_editor.take() {
                 let dir = state.config.user_dir.clone();
                 let _ = crate::style_mru::save_mru(&dir, &ed.mru);
                 let (cs, set, _w) = crate::style::resolve(&ed.doc, &dir);
@@ -196,7 +196,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
         }
 
         Action::StyleReset => {
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 let default_doc = crate::style::parse_style_toml(crate::style::DEFAULT_STYLE_TOML)
                     .expect("DEFAULT_STYLE_TOML is always valid");
                 let sel = ed.selectors[ed.active].to_string();
@@ -212,7 +212,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
         Action::StyleBorderTypeCycle(d) => {
             const STYLES: &[&str] = &["none", "single", "double", "rounded", "thick", "picture-frame"];
             let dir = state.config.user_dir.clone();
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 let sel = ed.selectors[ed.active].to_string();
                 let decl = ed.doc.colors.selectors.entry(sel).or_default();
                 let cur_name = decl.style.as_deref().unwrap_or("single");
@@ -225,7 +225,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
         }
 
         Action::StyleBorderZoneNav(d) => {
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 let n = 8i32;
                 ed.border_zone = ((ed.border_zone as i32 + d).rem_euclid(n)) as usize;
             }
@@ -233,7 +233,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
 
         Action::StyleBorderClearZone => {
             let dir = state.config.user_dir.clone();
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 let sel = ed.selectors[ed.active].to_string();
                 let zone = border_zone_from_index(ed.border_zone);
                 let decl = ed.doc.colors.selectors.entry(sel).or_default();
@@ -244,7 +244,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
 
         Action::StyleBorderToggleHeader => {
             let dir = state.config.user_dir.clone();
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 let sel = ed.selectors[ed.active].to_string();
                 let decl = ed.doc.colors.selectors.entry(sel).or_default();
                 decl.header = Some(!decl.header.unwrap_or(false));
@@ -254,7 +254,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
 
         Action::StyleBorderToggleShadow => {
             let dir = state.config.user_dir.clone();
-            if let Some(ed) = &mut state.style_editor {
+            if let Some(ed) = &mut state.overlays.style_editor {
                 let sel = ed.selectors[ed.active].to_string();
                 let decl = ed.doc.colors.selectors.entry(sel).or_default();
                 decl.shadow = Some(!decl.shadow.unwrap_or(false));
@@ -267,7 +267,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
 }
 
 /// Open the live style editor: load the current style doc, resolve a preview
-/// ColorScheme, and seed the StyleEditorState on `state.style_editor`.
+/// ColorScheme, and seed the StyleEditorState on `state.overlays.style_editor`.
 ///
 /// Does not touch `state.colors` — the live theme is untouched until Save.
 pub fn open_style_editor(state: &mut AppState) {
@@ -291,7 +291,7 @@ pub fn open_style_editor(state: &mut AppState) {
     let (preview, _set, _w2) = crate::style::resolve(&doc, &user_dir);
     let selectors: Vec<&'static str> =
         crate::style::SELECTOR_GROUPS.iter().flat_map(|(_, s)| s.iter().copied()).collect();
-    state.style_editor = Some(crate::state::StyleEditorState {
+    state.overlays.style_editor = Some(crate::state::StyleEditorState {
         doc,
         preview,
         selectors,
@@ -304,7 +304,7 @@ pub fn open_style_editor(state: &mut AppState) {
         swatch_cursor: 0,
         border_zone: 0,
     });
-    state.dialog_focus = 0;
+    state.overlays.dialog_focus = 0;
 }
 
 /// Re-resolve `ed.preview` from the current `ed.doc` + `user_dir`.
@@ -325,7 +325,7 @@ pub(crate) fn apply_style_set_color(
     value: Option<String>,
     user_dir: &std::path::Path,
 ) {
-    if let Some(ed) = &mut state.style_editor {
+    if let Some(ed) = &mut state.overlays.style_editor {
         let sel = ed.selectors[ed.active].to_string();
         let decl = ed.doc.colors.selectors.entry(sel).or_default();
         let slot = if is_bg { &mut decl.bg } else { &mut decl.fg };

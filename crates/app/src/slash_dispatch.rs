@@ -215,8 +215,8 @@ pub(crate) fn dispatch_slash_outcome(
         }
         SlashOutcome::Quit => {
             if should_prompt_save_on_quit(state) {
-                state.quit_dialog = true;
-                state.dialog_focus = 0;
+                state.overlays.quit_dialog = true;
+                state.overlays.dialog_focus = 0;
             } else {
                 return true;
             }

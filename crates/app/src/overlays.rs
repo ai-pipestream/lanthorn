@@ -86,90 +86,90 @@ pub(crate) fn draw_all(
     let dialog_area = app::render::screen::dialog_bounds(screen_model, story_bbox, full);
 
     // ── Hotkey dialog overlay — drawn over everything ─────────────────────
-    if state.hotkey_dialog {
+    if state.overlays.hotkey_dialog {
         dialog_rects_out = draw_hotkey_dialog(state, dialog_area, buf);
     }
 
     // ── Gallery overlay — drawn after hotkey dialog ───────────────────────
-    if state.gallery.is_some() {
+    if state.overlays.gallery.is_some() {
         if let Some(dr) = draw_gallery(state, dialog_area, buf) {
             dialog_rects_out = Some(dr);
         }
     }
 
     // ── Saves-manager overlay — drawn after gallery ───────────────────────
-    if state.saves.is_some() {
+    if state.overlays.saves.is_some() {
         dialog_rects_out = draw_saves(state, dialog_area, buf, modal_list_viewport);
     }
 
     // ── Replay/rewind overlay ─────────────────────────────────────────────
-    if state.replay.is_some() {
+    if state.overlays.replay.is_some() {
         dialog_rects_out = draw_history(state, dialog_area, buf, modal_list_viewport);
     }
 
     // ── File-browser overlay — drawn after saves ──────────────────────────
-    if state.file_browser.is_some() {
+    if state.overlays.file_browser.is_some() {
         dialog_rects_out = draw_file_browser(state, dialog_area, buf, modal_list_viewport);
     }
 
     // ── VFS file picker overlay (read-mode create_by_prompt) ──────────────
-    if state.file_picker.is_some() {
+    if state.overlays.file_picker.is_some() {
         dialog_rects_out = draw_file_picker(state, dialog_area, buf, modal_list_viewport);
     }
 
     // ── Config screen overlay — drawn after other modals ──────────────────
-    if state.config_screen.is_some() {
+    if state.overlays.config_screen.is_some() {
         dialog_rects_out = draw_config_screen(state, dialog_area, buf, modal_list_viewport);
     }
 
     // ── Style editor overlay — full-screen, drawn after config screen ──────
-    if state.style_editor.is_some() {
+    if state.overlays.style_editor.is_some() {
         style_editor_rects_out = draw_style_editor(state, dialog_area, buf);
     }
 
     // ── Glyph-picker modal — drawn over the style editor ──────────────────
-    if state.glyph_picker.is_some() {
+    if state.overlays.glyph_picker.is_some() {
         glyph_picker_rects_out = app::render::glyph_picker::draw_glyph_picker(state, dialog_area, buf);
     }
 
     // ── Aux-storage prompt — drawn over everything ────────────────────────
-    if state.aux_prompt {
+    if state.overlays.aux_prompt {
         aux_dialog_rects_out = draw_aux_dialog(state, dialog_area, buf);
     }
 
     // ── Reset dialog overlay — drawn over everything ───────────────────────
-    if state.reset_dialog {
+    if state.overlays.reset_dialog {
         reset_dialog_rects_out = draw_reset_dialog(state, dialog_area, buf);
     }
 
     // ── Save-name dialog overlay — drawn over everything ───────────────────
-    if state.save_name_dialog.is_some() {
+    if state.overlays.save_name_dialog.is_some() {
         save_name_dialog_rects_out =
             app::render::save_name_dialog::draw_save_name_dialog(state, dialog_area, buf);
     }
 
     // ── Text-entry dialog overlay — drawn over everything ──────────────────
-    if state.text_entry.is_some() {
+    if state.overlays.text_entry.is_some() {
         text_entry_rects_out = draw_text_entry_dialog(state, dialog_area, buf);
     }
 
     // ── Confirm-delete dialog overlay — drawn over the saves manager ───────
-    if state.confirm_delete_save.is_some() {
+    if state.overlays.confirm_delete_save.is_some() {
         confirm_delete_rects_out = draw_confirm_delete_dialog(state, dialog_area, buf);
     }
 
     // ── Quit dialog overlay — drawn over everything ────────────────────────
-    if state.quit_dialog {
+    if state.overlays.quit_dialog {
         quit_dialog_rects_out = draw_quit_dialog(state, dialog_area, buf);
     }
 
     // ── Launch dialog overlay — drawn over everything ──────────────────────
-    if state.launch_dialog {
+    if state.overlays.launch_dialog {
         launch_dialog_rects_out = draw_launch_dialog(state, dialog_area, buf);
     }
 
     // ── Hints panel overlay — drawn after other overlays ───────────────────
-    if state.hints.is_some() {
+    if state.overlays.hints.is_some() {
         hints_panel_rects_out = draw_hints_panel(state, dialog_area, buf);
     }
 

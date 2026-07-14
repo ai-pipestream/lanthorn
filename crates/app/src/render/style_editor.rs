@@ -50,9 +50,9 @@ pub struct StyleEditorRects {
 /// Draw the style-editor full-screen overlay onto `buf`.
 ///
 /// Returns `Some(StyleEditorRects)` when drawn, `None` when
-/// `state.style_editor` is `None` or the area is too small.
+/// `state.overlays.style_editor` is `None` or the area is too small.
 pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<StyleEditorRects> {
-    let Some(ed) = &state.style_editor else { return None };
+    let Some(ed) = &state.overlays.style_editor else { return None };
 
     // Total count of selectors across all groups (used for wrapping nav).
     let total_selectors: usize = SELECTOR_GROUPS.iter().map(|(_, s)| s.len()).sum();
@@ -87,7 +87,7 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         default: Some(ButtonId::Save),
         // Highlight a footer button only once focus has Tabbed onto the button row;
         // otherwise just the default (Save) is marked, and the body widgets own focus.
-        focus: if ed.focus == StyleFocus::Buttons { Some(state.dialog_focus) } else { None },
+        focus: if ed.focus == StyleFocus::Buttons { Some(state.overlays.dialog_focus) } else { None },
         field: None,
     };
 
@@ -633,7 +633,7 @@ mod tests {
 
         // Board order must match ed.selectors order: every selector has exactly
         // one sample at its own index (proves board order == ed.selectors).
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         let mut idxs: Vec<usize> = rects.samples.iter().map(|(i, _)| *i).collect();
         idxs.sort_unstable();
         assert_eq!(
@@ -647,8 +647,8 @@ mod tests {
     fn board_scrolls_to_keep_active_visible() {
         let mut s = AppState::default();
         crate::input::open_style_editor_hermetic(&mut s);
-        let n = s.style_editor.as_ref().unwrap().selectors.len();
-        s.style_editor.as_mut().unwrap().active = n - 1; // last selector
+        let n = s.overlays.style_editor.as_ref().unwrap().selectors.len();
+        s.overlays.style_editor.as_mut().unwrap().active = n - 1; // last selector
         // Small area that cannot show all selectors at once:
         let area = Rect::new(0, 0, 90, 18);
         let mut buf = Buffer::empty(area);
@@ -696,7 +696,7 @@ mod tests {
         let mut s = AppState::default();
         crate::input::open_style_editor_hermetic(&mut s);
         {
-            let ed = s.style_editor.as_mut().unwrap();
+            let ed = s.overlays.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|&sel| sel == "map_border")
                 .expect("map_border exists");
         }
@@ -709,7 +709,7 @@ mod tests {
         let mut s2 = AppState::default();
         crate::input::open_style_editor_hermetic(&mut s2);
         {
-            let ed = s2.style_editor.as_mut().unwrap();
+            let ed = s2.overlays.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|&sel| sel == "dialog")
                 .expect("dialog exists");
         }
@@ -773,7 +773,7 @@ mod tests {
         assert!(fg_text.contains("\u{2192}fg"), "custom row tags the fg target by default");
 
         // Switch target to bg.
-        s.style_editor.as_mut().unwrap().color_target = true;
+        s.overlays.style_editor.as_mut().unwrap().color_target = true;
         let mut buf2 = Buffer::empty(area);
         let _ = draw_style_editor(&s, area, &mut buf2);
         let bg_text: String = buf2.content().iter().flat_map(|c| c.symbol().chars()).collect();
@@ -785,7 +785,7 @@ mod tests {
         let mut s = AppState::default();
         crate::input::open_style_editor_hermetic(&mut s);
         {
-            let ed = s.style_editor.as_mut().unwrap();
+            let ed = s.overlays.style_editor.as_mut().unwrap();
             ed.focus = crate::state::StyleFocus::Custom;
             ed.custom_buf = "#ab12cd".to_string();
         }
@@ -803,7 +803,7 @@ mod tests {
         let mut s = AppState::default();
         crate::input::open_style_editor_hermetic(&mut s);
         {
-            let ed = s.style_editor.as_mut().unwrap();
+            let ed = s.overlays.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|&sel| sel == "map_border")
                 .expect("map_border exists");
             let decl = ed.doc.colors.selectors.entry("map_border".to_string()).or_default();

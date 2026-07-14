@@ -42,9 +42,9 @@ pub struct GlyphPickerRects {
 
 /// Draw the glyph-picker modal centered over `area`.
 ///
-/// Returns `None` when `state.glyph_picker` is `None` or the area is too small.
+/// Returns `None` when `state.overlays.glyph_picker` is `None` or the area is too small.
 pub fn draw_glyph_picker(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<GlyphPickerRects> {
-    let picker = state.glyph_picker.as_ref()?;
+    let picker = state.overlays.glyph_picker.as_ref()?;
 
     let modal_w = MODAL_W.min(area.width.saturating_sub(4));
     let modal_h = MODAL_H.min(area.height.saturating_sub(2));
@@ -340,9 +340,9 @@ mod tests {
             &mut state,
             &mut Mapper::default(),
         );
-        assert!(state.glyph_picker.is_some());
+        assert!(state.overlays.glyph_picker.is_some());
         // Inject an invalid (double-width) pending glyph directly.
-        state.glyph_picker.as_mut().unwrap().pending = Some("漢".into());
+        state.overlays.glyph_picker.as_mut().unwrap().pending = Some("漢".into());
 
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -377,7 +377,7 @@ mod tests {
             &mut state,
             &mut Mapper::default(),
         );
-        assert!(state.glyph_picker.is_some());
+        assert!(state.overlays.glyph_picker.is_some());
 
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();

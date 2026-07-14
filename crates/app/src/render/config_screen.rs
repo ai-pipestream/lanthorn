@@ -35,7 +35,7 @@ pub(crate) enum ConfigRowKind {
 }
 
 /// Draw the config-screen modal centered over `area`.
-/// Does nothing when `state.config_screen` is `None`.
+/// Does nothing when `state.overlays.config_screen` is `None`.
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` otherwise.
 pub fn draw_config_screen(
     state: &AppState,
@@ -43,7 +43,7 @@ pub fn draw_config_screen(
     buf: &mut Buffer,
     vp_out: &mut usize,
 ) -> Option<DialogRects> {
-    let Some(cs) = &state.config_screen else { return None };
+    let Some(cs) = &state.overlays.config_screen else { return None };
 
     let modal_w = 64u16.min(area.width.saturating_sub(4));
     // +4: title row (inside border) + header + button row + border overhead
@@ -66,7 +66,7 @@ pub fn draw_config_screen(
         buttons,
         show_close: true,
         default: Some(ButtonId::Save),
-        focus: Some(state.dialog_focus),
+        focus: Some(state.overlays.dialog_focus),
         field: None,
     };
 
@@ -197,7 +197,7 @@ mod tests {
     fn state_with_config_screen() -> AppState {
         let mut s = AppState::default();
         let working = crate::input::clone_config(&s.config);
-        s.config_screen = Some(ConfigScreenState { working, scroll: Default::default() });
+        s.overlays.config_screen = Some(ConfigScreenState { working, scroll: Default::default() });
         s
     }
 
@@ -238,7 +238,7 @@ mod tests {
         // Sync the captured viewport (run loop does this) then PageDown.
         state.modal_list_viewport = vp;
         apply_action(Action::ConfigPage(1), &mut state, &mut Mapper::default());
-        let sel = state.config_screen.as_ref().unwrap().scroll.selected;
+        let sel = state.overlays.config_screen.as_ref().unwrap().scroll.selected;
         assert!(sel >= vp.saturating_sub(1), "PageDown should advance ~one viewport, got {sel}");
     }
 

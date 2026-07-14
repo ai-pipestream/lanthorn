@@ -111,7 +111,7 @@ pub fn verb_dock_width(target_w: u16, fraction: f64) -> u16 {
 /// composed-input line. Sets `*vp_out` to the ACTIVE pane's visible list
 /// height so PageUp/PageDown paging keeps working.
 ///
-/// No-op when `state.verb_menu` is `None` or `area` is too small to show
+/// No-op when `state.overlays.verb_menu` is `None` or `area` is too small to show
 /// anything meaningful (mid-slide).
 pub fn draw_verb_menu(
     state: &AppState,
@@ -122,7 +122,7 @@ pub fn draw_verb_menu(
 ) {
     hits.rows.clear();
     hits.headers.clear();
-    let Some(vm) = &state.verb_menu else { return };
+    let Some(vm) = &state.overlays.verb_menu else { return };
 
     if area.width < 8 || area.height < 4 {
         return;
@@ -336,7 +336,7 @@ mod tests {
 
     fn make_state_with_verb_menu() -> AppState {
         let mut s = AppState::default();
-        s.verb_menu = Some(VerbMenuState {
+        s.overlays.verb_menu = Some(VerbMenuState {
             pane: VerbMenuPane::Verbs,
             verb_scroll: Default::default(),
             noun_scroll: Default::default(),
@@ -419,7 +419,7 @@ mod tests {
         // highlight (the selected Verbs row is NOT cyan-on-black).
         let mut buf = Buffer::empty(DOCK_AREA);
         let mut state = make_state_with_verb_menu();
-        state.verb_menu.as_mut().unwrap().story_focused = true;
+        state.overlays.verb_menu.as_mut().unwrap().story_focused = true;
         draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0, &mut VerbMenuHits::default());
 
         let has_cyan = buf.content().iter().any(|c| c.style().bg == Some(Color::Cyan));
@@ -444,7 +444,7 @@ mod tests {
         // PageDown advances the active (Verbs) pane's selection by ~one viewport.
         state.modal_list_viewport = vp;
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::PageDown), &mut state, &mut Mapper::default());
-        let sel = state.verb_menu.as_ref().unwrap().verb_scroll.selected;
+        let sel = state.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected;
         assert!(sel >= vp.saturating_sub(1), "PageDown should advance ~one viewport, got {sel}");
     }
 
@@ -536,7 +536,7 @@ mod tests {
         let area = Rect { x: 0, y: 0, width: 26, height: 30 };
         let mut buf = Buffer::empty(area);
         let state = AppState::default();
-        assert!(state.verb_menu.is_none());
+        assert!(state.overlays.verb_menu.is_none());
         draw_verb_menu(&state, area, &mut buf, &mut 0, &mut VerbMenuHits::default());
         // No assertion beyond "did not panic"; nothing drawn since verb_menu is None.
     }

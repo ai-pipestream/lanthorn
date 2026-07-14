@@ -11,7 +11,7 @@ use crate::state::AppState;
 
 /// Draw the replay/rewind modal centered over `area`: a turn list (turn# +
 /// command) with the selected turn highlighted, the selected turn's transcript,
-/// and a transport footer. Does nothing when `state.replay` is `None`.
+/// and a transport footer. Does nothing when `state.overlays.replay` is `None`.
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing).
 pub fn draw_history(
     state: &AppState,
@@ -19,7 +19,7 @@ pub fn draw_history(
     buf: &mut Buffer,
     vp_out: &mut usize,
 ) -> Option<DialogRects> {
-    let replay = state.replay.as_ref()?;
+    let replay = state.overlays.replay.as_ref()?;
     if state.history.is_empty() {
         return None;
     }
@@ -42,7 +42,7 @@ pub fn draw_history(
         buttons,
         show_close: true,
         default: Some(ButtonId::Done),
-        focus: Some(state.dialog_focus),
+        focus: Some(state.overlays.dialog_focus),
         field: None,
     };
     let rects = draw_dialog(buf, area, &spec, &st);
@@ -157,7 +157,7 @@ mod tests {
         }).unwrap();
 
         // Open → Some, and the selected turn's command AND transcript appear.
-        state.replay = Some(ReplayState::new(1));
+        state.overlays.replay = Some(ReplayState::new(1));
         let mut term2 = Terminal::new(TestBackend::new(80, 24)).unwrap();
         let mut rects: Option<DialogRects> = None;
         term2.draw(|f| {
@@ -181,7 +181,7 @@ mod tests {
             crate::history::record_turn(&mut state.history, t, "go north", vec![t as u8], &m, false, "Forest");
         }
         state.config.animation.enabled = false; // settle the offset instantly
-        state.replay = Some(ReplayState::new(state.history.len() - 1));
+        state.overlays.replay = Some(ReplayState::new(state.history.len() - 1));
         let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
         // First render captures the list viewport.
         let mut vp = 0usize;
@@ -190,7 +190,7 @@ mod tests {
         // Sync the idx-driven scroll (run loop does this) and re-render.
         {
             let anim = state.config.animation.clone();
-            let r = state.replay.as_mut().unwrap();
+            let r = state.overlays.replay.as_mut().unwrap();
             r.scroll.len(40);
             r.scroll.select(r.idx, vp, &anim);
         }

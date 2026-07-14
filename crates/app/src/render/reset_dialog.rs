@@ -29,10 +29,10 @@ pub struct ResetDialogRects {
 
 /// Draw the reset-confirmation dialog centered over `area`.
 ///
-/// Returns `None` when `state.reset_dialog` is false or the area is too small.
+/// Returns `None` when `state.overlays.reset_dialog` is false or the area is too small.
 /// Returns `ResetDialogRects` with hit-rects for close, checkbox, and buttons.
 pub fn draw_reset_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<ResetDialogRects> {
-    if !state.reset_dialog {
+    if !state.overlays.reset_dialog {
         return None;
     }
 
@@ -52,7 +52,7 @@ pub fn draw_reset_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     // Focus ring: 0 = "clear map" checkbox, 1 = "delete data" checkbox,
     // 2 = Reset button, 3 = Cancel button. Only buttons highlight via DialogSpec;
     // a focused checkbox is highlighted inline below.
-    let button_focus = state.dialog_focus.checked_sub(2);
+    let button_focus = state.overlays.dialog_focus.checked_sub(2);
     let spec = DialogSpec {
         title: "Reset game?",
         placement: Placement::Centered { w: modal_w, h: modal_h },
@@ -100,8 +100,8 @@ pub fn draw_reset_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     let checkbox_rect = draw_checkbox(
         buf,
         content.y + 2,
-        state.reset_clear_map,
-        state.dialog_focus == 0,
+        state.overlays.reset_clear_map,
+        state.overlays.dialog_focus == 0,
         "Also clear the map",
     );
 
@@ -109,8 +109,8 @@ pub fn draw_reset_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     let checkbox_data_rect = draw_checkbox(
         buf,
         content.y + 3,
-        state.reset_delete_data,
-        state.dialog_focus == 1,
+        state.overlays.reset_delete_data,
+        state.overlays.dialog_focus == 1,
         "Delete saved progress",
     );
 
@@ -185,8 +185,8 @@ mod tests {
     fn reset_dialog_renders_title_checkbox_and_buttons() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut state = crate::state::AppState::default();
-        state.reset_dialog = true;
-        state.reset_clear_map = false;
+        state.overlays.reset_dialog = true;
+        state.overlays.reset_clear_map = false;
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut rects = None;

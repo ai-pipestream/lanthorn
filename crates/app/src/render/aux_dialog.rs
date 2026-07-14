@@ -25,10 +25,10 @@ pub struct AuxDialogRects {
 
 /// Draw the aux-storage first-use prompt centered over `area`.
 ///
-/// Returns `None` when `state.aux_prompt` is false or the area is too small.
+/// Returns `None` when `state.overlays.aux_prompt` is false or the area is too small.
 /// Returns `AuxDialogRects` with hit-rects for close and both choice buttons.
 pub fn draw_aux_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<AuxDialogRects> {
-    if !state.aux_prompt {
+    if !state.overlays.aux_prompt {
         return None;
     }
 
@@ -51,7 +51,7 @@ pub fn draw_aux_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option
         buttons,
         show_close: true,
         default: Some(ButtonId::Archive),
-        focus: Some(state.dialog_focus),
+        focus: Some(state.overlays.dialog_focus),
         field: None,
     };
 
@@ -128,7 +128,7 @@ mod tests {
     fn aux_dialog_renders_title_and_buttons() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut state = crate::state::AppState::default();
-        state.aux_prompt = true;
+        state.overlays.aux_prompt = true;
         let backend = TestBackend::new(70, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut rects = None;

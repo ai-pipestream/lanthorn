@@ -40,11 +40,11 @@ pub struct HintsPanelRects {
 
 /// Draw the Hints panel modal centered over `area`.
 ///
-/// Returns `None` when `state.hints` is `None` or the area is too small.
+/// Returns `None` when `state.overlays.hints` is `None` or the area is too small.
 /// Returns `Some(HintsPanelRects)` with hit-rects for the close button and
 /// the input row.
 pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<HintsPanelRects> {
-    let session = state.hints.as_ref()?;
+    let session = state.overlays.hints.as_ref()?;
 
     let modal_w = DIALOG_W.min(area.width.saturating_sub(4));
     let modal_h = DIALOG_H.min(area.height.saturating_sub(2));
@@ -230,7 +230,7 @@ mod tests {
         };
 
         let mut state = crate::state::AppState::default();
-        state.hints = Some(hint_session);
+        state.overlays.hints = Some(hint_session);
 
         let backend = TestBackend::new(80, 30);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -273,7 +273,7 @@ mod tests {
             return;
         };
         let mut state = crate::state::AppState::default();
-        state.hints = Some(hint_session);
+        state.overlays.hints = Some(hint_session);
 
         let backend = TestBackend::new(20, 5); // too small
         let mut terminal = Terminal::new(backend).unwrap();

@@ -14,7 +14,7 @@ use crate::state::AppState;
 /// The currently-selected row is highlighted. A footer shows the available
 /// key actions.
 ///
-/// Does nothing when `state.saves` is `None`.
+/// Does nothing when `state.overlays.saves` is `None`.
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing), `None` otherwise.
 pub fn draw_saves(
     state: &AppState,
@@ -22,7 +22,7 @@ pub fn draw_saves(
     buf: &mut Buffer,
     vp_out: &mut usize,
 ) -> Option<DialogRects> {
-    let Some(saves) = &state.saves else { return None };
+    let Some(saves) = &state.overlays.saves else { return None };
 
     // ── Modal geometry ────────────────────────────────────────────────────────
 
@@ -49,7 +49,7 @@ pub fn draw_saves(
         buttons,
         show_close: true,
         default: Some(ButtonId::Done),
-        focus: Some(state.dialog_focus),
+        focus: Some(state.overlays.dialog_focus),
         field: None,
     };
 
@@ -234,7 +234,7 @@ mod tests {
         let mut s = AppState::default();
         let mut scroll = crate::list_scroll::ListScroll::new();
         scroll.selected = selected;
-        s.saves = Some(SavesState { entries, scroll });
+        s.overlays.saves = Some(SavesState { entries, scroll });
         s
     }
 
@@ -258,7 +258,7 @@ mod tests {
         // PageDown advances the selection by ~one viewport (clamped/wrapped via nav).
         state.modal_list_viewport = vp;
         apply_action(Action::SavesPage(1), &mut state, &mut Mapper::default());
-        let sel = state.saves.as_ref().unwrap().scroll.selected;
+        let sel = state.overlays.saves.as_ref().unwrap().scroll.selected;
         assert!(sel >= vp.saturating_sub(1), "PageDown should advance ~one viewport, got {sel}");
     }
 

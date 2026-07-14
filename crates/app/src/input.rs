@@ -472,34 +472,34 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     }
 
     // 4-6. Modal sub-modes: route to their handlers (all hardwired Actions).
-    if state.gallery.is_some() {
+    if state.overlays.gallery.is_some() {
         return KeyResolve::Action(gallery_key_to_action(key));
     }
-    if state.saves.is_some() {
-        return KeyResolve::Action(saves_key_to_action(key, state.dialog_focus));
+    if state.overlays.saves.is_some() {
+        return KeyResolve::Action(saves_key_to_action(key, state.overlays.dialog_focus));
     }
-    if state.file_picker.is_some() {
+    if state.overlays.file_picker.is_some() {
         return KeyResolve::Action(file_picker_key_to_action(key));
     }
-    if state.replay.is_some() {
+    if state.overlays.replay.is_some() {
         return KeyResolve::Action(history_key_to_action(key));
     }
-    if state.file_browser.is_some() {
+    if state.overlays.file_browser.is_some() {
         return KeyResolve::Action(filebrowser_key_to_action(key));
     }
-    if state.verb_menu.is_some() {
+    if state.overlays.verb_menu.is_some() {
         if let Some(a) = verb_menu_intercept(key, state) {
             return KeyResolve::Action(a);
         }
         // else: fall through — the story input is live, so the key is handled normally.
     }
-    if state.style_editor.is_some() {
+    if state.overlays.style_editor.is_some() {
         return KeyResolve::Action(style_editor_key_to_action(key, state));
     }
-    if state.config_screen.is_some() {
-        return KeyResolve::Action(config_screen_key_to_action(key, state.dialog_focus));
+    if state.overlays.config_screen.is_some() {
+        return KeyResolve::Action(config_screen_key_to_action(key, state.overlays.dialog_focus));
     }
-    if state.hotkey_dialog {
+    if state.overlays.hotkey_dialog {
         return hotkey_dialog_key_to_action(state, key);
     }
 
@@ -931,29 +931,29 @@ pub fn mouse_to_action(
     let wheel_up = wheel_delta(kind, false).map(|d| d < 0);
     if let Some(up) = wheel_up {
         // Priority mirrors the keyboard modal routing order above.
-        if state.gallery.is_some() {
+        if state.overlays.gallery.is_some() {
             return if up { Action::GalleryPrev } else { Action::GalleryNext };
         }
-        if state.config_screen.is_some() {
+        if state.overlays.config_screen.is_some() {
             return if up { Action::ConfigNav(-1) } else { Action::ConfigNav(1) };
         }
-        if state.saves.is_some() {
+        if state.overlays.saves.is_some() {
             return if up { Action::SavesNav(-1) } else { Action::SavesNav(1) };
         }
-        if state.replay.is_some() {
+        if state.overlays.replay.is_some() {
             return if up { Action::ReplayStep(-1) } else { Action::ReplayStep(1) };
         }
-        if state.file_browser.is_some() {
+        if state.overlays.file_browser.is_some() {
             return if up { Action::FbNav(-1) } else { Action::FbNav(1) };
         }
-        if state.verb_menu.is_some() {
+        if state.overlays.verb_menu.is_some() {
             return if up {
                 Action::VerbMenuNav(VerbMenuNavKind::Up)
             } else {
                 Action::VerbMenuNav(VerbMenuNavKind::Down)
             };
         }
-        if state.style_editor.is_some() {
+        if state.overlays.style_editor.is_some() {
             return if up { Action::StyleNav(-1) } else { Action::StyleNav(1) };
         }
     }
@@ -965,29 +965,29 @@ pub fn mouse_to_action(
             // all other clicks fall through to normal map/room routing below.
             // But if a centered modal is also open (stacked on top), it takes
             // priority and must swallow all outside clicks.
-            let centered_open = state.gallery.is_some() || state.config_screen.is_some()
-                || state.saves.is_some() || state.file_browser.is_some()
-                || state.hotkey_dialog;
+            let centered_open = state.overlays.gallery.is_some() || state.overlays.config_screen.is_some()
+                || state.overlays.saves.is_some() || state.overlays.file_browser.is_some()
+                || state.overlays.hotkey_dialog;
             let is_corner_overlay = !centered_open
                 && (state.room_panel.is_some() || state.tidy_anim.is_some());
 
-            if state.gallery.is_some() {
+            if state.overlays.gallery.is_some() {
                 if let Some(action) = gallery_dialog_action(rects, col, row) {
                     return action;
                 }
-            } else if state.config_screen.is_some() {
+            } else if state.overlays.config_screen.is_some() {
                 if let Some(action) = config_dialog_action(rects, col, row) {
                     return action;
                 }
-            } else if state.saves.is_some() {
+            } else if state.overlays.saves.is_some() {
                 if let Some(action) = saves_dialog_action(rects, col, row) {
                     return action;
                 }
-            } else if state.file_browser.is_some() {
+            } else if state.overlays.file_browser.is_some() {
                 if let Some(action) = filebrowser_dialog_action(rects, col, row) {
                     return action;
                 }
-            } else if state.hotkey_dialog {
+            } else if state.overlays.hotkey_dialog {
                 if let Some(action) = hotkeys_dialog_action(rects, col, row) {
                     return action;
                 }
@@ -1015,9 +1015,9 @@ pub fn mouse_to_action(
         } else {
             // For non-left-click events (wheel/drag): swallow unless a corner overlay
             // is active and no centered modal is stacked on top.
-            let centered_open = state.gallery.is_some() || state.config_screen.is_some()
-                || state.saves.is_some() || state.file_browser.is_some()
-                || state.hotkey_dialog;
+            let centered_open = state.overlays.gallery.is_some() || state.overlays.config_screen.is_some()
+                || state.overlays.saves.is_some() || state.overlays.file_browser.is_some()
+                || state.overlays.hotkey_dialog;
             let is_corner_overlay = !centered_open
                 && (state.room_panel.is_some() || state.tidy_anim.is_some());
             if !is_corner_overlay {
@@ -1250,7 +1250,7 @@ fn verb_menu_intercept(key: KeyEvent, state: &AppState) -> Option<Action> {
 
     // The remaining keys are only consumed when a dock pane is focused; while the
     // story is focused they belong to the game input (letters, Enter, ↑/↓ history).
-    let story_focused = state.verb_menu.as_ref().map(|vm| vm.story_focused).unwrap_or(true);
+    let story_focused = state.overlays.verb_menu.as_ref().map(|vm| vm.story_focused).unwrap_or(true);
     if story_focused {
         return None;
     }
@@ -1294,7 +1294,7 @@ fn resize_mode_key_to_action(key: KeyEvent) -> Action {
 /// Key dispatch for the style-editor full-screen mode.
 fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> Action {
     use crate::state::StyleFocus;
-    let ed_ref = state.style_editor.as_ref();
+    let ed_ref = state.overlays.style_editor.as_ref();
     let focus = ed_ref.map(|e| e.focus).unwrap_or(StyleFocus::Board);
     let attr_cursor = ed_ref.map(|e| e.attr_cursor).unwrap_or(0);
 
@@ -1377,7 +1377,7 @@ fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> 
         // Footer-button focus: Tab/Shift-Tab step between the buttons (handled by
         // StyleFocusCycle above); Enter activates the focused button.
         KeyCode::Enter if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Buttons => {
-            match state.dialog_focus {
+            match state.overlays.dialog_focus {
                 0 => Action::StyleSave,
                 1 => Action::StyleSaveGame,
                 _ => Action::StyleEditorCancel,
@@ -1821,26 +1821,26 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::RenameRoom => {
             if let Some(id) = state.selected_room {
-                state.hotkey_dialog = false;
-                state.dialog_focus = 0;
+                state.overlays.hotkey_dialog = false;
+                state.overlays.dialog_focus = 0;
                 // Opens empty: an empty submit clears the room's custom label.
-                state.text_entry = Some(TextEntryDialog::new(TextEntryKind::RenameRoom(id), ""));
+                state.overlays.text_entry = Some(TextEntryDialog::new(TextEntryKind::RenameRoom(id), ""));
             }
         }
         Action::RenameLayer => {
             let layer = state.active_layer(&mapper.graph);
             let current_name = mapper.graph.layer_name(layer).to_owned();
-            state.hotkey_dialog = false;
-            state.dialog_focus = 0;
-            state.text_entry =
+            state.overlays.hotkey_dialog = false;
+            state.overlays.dialog_focus = 0;
+            state.overlays.text_entry =
                 Some(TextEntryDialog::new(TextEntryKind::RenameLayer(layer), current_name));
         }
         Action::EditNotes => {
             if let Some(id) = state.selected_room {
-                state.hotkey_dialog = false;
-                state.dialog_focus = 0;
+                state.overlays.hotkey_dialog = false;
+                state.overlays.dialog_focus = 0;
                 // Opens empty: submit replaces the room's notes (empty clears them).
-                state.text_entry = Some(TextEntryDialog::new(TextEntryKind::EditNotes(id), ""));
+                state.overlays.text_entry = Some(TextEntryDialog::new(TextEntryKind::EditNotes(id), ""));
             }
         }
         Action::RelabelSelectedEdge => {
@@ -1850,9 +1850,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     mapper.graph.connections().iter().find(|c| c.origin == id)
                 {
                     let old_dir = conn.dir;
-                    state.hotkey_dialog = false;
-                    state.dialog_focus = 0;
-                    state.text_entry =
+                    state.overlays.hotkey_dialog = false;
+                    state.overlays.dialog_focus = 0;
+                    state.overlays.text_entry =
                         Some(TextEntryDialog::new(TextEntryKind::RelabelEdge(id, old_dir), ""));
                 }
             }
@@ -1881,14 +1881,14 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::OpenHotkeyDialog => {
-            state.hotkey_dialog = true;
+            state.overlays.hotkey_dialog = true;
             // Close other overlays if open.
-            state.gallery = None;
-            state.saves = None;
+            state.overlays.gallery = None;
+            state.overlays.saves = None;
         }
 
         Action::CloseHotkeyDialog => {
-            state.hotkey_dialog = false;
+            state.overlays.hotkey_dialog = false;
         }
 
         // ── Saves-manager actions ─────────────────────────────────────────────
@@ -1898,14 +1898,14 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // apply_action only sets up the state; the caller refreshes the list
             // via AppState::open_saves_modal after apply_action returns.
             // If already open, do nothing.
-            state.hotkey_dialog = false;
-            state.dialog_focus = 0;
+            state.overlays.hotkey_dialog = false;
+            state.overlays.dialog_focus = 0;
         }
 
         Action::SavesNav(delta) => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(s) = &mut state.saves {
+            if let Some(s) = &mut state.overlays.saves {
                 if !s.entries.is_empty() {
                     let len = s.entries.len();
                     s.scroll.len(len);
@@ -1919,7 +1919,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::SavesPage(dir) => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(s) = &mut state.saves {
+            if let Some(s) = &mut state.overlays.saves {
                 let len = s.entries.len();
                 s.scroll.len(len);
                 s.scroll.page(dir, vp, &anim);
@@ -1929,7 +1929,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::SavesHome => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(s) = &mut state.saves {
+            if let Some(s) = &mut state.overlays.saves {
                 s.scroll.len(s.entries.len());
                 s.scroll.home(vp, &anim);
             }
@@ -1938,7 +1938,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::SavesEnd => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(s) = &mut state.saves {
+            if let Some(s) = &mut state.overlays.saves {
                 let len = s.entries.len();
                 s.scroll.len(len);
                 s.scroll.end(len, vp, &anim);
@@ -1951,9 +1951,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::SavesSaveAs => {
             // Open the save-name dialog (a common-dialog modal, not a bottom-bar
             // prompt); on submit the caller performs the host Save State save.
-            state.hotkey_dialog = false;
-            state.dialog_focus = 0;
-            state.save_name_dialog = Some(crate::state::SaveNameDialog::new(
+            state.overlays.hotkey_dialog = false;
+            state.overlays.dialog_focus = 0;
+            state.overlays.save_name_dialog = Some(crate::state::SaveNameDialog::new(
                 crate::persist_files::default_save_name(),
                 false,
             ));
@@ -1962,18 +1962,18 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::SavesDelete => {
             // Open the two-button confirm-delete dialog for the selected entry;
             // focus starts on Cancel (index 1), the safe default.
-            if let Some(s) = &state.saves {
+            if let Some(s) = &state.overlays.saves {
                 if let Some(entry) = s.entries.get(s.scroll.selected) {
                     let path = entry.path.clone();
-                    state.hotkey_dialog = false;
-                    state.dialog_focus = 1;
-                    state.confirm_delete_save = Some(path);
+                    state.overlays.hotkey_dialog = false;
+                    state.overlays.dialog_focus = 1;
+                    state.overlays.confirm_delete_save = Some(path);
                 }
             }
         }
 
         Action::SavesClose => {
-            state.saves = None;
+            state.overlays.saves = None;
         }
 
         // SavesLoad is caller-handled.
@@ -1981,22 +1981,22 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         // ── VFS file-picker actions ─────────────────────────────────────────────
 
         Action::FilePickerNav(delta) => {
-            if let Some(fp) = &mut state.file_picker {
+            if let Some(fp) = &mut state.overlays.file_picker {
                 if delta < 0 { fp.move_up() } else { fp.move_down() }
             }
         }
         Action::FilePickerPick => {
-            if let Some(fp) = &state.file_picker {
+            if let Some(fp) = &state.overlays.file_picker {
                 if let Some(name) = fp.selected() {
                     state.filename_submitted = Some(Some(name.to_string()));
                 }
             }
-            state.file_picker = None;
+            state.overlays.file_picker = None;
         }
         Action::FilePickerClose => {
             // Leave pending_filename set: the run loop's resolver treats a closed
             // picker with a still-pending request as a cancel (NULL fileref).
-            state.file_picker = None;
+            state.overlays.file_picker = None;
         }
 
         // ── File-browser actions ──────────────────────────────────────────────
@@ -2006,7 +2006,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::FbNav(delta) => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(fb) = &mut state.file_browser {
+            if let Some(fb) = &mut state.overlays.file_browser {
                 if !fb.entries.is_empty() {
                     let len = fb.entries.len();
                     fb.scroll.len(len);
@@ -2020,7 +2020,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::FbPage(dir) => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(fb) = &mut state.file_browser {
+            if let Some(fb) = &mut state.overlays.file_browser {
                 let len = fb.entries.len();
                 fb.scroll.len(len);
                 fb.scroll.page(dir, vp, &anim);
@@ -2030,7 +2030,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::FbHome => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(fb) = &mut state.file_browser {
+            if let Some(fb) = &mut state.overlays.file_browser {
                 fb.scroll.len(fb.entries.len());
                 fb.scroll.home(vp, &anim);
             }
@@ -2039,7 +2039,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::FbEnd => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(fb) = &mut state.file_browser {
+            if let Some(fb) = &mut state.overlays.file_browser {
                 let len = fb.entries.len();
                 fb.scroll.len(len);
                 fb.scroll.end(len, vp, &anim);
@@ -2047,61 +2047,61 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::FbClose => {
-            state.file_browser = None;
+            state.overlays.file_browser = None;
         }
 
         Action::OpenGallery => {
-            state.hotkey_dialog = false;
-            state.dialog_focus = 0;
-            state.gallery = Some(crate::state::GalleryState {
+            state.overlays.hotkey_dialog = false;
+            state.overlays.dialog_focus = 0;
+            state.overlays.gallery = Some(crate::state::GalleryState {
                 category_idx: 0,
                 selections: [0, 0, 0, 0],
             });
         }
 
         Action::GalleryNext => {
-            if let Some(g) = &mut state.gallery {
+            if let Some(g) = &mut state.overlays.gallery {
                 let cat = g.category_idx;
                 let count = preset_count(cat);
                 g.selections[cat] = (g.selections[cat] + 1) % count;
             }
-            if let Some(g) = &state.gallery {
+            if let Some(g) = &state.overlays.gallery {
                 state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
             }
         }
 
         Action::GalleryPrev => {
-            if let Some(g) = &mut state.gallery {
+            if let Some(g) = &mut state.overlays.gallery {
                 let cat = g.category_idx;
                 let count = preset_count(cat);
                 g.selections[cat] = (g.selections[cat] + count - 1) % count;
             }
-            if let Some(g) = &state.gallery {
+            if let Some(g) = &state.overlays.gallery {
                 state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
             }
         }
 
         Action::GalleryCategoryNext => {
-            if let Some(g) = &mut state.gallery {
+            if let Some(g) = &mut state.overlays.gallery {
                 g.category_idx = (g.category_idx + 1) % 4;
             }
         }
 
         Action::GalleryCategoryPrev => {
-            if let Some(g) = &mut state.gallery {
+            if let Some(g) = &mut state.overlays.gallery {
                 g.category_idx = (g.category_idx + 3) % 4;
             }
         }
 
         Action::GalleryClose => {
-            if let Some(g) = state.gallery.take() {
+            if let Some(g) = state.overlays.gallery.take() {
                 state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
                 // Persistence is handled by the caller (main.rs detects GalleryClose).
             }
         }
 
         Action::GalleryApply => {
-            if let Some(g) = state.gallery.take() {
+            if let Some(g) = state.overlays.gallery.take() {
                 state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
                 // Persistence is handled by the caller (main.rs detects GalleryApply).
             }
@@ -2214,9 +2214,9 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::OpenVerbMenu => {
-            state.hotkey_dialog = false;
+            state.overlays.hotkey_dialog = false;
             let nouns = build_verb_menu_nouns(state, mapper);
-            state.verb_menu = Some(crate::state::VerbMenuState {
+            state.overlays.verb_menu = Some(crate::state::VerbMenuState {
                 pane: crate::state::VerbMenuPane::Verbs,
                 verb_scroll: Default::default(),
                 noun_scroll: Default::default(),
@@ -2233,7 +2233,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             use crate::render::verbmenu::{VERB_MENU_VERBS, VERB_MENU_PREPS};
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(vm) = &mut state.verb_menu {
+            if let Some(vm) = &mut state.overlays.verb_menu {
                 match kind {
                     // Focus ring INCLUDING the story pane: Story → Verbs → Nouns
                     // → Preps → Story.
@@ -2291,7 +2291,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             use crate::render::verbmenu::{VERB_MENU_VERBS, VERB_MENU_PREPS};
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(vm) = &mut state.verb_menu {
+            if let Some(vm) = &mut state.overlays.verb_menu {
                 let (token, scroll, len) = match pane {
                     VerbMenuPane::Verbs => (VERB_MENU_VERBS.get(idx).copied().map(str::to_string), &mut vm.verb_scroll, VERB_MENU_VERBS.len()),
                     VerbMenuPane::Nouns => (vm.nouns.get(idx).cloned(), &mut vm.noun_scroll, vm.nouns.len()),
@@ -2304,7 +2304,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::VerbMenuFocusPane(pane) => {
-            if let Some(vm) = &mut state.verb_menu {
+            if let Some(vm) = &mut state.overlays.verb_menu {
                 vm.story_focused = false;
                 vm.pane = pane;
             }
@@ -2312,7 +2312,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::VerbMenuPick => {
             use crate::render::verbmenu::{VERB_MENU_VERBS, VERB_MENU_PREPS};
-            if let Some(vm) = &state.verb_menu {
+            if let Some(vm) = &state.overlays.verb_menu {
                 let token = vm.selected_token(VERB_MENU_VERBS, VERB_MENU_PREPS).to_owned();
                 if !token.is_empty() {
                     state.input.push_str(&token);
@@ -2334,7 +2334,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ResizePanes => {
             let visible = state.resize_targets_visible();
             if let Some(first) = visible.first() {
-                state.hotkey_dialog = false;
+                state.overlays.hotkey_dialog = false;
                 state.resize_mode = true;
                 state.resize_target = *first;
             }
@@ -2410,10 +2410,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         // ── Config screen actions ─────────────────────────────────────────────
 
         Action::OpenConfig => {
-            state.hotkey_dialog = false;
-            state.dialog_focus = 0;
+            state.overlays.hotkey_dialog = false;
+            state.overlays.dialog_focus = 0;
             let working = clone_config(&state.config);
-            state.config_screen = Some(crate::state::ConfigScreenState {
+            state.overlays.config_screen = Some(crate::state::ConfigScreenState {
                 working,
                 scroll: Default::default(),
             });
@@ -2422,7 +2422,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ConfigNav(delta) => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(cs) = &mut state.config_screen {
+            if let Some(cs) = &mut state.overlays.config_screen {
                 let n = CONFIG_ROW_COUNT;
                 cs.scroll.len(n);
                 // Preserve the existing wrap-around behavior via select().
@@ -2434,7 +2434,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ConfigPage(dir) => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(cs) = &mut state.config_screen {
+            if let Some(cs) = &mut state.overlays.config_screen {
                 cs.scroll.len(CONFIG_ROW_COUNT);
                 cs.scroll.page(dir, vp, &anim);
             }
@@ -2443,7 +2443,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ConfigHome => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(cs) = &mut state.config_screen {
+            if let Some(cs) = &mut state.overlays.config_screen {
                 cs.scroll.len(CONFIG_ROW_COUNT);
                 cs.scroll.home(vp, &anim);
             }
@@ -2452,35 +2452,35 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ConfigEnd => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(cs) = &mut state.config_screen {
+            if let Some(cs) = &mut state.overlays.config_screen {
                 cs.scroll.len(CONFIG_ROW_COUNT);
                 cs.scroll.end(CONFIG_ROW_COUNT, vp, &anim);
             }
         }
 
         Action::ConfigToggle => {
-            if state.config_screen.is_some() {
+            if state.overlays.config_screen.is_some() {
                 // Split the borrow: take the selected row, then call helper.
-                let selected = state.config_screen.as_ref().map(|cs| cs.scroll.selected).unwrap_or(0);
+                let selected = state.overlays.config_screen.as_ref().map(|cs| cs.scroll.selected).unwrap_or(0);
                 config_toggle_or_edit(selected, state);
             }
         }
 
         Action::ConfigCycle(delta) => {
-            if let Some(cs) = &mut state.config_screen {
+            if let Some(cs) = &mut state.overlays.config_screen {
                 config_cycle(&mut cs.working, cs.scroll.selected, delta);
             }
         }
 
         Action::ConfigEdit => {
-            if let Some(cs) = &state.config_screen {
+            if let Some(cs) = &state.overlays.config_screen {
                 let field = config_path_field(cs.scroll.selected);
                 if let Some(f) = field {
                     let current = match &f {
                         crate::state::ConfigPathField::UserDir => cs.working.user_dir.to_string_lossy().to_string(),
                     };
-                    state.dialog_focus = 0;
-                    state.text_entry = Some(TextEntryDialog::new(
+                    state.overlays.dialog_focus = 0;
+                    state.overlays.text_entry = Some(TextEntryDialog::new(
                         TextEntryKind::ConfigEditPath { field: f },
                         current,
                     ));
@@ -2489,7 +2489,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::ConfigSave => {
-            if let Some(cs) = state.config_screen.take() {
+            if let Some(cs) = state.overlays.config_screen.take() {
                 state.config = clone_config(&cs.working);
                 if let Some(b) = state.audio.as_mut() {
                     b.set_volume(state.config.volume);
@@ -2514,16 +2514,16 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::ConfigCancel => {
-            state.config_screen = None;
+            state.overlays.config_screen = None;
         }
 
         Action::ResetGame => {
             // Open the reset dialog; the caller (main.rs) handles confirm/cancel/clear-map.
-            state.hotkey_dialog = false;
-            state.reset_dialog = true;
-            state.reset_clear_map = false;
-            state.reset_delete_data = false;
-            state.dialog_focus = 0;
+            state.overlays.hotkey_dialog = false;
+            state.overlays.reset_dialog = true;
+            state.overlays.reset_clear_map = false;
+            state.overlays.reset_delete_data = false;
+            state.overlays.dialog_focus = 0;
         }
 
         // Caller-handled: silently ignored.
@@ -2547,15 +2547,15 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::OpenHistory => {
             // Seed at the last turn; no-op when there is no history.
-            state.hotkey_dialog = false;
+            state.overlays.hotkey_dialog = false;
             if !state.history.is_empty() {
-                state.replay = Some(crate::state::ReplayState::new(state.history.len() - 1));
+                state.overlays.replay = Some(crate::state::ReplayState::new(state.history.len() - 1));
             }
         }
 
         Action::ReplayStep(delta) => {
             let len = state.history.len();
-            if let Some(r) = &mut state.replay {
+            if let Some(r) = &mut state.overlays.replay {
                 r.step(delta, len);
             }
         }
@@ -2564,19 +2564,19 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             let len = state.history.len();
             // Page by one list viewport (1-row overlap), clamped by step().
             let page = (state.modal_list_viewport.max(2) - 1) as isize;
-            if let Some(r) = &mut state.replay {
+            if let Some(r) = &mut state.overlays.replay {
                 r.step(dir as isize * page, len);
             }
         }
 
         Action::ReplayTogglePlay => {
-            if let Some(r) = &mut state.replay {
+            if let Some(r) = &mut state.overlays.replay {
                 r.toggle_play();
             }
         }
 
         Action::ReplayClose => {
-            state.replay = None;
+            state.overlays.replay = None;
         }
 
         // ReplayResume is caller-handled in main.rs (needs the live session/VM).
@@ -2779,7 +2779,7 @@ pub fn apply_text_entry(dlg: TextEntryDialog, state: &mut AppState, mapper: &mut
             state.bump_graph_gen();
         }
         TextEntryKind::ConfigEditPath { field } => {
-            if let Some(cs) = &mut state.config_screen {
+            if let Some(cs) = &mut state.overlays.config_screen {
                 match field {
                     crate::state::ConfigPathField::UserDir => {
                         cs.working.user_dir = std::path::PathBuf::from(&value);
@@ -2942,27 +2942,27 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
     match selected {
         0 => {
             // user_dir — open the text-entry path edit dialog.
-            let current = state.config_screen.as_ref()
+            let current = state.overlays.config_screen.as_ref()
                 .map(|cs| cs.working.user_dir.to_string_lossy().to_string())
                 .unwrap_or_default();
-            state.dialog_focus = 0;
-            state.text_entry = Some(TextEntryDialog::new(
+            state.overlays.dialog_focus = 0;
+            state.overlays.text_entry = Some(TextEntryDialog::new(
                 TextEntryKind::ConfigEditPath { field: crate::state::ConfigPathField::UserDir },
                 current,
             ));
         }
-        1 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_load = !cs.working.auto_load; } }
-        2 => { if let Some(cs) = &mut state.config_screen { cs.working.auto_save = !cs.working.auto_save; } }
-        3 => { if let Some(cs) = &mut state.config_screen { cs.working.prompt_save_on_quit = !cs.working.prompt_save_on_quit; } }
-        4 => { if let Some(cs) = &mut state.config_screen { cs.working.prompt_load_on_launch = !cs.working.prompt_load_on_launch; } }
-        5 => { if let Some(cs) = &mut state.config_screen { cs.working.show_room_numbers = !cs.working.show_room_numbers; } }
-        6 => { if let Some(cs) = &mut state.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
-        7 => { if let Some(cs) = &mut state.config_screen { config_cycle_aux_storage(&mut cs.working.aux_storage, 1); } }
-        8 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_game_colours = !cs.working.honor_game_colours; } }
-        9 => { if let Some(cs) = &mut state.config_screen { cs.working.honor_timed_input = !cs.working.honor_timed_input; } }
-        10 => { if let Some(cs) = &mut state.config_screen { cs.working.enable_sound = !cs.working.enable_sound; } }
-        12 => { if let Some(cs) = &mut state.config_screen { cs.working.mouse = !cs.working.mouse; } }
-        13 => { if let Some(cs) = &mut state.config_screen { cs.working.command_bar = !cs.working.command_bar; } }
+        1 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.auto_load = !cs.working.auto_load; } }
+        2 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.auto_save = !cs.working.auto_save; } }
+        3 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.prompt_save_on_quit = !cs.working.prompt_save_on_quit; } }
+        4 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.prompt_load_on_launch = !cs.working.prompt_load_on_launch; } }
+        5 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.show_room_numbers = !cs.working.show_room_numbers; } }
+        6 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_background_tidy(&mut cs.working.background_tidy, 1); } }
+        7 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_aux_storage(&mut cs.working.aux_storage, 1); } }
+        8 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.honor_game_colours = !cs.working.honor_game_colours; } }
+        9 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.honor_timed_input = !cs.working.honor_timed_input; } }
+        10 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.enable_sound = !cs.working.enable_sound; } }
+        12 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.mouse = !cs.working.mouse; } }
+        13 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.command_bar = !cs.working.command_bar; } }
         _ => {}
     }
 }
@@ -3042,7 +3042,7 @@ mod tests {
         s.ifid = ifid.to_string();
         crate::style_actions::open_style_editor(&mut s);
 
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         assert_eq!(
             ed.doc.colors.selectors.get("room").and_then(|d| d.fg.as_deref()),
             Some("red"),
@@ -3189,7 +3189,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::None));
         // Open dialog: Shift+N is not an authored leader letter, so it now closes
         // the dialog instead; the authored leader letter 'n' fires RenameLayer.
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::RenameLayer));
     }
@@ -3209,7 +3209,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::None));
         // Ctrl-combos always close the dialog now (never fire); the underlying
         // commands fire via their authored leader letters instead.
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::ExportSvg(_)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::ExportDot(_)));
@@ -3220,7 +3220,7 @@ mod tests {
     #[test]
     fn leader_letter_fires_command() {
         let mut s = AppState::default();
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         match key_to_command(&s, key(KeyCode::Char('t'))) {
             KeyResolve::Command(c, _) => assert_eq!(c, "tidy-map"),
             other => panic!("expected Command, got {other:?}"),
@@ -3230,7 +3230,7 @@ mod tests {
     #[test]
     fn leader_multiword_letter_fires_full_command() {
         let mut s = AppState::default();
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         match key_to_command(&s, key(KeyCode::Char('c'))) {
             KeyResolve::Command(c, _) => assert_eq!(c, "cycle-layer next"),
             other => panic!("expected Command, got {other:?}"),
@@ -3242,21 +3242,21 @@ mod tests {
         // All 26 letters are authored leader letters (SQ-0237 claimed the last
         // two, 'z' and 'k'), so use a digit to exercise the "unbound" path.
         let mut s = AppState::default();
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_command(&s, key(KeyCode::Char('1'))), KeyResolve::Action(Action::CloseHotkeyDialog)));
     }
 
     #[test]
     fn leader_ctrl_combo_closes_not_fires() {
         let mut s = AppState::default();
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Action(Action::CloseHotkeyDialog)));
     }
 
     #[test]
     fn leader_esc_closes() {
         let mut s = AppState::default();
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_command(&s, key(KeyCode::Esc)), KeyResolve::Action(Action::CloseHotkeyDialog)));
     }
 
@@ -3312,11 +3312,11 @@ mod tests {
         for t in 1..=3 {
             crate::history::record_turn(&mut s.history, t, "x", vec![t as u8], &m, false, "");
         }
-        s.replay = Some(ReplayState::new(2));
+        s.overlays.replay = Some(ReplayState::new(2));
         apply_action(Action::ReplayStep(-1), &mut s, &mut Mapper::default());
-        assert_eq!(s.replay.as_ref().unwrap().idx, 1);
+        assert_eq!(s.overlays.replay.as_ref().unwrap().idx, 1);
         apply_action(Action::ReplayClose, &mut s, &mut Mapper::default());
-        assert!(s.replay.is_none(), "Esc closes without change");
+        assert!(s.overlays.replay.is_none(), "Esc closes without change");
         assert_eq!(s.history.len(), 3, "close leaves history intact");
     }
 
@@ -3393,7 +3393,7 @@ mod tests {
         // Return actions when dialog is open, via their authored leader letters
         // ('t' for tidy-map/Retidy, 'r' for rename-room); Shift+R is no longer
         // an authored leader letter.
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::RenameRoom));
     }
@@ -3660,27 +3660,27 @@ mod tests {
         assert!(matches!(key_to_action(&state, key(KeyCode::Char('r'))), Action::None));
 
         // With dialog open, 'r' → RenameRoom action → the text-entry dialog opens.
-        state.hotkey_dialog = true;
+        state.overlays.hotkey_dialog = true;
         let a = key_to_action(&state, key(KeyCode::Char('r')));
         assert!(matches!(a, Action::RenameRoom));
         apply_action(a, &mut state, &mut mapper);
         // apply_action clears hotkey_dialog when opening the dialog.
-        assert!(!state.hotkey_dialog, "hotkey_dialog cleared when the dialog opens");
-        let dlg = state.text_entry.as_ref().expect("text-entry dialog opened");
+        assert!(!state.overlays.hotkey_dialog, "hotkey_dialog cleared when the dialog opens");
+        let dlg = state.overlays.text_entry.as_ref().expect("text-entry dialog opened");
         assert!(matches!(dlg.kind, crate::state::TextEntryKind::RenameRoom(1)));
-        assert_eq!(state.dialog_focus, 0, "focus starts on the field");
+        assert_eq!(state.overlays.dialog_focus, 0, "focus starts on the field");
 
         // Type "Lit Room" into the field via the dialog's key routing.
         for c in "Lit Room".chars() {
-            let d = state.text_entry.as_mut().unwrap();
+            let d = state.overlays.text_entry.as_mut().unwrap();
             crate::render::text_entry_dialog::text_entry_dialog_key(KeyCode::Char(c), &mut d.field, 0);
         }
-        assert_eq!(state.text_entry.as_ref().unwrap().field.value, "Lit Room");
+        assert_eq!(state.overlays.text_entry.as_ref().unwrap().field.value, "Lit Room");
 
         // Submit (what the run loop does on Enter) → mapper updated, dialog cleared.
-        let dlg = state.text_entry.take().unwrap();
+        let dlg = state.overlays.text_entry.take().unwrap();
         apply_text_entry(dlg, &mut state, &mut mapper);
-        assert!(state.text_entry.is_none());
+        assert!(state.overlays.text_entry.is_none());
         assert_eq!(mapper.graph.room(1).unwrap().label(), "Lit Room");
     }
 
@@ -3696,15 +3696,15 @@ mod tests {
 
         // Open rename dialog, type something.
         apply_action(Action::RenameRoom, &mut state, &mut mapper);
-        let d = state.text_entry.as_mut().unwrap();
+        let d = state.overlays.text_entry.as_mut().unwrap();
         text_entry_dialog_key(KeyCode::Char('X'), &mut d.field, 0);
-        assert_eq!(state.text_entry.as_ref().unwrap().field.value, "X");
+        assert_eq!(state.overlays.text_entry.as_ref().unwrap().field.value, "X");
 
         // Esc resolves to Cancel; the run loop drops the dialog without applying.
-        let d = state.text_entry.as_mut().unwrap();
+        let d = state.overlays.text_entry.as_mut().unwrap();
         let (act, _) = text_entry_dialog_key(KeyCode::Esc, &mut d.field, 0);
         assert!(matches!(act, TextEntryAction::Cancel));
-        state.text_entry = None;
+        state.overlays.text_entry = None;
         // Room name unchanged.
         assert_eq!(mapper.graph.room(1).unwrap().label(), "Original");
     }
@@ -3779,7 +3779,7 @@ mod tests {
         // CycleLayer is dialog-only: returns None when dialog is closed.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::None));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::None));
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         // Brackets are not authored leader letters: they close the dialog now.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::CloseHotkeyDialog));
@@ -3807,7 +3807,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::None));
         // Open dialog: authored leader letters 'p'/'m' fire the commands
         // (Shift+P/Shift+M are no longer authored leader letters).
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::PeelLayer));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('m'))), Action::MergeLayer));
     }
@@ -4029,7 +4029,7 @@ mod tests {
         // ToggleInspector is dialog-only: returns None when dialog is closed.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::None));
         // Returns the action when dialog is open.
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
     }
 
@@ -4173,7 +4173,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
 
         // ── Map focus (dialog open) ───────────────────────────────────────────
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         // Dialog-only commands now fire via their authored leader letters.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::RenameLayer));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::PeelLayer));
@@ -4191,7 +4191,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
         // 'q' is authored to toggle-portal-labels; it no longer closes the dialog.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::TogglePortalLabels));
-        s.hotkey_dialog = false;
+        s.overlays.hotkey_dialog = false;
 
         // ── Anim sub-mode ─────────────────────────────────────────────────────
         let mut s = AppState::default();
@@ -4222,7 +4222,7 @@ mod tests {
     fn gallery_submode_routes_arrow_keys() {
         use crate::state::GalleryState;
         let mut s = AppState::default();
-        s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+        s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
         assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::GalleryPrev));
         assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::GalleryNext));
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::GalleryCategoryPrev));
@@ -4239,12 +4239,12 @@ mod tests {
         use crate::symbols::BoxStyle;
         let mut s = AppState::default();
         let n = BoxStyle::preset_names().len();
-        s.gallery = Some(GalleryState { category_idx: 0, selections: [n - 1, 0, 0, 0] });
+        s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [n - 1, 0, 0, 0] });
         let mut m = mapper::mapper::Mapper::default();
         apply_action(Action::GalleryNext, &mut s, &mut m);
-        assert_eq!(s.gallery.as_ref().unwrap().selections[0], 0, "wraps to 0");
+        assert_eq!(s.overlays.gallery.as_ref().unwrap().selections[0], 0, "wraps to 0");
         // symbols should be updated live
-        let expected = crate::symbols::SymbolSet::resolve(&s.gallery.as_ref().unwrap().symbol_config());
+        let expected = crate::symbols::SymbolSet::resolve(&s.overlays.gallery.as_ref().unwrap().symbol_config());
         assert_eq!(s.symbols, expected);
     }
 
@@ -4252,10 +4252,10 @@ mod tests {
     fn gallery_close_clears_state() {
         use crate::state::GalleryState;
         let mut s = AppState::default();
-        s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+        s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
         let mut m = mapper::mapper::Mapper::default();
         apply_action(Action::GalleryClose, &mut s, &mut m);
-        assert!(s.gallery.is_none());
+        assert!(s.overlays.gallery.is_none());
     }
 
     #[test]
@@ -4272,7 +4272,7 @@ mod tests {
         // OpenGallery is dialog-only: returns None when dialog is closed.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('f'))), Action::None));
         // Returns the action when dialog is open, via its authored leader letter 'f'.
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('f'))), Action::OpenGallery));
     }
 
@@ -4283,7 +4283,7 @@ mod tests {
         use crate::persist_files::SaveInfo;
         use std::path::PathBuf;
         let mut s = AppState::default();
-        s.saves = Some(SavesState {
+        s.overlays.saves = Some(SavesState {
             entries: vec![
                 SaveInfo {
                     path: PathBuf::from("/tmp/default.babelmap"),
@@ -4312,12 +4312,12 @@ mod tests {
         let a = key_to_action(&s, key(KeyCode::Down));
         assert!(matches!(a, Action::SavesNav(1)));
         apply_action(a, &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 1);
+        assert_eq!(s.overlays.saves.as_ref().unwrap().scroll.selected, 1);
         // Up moves back to 0.
         let a = key_to_action(&s, key(KeyCode::Up));
         assert!(matches!(a, Action::SavesNav(-1)));
         apply_action(a, &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 0);
+        assert_eq!(s.overlays.saves.as_ref().unwrap().scroll.selected, 0);
     }
 
     #[test]
@@ -4328,24 +4328,24 @@ mod tests {
         apply_action(a, &mut s, &mut Mapper::default());
         // SavesSaveAs now opens the common-dialog save-name modal (not a bottom-bar
         // prompt), prefilled with a greyed date-time default, focused on the field.
-        assert!(s.text_entry.is_none(), "no text-entry dialog is opened for save-as");
-        let dlg = s.save_name_dialog.as_ref().expect("save-name dialog opened");
+        assert!(s.overlays.text_entry.is_none(), "no text-entry dialog is opened for save-as");
+        let dlg = s.overlays.save_name_dialog.as_ref().expect("save-name dialog opened");
         assert!(!dlg.active, "opens greyed (placeholder) until edited");
         assert!(!dlg.ingame, "host Save State context");
         assert!(!dlg.field.value.is_empty(), "prefilled with a default name");
-        assert_eq!(s.dialog_focus, 0, "focus starts on the text field");
+        assert_eq!(s.overlays.dialog_focus, 0, "focus starts on the text field");
     }
 
     #[test]
     fn saves_submode_d_opens_confirm_delete_dialog() {
         let mut s = state_with_saves_open();
         // Select entry 1 (the named save).
-        s.saves.as_mut().unwrap().scroll.selected = 1;
+        s.overlays.saves.as_mut().unwrap().scroll.selected = 1;
         let a = key_to_action(&s, key(KeyCode::Char('d')));
         assert!(matches!(a, Action::SavesDelete));
         apply_action(a, &mut s, &mut Mapper::default());
-        assert!(s.confirm_delete_save.is_some(), "SavesDelete opens the confirm-delete dialog");
-        assert_eq!(s.dialog_focus, 1, "focus starts on Cancel (the safe default)");
+        assert!(s.overlays.confirm_delete_save.is_some(), "SavesDelete opens the confirm-delete dialog");
+        assert_eq!(s.overlays.dialog_focus, 1, "focus starts on Cancel (the safe default)");
     }
 
     #[test]
@@ -4354,7 +4354,7 @@ mod tests {
         let a = key_to_action(&s, key(KeyCode::Esc));
         assert!(matches!(a, Action::SavesClose));
         apply_action(a, &mut s, &mut Mapper::default());
-        assert!(s.saves.is_none(), "Esc should close the saves modal");
+        assert!(s.overlays.saves.is_none(), "Esc should close the saves modal");
     }
 
     #[test]
@@ -4372,7 +4372,7 @@ mod tests {
         let mut s = AppState::default();
         s.toggle_focus();
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::None));
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         // Ctrl-combos always close the dialog now (never fire); it fires via
         // the authored leader letter 's' instead.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::CloseHotkeyDialog));
@@ -4385,20 +4385,20 @@ mod tests {
         use crate::persist_files::SaveInfo;
         use std::path::PathBuf;
         let mut s = AppState::default();
-        s.saves = Some(SavesState {
+        s.overlays.saves = Some(SavesState {
             entries: vec![
                 SaveInfo { path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0, saved_at: String::new(), is_default: false },
                 SaveInfo { path: PathBuf::from("/tmp/b.babelmap"), name: "b".into(), turns: 0, saved_at: String::new(), is_default: false },
             ],
             scroll: Default::default(),
         });
-        s.saves.as_mut().unwrap().scroll.selected = 1;
+        s.overlays.saves.as_mut().unwrap().scroll.selected = 1;
         // Down from last wraps to first.
         apply_action(Action::SavesNav(1), &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 0, "should wrap to 0 after last");
+        assert_eq!(s.overlays.saves.as_ref().unwrap().scroll.selected, 0, "should wrap to 0 after last");
         // Up from first wraps to last.
         apply_action(Action::SavesNav(-1), &mut s, &mut Mapper::default());
-        assert_eq!(s.saves.as_ref().unwrap().scroll.selected, 1, "should wrap to last");
+        assert_eq!(s.overlays.saves.as_ref().unwrap().scroll.selected, 1, "should wrap to last");
     }
 
     // ── Hotkey dialog dispatch tests ──────────────────────────────────────────
@@ -4453,7 +4453,7 @@ mod tests {
     fn prefix_closes_hotkey_dialog_action() {
         // Ctrl+K when dialog is open → CloseHotkeyDialog.
         let mut s = AppState::default();
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(matches!(
             key_to_action(&s, ctrl(KeyCode::Char('k'))),
             Action::CloseHotkeyDialog
@@ -4464,7 +4464,7 @@ mod tests {
     fn q_no_longer_closes_hotkey_dialog() {
         // q-close removed from hotkey dialog; q now falls through to keymap lookup.
         let mut s = AppState::default();
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         // 'q' is not bound to any command in the keymap, so it should produce None
         // (not CloseHotkeyDialog).
         let action = key_to_action(&s, key(KeyCode::Char('q')));
@@ -4479,7 +4479,7 @@ mod tests {
         // When dialog is open, the authored leader letter 't' in map focus fires Retidy.
         let mut s = AppState::default();
         s.focus = Focus::Map;
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
         // ToggleInspector fires too.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
@@ -4489,20 +4489,20 @@ mod tests {
     fn apply_open_hotkey_dialog_sets_flag() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        assert!(!s.hotkey_dialog);
+        assert!(!s.overlays.hotkey_dialog);
         apply_action(Action::OpenHotkeyDialog, &mut s, &mut m);
-        assert!(s.hotkey_dialog);
+        assert!(s.overlays.hotkey_dialog);
         apply_action(Action::CloseHotkeyDialog, &mut s, &mut m);
-        assert!(!s.hotkey_dialog);
+        assert!(!s.overlays.hotkey_dialog);
     }
 
     #[test]
     fn open_saves_clears_hotkey_dialog() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         apply_action(Action::OpenSaves, &mut s, &mut m);
-        assert!(!s.hotkey_dialog, "OpenSaves should clear the hotkey dialog");
+        assert!(!s.overlays.hotkey_dialog, "OpenSaves should clear the hotkey dialog");
     }
 
     // ── is_direct as sole direct-vs-prefix determiner ─────────────────────────
@@ -4550,7 +4550,7 @@ mod tests {
         );
         // Open dialog: Ctrl+T now closes the dialog (Ctrl-combos never fire);
         // the authored leader letter 't' fires Retidy instead.
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         assert!(
             matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::CloseHotkeyDialog),
             "Ctrl-combos close the hotkey dialog rather than firing"
@@ -4639,7 +4639,7 @@ mod tests {
     fn wheel_drives_gallery_selection() {
         use crate::state::GalleryState;
         let mut s = AppState::default();
-        s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+        s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
             Action::GalleryPrev
@@ -4654,7 +4654,7 @@ mod tests {
     fn wheel_drives_saves_selection() {
         use crate::state::SavesState;
         let mut s = AppState::default();
-        s.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
+        s.overlays.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
             Action::SavesNav(-1)
@@ -4669,7 +4669,7 @@ mod tests {
     fn wheel_drives_replay_step() {
         use crate::state::ReplayState;
         let mut s = AppState::default();
-        s.replay = Some(ReplayState::new(0));
+        s.overlays.replay = Some(ReplayState::new(0));
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
             Action::ReplayStep(-1)
@@ -4684,7 +4684,7 @@ mod tests {
     fn wheel_drives_file_browser_selection() {
         use crate::state::{FbMode, FileBrowserState};
         let mut s = AppState::default();
-        s.file_browser = Some(FileBrowserState::build(
+        s.overlays.file_browser = Some(FileBrowserState::build(
             std::env::temp_dir(),
             FbMode::PickFile));
         assert!(matches!(
@@ -4701,7 +4701,7 @@ mod tests {
     fn wheel_drives_verb_menu_selection() {
         use crate::state::{VerbMenuPane, VerbMenuState};
         let mut s = AppState::default();
-        s.verb_menu = Some(VerbMenuState {
+        s.overlays.verb_menu = Some(VerbMenuState {
             pane: VerbMenuPane::Verbs,
             verb_scroll: Default::default(),
             noun_scroll: Default::default(),
@@ -4741,7 +4741,7 @@ mod tests {
         use crate::render::dialog::DialogRects;
         use ratatui::layout::Rect;
         let mut s = AppState::default();
-        s.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
+        s.overlays.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
         let dialog = Some(DialogRects {
             area: Rect::new(10, 5, 40, 15),
             content: Rect::new(11, 7, 38, 10),
@@ -4762,7 +4762,7 @@ mod tests {
         // to the DOWN action and ScrollDown to the UP action.
         use crate::state::SavesState;
         let mut s = AppState::default();
-        s.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
+        s.overlays.saves = Some(SavesState { entries: Vec::new(), scroll: Default::default() });
         s.config.mouse_wheel_invert = true;
         assert!(matches!(
             mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
@@ -5237,11 +5237,11 @@ mod tests {
         use crate::state::AppState;
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        assert!(!s.reset_dialog, "dialog must start closed");
+        assert!(!s.overlays.reset_dialog, "dialog must start closed");
         apply_action(Action::ResetGame, &mut s, &mut m);
-        assert!(s.reset_dialog, "ResetGame must set reset_dialog = true");
-        assert!(!s.reset_clear_map, "checkbox must start unchecked");
-        assert!(s.text_entry.is_none(), "no text-entry dialog should be opened");
+        assert!(s.overlays.reset_dialog, "ResetGame must set reset_dialog = true");
+        assert!(!s.overlays.reset_clear_map, "checkbox must start unchecked");
+        assert!(s.overlays.text_entry.is_none(), "no text-entry dialog should be opened");
     }
 
     // ── reset-game is now leader-only; F5 has no default binding ──────────────
@@ -5262,7 +5262,7 @@ mod tests {
         let mut s2 = AppState::default();
         let mut m = Mapper::default();
         apply_action(Action::ResetGame, &mut s2, &mut m);
-        assert!(s2.reset_dialog, "reset-game must open the confirmation dialog, not instant-wipe");
+        assert!(s2.overlays.reset_dialog, "reset-game must open the confirmation dialog, not instant-wipe");
     }
 
     // ── Leaf 2: minizork fixture reset test ───────────────────────────────────
@@ -5368,7 +5368,7 @@ mod tests {
 
     /// Helper: open the verb menu with a specific noun list.
     fn open_verb_menu_with_nouns(state: &mut AppState, nouns: Vec<String>) {
-        state.verb_menu = Some(crate::state::VerbMenuState {
+        state.overlays.verb_menu = Some(crate::state::VerbMenuState {
             pane: crate::state::VerbMenuPane::Verbs,
             verb_scroll: Default::default(),
             noun_scroll: Default::default(),
@@ -5409,24 +5409,24 @@ mod tests {
         let with_idx = crate::render::verbmenu::VERB_MENU_PREPS.iter().position(|&p| p == "with").expect("with in preps");
 
         // 1. Pick "unlock" from Verbs pane.
-        s.verb_menu.as_mut().unwrap().verb_scroll.selected = unlock_idx;
+        s.overlays.verb_menu.as_mut().unwrap().verb_scroll.selected = unlock_idx;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
         assert_eq!(s.input, "unlock ");
 
         // 2. Switch to Nouns pane and pick "door" (noun_idx=0).
-        s.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
+        s.overlays.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
         assert_eq!(s.input, "unlock door ");
 
         // 3. Switch to Preps pane and pick "with".
-        s.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Preps;
-        s.verb_menu.as_mut().unwrap().prep_scroll.selected = with_idx;
+        s.overlays.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Preps;
+        s.overlays.verb_menu.as_mut().unwrap().prep_scroll.selected = with_idx;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
         assert_eq!(s.input, "unlock door with ");
 
         // 4. Switch back to Nouns and pick "key" (noun_idx=1).
-        s.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
-        s.verb_menu.as_mut().unwrap().noun_scroll.selected = 1;
+        s.overlays.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
+        s.overlays.verb_menu.as_mut().unwrap().noun_scroll.selected = 1;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
         assert_eq!(s.input, "unlock door with key ");
     }
@@ -5451,7 +5451,7 @@ mod tests {
         let mut mapper = Mapper::default();
         open_verb_menu_with_nouns(&mut s, vec![]);
         apply_action(Action::VerbMenuClose, &mut s, &mut mapper);
-        assert!(s.verb_menu.is_some(), "verb_menu content should persist during slide-out");
+        assert!(s.overlays.verb_menu.is_some(), "verb_menu content should persist during slide-out");
         assert!(!s.verb_dock.open, "verb_dock should be armed toward closed");
     }
 
@@ -5468,18 +5468,18 @@ mod tests {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
-        assert!(s.verb_menu.is_some());
+        assert!(s.overlays.verb_menu.is_some());
 
         // Mid-slide-out: still armed/active, content must persist.
         apply_action(Action::VerbMenuClose, &mut s, &mut mapper);
         s.settle_verb_dock();
-        assert!(s.verb_menu.is_some(), "content should persist while the slide is (potentially) active");
+        assert!(s.overlays.verb_menu.is_some(), "content should persist while the slide is (potentially) active");
 
         // Force-settle the tween (as if the animation had completed), then
         // settle_verb_dock should clear the content.
         s.verb_dock.toggle_to(false, true);
         s.settle_verb_dock();
-        assert!(s.verb_menu.is_none(), "content should be cleared once the slide-out has settled");
+        assert!(s.overlays.verb_menu.is_none(), "content should be cleared once the slide-out has settled");
     }
 
     // ── SQ-0237: interactive pane resize mode ─────────────────────────────────
@@ -5660,7 +5660,7 @@ mod tests {
         use crate::state::VerbMenuPane;
         let mut s = AppState::default();
         open_verb_menu_with_nouns(&mut s, vec![]);
-        assert_eq!(s.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Verbs);
+        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Verbs);
 
         // Tab → Nouns.
         let a = key_to_action(&s, key(KeyCode::Tab));
@@ -5687,7 +5687,7 @@ mod tests {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
-        assert!(s.verb_menu.as_ref().unwrap().story_focused, "dock opens story-focused");
+        assert!(s.overlays.verb_menu.as_ref().unwrap().story_focused, "dock opens story-focused");
     }
 
     #[test]
@@ -5697,22 +5697,22 @@ mod tests {
         let mut mapper = Mapper::default();
         open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
         // Start on the story.
-        s.verb_menu.as_mut().unwrap().story_focused = true;
+        s.overlays.verb_menu.as_mut().unwrap().story_focused = true;
 
         // (b) Tab from Story focuses Verbs.
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
         {
-            let vm = s.verb_menu.as_ref().unwrap();
+            let vm = s.overlays.verb_menu.as_ref().unwrap();
             assert!(!vm.story_focused && vm.pane == VerbMenuPane::Verbs, "Story → Verbs");
         }
 
         // (c) Verbs → Nouns → Preps → Story (three more NextPane).
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Nouns);
+        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Nouns);
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Preps);
+        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Preps);
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
-        assert!(s.verb_menu.as_ref().unwrap().story_focused, "Preps → Story (ring wraps)");
+        assert!(s.overlays.verb_menu.as_ref().unwrap().story_focused, "Preps → Story (ring wraps)");
     }
 
     #[test]
@@ -5722,11 +5722,11 @@ mod tests {
         let mut s = AppState::default();
         open_verb_menu_with_nouns(&mut s, vec![]);
 
-        s.verb_menu.as_mut().unwrap().story_focused = true;
+        s.overlays.verb_menu.as_mut().unwrap().story_focused = true;
         assert!(verb_menu_intercept(key(KeyCode::Char('x')), &s).is_none(), "letter falls through");
         assert!(verb_menu_intercept(key(KeyCode::Enter), &s).is_none(), "Enter falls through to game");
 
-        s.verb_menu.as_mut().unwrap().story_focused = false;
+        s.overlays.verb_menu.as_mut().unwrap().story_focused = false;
         assert!(
             matches!(verb_menu_intercept(key(KeyCode::Enter), &s), Some(Action::VerbMenuPick)),
             "Enter picks when a pane is focused"
@@ -5741,12 +5741,12 @@ mod tests {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_verb_menu_with_nouns(&mut s, vec![]);
-        s.verb_menu.as_mut().unwrap().story_focused = true;
+        s.overlays.verb_menu.as_mut().unwrap().story_focused = true;
 
         apply_action(Action::VerbMenuClickToken(VerbMenuPane::Verbs, 2), &mut s, &mut mapper);
         assert_eq!(s.input, format!("{} ", VERB_MENU_VERBS[2]));
-        assert!(s.verb_menu.as_ref().unwrap().story_focused, "click leaves story focus unchanged");
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 2, "click moves highlight");
+        assert!(s.overlays.verb_menu.as_ref().unwrap().story_focused, "click leaves story focus unchanged");
+        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 2, "click moves highlight");
     }
 
     #[test]
@@ -5756,10 +5756,10 @@ mod tests {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
-        s.verb_menu.as_mut().unwrap().story_focused = true;
+        s.overlays.verb_menu.as_mut().unwrap().story_focused = true;
 
         apply_action(Action::VerbMenuFocusPane(VerbMenuPane::Nouns), &mut s, &mut mapper);
-        let vm = s.verb_menu.as_ref().unwrap();
+        let vm = s.overlays.verb_menu.as_ref().unwrap();
         assert!(!vm.story_focused && vm.pane == VerbMenuPane::Nouns, "header click focuses Nouns");
     }
 
@@ -5769,22 +5769,22 @@ mod tests {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_verb_menu_with_nouns(&mut s, vec!["door".to_string(), "mailbox".to_string()]);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
+        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
 
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 1);
+        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 1);
 
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Up), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
+        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
 
         // Up at 0 stays at 0 (saturating).
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Up), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
+        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
 
         // Switch to Nouns, move down.
-        s.verb_menu.as_mut().unwrap().pane = VerbMenuPane::Nouns;
+        s.overlays.verb_menu.as_mut().unwrap().pane = VerbMenuPane::Nouns;
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
-        assert_eq!(s.verb_menu.as_ref().unwrap().noun_scroll.selected, 1);
+        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().noun_scroll.selected, 1);
     }
 
     #[test]
@@ -5796,12 +5796,12 @@ mod tests {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
-        assert!(s.verb_menu.as_ref().unwrap().story_focused, "dock opens story-focused");
-        assert_eq!(s.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
+        assert!(s.overlays.verb_menu.as_ref().unwrap().story_focused, "dock opens story-focused");
+        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
 
         apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
         assert_eq!(
-            s.verb_menu.as_ref().unwrap().verb_scroll.selected, 1,
+            s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 1,
             "wheel/Down must scroll the active pane even while story-focused"
         );
     }
@@ -5850,10 +5850,10 @@ mod tests {
     fn open_verb_menu_action_opens_modal() {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
-        assert!(s.verb_menu.is_none());
+        assert!(s.overlays.verb_menu.is_none());
         apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
-        assert!(s.verb_menu.is_some(), "verb_menu should be Some after OpenVerbMenu");
-        assert!(matches!(s.verb_menu.as_ref().unwrap().pane, crate::state::VerbMenuPane::Verbs));
+        assert!(s.overlays.verb_menu.is_some(), "verb_menu should be Some after OpenVerbMenu");
+        assert!(matches!(s.overlays.verb_menu.as_ref().unwrap().pane, crate::state::VerbMenuPane::Verbs));
     }
 
     #[test]
@@ -5867,7 +5867,7 @@ mod tests {
         s.inventory_fallback = vec!["mailbox".to_string()];
         let mut mapper = Mapper::default();
         apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
-        let nouns = &s.verb_menu.as_ref().unwrap().nouns;
+        let nouns = &s.overlays.verb_menu.as_ref().unwrap().nouns;
         let mailbox_count = nouns.iter().filter(|n| n.as_str() == "mailbox").count();
         assert_eq!(mailbox_count, 1, "mailbox should appear exactly once in nouns (dedup)");
     }
@@ -5877,7 +5877,7 @@ mod tests {
     /// Build a state with saves open (for testing e/i dispatch).
     fn state_with_saves_for_fb_tests() -> AppState {
         let mut s = AppState::default();
-        s.saves = Some(crate::state::SavesState { entries: Vec::new(), scroll: Default::default() });
+        s.overlays.saves = Some(crate::state::SavesState { entries: Vec::new(), scroll: Default::default() });
         s
     }
 
@@ -5886,7 +5886,7 @@ mod tests {
         use crate::state::FileBrowserState;
         let mut s = AppState::default();
         let tmp = std::env::temp_dir();
-        s.file_browser = Some(FileBrowserState::build(tmp, mode));
+        s.overlays.file_browser = Some(FileBrowserState::build(tmp, mode));
         s
     }
 
@@ -5929,23 +5929,23 @@ mod tests {
     #[test]
     fn fb_close_action_clears_file_browser() {
         let mut s = state_with_filebrowser(crate::state::FbMode::PickFile);
-        assert!(s.file_browser.is_some());
+        assert!(s.overlays.file_browser.is_some());
         apply_action(Action::FbClose, &mut s, &mut Mapper::default());
-        assert!(s.file_browser.is_none(), "FbClose should clear file_browser");
+        assert!(s.overlays.file_browser.is_none(), "FbClose should clear file_browser");
     }
 
     #[test]
     fn fb_nav_wraps_around() {
         let mut s = state_with_filebrowser(crate::state::FbMode::PickFile);
         // We need at least one entry — the tmp dir should have ".." if not root.
-        if let Some(fb) = &s.file_browser {
+        if let Some(fb) = &s.overlays.file_browser {
             if fb.entries.is_empty() {
                 return; // nothing to navigate
             }
         }
         // Move up from 0 should wrap to last entry.
         apply_action(Action::FbNav(-1), &mut s, &mut Mapper::default());
-        if let Some(fb) = &s.file_browser {
+        if let Some(fb) = &s.overlays.file_browser {
             assert_eq!(fb.scroll.selected, fb.entries.len() - 1, "nav -1 from 0 should wrap to last");
         }
     }
@@ -6024,7 +6024,7 @@ mod tests {
         // State with config_screen open (so dialog routing knows which modal).
         let mut state = AppState::default();
         let working = crate::input::clone_config(&state.config);
-        state.config_screen = Some(ConfigScreenState { working, scroll: Default::default() });
+        state.overlays.config_screen = Some(ConfigScreenState { working, scroll: Default::default() });
 
         let map   = Rect::default();
         let story = Rect::default();
@@ -6053,7 +6053,7 @@ mod tests {
         // ESC in config screen should produce ConfigCancel (same as [X] and Cancel button).
         let mut s = AppState::default();
         let working = crate::input::clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
+        s.overlays.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
         let a = key_to_action(&s, key(KeyCode::Esc));
         assert!(matches!(a, Action::ConfigCancel), "ESC in config screen should produce ConfigCancel");
     }
@@ -6075,7 +6075,7 @@ mod tests {
         };
 
         let mut state = AppState::default();
-        state.saves = Some(SavesState {
+        state.overlays.saves = Some(SavesState {
             entries: vec![SaveInfo {
                 path: PathBuf::from("/tmp/a.babelmap"),
                 name: "a".into(),
@@ -6119,7 +6119,7 @@ mod tests {
 
         let mut state = AppState::default();
         let tmp = std::env::temp_dir();
-        state.file_browser = Some(crate::state::FileBrowserState::build(
+        state.overlays.file_browser = Some(crate::state::FileBrowserState::build(
             tmp,
             crate::state::FbMode::PickFile));
 
@@ -6150,7 +6150,7 @@ mod tests {
         use crate::state::VerbMenuState;
 
         let mut state = AppState::default();
-        state.verb_menu = Some(VerbMenuState {
+        state.overlays.verb_menu = Some(VerbMenuState {
             pane: crate::state::VerbMenuPane::Verbs,
             verb_scroll: Default::default(),
             noun_scroll: Default::default(),
@@ -6182,7 +6182,7 @@ mod tests {
         };
 
         let mut state = AppState::default();
-        state.hotkey_dialog = true;
+        state.overlays.hotkey_dialog = true;
 
         let map   = Rect::default();
         let story = Rect::default();
@@ -6231,7 +6231,7 @@ mod tests {
         // 1. Gallery: ESC → GalleryClose, [X] → GalleryClose
         {
             let mut s = AppState::default();
-            s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+            s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::GalleryClose),
                 "gallery ESC should produce GalleryClose, got {:?}", esc_action);
@@ -6244,7 +6244,7 @@ mod tests {
         // 2. Saves: ESC → SavesClose, [X] → SavesClose
         {
             let mut s = AppState::default();
-            s.saves = Some(SavesState { entries: vec![SaveInfo {
+            s.overlays.saves = Some(SavesState { entries: vec![SaveInfo {
                 path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
                 saved_at: String::new(), is_default: false,
             }], scroll: Default::default() });
@@ -6260,7 +6260,7 @@ mod tests {
         // 3. File browser: ESC → FbClose, [X] → FbClose
         {
             let mut s = AppState::default();
-            s.file_browser = Some(crate::state::FileBrowserState::build(
+            s.overlays.file_browser = Some(crate::state::FileBrowserState::build(
                 std::env::temp_dir(), crate::state::FbMode::PickFile));
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::FbClose),
@@ -6279,7 +6279,7 @@ mod tests {
         {
             let mut s = AppState::default();
             let working = clone_config(&s.config);
-            s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
+            s.overlays.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::ConfigCancel),
                 "config screen ESC should produce ConfigCancel, got {:?}", esc_action);
@@ -6292,7 +6292,7 @@ mod tests {
         // 6. Hotkey dialog: ESC → CloseHotkeyDialog, [X] → CloseHotkeyDialog
         {
             let mut s = AppState::default();
-            s.hotkey_dialog = true;
+            s.overlays.hotkey_dialog = true;
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::CloseHotkeyDialog),
                 "hotkey dialog ESC should produce CloseHotkeyDialog, got {:?}", esc_action);
@@ -6313,7 +6313,7 @@ mod tests {
         // Gallery: q → not GalleryClose
         {
             let mut s = AppState::default();
-            s.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+            s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::GalleryClose),
                 "q must not close the gallery");
@@ -6322,7 +6322,7 @@ mod tests {
         // Saves: q → not SavesClose
         {
             let mut s = AppState::default();
-            s.saves = Some(SavesState { entries: vec![SaveInfo {
+            s.overlays.saves = Some(SavesState { entries: vec![SaveInfo {
                 path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
                 saved_at: String::new(), is_default: false,
             }], scroll: Default::default() });
@@ -6334,7 +6334,7 @@ mod tests {
         // File browser: q → not FbClose
         {
             let mut s = AppState::default();
-            s.file_browser = Some(crate::state::FileBrowserState::build(
+            s.overlays.file_browser = Some(crate::state::FileBrowserState::build(
                 std::env::temp_dir(), crate::state::FbMode::PickFile));
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::FbClose),
@@ -6344,7 +6344,7 @@ mod tests {
         // Verb menu: q → not VerbMenuClose
         {
             let mut s = AppState::default();
-            s.verb_menu = Some(VerbMenuState {
+            s.overlays.verb_menu = Some(VerbMenuState {
                 pane: crate::state::VerbMenuPane::Verbs,
                 verb_scroll: Default::default(), noun_scroll: Default::default(), prep_scroll: Default::default(), nouns: vec![], story_focused: false,
             });
@@ -6357,7 +6357,7 @@ mod tests {
         {
             let mut s = AppState::default();
             let working = clone_config(&s.config);
-            s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
+            s.overlays.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::ConfigCancel),
                 "q must not cancel the config screen");
@@ -6390,7 +6390,7 @@ mod tests {
         };
 
         let mut state = AppState::default();
-        state.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+        state.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
 
         let map   = Rect::default();
         let story = Rect::default();
@@ -6441,7 +6441,7 @@ mod tests {
         let mut state = AppState::default();
         state.zoom = Zoom::Compact;
         state.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
-        state.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+        state.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
 
         // The dialog rects represent the gallery centered dialog (not covering (0,0)).
         let dialog = Some(DialogRects {
@@ -6498,11 +6498,11 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
         let working = clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
-        s.dialog_focus = cycle_focus(0, 2, 1); // focus Cancel (index 1)
+        s.overlays.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
+        s.overlays.dialog_focus = cycle_focus(0, 2, 1); // focus Cancel (index 1)
         let a = config_screen_key_to_action(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            s.dialog_focus,
+            s.overlays.dialog_focus,
         );
         assert!(matches!(a, Action::ConfigCancel),
             "Enter with focus=1 (Cancel) should fire ConfigCancel, got {:?}", a);
@@ -6513,11 +6513,11 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
         let working = clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
-        s.dialog_focus = 0; // focus Save (default)
+        s.overlays.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
+        s.overlays.dialog_focus = 0; // focus Save (default)
         let a = config_screen_key_to_action(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            s.dialog_focus,
+            s.overlays.dialog_focus,
         );
         assert!(matches!(a, Action::ConfigSave),
             "Enter with focus=0 (Save) should fire ConfigSave, got {:?}", a);
@@ -6528,7 +6528,7 @@ mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
         let working = clone_config(&s.config);
-        s.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
+        s.overlays.config_screen = Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
         // Space must toggle the selected row regardless of focus.
         for focus in [0, 1] {
             let a = config_screen_key_to_action(
@@ -6546,15 +6546,15 @@ mod tests {
         // Enter still loads the selected save (existing behavior).
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut s = AppState::default();
-        s.saves = Some(crate::state::SavesState { entries: Vec::new(), scroll: Default::default() });
-        s.dialog_focus = 0;
+        s.overlays.saves = Some(crate::state::SavesState { entries: Vec::new(), scroll: Default::default() });
+        s.overlays.dialog_focus = 0;
         // Tab with ring len 1 stays at 0.
-        let after_tab = cycle_focus(s.dialog_focus, 1, 1);
+        let after_tab = cycle_focus(s.overlays.dialog_focus, 1, 1);
         assert_eq!(after_tab, 0, "Tab on ring-len-1 should stay at 0");
         // Enter still produces SavesLoad (not SavesClose) regardless of focus.
         let a = saves_key_to_action(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            s.dialog_focus,
+            s.overlays.dialog_focus,
         );
         assert!(matches!(a, Action::SavesLoad),
             "Enter in saves should still fire SavesLoad (not affected by focus), got {:?}", a);
@@ -6563,19 +6563,19 @@ mod tests {
     #[test]
     fn open_config_resets_dialog_focus() {
         let mut s = AppState::default();
-        s.dialog_focus = 5; // non-zero
+        s.overlays.dialog_focus = 5; // non-zero
         let mut m = mapper::mapper::Mapper::default();
         apply_action(Action::OpenConfig, &mut s, &mut m);
-        assert_eq!(s.dialog_focus, 0, "OpenConfig must reset dialog_focus to 0");
+        assert_eq!(s.overlays.dialog_focus, 0, "OpenConfig must reset dialog_focus to 0");
     }
 
     #[test]
     fn open_saves_resets_dialog_focus_in_apply() {
         let mut s = AppState::default();
-        s.dialog_focus = 5; // non-zero
+        s.overlays.dialog_focus = 5; // non-zero
         let mut m = mapper::mapper::Mapper::default();
         apply_action(Action::OpenSaves, &mut s, &mut m);
-        assert_eq!(s.dialog_focus, 0, "OpenSaves must reset dialog_focus to 0");
+        assert_eq!(s.overlays.dialog_focus, 0, "OpenSaves must reset dialog_focus to 0");
     }
 
     // ── Task 5: read-only / single-button panels ──────────────────────────────
@@ -6596,7 +6596,7 @@ mod tests {
     #[test]
     fn hotkey_dialog_enter_closes() {
         let mut s = AppState::default();
-        s.hotkey_dialog = true;
+        s.overlays.hotkey_dialog = true;
         let a = key_to_action(&s, key(KeyCode::Enter));
         assert!(
             matches!(a, Action::CloseHotkeyDialog),
@@ -6724,12 +6724,12 @@ mod tests {
     fn open_style_editor_seeds_doc_and_preview() {
         let mut s = AppState::default();
         apply_action(Action::OpenStyleEditor, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.style_editor.as_ref().expect("editor open");
+        let ed = s.overlays.style_editor.as_ref().expect("editor open");
         assert_eq!(ed.active, 0);
         assert!(!ed.selectors.is_empty(), "selector list seeded");
         // Cancel closes it.
         apply_action(Action::StyleEditorCancel, &mut s, &mut mapper::mapper::Mapper::default());
-        assert!(s.style_editor.is_none());
+        assert!(s.overlays.style_editor.is_none());
     }
 
     #[test]
@@ -6749,7 +6749,7 @@ mod tests {
         let mut s = AppState::default();
         s.config.user_dir = poison;
         open_style_editor_hermetic(&mut s);
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         assert!(
             ed.doc.colors.selectors.get("room").and_then(|d| d.fg.as_ref()).is_none(),
             "hermetic editor must not inherit the ambient user_dir's style.toml",
@@ -6760,9 +6760,9 @@ mod tests {
     fn toggling_bold_updates_decl_and_preview() {
         let mut s = AppState::default();
         crate::input::open_style_editor_hermetic(&mut s);
-        let sel = s.style_editor.as_ref().unwrap().selectors[0].to_string();
+        let sel = s.overlays.style_editor.as_ref().unwrap().selectors[0].to_string();
         apply_action(Action::StyleToggleAttr(AttrKind::Bold), &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.bold), Some(true));
         // Smoke: preview was recomputed (exercises the code path).
         let _ = ed.preview;
@@ -6774,13 +6774,13 @@ mod tests {
         // Use a non-existent user_dir so load_mru returns empty regardless of disk state.
         s.config.user_dir = std::path::PathBuf::from("/tmp/babelmap-test-empty-mru-dir");
         open_style_editor_hermetic(&mut s);
-        let sel = s.style_editor.as_ref().unwrap().selectors[0].to_string();
+        let sel = s.overlays.style_editor.as_ref().unwrap().selectors[0].to_string();
 
         // Set fg to a named color — no MRU push.
         apply_action(Action::StyleSetColor { is_bg: false, value: Some("red".into()) },
                      &mut s, &mut mapper::mapper::Mapper::default());
         {
-            let ed = s.style_editor.as_ref().unwrap();
+            let ed = s.overlays.style_editor.as_ref().unwrap();
             assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("red"));
             assert!(ed.mru.is_empty(), "named colors do not push to MRU");
         }
@@ -6789,7 +6789,7 @@ mod tests {
         apply_action(Action::StyleSetColor { is_bg: false, value: Some("#aabbcc".into()) },
                      &mut s, &mut mapper::mapper::Mapper::default());
         {
-            let ed = s.style_editor.as_ref().unwrap();
+            let ed = s.overlays.style_editor.as_ref().unwrap();
             assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("#aabbcc"));
             assert_eq!(ed.mru, vec!["#aabbcc".to_string()]);
         }
@@ -6798,7 +6798,7 @@ mod tests {
         apply_action(Action::StyleSetColor { is_bg: true, value: None },
                      &mut s, &mut mapper::mapper::Mapper::default());
         {
-            let ed = s.style_editor.as_ref().unwrap();
+            let ed = s.overlays.style_editor.as_ref().unwrap();
             assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.bg.as_deref()), None);
         }
     }
@@ -6816,11 +6816,11 @@ mod tests {
         apply_action(Action::StyleCustomChar('0'), &mut s, m);
         apply_action(Action::StyleCustomChar('0'), &mut s, m);
         apply_action(Action::StyleCustomChar('0'), &mut s, m);
-        assert_eq!(s.style_editor.as_ref().unwrap().custom_buf, "#ff0000");
+        assert_eq!(s.overlays.style_editor.as_ref().unwrap().custom_buf, "#ff0000");
 
         apply_action(Action::StyleCustomBackspace, &mut s, m);
         apply_action(Action::StyleCustomBackspace, &mut s, m);
-        assert_eq!(s.style_editor.as_ref().unwrap().custom_buf, "#ff00");
+        assert_eq!(s.overlays.style_editor.as_ref().unwrap().custom_buf, "#ff00");
     }
 
     #[test]
@@ -6830,7 +6830,7 @@ mod tests {
         let m = &mut mapper::mapper::Mapper::default();
         // Cycle delta=3 lands on Custom (Board=0 → index 3).
         apply_action(Action::StyleFocusCycle(3), &mut s, m);
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         assert_eq!(ed.focus, crate::state::StyleFocus::Custom);
         assert_eq!(ed.custom_buf, "#", "entering Custom via Tab seeds custom_buf with '#'");
     }
@@ -6846,18 +6846,18 @@ mod tests {
         // is its own tab stop, regardless of selector borderedness.
         for expected in [2usize, 1, 0] {
             apply_action(Action::StyleFocusCycle(-1), &mut s, m);
-            assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons);
-            assert_eq!(s.dialog_focus, expected);
+            assert_eq!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons);
+            assert_eq!(s.overlays.dialog_focus, expected);
         }
         // Forward Tab steps through them the other way, then leaves the row and
         // wraps back to the top of the body ring (Board).
         apply_action(Action::StyleFocusCycle(1), &mut s, m); // Save -> Save Game
-        assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons);
-        assert_eq!(s.dialog_focus, 1);
+        assert_eq!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons);
+        assert_eq!(s.overlays.dialog_focus, 1);
         apply_action(Action::StyleFocusCycle(1), &mut s, m); // -> Cancel
-        assert_eq!(s.dialog_focus, 2);
+        assert_eq!(s.overlays.dialog_focus, 2);
         apply_action(Action::StyleFocusCycle(1), &mut s, m); // -> wraps to Board
-        assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Board);
+        assert_eq!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Board);
     }
 
     #[test]
@@ -6865,12 +6865,12 @@ mod tests {
         use crate::state::StyleFocus;
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
-        s.style_editor.as_mut().unwrap().focus = StyleFocus::Buttons;
-        s.dialog_focus = 0;
+        s.overlays.style_editor.as_mut().unwrap().focus = StyleFocus::Buttons;
+        s.overlays.dialog_focus = 0;
         assert!(matches!(style_editor_key_to_action(key(KeyCode::Enter), &s), Action::StyleSave));
-        s.dialog_focus = 1;
+        s.overlays.dialog_focus = 1;
         assert!(matches!(style_editor_key_to_action(key(KeyCode::Enter), &s), Action::StyleSaveGame));
-        s.dialog_focus = 2;
+        s.overlays.dialog_focus = 2;
         assert!(matches!(style_editor_key_to_action(key(KeyCode::Enter), &s), Action::StyleEditorCancel));
     }
 
@@ -6880,11 +6880,11 @@ mod tests {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
         let m = &mut mapper::mapper::Mapper::default();
-        s.style_editor.as_mut().unwrap().focus = StyleFocus::Buttons;
-        s.dialog_focus = 2; // Cancel
+        s.overlays.style_editor.as_mut().unwrap().focus = StyleFocus::Buttons;
+        s.overlays.dialog_focus = 2; // Cancel
         let action = style_editor_key_to_action(key(KeyCode::Enter), &s);
         apply_action(action, &mut s, m);
-        assert!(s.style_editor.is_none(), "activating Cancel closes the editor");
+        assert!(s.overlays.style_editor.is_none(), "activating Cancel closes the editor");
     }
 
     #[test]
@@ -6894,10 +6894,10 @@ mod tests {
         let m = &mut mapper::mapper::Mapper::default();
         // Seed via focus cycle.
         apply_action(Action::StyleFocusCycle(3), &mut s, m);
-        assert_eq!(s.style_editor.as_ref().unwrap().custom_buf, "#");
+        assert_eq!(s.overlays.style_editor.as_ref().unwrap().custom_buf, "#");
         // Backspace on lone '#' must be a no-op.
         apply_action(Action::StyleCustomBackspace, &mut s, m);
-        assert_eq!(s.style_editor.as_ref().unwrap().custom_buf, "#",
+        assert_eq!(s.overlays.style_editor.as_ref().unwrap().custom_buf, "#",
             "backspace on lone '#' must not delete it");
     }
 
@@ -6911,7 +6911,7 @@ mod tests {
         );
         apply_action(Action::StyleSave, &mut s, &mut mapper::mapper::Mapper::default());
         // Save must close the editor.
-        assert!(s.style_editor.is_none(), "save closes the editor");
+        assert!(s.overlays.style_editor.is_none(), "save closes the editor");
         // The live color scheme must have been updated (resolve ran).
         // We can't assert a specific selector value without knowing which selector is first,
         // but we can verify that state.colors is a valid ColorScheme (non-default fields
@@ -6923,7 +6923,7 @@ mod tests {
     fn style_reset_reverts_active_selector_to_default() {
         let mut s = AppState::default();
         crate::input::open_style_editor_hermetic(&mut s);
-        let sel = s.style_editor.as_ref().unwrap().selectors[0].to_string();
+        let sel = s.overlays.style_editor.as_ref().unwrap().selectors[0].to_string();
         // Mutate the first selector's fg.
         apply_action(
             Action::StyleSetColor { is_bg: false, value: Some("#ff0000".into()) },
@@ -6931,7 +6931,7 @@ mod tests {
         );
         // Reset should revert it to the built-in default.
         apply_action(Action::StyleReset, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         let default_doc = crate::style::parse_style_toml(crate::style::DEFAULT_STYLE_TOML).unwrap();
         assert_eq!(
             ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()),
@@ -6943,9 +6943,9 @@ mod tests {
     #[test]
     fn open_style_editor_resets_dialog_focus() {
         let mut s = AppState::default();
-        s.dialog_focus = 5; // non-zero stale value
+        s.overlays.dialog_focus = 5; // non-zero stale value
         open_style_editor_hermetic(&mut s);
-        assert_eq!(s.dialog_focus, 0, "open_style_editor must reset dialog_focus to 0");
+        assert_eq!(s.overlays.dialog_focus, 0, "open_style_editor must reset dialog_focus to 0");
     }
 
     #[test]
@@ -7024,12 +7024,12 @@ mod tests {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
         {
-            let ed = s.style_editor.as_mut().unwrap();
+            let ed = s.overlays.style_editor.as_mut().unwrap();
             ed.color_target = true; // bg
             ed.custom_buf = "#abcdef".into();
         }
         apply_action(Action::StyleCommitCustom, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         let sel = ed.selectors[ed.active].to_string();
         assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.bg.clone()), Some("#abcdef".into()));
         assert!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.clone()).is_none());
@@ -7040,12 +7040,12 @@ mod tests {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
         {
-            let ed = s.style_editor.as_mut().unwrap();
+            let ed = s.overlays.style_editor.as_mut().unwrap();
             ed.color_target = false; // fg
             ed.swatch_cursor = crate::style_mru::ANSI_NAMES.len(); // the "default" cell
         }
         apply_action(Action::StyleSwatchPick, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         let sel = ed.selectors[ed.active].to_string();
         assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("reset"),
             "picking the default swatch cell stores the reset token");
@@ -7056,12 +7056,12 @@ mod tests {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
         {
-            let ed = s.style_editor.as_mut().unwrap();
+            let ed = s.overlays.style_editor.as_mut().unwrap();
             ed.color_target = false; // fg
             ed.custom_buf = "default".into();
         }
         apply_action(Action::StyleCommitCustom, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         let sel = ed.selectors[ed.active].to_string();
         assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("reset"),
             "typing default in the custom field stores the reset token");
@@ -7072,18 +7072,18 @@ mod tests {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
         {
-            let ed = s.style_editor.as_mut().unwrap();
+            let ed = s.overlays.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
             // Ensure not picture-frame regardless of what style.toml on disk says.
             ed.doc.colors.selectors.entry("map_border".into()).or_default().style = None;
         }
         apply_action(Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top), &mut s, &mut Mapper::default());
-        assert!(s.glyph_picker.is_some(), "picker opens");
+        assert!(s.overlays.glyph_picker.is_some(), "picker opens");
         // Feed '═' via the pending path then commit.
         apply_action(Action::GlyphPickerChar('═'), &mut s, &mut Mapper::default());
         apply_action(Action::GlyphPickerPick, &mut s, &mut Mapper::default());
-        assert!(s.glyph_picker.is_none(), "pick closes the picker");
-        let ed = s.style_editor.as_ref().unwrap();
+        assert!(s.overlays.glyph_picker.is_none(), "pick closes the picker");
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         assert_eq!(
             ed.doc.colors.selectors.get("map_border").and_then(|d| d.glyph_top.clone()),
             Some("═".into()),
@@ -7096,7 +7096,7 @@ mod tests {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
         {
-            let ed = s.style_editor.as_mut().unwrap();
+            let ed = s.overlays.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
             // Pre-set a glyph so we can verify clear removes it; also ensure not picture-frame.
             let decl = ed.doc.colors.selectors.entry("map_border".into()).or_default();
@@ -7104,10 +7104,10 @@ mod tests {
             decl.style = None;
         }
         apply_action(Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top), &mut s, &mut Mapper::default());
-        assert!(s.glyph_picker.is_some());
+        assert!(s.overlays.glyph_picker.is_some());
         apply_action(Action::GlyphPickerClear, &mut s, &mut Mapper::default());
-        assert!(s.glyph_picker.is_none(), "clear closes the picker");
-        let ed = s.style_editor.as_ref().unwrap();
+        assert!(s.overlays.glyph_picker.is_none(), "clear closes the picker");
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         assert_eq!(
             ed.doc.colors.selectors.get("map_border").and_then(|d| d.glyph_top.clone()),
             None,
@@ -7124,18 +7124,18 @@ mod tests {
             &mut s,
             &mut Mapper::default(),
         );
-        assert!(s.glyph_picker.is_some(), "picker opens");
+        assert!(s.overlays.glyph_picker.is_some(), "picker opens");
 
         // Enter custom-entry focus via the action.
         apply_action(Action::GlyphPickerCustomFocus, &mut s, &mut Mapper::default());
-        assert!(s.glyph_picker.as_ref().unwrap().custom_focus, "custom_focus set");
+        assert!(s.overlays.glyph_picker.as_ref().unwrap().custom_focus, "custom_focus set");
 
         // Type '2', '5', '0', '0' → U+2500.
         for c in ['2', '5', '0', '0'] {
             apply_action(Action::GlyphPickerCustomChar(c), &mut s, &mut Mapper::default());
         }
         {
-            let picker = s.glyph_picker.as_ref().unwrap();
+            let picker = s.overlays.glyph_picker.as_ref().unwrap();
             assert_eq!(picker.custom_buf, "2500", "buf accumulates hex digits");
             assert_eq!(picker.custom_start, Some(0x2500), "custom_start set to U+2500");
         }
@@ -7143,7 +7143,7 @@ mod tests {
         // Backspace removes last digit; custom_start updates.
         apply_action(Action::GlyphPickerCustomBackspace, &mut s, &mut Mapper::default());
         {
-            let picker = s.glyph_picker.as_ref().unwrap();
+            let picker = s.overlays.glyph_picker.as_ref().unwrap();
             assert_eq!(picker.custom_buf, "250");
             assert_eq!(picker.custom_start, Some(0x250));
         }
@@ -7151,7 +7151,7 @@ mod tests {
         // Block navigation clears custom state.
         apply_action(Action::GlyphPickerBlock(1), &mut s, &mut Mapper::default());
         {
-            let picker = s.glyph_picker.as_ref().unwrap();
+            let picker = s.overlays.glyph_picker.as_ref().unwrap();
             assert!(!picker.custom_focus, "block nav exits custom focus");
             assert!(picker.custom_buf.is_empty(), "block nav clears custom_buf");
             assert_eq!(picker.custom_start, None, "block nav clears custom_start");
@@ -7171,7 +7171,7 @@ mod tests {
         apply_action(Action::GlyphPickerCustomFocus, &mut s, &mut Mapper::default());
         apply_action(Action::GlyphPickerChar('═'), &mut s, &mut Mapper::default());
         assert!(
-            s.glyph_picker.as_ref().unwrap().pending.is_none(),
+            s.overlays.glyph_picker.as_ref().unwrap().pending.is_none(),
             "GlyphPickerChar should not set pending while in custom focus",
         );
     }
@@ -7180,9 +7180,9 @@ mod tests {
     fn swatch_pick_sets_color_for_target_and_default_clears() {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
-        { let ed = s.style_editor.as_mut().unwrap(); ed.color_target = false; ed.swatch_cursor = 16; } // default cell
+        { let ed = s.overlays.style_editor.as_mut().unwrap(); ed.color_target = false; ed.swatch_cursor = 16; } // default cell
         apply_action(Action::StyleSwatchPick, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         let sel = ed.selectors[ed.active].to_string();
         // default cell stores the reset token (freezes terminal-default)
         assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("reset"));
@@ -7192,10 +7192,10 @@ mod tests {
     fn border_type_cycle_updates_decl_style() {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
-        { let ed = s.style_editor.as_mut().unwrap();
+        { let ed = s.overlays.style_editor.as_mut().unwrap();
           ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap(); }
         apply_action(Action::StyleBorderTypeCycle(1), &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         let st = ed.doc.colors.selectors.get("map_border").and_then(|d| d.style.clone());
         assert!(st.is_some(), "cycling sets the border style name on the decl");
     }
@@ -7215,7 +7215,7 @@ mod tests {
         let mut state = AppState::default();
         open_style_editor_hermetic(&mut state);
         {
-            let ed = state.style_editor.as_mut().unwrap();
+            let ed = state.overlays.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
             ed.doc.colors.selectors.entry("map_border".into()).or_default().style =
                 Some("picture-frame".into());
@@ -7226,7 +7226,7 @@ mod tests {
             &mut Mapper::default(),
         );
         assert!(
-            state.glyph_picker.is_none(),
+            state.overlays.glyph_picker.is_none(),
             "picture-frame zones must not open the glyph picker",
         );
 
@@ -7234,7 +7234,7 @@ mod tests {
         let mut state2 = AppState::default();
         open_style_editor_hermetic(&mut state2);
         {
-            let ed = state2.style_editor.as_mut().unwrap();
+            let ed = state2.overlays.style_editor.as_mut().unwrap();
             ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
             // Explicitly clear any disk-loaded border style so this is not picture-frame.
             ed.doc.colors.selectors.entry("map_border".into()).or_default().style = None;
@@ -7245,7 +7245,7 @@ mod tests {
             &mut Mapper::default(),
         );
         assert!(
-            state2.glyph_picker.is_some(),
+            state2.overlays.glyph_picker.is_some(),
             "non-picture-frame selector opens the picker",
         );
     }
@@ -7259,7 +7259,7 @@ mod tests {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
         {
-            let ed = s.style_editor.as_mut().unwrap();
+            let ed = s.overlays.style_editor.as_mut().unwrap();
             let non_bordered_idx = ed.selectors.iter()
                 .position(|sel| !crate::input::is_bordered_selector(sel))
                 .expect("at least one non-bordered selector exists");
@@ -7269,11 +7269,11 @@ mod tests {
         // Attrs → the footer buttons; cycling a full loop never enters Border for
         // a non-bordered selector.
         apply_action(Action::StyleFocusCycle(1), &mut s, m);
-        assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons,
+        assert_eq!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons,
             "non-bordered selector goes from Attrs to the footer buttons");
         for _ in 0..10 {
             apply_action(Action::StyleFocusCycle(1), &mut s, m);
-            assert_ne!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Border,
+            assert_ne!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Border,
                 "non-bordered selector must never enter Border focus");
         }
 
@@ -7281,7 +7281,7 @@ mod tests {
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
         {
-            let ed = s.style_editor.as_mut().unwrap();
+            let ed = s.overlays.style_editor.as_mut().unwrap();
             let bordered_idx = ed.selectors.iter()
                 .position(|sel| crate::input::is_bordered_selector(sel))
                 .expect("at least one bordered selector exists");
@@ -7289,14 +7289,14 @@ mod tests {
             ed.focus = StyleFocus::Attrs;
         }
         apply_action(Action::StyleFocusCycle(1), &mut s, m);
-        assert_eq!(s.style_editor.as_ref().unwrap().focus, StyleFocus::Border,
+        assert_eq!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Border,
             "bordered selector must reach Border focus");
 
         // ── navigating away from bordered selector drops stale Border focus ──
         let mut s = AppState::default();
         open_style_editor_hermetic(&mut s);
         {
-            let ed = s.style_editor.as_mut().unwrap();
+            let ed = s.overlays.style_editor.as_mut().unwrap();
             let bordered_idx = ed.selectors.iter()
                 .position(|sel| crate::input::is_bordered_selector(sel))
                 .expect("at least one bordered selector exists");
@@ -7304,7 +7304,7 @@ mod tests {
             ed.focus = StyleFocus::Border;
         }
         apply_action(Action::StyleNav(1), &mut s, m);
-        let ed = s.style_editor.as_ref().unwrap();
+        let ed = s.overlays.style_editor.as_ref().unwrap();
         if !crate::input::is_bordered_selector(ed.selectors[ed.active]) {
             assert_ne!(ed.focus, StyleFocus::Border,
                 "Border focus must drop on a non-bordered selector");
@@ -7318,13 +7318,13 @@ mod tests {
         open_style_editor_hermetic(&mut s); // ifid is empty by default
         assert!(s.ifid.is_empty());
         apply_action(Action::StyleSaveGame, &mut s, &mut mapper::mapper::Mapper::default());
-        assert!(s.style_editor.is_some(), "no game: Save Game Style is a no-op, editor stays open");
+        assert!(s.overlays.style_editor.is_some(), "no game: Save Game Style is a no-op, editor stays open");
 
         // Game loaded: applies the look live and closes the editor.
         let mut s2 = AppState::default();
         open_style_editor_hermetic(&mut s2);
         s2.ifid = "ZCODE-1-ABCDEF-0001".to_string();
         apply_action(Action::StyleSaveGame, &mut s2, &mut mapper::mapper::Mapper::default());
-        assert!(s2.style_editor.is_none(), "with game: Save Game Style closes the editor");
+        assert!(s2.overlays.style_editor.is_none(), "with game: Save Game Style closes the editor");
     }
 }

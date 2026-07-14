@@ -2581,7 +2581,7 @@ mod tests {
         state.focus = Focus::Game; // focused on game, but overlay is open
 
         // Open the hotkey dialog — the simplest boolean overlay.
-        state.hotkey_dialog = true;
+        state.overlays.hotkey_dialog = true;
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);

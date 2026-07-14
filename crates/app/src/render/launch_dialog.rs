@@ -25,10 +25,10 @@ pub struct LaunchDialogRects {
 
 /// Draw the launch "Resume saved game?" dialog centered over `area`.
 ///
-/// Returns `None` when `state.launch_dialog` is false or the area is too small.
+/// Returns `None` when `state.overlays.launch_dialog` is false or the area is too small.
 /// Returns `LaunchDialogRects` with hit-rects for close and buttons.
 pub fn draw_launch_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<LaunchDialogRects> {
-    if !state.launch_dialog {
+    if !state.overlays.launch_dialog {
         return None;
     }
 
@@ -51,7 +51,7 @@ pub fn draw_launch_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
         buttons,
         show_close: true,
         default: Some(ButtonId::Resume),
-        focus: Some(state.dialog_focus),
+        focus: Some(state.overlays.dialog_focus),
         field: None,
     };
 
@@ -131,7 +131,7 @@ mod tests {
     fn launch_dialog_renders_title_body_and_buttons() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut state = crate::state::AppState::default();
-        state.launch_dialog = true;
+        state.overlays.launch_dialog = true;
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut rects = None;
@@ -162,7 +162,7 @@ mod tests {
     fn launch_dialog_returns_none_when_area_too_small() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut state = crate::state::AppState::default();
-        state.launch_dialog = true;
+        state.overlays.launch_dialog = true;
         // Use an area smaller than MIN_W x MIN_H
         let backend = TestBackend::new(10, 5);
         let mut terminal = Terminal::new(backend).unwrap();

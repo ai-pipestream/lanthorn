@@ -10,7 +10,7 @@ use crate::state::AppState;
 pub(crate) fn apply_glyph_action(action: Action, state: &mut AppState) {
     match action {
         Action::StyleOpenGlyphPicker(zone) => {
-            if let Some(ed) = &state.style_editor {
+            if let Some(ed) = &state.overlays.style_editor {
                 let target_selector = ed.selectors[ed.active].to_string();
                 // Picture-frame is a composite border; per-zone glyph overrides don't apply.
                 let is_picture_frame = ed.doc.colors.selectors.get(&target_selector)
@@ -19,7 +19,7 @@ pub(crate) fn apply_glyph_action(action: Action, state: &mut AppState) {
                 if !is_picture_frame {
                     let user_dir = state.config.user_dir.clone();
                     let mru = crate::style_mru::load_glyph_mru(&user_dir);
-                    state.glyph_picker = Some(crate::state::GlyphPickerState {
+                    state.overlays.glyph_picker = Some(crate::state::GlyphPickerState {
                         target_selector,
                         target_zone: zone,
                         block: 0,
@@ -31,12 +31,12 @@ pub(crate) fn apply_glyph_action(action: Action, state: &mut AppState) {
                         mru,
                     });
                 }
-                // picture-frame: leave state.glyph_picker as None (no-op).
+                // picture-frame: leave state.overlays.glyph_picker as None (no-op).
             }
         }
 
         Action::GlyphPickerNav(delta) => {
-            if let Some(picker) = &mut state.glyph_picker {
+            if let Some(picker) = &mut state.overlays.glyph_picker {
                 let (lo, hi) = picker_block_range(picker);
                 let count = (hi - lo + 1) as usize;
                 if count > 0 {
@@ -47,7 +47,7 @@ pub(crate) fn apply_glyph_action(action: Action, state: &mut AppState) {
         }
 
         Action::GlyphPickerBlock(delta) => {
-            if let Some(picker) = &mut state.glyph_picker {
+            if let Some(picker) = &mut state.overlays.glyph_picker {
                 picker.custom_start = None; // return to curated blocks
                 picker.custom_focus = false;
                 picker.custom_buf.clear();
@@ -59,7 +59,7 @@ pub(crate) fn apply_glyph_action(action: Action, state: &mut AppState) {
         }
 
         Action::GlyphPickerChar(c) => {
-            if let Some(picker) = &mut state.glyph_picker {
+            if let Some(picker) = &mut state.overlays.glyph_picker {
                 if !picker.custom_focus {
                     picker.pending = Some(c.to_string());
                 }
@@ -68,7 +68,7 @@ pub(crate) fn apply_glyph_action(action: Action, state: &mut AppState) {
 
         Action::GlyphPickerPick => {
             // Gather what we need before splitting borrows.
-            let resolve_info = state.glyph_picker.as_ref().and_then(|picker| {
+            let resolve_info = state.overlays.glyph_picker.as_ref().and_then(|picker| {
                 let glyph = if let Some(s) = &picker.pending {
                     if crate::style_mru::is_valid_glyph(s) { Some(s.clone()) } else { None }
                 } else {
@@ -81,13 +81,13 @@ pub(crate) fn apply_glyph_action(action: Action, state: &mut AppState) {
                 let user_dir = state.config.user_dir.clone();
 
                 // Write glyph into the style doc.
-                if let Some(ed) = &mut state.style_editor {
+                if let Some(ed) = &mut state.overlays.style_editor {
                     let decl = ed.doc.colors.selectors.entry(sel).or_default();
                     set_zone_glyph(decl, zone, Some(glyph.clone()));
                 }
 
                 // Push to glyph MRU and save.
-                let saved_mru = if let Some(picker) = &mut state.glyph_picker {
+                let saved_mru = if let Some(picker) = &mut state.overlays.glyph_picker {
                     crate::style_mru::push_glyph_mru(&mut picker.mru, &glyph);
                     picker.mru.clone()
                 } else {
@@ -96,10 +96,10 @@ pub(crate) fn apply_glyph_action(action: Action, state: &mut AppState) {
                 let _ = crate::style_mru::save_glyph_mru(&user_dir, &saved_mru);
 
                 // Close the picker.
-                state.glyph_picker = None;
+                state.overlays.glyph_picker = None;
 
                 // Recompute the preview.
-                if let Some(ed) = &mut state.style_editor {
+                if let Some(ed) = &mut state.overlays.style_editor {
                     crate::style_actions::recompute_style_preview(ed, &user_dir);
                 }
             }
@@ -107,32 +107,32 @@ pub(crate) fn apply_glyph_action(action: Action, state: &mut AppState) {
         }
 
         Action::GlyphPickerClear => {
-            let pick_info = state.glyph_picker.as_ref()
+            let pick_info = state.overlays.glyph_picker.as_ref()
                 .map(|p| (p.target_selector.clone(), p.target_zone));
             if let Some((sel, zone)) = pick_info {
                 let user_dir = state.config.user_dir.clone();
-                if let Some(ed) = &mut state.style_editor {
+                if let Some(ed) = &mut state.overlays.style_editor {
                     let decl = ed.doc.colors.selectors.entry(sel).or_default();
                     set_zone_glyph(decl, zone, None);
                     crate::style_actions::recompute_style_preview(ed, &user_dir);
                 }
             }
-            state.glyph_picker = None;
+            state.overlays.glyph_picker = None;
         }
 
         Action::GlyphPickerCancel => {
-            state.glyph_picker = None;
+            state.overlays.glyph_picker = None;
         }
 
         Action::GlyphPickerCustomFocus => {
-            if let Some(picker) = &mut state.glyph_picker {
+            if let Some(picker) = &mut state.overlays.glyph_picker {
                 picker.custom_focus = true;
                 picker.pending = None;
             }
         }
 
         Action::GlyphPickerCustomChar(c) => {
-            if let Some(picker) = &mut state.glyph_picker {
+            if let Some(picker) = &mut state.overlays.glyph_picker {
                 if c.is_ascii_hexdigit() && picker.custom_buf.len() < 6 {
                     picker.custom_buf.push(c.to_ascii_uppercase());
                     if let Ok(cp) = u32::from_str_radix(&picker.custom_buf, 16) {
@@ -144,7 +144,7 @@ pub(crate) fn apply_glyph_action(action: Action, state: &mut AppState) {
         }
 
         Action::GlyphPickerCustomBackspace => {
-            if let Some(picker) = &mut state.glyph_picker {
+            if let Some(picker) = &mut state.overlays.glyph_picker {
                 picker.custom_buf.pop();
                 picker.custom_start = if picker.custom_buf.is_empty() {
                     None

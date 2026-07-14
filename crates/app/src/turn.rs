@@ -300,8 +300,8 @@ pub(crate) fn persist_aux_after_turn(
             session.clear_aux_dirty(); // archive auto-save already embedded it
         }
         app::config::AuxStorage::Ask => {
-            state.aux_prompt = true; // resolve in the dialog; leave aux_dirty set
-            state.dialog_focus = 0;
+            state.overlays.aux_prompt = true; // resolve in the dialog; leave aux_dirty set
+            state.overlays.dialog_focus = 0;
         }
     }
 }
