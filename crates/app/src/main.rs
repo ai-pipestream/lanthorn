@@ -2624,17 +2624,30 @@ fn main() {
                 state.transcript_scroll = to as u16;
                 state.scroll_anim = None;
             }
-            // Finalize each open scrollable surface's animation likewise.
-            if let Some(s) = &mut state.saves { s.scroll.finalize_if_done(); }
-            if let Some(fb) = &mut state.file_browser { fb.scroll.finalize_if_done(); }
-            if let Some(cs) = &mut state.config_screen { cs.scroll.finalize_if_done(); }
+            // Finalize each open scrollable surface's animation likewise. Each
+            // finalize reports whether it just cleared a running anim; OR that
+            // into needs_redraw so the frame at the settled offset paints once.
+            // A list/dock anim can reach done() *during* the poll wait above, so
+            // the `has_active_animation()` check earlier this iteration already
+            // read false — without this the settle frame would be gated off and
+            // the list would land ~1 row short (or a dock leave a sliver). (SQ-0305)
+            if let Some(s) = &mut state.saves { needs_redraw |= s.scroll.finalize_if_done(); }
+            if let Some(fb) = &mut state.file_browser { needs_redraw |= fb.scroll.finalize_if_done(); }
+            if let Some(cs) = &mut state.config_screen { needs_redraw |= cs.scroll.finalize_if_done(); }
             if let Some(vm) = &mut state.verb_menu {
-                vm.verb_scroll.finalize_if_done();
-                vm.noun_scroll.finalize_if_done();
-                vm.prep_scroll.finalize_if_done();
+                needs_redraw |= vm.verb_scroll.finalize_if_done();
+                needs_redraw |= vm.noun_scroll.finalize_if_done();
+                needs_redraw |= vm.prep_scroll.finalize_if_done();
             }
-            if let Some(r) = &mut state.replay { r.scroll.finalize_if_done(); }
-            if let Some(h) = &mut state.hints { h.finalize_scroll_if_done(); }
+            if let Some(r) = &mut state.replay { needs_redraw |= r.scroll.finalize_if_done(); }
+            if let Some(h) = &mut state.hints { needs_redraw |= h.finalize_scroll_if_done(); }
+            // Docks slide via a Tween that goes inactive (not dropped) at done();
+            // finalize drops the finished tween and forces the settle frame so a
+            // just-opened dock paints fully and a closing inv_dock loses its last
+            // sliver. (verb_dock CLOSE is separately covered by settle_verb_dock
+            // dropping the drawer content next iteration.) (SQ-0305)
+            needs_redraw |= state.inv_dock.finalize_if_done();
+            needs_redraw |= state.verb_dock.finalize_if_done();
             continue;
         }
 

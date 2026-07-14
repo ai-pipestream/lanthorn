@@ -116,10 +116,17 @@ impl ListScroll {
     }
 
     /// Drop a completed animation (the offset already holds the target). Called
-    /// from the run loop once the tween finishes.
-    pub fn finalize_if_done(&mut self) {
+    /// from the run loop once the tween finishes. Returns `true` iff a running
+    /// animation was actually cleared this call — the run loop ORs that into its
+    /// redraw flag so the frame at the settled `target_offset()` paints once
+    /// (the last painted frame used an eased `display_offset()` at progress <1,
+    /// and the redraw gate would otherwise skip the settle frame). (SQ-0305)
+    pub fn finalize_if_done(&mut self) -> bool {
         if self.anim.as_ref().is_some_and(|a| a.done()) {
             self.anim = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -178,6 +185,31 @@ mod tests {
         l.home(10, &anim_off());
         assert_eq!(l.selected, 0);
         assert_eq!(l.target_offset(), 0);
+    }
+
+    fn anim_on() -> AnimationConfig {
+        AnimationConfig { enabled: true, easing: Easing::EaseOut, scroll_ms: 40 }
+    }
+
+    #[test]
+    fn finalize_if_done_reports_cleared_anim() {
+        // Idle: nothing to finalize.
+        let mut l = ListScroll::new();
+        l.len(100);
+        assert!(!l.finalize_if_done(), "idle scroll clears nothing");
+
+        // Arm a real (still-running) animation; finalize is a no-op until it ends.
+        l.move_by(40, 10, &anim_on());
+        assert!(l.has_active_animation(), "a moved list with anim enabled is easing");
+        assert!(!l.finalize_if_done(), "a running anim is not cleared");
+        assert!(l.has_active_animation(), "still easing after a no-op finalize");
+
+        // Let the tween elapse, then finalize clears it exactly once.
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        assert!(!l.has_active_animation(), "tween has elapsed");
+        assert_eq!(l.display_offset(), l.target_offset(), "settled offset holds target");
+        assert!(l.finalize_if_done(), "finishing anim is cleared and reported true");
+        assert!(!l.finalize_if_done(), "already cleared → false (idempotent)");
     }
 
     #[test]

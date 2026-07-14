@@ -139,6 +139,22 @@ impl PanelSlide {
         self.tween.as_ref().is_some_and(|t| !t.done())
     }
 
+    /// Drop a finished slide tween (the displayed `fraction()` already holds the
+    /// settled `to`). Returns `true` iff a completed tween was cleared this call
+    /// — the run loop ORs that into its redraw flag so the settled slide frame
+    /// paints once. Without it a dock that finishes its slide during the poll
+    /// wait goes inactive before the settle frame is drawn, leaving e.g. a
+    /// ~1-row sliver of a closing inv_dock. (SQ-0305)
+    pub fn finalize_if_done(&mut self) -> bool {
+        if self.tween.as_ref().is_some_and(|t| t.done()) {
+            self.tween = None;
+            self.from = self.to;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Toggle to `open`, arming a tween unless `instant`.
     pub fn toggle_to(&mut self, open: bool, instant: bool) {
         self.open = open;

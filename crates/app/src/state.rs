@@ -65,10 +65,15 @@ impl HintSession {
             .unwrap_or(self.scroll)
     }
 
-    /// Drop a completed scroll animation (called from the run loop).
-    pub fn finalize_scroll_if_done(&mut self) {
+    /// Drop a completed scroll animation (called from the run loop). Returns
+    /// `true` iff a running animation was cleared this call, so the loop can
+    /// force the one redraw that paints the settled offset. (SQ-0305)
+    pub fn finalize_scroll_if_done(&mut self) -> bool {
         if self.scroll_anim.as_ref().is_some_and(|a| a.done()) {
             self.scroll_anim = None;
+            true
+        } else {
+            false
         }
     }
 
