@@ -2410,7 +2410,10 @@ impl Model {
         let mut nchars = 0u32;
         for ch in s.chars() {
             if !unicode {
-                Self::vfs_write_byte(data, &mut pos, (ch as u32 & 0xFF) as u8);
+                // Latin-1/byte stream: a code point > 0xFF is stored as
+                // '?' (0x3F), not truncated to its low byte (Glk spec §5.4).
+                let cp = ch as u32;
+                Self::vfs_write_byte(data, &mut pos, if cp > 0xFF { 0x3F } else { cp as u8 });
             } else if !text {
                 for b in (ch as u32).to_be_bytes() {
                     Self::vfs_write_byte(data, &mut pos, b);

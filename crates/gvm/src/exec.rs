@@ -343,6 +343,16 @@ fn glk_char_to_upper(c: u32) -> u32 {
     }
 }
 
+/// Clamp a code point for a byte-oriented stream read: values above 0xFF are
+/// returned as '?' (0x3F), everything else unchanged (Glk spec §5.4).
+fn clamp_byte(cp: u32) -> u32 {
+    if cp > 0xFF {
+        0x3F
+    } else {
+        cp
+    }
+}
+
 /// Append one IFF chunk (`id`, 4-byte big-endian length, data, even-pad).
 fn push_chunk(out: &mut Vec<u8>, id: &[u8; 4], data: &[u8]) {
     out.extend_from_slice(id);
@@ -2515,7 +2525,9 @@ impl Machine {
                         if unicode {
                             let _ = self.store_mem_sized(ea, v, 4);
                         } else {
-                            let _ = self.store_mem_sized(ea, v & 0xFF, 1);
+                            // Byte stream: a code point > 0xFF stores as '?'
+                            // (0x3F), not its low byte (Glk spec §5.4).
+                            let _ = self.store_mem_sized(ea, if v > 0xFF { 0x3F } else { v }, 1);
                         }
                     }
                     p = p.saturating_add(1);
@@ -3043,11 +3055,20 @@ impl Machine {
                         self.glk.memory_stream_read_advance(sid, 1);
                         v
                     }
-                    _ if self.glk.file_stream_is_unicode(sid) == Some(false) => {
-                        self.glk.file_stream_read_char(sid).unwrap_or(0xFFFF_FFFF)
+                    // A byte-oriented read works on a Unicode file/resource
+                    // stream too: it returns each code point clamped to a byte
+                    // (> 0xFF → '?'), not EOF (Glk spec §5.4).
+                    _ if self.glk.file_stream_is_unicode(sid).is_some() => {
+                        match self.glk.file_stream_read_char(sid) {
+                            Some(cp) => clamp_byte(cp),
+                            None => 0xFFFF_FFFF,
+                        }
                     }
-                    _ if self.glk.resource_stream_is_unicode(sid) == Some(false) => {
-                        self.glk.resource_stream_read_char(sid).unwrap_or(0xFFFF_FFFF)
+                    _ if self.glk.resource_stream_is_unicode(sid).is_some() => {
+                        match self.glk.resource_stream_read_char(sid) {
+                            Some(cp) => clamp_byte(cp),
+                            None => 0xFFFF_FFFF,
+                        }
                     }
                     _ => 0xFFFF_FFFF, // EOF or not a byte stream
                 }
@@ -3068,11 +3089,12 @@ impl Machine {
                         }
                     }
                     self.glk.memory_stream_read_advance(sid, count);
-                } else if self.glk.file_stream_is_unicode(sid) == Some(false) {
+                } else if self.glk.file_stream_is_unicode(sid).is_some() {
                     while count + 1 < maxlen {
                         match self.glk.file_stream_read_char(sid) {
-                            Some(byte) => {
-                                self.store_mem_sized(buf + count, byte & 0xFF, 1)?;
+                            Some(cp) => {
+                                let byte = clamp_byte(cp);
+                                self.store_mem_sized(buf + count, byte, 1)?;
                                 count += 1;
                                 if byte == b'\n' as u32 {
                                     break;
@@ -3081,11 +3103,12 @@ impl Machine {
                             None => break,
                         }
                     }
-                } else if self.glk.resource_stream_is_unicode(sid) == Some(false) {
+                } else if self.glk.resource_stream_is_unicode(sid).is_some() {
                     while count + 1 < maxlen {
                         match self.glk.resource_stream_read_char(sid) {
-                            Some(byte) => {
-                                self.store_mem_sized(buf + count, byte & 0xFF, 1)?;
+                            Some(cp) => {
+                                let byte = clamp_byte(cp);
+                                self.store_mem_sized(buf + count, byte, 1)?;
                                 count += 1;
                                 if byte == b'\n' as u32 {
                                     break;
@@ -3113,21 +3136,21 @@ impl Machine {
                     }
                     count = available;
                     self.glk.memory_stream_read_advance(sid, count);
-                } else if self.glk.file_stream_is_unicode(sid) == Some(false) {
+                } else if self.glk.file_stream_is_unicode(sid).is_some() {
                     while count < maxlen {
                         match self.glk.file_stream_read_char(sid) {
-                            Some(byte) => {
-                                self.store_mem_sized(buf + count, byte & 0xFF, 1)?;
+                            Some(cp) => {
+                                self.store_mem_sized(buf + count, clamp_byte(cp), 1)?;
                                 count += 1;
                             }
                             None => break,
                         }
                     }
-                } else if self.glk.resource_stream_is_unicode(sid) == Some(false) {
+                } else if self.glk.resource_stream_is_unicode(sid).is_some() {
                     while count < maxlen {
                         match self.glk.resource_stream_read_char(sid) {
-                            Some(byte) => {
-                                self.store_mem_sized(buf + count, byte & 0xFF, 1)?;
+                            Some(cp) => {
+                                self.store_mem_sized(buf + count, clamp_byte(cp), 1)?;
                                 count += 1;
                             }
                             None => break,
@@ -9263,6 +9286,46 @@ mod tests {
         assert_eq!(m.glk_dispatch(0x0130, &[bsid]).unwrap(), 0x0001_F600, "4-byte BE code point");
         assert_eq!(m.glk_dispatch(0x0130, &[bsid]).unwrap(), 0xFFFF_FFFF, "EOF");
         assert!(m.diagnostics.is_empty(), "no diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_byte_read_on_a_unicode_resource_clamps_instead_of_eof() {
+        // SQ-0322: a byte-oriented read (glk_get_char_stream / _line / _buffer)
+        // on a UNICODE stream returns each code point clamped to a byte
+        // (> 0xFF → '?'), not EOF (Glk spec §5.4). Binary chunk of two 32-bit
+        // BE code points: 'A' (in range) and U+1F600 (clamps).
+        let mut bin = 0x0000_0041u32.to_be_bytes().to_vec();
+        bin.extend_from_slice(&0x0001_F600u32.to_be_bytes());
+        let backend = glk::TestBackend::new().with_data_resource(1, bin, false);
+        let mut m = resource_machine(backend, 0x400);
+
+        let sid = m.glk_dispatch(0x013A, &[1, 0]).unwrap(); // open_resource_uni(1)
+        assert_ne!(sid, 0);
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), 0x41, "'A' via a byte read on a uni stream");
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), b'?' as u32, "U+1F600 clamps to '?', not EOF");
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), 0xFFFF_FFFF, "EOF");
+
+        // Buffer-read variant clamps identically.
+        let sid2 = m.glk_dispatch(0x013A, &[1, 0]).unwrap();
+        let n = m.glk_dispatch(0x0092, &[sid2, 0x300, 8]).unwrap();
+        assert_eq!(n, 2, "two code points read (not EOF)");
+        assert_eq!(m.mem.read8(0x300).unwrap(), 0x41);
+        assert_eq!(m.mem.read8(0x301).unwrap(), b'?' as u32);
+        assert!(m.diagnostics.is_empty(), "no diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_byte_write_above_0xff_stores_question_mark() {
+        // SQ-0322: writing a code point > 0xFF to a byte (Latin-1) stream
+        // stores '?' (0x3F), not the low byte (Glk spec §5.4).
+        let mut m = resource_machine(glk::TestBackend::new(), 0x400);
+        // open_memory over [0x300, 0x304) as a BYTE stream (fmode write).
+        let sid = m.glk_dispatch(0x0043, &[0x300, 4, 1, 0]).unwrap();
+        assert_ne!(sid, 0);
+        m.glk_dispatch(0x012B, &[sid, 0x01C4]).unwrap(); // put_char_stream_uni(U+01C4)
+        m.glk_dispatch(0x012B, &[sid, b'x' as u32]).unwrap(); // put_char_stream_uni('x')
+        assert_eq!(m.mem.read8(0x300).unwrap(), 0x3F, "U+01C4 > 0xFF stored as '?', not low byte 0xC4");
+        assert_eq!(m.mem.read8(0x301).unwrap(), b'x' as u32, "in-range char stored verbatim");
     }
 
     #[test]
