@@ -1,14 +1,25 @@
 // Terminal Glk backend for gvm-cli (phase 3a-1: output).
 //
-// Reuses the zvm-cli screen-model approach: the status TextGrid window is pinned
-// at the top of the terminal via an ANSI scroll-region + cursor addressing, and
-// the main TextBuffer window scrolls in the region below. Glk styles map to SGR.
-// When stdout is not a TTY the backend degrades to plain text streaming (the
-// pinned grid is suppressed) so piped output stays clean.
+// Reuses the zvm-cli screen-model approach: static TextGrid windows are drawn at
+// their resolved rects via absolute cursor addressing, the main TextBuffer window
+// scrolls in an ANSI scroll-region confined to its row band, and inter-window
+// separators (the `winmethod_Border` hint) are drawn as box-drawing rules in the
+// gutter cells gvm reserves for them. Glk styles map to SGR. When stdout is not a
+// TTY the backend degrades to plain text streaming (all geometry/border chrome is
+// suppressed) so piped output stays byte-identical.
+//
+// KNOWN LIMITATION (SQ-0327): an ANSI scroll region (DECSTBM) is always
+// FULL-WIDTH, so a line-oriented terminal cannot scroll two side-by-side buffer
+// columns independently. ABOVE/BELOW (stacked) splits are honoured exactly — the
+// scrolling buffer takes the rows above/below its static neighbours. But for a
+// LEFT/RIGHT split the buffer can only be confined to its ROW band at full width:
+// it spans the whole terminal width and the side grid/graphics window (redrawn on
+// top) is overwritten as the buffer scrolls. This is documented rather than hacked
+// around with a broken sub-column scroll region.
 
 use std::io::{self, IsTerminal, Write};
 
-use gvm::glk::{GlkBackend, GlkStyle, Rect, StyleAttrs, StyleColour, WinType};
+use gvm::glk::{GlkBackend, GlkStyle, Rect, StyleAttrs, StyleColour, WinTree, WinType};
 
 // ── word-wrap helper ──────────────────────────────────────────────────────────
 
@@ -187,22 +198,102 @@ type GridCell = (char, GlkStyle, StyleColour, StyleAttrs);
 const BLANK_CELL: GridCell =
     (' ', GlkStyle::Normal, StyleColour { fg: None, bg: None, reverse: false }, StyleAttrs { weight: None, oblique: None, indent: None, para_indent: None, justify: None });
 
-/// Render the pinned grid rows as ANSI: save cursor, redraw each grid row at its
-/// absolute position (cleared), then restore the cursor.
-fn render_grid(cells: &[Vec<GridCell>], width: u32, honor: bool, tty: bool) -> String {
-    let mut out = String::new();
-    out.push_str("\x1b7"); // DECSC save cursor
-    for (r, row) in cells.iter().enumerate() {
-        out.push_str(&format!("\x1b[{};1H\x1b[2K", r + 1)); // move to row, clear line
+/// Box-drawing characters for the inter-window separator rules and graphics
+/// placeholder outlines.
+const H_RULE: char = '─';
+const V_RULE: char = '│';
+
+/// A tracked text-grid window: its resolved rect and cell buffer. Every grid
+/// leaf is drawn at its own rect (not collapsed to a single pinned status line).
+struct GridWin {
+    id: u32,
+    rect: Rect,
+    cells: Vec<Vec<GridCell>>,
+}
+
+impl GridWin {
+    /// Grow the cell buffer to at least `height × width`.
+    fn ensure(&mut self, height: u32, width: u32) {
+        if (self.cells.len() as u32) < height {
+            self.cells.resize(height as usize, Vec::new());
+        }
+        for row in &mut self.cells {
+            if (row.len() as u32) < width {
+                row.resize(width as usize, BLANK_CELL);
+            }
+        }
+    }
+}
+
+/// Append one grid's cells to `out`, addressed absolutely at its rect. A grid
+/// that spans the full terminal width keeps the historical clear-line rendering
+/// (`\x1b[2K` then the trimmed row), so the common status-line-on-top case is
+/// byte-identical; a narrower grid (a Left/Right column) writes its cells at its
+/// own width only, so it never clears into a neighbouring window.
+fn append_grid(out: &mut String, g: &GridWin, term_cols: u32, honor: bool, tty: bool) {
+    let full_width = g.rect.left == 0 && g.rect.width == term_cols;
+    for (r, row) in g.cells.iter().enumerate() {
+        let screen_row = g.rect.top + r as u32 + 1;
+        let screen_col = g.rect.left + 1;
+        out.push_str(&format!("\x1b[{screen_row};{screen_col}H"));
         let mut line = String::new();
-        for c in 0..width as usize {
+        for c in 0..g.rect.width as usize {
             let (ch, st, col, at) = row.get(c).copied().unwrap_or(BLANK_CELL);
             line.push_str(&style_wrap(&ch.to_string(), st, col, at, honor, tty));
         }
-        out.push_str(line.trim_end());
+        if full_width {
+            out.push_str("\x1b[2K"); // clear the whole line, then the trimmed row
+            out.push_str(line.trim_end());
+        } else {
+            out.push_str(&line); // fixed-width column: no line clear
+        }
     }
-    out.push_str("\x1b8"); // DECRC restore cursor
-    out
+}
+
+/// Append the inter-window separator rules for a window tree to `out`. Each
+/// bordered pair draws a rule in the gutter cell gvm reserves for it: a
+/// horizontal rule at row `top + split` for a stacked pair, a vertical rule at
+/// column `left + split` for a side-by-side pair. `NoBorder` pairs draw nothing.
+fn append_borders(out: &mut String, tree: &WinTree) {
+    if let WinTree::Pair { vertical, border, split, rect, first, second, .. } = tree {
+        if *border {
+            if *vertical {
+                // Horizontal rule across the reserved gutter row.
+                let row = rect.top + split + 1;
+                out.push_str(&format!("\x1b[{};{}H", row, rect.left + 1));
+                out.extend(std::iter::repeat(H_RULE).take(rect.width as usize));
+            } else {
+                // Vertical rule down the reserved gutter column.
+                let col = rect.left + split + 1;
+                for r in 0..rect.height {
+                    out.push_str(&format!("\x1b[{};{}H", rect.top + r + 1, col));
+                    out.push(V_RULE);
+                }
+            }
+        }
+        append_borders(out, first);
+        append_borders(out, second);
+    }
+}
+
+/// Append a simple bordered placeholder box for a graphics window at its rect
+/// (gvm-cli has no image protocol). The interior is cleared to spaces so stale
+/// content within the rect doesn't show through; nothing outside the rect is
+/// touched.
+fn append_graphics(out: &mut String, rect: Rect) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    for r in 0..rect.height {
+        out.push_str(&format!("\x1b[{};{}H", rect.top + r + 1, rect.left + 1));
+        let mut line = String::new();
+        for c in 0..rect.width {
+            let edge_row = r == 0 || r == rect.height - 1;
+            let edge_col = c == 0 || c == rect.width - 1;
+            line.push(if edge_row { H_RULE } else if edge_col { V_RULE } else { ' ' });
+        }
+        out.push_str(&line);
+    }
 }
 
 // ── Detect terminal size ──────────────────────────────────────────────────────
@@ -250,11 +341,15 @@ pub struct TerminalBackend {
     pending_word_attrs: StyleAttrs,
     /// Whether to render the game's stylehint colours (`--no-game-colours` off).
     honor: bool,
-    /// The tracked status grid window id (first TextGrid opened), if any.
-    grid_win: Option<u32>,
-    grid_rect: Rect,
-    /// Grid cell buffer `[row][col] -> (char, style, colour, attr hints)`.
-    grid_cells: Vec<Vec<GridCell>>,
+    /// Every tracked TextGrid window with its resolved rect + cell buffer. Each
+    /// is drawn at its own rect (grids no longer collapse to one status line).
+    grids: Vec<GridWin>,
+    /// Graphics windows as `(id, rect)`, drawn as bordered placeholder boxes.
+    graphics: Vec<(u32, Rect)>,
+    /// The live window tree (from `window_tree`), used to draw inter-window
+    /// separators in the gutters gvm reserves. `None` until the first tree, or
+    /// when no root window exists.
+    tree: Option<WinTree>,
     /// Whether the ANSI scroll region is currently in effect.
     region_set: bool,
     /// The `(top, bottom)` bounds of the scroll region as last emitted. Used to
@@ -294,9 +389,9 @@ impl TerminalBackend {
             pending_word_colour: StyleColour::default(),
             pending_word_attrs: StyleAttrs::default(),
             honor: true,
-            grid_win: None,
-            grid_rect: Rect::default(),
-            grid_cells: Vec::new(),
+            grids: Vec::new(),
+            graphics: Vec::new(),
+            tree: None,
             region_set: false,
             region_bounds: (0, 0),
             started: false,
@@ -333,9 +428,9 @@ impl TerminalBackend {
             pending_word_colour: StyleColour::default(),
             pending_word_attrs: StyleAttrs::default(),
             honor: true,
-            grid_win: None,
-            grid_rect: Rect::default(),
-            grid_cells: Vec::new(),
+            grids: Vec::new(),
+            graphics: Vec::new(),
+            tree: None,
             region_set: false,
             region_bounds: (0, 0),
             started: false,
@@ -345,15 +440,13 @@ impl TerminalBackend {
         }
     }
 
-    /// Grow the grid cell buffer to at least `height × width`.
-    fn ensure_grid(&mut self, height: u32, width: u32) {
-        if (self.grid_cells.len() as u32) < height {
-            self.grid_cells.resize(height as usize, Vec::new());
-        }
-        for row in &mut self.grid_cells {
-            if (row.len() as u32) < width {
-                row.resize(width as usize, BLANK_CELL);
-            }
+    /// Index of the tracked grid for `id`, creating an empty entry if none.
+    fn grid_index(&mut self, id: u32) -> usize {
+        if let Some(i) = self.grids.iter().position(|g| g.id == id) {
+            i
+        } else {
+            self.grids.push(GridWin { id, rect: Rect::default(), cells: Vec::new() });
+            self.grids.len() - 1
         }
     }
 
@@ -436,13 +529,26 @@ impl TerminalBackend {
         self.current_col = 0;
     }
 
-    /// Redraw the pinned grid (TTY only).
-    fn redraw_grid(&mut self) {
+    /// Redraw all static chrome (TTY only): every grid at its rect, the graphics
+    /// placeholders, and the inter-window separator rules — wrapped in a single
+    /// cursor save/restore so the scrolling buffer's cursor is never disturbed.
+    fn redraw_chrome(&mut self) {
         if !self.is_tty {
             return;
         }
-        let s = render_grid(&self.grid_cells, self.grid_rect.width, self.honor, true);
-        let _ = self.out.write_all(s.as_bytes());
+        let mut out = String::new();
+        out.push_str("\x1b7"); // DECSC save cursor
+        for g in &self.grids {
+            append_grid(&mut out, g, self.cols, self.honor, true);
+        }
+        for &(_, rect) in &self.graphics {
+            append_graphics(&mut out, rect);
+        }
+        if let Some(tree) = &self.tree {
+            append_borders(&mut out, tree);
+        }
+        out.push_str("\x1b8"); // DECRC restore cursor
+        let _ = self.out.write_all(out.as_bytes());
     }
 
     /// Update the terminal size. Returns `true` if the size actually changed.
@@ -488,33 +594,73 @@ impl GlkBackend for TerminalBackend {
                 eprintln!("[term] layout: win={id} {kind} w={} h={} (left={} top={})", r.width, r.height, r.left, r.top);
             }
         }
-        // Track the first TextGrid as the pinned status window. The terminal
-        // backend draws no inter-window frames, so the border hint is ignored.
-        let grid = wins.iter().find(|(_, ty, _, _)| *ty == WinType::TextGrid);
-        if let Some(&(id, _, rect, _)) = grid {
-            self.grid_win = Some(id);
-            self.grid_rect = rect;
-            self.ensure_grid(rect.height, rect.width);
-            if self.is_tty && rect.height > 0 {
-                if !self.started {
-                    let _ = self.out.write_all(b"\x1b[2J\x1b[H"); // clear screen, home
-                    self.started = true;
-                }
-                let top = rect.height + 1;
-                let bounds = (top, self.rows);
+        // Register every TextGrid at its rect (growing its cell buffer), and drop
+        // grids that have closed. Rendering happens in redraw_chrome / grid_put.
+        let mut live: Vec<u32> = Vec::new();
+        for &(id, ty, rect, _) in wins {
+            if ty == WinType::TextGrid {
+                let idx = self.grid_index(id);
+                self.grids[idx].rect = rect;
+                self.grids[idx].ensure(rect.height, rect.width);
+                live.push(id);
+            }
+        }
+        self.grids.retain(|g| live.contains(&g.id));
+        // Register graphics windows for their placeholder boxes.
+        self.graphics = wins
+            .iter()
+            .filter(|(_, ty, _, _)| *ty == WinType::Graphics)
+            .map(|&(id, _, rect, _)| (id, rect))
+            .collect();
+
+        if !self.is_tty {
+            return; // piped: no geometry chrome, output stays byte-identical
+        }
+
+        // Clear the screen once, on the first layout that establishes any chrome.
+        let has_chrome = !self.grids.is_empty() || !self.graphics.is_empty();
+        if !self.started && has_chrome {
+            let _ = self.out.write_all(b"\x1b[2J\x1b[H"); // clear screen, home
+            self.started = true;
+        }
+
+        // Confine the scrolling TextBuffer to its ROW band via an ANSI scroll
+        // region. DECSTBM is FULL-WIDTH, so this honours ABOVE/BELOW (stacked)
+        // geometry exactly, but a LEFT/RIGHT split falls back to the buffer's full
+        // width (the documented limitation — a terminal cannot scroll a sub-column
+        // independently). The largest buffer is treated as the primary one.
+        let buffer = wins
+            .iter()
+            .filter(|(_, ty, _, _)| *ty == WinType::TextBuffer)
+            .max_by_key(|(_, _, r, _)| r.width * r.height);
+        if let Some(&(_, _, rect, _)) = buffer {
+            let top = rect.top + 1;
+            let bottom = rect.top + rect.height;
+            // A full-screen buffer needs no region (natural whole-screen scroll),
+            // which also keeps the buffer-only case byte-identical.
+            let full_screen = top == 1 && bottom >= self.rows;
+            if !full_screen && rect.height > 0 {
+                let bounds = (top, bottom);
                 // Only (re)enter the scroll region when its bounds actually change.
                 // enter_region parks the cursor at the region's bottom-left, so
                 // re-emitting it on an unchanged re-layout would yank the cursor to
                 // column 0 mid-line — which is why the first prompt landed at the
                 // start of the line (CM re-lays-out its windows right before input).
                 if self.region_bounds != bounds {
-                    let _ = self.out.write_all(enter_region(top, self.rows).as_bytes());
+                    let _ = self.out.write_all(enter_region(top, bottom).as_bytes());
                     self.region_bounds = bounds;
                     self.current_col = 0; // cursor now parked at the region's bottom-left
                 }
                 self.region_set = true;
             }
         }
+    }
+
+    fn window_tree(&mut self, tree: Option<WinTree>) {
+        self.tree = tree;
+        // The tree carries the borders + true rects; redraw the static chrome so
+        // separators and any repositioned grids appear (TTY only).
+        self.redraw_chrome();
     }
 
     fn put_text(&mut self, win: u32, style: GlkStyle, s: &str) {
@@ -600,27 +746,28 @@ impl GlkBackend for TerminalBackend {
         if self.debug {
             eprintln!("[term] grid_put: win={win} x={x} y={y} len={}", s.chars().count());
         }
-        if self.grid_win.is_none() {
-            self.grid_win = Some(win);
-        }
-        self.ensure_grid(y + 1, x + s.chars().count() as u32);
+        let idx = self.grid_index(win);
+        self.grids[idx].ensure(y + 1, x + s.chars().count() as u32);
+        let cells = &mut self.grids[idx].cells;
         for (i, ch) in s.chars().enumerate() {
             let row = y as usize;
             let col = x as usize + i;
-            if row < self.grid_cells.len() && col < self.grid_cells[row].len() {
-                self.grid_cells[row][col] = (ch, style, colour, attrs);
+            if row < cells.len() && col < cells[row].len() {
+                cells[row][col] = (ch, style, colour, attrs);
             }
         }
-        self.redraw_grid();
+        self.redraw_chrome();
     }
 
-    fn grid_clear(&mut self, _win: u32) {
-        for row in &mut self.grid_cells {
-            for cell in row.iter_mut() {
-                *cell = BLANK_CELL;
+    fn grid_clear(&mut self, win: u32) {
+        if let Some(g) = self.grids.iter_mut().find(|g| g.id == win) {
+            for row in &mut g.cells {
+                for cell in row.iter_mut() {
+                    *cell = BLANK_CELL;
+                }
             }
         }
-        self.redraw_grid();
+        self.redraw_chrome();
     }
 
     fn flush(&mut self) {
@@ -1062,5 +1209,116 @@ mod tests {
         }
         assert_eq!(out_string(&buf), "hello world foo bar baz");
         assert!(!out_string(&buf).contains('\n'), "piped char-by-char: no newlines inserted");
+    }
+
+    // ── window geometry + borders (SQ-0327) ───────────────────────────────────
+
+    // Helpers to build leaf/pair nodes tersely.
+    fn leaf(id: u32, ty: WinType, left: u32, top: u32, width: u32, height: u32) -> WinTree {
+        WinTree::Leaf { id, wintype: ty, rect: Rect { left, top, width, height }, bg: None, fg: None }
+    }
+
+    #[test]
+    fn stacked_split_draws_horizontal_rule_and_confines_buffer_band() {
+        // Grid (h=1, top=0) above a buffer (top=2, h=22) with a reserved gutter
+        // row at screen row 2. The scroll region confines the buffer to its band
+        // and a horizontal rule sits in the gutter.
+        let (mut b, buf) = backend(true);
+        let grid = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 1 }, Some(true));
+        let buffer = (1u32, WinType::TextBuffer, Rect { left: 0, top: 2, width: 80, height: 22 }, Some(true));
+        b.window_layout(&[buffer, grid]);
+        let tree = WinTree::Pair {
+            vertical: true,
+            border: true,
+            split: 1,
+            rect: Rect { left: 0, top: 0, width: 80, height: 24 },
+            key_bg: None,
+            key_fg: None,
+            first: Box::new(leaf(2, WinType::TextGrid, 0, 0, 80, 1)),
+            second: Box::new(leaf(1, WinType::TextBuffer, 0, 2, 80, 22)),
+        };
+        b.window_tree(Some(tree));
+        let out = out_string(&buf);
+        assert!(out.contains("\x1b[3;24r"), "buffer band confined below the gutter: {out:?}");
+        assert!(out.contains(&format!("\x1b[2;1H{}", H_RULE)), "horizontal rule in the gutter row: {out:?}");
+    }
+
+    #[test]
+    fn left_right_split_draws_vertical_rule_and_buffer_stays_full_width() {
+        // Grid column (w=20) left of a buffer column (left=21, w=59), a reserved
+        // gutter column at screen col 21. A terminal cannot scroll a sub-column,
+        // so the buffer keeps the full-width fallback: NO scroll region is set.
+        let (mut b, buf) = backend(true);
+        let grid = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 20, height: 24 }, Some(true));
+        let buffer = (1u32, WinType::TextBuffer, Rect { left: 21, top: 0, width: 59, height: 24 }, Some(true));
+        b.window_layout(&[buffer, grid]);
+        let tree = WinTree::Pair {
+            vertical: false,
+            border: true,
+            split: 20,
+            rect: Rect { left: 0, top: 0, width: 80, height: 24 },
+            key_bg: None,
+            key_fg: None,
+            first: Box::new(leaf(2, WinType::TextGrid, 0, 0, 20, 24)),
+            second: Box::new(leaf(1, WinType::TextBuffer, 21, 0, 59, 24)),
+        };
+        b.window_tree(Some(tree));
+        let out = out_string(&buf);
+        assert!(!b.region_set, "left/right: no sub-column scroll region (full-width fallback)");
+        assert_eq!(b.region_bounds, (0, 0), "no scroll-region bounds recorded for a full-width buffer");
+        assert!(out.contains(&format!("\x1b[1;21H{}", V_RULE)), "vertical rule down the gutter column: {out:?}");
+    }
+
+    #[test]
+    fn noborder_split_draws_no_rule() {
+        // A NoBorder stacked split reserves no gutter and must draw no separator.
+        let (mut b, buf) = backend(true);
+        let grid = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 1 }, Some(false));
+        let buffer = (1u32, WinType::TextBuffer, Rect { left: 0, top: 1, width: 80, height: 23 }, Some(false));
+        b.window_layout(&[buffer, grid]);
+        let tree = WinTree::Pair {
+            vertical: true,
+            border: false,
+            split: 1,
+            rect: Rect { left: 0, top: 0, width: 80, height: 24 },
+            key_bg: None,
+            key_fg: None,
+            first: Box::new(leaf(2, WinType::TextGrid, 0, 0, 80, 1)),
+            second: Box::new(leaf(1, WinType::TextBuffer, 0, 1, 80, 23)),
+        };
+        b.window_tree(Some(tree));
+        let out = out_string(&buf);
+        assert!(!out.contains(H_RULE), "NoBorder draws no horizontal rule: {out:?}");
+        assert!(!out.contains(V_RULE), "NoBorder draws no vertical rule: {out:?}");
+    }
+
+    #[test]
+    fn second_grid_renders_at_its_own_rect() {
+        // Two grids (a top status line and a bottom bar) must both be drawn at
+        // their rects — not collapsed to a single pinned grid.
+        let (mut b, buf) = backend(true);
+        let top = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 1 }, Some(true));
+        let bot = (3u32, WinType::TextGrid, Rect { left: 0, top: 23, width: 80, height: 1 }, Some(true));
+        let buffer = (1u32, WinType::TextBuffer, Rect { left: 0, top: 1, width: 80, height: 22 }, Some(true));
+        b.window_layout(&[buffer, top, bot]);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "TOP");
+        b.grid_put(3, 0, 0, GlkStyle::Normal, "BOTTOM");
+        let out = out_string(&buf);
+        assert!(out.contains("\x1b[1;1H\x1b[2KTOP"), "top grid at row 1: {out:?}");
+        assert!(out.contains("\x1b[24;1H\x1b[2KBOTTOM"), "bottom grid at row 24: {out:?}");
+    }
+
+    #[test]
+    fn graphics_window_draws_a_placeholder_box() {
+        // A graphics window has no image protocol here, so it gets a bordered
+        // placeholder box positioned at its rect.
+        let (mut b, buf) = backend(true);
+        let gfx = (2u32, WinType::Graphics, Rect { left: 0, top: 0, width: 10, height: 3 }, Some(true));
+        let buffer = (1u32, WinType::TextBuffer, Rect { left: 0, top: 3, width: 80, height: 21 }, Some(true));
+        b.window_layout(&[buffer, gfx]);
+        b.window_tree(None); // trigger a chrome redraw
+        let out = out_string(&buf);
+        // Top edge is a run of horizontal rules at the window's top-left.
+        assert!(out.contains(&format!("\x1b[1;1H{}", H_RULE.to_string().repeat(10))), "graphics box top edge: {out:?}");
     }
 }
