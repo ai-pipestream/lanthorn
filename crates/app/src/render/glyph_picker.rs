@@ -5,9 +5,10 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 
 use crate::input::{GLYPH_BLOCKS, GLYPH_GRID_COLS, picker_block_range};
+use crate::render::dialog::{draw_dialog, DialogPlacement, DialogSpec, DialogStyle, Placement};
+use crate::render::paneframe::{BorderStyle, PaneGlyphs};
 use crate::state::AppState;
 
 // Modal dimensions.
@@ -53,51 +54,45 @@ pub fn draw_glyph_picker(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         return None;
     }
 
-    // Center the modal.
-    let mx = area.x + (area.width - modal_w) / 2;
-    let my = area.y + (area.height - modal_h) / 2;
-    let modal = Rect::new(mx, my, modal_w, modal_h);
-
-    // Style tokens from the live color scheme.
+    // Style tokens from the live color scheme (same selectors as before).
     let frame_style = state.colors.dialog;
     let title_style = state.colors.dialog_title;
     let button_style = state.colors.dialog_button;
     let cursor_style = state.colors.dialog_button_active;
 
-    // Fill modal area opaque.
-    let fill = Style::reset().patch(frame_style);
-    for row in modal.y..modal.bottom() {
-        for col in modal.x..modal.right() {
-            if let Some(cell) = buf.cell_mut((col, row)) {
-                cell.set_symbol(" ").set_style(fill);
-            }
-        }
-    }
-
-    // Draw a simple single-line border manually (avoids pulling in paneframe extras).
-    draw_border(buf, modal, frame_style);
-
-    // Content area = inside the border.
-    if modal_w < 2 || modal_h < 2 {
-        return None;
-    }
-    let cx = modal.x + 1;
-    let cy = modal.y + 1;
-    let cw = modal_w.saturating_sub(2);
-    let ch = modal_h.saturating_sub(2);
-    let content = Rect::new(cx, cy, cw, ch);
-
-    // ── Close button [✕] ──────────────────────────────────────────────────────
-    let close_rect = if modal.width >= 3 {
-        let bx = modal.right().saturating_sub(2);
-        let by = modal.y;
-        if let Some(cell) = buf.cell_mut((bx, by)) {
-            cell.set_symbol("✕").set_style(frame_style);
-        }
-        Some(Rect::new(bx, by, 1, 1))
-    } else {
-        None
+    // Frame, opaque fill, centered bracketed title, and the ✕ close button all
+    // come from the shared dialog chrome now. The picker keeps its fixed
+    // single-line, centered, shadowless geometry (its tight glyph grid depends on
+    // the content rect being inset by exactly one cell), so it builds an explicit
+    // DialogStyle rather than honoring the dialog box/glyph/shadow/placement theme
+    // selectors it never used.
+    let st = DialogStyle {
+        frame: frame_style,
+        box_style: BorderStyle::Single,
+        glyphs: PaneGlyphs::default(),
+        title: title_style,
+        button: button_style,
+        button_active: cursor_style,
+        shadow: state.colors.dialog_shadow,
+        shadow_on: false,
+        placement: DialogPlacement::Center,
+        margin: 0,
     };
+    let spec = DialogSpec {
+        title: "Glyph Picker",
+        placement: Placement::Centered { w: modal_w, h: modal_h },
+        buttons: &[],
+        show_close: true,
+        default: None,
+        focus: None,
+        field: None,
+    };
+    let dialog_rects = draw_dialog(buf, area, &spec, &st);
+
+    let modal = dialog_rects.area;
+    let content = dialog_rects.content;
+    let cw = content.width;
+    let close_rect = dialog_rects.close;
 
     // ── Row 0: block name header with ◀ ▶ ────────────────────────────────────
     let mut prev_rect: Option<Rect> = None;
@@ -260,11 +255,6 @@ pub fn draw_glyph_picker(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         }
     }
 
-    // ── Title ─────────────────────────────────────────────────────────────────
-    let title = "Glyph Picker";
-    let title_x = modal.x + (modal_w.saturating_sub(title.len() as u16 + 2)) / 2;
-    crate::render::draw_str_clipped(buf, title_x, modal.y, title, title_style, modal);
-
     Some(GlyphPickerRects {
         area: modal,
         close: close_rect,
@@ -275,42 +265,6 @@ pub fn draw_glyph_picker(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         clear: clear_rect,
         custom: custom_rect,
     })
-}
-
-// ── Border helper ─────────────────────────────────────────────────────────────
-
-fn draw_border(buf: &mut Buffer, r: Rect, style: Style) {
-    if r.width < 2 || r.height < 2 {
-        return;
-    }
-    let x0 = r.x;
-    let x1 = r.right() - 1;
-    let y0 = r.y;
-    let y1 = r.bottom() - 1;
-
-    // Corners.
-    set_sym(buf, x0, y0, "┌", style);
-    set_sym(buf, x1, y0, "┐", style);
-    set_sym(buf, x0, y1, "└", style);
-    set_sym(buf, x1, y1, "┘", style);
-
-    // Top/bottom edges.
-    for x in (x0 + 1)..x1 {
-        set_sym(buf, x, y0, "─", style);
-        set_sym(buf, x, y1, "─", style);
-    }
-
-    // Left/right edges.
-    for y in (y0 + 1)..y1 {
-        set_sym(buf, x0, y, "│", style);
-        set_sym(buf, x1, y, "│", style);
-    }
-}
-
-fn set_sym(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style) {
-    if let Some(cell) = buf.cell_mut((x, y)) {
-        cell.set_symbol(s).set_style(style);
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -360,6 +314,42 @@ mod tests {
             .flat_map(|c| c.symbol().chars())
             .collect();
         assert!(all.contains("single-width"), "invalid pending must show a single-width-only hint");
+    }
+
+    #[test]
+    fn glyph_picker_title_uses_shared_dialog_chrome() {
+        // Adopting `draw_dialog` means the title is now the shared bracketed strip
+        // "┫ Glyph Picker ┣" (matching every other modal), drawn by draw_top_inset,
+        // rather than the old plain centered title. The row is contiguous, so the
+        // bracketed run survives row-major concatenation of the buffer.
+        use ratatui::{backend::TestBackend, Terminal};
+        use crate::input::open_style_editor_hermetic;
+        use crate::input::{apply_action, Action};
+        use mapper::mapper::Mapper;
+
+        let mut state = crate::state::AppState::default();
+        open_style_editor_hermetic(&mut state);
+        apply_action(
+            Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top),
+            &mut state,
+            &mut Mapper::default(),
+        );
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let _ = draw_glyph_picker(&state, f.area(), f.buffer_mut());
+            })
+            .unwrap();
+        let all: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .flat_map(|c| c.symbol().chars())
+            .collect();
+        assert!(all.contains("┫ Glyph Picker ┣"), "shared bracketed dialog title strip");
     }
 
     #[test]

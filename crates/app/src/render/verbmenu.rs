@@ -14,7 +14,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use super::paneframe::{draw_pane_frame, BorderStyle, PaneGlyphs};
+use super::paneframe::{draw_pane_frame, draw_top_inset, BorderStyle, InsetSegment, PaneGlyphs};
 use crate::state::{AppState, VerbMenuPane};
 
 // ── Curated lists ─────────────────────────────────────────────────────────────
@@ -145,15 +145,10 @@ pub fn draw_verb_menu(
     // see SQ-0238), so its border never picks up the resize highlight.
     let frame = draw_pane_frame(buf, area, BorderStyle::Single, &PaneGlyphs::default(), base);
 
-    // Title, centered on the top border row.
-    if area.height >= 2 && area.width >= 2 {
-        let title = " Verbs ";
-        let avail = area.width as usize;
-        let tw = title.chars().count();
-        let leading = avail.saturating_sub(tw) / 2;
-        let start_x = area.x + leading as u16;
-        crate::render::draw_str_clipped(buf, start_x, area.y, title, base, area);
-    }
+    // Title strip on the top border row, via the shared header helper (bracketed
+    // ┫ Verbs ┣, matching the map/story panes and every modal). No-ops when the
+    // band is too short for a border row.
+    draw_top_inset(buf, frame.top_inset, &[InsetSegment { text: "Verbs", active: false }], base, base);
 
     let content = frame.content;
     if content.height < 4 || content.width < 4 {
@@ -361,6 +356,18 @@ mod tests {
         let content: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
         assert!(content.contains("look"), "should show 'look' verb");
         assert!(content.contains("Verbs"), "should show Verbs section header");
+    }
+
+    #[test]
+    fn verb_menu_title_uses_shared_bracketed_header() {
+        // The dock's title now comes from the shared `draw_top_inset` helper, so
+        // the top border row reads "┫ Verbs ┣" (bracketed), matching the map/story
+        // panes and every modal instead of the old plain centered title.
+        let mut buf = Buffer::empty(DOCK_AREA);
+        let state = make_state_with_verb_menu();
+        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0, &mut VerbMenuHits::default());
+        let top: String = (0..DOCK_AREA.width).map(|x| buf.cell((x, 0)).unwrap().symbol().to_owned()).collect();
+        assert!(top.contains("┫ Verbs ┣"), "bracketed title strip, got {top:?}");
     }
 
     #[test]

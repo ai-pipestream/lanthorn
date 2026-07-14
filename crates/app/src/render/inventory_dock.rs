@@ -10,7 +10,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use super::draw_str_clipped;
-use super::paneframe::{draw_pane_frame, BorderStyle, PaneGlyphs};
+use super::paneframe::{draw_pane_frame, draw_top_inset, BorderStyle, InsetSegment, PaneGlyphs};
 use crate::colors::ColorScheme;
 
 /// Compute the dock's fully-open target height in rows: one row per item
@@ -57,16 +57,11 @@ pub fn draw_inventory_dock(items: &[String], area: Rect, colors: &ColorScheme, h
 
     let frame = draw_pane_frame(buf, area, BorderStyle::Single, &PaneGlyphs::default(), border_color);
 
-    // Title, centered on the top border row (only meaningful once the band is
-    // tall enough for the border to actually be drawn).
-    if area.height >= 2 && area.width >= 2 {
-        let title = " Inventory ";
-        let avail = area.width as usize;
-        let tw = title.chars().count();
-        let leading = avail.saturating_sub(tw) / 2;
-        let start_x = area.x + leading as u16;
-        draw_str_clipped(buf, start_x, area.y, title, style, area);
-    }
+    // Title strip on the top border row via the shared header helper (bracketed
+    // ┫ Inventory ┣, matching the framed panes and modals). Drawn in the dock's
+    // own `inventory_dock` style, independent of the border accent. No-ops when
+    // the band is too short for a border row.
+    draw_top_inset(buf, frame.top_inset, &[InsetSegment { text: "Inventory", active: false }], style, style);
 
     let content = frame.content;
     if content.height == 0 || content.width == 0 {
@@ -114,6 +109,19 @@ mod tests {
         assert!(buf_contains(&buf, "Inventory"), "title");
         assert!(buf_contains(&buf, "lamp"), "first item");
         assert!(buf_contains(&buf, "sword"), "second item");
+    }
+
+    #[test]
+    fn draw_inventory_dock_title_uses_shared_bracketed_header() {
+        // The title now comes from the shared `draw_top_inset` helper, so the top
+        // border row reads "┫ Inventory ┣" (bracketed), matching the framed panes
+        // and modals rather than the old plain centered title.
+        let area = Rect::new(0, 0, 24, 5);
+        let mut buf = Buffer::empty(area);
+        let colors = ColorScheme::default();
+        draw_inventory_dock(&["lamp".to_string()], area, &colors, false, &mut buf);
+        let top: String = (0..area.width).map(|x| buf.cell((x, 0)).unwrap().symbol().to_owned()).collect();
+        assert!(top.contains("┫ Inventory ┣"), "bracketed title strip, got {top:?}");
     }
 
     #[test]
