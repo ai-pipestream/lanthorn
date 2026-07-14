@@ -70,6 +70,12 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
     let (cs, set, warnings) = crate::style::resolve(&doc, &user_dir);
     state.colors = cs;
     state.symbols = set;
+    // Re-apply the per-game garglk.ini overlay (SQ-0319): the resolve above
+    // rebuilds `colors` from style.toml + styles/<ifid>.toml and would drop it,
+    // so fold it back on so the imported look survives every reload path.
+    if let Some(ov) = state.garglk_overlay.clone() {
+        ov.apply(&mut state.colors);
+    }
     ReloadOutcome::Reloaded { warnings }
 }
 

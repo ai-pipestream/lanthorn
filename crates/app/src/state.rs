@@ -1430,6 +1430,12 @@ pub struct AppState {
     /// ANSI colors); overwritten at startup (and on `/reload`) from `style.toml` via `style::resolve`.
     pub colors: crate::colors::ColorScheme,
 
+    /// Per-game garglk.ini colour overlay (SQ-0319), discovered beside the story
+    /// at boot. Kept here so `reload_style` can re-apply it over the freshly
+    /// resolved `colors` (garglk sits between the global theme and the user's
+    /// `styles/<ifid>.toml`). `None` when no sidecar was found.
+    pub garglk_overlay: Option<crate::garglk_ini::GarglkOverlay>,
+
     /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
     /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
     pub keymap: crate::keymap::KeyMap,
@@ -1666,6 +1672,7 @@ impl Default for AppState {
             transcript_para: Vec::new(),
             transcript_images: Vec::new(),
             transcript_filter: TranscriptFilter::Both,
+            garglk_overlay: None,
             transcript_scroll: 0,
             clear_anchor: None,
             transcript_gen: 0,

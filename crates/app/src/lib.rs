@@ -15,6 +15,7 @@ pub mod complete;
 pub mod config;
 pub mod cover;
 pub mod engine;
+pub mod garglk_ini;
 pub mod glk_backend;
 pub mod glyph_actions;
 pub mod glulx_session;

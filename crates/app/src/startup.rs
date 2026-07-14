@@ -62,7 +62,7 @@ pub(crate) fn boot() -> BootResult {
     install_termination_handlers();
 
     let cli = Cli::parse();
-    let cfg = resolve(&cli);
+    let mut cfg = resolve(&cli);
     let story_path = cli.story.clone();
 
     // Storage base for saves/sidecars (SQ-0284): `--data-dir` overrides the
@@ -148,7 +148,22 @@ pub(crate) fn boot() -> BootResult {
     // SQ-0315), so the theme pairs must be in the backend first. `state.colors`
     // is assigned from these below.
     let (style_doc, style_w1) = app::style::load_style(cfg.style.as_deref(), &cfg.user_dir);
-    let (cs, set, style_w2) = app::style::resolve(&style_doc, &cfg.user_dir);
+    let (mut cs, set, style_w2) = app::style::resolve(&style_doc, &cfg.user_dir);
+    // SQ-0319: discover a per-game garglk.ini beside the story and overlay its
+    // colours onto the resolved theme BEFORE the backend snapshot below, so the
+    // imported look is in the backend for glk_style_measure and painted from
+    // turn one. The overlay is stashed in `state` further down so the post-IFID
+    // reload_style (and any live /reload) re-applies it. `stylehint` gates
+    // honor_game_colours, which the engine build below reads. Precedence: global
+    // theme < garglk.ini < user styles/<ifid>.toml.
+    let garglk_overlay = app::garglk_ini::discover(&story_path);
+    let garglk_line = garglk_overlay.as_ref().map(|ov| {
+        let summary = ov.apply(&mut cs);
+        if let Some(h) = ov.honor_game_colours {
+            cfg.honor_game_colours = h;
+        }
+        summary.console_line()
+    });
     let theme_colours = app::glk_backend::theme_style_colours(&cs);
 
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
@@ -211,6 +226,12 @@ pub(crate) fn boot() -> BootResult {
     // Engine is up — stop the loading spinner and let it erase its line.
     loading_done.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = loading_spinner.join();
+
+    // SQ-0319: announce the imported garglk config (after the spinner erased its
+    // line, so the message isn't clobbered). Printed only when a sidecar applied.
+    if let Some(line) = &garglk_line {
+        eprintln!("babelmap: {line}");
+    }
 
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 
@@ -291,6 +312,9 @@ pub(crate) fn boot() -> BootResult {
     // Apply the look resolved from style.toml above (before the engine build).
     state.colors = cs;
     state.symbols = set;
+    // Stash the garglk.ini overlay (already folded into `cs` above) so the
+    // post-IFID reload_style below — and every later /reload — re-applies it.
+    state.garglk_overlay = garglk_overlay;
     for w in style_w1.into_iter().chain(style_w2) {
         state.push_notice(&format!("[{}]", w));
     }
