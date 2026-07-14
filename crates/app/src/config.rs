@@ -385,9 +385,6 @@ pub struct Config {
     /// When true (default) and auto_load is off, prompt the user to resume a found save on launch.
     #[serde(default = "default_true")]
     pub prompt_load_on_launch: bool,
-    /// When true (default), record command history across sessions. Set false to disable.
-    #[serde(default = "default_true")]
-    pub record_history: bool,
     /// When true, record a per-turn rewind/replay history (Quetzal save + map
     /// snapshots) into the `.babelmap` archive. Default false (opt-in: it grows
     /// the archive and keeps per-turn blobs in memory).
@@ -501,7 +498,6 @@ impl Default for Config {
             command_bar: false,
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
-            record_history: true,
             record_turn_history: false,
             background_tidy: BackgroundTidy::EveryRoom,
             aux_storage: AuxStorage::Ask,
@@ -577,7 +573,6 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.command_bar = from_file.command_bar;
             cfg.prompt_save_on_quit = from_file.prompt_save_on_quit;
             cfg.prompt_load_on_launch = from_file.prompt_load_on_launch;
-            cfg.record_history = from_file.record_history;
             cfg.record_turn_history = from_file.record_turn_history;
             cfg.background_tidy = from_file.background_tidy;
             cfg.aux_storage = from_file.aux_storage;
@@ -641,7 +636,6 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["command_bar"] = toml_edit::value(cfg.command_bar);
     doc["prompt_save_on_quit"] = toml_edit::value(cfg.prompt_save_on_quit);
     doc["prompt_load_on_launch"] = toml_edit::value(cfg.prompt_load_on_launch);
-    doc["record_history"] = toml_edit::value(cfg.record_history);
     let bg_str = match cfg.background_tidy {
         BackgroundTidy::Off => "off",
         BackgroundTidy::EveryRoom => "every_room",
@@ -963,7 +957,6 @@ use_defaults = false
             command_bar: false,
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
-            record_history: false,
             record_turn_history: false,
             background_tidy: BackgroundTidy::OnOverlap,
             aux_storage: AuxStorage::Ask,
@@ -1000,7 +993,6 @@ use_defaults = false
         // Scalars are set.
         assert_eq!(doc["auto_load"].as_bool(), Some(false));
         assert_eq!(doc["auto_save"].as_bool(), Some(true));
-        assert_eq!(doc["record_history"].as_bool(), Some(false));
         assert_eq!(doc["background_tidy"].as_str(), Some("on_overlap"));
         assert_eq!(doc["split_ratio"].as_integer(), Some(70));
         assert_eq!(doc["verb_dock_pct"].as_integer(), Some(40));

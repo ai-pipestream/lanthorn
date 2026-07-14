@@ -15,7 +15,6 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
     ("auto_save",            ConfigRowKind::Bool),
     ("prompt_save_on_quit",  ConfigRowKind::Bool),
     ("prompt_load_on_launch",ConfigRowKind::Bool),
-    ("record_history",       ConfigRowKind::Bool),
     ("show_room_numbers",    ConfigRowKind::Bool),
     ("background_tidy",      ConfigRowKind::Enum),
     ("aux_storage",          ConfigRowKind::Enum),
@@ -160,25 +159,24 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         2 => bool_str(cfg.auto_save),
         3 => bool_str(cfg.prompt_save_on_quit),
         4 => bool_str(cfg.prompt_load_on_launch),
-        5 => bool_str(cfg.record_history),
-        6 => bool_str(cfg.show_room_numbers),
-        7 => match cfg.background_tidy {
+        5 => bool_str(cfg.show_room_numbers),
+        6 => match cfg.background_tidy {
             BackgroundTidy::Off => "off".to_string(),
             BackgroundTidy::EveryRoom => "every_room".to_string(),
             BackgroundTidy::OnOverlap => "on_overlap".to_string(),
             BackgroundTidy::Debounced => "debounced".to_string(),
         },
-        8 => match cfg.aux_storage {
+        7 => match cfg.aux_storage {
             crate::config::AuxStorage::Ask => "ask".to_string(),
             crate::config::AuxStorage::Archive => "archive".to_string(),
             crate::config::AuxStorage::Global => "global".to_string(),
         },
-        9 => bool_str(cfg.honor_game_colours),
-        10 => bool_str(cfg.honor_timed_input),
-        11 => bool_str(cfg.enable_sound),
-        12 => cfg.volume.to_string(),
-        13 => bool_str(cfg.mouse),
-        14 => bool_str(cfg.command_bar),
+        8 => bool_str(cfg.honor_game_colours),
+        9 => bool_str(cfg.honor_timed_input),
+        10 => bool_str(cfg.enable_sound),
+        11 => cfg.volume.to_string(),
+        12 => bool_str(cfg.mouse),
+        13 => bool_str(cfg.command_bar),
         _ => String::new(),
     }
 }

@@ -729,8 +729,6 @@ pub enum PromptKind {
     RelabelEdge(RoomId, Direction),
     /// Rename the layer with the given id.
     RenameLayer(LayerId),
-    /// Enter a name for a new named save slot (saves-manager sub-mode).
-    SaveAs,
     /// Confirm deletion of the named save at this path.
     ConfirmDeleteSave(std::path::PathBuf),
     /// Edit a config path field (user_dir or colors.scheme) from the config screen.
@@ -1114,9 +1112,6 @@ pub struct AppState {
     /// `transcript_viewport_rows`). 0 when no list modal is open.
     pub modal_list_viewport: usize,
     pub input: String,
-    // Reserved for future status-bar messages (not yet displayed).
-    #[allow(dead_code)]
-    pub status: String,
     /// Transient status message shown on the status line (cleared on next keypress/turn).
     pub status_msg: Option<String>,
     /// Active text-entry prompt, if any.  While set, key events are routed to
@@ -1281,7 +1276,7 @@ pub struct AppState {
     /// Active rewind/replay modal state. `None` means the modal is closed.
     pub replay: Option<ReplayState>,
 
-    /// Set by apply_action when a saves-manager prompt (SaveAs or ConfirmDeleteSave)
+    /// Set by apply_action when a saves-manager prompt (ConfirmDeleteSave)
     /// is submitted. The caller (main.rs) reads this to perform the I/O operation,
     /// then clears it. The tuple is (kind, user_input_buffer).
     pub saves_prompt_submitted: Option<(PromptKind, String)>,
@@ -1489,7 +1484,6 @@ impl Default for AppState {
             clear_anchor: None,
             modal_list_viewport: 0,
             input: String::new(),
-            status: String::new(),
             status_msg: None,
             prompt: None,
             show_alignment: false,
@@ -3276,7 +3270,7 @@ mod tests {
         s.tidy_anim = None;
 
         // prompt
-        s.prompt = Some(Prompt { kind: PromptKind::SaveAs, buffer: String::new() });
+        s.prompt = Some(Prompt { kind: PromptKind::CreateFile, buffer: String::new() });
         assert!(s.any_overlay_open(), "prompt active => any_overlay_open true");
         s.prompt = None;
 
