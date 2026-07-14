@@ -25,13 +25,6 @@ use app::persist_files::{list_saves, restore_game};
 use app::render::style_editor::StyleEditorRects;
 use app::render::dialog::{DialogRects, DialogStyle};
 use app::render::hints_panel::{hint_key_routes, HintKeyKind, HintsPanelRects};
-use app::render::aux_dialog::{aux_dialog_key_focused, AuxDialogAction};
-use app::render::reset_dialog::{reset_dialog_key_focused, ResetDialogAction};
-use app::render::save_name_dialog::{save_name_dialog_key, SaveNameAction};
-use app::render::text_entry_dialog::{text_entry_dialog_key, TextEntryAction};
-use app::render::confirm_delete_dialog::{confirm_delete_key_focused, ConfirmDeleteAction};
-use app::render::quit_dialog::{quit_dialog_key_focused, QuitDialogAction};
-use app::render::launch_dialog::{launch_dialog_key_focused, LaunchDialogAction};
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
@@ -1092,481 +1085,133 @@ fn main() {
         // the draw gate once the queue empties (poll(ZERO) == false).
         skip_draw = poll(Duration::ZERO).unwrap_or(false);
 
-        // ── Aux-storage prompt intercept — before normal action routing ───────
-        // When the first-use aux-storage prompt is open, route events here and
-        // continue (swallowing events the dialog does not handle).
-        if state.overlays.aux_prompt {
-            match &event {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    match k.code {
-                        crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
-                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, 1),
-                        crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
-                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, -1),
-                        code => match aux_dialog_key_focused(code, state.overlays.dialog_focus) {
-                            AuxDialogAction::Archive => {
-                                let mode = app::config::AuxStorage::Archive;
-                                state.overlays.aux_prompt = false;
-                                state.config.aux_storage = mode;
-                                let user_dir = state.config.user_dir.clone();
-                                let _ = app::config::write_config(&user_dir, &state.config);
-                                session.clear_aux_dirty();
-                            }
-                            AuxDialogAction::Global => {
-                                let mode = app::config::AuxStorage::Global;
-                                state.overlays.aux_prompt = false;
-                                state.config.aux_storage = mode;
-                                let user_dir = state.config.user_dir.clone();
-                                let _ = app::config::write_config(&user_dir, &state.config);
-                                let _ = app::aux_store::write_global_aux(&game_dir, session.aux_data());
-                                session.clear_aux_dirty();
-                            }
-                            AuxDialogAction::None => {}
-                        },
+        // ── Common-dialog overlay intercept ladder (SQ-0307) ──────────────────
+        // The aux / reset / save-name / text-entry / confirm-delete / quit /
+        // launch modals share one decode+apply seam. The top-most open overlay
+        // (priority order aux ▸ reset ▸ save-name ▸ text-entry ▸ confirm-delete ▸
+        // quit ▸ launch — exactly the old if-ladder) decodes the event through
+        // its `Overlay` impl, applying pure focus / field / checkbox changes in
+        // place, and returns an `OverlayAct` for the game-affecting side effects
+        // to run here where session / mapper / paths are in scope. Swallows the
+        // events its overlay does not handle, then `continue`s.
+        if let Some(ov) = overlays::topmost_common_dialog(&state.overlays) {
+            if let Event::Resize(_, _) = &event { let _ = terminal.clear(); continue; }
+            let outcome = match &event {
+                Event::Key(k) if k.kind == KeyEventKind::Press => ov.key(&mut state, k),
+                Event::Mouse(m) => ov.mouse(&mut state, m, &last_panes),
+                _ => overlays::OverlayOutcome::Consumed,
+            };
+            if let overlays::OverlayOutcome::Act(act) = outcome {
+                use overlays::OverlayAct;
+                match act {
+                    OverlayAct::AuxArchive => {
+                        let mode = app::config::AuxStorage::Archive;
+                        state.overlays.aux_prompt = false;
+                        state.config.aux_storage = mode;
+                        let user_dir = state.config.user_dir.clone();
+                        let _ = app::config::write_config(&user_dir, &state.config);
+                        session.clear_aux_dirty();
                     }
-                }
-                Event::Mouse(m) => {
-                    use crossterm::event::{MouseEventKind, MouseButton};
-                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
-                        let col = m.column;
-                        let row = m.row;
-                        let pt = ratatui::layout::Position { x: col, y: row };
-                        if let Some(ad) = &last_panes.aux_dialog {
-                            let in_close   = ad.close.is_some_and(|r| r.contains(pt));
-                            let in_archive = ad.archive.is_some_and(|r| r.contains(pt));
-                            let in_global  = ad.global.is_some_and(|r| r.contains(pt));
-                            let in_dialog  = ad.area.contains(pt);
-                            if in_close || (!in_archive && !in_global && !in_dialog) {
-                                // Close button or click outside → Archive (conservative default).
-                                let mode = app::config::AuxStorage::Archive;
-                                state.overlays.aux_prompt = false;
-                                state.config.aux_storage = mode;
-                                let user_dir = state.config.user_dir.clone();
-                                let _ = app::config::write_config(&user_dir, &state.config);
-                                session.clear_aux_dirty();
-                            } else if in_archive {
-                                let mode = app::config::AuxStorage::Archive;
-                                state.overlays.aux_prompt = false;
-                                state.config.aux_storage = mode;
-                                let user_dir = state.config.user_dir.clone();
-                                let _ = app::config::write_config(&user_dir, &state.config);
-                                session.clear_aux_dirty();
-                            } else if in_global {
-                                let mode = app::config::AuxStorage::Global;
-                                state.overlays.aux_prompt = false;
-                                state.config.aux_storage = mode;
-                                let user_dir = state.config.user_dir.clone();
-                                let _ = app::config::write_config(&user_dir, &state.config);
-                                let _ = app::aux_store::write_global_aux(&game_dir, session.aux_data());
-                                session.clear_aux_dirty();
-                            }
+                    OverlayAct::AuxGlobal => {
+                        let mode = app::config::AuxStorage::Global;
+                        state.overlays.aux_prompt = false;
+                        state.config.aux_storage = mode;
+                        let user_dir = state.config.user_dir.clone();
+                        let _ = app::config::write_config(&user_dir, &state.config);
+                        let _ = app::aux_store::write_global_aux(&game_dir, session.aux_data());
+                        session.clear_aux_dirty();
+                    }
+                    OverlayAct::ResetConfirm => {
+                        let clear = state.overlays.reset_clear_map;
+                        let delete = state.overlays.reset_delete_data;
+                        state.overlays.reset_dialog = false;
+                        reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, clear, delete);
+                    }
+                    OverlayAct::ResetCancel => {
+                        state.overlays.reset_dialog = false;
+                    }
+                    OverlayAct::SaveNameSubmit => {
+                        // Empty names are rejected (dialog stays open); valid names
+                        // go through the shared handle_save_as save path.
+                        let value = state
+                            .overlays.save_name_dialog
+                            .as_ref()
+                            .map(|d| d.field.value.clone())
+                            .unwrap_or_default();
+                        if value.trim().is_empty() {
+                            if let Some(d) = state.overlays.save_name_dialog.as_mut() { d.active = false; }
+                            state.push_notice("[Save name cannot be empty]");
+                        } else {
+                            state.overlays.save_name_dialog = None;
+                            handle_save_as(
+                                value, &game_dir, &ifid, &mut mapper, &mut *session, &mut state,
+                            );
+                            let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
+                                || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
+                            turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                            turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                            if quit { break; }
                         }
                     }
-                }
-                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
-                _ => {}
-            }
-            continue;
-        }
-
-        // ── Reset dialog intercept — before normal action routing ─────────────
-        // When the reset dialog is open, route keyboard/mouse directly here and
-        // continue (swallowing events the dialog does not handle).
-        if state.overlays.reset_dialog {
-            match &event {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    match k.code {
-                        crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
-                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 4, 1),
-                        crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
-                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 4, -1),
-                        code => match reset_dialog_key_focused(code, state.overlays.dialog_focus) {
-                            ResetDialogAction::Confirm => {
-                                let clear = state.overlays.reset_clear_map;
-                                let delete = state.overlays.reset_delete_data;
-                                state.overlays.reset_dialog = false;
-                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, clear, delete);
-                            }
-                            ResetDialogAction::Cancel => {
-                                state.overlays.reset_dialog = false;
-                            }
-                            ResetDialogAction::ToggleClearMap => {
-                                state.overlays.reset_clear_map = !state.overlays.reset_clear_map;
-                            }
-                            ResetDialogAction::ToggleDeleteData => {
-                                state.overlays.reset_delete_data = !state.overlays.reset_delete_data;
-                            }
-                            ResetDialogAction::None => {}
-                        },
+                    OverlayAct::SaveNameCancel => {
+                        state.overlays.save_name_dialog = None;
+                        let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
+                            || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
+                        turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                        turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                        if quit { break; }
                     }
-                }
-                Event::Mouse(m) => {
-                    use crossterm::event::{MouseEventKind, MouseButton};
-                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
-                        let col = m.column;
-                        let row = m.row;
-                        let pt = ratatui::layout::Position { x: col, y: row };
-                        if let Some(rd) = &last_panes.reset_dialog {
-                            // Check buttons and close in order: close > reset > cancel > checkbox.
-                            let in_close = rd.close.is_some_and(|r| r.contains(pt));
-                            let in_reset = rd.reset.is_some_and(|r| r.contains(pt));
-                            let in_cancel = rd.cancel.is_some_and(|r| r.contains(pt));
-                            let in_checkbox = rd.checkbox.contains(pt);
-                            let in_checkbox_data = rd.checkbox_data.contains(pt);
-                            let in_dialog = rd.area.contains(pt);
-                            if in_close || in_cancel {
-                                state.overlays.reset_dialog = false;
-                            } else if in_reset {
-                                let clear = state.overlays.reset_clear_map;
-                                let delete = state.overlays.reset_delete_data;
-                                state.overlays.reset_dialog = false;
-                                reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, clear, delete);
-                            } else if in_checkbox {
-                                state.overlays.reset_clear_map = !state.overlays.reset_clear_map;
-                            } else if in_checkbox_data {
-                                state.overlays.reset_delete_data = !state.overlays.reset_delete_data;
-                            } else if !in_dialog {
-                                // Click outside the dialog: swallow (do nothing, keep dialog open).
-                            }
+                    OverlayAct::TextEntrySubmit => {
+                        // A CreateFile submit hops through filename_submitted → resume
+                        // here; map-edit / config submits leave nothing pending.
+                        if let Some(dlg) = state.overlays.text_entry.take() {
+                            apply_text_entry(dlg, &mut state, &mut mapper);
+                        }
+                        let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
+                            || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
+                        turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                        turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                        if quit { break; }
+                    }
+                    OverlayAct::TextEntryCancel => {
+                        // A cancelled CreateFile leaves pending_filename set with no
+                        // dialog open → resolve_filename_request treats it as NULL.
+                        state.overlays.text_entry = None;
+                        let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
+                            || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
+                        turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                        turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                        if quit { break; }
+                    }
+                    OverlayAct::ConfirmDelete(confirmed) => {
+                        if let Some(path) = state.overlays.confirm_delete_save.take() {
+                            delete_save_confirmed(&path, confirmed, &game_dir, &mut state);
+                        }
+                        // Return the saves manager (still open behind us) to default focus.
+                        state.overlays.dialog_focus = 0;
+                    }
+                    OverlayAct::QuitSave => {
+                        state.overlays.quit_dialog = false;
+                        lifecycle::quit_dialog_save(&*session, &mapper, &state, &ifid, &arc_file);
+                        break;
+                    }
+                    OverlayAct::QuitQuit => {
+                        break;
+                    }
+                    OverlayAct::QuitCancel => {
+                        state.overlays.quit_dialog = false;
+                    }
+                    OverlayAct::LaunchResume => {
+                        if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
+                            state.overlays.launch_dialog = false;
+                            turn::apply_launch_resume(&save, lines, kinds, screen, &mut *session, &mut mapper, &mut state, &last_panes, &arc_file);
                         }
                     }
-                }
-                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
-                _ => {}
-            }
-            continue;
-        }
-
-        // ── Save-name dialog intercept — before normal action routing ─────────
-        // A common-dialog modal with a caret text field. Focus ring: 0 = field,
-        // 1 = Save, 2 = Cancel. The field opens with a greyed date-time default
-        // (active = false); Tab/→/edit-keys adopt it for editing, typing starts
-        // fresh, Enter on the untouched placeholder saves the default. Submit reuses
-        // the handle_save_as save path (the retired bottom-bar prompt is gone).
-        if state.overlays.save_name_dialog.is_some() {
-            let mut do_save = false;
-            let mut do_cancel = false;
-            match &event {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    use crossterm::event::{KeyCode, KeyModifiers};
-                    // Suppress Ctrl/Alt/Super-modified printable chars (accelerators,
-                    // not text). Everything else routes through the state machine.
-                    let ctrl_char = matches!(k.code, KeyCode::Char(_))
-                        && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
-                    if !ctrl_char {
-                        let focus = state.overlays.dialog_focus;
-                        let dlg = state.overlays.save_name_dialog.as_mut().unwrap();
-                        let (act, new_focus) = save_name_dialog_key(k.code, dlg, focus);
-                        state.overlays.dialog_focus = new_focus;
-                        match act {
-                            SaveNameAction::Save => do_save = true,
-                            SaveNameAction::Cancel => do_cancel = true,
-                            SaveNameAction::None => {}
-                        }
+                    OverlayAct::LaunchNewGame => {
+                        state.overlays.launch_dialog = false;
+                        state.pending_resume = None;
                     }
                 }
-                Event::Mouse(m) => {
-                    use crossterm::event::{MouseButton, MouseEventKind};
-                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
-                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                        if let Some(sd) = &last_panes.save_name_dialog {
-                            let in_close = sd.close.is_some_and(|r| r.contains(pt));
-                            let in_save = sd.save.is_some_and(|r| r.contains(pt));
-                            let in_cancel = sd.cancel.is_some_and(|r| r.contains(pt));
-                            let in_field = sd.field.is_some_and(|r| r.contains(pt));
-                            let in_dialog = sd.area.contains(pt);
-                            if in_close || in_cancel {
-                                do_cancel = true;
-                            } else if in_save {
-                                do_save = true;
-                            } else if in_field {
-                                // Focus + activate the field (caret to end).
-                                state.overlays.dialog_focus = 0;
-                                if let Some(dlg) = state.overlays.save_name_dialog.as_mut() {
-                                    dlg.active = true;
-                                    dlg.field.end();
-                                }
-                            } else if !in_dialog {
-                                // Click outside: swallow, keep the dialog open.
-                            }
-                        }
-                    }
-                }
-                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
-                _ => {}
-            }
-
-            // Resolve a submit/cancel outside the dialog borrow. Empty names are
-            // rejected (the dialog stays open); valid names go through handle_save_as.
-            if do_save {
-                let value = state
-                    .overlays.save_name_dialog
-                    .as_ref()
-                    .map(|d| d.field.value.clone())
-                    .unwrap_or_default();
-                if value.trim().is_empty() {
-                    if let Some(d) = state.overlays.save_name_dialog.as_mut() { d.active = false; }
-                    state.push_notice("[Save name cannot be empty]");
-                } else {
-                    state.overlays.save_name_dialog = None;
-                    handle_save_as(
-                        value, &game_dir, &ifid, &mut mapper, &mut *session, &mut state,
-                    );
-                    let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
-                        || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
-                    turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-                    turn::persist_vfs_after_turn(&mut *session, &game_dir);
-                    if quit { break; }
-                }
-            } else if do_cancel {
-                state.overlays.save_name_dialog = None;
-                let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
-                    || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
-                turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-                turn::persist_vfs_after_turn(&mut *session, &game_dir);
-                if quit { break; }
-            }
-            continue;
-        }
-
-        // ── Text-entry dialog intercept — before normal action routing ────────
-        // The generic single-field modal (rename room / edit notes / relabel edge /
-        // rename layer / config path / create-file). Focus ring: 0 = field, 1 = OK,
-        // 2 = Cancel. The field opens active, prefilled; Enter submits (each kind
-        // decides empty semantics — see apply_text_entry), Esc cancels. (SQ-0307)
-        if state.overlays.text_entry.is_some() {
-            let mut do_submit = false;
-            let mut do_cancel = false;
-            match &event {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    use crossterm::event::{KeyCode, KeyModifiers};
-                    // Suppress Ctrl/Alt/Super-modified printable chars (accelerators,
-                    // not text); everything else routes to the field state machine.
-                    let ctrl_char = matches!(k.code, KeyCode::Char(_))
-                        && k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
-                    if !ctrl_char {
-                        let focus = state.overlays.dialog_focus;
-                        let dlg = state.overlays.text_entry.as_mut().unwrap();
-                        let (act, new_focus) = text_entry_dialog_key(k.code, &mut dlg.field, focus);
-                        state.overlays.dialog_focus = new_focus;
-                        match act {
-                            TextEntryAction::Submit => do_submit = true,
-                            TextEntryAction::Cancel => do_cancel = true,
-                            TextEntryAction::None => {}
-                        }
-                    }
-                }
-                Event::Mouse(m) => {
-                    use crossterm::event::{MouseButton, MouseEventKind};
-                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
-                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                        if let Some(td) = &last_panes.text_entry {
-                            let in_close = td.close.is_some_and(|r| r.contains(pt));
-                            let in_ok = td.ok.is_some_and(|r| r.contains(pt));
-                            let in_cancel = td.cancel.is_some_and(|r| r.contains(pt));
-                            let in_field = td.field.is_some_and(|r| r.contains(pt));
-                            let in_dialog = td.area.contains(pt);
-                            if in_close || in_cancel {
-                                do_cancel = true;
-                            } else if in_ok {
-                                do_submit = true;
-                            } else if in_field {
-                                // Focus the field (caret to end).
-                                state.overlays.dialog_focus = 0;
-                                if let Some(dlg) = state.overlays.text_entry.as_mut() { dlg.field.end(); }
-                            } else if !in_dialog {
-                                // Click outside: swallow, keep the dialog open.
-                            }
-                        }
-                    }
-                }
-                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
-                _ => {}
-            }
-
-            if do_submit {
-                if let Some(dlg) = state.overlays.text_entry.take() {
-                    apply_text_entry(dlg, &mut state, &mut mapper);
-                }
-                // A CreateFile submit hops through filename_submitted → resume here;
-                // map-edit / config submits leave nothing pending (both resolvers no-op).
-                let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
-                    || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
-                turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-                turn::persist_vfs_after_turn(&mut *session, &game_dir);
-                if quit { break; }
-            } else if do_cancel {
-                state.overlays.text_entry = None;
-                // A cancelled CreateFile leaves pending_filename set with no dialog
-                // open → resolve_filename_request treats it as a NULL fileref.
-                let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
-                    || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
-                turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-                turn::persist_vfs_after_turn(&mut *session, &game_dir);
-                if quit { break; }
-            }
-            continue;
-        }
-
-        // ── Confirm-delete dialog intercept — before normal action routing ────
-        // A two-button confirm over the saves manager. Confirm deletes the save,
-        // Cancel keeps it; focus starts on Cancel (the safe default). (SQ-0307)
-        if state.overlays.confirm_delete_save.is_some() {
-            let mut outcome: Option<bool> = None; // Some(true)=delete, Some(false)=keep
-            match &event {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    use crossterm::event::KeyCode;
-                    match k.code {
-                        KeyCode::Tab | KeyCode::Right =>
-                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, 1),
-                        KeyCode::BackTab | KeyCode::Left =>
-                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, -1),
-                        code => match confirm_delete_key_focused(code, state.overlays.dialog_focus) {
-                            ConfirmDeleteAction::Confirm => outcome = Some(true),
-                            ConfirmDeleteAction::Cancel => outcome = Some(false),
-                            ConfirmDeleteAction::None => {}
-                        },
-                    }
-                }
-                Event::Mouse(m) => {
-                    use crossterm::event::{MouseButton, MouseEventKind};
-                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
-                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                        if let Some(cd) = &last_panes.confirm_delete {
-                            let in_close = cd.close.is_some_and(|r| r.contains(pt));
-                            let in_delete = cd.delete.is_some_and(|r| r.contains(pt));
-                            let in_cancel = cd.cancel.is_some_and(|r| r.contains(pt));
-                            if in_close || in_cancel {
-                                outcome = Some(false);
-                            } else if in_delete {
-                                outcome = Some(true);
-                            }
-                        }
-                    }
-                }
-                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
-                _ => {}
-            }
-
-            if let Some(confirmed) = outcome {
-                if let Some(path) = state.overlays.confirm_delete_save.take() {
-                    delete_save_confirmed(&path, confirmed, &game_dir, &mut state);
-                }
-                // Return the saves manager (still open behind us) to its default focus.
-                state.overlays.dialog_focus = 0;
-            }
-            continue;
-        }
-
-        // ── Quit dialog intercept — before normal action routing ──────────────
-        // When the quit dialog is open, route keyboard/mouse directly here and
-        // continue (swallowing events the dialog does not handle).
-        if state.overlays.quit_dialog {
-            match &event {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    match k.code {
-                        crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
-                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 3, 1),
-                        crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
-                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 3, -1),
-                        code => match quit_dialog_key_focused(code, state.overlays.dialog_focus) {
-                            QuitDialogAction::Save => {
-                                state.overlays.quit_dialog = false;
-                                lifecycle::quit_dialog_save(&*session, &mapper, &state, &ifid, &arc_file);
-                                break;
-                            }
-                            QuitDialogAction::Quit => {
-                                break;
-                            }
-                            QuitDialogAction::Cancel => {
-                                state.overlays.quit_dialog = false;
-                            }
-                            QuitDialogAction::None => {}
-                        },
-                    }
-                }
-                Event::Mouse(m) => {
-                    use crossterm::event::{MouseButton, MouseEventKind};
-                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
-                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                        if let Some(qd) = &last_panes.quit_dialog {
-                            let in_close = qd.close.is_some_and(|r| r.contains(pt));
-                            let in_save = qd.save.is_some_and(|r| r.contains(pt));
-                            let in_quit = qd.quit.is_some_and(|r| r.contains(pt));
-                            let in_cancel = qd.cancel.is_some_and(|r| r.contains(pt));
-                            let in_dialog = qd.area.contains(pt);
-                            if in_save {
-                                state.overlays.quit_dialog = false;
-                                lifecycle::quit_dialog_save(&*session, &mapper, &state, &ifid, &arc_file);
-                                break;
-                            } else if in_quit {
-                                break;
-                            } else if in_close || in_cancel {
-                                state.overlays.quit_dialog = false;
-                            } else if !in_dialog {
-                                // Click outside: swallow (keep dialog open).
-                            }
-                        }
-                    }
-                }
-                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
-                _ => {}
-            }
-            continue;
-        }
-
-        // ── Launch dialog intercept — before normal action routing ────────────
-        // When the launch dialog is open, route keyboard/mouse directly here and
-        // continue (swallowing events the dialog does not handle).
-        if state.overlays.launch_dialog {
-            match &event {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    match k.code {
-                        crossterm::event::KeyCode::Tab | crossterm::event::KeyCode::Right =>
-                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, 1),
-                        crossterm::event::KeyCode::BackTab | crossterm::event::KeyCode::Left =>
-                            state.overlays.dialog_focus = app::input::cycle_focus(state.overlays.dialog_focus, 2, -1),
-                        code => match launch_dialog_key_focused(code, state.overlays.dialog_focus) {
-                            LaunchDialogAction::Resume => {
-                                if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
-                                    state.overlays.launch_dialog = false;
-                                    turn::apply_launch_resume(&save, lines, kinds, screen, &mut *session, &mut mapper, &mut state, &last_panes, &arc_file);
-                                }
-                            }
-                            LaunchDialogAction::NewGame => {
-                                state.overlays.launch_dialog = false;
-                                state.pending_resume = None;
-                            }
-                            LaunchDialogAction::None => {}
-                        },
-                    }
-                }
-                Event::Mouse(m) => {
-                    use crossterm::event::{MouseButton, MouseEventKind};
-                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
-                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                        if let Some(ld) = &last_panes.launch_dialog {
-                            let in_resume = ld.resume.is_some_and(|r| r.contains(pt));
-                            let in_new_game = ld.new_game.is_some_and(|r| r.contains(pt));
-                            let in_close = ld.close.is_some_and(|r| r.contains(pt));
-                            let in_dialog = ld.area.contains(pt);
-                            if in_resume {
-                                if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
-                                    state.overlays.launch_dialog = false;
-                                    turn::apply_launch_resume(&save, lines, kinds, screen, &mut *session, &mut mapper, &mut state, &last_panes, &arc_file);
-                                }
-                            } else if in_new_game || in_close {
-                                // [X] (close) and [New game] both discard the save.
-                                state.overlays.launch_dialog = false;
-                                state.pending_resume = None;
-                            } else if !in_dialog {
-                                // Click outside: swallow (keep dialog open).
-                            }
-                        }
-                    }
-                }
-                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
-                _ => {}
             }
             continue;
         }
