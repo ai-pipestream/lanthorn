@@ -8,6 +8,13 @@
 # Local-only project files
 /stories/
 
+# Glulx/Glk conformance test story binaries (fetched, never committed — see
+# unit_tests/README.md for the manifest + re-fetch recipe)
+/unit_tests/*.ulx
+/unit_tests/*.gblorb
+/unit_tests/*.blb
+/unit_tests/*.z5
+
 # Internal tooling / agent workspaces (machine-local, never committed)
 /.claude/
 /.worktrees/
