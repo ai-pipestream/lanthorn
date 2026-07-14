@@ -69,6 +69,11 @@ pub(crate) fn dispatch_slash_outcome(
                 }
             }
         }
+        SlashOutcome::DumpWindows => {
+            for line in session.window_dump() {
+                state.push_transcript_internal(&line, TranscriptKind::Meta);
+            }
+        }
         SlashOutcome::PlaySound(None) => {
             for line in app::state::format_sound_resource_list(state.sound_blorb.as_ref()) {
                 state.push_transcript_internal(&line, TranscriptKind::Meta);

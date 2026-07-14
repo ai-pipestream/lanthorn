@@ -132,6 +132,11 @@ pub struct GridWindow {
     /// The game's border-presence preference (SQ-0286). `Unspecified` (the
     /// default) lets the theme decide; a Glulx split forces `Border`/`NoBorder`.
     pub border: BorderPref,
+    /// This window's own Normal-style background colour (packed RGB
+    /// `0x00RRGGBB`), or `None` if the game set none (the host uses its theme).
+    pub bg: Option<u32>,
+    /// This window's own Normal-style foreground colour (packed RGB), or `None`.
+    pub fg: Option<u32>,
 }
 
 impl GridWindow {
@@ -185,6 +190,11 @@ pub struct BufferWindow {
     /// True when this is the primary window whose content the app mirrors into
     /// `state.transcript`; the renderer then draws it via the transcript path.
     pub primary: bool,
+    /// This window's own Normal-style background colour (packed RGB
+    /// `0x00RRGGBB`), or `None` if the game set none (the host uses its theme).
+    pub bg: Option<u32>,
+    /// This window's own Normal-style foreground colour (packed RGB), or `None`.
+    pub fg: Option<u32>,
 }
 
 /// How a [`WinNode::Pair`] divides its space.
@@ -212,6 +222,11 @@ pub enum WinNode {
         /// The split's `winmethod_Border` hint (true = a separator between the
         /// children); rendered in T4.
         border: bool,
+        /// The KEY (new) window's Normal-style background colour (packed RGB),
+        /// or `None` if unset — the colour the between-siblings separator adopts.
+        key_bg: Option<u32>,
+        /// The KEY window's Normal-style foreground colour (packed RGB), or `None`.
+        key_fg: Option<u32>,
         first: Box<WinNode>,
         second: Box<WinNode>,
     },
@@ -430,6 +445,16 @@ pub trait Engine {
     /// The current screen as a neutral window tree + status.
     fn screen(&self) -> ScreenModel;
 
+    /// A diagnostic dump of the live window layout, one line per entry, for the
+    /// `/dump-windows` command. The default gives a one-line Z-machine summary
+    /// (the grid dims + the buffer); engines with a real Glk window tree (Glulx)
+    /// override this to print the full indented tree with per-window colours.
+    fn window_dump(&self) -> Vec<String> {
+        let model = self.screen();
+        let (gc, gr) = model.grid().map(|g| (g.cols, g.active_rows)).unwrap_or((0, 0));
+        vec![format!("Window layout: Grid {}x{} over Buffer (Z-machine simple path)", gc, gr)]
+    }
+
     // ── persistence (engine-tagged) ──
     /// Capture the game state as an engine-tagged save.
     fn save_state(&self) -> EngineSave;
@@ -521,6 +546,8 @@ mod tests {
                 vertical: true,
                 split: Split { fixed: 1 },
                 border: false,
+                key_bg: None,
+                key_fg: None,
                 first: Box::new(WinNode::Grid(grid)),
                 second: Box::new(WinNode::Buffer(BufferWindow::default())),
             },

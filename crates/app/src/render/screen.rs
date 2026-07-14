@@ -273,7 +273,7 @@ fn render_node(
         return None;
     }
     match node {
-        WinNode::Pair { vertical, split, border, first, second } => {
+        WinNode::Pair { vertical, split, border, key_bg, key_fg, first, second } => {
             let b = if *border { 1 } else { 0 };
             let (a1, sep, a2) = split_area_bordered(area, *vertical, split.fixed, b);
             let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input, links, grid_colors);
@@ -282,7 +282,7 @@ fn render_node(
             // shows a letter — would otherwise draw a stray rule with nothing beyond
             // it (SQ-0325).
             if b > 0 && !a1.is_empty() && !a2.is_empty() {
-                draw_window_separator(sep, *vertical, grid_colors, buf);
+                draw_window_separator(sep, *vertical, *key_fg, *key_bg, grid_colors, buf);
             }
             let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input, links, grid_colors);
             m1.or(m2)
@@ -356,7 +356,7 @@ fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>) {
         return;
     }
     match node {
-        WinNode::Pair { vertical, split, border, first, second } => {
+        WinNode::Pair { vertical, split, border, first, second, .. } => {
             let b = if *border { 1 } else { 0 };
             // Reserve the same separator gutter render_node does, so the graphics
             // rects (and thus `dialog_bounds`) match exactly what's drawn.
@@ -437,14 +437,23 @@ fn split_area_bordered(area: Rect, vertical: bool, fixed: u16, border: u16) -> (
 /// horizontal rule, `.left` for a vertical one — is honoured, else the box-drawing
 /// defaults. (A dedicated `window-border` selector can follow when the deferred
 /// style redesign lands — do NOT add a new selector here.)
-fn draw_window_separator(area: Rect, vertical: bool, colors: &ColorScheme, buf: &mut Buffer) {
+fn draw_window_separator(area: Rect, vertical: bool, key_fg: Option<u32>, key_bg: Option<u32>, colors: &ColorScheme, buf: &mut Buffer) {
     let g = &colors.upper_window_border_glyphs;
     let glyph = if vertical {
         g.top.as_deref().unwrap_or("\u{2500}") // ─
     } else {
         g.left.as_deref().unwrap_or("\u{2502}") // │
     };
-    let style = colors.upper_window_border;
+    // The separator adopts the split's KEY (new) window colour (SQ-0325 follow-up):
+    // draw the rule glyph in `key_fg` on `key_bg` when the game set them, falling
+    // back to the themed `upper_window_border` fg/bg per channel when `None`.
+    let mut style = colors.upper_window_border;
+    if let Some(rgb) = key_fg {
+        style = style.fg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), colors));
+    }
+    if let Some(rgb) = key_bg {
+        style = style.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), colors));
+    }
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
@@ -456,11 +465,17 @@ fn draw_window_separator(area: Rect, vertical: bool, colors: &ColorScheme, buf: 
 
 /// Draw an inline (non-primary) buffer window's wrapped, styled lines.
 fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mut Buffer) {
-    fill(area, buf, &state.colors);
+    // This window's own Normal-style background (Glulx window colour, SQ-0328)
+    // replaces the theme transcript bg when the game set one; `None` keeps the
+    // theme background (today's behaviour).
+    let base = match b.bg {
+        Some(rgb) => state.colors.transcript.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), &state.colors)),
+        None => state.colors.transcript,
+    };
+    fill_style(area, buf, base);
     if b.lines.is_empty() {
         return;
     }
-    let base = state.colors.transcript;
     let kinds = vec![TranscriptKind::Story; b.lines.len()];
     let styles = vec![base; b.lines.len()];
     // Inline images render as bands only when a game picker exists (same as the
@@ -501,10 +516,15 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
 
 /// Fill `area` with the transcript background style.
 fn fill(area: Rect, buf: &mut Buffer, colors: &crate::colors::ColorScheme) {
+    fill_style(area, buf, colors.transcript);
+}
+
+/// Fill `area` with an explicit `style` (used for a per-window background override).
+fn fill_style(area: Rect, buf: &mut Buffer, style: ratatui::style::Style) {
     for y in area.y..area.bottom() {
         for x in area.x..area.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_symbol(" ").set_style(colors.transcript);
+                cell.set_symbol(" ").set_style(style);
             }
         }
     }
@@ -599,6 +619,8 @@ mod tests {
             images: vec![None],
             scroll: 0,
             primary: false,
+            bg: None,
+            fg: None,
         }
     }
 
@@ -606,6 +628,23 @@ mod tests {
         (0..w)
             .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
             .collect()
+    }
+
+    /// SQ-0325 follow-up: the between-siblings separator is drawn in the split's
+    /// KEY window colour — `key_fg` on `key_bg` — rather than the plain theme
+    /// border style. Each channel falls back to the theme when `None`.
+    #[test]
+    fn separator_adopts_key_window_colour() {
+        use ratatui::style::Color;
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 5, 1);
+        let mut buf = Buffer::empty(area);
+        // Vertical pair → horizontal rule; key fg red (0xFF0000), key bg blue (0x0000FF).
+        draw_window_separator(area, true, Some(0x00FF_0000), Some(0x0000_00FF), &colors, &mut buf);
+        let c = buf.cell((2, 0)).unwrap();
+        assert_eq!(c.style().fg, Some(Color::Rgb(0xFF, 0, 0)), "rule fg is the key window fg");
+        assert_eq!(c.style().bg, Some(Color::Rgb(0, 0, 0xFF)), "rule bg is the key window bg");
+        assert_eq!(c.symbol(), "\u{2500}", "vertical pair draws a horizontal rule glyph");
     }
 
     #[test]
@@ -616,6 +655,8 @@ mod tests {
                 vertical: true,
                 split: Split { fixed: 1 },
                 border: false,
+                key_bg: None,
+                key_fg: None,
                 first: Box::new(WinNode::Grid(GridWindow::default())),
                 second: Box::new(WinNode::Buffer(BufferWindow::default())),
             },
@@ -640,6 +681,8 @@ mod tests {
                 vertical: false,
                 split: Split { fixed: 10 },
                 border: false,
+                key_bg: None,
+                key_fg: None,
                 first: Box::new(WinNode::Buffer(BufferWindow::default())),
                 second: Box::new(WinNode::Buffer(BufferWindow::default())),
             },
@@ -664,6 +707,8 @@ mod tests {
                 vertical: false, // horizontal pair = Left/Right split
                 split: Split { fixed: 20 },
                 border: false,
+                key_bg: None,
+                key_fg: None,
                 first: Box::new(WinNode::Grid(GridWindow::default())),
                 second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
             },
@@ -685,6 +730,8 @@ mod tests {
                 vertical: true,
                 split: Split { fixed: 22 },
                 border: false,
+                key_bg: None,
+                key_fg: None,
                 first: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
                 second: Box::new(WinNode::Grid(GridWindow::default())),
             },
@@ -714,6 +761,8 @@ mod tests {
                 vertical: false,
                 split: Split { fixed: 6 },
                 border: false,
+                key_bg: None,
+                key_fg: None,
                 first: Box::new(WinNode::Grid(grid)),
                 second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
             },
@@ -775,6 +824,8 @@ mod tests {
                 vertical: true,
                 split: Split { fixed: 1 },
                 border: false,
+                key_bg: None,
+                key_fg: None,
                 // Grid border Unspecified + theme sides off → frameless (SQ-0286);
                 // this test checks buffer subrects, not border chrome.
                 first: Box::new(WinNode::Grid(grid_with("STATUS"))),
@@ -782,6 +833,8 @@ mod tests {
                     vertical: false,
                     split: Split { fixed: 10 },
                     border: false,
+                    key_bg: None,
+                    key_fg: None,
                     first: Box::new(WinNode::Buffer(inline_buffer("LEFT"))),
                     second: Box::new(WinNode::Buffer(inline_buffer("RIGHT"))),
                 }),
@@ -833,10 +886,14 @@ mod tests {
                 vertical: false,
                 split: Split { fixed: 8 },
                 border: false,
+                key_bg: None,
+                key_fg: None,
                 first: Box::new(WinNode::Pair {
                     vertical: true,
                     split: Split { fixed: 1 },
                     border: false,
+                    key_bg: None,
+                    key_fg: None,
                     first: Box::new(WinNode::Grid(grid)),
                     second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
                 }),
@@ -844,6 +901,8 @@ mod tests {
                     vertical: false,
                     split: Split { fixed: 1 },
                     border: false,
+                    key_bg: None,
+                    key_fg: None,
                     first: Box::new(graphics_node()),
                     second: Box::new(WinNode::Buffer(inline_buffer("SIDE"))),
                 }),
@@ -904,6 +963,8 @@ mod tests {
                 vertical: true,
                 split: Split { fixed: 1 },
                 border: false,
+                key_bg: None,
+                key_fg: None,
                 first: Box::new(WinNode::Grid(grid)),
                 second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
             },
@@ -944,11 +1005,15 @@ mod tests {
                 vertical: true,
                 split: Split { fixed: 1 },
                 border: false,
+                key_bg: None,
+                key_fg: None,
                 first: Box::new(WinNode::Grid(grid_with("ST"))),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
                     split: Split { fixed: 4 },
                     border: false,
+                    key_bg: None,
+                    key_fg: None,
                     first: Box::new(WinNode::Buffer(inline_buffer("LEFT"))),
                     second: Box::new(WinNode::Buffer(inline_buffer("RGHT"))),
                 }),
@@ -1020,6 +1085,8 @@ mod tests {
             images: vec![None, Some(dummy), None],
             scroll: 0,
             primary: false,
+            bg: None,
+            fg: None,
         };
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
@@ -1131,6 +1198,8 @@ mod tests {
             vertical: false,
             split: Split { fixed: 10 },
             border: false,
+            key_bg: None,
+            key_fg: None,
             first: Box::new(graphics_node()),
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
@@ -1146,6 +1215,8 @@ mod tests {
             vertical: true,
             split: Split { fixed: 3 },
             border: false,
+            key_bg: None,
+            key_fg: None,
             first: Box::new(graphics_node()),
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
@@ -1161,6 +1232,8 @@ mod tests {
             vertical: false,
             split: Split { fixed: 10 },
             border: false,
+            key_bg: None,
+            key_fg: None,
             first: Box::new(graphics_node()),
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
@@ -1242,6 +1315,8 @@ mod tests {
                 vertical: true,
                 split: Split { fixed: 1 },
                 border: true,
+                key_bg: None,
+                key_fg: None,
                 first: Box::new(WinNode::Grid(grid_with("STATUS"))),
                 second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
             },
@@ -1280,6 +1355,8 @@ mod tests {
                 vertical: false,
                 split: Split { fixed: 6 },
                 border: true,
+                key_bg: None,
+                key_fg: None,
                 first: Box::new(WinNode::Grid(grid_with("GRID"))),
                 second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
             },
@@ -1318,6 +1395,8 @@ mod tests {
                     vertical,
                     split: Split { fixed: if vertical { 1 } else { 6 } },
                     border: false,
+                    key_bg: None,
+                    key_fg: None,
                     first: Box::new(WinNode::Grid(grid_with("GRID"))),
                     second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
                 },
@@ -1354,6 +1433,8 @@ mod tests {
             vertical: false,
             split: Split { fixed: 10 },
             border: false,
+            key_bg: None,
+            key_fg: None,
             first: Box::new(graphics_node()), // win: 1
             second: Box::new(other),
         };

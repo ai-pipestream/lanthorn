@@ -60,6 +60,9 @@ pub enum SlashOutcome {
     /// Print the resolved color scheme to the transcript. `actual` = render each
     /// selector line in its own style instead of the plain meta color.
     PrintColors { actual: bool },
+    /// Diagnostic: dump the live Glk window layout (sizes, borders, per-window
+    /// colours) to the transcript as Meta lines. Handled in `slash_dispatch`.
+    DumpWindows,
     /// Diagnostic: list Blorb `Snd` resources (`None`) or play resource `n`
     /// (`Some(n)`). Handled in `main.rs::dispatch_slash_outcome` because it
     /// needs `AppState` (audio backend + sound blorb).
@@ -392,6 +395,9 @@ pub static COMMANDS: &[CommandSpec] = &[
         dispatch: |_| SlashOutcome::Action(crate::input::Action::AnimExit) },
 
     // ── Help ──────────────────────────────────────────────────────────────
+    CommandSpec { name: "dump-windows", category: Category::Help, context: Context::Global,
+        usage: "dump-windows", description: "dump the live Glk window layout (sizes, borders, colours)",
+        dispatch: |_| SlashOutcome::DumpWindows },
     CommandSpec { name: "help", category: Category::Help, context: Context::Global,
         usage: "help [command]", description: "list all commands by category; with a name, show one command's detail",
         dispatch: |_| SlashOutcome::Help },
@@ -658,7 +664,7 @@ mod tests {
         assert_eq!(by("anim-step").context, Context::Anim);
         // Total count matches the spec table (55 commands: Game 12, Map 21, View 6,
         // Transcript 3, Style 5, Export 3, Animation 4, Help 1).
-        assert_eq!(COMMANDS.len(), 55, "registry must match the spec's Full command table");
+        assert_eq!(COMMANDS.len(), 56, "registry must match the spec's Full command table");
     }
 
     #[test]
@@ -695,6 +701,12 @@ mod tests {
         assert!(find_command("print-colors").is_some());
         assert!(matches!(parse("print-colors", '/'), SlashOutcome::PrintColors { actual: false }));
         assert!(matches!(parse("print-colors color", '/'), SlashOutcome::PrintColors { actual: true }));
+    }
+
+    #[test]
+    fn dump_windows_command_parses() {
+        assert!(find_command("dump-windows").is_some());
+        assert!(matches!(parse("dump-windows", '/'), SlashOutcome::DumpWindows));
     }
 
     #[test]

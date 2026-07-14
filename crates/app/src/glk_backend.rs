@@ -281,6 +281,55 @@ impl AppGlk {
         self.primary
     }
 
+    /// Format the live Glk window tree as indented diagnostic lines for the
+    /// `/dump-windows` command: one window per line with its type, id, size,
+    /// origin, and any per-window `bg`/`fg` colour; each pair shows orientation,
+    /// border presence, split, and its key window's colour. (SQ-0329)
+    pub fn window_dump_lines(&self) -> Vec<String> {
+        let Some(tree) = &self.layout_tree else {
+            return vec!["Window layout: (none)".to_string()];
+        };
+        let r = tree.rect();
+        let mut out = vec![format!("Window layout ({}x{}):", r.width, r.height)];
+        fn col(label: &str, c: Option<u32>) -> String {
+            match c {
+                Some(rgb) => format!(" {}=#{:06X}", label, rgb & 0x00FF_FFFF),
+                None => String::new(),
+            }
+        }
+        fn walk(node: &WinTree, depth: usize, primary: Option<u32>, out: &mut Vec<String>) {
+            let indent = "  ".repeat(depth);
+            match node {
+                WinTree::Leaf { id, wintype, rect, bg, fg } => {
+                    let ty = match wintype {
+                        WinType::TextGrid => "Grid",
+                        WinType::TextBuffer => "Buffer",
+                        WinType::Graphics => "Graphics",
+                        WinType::Pair => "Pair",
+                    };
+                    let prim = if primary == Some(*id) { " (primary)" } else { "" };
+                    out.push(format!(
+                        "{}{} id={}{}  {}x{} @({},{}){}{}",
+                        indent, ty, id, prim, rect.width, rect.height, rect.left, rect.top,
+                        col("bg", *bg), col("fg", *fg),
+                    ));
+                }
+                WinTree::Pair { vertical, border, split, key_bg, first, second, .. } => {
+                    let orient = if *vertical { "vertical" } else { "horizontal" };
+                    let brd = if *border { "border" } else { "no-border" };
+                    out.push(format!(
+                        "{}Pair  {}  {}  split={}{}",
+                        indent, orient, brd, split, col("key", *key_bg),
+                    ));
+                    walk(first, depth + 1, primary, out);
+                    walk(second, depth + 1, primary, out);
+                }
+            }
+        }
+        walk(tree, 0, self.primary, &mut out);
+        out
+    }
+
     /// The current resolved leaf-window layout `(id, type, rect, border)`.
     /// Rects are in story-pane cells (the Glk screen is sized to exactly the
     /// story pane). The host reads this to map terminal clicks to mouse-watching
@@ -448,11 +497,26 @@ impl AppGlk {
                 (self.convert_tree(tree), size)
             }
         };
+        // The page colour is the PRIMARY buffer window's own colour (the app
+        // paints the story pane / live input line with model.bg/fg); each other
+        // window carries its own colour on its node. `None` → theme default.
+        fn primary_colour(node: &WinNode) -> Option<(Option<u32>, Option<u32>)> {
+            match node {
+                WinNode::Buffer(b) if b.primary => Some((b.bg, b.fg)),
+                WinNode::Pair { first, second, .. } => primary_colour(first).or_else(|| primary_colour(second)),
+                _ => None,
+            }
+        }
+        let (pbg, pfg) = primary_colour(&root).unwrap_or((None, None));
+        let pack = |c: Option<u32>| match c {
+            Some(rgb) => crate::state::pack_zcolour(zvm::screen::ZColour::True24(rgb)),
+            None => crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+        };
         ScreenModel {
             root,
             status: StatusModel::HostManaged,
-            bg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
-            fg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+            bg: pack(pbg),
+            fg: pack(pfg),
             content_size,
         }
     }
@@ -462,11 +526,21 @@ impl AppGlk {
     /// zero-area areas in T4.
     fn convert_tree(&self, tree: &WinTree) -> WinNode {
         match tree {
-            WinTree::Leaf { id, wintype, rect } => match wintype {
+            WinTree::Leaf { id, wintype, rect, bg, fg } => match wintype {
                 // Glulx grids are frameless on the generic path; the pair
                 // separator carries the border (T4), so pass `None` here.
-                WinType::TextGrid => WinNode::Grid(self.grid_node(*id, *rect, None)),
-                WinType::TextBuffer => WinNode::Buffer(self.buffer_node(*id)),
+                WinType::TextGrid => {
+                    let mut g = self.grid_node(*id, *rect, None);
+                    g.bg = *bg;
+                    g.fg = *fg;
+                    WinNode::Grid(g)
+                }
+                WinType::TextBuffer => {
+                    let mut b = self.buffer_node(*id);
+                    b.bg = *bg;
+                    b.fg = *fg;
+                    WinNode::Buffer(b)
+                }
                 WinType::Graphics => {
                     let c = self.graphics.get(id);
                     WinNode::Graphics(crate::engine::GraphicsWindow {
@@ -477,10 +551,12 @@ impl AppGlk {
                 }
                 WinType::Pair => unreachable!("pair windows are never tree leaves"),
             },
-            WinTree::Pair { vertical, border, split, first, second, .. } => WinNode::Pair {
+            WinTree::Pair { vertical, border, split, key_bg, key_fg, first, second, .. } => WinNode::Pair {
                 vertical: *vertical,
                 split: Split { fixed: *split as u16 },
                 border: *border,
+                key_bg: *key_bg,
+                key_fg: *key_fg,
                 first: Box::new(self.convert_tree(first)),
                 second: Box::new(self.convert_tree(second)),
             },
@@ -512,6 +588,8 @@ impl AppGlk {
                 Some(true) => BorderPref::Border,
                 Some(false) => BorderPref::NoBorder,
             },
+            bg: None,
+            fg: None,
         }
     }
 
@@ -524,7 +602,7 @@ impl AppGlk {
         let buf = self.buffers.get(&id);
         let (lines, runs, images) = buf.map(|b| log_to_lines(&b.log)).unwrap_or_default();
         let scroll = buf.map(|b| b.scroll).unwrap_or(0);
-        BufferWindow { lines, runs, images, scroll, primary: false }
+        BufferWindow { lines, runs, images, scroll, primary: false, bg: None, fg: None }
     }
 }
 
@@ -870,9 +948,14 @@ mod tests {
         GlkRect { left, top, width, height }
     }
 
-    /// Test helper: a `WinTree` leaf.
+    /// Test helper: a `WinTree` leaf (no per-window colour).
     fn leaf(id: u32, wintype: WinType, r: GlkRect) -> WinTree {
-        WinTree::Leaf { id, wintype, rect: r }
+        WinTree::Leaf { id, wintype, rect: r, bg: None, fg: None }
+    }
+
+    /// Test helper: a `WinTree` leaf carrying a packed bg/fg colour.
+    fn leaf_col(id: u32, wintype: WinType, r: GlkRect, bg: Option<u32>, fg: Option<u32>) -> WinTree {
+        WinTree::Leaf { id, wintype, rect: r, bg, fg }
     }
 
     /// Bounding rect of two child rects (a pair node's own rect).
@@ -888,14 +971,14 @@ mod tests {
     /// child's row count.
     fn vpair(split: u32, first: WinTree, second: WinTree) -> WinTree {
         let rect = union(first.rect(), second.rect());
-        WinTree::Pair { vertical: true, border: false, split, rect, first: Box::new(first), second: Box::new(second) }
+        WinTree::Pair { vertical: true, border: false, split, rect, key_bg: None, key_fg: None, first: Box::new(first), second: Box::new(second) }
     }
 
     /// Test helper: a Left/Right (horizontal) pair; `split` = the first (left)
     /// child's column count.
     fn hpair(split: u32, first: WinTree, second: WinTree) -> WinTree {
         let rect = union(first.rect(), second.rect());
-        WinTree::Pair { vertical: false, border: false, split, rect, first: Box::new(first), second: Box::new(second) }
+        WinTree::Pair { vertical: false, border: false, split, rect, key_bg: None, key_fg: None, first: Box::new(first), second: Box::new(second) }
     }
 
     #[test]
@@ -1004,7 +1087,7 @@ mod tests {
         )));
         let model = glk.screen_model();
         match &model.root {
-            WinNode::Pair { vertical, split, border: _, first, second } => {
+            WinNode::Pair { vertical, split, first, second, .. } => {
                 assert!(*vertical, "grid-above-buffer is a vertical stack");
                 assert_eq!(split.fixed, 1, "the 1-row grid is the fixed first child");
                 assert!(matches!(**first, WinNode::Grid(_)), "top child is the grid");
@@ -1015,6 +1098,40 @@ mod tests {
         // The buffer is the primary (mirrored by the transcript).
         assert_eq!(glk.primary(), Some(1));
         assert!(model.grid().is_some(), "the tree exposes a grid node");
+    }
+
+    /// SQ-0329: `/dump-windows` formats the live tree with each window's type, id,
+    /// size, origin, and per-window colour; the primary buffer is marked.
+    #[test]
+    fn window_dump_formats_tree_with_colours() {
+        let mut glk = AppGlk::new(60, 14);
+        glk.window_open(1, WinType::TextBuffer);
+        glk.window_open(2, WinType::TextGrid);
+        glk.window_layout(&[
+            (1, WinType::TextBuffer, rect(0, 1, 60, 13), Some(true)),
+            (2, WinType::TextGrid, rect(0, 0, 60, 1), Some(true)),
+        ]);
+        glk.window_tree(Some(vpair(
+            1,
+            leaf_col(2, WinType::TextGrid, rect(0, 0, 60, 1), Some(0x00FF_FFFF), Some(0x0000_0000)),
+            leaf_col(1, WinType::TextBuffer, rect(0, 1, 60, 13), Some(0x0012_3456), None),
+        )));
+        let lines = glk.window_dump_lines();
+        assert_eq!(lines[0], "Window layout (60x14):");
+        assert!(
+            lines.iter().any(|l| l.contains("Pair") && l.contains("vertical") && l.contains("split=1")),
+            "pair line missing: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Grid id=2")
+                && l.contains("60x1") && l.contains("@(0,0)")
+                && l.contains("bg=#FFFFFF") && l.contains("fg=#000000")),
+            "grid line missing: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Buffer id=1 (primary)") && l.contains("bg=#123456")),
+            "buffer line missing: {lines:?}"
+        );
     }
 
     #[test]

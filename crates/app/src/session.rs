@@ -801,6 +801,11 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
         cursor_active: screen.current_window == 1,
         // The Z-machine has no Glk border concept — leave it to the theme (SQ-0286).
         border: BorderPref::Unspecified,
+        // The Z-machine simple path carries no per-window colour override; the
+        // page colour comes from the model bg/fg below, so draw_grid stays
+        // byte-identical (bg=None → theme). (SQ-0328)
+        bg: None,
+        fg: None,
     };
     ScreenModel {
         root: WinNode::Pair {
@@ -808,6 +813,8 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
             split: Split { fixed: screen.upper.rows },
             // The Z-machine has no Glk border; its status box is drawn by the simple path.
             border: false,
+            key_bg: None,
+            key_fg: None,
             first: Box::new(WinNode::Grid(grid)),
             second: Box::new(WinNode::Buffer(BufferWindow::default())),
         },

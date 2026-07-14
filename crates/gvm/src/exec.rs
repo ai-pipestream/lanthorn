@@ -2497,7 +2497,7 @@ impl Machine {
             StreamKind::Window(win) => {
                 match self.glk.window_type(win) {
                     Some(WinType::TextBuffer) => {
-                        let colour = self.glk.stream_style_colour(sid, WinType::TextBuffer, style);
+                        let colour = self.glk.window_stream_style_colour(win, sid, style);
                         let attrs = self.glk.style_attrs(WinType::TextBuffer, style);
                         self.backend.put_text_attr(win, style, colour, attrs, link, s);
                     }
@@ -2548,7 +2548,7 @@ impl Machine {
     /// discarded). `\n` moves to the next row, column 0.
     fn grid_put_str(&mut self, sid: u32, win: u32, style: GlkStyle, link: u32, s: &str) {
         let Some((w, h, mut cx, mut cy)) = self.glk.grid_state(win) else { return };
-        let colour = self.glk.stream_style_colour(sid, WinType::TextGrid, style);
+        let colour = self.glk.window_stream_style_colour(win, sid, style);
         let attrs = self.glk.style_attrs(WinType::TextGrid, style);
         for ch in s.chars() {
             if ch == '\n' {

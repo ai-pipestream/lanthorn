@@ -17,11 +17,16 @@ use crate::render::paneframe::{draw_framed, BorderStyle, PaneSides};
 /// modifier so the terminal performs exactly one swap. fg/bg are applied in
 /// logical order (pre-reverse) for non-Default channels when
 /// `honor_game_colours` is true; Default channels inherit from the theme base.
-fn cell_style(cell: zvm::screen::Cell, scheme: &ColorScheme, honor_game_colours: bool) -> Style {
+fn cell_style(cell: zvm::screen::Cell, scheme: &ColorScheme, honor_game_colours: bool, bg_override: Option<u32>) -> Style {
     use zvm::screen::ZColour;
     // Use the theme upper_window content style as the base (consistent with the
     // blank-fill path in draw_grid, and with how transcript.rs draws styled runs).
-    let base = scheme.upper_window;
+    // A per-window background override (Glulx window colour, SQ-0328) replaces the
+    // theme bg here so a Default-bg game cell shows the window's own colour.
+    let mut base = scheme.upper_window;
+    if let Some(rgb) = bg_override {
+        base = base.bg(crate::render::resolve_zcolour(ZColour::True24(rgb), scheme));
+    }
     // apply_text_style adds REVERSED for bit 0x01, BOLD for 0x02, ITALIC for 0x04.
     // The terminal performs exactly one swap for the REVERSED modifier — no manual
     // fg/bg swap here (which would be a no-op for Default/Reset channels, C1 bug).
@@ -113,7 +118,14 @@ pub fn draw_grid(
     }
 
     let border_style = colors.virtual_window_border;
-    let content_style = colors.upper_window;
+    // Per-window background override (Glulx window colour, SQ-0328): when the grid
+    // carries its own `bg`, the content fill and each cell's default background use
+    // it instead of the theme's `upper_window` bg. `None` (Z-machine simple path,
+    // default) leaves the behaviour byte-identical.
+    let content_style = match upper.bg {
+        Some(rgb) => colors.upper_window.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), colors)),
+        None => colors.upper_window,
+    };
     let border_color = colors.upper_window_border;
 
     // Resolve which sides to frame. The game controls border PRESENCE (SQ-0286);
@@ -197,7 +209,7 @@ pub fn draw_grid(
             let bx = content.x + dx;
             let by = content.y + dy;
             if let Some(buf_cell) = buf.cell_mut((bx, by)) {
-                let mut style = cell_style(grid_cell_to_zvm(cell), colors, honor_game_colours);
+                let mut style = cell_style(grid_cell_to_zvm(cell), colors, honor_game_colours, upper.bg);
                 // Glk hyperlink affordance: layer the themeable `hyperlink` colour
                 // and an underline on top, and record the cell for click hit-testing.
                 // Mirrors the transcript path in `draw_str_runs`. (SQ-0258)
@@ -232,7 +244,7 @@ pub fn draw_grid(
             let grid_col = cur_dx + col_offset + 1; // 1-based
             let mut cur_zvm = grid_cell_to_zvm(upper.cell(grid_row, grid_col));
             cur_zvm.style ^= 0x01; // toggle reverse bit
-            let style = cell_style(cur_zvm, colors, honor_game_colours);
+            let style = cell_style(cur_zvm, colors, honor_game_colours, upper.bg);
             if let Some(c) = buf.cell_mut((content.x + cur_dx, content.y + cur_dy)) {
                 c.modifier = ratatui::style::Modifier::empty(); // clear before re-apply
                 c.set_style(style);
@@ -294,6 +306,7 @@ mod tests {
             Cell { ch: 'x', style: 0, fg: ZColour::Standard(3), bg: ZColour::Standard(6) },
             &scheme,
             true,
+            None,
         );
         assert_eq!(s.fg, Some(Color::Rgb(200, 0, 0)));
         assert_eq!(s.bg, Some(Color::Rgb(0, 0, 200)));
@@ -304,6 +317,7 @@ mod tests {
             Cell { ch: 'x', style: 0x01, fg: ZColour::Standard(3), bg: ZColour::Standard(6) },
             &scheme,
             true,
+            None,
         );
         assert!(r.add_modifier.contains(Modifier::REVERSED), "REVERSED modifier for style=0x01");
         assert_eq!(r.fg, Some(Color::Rgb(200, 0, 0)), "fg stays logical (not swapped)");
@@ -322,6 +336,7 @@ mod tests {
             Cell { ch: ' ', style: 0x01, fg: ZColour::Default, bg: ZColour::Default },
             &scheme,
             true,
+            None,
         );
         assert!(
             s.add_modifier.contains(Modifier::REVERSED),
@@ -378,6 +393,31 @@ mod tests {
             "a linked grid cell must render underlined"
         );
         assert_eq!(links, vec![((4, 0), 77)], "the linked cell is recorded at its buffer position");
+    }
+
+    /// SQ-0328: a grid carrying its own `bg` (a Glulx per-window background)
+    /// fills its content cells with that colour instead of the theme's
+    /// `upper_window` bg. A grid with `bg = None` is byte-identical to today.
+    #[test]
+    fn draw_grid_window_bg_fills_override_colour() {
+        let mut upper = GridWindow::default();
+        upper.resize(1, 3);
+        upper.bg = Some(0x0012_3456); // packed 0x00RRGGBB window background
+
+        let mut colors = make_colors();
+        colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
+
+        // cols=3 centered in 10 (no border): x_off=(10-3)/2=3; a content cell at x=4,y=0.
+        let area = Rect::new(0, 0, 10, 2);
+        let mut buf = Buffer::empty(area);
+        draw_grid(&upper, 1, (1, 1), false, &colors, area, &mut buf, true, &mut Vec::new());
+
+        assert_eq!(
+            buf.cell((4, 0)).unwrap().style().bg,
+            Some(Color::Rgb(0x12, 0x34, 0x56)),
+            "the grid's own window bg fills the content cells"
+        );
     }
 
     /// SQ-0286 (a): a `BorderPref::NoBorder` grid draws NO frame even when the

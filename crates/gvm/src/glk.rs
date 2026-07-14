@@ -476,7 +476,18 @@ pub struct Rect {
 /// comparing rects.)
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum WinTree {
-    Leaf { id: u32, wintype: WinType, rect: Rect },
+    Leaf {
+        id: u32,
+        wintype: WinType,
+        rect: Rect,
+        /// The window's Normal-style background colour from its own snapshot
+        /// (packed RGB `0x00RRGGBB`), or `None` if the game set none (host uses
+        /// its theme). Distinct per window even at the same wintype.
+        bg: Option<u32>,
+        /// The window's Normal-style foreground colour from its own snapshot
+        /// (packed RGB `0x00RRGGBB`), or `None` if unset.
+        fg: Option<u32>,
+    },
     Pair {
         /// true for an Above/Below split (children stacked), false for Left/Right.
         vertical: bool,
@@ -488,6 +499,14 @@ pub enum WinTree {
         /// cells, then the border cell (if `border`), then `second` the rest.
         split: u32,
         rect: Rect,
+        /// The Normal-style background colour of this split's KEY window (the new
+        /// window that created the border) from its snapshot, or `None` if the
+        /// key is absent/a pair/unset. The host draws the between-siblings
+        /// separator in this colour (SQ-0325 follow-up).
+        key_bg: Option<u32>,
+        /// The Normal-style foreground colour of this split's KEY window, or
+        /// `None` if absent/a pair/unset.
+        key_fg: Option<u32>,
         first: Box<WinTree>,
         second: Box<WinTree>,
     },
@@ -1113,6 +1132,15 @@ struct Window {
     key: u32,
     method: u32,
     size: u32,
+    /// This window's OWN snapshot of the colour style hints, copied from the
+    /// global `style_hints` row for its wintype at `window_open` (the garglk
+    /// convention). A later `glk_stylehint_set` changes the GLOBAL table (future
+    /// opens) but must NOT retroactively repaint an already-open window, so each
+    /// window keeps its own row and same-type windows can have distinct
+    /// backgrounds. Default (all unset) for graphics/pair windows and on restore
+    /// (the game re-establishes hints and repaints), so it is not serialized —
+    /// mirroring `style_hints`, which also resets to defaults on restore.
+    styles: [StyleColour; NUMSTYLES as usize],
 }
 
 /// A Glk file reference: a named handle into the in-memory VFS (`Model::files`).
@@ -1344,6 +1372,30 @@ impl Model {
         self.style_hints[row][style as usize]
     }
 
+    /// Resolve the colour hints active for `style` in the specific window `win`.
+    ///
+    /// Per channel: the window's OWN snapshot (taken at open — the garglk
+    /// per-window convention) wins where the window set that channel, so two
+    /// same-type windows opened under different hints keep distinct colours
+    /// (Kerkerkruip's panels). A channel the window left unset at open falls back
+    /// to the CURRENT type-global hint, so a game that sets a global hint AFTER
+    /// opening its window still takes effect (Counterfeit Monkey sets its
+    /// black-on-white Normal colours after its main buffer opens). A pair window
+    /// or missing id resolves to the type-global (or default). (SQ-0328)
+    pub fn window_style_colour(&self, win: u32, style: GlkStyle) -> StyleColour {
+        let Some(w) = self.win(win) else { return StyleColour::default() };
+        let global = self.style_colour(w.wintype, style);
+        if w.wintype == WinType::Pair {
+            return global;
+        }
+        let snap = w.styles[style as usize];
+        StyleColour {
+            fg: snap.fg.or(global.fg),
+            bg: snap.bg.or(global.bg),
+            reverse: snap.reverse || global.reverse,
+        }
+    }
+
     /// Resolve the non-colour rendered attributes (Weight, Oblique) active for
     /// `style` in a window of type `wintype`.
     pub fn style_attrs(&self, wintype: WinType, style: GlkStyle) -> StyleAttrs {
@@ -1395,7 +1447,23 @@ impl Model {
     /// window with the given `style`, layering any `garglk_*` override on top of
     /// the style-hint colour (an unset override channel falls through to the hint).
     pub fn stream_style_colour(&self, strid: u32, wintype: WinType, style: GlkStyle) -> StyleColour {
-        let mut sc = self.style_colour(wintype, style);
+        self.apply_stream_override(self.style_colour(wintype, style), strid)
+    }
+
+    /// Resolve the effective colour for text written to `strid` in the specific
+    /// window `win` with the given `style`: the same `garglk_*` per-stream
+    /// override layered on top of the window's OWN snapshot colour (via
+    /// [`window_style_colour`](Self::window_style_colour)) rather than the
+    /// type-global hint. Override precedence is identical to
+    /// [`stream_style_colour`](Self::stream_style_colour) — only the base moved
+    /// from wintype-global to the per-window snapshot.
+    pub fn window_stream_style_colour(&self, win: u32, strid: u32, style: GlkStyle) -> StyleColour {
+        self.apply_stream_override(self.window_style_colour(win, style), strid)
+    }
+
+    /// Layer any `garglk_*` per-stream override (fg/bg/reverse) on top of a base
+    /// colour; an unset override channel falls through to the base.
+    fn apply_stream_override(&self, mut sc: StyleColour, strid: u32) -> StyleColour {
         if let Some(s) = self.stream(strid) {
             if s.zfg.is_some() {
                 sc.fg = s.zfg;
@@ -1505,6 +1573,7 @@ impl Model {
             key: 0,
             method: 0,
             size: 0,
+            styles: [StyleColour::default(); NUMSTYLES as usize],
         }));
         id
     }
@@ -1703,7 +1772,19 @@ impl Model {
         }
         let nid = self.alloc_window(wt, rock);
         let sid = self.alloc_stream(StreamKind::Window(nid), 0);
-        self.win_mut(nid).unwrap().stream = sid;
+        // Snapshot the current global style-hint row for this wintype into the
+        // window (garglk convention): later `glk_stylehint_set` affects only
+        // future opens, not this window. Graphics windows keep defaults.
+        let styles = match wt {
+            WinType::TextBuffer => self.style_hints[0],
+            WinType::TextGrid => self.style_hints[1],
+            WinType::Pair | WinType::Graphics => [StyleColour::default(); NUMSTYLES as usize],
+        };
+        {
+            let w = self.win_mut(nid).unwrap();
+            w.stream = sid;
+            w.styles = styles;
+        }
 
         if split == 0 {
             if self.root != 0 {
@@ -1987,7 +2068,8 @@ impl Model {
     fn build_win_tree(&self, id: u32) -> WinTree {
         let w = self.win(id).expect("window_tree walks the live window tree");
         if w.wintype != WinType::Pair {
-            return WinTree::Leaf { id, wintype: w.wintype, rect: w.rect };
+            let sc = self.window_style_colour(id, GlkStyle::Normal);
+            return WinTree::Leaf { id, wintype: w.wintype, rect: w.rect, bg: sc.bg, fg: sc.fg };
         }
         let dir = w.method & WINMETHOD_DIRMASK;
         let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
@@ -2000,11 +2082,16 @@ impl Model {
         let (first, second) = if pos(&c1) <= pos(&c2) { (c1, c2) } else { (c2, c1) };
         let fr = first.rect();
         let split = if vertical { fr.height } else { fr.width };
+        // The between-siblings border adopts the KEY window's Normal colour
+        // (the new window that created this split). key 0 / pair / missing → None.
+        let key_sc = self.window_style_colour(w.key, GlkStyle::Normal);
         WinTree::Pair {
             vertical,
             border,
             split,
             rect: w.rect,
+            key_bg: key_sc.bg,
+            key_fg: key_sc.fg,
             first: Box::new(first),
             second: Box::new(second),
         }
@@ -3016,6 +3103,9 @@ impl Model {
             windows.push(Some(Window {
                 id, wintype, rock, parent, stream, rect, grid, line_req, char_req, mouse_req,
                 hyperlink_req, terminators: Vec::new(), echo_line: true, echo: 0, child1, child2, key, method, size,
+                // Reset to defaults on restore (like `style_hints`); the game
+                // re-establishes its hints and repaints. Not serialized.
+                styles: [StyleColour::default(); NUMSTYLES as usize],
             }));
         }
 
@@ -3675,6 +3765,108 @@ mod layout_snap_tests {
     fn window_tree_is_none_without_a_root() {
         let m = Model::new();
         assert!(m.window_tree().is_none(), "no root → None");
+    }
+
+    // ── SQ-0328: per-window style-hint snapshot ───────────────────────────────
+
+    // Each window snapshots the global hint row at open, so two same-type
+    // windows opened under different BackColor hints keep DISTINCT backgrounds
+    // (the pre-fix bug collapsed both to the last-set global hint).
+    #[test]
+    fn window_open_snapshots_distinct_backgrounds_per_window() {
+        let mut m = Model::new();
+        m.set_style_hint(3, 0, 8, 0x00AA_AAAA); // TextBuffer Normal BackColor
+        let a = m.window_open(0, 0, 0, 3, 0).unwrap(); // buffer A snapshots 0xAAAAAA
+        m.set_style_hint(3, 0, 8, 0x0022_2222); // change the GLOBAL hint
+        let b = m.window_open(a, WINMETHOD_BELOW | WINMETHOD_PROPORTIONAL, 50, 3, 0).unwrap();
+        assert_eq!(
+            m.window_style_colour(a, GlkStyle::Normal).bg,
+            Some(0x00AA_AAAA),
+            "A keeps its open-time snapshot",
+        );
+        assert_eq!(
+            m.window_style_colour(b, GlkStyle::Normal).bg,
+            Some(0x0022_2222),
+            "B has its own, later snapshot — distinct from A",
+        );
+    }
+
+    // A missing id or a pair window has no snapshot → default (all-None).
+    #[test]
+    fn window_style_colour_defaults_for_missing_or_pair() {
+        let mut m = Model::new();
+        m.set_style_hint(3, 0, 8, 0x00AA_AAAA);
+        let a = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let _b = m.window_open(a, WINMETHOD_BELOW | WINMETHOD_FIXED, 3, 3, 0).unwrap();
+        let root = m.root(); // the pair created by the split
+        assert_eq!(m.window_style_colour(root, GlkStyle::Normal), StyleColour::default(), "pair → default");
+        assert_eq!(m.window_style_colour(9999, GlkStyle::Normal), StyleColour::default(), "missing → default");
+    }
+
+    // A nested two-panel tree carries each leaf's OWN background on the WinTree.
+    #[test]
+    fn window_tree_leaf_carries_own_bg() {
+        let mut m = Model::new();
+        m.set_style_hint(3, 0, 8, 0x00AA_AAAA);
+        let a = m.window_open(0, 0, 0, 3, 0).unwrap();
+        m.set_style_hint(3, 0, 8, 0x0022_2222);
+        let b = m.window_open(a, WINMETHOD_BELOW | WINMETHOD_PROPORTIONAL, 50, 3, 0).unwrap();
+        m.relayout(80, 24, (1, 1));
+        // Collect leaf bgs by id.
+        fn leaf_bg(t: &WinTree, want: u32) -> Option<Option<u32>> {
+            match t {
+                WinTree::Leaf { id, bg, .. } => (*id == want).then_some(*bg),
+                WinTree::Pair { first, second, .. } => leaf_bg(first, want).or_else(|| leaf_bg(second, want)),
+            }
+        }
+        let tree = m.window_tree().unwrap();
+        assert_eq!(leaf_bg(&tree, a), Some(Some(0x00AA_AAAA)), "leaf A carries its own bg");
+        assert_eq!(leaf_bg(&tree, b), Some(Some(0x0022_2222)), "leaf B carries its own, different bg");
+    }
+
+    // A pair reports the KEY (new) window's Normal colour for the border rule:
+    // a grid opened ABOVE a buffer, with only a grid BackColor set, yields the
+    // grid's colour on the pair — not the buffer's.
+    #[test]
+    fn window_tree_pair_key_colour_is_the_key_window() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // buffer: no hint → None
+        m.set_style_hint(4, 0, 8, 0x0033_4455); // TextGrid Normal BackColor
+        let grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap(); // key = grid
+        m.relayout(80, 24, (1, 1));
+        match m.window_tree().unwrap() {
+            WinTree::Pair { key_bg, key_fg, .. } => {
+                assert_eq!(key_bg, Some(0x0033_4455), "border colour is the key grid's bg");
+                assert_eq!(key_fg, None, "no grid fg hint → None");
+            }
+            _ => panic!("root should be a pair"),
+        }
+        // Sanity: the buffer leaf itself carries no background.
+        assert_eq!(m.window_style_colour(grid, GlkStyle::Normal).bg, Some(0x0033_4455));
+        assert_eq!(m.window_style_colour(buf, GlkStyle::Normal).bg, None);
+    }
+
+    // The per-window run-colour resolver uses each window's OWN snapshot as the
+    // base, with the garglk per-stream override still layered on top.
+    #[test]
+    fn window_stream_style_colour_bases_on_window_snapshot() {
+        let mut m = Model::new();
+        m.set_style_hint(3, 0, 8, 0x00AA_AAAA);
+        let a = m.window_open(0, 0, 0, 3, 0).unwrap();
+        m.set_style_hint(3, 0, 8, 0x0022_2222);
+        let b = m.window_open(a, WINMETHOD_BELOW | WINMETHOD_PROPORTIONAL, 50, 3, 0).unwrap();
+        let sa = m.window_stream(a).unwrap();
+        let sb = m.window_stream(b).unwrap();
+        // Base colour differs per window even at the same wintype.
+        assert_eq!(m.window_stream_style_colour(a, sa, GlkStyle::Normal).bg, Some(0x00AA_AAAA));
+        assert_eq!(m.window_stream_style_colour(b, sb, GlkStyle::Normal).bg, Some(0x0022_2222));
+        // The garglk per-stream override still wins over the snapshot base.
+        m.set_stream_zcolors(sa, Model::ZCOLOR_CURRENT, 0x0055_6677);
+        assert_eq!(
+            m.window_stream_style_colour(a, sa, GlkStyle::Normal).bg,
+            Some(0x0055_6677),
+            "stream bg override wins over the per-window snapshot",
+        );
     }
 }
 

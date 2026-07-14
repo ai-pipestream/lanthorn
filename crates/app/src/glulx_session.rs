@@ -80,6 +80,10 @@ pub struct GlulxSession {
     /// The last screen snapshot (the backend's tree is only reachable mutably, so
     /// `screen()` returns this cache, refreshed after each turn).
     screen_cache: ScreenModel,
+    /// The last `/dump-windows` diagnostic snapshot of the live Glk window tree,
+    /// refreshed alongside `screen_cache` (the tree is only reachable mutably, so
+    /// `window_dump()` returns this cache). (SQ-0329)
+    window_dump_cache: Vec<String>,
     /// Auxiliary persistent data (Glulx aux persistence is a later phase).
     aux: BTreeMap<String, Vec<u8>>,
     aux_dirty: bool,
@@ -332,6 +336,7 @@ impl GlulxSession {
             pending_io: None,
             pending_filename: None,
             screen_cache: blank_screen(),
+            window_dump_cache: Vec::new(),
             aux: BTreeMap::new(),
             aux_dirty: false,
             last_room: None,
@@ -427,21 +432,14 @@ impl GlulxSession {
     }
 
     fn refresh_screen(&mut self) {
-        let mut model = self.appglk().screen_model();
-        // Honor the game's Normal buffer-window colours as the pane background/
-        // foreground, so a game that styles its text for a light interpreter
-        // (e.g. CounterfeitMonkey's black-on-white intro) paints a matching pane
-        // instead of leaving white text-islands on the dark theme. Only overrides
-        // a channel the game actually set (via glk_stylehint_set); an unset
-        // channel stays Default and the theme wins. (SQ-0196)
-        let normal = self.machine.style_colour(WinType::TextBuffer, gvm::glk::GlkStyle::Normal);
-        if let Some(rgb) = normal.bg {
-            model.bg = crate::state::pack_zcolour(zvm::screen::ZColour::True24(rgb));
-        }
-        if let Some(rgb) = normal.fg {
-            model.fg = crate::state::pack_zcolour(zvm::screen::ZColour::True24(rgb));
-        }
+        // `screen_model` now derives the pane background/foreground from the
+        // PRIMARY buffer window's own Normal-style colour snapshot (per-window),
+        // so a game that styles its text for a light interpreter (e.g.
+        // CounterfeitMonkey's black-on-white intro) paints a matching pane while
+        // each other window keeps its own colour on its node. (SQ-0196/SQ-0328)
+        let model = self.appglk().screen_model();
         self.screen_cache = model;
+        self.window_dump_cache = self.appglk().window_dump_lines();
     }
 
     /// Drain the primary window output + refresh the screen, building the turn
@@ -807,6 +805,10 @@ impl Engine for GlulxSession {
 
     fn screen(&self) -> ScreenModel {
         self.screen_cache.clone()
+    }
+
+    fn window_dump(&self) -> Vec<String> {
+        self.window_dump_cache.clone()
     }
 
     fn save_state(&self) -> EngineSave {
