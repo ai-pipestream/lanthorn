@@ -1436,6 +1436,12 @@ pub struct AppState {
     /// `styles/<ifid>.toml`). `None` when no sidecar was found.
     pub garglk_overlay: Option<crate::garglk_ini::GarglkOverlay>,
 
+    /// The global `honor_game_colours` default (from config.toml/CLI, before any
+    /// garglk.ini or per-game override), captured at boot. `reload_style` recomputes
+    /// the live `config.honor_game_colours` as `per_game > garglk.ini > this base`
+    /// (SQ-0318), so `auto` (no per-game override) falls back here.
+    pub honor_game_colours_base: bool,
+
     /// Resolved keymap.  Defaults to `KeyMap::default()` (today's hardcoded bindings);
     /// overwritten at startup via `KeyMap::resolve(&cfg.keymap)` when a config is present.
     pub keymap: crate::keymap::KeyMap,
@@ -1673,6 +1679,7 @@ impl Default for AppState {
             transcript_images: Vec::new(),
             transcript_filter: TranscriptFilter::Both,
             garglk_overlay: None,
+            honor_game_colours_base: true,
             transcript_scroll: 0,
             clear_anchor: None,
             transcript_gen: 0,

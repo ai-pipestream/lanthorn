@@ -2491,6 +2491,10 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ConfigSave => {
             if let Some(cs) = state.overlays.config_screen.take() {
                 state.config = clone_config(&cs.working);
+                // The config screen edits the GLOBAL honor default; keep the
+                // SQ-0318 base in sync so a later reload_style doesn't revert it
+                // (a per-game override, if any, still wins on the next reload).
+                state.honor_game_colours_base = state.config.honor_game_colours;
                 if let Some(b) = state.audio.as_mut() {
                     b.set_volume(state.config.volume);
                 } else if state.config.enable_sound {

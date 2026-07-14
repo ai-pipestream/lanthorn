@@ -8,6 +8,45 @@ pub fn per_game_style_path(user_dir: &Path, ifid: &str) -> PathBuf {
     user_dir.join("styles").join(format!("{ifid}.toml"))
 }
 
+/// The per-game NON-style config sidecar: `user_dir/styles/<ifid>.config.toml`.
+/// Holds per-game overrides that are not part of the style schema (SQ-0318:
+/// currently just `honor_game_colours`), kept separate from `<ifid>.toml` so the
+/// style parser/writer stays a pure style document.
+pub fn per_game_config_path(user_dir: &Path, ifid: &str) -> PathBuf {
+    user_dir.join("styles").join(format!("{ifid}.config.toml"))
+}
+
+/// Read the per-game `honor_game_colours` override, if the user set one.
+/// `None` = no override (fall back to garglk.ini, then the global config default).
+pub fn read_per_game_honor(user_dir: &Path, ifid: &str) -> Option<bool> {
+    let path = per_game_config_path(user_dir, ifid);
+    let text = std::fs::read_to_string(&path).ok()?;
+    text.parse::<toml::Value>()
+        .ok()?
+        .get("honor_game_colours")
+        .and_then(|v| v.as_bool())
+}
+
+/// Persist (or clear) the per-game `honor_game_colours` override. `Some(v)` writes
+/// the sidecar (creating `styles/` if needed); `None` clears it (deletes the
+/// sidecar → fall back to garglk.ini / the global default).
+pub fn write_per_game_honor(user_dir: &Path, ifid: &str, value: Option<bool>) -> std::io::Result<()> {
+    let path = per_game_config_path(user_dir, ifid);
+    match value {
+        Some(v) => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, format!("honor_game_colours = {v}\n"))
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        },
+    }
+}
+
 /// Write the live look self-contained to the current game's per-game style file
 /// (`user_dir/styles/<ifid>.toml`), creating `styles/` if needed. Returns the path
 /// written. Does NOT repoint `config.style`; the file is merged over the global
@@ -84,6 +123,28 @@ mod tests {
         assert!(!created2);
         assert_eq!(path2, p);
         assert!(std::fs::read_to_string(&path2).unwrap().contains("\"room\""), "existing content preserved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn per_game_honor_roundtrips_and_clears() {
+        let dir = tmp("honor");
+        let ifid = "ZCODE-1-ABCDEF-0001";
+        // Absent → no override.
+        assert_eq!(read_per_game_honor(&dir, ifid), None);
+        // Some(false) persists and reads back.
+        write_per_game_honor(&dir, ifid, Some(false)).unwrap();
+        assert_eq!(read_per_game_honor(&dir, ifid), Some(false));
+        assert!(per_game_config_path(&dir, ifid).is_file());
+        // Overwrite with Some(true).
+        write_per_game_honor(&dir, ifid, Some(true)).unwrap();
+        assert_eq!(read_per_game_honor(&dir, ifid), Some(true));
+        // None (auto) clears the override.
+        write_per_game_honor(&dir, ifid, None).unwrap();
+        assert_eq!(read_per_game_honor(&dir, ifid), None);
+        assert!(!per_game_config_path(&dir, ifid).exists());
+        // Clearing when already absent is a no-op, not an error.
+        write_per_game_honor(&dir, ifid, None).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

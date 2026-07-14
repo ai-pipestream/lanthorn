@@ -156,6 +156,11 @@ pub(crate) fn boot() -> BootResult {
     // reload_style (and any live /reload) re-applies it. `stylehint` gates
     // honor_game_colours, which the engine build below reads. Precedence: global
     // theme < garglk.ini < user styles/<ifid>.toml.
+    // SQ-0318: the global config default is the honor base; garglk.ini's
+    // `stylehint` gate and the user's per-game override layer on top (per-game
+    // wins). Capture the base before garglk mutates `cfg` so `reload_style` can
+    // recompute the precedence and `auto` can fall back to it.
+    let honor_game_colours_base = cfg.honor_game_colours;
     let garglk_overlay = app::garglk_ini::discover(&story_path);
     let garglk_line = garglk_overlay.as_ref().map(|ov| {
         let summary = ov.apply(&mut cs);
@@ -164,6 +169,14 @@ pub(crate) fn boot() -> BootResult {
         }
         summary.console_line()
     });
+    // SQ-0318: apply the user's persisted per-game honor override (if any) ON TOP
+    // of garglk/global, so the engine builds — and turn one renders — with the
+    // user's explicit choice in force. The IFID is computed here (from the raw
+    // bytes) and reused for the map dir / identity below.
+    let ifid = compute_ifid(&story_bytes);
+    if let Some(v) = app::styles::read_per_game_honor(&cfg.user_dir, &ifid) {
+        cfg.honor_game_colours = v;
+    }
     let theme_colours = app::glk_backend::theme_style_colours(&cs);
 
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
@@ -235,9 +248,10 @@ pub(crate) fn boot() -> BootResult {
 
     // ── 2. IFID + map dir + load/create mapper ────────────────────────────────
 
-    let ifid = compute_ifid(&story_bytes);
-    // `game_dir` (per-story storage) was computed and created before the engine
-    // build; the IFID stays for title/hint/display only.
+    // `ifid` was computed above (before the engine build) so the per-game honor
+    // override could feed the engine; `game_dir` (per-story storage) was computed
+    // and created before the engine build too. The IFID stays for title/hint/
+    // display and the per-game style reload below.
     let arc_file = default_state_path(&game_dir);
 
     // Load mapper (and optionally restore the game save) from the archive.
@@ -338,6 +352,9 @@ pub(crate) fn boot() -> BootResult {
         verb_dock_pct: cfg.verb_dock_pct,
         inv_dock_pct: cfg.inv_dock_pct,
     };
+    // SQ-0318: remember the global honor base so reload_style can recompute the
+    // per-game > garglk > global precedence (and `auto` can fall back here).
+    state.honor_game_colours_base = honor_game_colours_base;
     state.config = cfg;
 
     // Resolve the sound container + construct the audio backend (silent if the

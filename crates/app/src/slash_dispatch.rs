@@ -303,6 +303,30 @@ pub(crate) fn dispatch_slash_outcome(
                 state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
         }
+        SlashOutcome::SetGameColours(opt) => {
+            // Persist the per-game override (or clear it on `auto`), then recompute
+            // the live look + honor precedence from disk (SQ-0318). reload_style
+            // applies `per_game > garglk.ini > global`, so an explicit choice wins
+            // and `auto` falls back to garglk/global.
+            match app::styles::write_per_game_honor(&state.config.user_dir, ifid, opt) {
+                Ok(()) => {
+                    let _ = app::reload::reload_style(state);
+                    let label = match opt {
+                        Some(true) => "on",
+                        Some(false) => "off",
+                        None => "auto",
+                    };
+                    state.push_transcript_internal(
+                        &format!(
+                            "game colours: {label} (honor_game_colours = {})",
+                            state.config.honor_game_colours
+                        ),
+                        TranscriptKind::Meta,
+                    );
+                }
+                Err(e) => state.set_status(format!("set-game-colours failed: {e}")),
+            }
+        }
     }
     false
 }

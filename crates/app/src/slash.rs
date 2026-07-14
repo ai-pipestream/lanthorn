@@ -69,6 +69,10 @@ pub enum SlashOutcome {
     PlaySound(Option<u32>),
     /// Load a standalone map file (path argument) into the current session.
     LoadMap(String),
+    /// Force this game's `honor_game_colours` on/off (`Some`) or clear the
+    /// per-game override (`None` = `auto`, fall back to garglk.ini/global).
+    /// Persisted per-game; handled in `slash_dispatch`.
+    SetGameColours(Option<bool>),
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -361,6 +365,14 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "print-colors", category: Category::Style, context: Context::Global,
         usage: "print-colors [color]", description: "print the current color scheme (color = actual colors)",
         dispatch: |a| SlashOutcome::PrintColors { actual: a.first() == Some(&"color") } },
+    CommandSpec { name: "set-game-colours", category: Category::Style, context: Context::Global,
+        usage: "set-game-colours on|off|auto", description: "force this game's own colours on/off (auto follows garglk.ini/global); persisted per-game",
+        dispatch: |a| match a.first().copied() {
+            Some("on")   => SlashOutcome::SetGameColours(Some(true)),
+            Some("off")  => SlashOutcome::SetGameColours(Some(false)),
+            Some("auto") => SlashOutcome::SetGameColours(None),
+            _ => err("set-game-colours requires an argument: on | off | auto"),
+        } },
 
     // ── Export ────────────────────────────────────────────────────────────
     CommandSpec { name: "export-svg", category: Category::Export, context: Context::Global,
@@ -662,9 +674,9 @@ mod tests {
         assert_eq!(by("save-state").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (55 commands: Game 12, Map 21, View 6,
-        // Transcript 3, Style 5, Export 3, Animation 4, Help 1).
-        assert_eq!(COMMANDS.len(), 56, "registry must match the spec's Full command table");
+        // Total count matches the spec table (Game 12, Map 21, View 6,
+        // Transcript 3, Style 6, Export 3, Animation 4, Help 2).
+        assert_eq!(COMMANDS.len(), 57, "registry must match the spec's Full command table");
     }
 
     #[test]
@@ -726,6 +738,16 @@ mod tests {
         // The run loop calls help_for_command on a HelpCommand(name); verify the
         // function exists with the expected signature and returns non-empty lines.
         assert!(!help_for_command('/', "save-state").is_empty());
+    }
+
+    #[test]
+    fn set_game_colours_parses_on_off_auto() {
+        assert!(matches!(parse("set-game-colours on", '/'), SlashOutcome::SetGameColours(Some(true))));
+        assert!(matches!(parse("set-game-colours off", '/'), SlashOutcome::SetGameColours(Some(false))));
+        assert!(matches!(parse("set-game-colours auto", '/'), SlashOutcome::SetGameColours(None)));
+        assert!(matches!(parse("set-game-colours", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("set-game-colours maybe", '/'), SlashOutcome::Error(_)));
+        assert_eq!(find_command("set-game-colours").expect("set-game-colours").category, Category::Style);
     }
 
     #[test]
