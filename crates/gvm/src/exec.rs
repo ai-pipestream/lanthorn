@@ -1788,12 +1788,14 @@ impl Machine {
         let stks = find(b"Stks").ok_or_else(|| GError::BadSave("missing Stks chunk".into()))?;
 
         // Snapshot the currently-protected bytes (preserved across restore).
+        // Capture 0 for any address currently out of bounds (memory was shrunk
+        // below the protected range): the restore re-extends memory and would
+        // otherwise leak the saved diff into the protected range, so the
+        // re-impose loop must zero it back out.
         let (cur_paddr, cur_plen) = self.protect;
         let mut protected: Vec<(u32, u8)> = Vec::new();
         for a in cur_paddr..cur_paddr.saturating_add(cur_plen) {
-            if let Some(b) = self.mem.read8(a) {
-                protected.push((a, b as u8));
-            }
+            protected.push((a, self.mem.read8(a).unwrap_or(0) as u8));
         }
 
         // Reset RAM to the original image and apply the saved memory chunk —
@@ -6974,6 +6976,34 @@ mod tests {
         m.step_once().unwrap(); // restoreundo, resumes just after saveundo
         assert_eq!(m.mem.read32(0x110).unwrap(), 0xBEEF); // protected → kept current value
         assert_eq!(m.protect, (0x110, 4));
+    }
+
+    /// SQ-0320: `@protect` + a restore that re-extends memory. When the protected
+    /// range lies above the (shrunken) memory top at restore time, the restore
+    /// must bring those bytes back as 0 — not leak the saved diff into them. The
+    /// pre-resize snapshot must capture out-of-bounds protected addresses as 0.
+    #[test]
+    fn restore_zeroes_a_protected_range_deallocated_by_a_shrink() {
+        let mut m = machine_with_body(&[], vec![]);
+        let base = m.mem.mem_size(); // grow beyond the current top
+        let grown = base + 0x100;
+        m.mem.set_raw_size(grown);
+        // Distinct non-zero bytes across the grown region; protect [base+1, base+6).
+        for i in 0..12u32 {
+            m.mem.write8(base + i, i + 1).unwrap();
+        }
+        m.protect = (base + 1, 5);
+        let snap = m.save_state(); // captures memsize=grown incl. bytes 1..=12
+
+        m.mem.set_raw_size(base); // shrink below the protected range (deallocates it)
+        m.restore_state(&snap).unwrap(); // re-extends to grown, applies the diff
+
+        assert_eq!(m.mem.mem_size(), grown);
+        assert_eq!(m.mem.read8(base).unwrap(), 1, "outside protect → restored");
+        for a in base + 1..base + 6 {
+            assert_eq!(m.mem.read8(a).unwrap(), 0, "protected byte {a:#x} must not leak the saved diff");
+        }
+        assert_eq!(m.mem.read8(base + 6).unwrap(), 7, "outside protect → restored");
     }
 
     // ── Task 4 (2c): accel storage, PRNG, verify, gestalt ─────────────────────
