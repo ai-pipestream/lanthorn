@@ -3050,8 +3050,15 @@ impl Machine {
                 // glk_get_char_stream(str) — read one Latin-1 byte, or 0xFFFFFFFF = EOF
                 let sid = a(0);
                 match self.glk.memory_stream_read_info(sid) {
-                    Some((addr, len, pos, false)) if pos < len => {
-                        let v = self.m8(addr + pos)?;
+                    // A byte-oriented read works on a Unicode memory stream too:
+                    // each 32-bit element comes back clamped to a byte
+                    // (> 0xFF → '?'), not EOF (cheapglk gli_get_char).
+                    Some((addr, len, pos, unicode)) if pos < len => {
+                        let v = if unicode {
+                            clamp_byte(self.m32(addr + pos * 4)?)
+                        } else {
+                            self.m8(addr + pos)?
+                        };
                         self.glk.memory_stream_read_advance(sid, 1);
                         v
                     }
@@ -3077,14 +3084,20 @@ impl Machine {
                 // glk_get_line_stream(str, buf, maxlen) — read up to maxlen-1 bytes
                 let (sid, buf, maxlen) = (a(0), a(1), a(2));
                 let mut count = 0u32;
-                if let Some((addr, len, pos, false)) = self.glk.memory_stream_read_info(sid) {
+                if let Some((addr, len, pos, unicode)) = self.glk.memory_stream_read_info(sid) {
                     let mut p = pos;
                     while count + 1 < maxlen && p < len {
-                        let byte = self.m8(addr + p)? as u8;
+                        // Unicode memory stream: clamp each 32-bit element to a
+                        // byte (> 0xFF → '?') — cheapglk gli_get_line.
+                        let byte = if unicode {
+                            clamp_byte(self.m32(addr + p * 4)?)
+                        } else {
+                            self.m8(addr + p)?
+                        };
                         p += 1;
-                        self.store_mem_sized(buf + count, byte as u32, 1)?;
+                        self.store_mem_sized(buf + count, byte, 1)?;
                         count += 1;
-                        if byte == b'\n' {
+                        if byte == b'\n' as u32 {
                             break;
                         }
                     }
@@ -3128,10 +3141,16 @@ impl Machine {
                 // glk_get_buffer_stream(str, buf, len) — read up to len bytes
                 let (sid, buf, maxlen) = (a(0), a(1), a(2));
                 let mut count = 0u32;
-                if let Some((addr, len, pos, false)) = self.glk.memory_stream_read_info(sid) {
+                if let Some((addr, len, pos, unicode)) = self.glk.memory_stream_read_info(sid) {
                     let available = (len - pos).min(maxlen);
                     for i in 0..available {
-                        let byte = self.m8(addr + pos + i)?;
+                        // Unicode memory stream: clamp each 32-bit element to a
+                        // byte (> 0xFF → '?') — cheapglk gli_get_buffer.
+                        let byte = if unicode {
+                            clamp_byte(self.m32(addr + (pos + i) * 4)?)
+                        } else {
+                            self.m8(addr + pos + i)?
+                        };
                         self.store_mem_sized(buf + i, byte, 1)?;
                     }
                     count = available;
@@ -9347,6 +9366,31 @@ mod tests {
         assert_eq!(n, 2, "two code points read (not EOF)");
         assert_eq!(m.mem.read8(0x300).unwrap(), 0x41);
         assert_eq!(m.mem.read8(0x301).unwrap(), b'?' as u32);
+        assert!(m.diagnostics.is_empty(), "no diagnostics: {:?}", m.diagnostics);
+    }
+
+    #[test]
+    fn glk_byte_read_on_a_unicode_memory_stream_clamps_instead_of_eof() {
+        // SQ-0322: a byte-oriented read on a Unicode MEMORY stream returns each
+        // 32-bit element clamped to a byte (> 0xFF → '?'), not EOF (cheapglk
+        // gli_get_char / gli_get_buffer, strtype_Memory unicode arm).
+        let mut m = resource_machine(glk::TestBackend::new(), 0x400);
+        // Two 32-bit elements at 0x300: 'A' (in range) and U+2190 (clamps).
+        m.mem.write32(0x300, 0x41).unwrap();
+        m.mem.write32(0x304, 0x2190).unwrap();
+        // open_memory_uni over 2 words, fmode = Read (buffer is content).
+        let sid = m.glk_dispatch(0x0139, &[0x300, 2, 2, 0]).unwrap();
+        assert_ne!(sid, 0);
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), 0x41, "'A' passes through");
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), b'?' as u32, "U+2190 clamps to '?', not EOF");
+        assert_eq!(m.glk_dispatch(0x0090, &[sid]).unwrap(), 0xFFFF_FFFF, "EOF");
+
+        // Buffer-read variant clamps identically (seek back to the start).
+        m.glk_dispatch(0x0045, &[sid, 0, 0]).unwrap();
+        let n = m.glk_dispatch(0x0092, &[sid, 0x380, 8]).unwrap();
+        assert_eq!(n, 2, "two elements read (not EOF)");
+        assert_eq!(m.mem.read8(0x380).unwrap(), 0x41);
+        assert_eq!(m.mem.read8(0x381).unwrap(), b'?' as u32);
         assert!(m.diagnostics.is_empty(), "no diagnostics: {:?}", m.diagnostics);
     }
 
