@@ -20,7 +20,7 @@ use app::export_svg::export_svg;
 use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
 use app::storage::default_state_path;
-use app::input::{apply_action, apply_tidy_result, key_to_command, mouse_to_action, should_bg_tidy, style_dialog_action, tidy_layer_silent, Action, ApplyTidyOutcome, KeyResolve};
+use app::input::{apply_action, key_to_command, mouse_to_action, should_bg_tidy, style_dialog_action, tidy_layer_silent, Action, KeyResolve};
 use app::persist_files::{delete_save, list_saves, load_map, save_game_named, restore_game, save_named};
 use app::render::config_screen::draw_config_screen;
 use app::render::style_editor::{draw_style_editor, StyleEditorRects};
@@ -35,7 +35,7 @@ use app::render::reset_dialog::draw_reset_dialog;
 use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
-use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color, SOUND_PULSE_MS};
+use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
 use app::render::paneframe::{build_layer_segments, draw_framed, draw_header_plain, draw_top_inset, InsetSegment};
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
@@ -54,6 +54,7 @@ use app::hints;
 use app::slash::{self, SlashOutcome, TranscriptFilterArg};
 use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, PromptKind, RoomPanelMode, SavesState, SoundPulse, TidyJob, TranscriptFilter, TranscriptKind};
 
+mod loop_tick;
 mod picker_ui;
 mod startup;
 
@@ -1128,210 +1129,21 @@ fn main() {
         // ~50ms, so this is checked promptly.
         exit_if_terminated();
 
-        // ── Style watch: drain events, debounce, then reload ──────────────────
-        if let Some(w) = &style_watcher {
-            let mut saw = false;
-            while w.rx.try_recv().is_ok() { saw = true; }
-            if saw { watch_dirty = Some(std::time::Instant::now()); }
-        } else {
-            // Watch turned off: drop any pending debounce so it can't fire later.
-            watch_dirty = None;
-        }
-        if app::watch::due(watch_dirty, std::time::Instant::now(), Duration::from_millis(200)) {
-            watch_dirty = None;
-            needs_redraw = true; // style reload changes colours/status → repaint
-            match app::reload::reload_style(&mut state) {
-                app::reload::ReloadOutcome::Reloaded { warnings } => {
-                    for wn in &warnings {
-                        state.push_transcript_internal(wn, TranscriptKind::Warning);
-                    }
-                    state.set_status("style reloaded (watch)");
-                }
-                app::reload::ReloadOutcome::Failed { msg } => {
-                    state.push_transcript_internal(
-                        &format!("style reload failed: {}", msg),
-                        TranscriptKind::Warning,
-                    );
-                }
-            }
-        }
-
-        // ── Glulx re-arrange on settled story-pane size (SQ-0201) ─────────────
-        // Uses last frame's story rect (one-frame lag is fine). Runs BEFORE the
-        // draw so the resized graphics show on the next frame. Glulx-only; the
-        // Z-machine renders its own fixed virtual screen into the pane.
-        if session.as_any().is::<GlulxSession>() {
-            let now = std::time::Instant::now();
-            let cur = (last_panes.story.width, last_panes.story.height);
-            if cur.0 > 0 && cur.1 > 0 {
-                if Some(cur) != story_size_seen {
-                    story_size_seen = Some(cur);
-                    resize_dirty = Some(now); // size moved; (re)start the settle timer
-                }
-                if Some(cur) != vm_story_size
-                    && app::watch::due(resize_dirty, now, Duration::from_millis(150))
-                {
-                    resize_dirty = None;
-                    vm_story_size = Some(cur);
-                    needs_redraw = true; // Glulx graphics repaint at the new size
-                    if let Some(gs) = session.as_any_mut().downcast_mut::<GlulxSession>() {
-                        gs.resize(cur.0 as u32, cur.1 as u32);
-                    }
-                }
-            }
-        }
-
-        // ── Background tidy job: poll and apply ───────────────────────────────
-        // Check whether the in-flight tidy job has finished. Do this BEFORE the
-        // draw so the first fully-drawn frame after completion shows the new layout.
-        if state.tidy_job.as_ref().is_some_and(|j| j.handle.is_finished()) {
-            needs_redraw = true; // tidy result applied (or re-triggered) → map changes
-            let job = state.tidy_job.take().unwrap();
-            let current_gen = state.graph_gen;
-            let active_layer = job.layer;
-            match job.handle.join() {
-                Ok(tidied) => {
-                    match apply_tidy_result(&mut mapper.graph, tidied, active_layer, job.gen, current_gen) {
-                        ApplyTidyOutcome::Applied => {
-                            state.bump_graph_gen(); // tidied layout applied → invalidate map memo (SQ-0305)
-                            // Re-center on the current room if it moved.
-                            if let Some(rid) = mapper.graph.current() {
-                                if let Some(room) = mapper.graph.room(rid) {
-                                    if let Some(pos) = room.pos {
-                                        let (pw, ph) = map_pane_dims(last_panes.map);
-                                        state.recenter_on(pos, pw, ph);
-                                    }
-                                }
-                            }
-                        }
-                        ApplyTidyOutcome::Stale => {
-                            // Graph changed mid-tidy: re-trigger a fresh tidy immediately.
-                            let active_layer2 = state.active_layer(&mapper.graph);
-                            let graph_clone = mapper.graph.clone();
-                            let gen2 = state.graph_gen;
-                            let handle2 = std::thread::spawn(move || {
-                                let mut g = graph_clone;
-                                tidy_layer_silent(&mut g, active_layer2);
-                                g
-                            });
-                            state.tidy_job = Some(TidyJob {
-                                handle: handle2,
-                                layer: active_layer2,
-                                gen: gen2,
-                                started: std::time::Instant::now(),
-                            });
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Worker panicked: discard result, leave graph as-is. Do not crash.
-                }
-            }
-        }
-
-        // ── Tidy-animation build job: poll and install ────────────────────────
-        // The `animate-tidy` command builds its frames off-thread. When the worker
-        // finishes, apply the tidied graph (staleness-guarded) and install the anim.
-        // Unlike the background tidy above, a stale result is simply discarded — the
-        // user asked for one animation, so we do NOT re-trigger a fresh build.
-        if state.anim_build_job.as_ref().is_some_and(|j| j.handle.is_finished()) {
-            needs_redraw = true; // anim build installed / graph applied → repaint
-            let job = state.anim_build_job.take().unwrap();
-            let current_gen = state.graph_gen;
-            state.status_msg = None;
-            if let Ok((frames, tidied)) = job.handle.join() {
-                match apply_tidy_result(&mut mapper.graph, tidied, job.layer, job.gen, current_gen) {
-                    ApplyTidyOutcome::Applied => {
-                        // Instant re-tidy (animate=false) and the anim's final settle both
-                        // land the tidied graph here — invalidate the map memo so the live
-                        // path shows it (and does not SNAP BACK when the anim ends). (SQ-0305)
-                        state.bump_graph_gen();
-                        // `animate-tidy` plays the captured frames; the instant `tidy-map`
-                        // re-tidy (animate=false) applies the tidied graph without an
-                        // animation — it only used the off-thread build for the progress
-                        // bar. (SQ-0261)
-                        if job.animate {
-                            state.tidy_anim = Some(app::state::TidyAnim::new(frames));
-                        }
-                        // Re-center on the current room if it moved (mirrors the tidy_job path).
-                        if let Some(rid) = mapper.graph.current() {
-                            if let Some(room) = mapper.graph.room(rid) {
-                                if let Some(pos) = room.pos {
-                                    let (pw, ph) = map_pane_dims(last_panes.map);
-                                    state.recenter_on(pos, pw, ph);
-                                }
-                            }
-                        }
-                    }
-                    ApplyTidyOutcome::Stale => {
-                        // Graph changed during the build: discard the frames and the
-                        // tidied result. Do not install an animation or apply a stale graph.
-                    }
-                }
-            }
-        }
-
-        // Update char_mode flag so the renderer hides the prompt during read_char.
-        let prev_char_mode = state.char_mode;
-        let prev_event_wait = state.event_wait;
-        state.char_mode = matches!(session.pending_input(), app::session::InputKind::Char);
-        // A Glulx timer/mouse/hyperlink-only glk_select: hide the prompt too (no
-        // typed input is requested), but unlike char_mode do NOT forward keys to
-        // the game — the timer clock / click delivers the event instead.
-        state.event_wait = matches!(session.pending_input(), app::session::InputKind::Event);
-        // A prompt-visibility transition changes the frame even with no new input.
-        if state.char_mode != prev_char_mode || state.event_wait != prev_event_wait {
-            needs_redraw = true;
-        }
-
-        // Re-arm the timed-input deadline each iteration. Only while the game is
-        // actually awaiting input (no dialog/overlay/prompt covering the pane) and
-        // honoring timers; `pending_timeout()` is `None` for an untimed read, so
-        // this is a no-op for the vast majority of games (regression guard). Timed
-        // input is a Z-machine-only concept (ZMSD): `zvm_session_opt` is `None` for
-        // a Glulx engine, so the timer never arms there.
-        let timer_interval = zvm_session_opt(&*session)
-            .and_then(|s| s.pending_timeout())
-            .map(|(t, _)| Duration::from_millis(t as u64 * 100));
-        let should_arm = state.config.honor_timed_input
-            && !state.any_overlay_open()
-            && timer_interval.is_some();
-        state.input_deadline = next_input_deadline(
-            state.input_deadline,
-            should_arm,
-            timer_interval.unwrap_or(Duration::ZERO),
-            std::time::Instant::now(),
+        // ── Pre-input pollers (SQ-0306) ───────────────────────────────────────
+        // The per-iteration housekeeping that runs BEFORE the draw/poll: each
+        // independent pollable subsystem lives in `loop_tick` and returns its
+        // redraw contribution, OR-ed into `needs_redraw` here (order preserved).
+        needs_redraw |= loop_tick::poll_style_watch(&mut state, &style_watcher, &mut watch_dirty);
+        needs_redraw |= loop_tick::poll_glulx_resize(
+            &mut *session,
+            &last_panes,
+            &mut story_size_seen,
+            &mut resize_dirty,
+            &mut vm_story_size,
         );
-
-        // Re-arm the Glulx Glk timer-events clock (glk_request_timer_events) — the
-        // Glulx analogue of `input_deadline`, and independent of it. Armed only
-        // when a Glulx game has requested a timer interval and no overlay covers
-        // the pane; uses the same arm-once semantics (`next_input_deadline`) so the
-        // deadline holds steady until it fires (the fire path below re-arms fresh).
-        let glk_timer_interval = glulx_session_opt(&*session).and_then(|s| s.timer_interval());
-        let should_arm_glk_timer = !state.any_overlay_open() && glk_timer_interval.is_some();
-        state.glulx_timer_next_fire = next_input_deadline(
-            state.glulx_timer_next_fire,
-            should_arm_glk_timer,
-            glk_timer_interval.unwrap_or(Duration::ZERO),
-            std::time::Instant::now(),
-        );
-
-        // Expire a finished sound pulse so the story border returns to normal.
-        if let Some(p) = &state.sound_pulse {
-            if p.started.elapsed().as_millis() as u64 >= SOUND_PULSE_MS {
-                state.sound_pulse = None;
-                needs_redraw = true; // border returns to normal → repaint once
-            }
-        }
-
-        // Clear the verb-menu content once its slide-out has fully settled
-        // (drawer pattern: content persists during the close animation).
-        let had_verb_menu = state.verb_menu.is_some();
-        state.settle_verb_dock();
-        if had_verb_menu && state.verb_menu.is_none() {
-            needs_redraw = true; // drawer content dropped → repaint the cleared pane
-        }
+        needs_redraw |= loop_tick::poll_tidy_jobs(&mut state, &mut mapper, &last_panes);
+        needs_redraw |= loop_tick::refresh_engine_input(&mut state, &*session);
+        needs_redraw |= loop_tick::expire_sound_and_settle_dock(&mut state);
 
         // Draw — unless we're mid-drain of an input burst (skip_draw), in which
         // case the deferred redraw happens once the queue empties. last_panes and
