@@ -140,12 +140,21 @@ impl Blorb {
     }
 
     fn chunk_data(&self, e: &ResourceEntry) -> &[u8] {
-        &self.bytes[e.start + 8..e.start + 8 + e.len]
+        // A `FORM` resource (a nested IFF FORM — e.g. an AIFF sound, or a `Data`
+        // FORM resource) keeps its 8-byte `FORM`+length header: per the Blorb
+        // spec the header is part of the resource data. Every other chunk type
+        // yields just its payload (the bytes after the 8-byte chunk header).
+        if &e.chunk_type == b"FORM" {
+            &self.bytes[e.start..e.start + 8 + e.len]
+        } else {
+            &self.bytes[e.start + 8..e.start + 8 + e.len]
+        }
     }
 
-    /// Public counterpart of [`Blorb::chunk_data`]: the raw payload bytes for
-    /// resource `e` (post 8-byte chunk header, pre pad byte). For callers that
-    /// need to inspect a resource's raw bytes (e.g. format-detail parsing).
+    /// Public counterpart of [`Blorb::chunk_data`]: the raw data bytes for
+    /// resource `e` (post 8-byte chunk header, pre pad byte — but a `FORM`
+    /// resource retains its `FORM`+length header). For callers that need to
+    /// inspect a resource's raw bytes (e.g. format-detail parsing).
     pub fn resource_data(&self, e: &ResourceEntry) -> &[u8] {
         self.chunk_data(e)
     }
@@ -179,8 +188,9 @@ impl Blorb {
         Some((&e.chunk_type, self.chunk_data(e)))
     }
 
-    /// Payload bytes + detected [`SoundKind`] for sound resource `number`
-    /// (`usage == b"Snd "`), or `None` when no such resource exists. The kind is
+    /// Data bytes + detected [`SoundKind`] for sound resource `number`
+    /// (`usage == b"Snd "`), or `None` when no such resource exists. An AIFF
+    /// (`FORM`) sound retains its `FORM`+length header. The kind is
     /// detected from the chunk type: `FORM` → AIFF, `OGGV` → Ogg, `MOD ` → Mod,
     /// anything else → Other.
     pub fn sound(&self, number: u32) -> Option<(&[u8], SoundKind)> {
@@ -476,6 +486,26 @@ mod tests {
     }
 
     #[test]
+    fn form_resource_retains_its_header() {
+        // SQ-0323: a FORM resource (nested IFF FORM) must be returned WITH its
+        // 8-byte `FORM`+length header — the header is part of the resource data
+        // per the Blorb spec — whereas a non-FORM chunk yields only its payload.
+        let b = build_blorb(&[
+            (b"Data", 8, b"FORM", b"THIS"),   // FORM resource: keep the header
+            (b"Data", 9, b"TEXT", b"payload"), // non-FORM: payload only
+        ]);
+        let blorb = Blorb::parse(b).unwrap();
+        let (ty, data) = blorb.resource(b"Data", 8).unwrap();
+        assert_eq!(ty, b"FORM");
+        // Whole chunk: "FORM" + big-endian length (4) + "THIS" = 12 bytes.
+        let mut expected = b"FORM".to_vec();
+        expected.extend_from_slice(&4u32.to_be_bytes());
+        expected.extend_from_slice(b"THIS");
+        assert_eq!(data, &expected[..], "FORM resource keeps its 8-byte header");
+        assert_eq!(blorb.resource(b"Data", 9).unwrap().1, b"payload", "non-FORM: payload only");
+    }
+
+    #[test]
     fn resource_handles_odd_length_pad_byte() {
         // First chunk has odd-length data ("oggdata" = 7); the pad byte must be
         // skipped so the following resource is still found at its real offset.
@@ -498,7 +528,11 @@ mod tests {
         ]);
         let blorb = Blorb::parse(b).unwrap();
         let (data, kind) = blorb.sound(7).unwrap();
-        assert_eq!(data, b"aiffbytes");
+        // A FORM resource keeps its 8-byte `FORM`+length header (Blorb spec).
+        let mut expected = b"FORM".to_vec();
+        expected.extend_from_slice(&(b"aiffbytes".len() as u32).to_be_bytes());
+        expected.extend_from_slice(b"aiffbytes");
+        assert_eq!(data, &expected[..]);
         assert_eq!(kind, SoundKind::Aiff);
         assert!(blorb.sound(99).is_none(), "absent sound number returns None");
     }
@@ -585,10 +619,12 @@ mod tests {
         sound_blorb_tagged(b"aiffdata")
     }
 
-    /// A sound Blorb whose `Snd ` payload is `tag`, so tests can tell which
-    /// file the resolver actually picked among several candidates.
+    /// A sound Blorb whose `Snd ` payload is exactly `tag`, so tests can tell
+    /// which file the resolver actually picked among several candidates. Uses an
+    /// `OGGV` chunk (not `FORM`) so `sound()` returns the payload verbatim — a
+    /// `FORM` resource would retain its 8-byte header (see `sound()`).
     fn sound_blorb_tagged(tag: &[u8]) -> Vec<u8> {
-        build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd"), (b"Snd ", 1, b"FORM", tag)])
+        build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd"), (b"Snd ", 1, b"OGGV", tag)])
     }
 
     #[test]

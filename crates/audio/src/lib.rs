@@ -65,10 +65,10 @@ fn extended80_to_u32(b: &[u8; 10]) -> u32 {
 /// big-endian 16-bit PCM). Returns None on a malformed or non-16-bit AIFF.
 #[cfg_attr(not(feature = "playback"), allow(dead_code))]
 fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
-    // Blorb's `Blorb::sound` returns the FORM chunk's PAYLOAD (the 8-byte
-    // `FORM`+len header already stripped), so the bytes it hands us usually
-    // start directly with the form type `AIFF`/`AIFC`. Accept both that shape
-    // and a full `FORM`...`AIFF`/`AIFC` container (e.g. a standalone .aiff file).
+    // `Blorb::sound` returns an AIFF resource as a full `FORM`...`AIFF`/`AIFC`
+    // container (the `FORM`+len header is part of the resource per the Blorb
+    // spec). Accept that, and also a bare payload starting directly at the form
+    // type `AIFF`/`AIFC` (a headerless slice or a legacy caller).
     let mut pos = if bytes.len() >= 12
         && &bytes[0..4] == b"FORM"
         && (&bytes[8..12] == b"AIFF" || &bytes[8..12] == b"AIFC")
