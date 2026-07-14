@@ -2208,6 +2208,16 @@ fn main() {
     // motion events (or a paste) then costs ONE redraw instead of one per event.
     let mut skip_draw = false;
 
+    // Dirty-flag redraw gate (SQ-0305): the loop wakes every ~50ms (faster while
+    // animating/timing) but the UI only changes when something observable happens.
+    // Redraw only when `needs_redraw` is set (or an animation is active); an idle
+    // app then does ~zero work per tick. The flag is set wherever the loop did
+    // something — an event was dispatched, a background poller applied a change, a
+    // deadline fired — and left false only on the pure poll-timeout no-op path.
+    // First frame always draws. The poll deadlines are UNCHANGED: this gates the
+    // draw, not the tick.
+    let mut needs_redraw = true;
+
     'event_loop: loop {
         // Restore the terminal + exit if an external termination signal arrived
         // (SIGTERM/SIGHUP/out-of-band SIGINT); the poll below wakes at least every
@@ -2225,6 +2235,7 @@ fn main() {
         }
         if app::watch::due(watch_dirty, std::time::Instant::now(), Duration::from_millis(200)) {
             watch_dirty = None;
+            needs_redraw = true; // style reload changes colours/status → repaint
             match app::reload::reload_style(&mut state) {
                 app::reload::ReloadOutcome::Reloaded { warnings } => {
                     for wn in &warnings {
@@ -2258,6 +2269,7 @@ fn main() {
                 {
                     resize_dirty = None;
                     vm_story_size = Some(cur);
+                    needs_redraw = true; // Glulx graphics repaint at the new size
                     if let Some(gs) = session.as_any_mut().downcast_mut::<GlulxSession>() {
                         gs.resize(cur.0 as u32, cur.1 as u32);
                     }
@@ -2269,6 +2281,7 @@ fn main() {
         // Check whether the in-flight tidy job has finished. Do this BEFORE the
         // draw so the first fully-drawn frame after completion shows the new layout.
         if state.tidy_job.as_ref().is_some_and(|j| j.handle.is_finished()) {
+            needs_redraw = true; // tidy result applied (or re-triggered) → map changes
             let job = state.tidy_job.take().unwrap();
             let current_gen = state.graph_gen;
             let active_layer = job.layer;
@@ -2317,6 +2330,7 @@ fn main() {
         // Unlike the background tidy above, a stale result is simply discarded — the
         // user asked for one animation, so we do NOT re-trigger a fresh build.
         if state.anim_build_job.as_ref().is_some_and(|j| j.handle.is_finished()) {
+            needs_redraw = true; // anim build installed / graph applied → repaint
             let job = state.anim_build_job.take().unwrap();
             let current_gen = state.graph_gen;
             state.status_msg = None;
@@ -2349,11 +2363,17 @@ fn main() {
         }
 
         // Update char_mode flag so the renderer hides the prompt during read_char.
+        let prev_char_mode = state.char_mode;
+        let prev_event_wait = state.event_wait;
         state.char_mode = matches!(session.pending_input(), app::session::InputKind::Char);
         // A Glulx timer/mouse/hyperlink-only glk_select: hide the prompt too (no
         // typed input is requested), but unlike char_mode do NOT forward keys to
         // the game — the timer clock / click delivers the event instead.
         state.event_wait = matches!(session.pending_input(), app::session::InputKind::Event);
+        // A prompt-visibility transition changes the frame even with no new input.
+        if state.char_mode != prev_char_mode || state.event_wait != prev_event_wait {
+            needs_redraw = true;
+        }
 
         // Re-arm the timed-input deadline each iteration. Only while the game is
         // actually awaiting input (no dialog/overlay/prompt covering the pane) and
@@ -2392,18 +2412,29 @@ fn main() {
         if let Some(p) = &state.sound_pulse {
             if p.started.elapsed().as_millis() as u64 >= SOUND_PULSE_MS {
                 state.sound_pulse = None;
+                needs_redraw = true; // border returns to normal → repaint once
             }
         }
 
         // Clear the verb-menu content once its slide-out has fully settled
         // (drawer pattern: content persists during the close animation).
+        let had_verb_menu = state.verb_menu.is_some();
         state.settle_verb_dock();
+        if had_verb_menu && state.verb_menu.is_none() {
+            needs_redraw = true; // drawer content dropped → repaint the cleared pane
+        }
 
         // Draw — unless we're mid-drain of an input burst (skip_draw), in which
         // case the deferred redraw happens once the queue empties. last_panes and
         // the panes-derived clamps below simply carry over from the last real
         // frame during the burst (layout is stable within a burst).
-        if !std::mem::take(&mut skip_draw) {
+        // Redraw gate (SQ-0305): skip the draw entirely when nothing changed and
+        // no animation is in flight. `skip_draw` still coalesces an input burst
+        // (and, when it fires, leaves `needs_redraw` set so the deferred frame
+        // draws once the queue empties). An active animation always draws so its
+        // tween keeps stepping.
+        if !std::mem::take(&mut skip_draw) && (needs_redraw || state.has_active_animation()) {
+        needs_redraw = false;
         match draw_frame(&mut terminal, &*session, &mapper, &state) {
             Ok(panes) => {
                 // Clamp scrollback to what the frame can actually show, so an
@@ -2476,10 +2507,18 @@ fn main() {
         };
 
         if !event_ready {
+            // Any animation in flight this tick (scroll/dock/list eases, sound
+            // pulse, pending tidy jobs) needs a redraw — both while it tweens and
+            // for the one frame where it settles (has_active_animation flips false
+            // only after finalize below). (SQ-0305)
+            if state.has_active_animation() {
+                needs_redraw = true;
+            }
             // Story-pane selection held at an edge with no new mouse event: step the
             // auto-scroll one wrapped row and let the next iteration redraw. (SQ-0197)
             if selecting_at_edge {
                 app::input::apply_selection_autoscroll(&mut state);
+                needs_redraw = true;
             }
             // Timed-input interrupt: the deadline elapsed with no key pressed. Run
             // the game's interrupt routine and apply its output through the same
@@ -2496,6 +2535,7 @@ fn main() {
                         // now + interval (otherwise the elapsed deadline would refire
                         // immediately every iteration).
                         state.input_deadline = None;
+                        needs_redraw = true; // interrupt ran → repaint any output
                         if apply_game_driven_result(
                             &mut state, &mut mapper, &result, &game_dir, last_panes.map,
                         ) {
@@ -2511,6 +2551,7 @@ fn main() {
             if let Some(dl) = state.glulx_timer_next_fire {
                 if std::time::Instant::now() >= dl {
                     state.glulx_timer_next_fire = None;
+                    needs_redraw = true; // timer event delivered → repaint any output
                     if let Some(gs) = glulx_session_opt_mut(&mut *session) {
                         let result = gs.deliver_timer();
                         if apply_game_driven_result(
@@ -2523,6 +2564,9 @@ fn main() {
             }
             // Poll for finished sampled sounds and fire their finish-routines.
             let done: Vec<u32> = state.audio.as_mut().map(|b| b.finished()).unwrap_or_default();
+            if !done.is_empty() {
+                needs_redraw = true; // finish-routine output / channel state changed
+            }
             for id in done {
                 // Always forget the number->id mapping for a finished sound, even
                 // one with no finish routine.
@@ -2557,10 +2601,17 @@ fn main() {
             if let Some(anim) = &mut state.tidy_anim {
                 // Short auto-play dwell — stepping is mostly done manually with the
                 // arrow keys, so the delay only needs to be long enough to follow.
-                anim.tick(Duration::from_millis(100));
+                // `tick` returns true only when a frame actually advanced — redraw
+                // just then, so a paused/holding anim still idles. (SQ-0305)
+                if anim.tick(Duration::from_millis(100)) {
+                    needs_redraw = true;
+                }
             }
             if let Some(r) = &mut state.replay {
-                r.tick(Duration::from_millis(700), state.history.len());
+                // Likewise: redraw only when the auto-play cursor advanced a turn.
+                if r.tick(Duration::from_millis(700), state.history.len()) {
+                    needs_redraw = true;
+                }
             }
             // Finalize a completed smooth-scroll: snap the logical offset to the
             // target and drop the animation. The next iteration redraws.
@@ -2595,6 +2646,12 @@ fn main() {
                 std::process::exit(1);
             }
         };
+
+        // An event was read and will be dispatched (key/mouse/paste/resize, or a
+        // dialog/overlay intercept) — the frame may change, so redraw next pass.
+        // Biasing to over-draw here is deliberate: a swallowed key costs one extra
+        // frame; a missed redraw is a visible bug. (SQ-0305)
+        needs_redraw = true;
 
         // If more input is already queued behind this event, defer the next
         // redraw so the whole burst collapses into a single frame. Cleared at
