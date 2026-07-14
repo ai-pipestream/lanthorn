@@ -226,7 +226,7 @@ pub(crate) fn refresh_engine_input(
     let should_arm = state.config.honor_timed_input
         && !state.any_overlay_open()
         && timer_interval.is_some();
-    state.input_deadline = crate::next_input_deadline(
+    state.input_deadline = crate::turn::next_input_deadline(
         state.input_deadline,
         should_arm,
         timer_interval.unwrap_or(Duration::ZERO),
@@ -240,7 +240,7 @@ pub(crate) fn refresh_engine_input(
     // deadline holds steady until it fires (the fire path below re-arms fresh).
     let glk_timer_interval = crate::glulx_session_opt(session).and_then(|s| s.timer_interval());
     let should_arm_glk_timer = !state.any_overlay_open() && glk_timer_interval.is_some();
-    state.glulx_timer_next_fire = crate::next_input_deadline(
+    state.glulx_timer_next_fire = crate::turn::next_input_deadline(
         state.glulx_timer_next_fire,
         should_arm_glk_timer,
         glk_timer_interval.unwrap_or(Duration::ZERO),
