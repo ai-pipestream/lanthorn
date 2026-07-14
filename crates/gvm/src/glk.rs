@@ -469,6 +469,39 @@ pub struct Rect {
     pub height: u32,
 }
 
+/// A node of gvm's live window tree, for a host renderer. Children are in
+/// POSITION order: `first` is the top/left child, `second` the bottom/right —
+/// matching how a host lays out `first` before `second`. (Glk's child1/child2
+/// are old/key, NOT position; [`Model::window_tree`] normalizes here by
+/// comparing rects.)
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum WinTree {
+    Leaf { id: u32, wintype: WinType, rect: Rect },
+    Pair {
+        /// true for an Above/Below split (children stacked), false for Left/Right.
+        vertical: bool,
+        /// Whether the split requested a visible border (`winmethod_Border`; the
+        /// default). NoBorder → false.
+        border: bool,
+        /// The FIRST (top/left) child's extent along the split axis, in cells
+        /// (rows if vertical, cols if not) — the host gives `first` this many
+        /// cells, then the border cell (if `border`), then `second` the rest.
+        split: u32,
+        rect: Rect,
+        first: Box<WinTree>,
+        second: Box<WinTree>,
+    },
+}
+
+impl WinTree {
+    /// This node's resolved rectangle (the leaf's, or the pair window's own).
+    pub fn rect(&self) -> Rect {
+        match self {
+            WinTree::Leaf { rect, .. } | WinTree::Pair { rect, .. } => *rect,
+        }
+    }
+}
+
 // ── Backend trait ─────────────────────────────────────────────────────────────
 
 /// A display backend the VM drives for all output-side effects. The Glk state
@@ -491,6 +524,12 @@ pub trait GlkBackend {
     /// root), `Some(false)` = `winmethod_NoBorder`, `Some(true)` = `winmethod_Border`.
     /// A host that draws inter-window frames uses it to force presence on/off.
     fn window_layout(&mut self, _wins: &[(u32, WinType, Rect, Option<bool>)]) {}
+    /// The resolved window tree changed. `tree` is gvm's live [`WinTree`] (with
+    /// position-ordered children and border hints), or `None` when no root
+    /// window exists. A host that renders the true window hierarchy (borders,
+    /// nested splits) consumes this; the flat [`GlkBackend::window_layout`] still
+    /// feeds hit-testing. Default no-op.
+    fn window_tree(&mut self, _tree: Option<WinTree>) {}
     /// Append `s` (already style-tagged) to a text-buffer window.
     fn put_text(&mut self, _win: u32, _style: GlkStyle, _s: &str) {}
     /// Write `s` to a text-grid window's cells starting at `(x, y)`.
@@ -1831,13 +1870,18 @@ impl Model {
         let dir = w.method & WINMETHOD_DIRMASK;
         let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
         if vertical != horizontal {
-            // This split divides the axis under test.
+            // This split divides the axis under test. A bordered split reserves
+            // one cell (the separator), so the proportional halves must divide
+            // the *content* (`size − border`), not the full extent — otherwise a
+            // bordered 50% split lands on unequal cells.
+            let border = if (w.method & WINMETHOD_BORDERMASK) != WINMETHOD_NOBORDER { 1 } else { 0 };
+            let content = size.saturating_sub(border);
             let proportional = (w.method & WINMETHOD_DIVISIONMASK) == WINMETHOD_PROPORTIONAL;
-            if proportional && !(size * w.size).is_multiple_of(100) {
-                return false; // (total * pct) / 100 would truncate → fractional split
+            if proportional && !(content * w.size).is_multiple_of(100) {
+                return false; // (content * pct) / 100 would truncate → fractional split
             }
             let new = if proportional {
-                (size * w.size) / 100
+                (content * w.size) / 100
             } else {
                 let key_is_graphics = self.win(w.child2).map(|c| c.wintype) == Some(WinType::Graphics);
                 if key_is_graphics {
@@ -1847,8 +1891,9 @@ impl Model {
                     w.size
                 }
             }
-            .min(size);
-            self.axis_splits_exact(w.child1, size - new, horizontal)
+            .min(content);
+            let old = content - new;
+            self.axis_splits_exact(w.child1, old, horizontal)
                 && self.axis_splits_exact(w.child2, new, horizontal)
         } else {
             // Splits the other axis: this axis passes full `size` to both children.
@@ -1929,6 +1974,40 @@ impl Model {
     /// A window's `(width, height)` in characters. `None` if invalid.
     pub fn window_size(&self, win: u32) -> Option<(u32, u32)> {
         self.win(win).map(|w| (w.rect.width, w.rect.height))
+    }
+    /// gvm's live window tree as a [`WinTree`], reflecting the rects from the
+    /// most recent [`relayout`](Self::relayout). `None` when no root is open.
+    /// Pair children are normalized to POSITION order (`first` = top/left).
+    pub fn window_tree(&self) -> Option<WinTree> {
+        if self.root == 0 {
+            return None;
+        }
+        Some(self.build_win_tree(self.root))
+    }
+    fn build_win_tree(&self, id: u32) -> WinTree {
+        let w = self.win(id).expect("window_tree walks the live window tree");
+        if w.wintype != WinType::Pair {
+            return WinTree::Leaf { id, wintype: w.wintype, rect: w.rect };
+        }
+        let dir = w.method & WINMETHOD_DIRMASK;
+        let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
+        let border = (w.method & WINMETHOD_BORDERMASK) != WINMETHOD_NOBORDER;
+        let c1 = self.build_win_tree(w.child1);
+        let c2 = self.build_win_tree(w.child2);
+        // Glk's child1/child2 are old/key, not position; order them by on-screen
+        // position so `first` is always the top/left child.
+        let pos = |t: &WinTree| if vertical { t.rect().top } else { t.rect().left };
+        let (first, second) = if pos(&c1) <= pos(&c2) { (c1, c2) } else { (c2, c1) };
+        let fr = first.rect();
+        let split = if vertical { fr.height } else { fr.width };
+        WinTree::Pair {
+            vertical,
+            border,
+            split,
+            rect: w.rect,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
     }
     /// Whether any open window is a graphics window (used to gate Redraw events
     /// on arrangement — text-only trees never need one).
@@ -3171,36 +3250,46 @@ impl<'a> SnapReader<'a> {
 /// direction; its size is `size` characters (Fixed) or `size`% (Proportional)
 /// of the split axis. An oversized request collapses the old window to zero
 /// (Glk spec §3.3: undersized windows get zero, not renegotiation).
+///
+/// A bordered split (the default; `winmethod_NoBorder` clears the border bit)
+/// reserves one cell *between* the two children for the separator rule. That
+/// border is extra space (Glk spec §3.2): a Fixed window keeps its exact
+/// requested size and the border comes out of the sibling's share. So the
+/// content apportioned between the children is `total − 1`, and the two
+/// children sit on either side of the reserved cell.
 fn split_rect(rect: Rect, method: u32, size: u32) -> (Rect, Rect) {
     let dir = method & WINMETHOD_DIRMASK;
     let division = method & WINMETHOD_DIVISIONMASK;
     let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
     let total = if vertical { rect.height } else { rect.width };
+    let border = if (method & WINMETHOD_BORDERMASK) != WINMETHOD_NOBORDER { 1 } else { 0 };
+    let border = border.min(total); // a degenerate 0-cell rect can't spare one
+    let content = total - border;
     let new_size = if division == WINMETHOD_PROPORTIONAL {
-        (total * size) / 100
+        (content * size) / 100
     } else {
         size
     }
-    .min(total);
-    let old_size = total - new_size;
+    .min(content);
+    let old_size = content - new_size;
 
     match dir {
         WINMETHOD_LEFT => (
-            Rect { left: rect.left + new_size, width: old_size, ..rect },
+            Rect { left: rect.left + new_size + border, width: old_size, ..rect },
             Rect { left: rect.left, width: new_size, ..rect },
         ),
         WINMETHOD_RIGHT => (
             Rect { left: rect.left, width: old_size, ..rect },
-            Rect { left: rect.left + old_size, width: new_size, ..rect },
+            Rect { left: rect.left + old_size + border, width: new_size, ..rect },
         ),
         WINMETHOD_ABOVE => (
-            Rect { top: rect.top + new_size, height: old_size, ..rect },
+            Rect { top: rect.top + new_size + border, height: old_size, ..rect },
             Rect { top: rect.top, height: new_size, ..rect },
         ),
         // WINMETHOD_BELOW (and any unknown direction defaults to below).
         _ => (
             Rect { top: rect.top, height: old_size, ..rect },
-            Rect { top: rect.top + old_size, height: new_size, ..rect },
+            Rect { top: rect.top + old_size + border, height: new_size, ..rect },
         ),
     }
 }
@@ -3209,8 +3298,11 @@ fn split_rect(rect: Rect, method: u32, size: u32) -> (Rect, Rect) {
 mod layout_snap_tests {
     use super::*;
 
-    // Left|Proportional 50% sidebar (like an Inform 7 map): an odd column count
-    // must snap down so the two halves are equal cells, not 41|40.
+    // Left|Proportional 50% sidebar (like an Inform 7 map) with the DEFAULT
+    // border: the split reserves one column for the separator, so the two halves
+    // divide the *content* (width − 1). The snap must therefore land on an odd
+    // total whose content is even — here 81 (content 80 → 40|border|40) — not on
+    // an even total (80 → content 79, an unequal split).
     #[test]
     fn relayout_snaps_odd_width_so_proportional_halves_are_equal() {
         let mut m = Model::new();
@@ -3220,20 +3312,26 @@ mod layout_snap_tests {
         let gw = m.window_size(gfx).unwrap().0;
         let bw = m.window_size(buf).unwrap().0;
         assert_eq!(gw, bw, "50% split must be equal halves (gfx={gw}, buf={bw})");
-        assert_eq!(gw + bw, 80, "snapped to the largest even width ≤ 81");
+        assert_eq!(gw + bw, 80, "content (81 − 1 border) split into equal halves");
     }
 
+    // NoBorder: with no separator cell reserved, an already-even width needs no
+    // snapping — the 50% split lands on 40|40 directly.
     #[test]
     fn relayout_leaves_even_width_untouched() {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
-        let gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 50, 5, 0).unwrap();
+        let gfx = m
+            .window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL | WINMETHOD_NOBORDER, 50, 5, 0)
+            .unwrap();
         m.relayout(80, 40, (9, 19));
         assert_eq!(m.window_size(gfx).unwrap().0, 40);
         assert_eq!(m.window_size(buf).unwrap().0, 40);
     }
 
-    // A vertical proportional split constrains rows, not columns.
+    // A vertical proportional split constrains rows, not columns. With the
+    // DEFAULT border, one row is reserved for the separator, so the equal halves
+    // divide the content (height − 1): 41 → content 40 → 20|border|20.
     #[test]
     fn relayout_snaps_odd_height_for_vertical_proportional_split() {
         let mut m = Model::new();
@@ -3241,7 +3339,11 @@ mod layout_snap_tests {
         let top = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_PROPORTIONAL, 50, 5, 0).unwrap();
         m.relayout(80, 41, (9, 19));
         assert_eq!(m.window_size(top).unwrap().1, m.window_size(buf).unwrap().1, "equal rows");
-        assert_eq!(m.window_size(top).unwrap().1 + m.window_size(buf).unwrap().1, 40, "snapped 41→40 rows");
+        assert_eq!(
+            m.window_size(top).unwrap().1 + m.window_size(buf).unwrap().1,
+            40,
+            "content (41 − 1 border) split into equal halves",
+        );
         // Width (no horizontal proportional split) is untouched.
         assert_eq!(m.window_size(top).unwrap().0, 80);
     }
@@ -3412,6 +3514,167 @@ mod layout_snap_tests {
         assert_eq!(armed.len(), 1, "only the grid is armed");
         assert_eq!(armed[0].0, grid);
         assert_eq!(armed[0].1, WinType::TextGrid);
+    }
+
+    // ── T1: a bordered split reserves one cell between the children ────────────
+
+    // Left|Fixed 20 with the default border: the fixed key keeps its exact 20
+    // columns; the reserved separator column comes out of the sibling.
+    #[test]
+    fn bordered_left_fixed_split_reserves_a_column() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
+        let grid = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_FIXED, 20, 4, 0).unwrap();
+        m.relayout(80, 24, (1, 1));
+        assert_eq!(m.window_size(grid).unwrap().0, 20, "fixed key keeps its exact 20 cols");
+        assert_eq!(m.window_size(buf).unwrap().0, 59, "sibling = 80 − 20 − 1 border");
+    }
+
+    // Same split with winmethod_NoBorder: no separator, so the sibling gets the
+    // full remainder (60, not 59).
+    #[test]
+    fn noborder_left_fixed_split_reserves_nothing() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let grid = m
+            .window_open(buf, WINMETHOD_LEFT | WINMETHOD_FIXED | WINMETHOD_NOBORDER, 20, 4, 0)
+            .unwrap();
+        m.relayout(80, 24, (1, 1));
+        assert_eq!(m.window_size(grid).unwrap().0, 20);
+        assert_eq!(m.window_size(buf).unwrap().0, 60, "no border reserved → 80 − 20");
+    }
+
+    // Below|Fixed 3 rows with the default border: the border is a row this time.
+    #[test]
+    fn bordered_below_fixed_split_reserves_a_row() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let grid = m.window_open(buf, WINMETHOD_BELOW | WINMETHOD_FIXED, 3, 4, 0).unwrap();
+        m.relayout(80, 24, (1, 1));
+        assert_eq!(m.window_size(grid).unwrap().1, 3, "fixed key keeps its 3 rows");
+        assert_eq!(m.window_size(buf).unwrap().1, 20, "sibling = 24 − 3 − 1 border");
+    }
+
+    // A bordered 50% split lands on equal whole cells once the border is
+    // reserved: the two halves divide the content and sum to extent − 1.
+    #[test]
+    fn bordered_proportional_half_split_is_equal_after_reserving_the_border() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let grid = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 50, 4, 0).unwrap();
+        m.relayout(81, 24, (1, 1)); // content 80 is even → equal halves
+        let gw = m.window_size(grid).unwrap().0;
+        let bw = m.window_size(buf).unwrap().0;
+        let total = m.window_size(m.root()).unwrap().0;
+        assert_eq!(gw, bw, "bordered 50% split lands on equal halves ({gw} vs {bw})");
+        assert_eq!(gw + bw, total - 1, "the two halves sum to the extent minus the reserved border");
+    }
+
+    // ── T2: window_tree exposes the real pair tree ────────────────────────────
+
+    // Above|Fixed 1 grid over a buffer (default border): a vertical, bordered
+    // pair with the grid first (top) and the buffer second (bottom).
+    #[test]
+    fn window_tree_above_fixed_grid_over_buffer() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap();
+        m.relayout(80, 24, (1, 1));
+        match m.window_tree().unwrap() {
+            WinTree::Pair { vertical, border, split, first, second, .. } => {
+                assert!(vertical, "Above → vertical split");
+                assert!(border, "default → bordered");
+                assert_eq!(split, 1, "first (top) child gets 1 row");
+                assert!(
+                    matches!(*first, WinTree::Leaf { id, wintype: WinType::TextGrid, .. } if id == grid),
+                    "top child is the grid",
+                );
+                assert!(
+                    matches!(*second, WinTree::Leaf { id, wintype: WinType::TextBuffer, .. } if id == buf),
+                    "bottom child is the buffer",
+                );
+            }
+            _ => panic!("root should be a pair"),
+        }
+    }
+
+    // Left|Fixed 20 grid (default border): a horizontal, bordered pair. Left puts
+    // the new/key grid on the LEFT, so it is `first` (position-ordered).
+    #[test]
+    fn window_tree_left_fixed_orders_children_by_position() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let grid = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_FIXED, 20, 4, 0).unwrap();
+        m.relayout(80, 24, (1, 1));
+        match m.window_tree().unwrap() {
+            WinTree::Pair { vertical, border, split, first, second, .. } => {
+                assert!(!vertical, "Left → horizontal split");
+                assert!(border, "default → bordered");
+                assert_eq!(split, 20, "first (left) child extent is 20 cols");
+                assert!(matches!(*first, WinTree::Leaf { id, .. } if id == grid), "left child is the key grid");
+                assert!(matches!(*second, WinTree::Leaf { id, .. } if id == buf), "right child is the buffer");
+                assert!(first.rect().left < second.rect().left, "children ordered by column position");
+            }
+            _ => panic!("root should be a pair"),
+        }
+    }
+
+    // NoBorder split → the pair reports border == false.
+    #[test]
+    fn window_tree_noborder_split_has_border_false() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let _grid = m
+            .window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED | WINMETHOD_NOBORDER, 1, 4, 0)
+            .unwrap();
+        m.relayout(80, 24, (1, 1));
+        match m.window_tree().unwrap() {
+            WinTree::Pair { border, .. } => assert!(!border, "NoBorder → border == false"),
+            _ => panic!("root should be a pair"),
+        }
+    }
+
+    // Nested: a grid Above a pair of side-by-side buffers. The outer pair is
+    // vertical; its `second` (bottom) child is the inner horizontal pair of two
+    // buffer leaves, the new Left buffer being the inner `first` (left).
+    #[test]
+    fn window_tree_nested_grid_over_side_by_side_buffers() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let _grid = m.window_open(buf, WINMETHOD_ABOVE | WINMETHOD_FIXED, 1, 4, 0).unwrap();
+        let buf2 = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 50, 3, 0).unwrap();
+        m.relayout(81, 24, (1, 1));
+        match m.window_tree().unwrap() {
+            WinTree::Pair { vertical, first, second, .. } => {
+                assert!(vertical, "outer split is Above → vertical");
+                assert!(
+                    matches!(*first, WinTree::Leaf { wintype: WinType::TextGrid, .. }),
+                    "top of the outer pair is the grid",
+                );
+                match *second {
+                    WinTree::Pair { vertical: inner_vertical, first: f, second: s, .. } => {
+                        assert!(!inner_vertical, "inner split is Left → horizontal");
+                        assert!(
+                            matches!(*f, WinTree::Leaf { id, wintype: WinType::TextBuffer, .. } if id == buf2),
+                            "inner first (left) is the new Left buffer",
+                        );
+                        assert!(
+                            matches!(*s, WinTree::Leaf { wintype: WinType::TextBuffer, .. }),
+                            "inner second (right) is the other buffer",
+                        );
+                    }
+                    _ => panic!("outer second child should be the inner pair"),
+                }
+            }
+            _ => panic!("root should be a pair"),
+        }
+    }
+
+    // window_tree is None when no root window is open.
+    #[test]
+    fn window_tree_is_none_without_a_root() {
+        let m = Model::new();
+        assert!(m.window_tree().is_none(), "no root → None");
     }
 }
 

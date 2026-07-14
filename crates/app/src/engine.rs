@@ -209,6 +209,9 @@ pub enum WinNode {
     Pair {
         vertical: bool,
         split: Split,
+        /// The split's `winmethod_Border` hint (true = a separator between the
+        /// children); rendered in T4.
+        border: bool,
         first: Box<WinNode>,
         second: Box<WinNode>,
     },
@@ -517,6 +520,7 @@ mod tests {
             root: WinNode::Pair {
                 vertical: true,
                 split: Split { fixed: 1 },
+                border: false,
                 first: Box::new(WinNode::Grid(grid)),
                 second: Box::new(WinNode::Buffer(BufferWindow::default())),
             },

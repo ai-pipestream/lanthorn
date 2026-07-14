@@ -806,6 +806,8 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
         root: WinNode::Pair {
             vertical: true,
             split: Split { fixed: screen.upper.rows },
+            // The Z-machine has no Glk border; its status box is drawn by the simple path.
+            border: false,
             first: Box::new(WinNode::Grid(grid)),
             second: Box::new(WinNode::Buffer(BufferWindow::default())),
         },

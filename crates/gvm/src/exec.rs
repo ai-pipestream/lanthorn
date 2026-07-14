@@ -3782,6 +3782,8 @@ impl Machine {
         let cp = self.backend.char_pixels();
         let layout = self.glk.relayout(w, h, cp);
         self.backend.window_layout(&layout);
+        let tree = self.glk.window_tree();
+        self.backend.window_tree(tree);
     }
 
     /// Deliver Glk output reference/struct values `vals` for the pointer argument
@@ -7328,8 +7330,12 @@ mod tests {
     #[test]
     fn glk_window_tree_queries_and_proportional_split() {
         use asm::Op::{C16, C8, Zero};
-        // Split window 1 RIGHT | PROPORTIONAL (0x21), 25% of 80 = 20 cols.
-        let mut body = glk_call(0x23, &[C8(1), C8(0x21), C8(25), C8(4), C8(0)], asm::Op::Mem16(0x0100));
+        // Split window 1 RIGHT | PROPORTIONAL | NoBorder (0x121), 25% of 80 = 20
+        // cols. NoBorder keeps the full 80-col content (a bordered split reserves
+        // a separator column, so 25% would be of 79); this test only cares about
+        // the proportional math and the tree-navigation queries below.
+        let mut body =
+            glk_call(0x23, &[C8(1), C16(0x121), C8(25), C8(4), C8(0)], asm::Op::Mem16(0x0100));
         // get_size(grid=2) -> 0x108,0x10C ; get_size(buf=1) -> 0x110,0x114
         body.extend(glk_call(0x25, &[C8(2), C16(0x0108), C16(0x010C)], Zero));
         body.extend(glk_call(0x25, &[C8(1), C16(0x0110), C16(0x0114)], Zero));

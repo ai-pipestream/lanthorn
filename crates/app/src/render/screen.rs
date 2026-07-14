@@ -32,7 +32,9 @@ pub struct StoryPaneMetrics {
     pub links: Vec<((u16, u16), u32)>,
 }
 
-/// Tally `(grids, buffers, others)` leaf windows in the tree.
+/// Tally `(grids, buffers, others)` leaf windows in the tree. Used only by tests
+/// now that [`is_simple`] classifies structurally (SQ-0325).
+#[cfg(test)]
 fn count_leaves(node: &WinNode) -> (u32, u32, u32) {
     match node {
         WinNode::Grid(_) => (1, 0, 0),
@@ -49,11 +51,26 @@ fn count_leaves(node: &WinNode) -> (u32, u32, u32) {
     }
 }
 
-/// True for the Z-machine shape (and a lone-buffer Glulx game): ≤1 grid, ≤1
-/// buffer, no other leaves — drawn through the existing grid/transcript path.
+/// True only for the Z-machine shapes the simple grid/transcript path renders
+/// byte-identically: a lone buffer or grid, or a grid status band strictly ABOVE
+/// the buffer. Every real Glulx layout (nonzero `content_size` extent) renders
+/// through the generic tree path instead, so borders and orientation are honoured
+/// (SQ-0325). `content_size == (0, 0)` is the Z-machine marker (`session.rs`
+/// hardcodes it; `AppGlk` sets a real extent), so a Glulx grid-over-buffer that
+/// once matched here — e.g. Counterfeit Monkey — now correctly takes the generic
+/// path. That path always draws `model.grid()` as a full-width top band over the
+/// transcript, so it is only correct for the one Z-machine orientation.
 fn is_simple(model: &ScreenModel) -> bool {
-    let (grids, buffers, others) = count_leaves(&model.root);
-    others == 0 && grids <= 1 && buffers <= 1 && grids + buffers >= 1
+    if model.content_size != (0, 0) {
+        return false;
+    }
+    match &model.root {
+        WinNode::Buffer(_) | WinNode::Grid(_) => true,
+        WinNode::Pair { vertical: true, first, second, .. } => {
+            matches!(**first, WinNode::Grid(_)) && matches!(**second, WinNode::Buffer(_))
+        }
+        _ => false,
+    }
 }
 
 /// The game's live input colour (fg/bg) for the input line, or None when
@@ -256,9 +273,17 @@ fn render_node(
         return None;
     }
     match node {
-        WinNode::Pair { vertical, split, first, second } => {
-            let (a1, a2) = split_area(area, *vertical, split.fixed);
+        WinNode::Pair { vertical, split, border, first, second } => {
+            let b = if *border { 1 } else { 0 };
+            let (a1, sep, a2) = split_area_bordered(area, *vertical, split.fixed, b);
             let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input, links, grid_colors);
+            // Only rule between two VISIBLE siblings. A border before a collapsed
+            // (zero-extent) window — e.g. Counterfeit Monkey's image pane before it
+            // shows a letter — would otherwise draw a stray rule with nothing beyond
+            // it (SQ-0325).
+            if b > 0 && !a1.is_empty() && !a2.is_empty() {
+                draw_window_separator(sep, *vertical, grid_colors, buf);
+            }
             let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input, links, grid_colors);
             m1.or(m2)
         }
@@ -331,8 +356,11 @@ fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>) {
         return;
     }
     match node {
-        WinNode::Pair { vertical, split, first, second } => {
-            let (a1, a2) = split_area(area, *vertical, split.fixed);
+        WinNode::Pair { vertical, split, border, first, second } => {
+            let b = if *border { 1 } else { 0 };
+            // Reserve the same separator gutter render_node does, so the graphics
+            // rects (and thus `dialog_bounds`) match exactly what's drawn.
+            let (a1, _sep, a2) = split_area_bordered(area, *vertical, split.fixed, b);
             collect_graphics_rects(first, a1, out);
             collect_graphics_rects(second, a2, out);
         }
@@ -376,20 +404,53 @@ fn subtract_rect(bounds: Rect, g: Rect) -> Rect {
         .unwrap_or(bounds)
 }
 
-/// Split `area` into `(first, second)`: a vertical pair stacks first-on-top
-/// (first gets `fixed` rows); a horizontal pair places first-on-left (first gets
-/// `fixed` cols). `fixed` is clamped to the available extent.
-fn split_area(area: Rect, vertical: bool, fixed: u16) -> (Rect, Rect) {
+/// Split `area` for a pair, reserving `border` cells (0 or 1) between the children
+/// for the separator rule. `first` gets `fixed` cells; the separator gets `border`;
+/// `second` gets the rest. gvm already reserved this 1-cell gutter between bordered
+/// siblings, so the two child areas never include it — the rule is drawn in `sep`.
+fn split_area_bordered(area: Rect, vertical: bool, fixed: u16, border: u16) -> (Rect, Rect, Rect) {
     if vertical {
-        let h = fixed.min(area.height);
-        let first = Rect::new(area.x, area.y, area.width, h);
-        let second = Rect::new(area.x, area.y + h, area.width, area.height - h);
-        (first, second)
+        let f = fixed.min(area.height);
+        let b = border.min(area.height - f);
+        let first = Rect::new(area.x, area.y, area.width, f);
+        let sep = Rect::new(area.x, area.y + f, area.width, b);
+        let second = Rect::new(area.x, area.y + f + b, area.width, area.height - f - b);
+        (first, sep, second)
     } else {
-        let w = fixed.min(area.width);
-        let first = Rect::new(area.x, area.y, w, area.height);
-        let second = Rect::new(area.x + w, area.y, area.width - w, area.height);
-        (first, second)
+        let f = fixed.min(area.width);
+        let b = border.min(area.width - f);
+        let first = Rect::new(area.x, area.y, f, area.height);
+        let sep = Rect::new(area.x + f, area.y, b, area.height);
+        let second = Rect::new(area.x + f + b, area.y, area.width - f - b, area.height);
+        (first, sep, second)
+    }
+}
+
+/// Fill every cell of the separator gutter `area` with the Glk inter-window
+/// rule: a horizontal `─` for a stacked/vertical pair (rule runs across the top
+/// child's bottom edge), a vertical `│` for a side-by-side/horizontal pair.
+///
+/// Glk provides no border styling, so this reuses the existing themeable
+/// window-border presentation rather than a dedicated selector: the rule is drawn
+/// in `colors.upper_window_border` (the same Style the status frame uses), and a
+/// user-set glyph override from `colors.upper_window_border_glyphs` — `.top` for a
+/// horizontal rule, `.left` for a vertical one — is honoured, else the box-drawing
+/// defaults. (A dedicated `window-border` selector can follow when the deferred
+/// style redesign lands — do NOT add a new selector here.)
+fn draw_window_separator(area: Rect, vertical: bool, colors: &ColorScheme, buf: &mut Buffer) {
+    let g = &colors.upper_window_border_glyphs;
+    let glyph = if vertical {
+        g.top.as_deref().unwrap_or("\u{2500}") // ─
+    } else {
+        g.left.as_deref().unwrap_or("\u{2502}") // │
+    };
+    let style = colors.upper_window_border;
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(glyph).set_style(style);
+            }
+        }
     }
 }
 
@@ -554,6 +615,7 @@ mod tests {
             root: WinNode::Pair {
                 vertical: true,
                 split: Split { fixed: 1 },
+                border: false,
                 first: Box::new(WinNode::Grid(GridWindow::default())),
                 second: Box::new(WinNode::Buffer(BufferWindow::default())),
             },
@@ -577,6 +639,7 @@ mod tests {
             root: WinNode::Pair {
                 vertical: false,
                 split: Split { fixed: 10 },
+                border: false,
                 first: Box::new(WinNode::Buffer(BufferWindow::default())),
                 second: Box::new(WinNode::Buffer(BufferWindow::default())),
             },
@@ -588,18 +651,119 @@ mod tests {
         assert!(!is_simple(&two));
     }
 
+    /// SQ-0325: a grid split BESIDE the buffer (winmethod_Left/Right, a horizontal
+    /// pair) must NOT be the simple path. The simple path always draws the grid as a
+    /// full-width top status band over the transcript, so a side-by-side grid would
+    /// be mis-rendered as a centered top bar with the buffer full-width below
+    /// ("the window is centered and we lose the main window"). It must take the
+    /// generic path, which honours the left/right geometry.
     #[test]
-    fn split_area_vertical_and_horizontal() {
+    fn grid_beside_buffer_is_not_simple() {
+        let side = ScreenModel {
+            root: WinNode::Pair {
+                vertical: false, // horizontal pair = Left/Right split
+                split: Split { fixed: 20 },
+                border: false,
+                first: Box::new(WinNode::Grid(GridWindow::default())),
+                second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (0, 0),
+        };
+        assert!(!is_simple(&side), "a grid beside the buffer must use the generic path");
+    }
+
+    /// SQ-0325: a grid split BELOW the buffer (winmethod_Below → buffer-above-grid,
+    /// a vertical pair with the buffer first) is likewise not the simple shape —
+    /// the simple path would still draw the grid on TOP, in the wrong place.
+    #[test]
+    fn buffer_above_grid_is_not_simple() {
+        let below = ScreenModel {
+            root: WinNode::Pair {
+                vertical: true,
+                split: Split { fixed: 22 },
+                border: false,
+                first: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+                second: Box::new(WinNode::Grid(GridWindow::default())),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (0, 0),
+        };
+        assert!(!is_simple(&below), "a grid below the buffer must use the generic path");
+    }
+
+    /// SQ-0325 end-to-end: a text grid opened to the LEFT of the main buffer renders
+    /// as a full-height left column (its cells filling that column from the top-left),
+    /// NOT centered on the top row. Regression guard for the mis-routing.
+    #[test]
+    fn left_grid_renders_in_left_column_not_top_bar() {
+        // A 6-col grid whose row 0 reads "GRID" (filling from the left), split to the
+        // left of the primary buffer at a 6-col boundary in a 20-wide pane.
+        let mut grid = GridWindow::default();
+        grid.resize(4, 6); // 4 rows, 6 cols — a full window, not a 1-row status line
+        for (i, ch) in "GRID".chars().enumerate() {
+            grid.put(1, i as u16 + 1, ch, 0);
+        }
+        grid.active_rows = 4;
+        let model = ScreenModel {
+            root: WinNode::Pair {
+                vertical: false,
+                split: Split { fixed: 6 },
+                border: false,
+                first: Box::new(WinNode::Grid(grid)),
+                second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (0, 0),
+        };
+
+        let mut colors = crate::colors::ColorScheme::terminal_default();
+        colors.virtual_window_border = crate::render::paneframe::BorderStyle::None;
+        colors.upper_window_border_sides =
+            crate::render::paneframe::PaneSides::all(crate::render::paneframe::BorderStyle::None);
+        let mut state = AppState::default();
+        state.colors = colors;
+
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // "GRID" fills the left column from column 0 on row 0 — not centered, not a
+        // top status bar over a full-width transcript.
+        assert_eq!(row_text(&buf, 0, 6), "GRID  ", "grid fills the left column: {:?}", row_text(&buf, 0, 6));
+    }
+
+    #[test]
+    fn split_area_bordered_vertical_and_horizontal() {
         let area = Rect::new(0, 0, 20, 10);
-        let (top, bottom) = split_area(area, true, 3);
+        // Borderless (b=0): the gutter is empty, children abut.
+        let (top, sep, bottom) = split_area_bordered(area, true, 3, 0);
         assert_eq!(top, Rect::new(0, 0, 20, 3));
+        assert_eq!(sep, Rect::new(0, 3, 20, 0));
         assert_eq!(bottom, Rect::new(0, 3, 20, 7));
-        let (left, right) = split_area(area, false, 8);
+        let (left, sep, right) = split_area_bordered(area, false, 8, 0);
         assert_eq!(left, Rect::new(0, 0, 8, 10));
+        assert_eq!(sep, Rect::new(8, 0, 0, 10));
         assert_eq!(right, Rect::new(8, 0, 12, 10));
-        // Oversized fixed clamps to the extent.
-        let (l2, r2) = split_area(area, true, 99);
+        // Bordered (b=1): a 1-cell gutter is carved out between the children.
+        let (top, sep, bottom) = split_area_bordered(area, true, 3, 1);
+        assert_eq!(top, Rect::new(0, 0, 20, 3));
+        assert_eq!(sep, Rect::new(0, 3, 20, 1));
+        assert_eq!(bottom, Rect::new(0, 4, 20, 6));
+        let (left, sep, right) = split_area_bordered(area, false, 8, 1);
+        assert_eq!(left, Rect::new(0, 0, 8, 10));
+        assert_eq!(sep, Rect::new(8, 0, 1, 10));
+        assert_eq!(right, Rect::new(9, 0, 11, 10));
+        // Oversized fixed clamps to the extent; the border can't overflow either.
+        let (l2, sep, r2) = split_area_bordered(area, true, 99, 1);
         assert_eq!(l2.height, 10);
+        assert_eq!(sep.height, 0);
         assert_eq!(r2.height, 0);
     }
 
@@ -610,12 +774,14 @@ mod tests {
             root: WinNode::Pair {
                 vertical: true,
                 split: Split { fixed: 1 },
+                border: false,
                 // Grid border Unspecified + theme sides off → frameless (SQ-0286);
                 // this test checks buffer subrects, not border chrome.
                 first: Box::new(WinNode::Grid(grid_with("STATUS"))),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
                     split: Split { fixed: 10 },
+                    border: false,
                     first: Box::new(WinNode::Buffer(inline_buffer("LEFT"))),
                     second: Box::new(WinNode::Buffer(inline_buffer("RIGHT"))),
                 }),
@@ -666,15 +832,18 @@ mod tests {
             root: WinNode::Pair {
                 vertical: false,
                 split: Split { fixed: 8 },
+                border: false,
                 first: Box::new(WinNode::Pair {
                     vertical: true,
                     split: Split { fixed: 1 },
+                    border: false,
                     first: Box::new(WinNode::Grid(grid)),
                     second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
                 }),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
                     split: Split { fixed: 1 },
+                    border: false,
                     first: Box::new(graphics_node()),
                     second: Box::new(WinNode::Buffer(inline_buffer("SIDE"))),
                 }),
@@ -734,6 +903,7 @@ mod tests {
             root: WinNode::Pair {
                 vertical: true,
                 split: Split { fixed: 1 },
+                border: false,
                 first: Box::new(WinNode::Grid(grid)),
                 second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
             },
@@ -773,10 +943,12 @@ mod tests {
             root: WinNode::Pair {
                 vertical: true,
                 split: Split { fixed: 1 },
+                border: false,
                 first: Box::new(WinNode::Grid(grid_with("ST"))),
                 second: Box::new(WinNode::Pair {
                     vertical: false,
                     split: Split { fixed: 4 },
+                    border: false,
                     first: Box::new(WinNode::Buffer(inline_buffer("LEFT"))),
                     second: Box::new(WinNode::Buffer(inline_buffer("RGHT"))),
                 }),
@@ -958,6 +1130,7 @@ mod tests {
         let model = model_with(WinNode::Pair {
             vertical: false,
             split: Split { fixed: 10 },
+            border: false,
             first: Box::new(graphics_node()),
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
@@ -972,6 +1145,7 @@ mod tests {
         let model = model_with(WinNode::Pair {
             vertical: true,
             split: Split { fixed: 3 },
+            border: false,
             first: Box::new(graphics_node()),
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
@@ -986,6 +1160,7 @@ mod tests {
         let model = model_with(WinNode::Pair {
             vertical: false,
             split: Split { fixed: 10 },
+            border: false,
             first: Box::new(graphics_node()),
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
         });
@@ -1010,15 +1185,16 @@ mod tests {
         assert!(has_pixels, "graphics canvas should render half-block pixels");
     }
 
-    /// SQ-0303 Step 0 regression: Counterfeit Monkey must stay on the SIMPLE
-    /// path (a status grid over the primary buffer; inline images go INTO the
-    /// buffer, not a separate graphics window — so `others == 0`). The frameless
-    /// generic-path grid fix (SQ-0303 Stage 2) only touches the generic path, so
-    /// keeping CM simple is what preserves its framed/coloured status border
-    /// (SQ-0267). If a future change pushes CM onto the generic path this fails
-    /// loudly. Skips when the (git-ignored) gblorb is absent.
+    /// SQ-0325: Counterfeit Monkey is a real Glulx layout (nonzero `content_size`),
+    /// so it now routes through the GENERIC tree path — "compliant all the way",
+    /// off the simple grid-over-transcript box and onto the spec separator/geometry.
+    /// (This flips the old SQ-0303 premise, which kept CM on the simple path to
+    /// preserve its framed status border; the generic path renders the game's true
+    /// layout instead.) Its tree is still a status grid over the primary buffer — a
+    /// vertical Pair with the grid first — but the nonzero extent forces the generic
+    /// path. Skips when the (git-ignored) gblorb is absent.
     #[test]
-    fn counterfeit_monkey_stays_on_the_simple_path() {
+    fn counterfeit_monkey_uses_the_generic_tree_path() {
         use crate::engine::Engine;
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../stories/CounterfeitMonkey-11.gblorb");
@@ -1033,9 +1209,137 @@ mod tests {
         let model = sess.screen();
         let (grids, buffers, others) = count_leaves(&model.root);
         assert!(
-            is_simple(&model),
-            "CM must be on the simple path (grids={grids}, buffers={buffers}, others={others})"
+            !is_simple(&model),
+            "CM is a real Glulx layout → generic path (grids={grids}, buffers={buffers}, others={others})"
         );
+        // The shape is still a status grid stacked over the primary buffer.
+        assert!(
+            matches!(&model.root, WinNode::Pair { vertical: true, first, .. } if matches!(first.as_ref(), WinNode::Grid(_))),
+            "CM tree is a vertical Pair with the status grid first"
+        );
+    }
+
+    /// Build the theme used by the separator tests: every app-frame border off, so
+    /// the only box-drawing glyphs in the pane are the inter-window separator rules.
+    fn frameless_state() -> AppState {
+        let mut colors = crate::colors::ColorScheme::terminal_default();
+        colors.virtual_window_border = crate::render::paneframe::BorderStyle::None;
+        colors.upper_window_border_sides =
+            crate::render::paneframe::PaneSides::all(crate::render::paneframe::BorderStyle::None);
+        let mut state = AppState::default();
+        state.colors = colors;
+        state
+    }
+
+    /// SQ-0325: a bordered STACKED pair (grid above an inline buffer, `border: true`,
+    /// nonzero `content_size` → generic path) draws a horizontal `─` rule filling the
+    /// gutter row between the two children, in the themed border colour; the grid sits
+    /// above it and the buffer below.
+    #[test]
+    fn vertical_bordered_pair_draws_horizontal_rule() {
+        let model = ScreenModel {
+            root: WinNode::Pair {
+                vertical: true,
+                split: Split { fixed: 1 },
+                border: true,
+                first: Box::new(WinNode::Grid(grid_with("STATUS"))),
+                second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (20, 6),
+        };
+        assert!(!is_simple(&model));
+
+        let state = frameless_state();
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // The gutter row (row 1) between grid (row 0) and buffer (rows 2..) is all `─`.
+        assert_eq!(row_text(&buf, 1, 20), "─".repeat(20), "gutter row filled with horizontal rule");
+        // In the themed border colour.
+        assert_eq!(
+            buf.cell((10, 1)).unwrap().style().fg,
+            state.colors.upper_window_border.fg,
+            "separator carries the themed window-border colour"
+        );
+        // Grid content on row 0, buffer below the rule on row 2.
+        assert!(row_text(&buf, 0, 20).contains("STATUS"), "grid above the rule: {:?}", row_text(&buf, 0, 20));
+        assert_eq!(row_text(&buf, 2, 4), "BODY", "buffer below the rule");
+    }
+
+    /// SQ-0325: a bordered SIDE-BY-SIDE pair (grid left of the primary buffer,
+    /// `border: true`) draws a vertical `│` rule filling the gutter column between
+    /// the children, in the themed border colour; the grid sits left of it.
+    #[test]
+    fn horizontal_bordered_pair_draws_vertical_rule() {
+        let model = ScreenModel {
+            root: WinNode::Pair {
+                vertical: false,
+                split: Split { fixed: 6 },
+                border: true,
+                first: Box::new(WinNode::Grid(grid_with("GRID"))),
+                second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (20, 6),
+        };
+        assert!(!is_simple(&model));
+
+        let state = frameless_state();
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // The gutter column (col 6, after the 6-wide grid) is all `│` on every row.
+        for y in 0..6 {
+            assert_eq!(buf.cell((6, y)).unwrap().symbol(), "│", "vertical rule at split col, row {y}");
+        }
+        assert_eq!(
+            buf.cell((6, 0)).unwrap().style().fg,
+            state.colors.upper_window_border.fg,
+            "separator carries the themed window-border colour"
+        );
+        // Grid content left of the rule (cols < 6) on row 0.
+        assert!(row_text(&buf, 0, 6).contains("GRID"), "grid left of the rule: {:?}", row_text(&buf, 0, 6));
+    }
+
+    /// SQ-0325: `border: false` on the same shapes draws NO separator glyph — the
+    /// children abut with no gutter. Guards that the rule is gated on the flag.
+    #[test]
+    fn unbordered_pairs_draw_no_separator() {
+        for vertical in [true, false] {
+            let model = ScreenModel {
+                root: WinNode::Pair {
+                    vertical,
+                    split: Split { fixed: if vertical { 1 } else { 6 } },
+                    border: false,
+                    first: Box::new(WinNode::Grid(grid_with("GRID"))),
+                    second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
+                },
+                status: StatusModel::HostManaged,
+                bg: 0,
+                fg: 0,
+                content_size: (20, 6),
+            };
+            let state = frameless_state();
+            let area = Rect::new(0, 0, 20, 6);
+            let mut buf = Buffer::empty(area);
+            render_story_pane(&model, false, None, &state, area, &mut buf);
+            for y in 0..6 {
+                for x in 0..20 {
+                    let s = buf.cell((x, y)).unwrap().symbol();
+                    assert!(
+                        !"─│".contains(s),
+                        "no separator glyph when border:false (vertical={vertical}), found {s:?} at ({x},{y})"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1049,6 +1353,7 @@ mod tests {
         let tree = WinNode::Pair {
             vertical: false,
             split: Split { fixed: 10 },
+            border: false,
             first: Box::new(graphics_node()), // win: 1
             second: Box::new(other),
         };

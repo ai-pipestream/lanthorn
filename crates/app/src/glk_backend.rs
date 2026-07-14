@@ -15,7 +15,7 @@
 use std::any::Any;
 use std::collections::BTreeMap;
 
-use gvm::glk::{GlkBackend, GlkStyle, Rect as GlkRect, StyleAttrs, StyleColour, WinType};
+use gvm::glk::{GlkBackend, GlkStyle, Rect as GlkRect, StyleAttrs, StyleColour, WinTree, WinType};
 
 use crate::engine::{
     BorderPref, BufferWindow, GridCell, GridWindow, ScreenModel, Split, StatusModel, WinNode,
@@ -152,6 +152,11 @@ pub struct AppGlk {
     /// border hint is `None` (no preference), `Some(false)` (`winmethod_NoBorder`),
     /// or `Some(true)` (`winmethod_Border`). (SQ-0286)
     layout: Vec<(u32, WinType, GlkRect, Option<bool>)>,
+    /// gvm's live window tree (position-ordered children, border hints), or
+    /// `None` when no root window exists. Delivered by `window_tree`; walked by
+    /// `screen_model` into the neutral `WinNode` tree. (The flat `layout` above
+    /// still feeds `mouse_windows`/`hyperlink_windows` hit-testing.)
+    layout_tree: Option<WinTree>,
     grids: BTreeMap<u32, GridBuf>,
     buffers: BTreeMap<u32, BufBuf>,
     /// The primary buffer window id (the first text-buffer opened), if any.
@@ -219,6 +224,7 @@ impl AppGlk {
             cols,
             rows,
             layout: Vec::new(),
+            layout_tree: None,
             grids: BTreeMap::new(),
             buffers: BTreeMap::new(),
             primary: None,
@@ -426,53 +432,58 @@ impl AppGlk {
         self.last_heading.take()
     }
 
-    /// Project the recorded Glk state onto the neutral [`ScreenModel`].
+    /// Project the recorded Glk state onto the neutral [`ScreenModel`] by walking
+    /// gvm's live window tree (`layout_tree`). Content is looked up by window id
+    /// (unchanged); the tree's position-ordered children and border hints carry
+    /// the layout directly, with no rect reconstruction.
     pub fn screen_model(&self) -> ScreenModel {
-        // Build a (rect, node) pair for each laid-out leaf window, then assemble
-        // the guillotine tree from the rects.
-        let mut leaves: Vec<(GlkRect, WinNode)> = Vec::new();
-        for &(id, ty, rect, border) in &self.layout {
-            // A zero-area window (e.g. a collapsed/hidden graphics window a game
-            // keeps around) is invisible, and a degenerate rect sitting on a
-            // boundary defeats the guillotine reconstruction in `assemble` —
-            // making it drop every other window. Skip it entirely.
-            if rect.width == 0 || rect.height == 0 {
-                continue;
+        let (root, content_size) = match &self.layout_tree {
+            None => (WinNode::Blank, (0u16, 0u16)),
+            Some(tree) => {
+                // Root rect = gvm's snapped screen (incl. any border gutters); the
+                // composite clamps to it so no leaf absorbs the blank margin gvm
+                // leaves when it snaps proportional splits to whole cells (SQ-0303).
+                let r = tree.rect();
+                let size = (r.width.min(u16::MAX as u32) as u16, r.height.min(u16::MAX as u32) as u16);
+                (self.convert_tree(tree), size)
             }
-            let node = match ty {
-                WinType::TextGrid => WinNode::Grid(self.grid_node(id, rect, border)),
-                WinType::TextBuffer => WinNode::Buffer(self.buffer_node(id)),
-                WinType::Pair => continue, // pair windows are never in the layout
-                WinType::Graphics => {
-                    let c = self.graphics.get(&id);
-                    WinNode::Graphics(crate::engine::GraphicsWindow {
-                        win: id,
-                        canvas: c.map(|c| c.arc()).unwrap_or_else(|| std::sync::Arc::new(image::RgbaImage::new(1, 1))),
-                        version: c.map(|c| c.version).unwrap_or(0),
-                    })
-                }
-            };
-            leaves.push((rect, node));
-        }
-        let root = assemble(&leaves);
-        // The bounding box of the laid-out leaves. gvm lays leaves from (0,0) and
-        // snaps proportional splits to whole cells, so this may be narrower/shorter
-        // than the story pane — the remaining cols/rows are gvm's intended blank
-        // margin. The composite clamps to this box so no leaf absorbs the surplus
-        // (SQ-0303). (0, 0) when there are no leaves → composite uses the full pane.
-        let content_size = leaves.iter().fold((0u32, 0u32), |(w, h), (r, _)| {
-            (w.max(r.left + r.width), h.max(r.top + r.height))
-        });
-        let content_size = (
-            content_size.0.min(u16::MAX as u32) as u16,
-            content_size.1.min(u16::MAX as u32) as u16,
-        );
+        };
         ScreenModel {
             root,
             status: StatusModel::HostManaged,
             bg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
             fg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
             content_size,
+        }
+    }
+
+    /// Recursively convert a gvm [`WinTree`] node into the neutral [`WinNode`].
+    /// Zero-area leaves are kept (they are part of the tree); the renderer skips
+    /// zero-area areas in T4.
+    fn convert_tree(&self, tree: &WinTree) -> WinNode {
+        match tree {
+            WinTree::Leaf { id, wintype, rect } => match wintype {
+                // Glulx grids are frameless on the generic path; the pair
+                // separator carries the border (T4), so pass `None` here.
+                WinType::TextGrid => WinNode::Grid(self.grid_node(*id, *rect, None)),
+                WinType::TextBuffer => WinNode::Buffer(self.buffer_node(*id)),
+                WinType::Graphics => {
+                    let c = self.graphics.get(id);
+                    WinNode::Graphics(crate::engine::GraphicsWindow {
+                        win: *id,
+                        canvas: c.map(|c| c.arc()).unwrap_or_else(|| std::sync::Arc::new(image::RgbaImage::new(1, 1))),
+                        version: c.map(|c| c.version).unwrap_or(0),
+                    })
+                }
+                WinType::Pair => unreachable!("pair windows are never tree leaves"),
+            },
+            WinTree::Pair { vertical, border, split, first, second, .. } => WinNode::Pair {
+                vertical: *vertical,
+                split: Split { fixed: *split as u16 },
+                border: *border,
+                first: Box::new(self.convert_tree(first)),
+                second: Box::new(self.convert_tree(second)),
+            },
         }
     }
 
@@ -517,83 +528,7 @@ impl AppGlk {
     }
 }
 
-// ── Tree assembly + log → lines helpers ────────────────────────────────────────
-
-/// Assemble a guillotine window tree from laid-out leaves `(rect, node)`.
-///
-/// Glk layouts are always recursive guillotine splits, so the leaf rects admit a
-/// clean horizontal or vertical cut at each level. Picks the smallest cut for
-/// determinism; falls back to the first leaf if no clean cut exists.
-fn assemble(leaves: &[(GlkRect, WinNode)]) -> WinNode {
-    match leaves.len() {
-        0 => return WinNode::Blank,
-        1 => return leaves[0].1.clone(),
-        _ => {}
-    }
-    let region = bounding_box(leaves);
-
-    // Try a horizontal cut (stacked top/bottom → vertical Pair).
-    let mut tops: Vec<u32> = leaves.iter().map(|(r, _)| r.top).filter(|&t| t > region.top).collect();
-    tops.sort_unstable();
-    tops.dedup();
-    for &cut in &tops {
-        let top: Vec<(GlkRect, WinNode)> = leaves
-            .iter()
-            .filter(|(r, _)| r.top + r.height <= cut)
-            .cloned()
-            .collect();
-        let bottom: Vec<(GlkRect, WinNode)> = leaves
-            .iter()
-            .filter(|(r, _)| r.top >= cut)
-            .cloned()
-            .collect();
-        if !top.is_empty() && top.len() + bottom.len() == leaves.len() && !bottom.is_empty() {
-            return WinNode::Pair {
-                vertical: true,
-                split: Split { fixed: (cut - region.top) as u16 },
-                first: Box::new(assemble(&top)),
-                second: Box::new(assemble(&bottom)),
-            };
-        }
-    }
-
-    // Try a vertical cut (side-by-side left/right → horizontal Pair).
-    let mut lefts: Vec<u32> = leaves.iter().map(|(r, _)| r.left).filter(|&l| l > region.left).collect();
-    lefts.sort_unstable();
-    lefts.dedup();
-    for &cut in &lefts {
-        let left: Vec<(GlkRect, WinNode)> = leaves
-            .iter()
-            .filter(|(r, _)| r.left + r.width <= cut)
-            .cloned()
-            .collect();
-        let right: Vec<(GlkRect, WinNode)> = leaves
-            .iter()
-            .filter(|(r, _)| r.left >= cut)
-            .cloned()
-            .collect();
-        if !left.is_empty() && left.len() + right.len() == leaves.len() && !right.is_empty() {
-            return WinNode::Pair {
-                vertical: false,
-                split: Split { fixed: (cut - region.left) as u16 },
-                first: Box::new(assemble(&left)),
-                second: Box::new(assemble(&right)),
-            };
-        }
-    }
-
-    // No clean guillotine cut (shouldn't happen for Glk): show the first leaf.
-    leaves[0].1.clone()
-}
-
-/// The bounding rectangle of a set of leaves.
-fn bounding_box(leaves: &[(GlkRect, WinNode)]) -> GlkRect {
-    let left = leaves.iter().map(|(r, _)| r.left).min().unwrap_or(0);
-    let top = leaves.iter().map(|(r, _)| r.top).min().unwrap_or(0);
-    let right = leaves.iter().map(|(r, _)| r.left + r.width).max().unwrap_or(0);
-    let bottom = leaves.iter().map(|(r, _)| r.top + r.height).max().unwrap_or(0);
-    GlkRect { left, top, width: right - left, height: bottom - top }
-}
+// ── log → lines helper ─────────────────────────────────────────────────────────
 
 /// Split a buffer window's styled log into `(lines, per-line runs, per-line
 /// image)`, merging adjacent same-style chars into one [`StyleRun`]. The three
@@ -709,6 +644,10 @@ impl GlkBackend for AppGlk {
                 }
             }
         }
+    }
+
+    fn window_tree(&mut self, tree: Option<WinTree>) {
+        self.layout_tree = tree;
     }
 
     fn put_text(&mut self, win: u32, style: GlkStyle, s: &str) {
@@ -931,6 +870,34 @@ mod tests {
         GlkRect { left, top, width, height }
     }
 
+    /// Test helper: a `WinTree` leaf.
+    fn leaf(id: u32, wintype: WinType, r: GlkRect) -> WinTree {
+        WinTree::Leaf { id, wintype, rect: r }
+    }
+
+    /// Bounding rect of two child rects (a pair node's own rect).
+    fn union(a: GlkRect, b: GlkRect) -> GlkRect {
+        let l = a.left.min(b.left);
+        let t = a.top.min(b.top);
+        let r = (a.left + a.width).max(b.left + b.width);
+        let bo = (a.top + a.height).max(b.top + b.height);
+        GlkRect { left: l, top: t, width: r - l, height: bo - t }
+    }
+
+    /// Test helper: an Above/Below (vertical) pair; `split` = the first (top)
+    /// child's row count.
+    fn vpair(split: u32, first: WinTree, second: WinTree) -> WinTree {
+        let rect = union(first.rect(), second.rect());
+        WinTree::Pair { vertical: true, border: false, split, rect, first: Box::new(first), second: Box::new(second) }
+    }
+
+    /// Test helper: a Left/Right (horizontal) pair; `split` = the first (left)
+    /// child's column count.
+    fn hpair(split: u32, first: WinTree, second: WinTree) -> WinTree {
+        let rect = union(first.rect(), second.rect());
+        WinTree::Pair { vertical: false, border: false, split, rect, first: Box::new(first), second: Box::new(second) }
+    }
+
     #[test]
     fn local_offset_is_some_and_plausible() {
         // We can't assert a specific zone on an unknown CI host, but the hook
@@ -1030,9 +997,14 @@ mod tests {
             (1, WinType::TextBuffer, rect(0, 1, 80, 23), Some(true)),
             (2, WinType::TextGrid, rect(0, 0, 80, 1), Some(true)),
         ]);
+        glk.window_tree(Some(vpair(
+            1,
+            leaf(2, WinType::TextGrid, rect(0, 0, 80, 1)),
+            leaf(1, WinType::TextBuffer, rect(0, 1, 80, 23)),
+        )));
         let model = glk.screen_model();
         match &model.root {
-            WinNode::Pair { vertical, split, first, second } => {
+            WinNode::Pair { vertical, split, border: _, first, second } => {
                 assert!(*vertical, "grid-above-buffer is a vertical stack");
                 assert_eq!(split.fixed, 1, "the 1-row grid is the fixed first child");
                 assert!(matches!(**first, WinNode::Grid(_)), "top child is the grid");
@@ -1057,6 +1029,15 @@ mod tests {
             (1, WinType::TextBuffer, rect(0, 1, 40, 23), Some(true)),
             (2, WinType::TextBuffer, rect(40, 1, 40, 23), Some(true)),
         ]);
+        glk.window_tree(Some(vpair(
+            1,
+            leaf(3, WinType::TextGrid, rect(0, 0, 80, 1)),
+            hpair(
+                40,
+                leaf(1, WinType::TextBuffer, rect(0, 1, 40, 23)),
+                leaf(2, WinType::TextBuffer, rect(40, 1, 40, 23)),
+            ),
+        )));
         let model = glk.screen_model();
         // Top-level: vertical pair (grid over the rest).
         let WinNode::Pair { vertical, first, second, .. } = &model.root else {
@@ -1083,6 +1064,11 @@ mod tests {
             (1, WinType::TextBuffer, rect(0, 0, 40, 24), Some(true)),
             (2, WinType::TextBuffer, rect(40, 0, 40, 24), Some(true)),
         ]);
+        glk.window_tree(Some(hpair(
+            40,
+            leaf(1, WinType::TextBuffer, rect(0, 0, 40, 24)),
+            leaf(2, WinType::TextBuffer, rect(40, 0, 40, 24)),
+        )));
         glk.put_text(2, GlkStyle::Normal, "ab");
         glk.put_text(2, GlkStyle::Header, "CD");
         glk.put_text(2, GlkStyle::Normal, "\nx");
@@ -1113,6 +1099,7 @@ mod tests {
         let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextBuffer);
         glk.window_layout(&[(1, WinType::TextBuffer, rect(0, 0, 80, 24), Some(true))]);
+        glk.window_tree(Some(leaf(1, WinType::TextBuffer, rect(0, 0, 80, 24))));
         glk.put_text(1, GlkStyle::Normal, "You are here. ");
         glk.put_text(1, GlkStyle::Emphasized, "Look!");
         let (text, chunks) = glk.take_transcript();
@@ -1139,6 +1126,7 @@ mod tests {
         let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextGrid);
         glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2), Some(true))]);
+        glk.window_tree(Some(leaf(1, WinType::TextGrid, rect(0, 0, 10, 2))));
         glk.grid_put(1, 2, 0, GlkStyle::Header, "Hi");
         let model = glk.screen_model();
         let g = model.grid().expect("grid node");
@@ -1217,6 +1205,7 @@ mod tests {
         let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextGrid);
         glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2), Some(true))]);
+        glk.window_tree(Some(leaf(1, WinType::TextGrid, rect(0, 0, 10, 2))));
         let blue_on_white = StyleColour { fg: Some(0x0000_00FF), bg: Some(0x00FF_FFFF), reverse: false };
         glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, blue_on_white, StyleAttrs::default(), 0, "X");
         let cell = glk.screen_model().grid().unwrap().cell(1, 1);
@@ -1232,6 +1221,7 @@ mod tests {
         let mut glk = AppGlk::new(80, 24);
         glk.window_open(1, WinType::TextGrid);
         glk.window_layout(&[(1, WinType::TextGrid, rect(0, 0, 10, 2), Some(true))]);
+        glk.window_tree(Some(leaf(1, WinType::TextGrid, rect(0, 0, 10, 2))));
         glk.grid_put_attr(1, 0, 0, GlkStyle::Normal, StyleColour::default(), StyleAttrs::default(), 42, "L");
         glk.grid_put_attr(1, 1, 0, GlkStyle::Normal, StyleColour::default(), StyleAttrs::default(), 0, "x");
         assert_eq!(glk.screen_model().grid().unwrap().cell(1, 1).link, 42, "linked cell carries its link value");
@@ -1255,6 +1245,7 @@ mod tests {
         let mut g = AppGlk::with_graphics(80, 24, (1, 1), crate::graphics::PictSource::new(None));
         g.window_open(1, gvm::glk::WinType::Graphics);
         g.window_layout(&[(1, gvm::glk::WinType::Graphics, gvm::glk::Rect { left: 0, top: 0, width: 10, height: 4 }, Some(true))]);
+        g.window_tree(Some(leaf(1, WinType::Graphics, rect(0, 0, 10, 4))));
         g.graphics_fill_rect(1, 0x00FF00, 0, 0, 10, 4);
         let model = g.screen_model();
         // The tree's single leaf is a Graphics node for window 1.
@@ -1270,9 +1261,9 @@ mod tests {
 
     /// Regression (CounterfeitMonkey layout): a game keeps a zero-height
     /// graphics window (win 4) around alongside a real graphics window (win 6,
-    /// the image), a status grid, and the text buffer. The degenerate rect must
-    /// not defeat the guillotine reconstruction — the real graphics window and
-    /// the buffer must both survive.
+    /// the image), a status grid, and the text buffer. Every leaf — including the
+    /// collapsed one — is part of gvm's tree, so the real graphics window, the
+    /// grid, and the buffer all survive the conversion.
     #[test]
     fn screen_model_survives_zero_area_window() {
         use gvm::glk::{Rect, WinType};
@@ -1287,6 +1278,21 @@ mod tests {
             (4, WinType::Graphics, Rect { left: 0, top: 24, width: 80, height: 0 }, Some(true)), // collapsed
             (6, WinType::Graphics, Rect { left: 0, top: 1, width: 40, height: 23 }, Some(true)), // the image
         ]);
+        // The matching tree: grid on top; below it a left graphics | right buffer
+        // split; and the collapsed zero-height graphics (win 4) at the bottom.
+        g.window_tree(Some(vpair(
+            1,
+            leaf(2, WinType::TextGrid, rect(0, 0, 80, 1)),
+            vpair(
+                23,
+                hpair(
+                    40,
+                    leaf(6, WinType::Graphics, rect(0, 1, 40, 23)),
+                    leaf(1, WinType::TextBuffer, rect(40, 1, 40, 23)),
+                ),
+                leaf(4, WinType::Graphics, rect(0, 24, 80, 0)),
+            ),
+        )));
         g.graphics_fill_rect(6, 0x00FF00, 0, 0, 40, 23);
         let model = g.screen_model();
 
