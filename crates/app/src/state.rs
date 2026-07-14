@@ -277,6 +277,27 @@ pub fn glk_volume_to_gain(vol: u32) -> f32 {
     vol as f32 / 65536.0
 }
 
+/// One in-flight Sound2 volume ramp (`glk_schannel_set_volume_ext` with a nonzero
+/// duration): the host interpolates the channel's linear gain from `start_gain`
+/// to `target_gain` over `duration_ms`, starting at `start`.
+#[derive(Clone, Copy, Debug)]
+pub struct VolumeRamp {
+    pub start: std::time::Instant,
+    pub duration_ms: u32,
+    pub start_gain: f32,
+    pub target_gain: f32,
+}
+
+/// Linearly interpolate a ramping gain: `start_gain` at `elapsed_ms == 0`,
+/// `target_gain` once `elapsed_ms >= duration_ms` (and for a zero duration).
+pub fn ramp_gain(start_gain: f32, target_gain: f32, elapsed_ms: u32, duration_ms: u32) -> f32 {
+    if duration_ms == 0 || elapsed_ms >= duration_ms {
+        return target_gain;
+    }
+    let t = elapsed_ms as f32 / duration_ms as f32;
+    start_gain + (target_gain - start_gain) * t
+}
+
 /// Map Glk `repeats` to the audio backend's `repeats` byte, or `None` to skip
 /// playing entirely. Glk: `0xFFFFFFFF` = loop forever; `0` = play zero times;
 /// `N` = N plays. The audio byte reserves `255` for "forever", so finite counts
@@ -1326,6 +1347,16 @@ pub struct AppState {
     /// when the deadline passes the event loop delivers an `evtype_VolumeNotify`.
     /// At most one entry per channel (a new volume change interrupts the prior).
     pub glulx_volume_notify: std::collections::HashMap<u32, (std::time::Instant, u32)>,
+    /// Current linear pre-master gain per Glk channel ref, tracking the value a
+    /// live volume ramp is interpolating toward (and where a fresh ramp starts).
+    /// Seeded on play / set_volume; stepped by [`AppState::advance_volume_ramps`].
+    pub glulx_gain: std::collections::HashMap<u32, f32>,
+    /// Active Sound2 volume ramps keyed by Glk channel ref (Sound2
+    /// `set_volume_ext` with a nonzero duration). The event loop steps these each
+    /// pass via [`AppState::advance_volume_ramps`], interpolating the sink gain
+    /// linearly from start to target; a completed ramp is removed. At most one per
+    /// channel (a new volume change interrupts the prior).
+    pub glulx_volume_ramp: std::collections::HashMap<u32, VolumeRamp>,
     /// A pending change to the running Glulx VM's Sound gestalt, set when the
     /// sound toggle / config save flips `enable_sound`. The event loop drains it
     /// (it holds the session) and calls `GlulxSession::set_sound`, so a game that
@@ -1628,6 +1659,8 @@ impl Default for AppState {
             glulx_channels: std::collections::HashMap::new(),
             glulx_sound_notify: std::collections::HashMap::new(),
             glulx_volume_notify: std::collections::HashMap::new(),
+            glulx_gain: std::collections::HashMap::new(),
+            glulx_volume_ramp: std::collections::HashMap::new(),
             pending_vm_sound: None,
             scroll_anim: None,
             graph_gen: 0,
@@ -1796,6 +1829,11 @@ impl AppState {
                                 let gain = glk_volume_to_gain(volume);
                                 if let Some(id) = backend.play_sample_gain(bytes, fmt, gain, reps) {
                                     self.glulx_channels.insert(chan, id);
+                                    // A fresh sound starts at the channel's snapshot
+                                    // volume; cancel any ramp left over from a prior
+                                    // sound and seed the current gain.
+                                    self.glulx_gain.insert(chan, gain);
+                                    self.glulx_volume_ramp.remove(&chan);
                                     if notify != 0 {
                                         self.glulx_sound_notify.insert(id, (snd, notify));
                                     }
@@ -1824,14 +1862,19 @@ impl AppState {
                     }
                     // A destroyed channel can never complete a pending ramp.
                     self.glulx_volume_notify.remove(&chan);
+                    self.glulx_volume_ramp.remove(&chan);
+                    self.glulx_gain.remove(&chan);
                 }
                 SchannelOp::SetVolume { chan, vol } => {
+                    let gain = glk_volume_to_gain(vol);
                     if let Some(&id) = self.glulx_channels.get(&chan) {
-                        backend.set_sample_gain(id, glk_volume_to_gain(vol));
+                        backend.set_sample_gain(id, gain);
                     }
                     // A plain set_volume is an immediate change; it interrupts any
                     // in-progress ramp (whose notify is then dropped, per spec §8.3).
                     self.glulx_volume_notify.remove(&chan);
+                    self.glulx_volume_ramp.remove(&chan);
+                    self.glulx_gain.insert(chan, gain);
                 }
                 SchannelOp::Pause { chan } => {
                     if let Some(&id) = self.glulx_channels.get(&chan) {
@@ -1844,15 +1887,33 @@ impl AppState {
                     }
                 }
                 SchannelOp::SetVolumeExt { chan, vol, duration_ms, notify } => {
-                    // First cut: apply the target volume immediately (rodio has no
-                    // native ramp) — the notify TIMING is what games sequence on.
-                    if let Some(&id) = self.glulx_channels.get(&chan) {
-                        backend.set_sample_gain(id, glk_volume_to_gain(vol));
-                    }
-                    // A new volume change interrupts any prior one on this channel
-                    // (the prior notify is dropped). Schedule this one's notify at
-                    // now + duration, regardless of whether a sound is playing.
+                    let target = glk_volume_to_gain(vol);
+                    // A new volume change interrupts any prior one on this channel:
+                    // the prior notify AND ramp are dropped (spec §8.3).
                     self.glulx_volume_notify.remove(&chan);
+                    self.glulx_volume_ramp.remove(&chan);
+                    if duration_ms == 0 {
+                        // Immediate change: jump the sink and current gain to target.
+                        if let Some(&id) = self.glulx_channels.get(&chan) {
+                            backend.set_sample_gain(id, target);
+                        }
+                        self.glulx_gain.insert(chan, target);
+                    } else {
+                        // Gradual ramp: interpolate from the channel's current gain to
+                        // target over duration_ms. The event loop steps the sink each
+                        // pass via advance_volume_ramps; the sink stays at start until
+                        // the first step (no jump). Interrupting a live ramp starts the
+                        // new one from wherever the gain currently sits.
+                        let start_gain = self.glulx_gain.get(&chan).copied().unwrap_or(target);
+                        self.glulx_volume_ramp.insert(chan, VolumeRamp {
+                            start: std::time::Instant::now(),
+                            duration_ms,
+                            start_gain,
+                            target_gain: target,
+                        });
+                    }
+                    // Schedule the notify at now + duration, regardless of whether a
+                    // sound is playing (a volume change may occur between sounds).
                     if notify != 0 {
                         let deadline = std::time::Instant::now()
                             + std::time::Duration::from_millis(duration_ms as u64);
@@ -1876,6 +1937,34 @@ impl AppState {
         self.glulx_channels.clear();
         self.glulx_sound_notify.clear();
         self.glulx_volume_notify.clear();
+        self.glulx_gain.clear();
+        self.glulx_volume_ramp.clear();
+    }
+
+    /// Step every active Sound2 volume ramp to time `now`: interpolate the
+    /// channel's linear gain, apply it to the live sink, and drop the ramp once
+    /// it completes. Called each event-loop pass (host owns the ramp clock).
+    pub fn advance_volume_ramps(&mut self, now: std::time::Instant) {
+        if self.glulx_volume_ramp.is_empty() {
+            return;
+        }
+        let mut done: Vec<u32> = Vec::new();
+        for (&chan, ramp) in self.glulx_volume_ramp.iter() {
+            let elapsed = now.saturating_duration_since(ramp.start).as_millis() as u32;
+            let gain = ramp_gain(ramp.start_gain, ramp.target_gain, elapsed, ramp.duration_ms);
+            self.glulx_gain.insert(chan, gain);
+            if let Some(&id) = self.glulx_channels.get(&chan) {
+                if let Some(b) = self.audio.as_mut() {
+                    b.set_sample_gain(id, gain);
+                }
+            }
+            if elapsed >= ramp.duration_ms {
+                done.push(chan);
+            }
+        }
+        for chan in done {
+            self.glulx_volume_ramp.remove(&chan);
+        }
     }
 
     /// Set the transcript scroll target to `target`. When animation is enabled
@@ -2717,12 +2806,69 @@ mod tests {
         state.glulx_channels.insert(1, 5);
         state.glulx_sound_notify.insert(5, (7, 42));
         state.glulx_volume_notify.insert(1, (std::time::Instant::now(), 9));
+        state.glulx_gain.insert(1, 0.5);
+        state.glulx_volume_ramp.insert(1, VolumeRamp {
+            start: std::time::Instant::now(), duration_ms: 500, start_gain: 1.0, target_gain: 0.0,
+        });
         state.reset_sound_sidecars();
         assert!(state.sound_ids.is_empty());
         assert!(state.sound_routines.is_empty());
         assert!(state.glulx_channels.is_empty());
         assert!(state.glulx_sound_notify.is_empty());
         assert!(state.glulx_volume_notify.is_empty());
+        assert!(state.glulx_gain.is_empty());
+        assert!(state.glulx_volume_ramp.is_empty());
+    }
+
+    #[test]
+    fn ramp_gain_interpolates_at_endpoints_and_midpoint() {
+        // t=0 → start; t=mid → linear midpoint; t>=end (and zero duration) → target.
+        assert_eq!(ramp_gain(1.0, 0.0, 0, 1000), 1.0, "t=0 sits at the start gain");
+        assert_eq!(ramp_gain(1.0, 0.0, 500, 1000), 0.5, "halfway is the midpoint");
+        assert_eq!(ramp_gain(1.0, 0.0, 1000, 1000), 0.0, "t=end lands on target");
+        assert_eq!(ramp_gain(1.0, 0.0, 5000, 1000), 0.0, "past the end clamps to target");
+        assert_eq!(ramp_gain(0.2, 0.8, 0, 0), 0.8, "zero duration is an immediate jump");
+        // Rising ramp, quarter point.
+        assert!((ramp_gain(0.0, 1.0, 250, 1000) - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn set_volume_ext_ramps_interpolates_interrupts_and_completes() {
+        use crate::session::SchannelOp;
+        let mut state = AppState::default();
+        state.config.enable_sound = true;
+        state.audio = Some(audio::AudioBackend::new(50));
+        // Seed the channel's current gain (as a prior play/set_volume would).
+        state.glulx_gain.insert(1, 1.0);
+        // A ramped set_volume_ext installs a ramp from the current gain to target
+        // (vol 0 → gain 0) and does NOT jump the stored gain immediately.
+        let t0 = std::time::Instant::now();
+        state.play_glulx_sound_ops(&[SchannelOp::SetVolumeExt { chan: 1, vol: 0, duration_ms: 1000, notify: 7 }]);
+        let ramp = *state.glulx_volume_ramp.get(&1).expect("ramp installed");
+        assert_eq!(ramp.start_gain, 1.0, "ramp starts from the channel's current gain");
+        assert_eq!(ramp.target_gain, 0.0, "ramp targets the new volume's gain");
+        assert_eq!(state.glulx_volume_notify.get(&1).map(|&(_, n)| n), Some(7), "notify still scheduled at the deadline");
+        // Halfway through, the interpolated gain is ~0.5.
+        state.advance_volume_ramps(t0 + std::time::Duration::from_millis(500));
+        let mid = *state.glulx_gain.get(&1).unwrap();
+        assert!((mid - 0.5).abs() < 0.1, "gain interpolates to ~0.5 at half-time, got {mid}");
+        assert!(state.glulx_volume_ramp.contains_key(&1), "ramp still active mid-way");
+        // A new change interrupts: the old ramp is replaced and heads to the new
+        // target from wherever the gain currently sits (spec §8.3).
+        state.play_glulx_sound_ops(&[SchannelOp::SetVolumeExt { chan: 1, vol: 0x10000, duration_ms: 1000, notify: 9 }]);
+        let ramp2 = *state.glulx_volume_ramp.get(&1).expect("new ramp installed");
+        assert_eq!(ramp2.target_gain, 1.0, "interruption retargets to the new volume");
+        assert!((ramp2.start_gain - mid).abs() < 1e-6, "new ramp starts from the current gain");
+        assert_eq!(state.glulx_volume_notify.get(&1).map(|&(_, n)| n), Some(9), "the prior notify was dropped, the new one scheduled");
+        // Stepping past the duration completes the ramp: gain lands on target and
+        // the ramp is removed.
+        state.advance_volume_ramps(ramp2.start + std::time::Duration::from_millis(1000));
+        assert_eq!(*state.glulx_gain.get(&1).unwrap(), 1.0, "completed ramp lands on target");
+        assert!(!state.glulx_volume_ramp.contains_key(&1), "completed ramp is dropped");
+        // An immediate (duration 0) change jumps and installs no ramp.
+        state.play_glulx_sound_ops(&[SchannelOp::SetVolume { chan: 1, vol: 0x8000 }]);
+        assert_eq!(*state.glulx_gain.get(&1).unwrap(), 0.5, "plain set_volume jumps the gain");
+        assert!(!state.glulx_volume_ramp.contains_key(&1), "plain set_volume leaves no ramp");
     }
 
     #[test]

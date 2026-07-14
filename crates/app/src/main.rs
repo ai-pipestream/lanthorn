@@ -887,7 +887,10 @@ fn main() {
         // this is a no-op when no timer is running (regression guard).
         let sound_active = !state.sound_routines.is_empty()
             || !state.glulx_sound_notify.is_empty()
-            || !state.glulx_volume_notify.is_empty();
+            || !state.glulx_volume_notify.is_empty()
+            // A notify-less ramp still needs the loop to keep waking so it can
+            // step the sink gain smoothly (glulx_volume_notify may be empty).
+            || !state.glulx_volume_ramp.is_empty();
         let timer_active = state.glulx_timer_next_fire.is_some();
         // Continuous story-pane selection auto-scroll: while a drag is held at an
         // edge and that direction can still scroll, keep the loop live so it steps
@@ -1020,6 +1023,9 @@ fn main() {
             // the ramp clock (mirroring the sound-finish notify above); deliver every
             // due one, newest-driven output redrawn next iteration.
             let now = std::time::Instant::now();
+            // Step any in-flight Sound2 volume ramp toward its target (host owns
+            // the ramp clock). Pure audio — no redraw needed.
+            state.advance_volume_ramps(now);
             let due_volume: Vec<(u32, u32)> = state
                 .glulx_volume_notify
                 .iter()
