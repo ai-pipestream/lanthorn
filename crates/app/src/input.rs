@@ -2929,20 +2929,35 @@ fn select_adjacent(state: &mut AppState, mapper: &Mapper, delta: i32) {
     state.select_room(Some(new_id));
 }
 
-/// Re-center the map on the selected room's grid position.
-/// Uses a fallback pane size of 80×24 when the real render size is unavailable.
+/// Re-center the map on the selected room, or — with nothing selected — on the room the player is
+/// currently in (SQ-0349).
+///
+/// The origin is only a last resort now. It used to be the fallback for "nothing selected", which
+/// is an arbitrary corner of the map that need not hold a room at all: the common case (no
+/// selection, just wanting the view back on yourself) threw the map somewhere useless. A selection
+/// that has no position falls through to the current room for the same reason — it cannot be
+/// centred on, but the origin is not a better answer than where the player is standing.
+///
+/// Uses a fallback pane size of 80×24: the real size lives in the run loop's `last_panes`, which
+/// `apply_action` has no access to.
 fn apply_recenter(state: &mut AppState, mapper: &Mapper) {
-    if let Some(id) = state.selected_room {
-        if let Some(room) = mapper.graph.room(id) {
-            if let Some(pos) = room.pos {
-                // TODO(run-loop): pass the real pane size when available.
-                state.recenter_on(pos, 80, 24);
-                return;
-            }
-        }
-    }
-    // No selected room or no position: recenter on origin.
-    state.recenter_on((0, 0), 80, 24);
+    let target = recenter_target(state, &mapper.graph);
+    state.recenter_on(target, 80, 24);
+}
+
+/// The cell the map view should sit on: the selected room, else the room the player is in, else the
+/// origin (SQ-0349).
+///
+/// The run loop's own auto-recentres (after a turn, after a tidy) deliberately aim at the current
+/// room instead: the map follows the player as you play, and a selection lasts until your next
+/// command. That is intended, not an oversight.
+fn recenter_target(state: &AppState, graph: &mapper::graph::MapGraph) -> (i32, i32) {
+    let pos_of = |id| graph.room(id).and_then(|r| r.pos);
+    state
+        .selected_room
+        .and_then(pos_of)
+        .or_else(|| graph.current().and_then(pos_of))
+        .unwrap_or((0, 0))
 }
 
 // ── Glyph-picker helpers ──────────────────────────────────────────────────────
@@ -6600,6 +6615,69 @@ mod tests {
             matches!(a, Action::None),
             "outside-gallery click with room_panel also open must be swallowed (None), got {:?}", a
         );
+    }
+
+    // ── SQ-0349: center-map target ───────────────────────────────────────────
+
+    /// Two placed rooms; `current` is #1 at (2,2), #2 sits at (7,7).
+    fn recenter_fixture() -> (AppState, Mapper) {
+        let mut m = Mapper::default();
+        m.graph.upsert_room(1, "Here".into());
+        m.graph.upsert_room(2, "There".into());
+        m.graph.set_pos(1, (2, 2));
+        m.graph.set_pos(2, (7, 7));
+        m.graph.set_current(1);
+        (AppState::default(), m)
+    }
+
+    #[test]
+    fn center_map_uses_the_selected_room() {
+        let (mut s, mut m) = recenter_fixture();
+        s.select_room(Some(2));
+        apply_action(Action::Recenter, &mut s, &mut m);
+        let mut want = AppState::default();
+        want.recenter_on((7, 7), 80, 24);
+        assert_eq!(s.scroll, want.scroll, "centred on the SELECTED room, not the current one");
+    }
+
+    #[test]
+    fn center_map_falls_back_to_the_current_room_not_the_origin() {
+        // SQ-0349: with nothing selected it recentred on (0,0) — an arbitrary corner of the map
+        // that need not hold a room at all. The player's own location is the only sensible answer.
+        let (mut s, mut m) = recenter_fixture();
+        assert!(s.selected_room.is_none(), "nothing selected");
+        apply_action(Action::Recenter, &mut s, &mut m);
+        let mut want = AppState::default();
+        want.recenter_on((2, 2), 80, 24);
+        assert_eq!(s.scroll, want.scroll, "centred on the CURRENT room");
+
+        let mut origin = AppState::default();
+        origin.recenter_on((0, 0), 80, 24);
+        assert_ne!(s.scroll, origin.scroll, "and not on the origin");
+    }
+
+    #[test]
+    fn center_map_falls_through_an_unplaced_selection_to_the_current_room() {
+        // A selected room with no position cannot be centred on. Dropping to the origin would
+        // strand the view; the current room is still a real answer.
+        let (mut s, mut m) = recenter_fixture();
+        m.graph.upsert_room(9, "Unplaced".into()); // never given a pos
+        s.select_room(Some(9));
+        apply_action(Action::Recenter, &mut s, &mut m);
+        let mut want = AppState::default();
+        want.recenter_on((2, 2), 80, 24);
+        assert_eq!(s.scroll, want.scroll, "fell through to the current room");
+    }
+
+    #[test]
+    fn center_map_with_nothing_placed_at_all_uses_the_origin() {
+        // Last resort, unchanged: no selection, no current room, nothing to aim at.
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        apply_action(Action::Recenter, &mut s, &mut m);
+        let mut want = AppState::default();
+        want.recenter_on((0, 0), 80, 24);
+        assert_eq!(s.scroll, want.scroll);
     }
 
     // ── SQ-0354: caret editing on the command line ───────────────────────────

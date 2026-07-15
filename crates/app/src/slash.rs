@@ -228,7 +228,7 @@ pub static COMMANDS: &[CommandSpec] = &[
             }
         } },
     CommandSpec { name: "center-map", category: Category::Map, context: Context::Map,
-        usage: "center-map", description: "re-center the map on the selected room",
+        usage: "center-map", description: "re-center the map on the selected room, or the current one",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::Recenter) },
     CommandSpec { name: "tidy-map", category: Category::Map, context: Context::Map,
         usage: "tidy-map", description: "re-run the layout tidy",
