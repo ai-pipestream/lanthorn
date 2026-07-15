@@ -182,7 +182,13 @@ pub(crate) fn sort_layout(graph: &MapGraph) -> BTreeMap<RoomId, (i32, i32)> {
             let (Some(&a), Some(&b)) = (index.get(&c.origin), index.get(&c.dest)) else {
                 continue;
             };
-            if let Some((dx, dy)) = grid_offset(c.dir) {
+            // `layout_offset`, not `grid_offset` (SQ-0218): up/down seat on the N/S axis here, the
+            // same as they do in the axis marking above and in the constraint engine that refines
+            // this layering (`constraints.rs`). On `grid_offset` an up/down edge ordered NOTHING —
+            // yet the marking above still pinned both its rooms Y-constrained, so they were held on
+            // an axis nothing was ordering them on. `layout_offset == grid_offset` for every
+            // compass direction, so no compass-only map moves.
+            if let Some((dx, dy)) = layout_offset(c.dir) {
                 if dx > 0 { xe.push((a, b)); } else if dx < 0 { xe.push((b, a)); }
                 if dy > 0 { ye.push((a, b)); } else if dy < 0 { ye.push((b, a)); }
             }
@@ -251,6 +257,46 @@ mod tests {
         let cells: Vec<_> = pos.values().collect();
         let set: BTreeSet<_> = cells.iter().collect();
         assert_eq!(cells.len(), set.len());
+    }
+
+    #[test]
+    fn sort_layout_seats_up_and_down_on_the_n_s_axis() {
+        // SQ-0218: the layering built its axis edge lists from `grid_offset`, which is None for
+        // Up/Down — so an up/down edge ordered nothing, and its rooms were free to land in any
+        // vertical order. That contradicted this same function's own axis marking a few lines
+        // above, which uses `layout_offset` to mark those rooms Y-CONSTRAINED: they were pinned on
+        // an axis nothing was ordering them on.
+        //
+        // It matters twice over: this is the whole layout above MAX_NODES rooms, and the SEED for
+        // every graph below it — and the constraint engine that refines that seed already treats
+        // up/down as N/S (`constraints.rs` uses `layout_offset`), so the seed was starting out
+        // disagreeing with it.
+        let mut g = MapGraph::new();
+        for id in 1..=3 {
+            g.upsert_room(id, "r".into());
+        }
+        g.add_edge(1, Direction::Up, 2); // 2 is "above" 1
+        g.add_edge(1, Direction::Down, 3); // 3 is "below" 1
+        let pos = sort_layout(&g);
+        assert!(pos[&2].1 < pos[&1].1, "Up seats the destination north: {pos:?}");
+        assert!(pos[&3].1 > pos[&1].1, "Down seats it south: {pos:?}");
+    }
+
+    #[test]
+    fn sort_layout_keeps_compass_edges_identical() {
+        // `layout_offset == grid_offset` for every compass direction, so widening the layering to
+        // up/down must not move a compass-only map by a single cell.
+        let mut g = MapGraph::new();
+        for id in 1..=4 {
+            g.upsert_room(id, "r".into());
+        }
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(1, Direction::E, 3);
+        g.add_edge(3, Direction::S, 4);
+        let pos = sort_layout(&g);
+        assert!(pos[&2].1 < pos[&1].1);
+        assert!(pos[&3].0 > pos[&1].0);
+        assert!(pos[&4].1 > pos[&3].1);
     }
 
     #[test]
