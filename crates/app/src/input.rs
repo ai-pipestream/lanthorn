@@ -2693,22 +2693,46 @@ fn build_verb_menu_nouns(state: &AppState, _mapper: &Mapper) -> Vec<String> {
     nouns
 }
 
-/// Return up to `limit` slash command names from `names` whose prefix matches
-/// `body_token` (case-insensitive). Results are sorted alphabetically.
+/// Return up to `limit` names from `names` containing `body_token` ANYWHERE (case-insensitive),
+/// best match first. A name equal to the token is never offered — it is already typed in full.
+///
+/// Matching was prefix-only (SQ-0353). But command names are compound — `toggle-room-numbers`,
+/// `select-room` — and the part anyone actually remembers is the noun, not the verb the name
+/// happens to begin with. Typing the one word you could recall found nothing at all: `room` matched
+/// no command, though four contain it.
+///
+/// Ranking is what keeps substring matching from becoming a free-for-all — the obvious answer must
+/// still come first:
+///   0. the name starts with the token (a plain prefix hit, the old behaviour),
+///   1. a name-PART starts with it (right after a `-`) — `room` in `toggle-room-numbers`,
+///   2. it appears mid-word — `map` in `unmappable`.
+/// Alphabetical within a rank, so the list is stable and predictable as you type.
 pub(crate) fn slash_suggestions(body_token: &str, names: &[String], limit: usize) -> Vec<String> {
     if body_token.is_empty() || limit == 0 {
         return Vec::new();
     }
     let lower = body_token.to_lowercase();
-    let mut matches: Vec<String> = names
+    let mut matches: Vec<(u8, String)> = names
         .iter()
-        .filter(|n| n.to_lowercase().starts_with(&lower) && n.to_lowercase() != lower)
-        .cloned()
+        .filter_map(|n| {
+            let ln = n.to_lowercase();
+            if ln == lower {
+                return None; // already typed in full — suggesting it back is noise
+            }
+            let at = ln.find(&lower)?;
+            // `at` is a byte index; step back by CHAR so a non-ASCII token can't split one.
+            let rank = match ln[..at].chars().next_back() {
+                None => 0,       // prefix
+                Some('-') => 1,  // start of a name-part
+                Some(_) => 2,    // mid-word
+            };
+            Some((rank, n.clone()))
+        })
         .collect();
     matches.sort_unstable();
     matches.dedup();
     matches.truncate(limit);
-    matches
+    matches.into_iter().map(|(_, n)| n).collect()
 }
 
 /// Recompute `state.suggestions` from `state.dict_words`, the room words
@@ -6514,6 +6538,45 @@ mod tests {
         let s = slash_suggestions("pa", &names, 6);
         assert!(s.contains(&"panh".to_string()) && s.contains(&"panv".to_string()));
         assert!(!s.contains(&"zoom".to_string()));
+    }
+
+    #[test]
+    fn slash_suggestions_match_any_part_of_the_name() {
+        // SQ-0353. Command names are compound (`toggle-room-numbers`), and the part you remember is
+        // usually the NOUN, not the verb it happens to start with. Prefix-only matching meant the
+        // word you could actually recall found nothing at all.
+        let names = crate::slash::slash_names();
+        let s = slash_suggestions("room", &names, 10);
+        for want in ["toggle-room-numbers", "select-room", "nudge-room", "rename-room"] {
+            assert!(s.contains(&want.to_string()), "'room' must offer {want}: {s:?}");
+        }
+        // And it must not turn into a free-for-all: a name without the token stays out.
+        assert!(!s.iter().any(|n| !n.contains("room")), "every hit contains the token: {s:?}");
+    }
+
+    #[test]
+    fn slash_suggestions_rank_prefix_then_word_start_then_middle() {
+        // Substring matching is only useful if the obvious answer still comes first. Typing the
+        // start of a name must not bury it under incidental mid-word hits elsewhere.
+        let names: Vec<String> = ["map-x", "zoom-map", "unmappable", "map-y"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let s = slash_suggestions("map", &names, 10);
+        assert_eq!(
+            s,
+            vec!["map-x", "map-y", "zoom-map", "unmappable"],
+            "prefix first, then a name-part start, then mid-word; alphabetical within each rank",
+        );
+    }
+
+    #[test]
+    fn slash_suggestions_never_offer_what_is_already_typed() {
+        // Pre-existing contract, kept: a completion identical to the token is noise.
+        let names = vec!["map".to_string(), "zoom-map".to_string()];
+        let s = slash_suggestions("map", &names, 6);
+        assert!(!s.contains(&"map".to_string()), "exact token is not a suggestion: {s:?}");
+        assert!(s.contains(&"zoom-map".to_string()), "but other substring hits still show: {s:?}");
     }
 
     /// Regression: CONFIG_ROW_COUNT must equal CONFIG_ROWS.len() so every config row is
