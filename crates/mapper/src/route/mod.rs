@@ -132,11 +132,9 @@ pub struct RoutePlan {
     ///
     /// A diagonal carries NO lane: every step of its route touches a room centre or the corner
     /// itself, so `long_runs` finds nothing to lane and both channels it crosses report zero. Left
-    /// at that, the renderer gives them the bare `MIN_GUTTER` and the 45° line is crushed into the
-    /// tightest gap on the map — the exact opposite of what it needs, since a diagonal wants MORE
-    /// room than an orthogonal line (a terminal cell is about twice as tall as it is wide, so a
-    /// visual 45° costs two columns per row). This set is how a diagonal declares the space it
-    /// needs; the renderer sizes those gaps from it.
+    /// at that, the renderer gives them the bare `MIN_GUTTER` and the diagonal is crushed into the
+    /// tightest gap on the map, with too little room to draw its line at all. This set is how a
+    /// diagonal declares the space it needs; the renderer sizes those gaps from it.
     pub diag_corners: BTreeSet<(i32, i32)>,
 }
 
@@ -161,8 +159,8 @@ pub fn exit_point(cell: (i32, i32), side: Side) -> (i32, i32) {
 ///
 /// Unlike [`exit_point`], the result is already ALL-ODD — the corner *is* its own gap-lattice
 /// point, so `snap_to_lattice` is a no-op on it. That is the whole trick behind SQ-0314: a
-/// diagonal needs no perpendicular stub to reach the lattice, so it can leave the box corner on a
-/// 45° line and hand straight off to an ordinary orthogonal L.
+/// diagonal needs no perpendicular stub to reach the lattice, so it can leave the box corner
+/// diagonally and hand straight off to an ordinary orthogonal L.
 ///
 /// Returns `None` for every non-diagonal direction.
 pub fn corner_point(cell: (i32, i32), dir: Direction) -> Option<(i32, i32)> {
@@ -2209,7 +2207,7 @@ mod tests {
         // diagonal needs no perpendicular stub to reach it. For diagonally-adjacent rooms both
         // boxes' corners resolve to the SAME shared corner, collapsing the route to
         // centre → corner → centre: R1(0,1) doubled (0,2), the shared corner (1,1), R2(1,0)
-        // doubled (2,0). The corner is the exact midpoint, so it renders as one clean 45° line.
+        // doubled (2,0). The corner is the exact midpoint, so it renders as one clean diagonal.
         //
         // The one-way and the reciprocal MUST agree here: an arrowhead is the only thing that
         // should distinguish them, never the path itself.
