@@ -11,8 +11,14 @@ fn rgb(color: u32) -> Rgba<u8> {
 }
 
 /// A graphics window's pixel canvas.
+///
+/// `img` is an `Arc` so [`arc`](Canvas::arc) — called for every graphics window
+/// on every screen refresh (once per timer tick during an animation) — is a
+/// cheap reference-count bump, not a full-bitmap deep copy. Mutations go through
+/// `Arc::make_mut`, which copies-on-write only when a previously-handed-out clone
+/// is still alive, so a static canvas is never copied. (SQ-0343)
 pub struct Canvas {
-    pub img: RgbaImage,
+    pub img: Arc<RgbaImage>,
     bg: Rgba<u8>,
     /// Bumped on every draw so the renderer can cache the built protocol.
     pub version: u64,
@@ -25,7 +31,7 @@ impl Canvas {
         // by a resize before the game's Arrange redraw lands) must show the pane
         // underneath, never a solid black block. Games that want an opaque
         // background set it via glk_window_set_background_color. (SQ-0332)
-        Canvas { img: RgbaImage::new(w.max(1), h.max(1)), bg: Rgba([0, 0, 0, 0x00]), version: 1 }
+        Canvas { img: Arc::new(RgbaImage::new(w.max(1), h.max(1))), bg: Rgba([0, 0, 0, 0x00]), version: 1 }
     }
 
     /// Resize (preserving nothing — Glk redraws) if the pixel dims changed. Cleared
@@ -33,7 +39,7 @@ impl Canvas {
     /// the pane, not a black block.
     pub fn resize(&mut self, w: u32, h: u32) {
         if (self.img.width(), self.img.height()) != (w.max(1), h.max(1)) {
-            self.img = RgbaImage::from_pixel(w.max(1), h.max(1), self.bg);
+            self.img = Arc::new(RgbaImage::from_pixel(w.max(1), h.max(1), self.bg));
             self.version += 1;
         }
     }
@@ -46,9 +52,10 @@ impl Canvas {
         let y0 = top.max(0) as i64;
         let x1 = (left as i64 + w as i64).min(cw);
         let y1 = (top as i64 + h as i64).min(ch);
+        let img = Arc::make_mut(&mut self.img);
         for y in y0..y1 {
             for x in x0..x1 {
-                self.img.put_pixel(x as u32, y as u32, px);
+                img.put_pixel(x as u32, y as u32, px);
             }
         }
         self.version += 1;
@@ -81,11 +88,13 @@ impl Canvas {
             }
             _ => src,
         };
-        image::imageops::overlay(&mut self.img, view, x as i64, y as i64);
+        image::imageops::overlay(Arc::make_mut(&mut self.img), view, x as i64, y as i64);
         self.version += 1;
     }
 
-    pub fn arc(&self) -> Arc<RgbaImage> { Arc::new(self.img.clone()) }
+    /// A cheap clone of the canvas bitmap (an `Arc` ref-count bump — see the type
+    /// docs), handed to the renderer each frame.
+    pub fn arc(&self) -> Arc<RgbaImage> { Arc::clone(&self.img) }
 }
 
 /// Resolves + caches decoded images by Blorb `Pict` resource number.
@@ -170,6 +179,21 @@ pub(crate) fn test_blorb_with_pict(resnum: u32, data: &[u8]) -> blorb::Blorb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arc_shares_while_unchanged_and_copies_on_write() {
+        // arc() must be a cheap Arc share when the canvas hasn't changed (the
+        // per-tick deep-clone this removes), and a later draw must NOT mutate a
+        // frame already handed to the renderer (copy-on-write isolation). (SQ-0343)
+        let mut c = Canvas::new(4, 4);
+        c.fill_rect(0x00FF_0000, 0, 0, 4, 4); // red
+        let snap = c.arc(); // renderer's frame this tick
+        assert!(Arc::ptr_eq(&snap, &c.img), "arc() shares the bitmap, no deep copy");
+        c.fill_rect(0x0000_00FF, 0, 0, 4, 4); // game draws blue next tick
+        assert_eq!(snap.get_pixel(0, 0).0, [0xFF, 0, 0, 0xFF], "handed-out frame stays red");
+        assert_eq!(c.img.get_pixel(0, 0).0, [0, 0, 0xFF, 0xFF], "live canvas is now blue");
+        assert!(!Arc::ptr_eq(&snap, &c.img), "make_mut copied-on-write for the new draw");
+    }
 
     #[test]
     fn fill_rect_paints_pixels_and_bumps_version() {
