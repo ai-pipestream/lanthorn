@@ -284,8 +284,8 @@ fn render_node(
             // OWN divider as a graphics window adjacent to the gutter (Kerkerkruip),
             // so we don't double the line — matching a pixel interpreter that leaves
             // the border to the game's chrome (SQ-0332).
-            let game_divider = edge_touches_graphics(first, *vertical, true)
-                || edge_touches_graphics(second, *vertical, false);
+            let game_divider = edge_touches_painted_graphics(first, *vertical, true)
+                || edge_touches_painted_graphics(second, *vertical, false);
             if b > 0 && !a1.is_empty() && !a2.is_empty() && !game_divider {
                 draw_window_separator(sep, *vertical, *key_fg, *key_bg, grid_colors, buf);
             }
@@ -415,25 +415,31 @@ fn subtract_rect(bounds: Rect, g: Rect) -> Rect {
         .unwrap_or(bounds)
 }
 
-/// Whether the leaf touching a pair's separator gutter is a graphics window (the
-/// game's own divider). `vertical` is the PARENT pair's split orientation; `high`
-/// is true when the gutter lies on this node's high-coordinate edge (i.e. this is
-/// the pair's `first` child, whose far edge abuts the gutter).
+/// Whether the leaf touching a pair's separator gutter is a PAINTED graphics
+/// window (the game's own drawn divider). `vertical` is the PARENT pair's split
+/// orientation; `high` is true when the gutter lies on this node's high-coordinate
+/// edge (i.e. this is the pair's `first` child, whose far edge abuts the gutter).
 ///
 /// Walks structurally: along the same split axis only the child on the gutter side
 /// touches it; across axes both children span the parent's edge, so either can. Used
 /// to suppress our redundant separator when a game (Kerkerkruip) draws its own
-/// graphics-window rule there. (SQ-0332)
-fn edge_touches_graphics(node: &WinNode, vertical: bool, high: bool) -> bool {
+/// graphics-window rule there (SQ-0332) — but only when that window is actually
+/// painted, so a game's empty frame windows (narco) still get our rule (SQ-0340).
+fn edge_touches_painted_graphics(node: &WinNode, vertical: bool, high: bool) -> bool {
     match node {
-        WinNode::Graphics(_) => true,
+        // Only a PAINTED graphics window counts as the game's own divider. A
+        // window the game opened but never drew into (narco frames its story with
+        // empty graphics windows) is NOT a divider — suppressing our separator
+        // there would leave the pane with no visible boundary at all. (SQ-0340)
+        WinNode::Graphics(g) => g.canvas.pixels().any(|p| p[3] >= 128),
         WinNode::Buffer(_) | WinNode::Grid(_) | WinNode::Blank => false,
         WinNode::Pair { vertical: v, first, second, .. } => {
             if *v == vertical {
                 let child = if high { second } else { first };
-                edge_touches_graphics(child, vertical, high)
+                edge_touches_painted_graphics(child, vertical, high)
             } else {
-                edge_touches_graphics(first, vertical, high) || edge_touches_graphics(second, vertical, high)
+                edge_touches_painted_graphics(first, vertical, high)
+                    || edge_touches_painted_graphics(second, vertical, high)
             }
         }
     }
@@ -1540,6 +1546,41 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn empty_graphics_neighbour_draws_separator_painted_one_suppresses() {
+        // narco frames its story with graphics windows it never paints; the frame
+        // must still get our separator rule. Kerkerkruip PAINTS its dividers, so
+        // those still suppress our rule (no doubling). (SQ-0340, refines SQ-0332)
+        let empty_graphics = || {
+            let img = image::RgbaImage::new(9, 57); // opened but never drawn → transparent
+            WinNode::Graphics(crate::engine::GraphicsWindow { win: 4, canvas: std::sync::Arc::new(img), version: 1 })
+        };
+        let make = |second: WinNode| ScreenModel {
+            root: WinNode::Pair {
+                vertical: false, // left/right split → a │ separator
+                split: Split { fixed: 10 },
+                border: true,
+                key_bg: None,
+                key_fg: None,
+                first: Box::new(WinNode::Buffer(inline_buffer("STORY"))),
+                second: Box::new(second),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (20, 6),
+        };
+        let state = frameless_state();
+        let area = Rect::new(0, 0, 20, 6);
+        let has_rule = |m: &ScreenModel| {
+            let mut buf = Buffer::empty(area);
+            render_story_pane(m, false, None, &state, area, &mut buf);
+            (0..6).any(|y| (0..20).any(|x| buf.cell((x, y)).unwrap().symbol() == "\u{2502}"))
+        };
+        assert!(has_rule(&make(empty_graphics())), "empty graphics neighbour → our separator drawn");
+        assert!(!has_rule(&make(graphics_node())), "painted graphics divider → our separator suppressed");
     }
 
     #[test]
