@@ -5229,13 +5229,39 @@ mod tests {
     #[test]
     fn apply_action_toggle_map() {
         use crate::state::{AppState, Layout};
-        let mut s = AppState::default(); // empty ifid → no sidecar write
+        let mut s = AppState::default(); // empty game_dir → no sidecar write
         let mut m = Mapper::default();
         assert!(matches!(s.layout, Layout::Split));
         apply_action(Action::ToggleMap, &mut s, &mut m);
         assert!(matches!(s.layout, Layout::TranscriptFull));
         apply_action(Action::ToggleMap, &mut s, &mut m);
         assert!(matches!(s.layout, Layout::Split));
+    }
+
+    #[test]
+    fn toggle_map_persists_show_map_to_game_dir() {
+        use crate::state::{AppState, Layout};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let game_dir = std::env::temp_dir()
+            .join(format!("bm-togglemap-{}-{}.save", std::process::id(), n));
+        std::fs::create_dir_all(&game_dir).unwrap();
+
+        let mut s = AppState::default();
+        s.game_dir = game_dir.clone();
+        let mut m = Mapper::default();
+
+        // Hide the map → show_map = false persisted.
+        apply_action(Action::ToggleMap, &mut s, &mut m);
+        assert!(matches!(s.layout, Layout::TranscriptFull));
+        assert_eq!(crate::styles::read_per_game_show_map(&game_dir), Some(false));
+
+        // Show it again → show_map = true persisted.
+        apply_action(Action::ToggleMap, &mut s, &mut m);
+        assert!(matches!(s.layout, Layout::Split));
+        assert_eq!(crate::styles::read_per_game_show_map(&game_dir), Some(true));
+        let _ = std::fs::remove_dir_all(&game_dir);
     }
 
     // ── Leaf 2: ResetGame opens the dialog ───────────────────────────────────
