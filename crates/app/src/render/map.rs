@@ -288,11 +288,11 @@ const DIAG_GUTTER: i32 = 3;
 
 /// The column gap a diagonal needs to cross a row gap of `row_gap` without a dogleg (SQ-0314).
 ///
-/// A chain crosses one row per step and AT LEAST one column with it — a step cannot be steeper than
-/// that, because its two halves must sit in different columns. So the columns must at minimum keep
-/// up with the rows: `col_gap >= row_gap`. Surplus columns are fine and cost nothing, since
-/// `diagonal_chain` spends them as `─` fill inside the steps (one column per row is a 63° climb,
-/// two is a true 45°, more is shallower still).
+/// `diagonal_chain` can draw any ratio — it spends a surplus on either axis as fill — so this is
+/// about how the result READS, not whether it can be drawn. A square gap gives one column per row
+/// (a 63° climb on a ~1:2 cell); wider gives a shallower line, narrower a steeper one. Matching the
+/// column gap to the row gap keeps diagonals looking consistent across a map whose channels carry
+/// wildly different lane counts.
 ///
 /// Never below `MIN_GUTTER`, so this can only ever widen a gap.
 fn diagonal_col_gap(row_gap: i32) -> i32 {
@@ -938,12 +938,16 @@ struct ConnectorPlot {
 /// to lane 1 or beyond of a channel has only that much room, because higher lanes sit closer to the
 /// next box.
 ///
-/// A step may be WIDENED with `─` fill between its two halves. `─` attaches at middle-left and
-/// middle-right — the very points the half-diagonals hand off on — so `🮣─🮠` chains exactly as
-/// `🮣🮠` does, just two columns wide instead of one. That is how the chain absorbs a gap that is
-/// wider than it is tall and still lands EXACTLY on its target: surplus columns are spread through
-/// the steps rather than left over as a stray run beside the corner. (A 1-column step is a 63°
-/// climb on a ~1:2 cell; a 2-column step is a true 45°; wider is shallower still.)
+/// A step can be RESHAPED with fill, because both fill glyphs attach exactly where the
+/// half-diagonals hand off:
+///   * `─` attaches middle-left/middle-right, so it goes BETWEEN a step's two halves: `🮣─🮠` chains
+///     exactly as `🮣🮠` does, two columns wide instead of one — a shallower step.
+///   * `│` attaches upper-/lower-centre, so it goes AFTER a step's far glyph: one column across two
+///     rows — a steeper step.
+/// So the chain absorbs a surplus on EITHER axis and still lands exactly on its target, instead of
+/// leaving a stray run beside the corner (too wide) or refusing to draw at all (too tall). On a
+/// ~1:2 cell a bare step is a 63° climb, one `─` of fill makes it a true 45°, and one `│` makes it
+/// 76°.
 
 /// The direction bit that seams a `dir` chain to the orthogonal cell it hands off to (SQ-0314).
 ///
@@ -976,34 +980,50 @@ fn diagonal_chain(
         _ => return None,
     };
     let (cx, cy) = anchor;
-    // One step per row of travel, and the surplus columns spread across those steps as `─` fill, so
-    // the chain lands exactly on `target`.
     let rows = (target.1 - cy).abs();
-    let surplus = (target.0 - cx).abs() - rows;
-    if rows < 1 || surplus < 0 {
-        // Level with the corner (nothing diagonal to draw), or steeper than one column per row —
-        // which no chain can express, since a step must cross at least its own column. The caller
-        // keeps its orthogonal geometry.
-        return None;
+    let cols = (target.0 - cx).abs();
+    if rows < 1 || cols < 1 {
+        return None; // level with the corner on one axis: nothing diagonal to draw
     }
-    let mut cells = Vec::with_capacity((rows + surplus) as usize * 2);
-    let mut x = cx; // the column the line currently sits on; starts on the corner itself
-    for k in 0..rows {
-        let row = cy + k * sy;
-        // Spread the surplus as evenly as the steps allow, widest first, so no single step is
-        // conspicuously shallower than its neighbours.
-        let fill = surplus / rows + i32::from(k < surplus % rows);
-        // Step 0's near cell would BE the corner, so it contributes its far glyph only.
+    // A bare step crosses one row and one column. Whichever axis has more to cover is the surplus,
+    // and it is spent as FILL inside the steps so the chain lands exactly on `target`.
+    let steps = rows.min(cols);
+    let h_surplus = cols - steps; // spent as `─` BETWEEN a step's two halves → shallower
+    let v_surplus = rows - steps; // spent as `│` AFTER a step's far glyph → steeper
+    //
+    // Step 0 never takes `─` fill. Its near cell IS the corner, so fill there would sit between the
+    // corner and the first diagonal glyph — the line would leave the room HORIZONTALLY and only
+    // then turn diagonal, which is the one thing the corner exit exists to avoid. Steps 1.. have a
+    // real near glyph, so their fill lands mid-step and reads as part of the diagonal. `│` fill is
+    // safe on any step, including 0: it goes AFTER the far glyph, never touching the corner.
+    let hf_steps = steps - 1;
+    let (hf, hf_wide) = if hf_steps > 0 { (h_surplus / hf_steps, h_surplus % hf_steps) } else { (0, 0) };
+    let (vf, vf_tall) = (v_surplus / steps, v_surplus % steps);
+    let mut cells = Vec::with_capacity((rows + cols) as usize);
+    let (mut x, mut y) = (cx, cy); // where the line currently sits; starts on the corner itself
+    for k in 0..steps {
+        // Spread each surplus as evenly as its steps allow, widest first, so no single step is
+        // conspicuously shallower or steeper than its neighbours.
+        let h = if k == 0 { 0 } else { hf + i32::from(k - 1 < hf_wide) };
+        let v = vf + i32::from(k < vf_tall);
         if k > 0 {
-            cells.push(((x, row), near));
+            cells.push(((x, y), near)); // step 0's near cell would BE the corner
         }
-        for i in 1..=fill {
-            cells.push(((x + i * sx, row), g.ew));
+        for i in 1..=h {
+            cells.push(((x + i * sx, y), g.ew));
         }
-        x += (fill + 1) * sx;
-        cells.push(((x, row), far));
+        x += (h + 1) * sx;
+        cells.push(((x, y), far));
+        for i in 1..=v {
+            cells.push(((x, y + i * sy), g.ns));
+        }
+        y += (v + 1) * sy;
     }
-    Some((cells, (x, cy + rows * sy)))
+    // `y` always lands on `target.1`. `x` does too, EXCEPT when there was only step 0 to hold `─`
+    // fill — then the chain stays one column wide and stops short, and the caller bridges the rest
+    // along the TARGET's row. That row is the channel lane the line was heading for anyway, so the
+    // remainder reads as part of that run rather than as a stub hanging off the corner.
+    Some((cells, (x, y)))
 }
 
 /// Compute the virtual cells + per-cell masks a single connector occupies.
@@ -2990,23 +3010,23 @@ mod tests {
         //
         // A step in the corner's OWN row crosses exactly one row, and joins the corner edge-to-edge:
         // 🮠's middle-left meets the corner's middle-right, and its upper-centre meets the bottom of
-        // the cell holding the run. The two columns on offer are spent as `─` fill, so the chain
-        // lands ON the run rather than a column short of it.
+        // the cell holding the run.
         let g = AppState::default().symbols.path;
         let (cells, resume) =
-            diagonal_chain((40, 41), (42, 40), Direction::NE, &g).expect("a one-row hop draws");
-        assert_eq!(
-            cells,
-            vec![((41, 41), g.ew), ((42, 41), g.diag_ul)],
-            "one row, two columns: `─` fill then 🮠, all in the corner's own row",
-        );
-        assert_eq!(resume, (42, 40), "landing exactly on the run, with nothing left over");
-
-        // One row and one column: the bare half-diagonal, no fill.
-        let (cells, resume) =
-            diagonal_chain((40, 41), (41, 40), Direction::NE, &g).expect("draws");
+            diagonal_chain((40, 41), (41, 40), Direction::NE, &g).expect("a one-row hop draws");
         assert_eq!(cells, vec![((41, 41), g.diag_ul)], "a single 🮠, in the corner's own row");
         assert_eq!(resume, (41, 40));
+
+        // With spare columns and only step 0 to work with, the chain does NOT widen: `─` fill in
+        // step 0 would sit between the corner and the first diagonal glyph, so the line would leave
+        // the room horizontally and only then turn diagonal — the very thing the corner exit is
+        // for. It stays one column wide and lets the caller bridge the rest along the target's row,
+        // which is the channel lane it was heading for anyway.
+        let (cells, resume) =
+            diagonal_chain((40, 41), (43, 40), Direction::NE, &g).expect("draws");
+        assert_eq!(cells, vec![((41, 41), g.diag_ul)], "still just 🮠 — no fill beside the corner");
+        assert_eq!(resume.1, 40, "the row is always reached");
+        assert_eq!(resume, (41, 40), "and the spare columns are left to the caller's bridge");
 
         // Level with the corner there is genuinely nothing diagonal to draw, and the caller keeps
         // its orthogonal geometry.
@@ -3021,31 +3041,47 @@ mod tests {
         // diagonal's floor. The chain covered 4x4 and the spare column was left over as a one-cell
         // horizontal run into the corner: the dangle.
         //
-        // `─` attaches at middle-left/middle-right, exactly where the half-diagonals hand off, so
-        // `🮣─🮠` chains just like `🮣🮠` at two columns per row instead of one. Surplus columns go
-        // INSIDE the steps and the chain lands dead on its target.
+        // Both surpluses chain, because both fill glyphs attach where the half-diagonals hand off:
+        //   * `─` attaches middle-left/middle-right, so it goes BETWEEN a step's two halves —
+        //     `🮣─🮠` chains just like `🮣🮠`, at two columns per row instead of one (shallower).
+        //   * `│` attaches upper-/lower-centre, so it goes AFTER a step's far glyph — one column
+        //     per two rows (steeper). #143's SW arrival needs this: four rows to three columns.
         let g = AppState::default().symbols.path;
-        for (rows, cols) in [(4, 4), (4, 5), (4, 8), (4, 11), (1, 1), (1, 3), (3, 4), (6, 7)] {
+        let ratios = [
+            (4, 4), (4, 5), (4, 8), (4, 11), // square, then progressively shallower
+            (1, 1), (3, 4), (6, 7),
+            (4, 3), (5, 2), (8, 3), (7, 1), // and progressively steeper
+        ];
+        for (rows, cols) in ratios {
             let anchor = (58, 31);
             let target = (anchor.0 - cols, anchor.1 + rows); // SW-ward, as the Zork case is
             let (cells, resume) =
-                diagonal_chain(anchor, target, Direction::SW, &g).expect("{rows}x{cols} draws");
+                diagonal_chain(anchor, target, Direction::SW, &g).expect("draws");
             assert_eq!(resume, target, "{rows} rows x {cols} cols: nothing may be left over");
 
-            // One step per row, so exactly `rows` far glyphs; the rest is near glyphs and fill.
-            let fars = cells.iter().filter(|(_, c)| *c == g.diag_lr).count();
-            assert_eq!(fars, rows as usize, "{rows}x{cols}: one far glyph per row crossed");
-            let fills = cells.iter().filter(|(_, c)| *c == g.ew).count();
-            assert_eq!(fills, (cols - rows) as usize, "{rows}x{cols}: surplus spent as `─` fill");
+            // One far glyph per step, and the surplus on each axis spent as its own fill.
+            let steps = rows.min(cols);
+            let count = |ch: char| cells.iter().filter(|(_, c)| *c == ch).count();
+            assert_eq!(count(g.diag_lr), steps as usize, "{rows}x{cols}: one far glyph per step");
+            assert_eq!(count(g.ew), (cols - steps) as usize, "{rows}x{cols}: `─` fill");
+            assert_eq!(count(g.ns), (rows - steps) as usize, "{rows}x{cols}: `│` fill");
 
             // Every cell distinct — a step must never stack two glyphs on one cell.
             let uniq: std::collections::HashSet<_> = cells.iter().map(|(p, _)| *p).collect();
             assert_eq!(uniq.len(), cells.len(), "{rows}x{cols}: {cells:?}");
+
+            // And never `─` beside the corner: step 0's fill would leave the room horizontally.
+            let inline = (anchor.0 - 1, anchor.1);
+            assert_eq!(
+                cells.iter().find(|(p, _)| *p == inline).map(|(_, c)| *c),
+                Some(g.diag_lr),
+                "{rows}x{cols}: the first cell out of the corner must be the diagonal itself",
+            );
         }
 
-        // Steeper than one column per row is not expressible: a step must cross at least its own
-        // column. The caller keeps its orthogonal geometry rather than drawing something wrong.
-        assert!(diagonal_chain((58, 31), (56, 35), Direction::SW, &g).is_none(), "4 rows, 2 cols");
+        // Level with the corner on either axis: nothing diagonal to draw.
+        assert!(diagonal_chain((58, 31), (56, 31), Direction::SW, &g).is_none(), "zero rows");
+        assert!(diagonal_chain((58, 31), (58, 35), Direction::SW, &g).is_none(), "zero columns");
     }
 
     #[test]
