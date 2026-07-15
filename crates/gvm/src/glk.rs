@@ -1953,9 +1953,21 @@ impl Model {
     /// 37 %) has no small clean size; there we fall back to the requested size and
     /// rely on the host's per-turn watchdog.
     fn clean_dims(&self, width: u32, height: u32) -> (u32, u32) {
-        let w = (1..=width).rev().find(|&s| self.axis_splits_exact(self.root, s, true)).unwrap_or(width);
-        let h = (1..=height).rev().find(|&s| self.axis_splits_exact(self.root, s, false)).unwrap_or(height);
-        (w.max(1), h.max(1))
+        // Snap DOWN to the largest size at which every proportional split lands
+        // on whole cells — but only when that costs a handful of cells. A "nice"
+        // ratio (50 %, 25 %) needs at most a rounding cell; an awkward one (33 %,
+        // or narco's nested panels) has no clean size near the requested one, and
+        // taking the largest one that exists collapses the whole screen (narco:
+        // 95×57 → 3×1). Losing more than half an axis is never a rounding
+        // correction, so fall back to the requested size there and rely on the
+        // host's per-turn watchdog for a genuine looper. (SQ-0336)
+        let snap = |extent: u32, horizontal: bool| -> u32 {
+            match (1..=extent).rev().find(|&s| self.axis_splits_exact(self.root, s, horizontal)) {
+                Some(s) if s * 2 >= extent => s, // kept ≥ half: a real rounding fix
+                _ => extent,                      // collapse (or none): keep requested
+            }
+        };
+        (snap(width, true).max(1), snap(height, false).max(1))
     }
 
     /// Does every proportional split that divides the given axis land on whole
@@ -3580,6 +3592,25 @@ mod layout_snap_tests {
         assert_eq!(pw, 722, "reports the exact requested width, not 81×9=729");
         // The non-fixed axis stays cells × char_px.
         assert_eq!(ph, m.window_size(gfx).unwrap().1 * 19, "height still cells × char_px");
+    }
+
+    // An awkward split percentage has no clean size near the requested one: a
+    // 33% split needs its content (width − 1 border) to be a multiple of 100, so
+    // the only "clean" width is 1 (content 0). Taking that would collapse the
+    // whole screen (narco's nested panels did exactly this: 95×57 → 3×1). The
+    // snap must instead fall back to the requested size — a fractional split is
+    // harmless here and the host's per-turn watchdog guards a genuine looper.
+    // (SQ-0336)
+    #[test]
+    fn relayout_falls_back_when_snapping_would_collapse_the_screen() {
+        let mut m = Model::new();
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let _gfx = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 33, 5, 0).unwrap();
+        let leaves = m.relayout(95, 57, (9, 19));
+        let right = leaves.iter().map(|(_, _, r, _)| r.left + r.width).max().unwrap();
+        let bottom = leaves.iter().map(|(_, _, r, _)| r.top + r.height).max().unwrap();
+        assert_eq!(right, 95, "awkward proportional split must not collapse the width");
+        assert_eq!(bottom, 57, "the unconstrained axis is untouched");
     }
 
     // A fixed split imposes no proportional constraint: an odd screen passes through.
