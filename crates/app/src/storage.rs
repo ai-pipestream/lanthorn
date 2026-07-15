@@ -4,7 +4,8 @@
 //! colliding with the story file when `base` is the story's own directory.
 //! Inside it: `default.aux`, `default.glkvfs`,
 //! `default.babelmap` (auto/singleton), plus `<slug>.babelmap` / `<slug>.qzl`
-//! (named). IFID is retained elsewhere for title/hint lookup only.
+//! (named), and the per-game `style.toml` / `config.toml` overrides (SQ-0346).
+//! IFID is retained elsewhere for title/hint lookup only.
 
 use std::path::{Path, PathBuf};
 

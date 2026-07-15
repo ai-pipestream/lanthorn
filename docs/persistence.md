@@ -120,6 +120,8 @@ that game side by side:
     default.babelmap   # the auto/singleton Save State slot (Layer 2)
     <slug>.babelmap     # named Save States (Layer 2, app only)
     <slug>.qzl           # in-game @save files (Layer 1)
+    style.toml          # per-game style override (app only, layered over global)
+    config.toml         # per-game non-style overrides (honor/borders/map panel)
 ```
 
 `<story-key>` is the story's own **filename** (basename including extension,

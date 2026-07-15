@@ -49,9 +49,9 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
         }
     };
 
-    // Layer the per-game override (user_dir/styles/<ifid>.toml) over the global.
-    let doc = if !state.ifid.is_empty() {
-        let pg_path = crate::styles::per_game_style_path(&user_dir, &state.ifid);
+    // Layer the per-game override (<game_dir>/style.toml) over the global.
+    let doc = if !state.game_dir.as_os_str().is_empty() {
+        let pg_path = crate::styles::per_game_style_path(&state.game_dir);
         if pg_path.is_file() {
             match std::fs::read_to_string(&pg_path) {
                 Ok(text) => match crate::style::parse_style_toml(&text) {
@@ -71,7 +71,7 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
     state.colors = cs;
     state.symbols = set;
     // Re-apply the per-game garglk.ini overlay (SQ-0319): the resolve above
-    // rebuilds `colors` from style.toml + styles/<ifid>.toml and would drop it,
+    // rebuilds `colors` from style.toml + <game_dir>/style.toml and would drop it,
     // so fold it back on so the imported look survives every reload path.
     if let Some(ov) = state.garglk_overlay.clone() {
         ov.apply(&mut state.colors);
@@ -81,10 +81,10 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
     // the global config default. Recompute from disk each reload so `auto` (no
     // per-game override) falls back to garglk/global, and an explicit per-game
     // choice is never clobbered by the garglk gate.
-    let per_game_honor = if state.ifid.is_empty() {
+    let per_game_honor = if state.game_dir.as_os_str().is_empty() {
         None
     } else {
-        crate::styles::read_per_game_honor(&user_dir, &state.ifid)
+        crate::styles::read_per_game_honor(&state.game_dir)
     };
     let garglk_honor = state.garglk_overlay.as_ref().and_then(|o| o.honor_game_colours);
     state.config.honor_game_colours =
@@ -132,22 +132,22 @@ mod tests {
         // global: transcript white; per-game overrides transcript to green.
         let global = dir.join("style.toml");
         std::fs::write(&global, "[colors]\n\"transcript\" = { fg = \"white\" }\n").unwrap();
-        let ifid = "ZCODE-1-PG-0001";
-        let pg_dir = dir.join("styles");
-        std::fs::create_dir_all(&pg_dir).unwrap();
-        std::fs::write(pg_dir.join(format!("{ifid}.toml")), "[colors]\n\"transcript\" = { fg = \"green\" }\n").unwrap();
+        let game_dir = dir.join("game.save");
+        std::fs::create_dir_all(&game_dir).unwrap();
+        std::fs::write(game_dir.join("style.toml"), "[colors]\n\"transcript\" = { fg = \"green\" }\n").unwrap();
 
         let mut state = AppState::default();
         state.config.user_dir = dir.clone();
         state.config.style = Some(global.to_string_lossy().to_string());
-        state.ifid = ifid.to_string();
+        state.game_dir = game_dir.clone();
 
         let outcome = reload_style(&mut state);
         assert!(matches!(outcome, ReloadOutcome::Reloaded { .. }));
         assert_eq!(state.colors.transcript.fg, Some(Color::Green), "per-game overrides global");
 
         // With no per-game file, the global value stands.
-        state.ifid = "ZCODE-1-NONE-9999".to_string();
+        state.game_dir = dir.join("empty.save");
+        std::fs::create_dir_all(&state.game_dir).unwrap();
         reload_style(&mut state);
         assert_eq!(state.colors.transcript.fg, Some(Color::White), "global-only when no per-game file");
         let _ = std::fs::remove_dir_all(&dir);
@@ -164,23 +164,24 @@ mod tests {
     fn per_game_honor_override_beats_global_and_auto_falls_back() {
         let dir = temp_dir("honor");
         let global = seed_style(&dir);
-        let ifid = "ZCODE-1-HONOR-0001";
+        let game_dir = dir.join("game.save");
+        std::fs::create_dir_all(&game_dir).unwrap();
 
         let mut state = AppState::default();
         state.config.user_dir = dir.clone();
         state.config.style = Some(global.to_string_lossy().to_string());
-        state.ifid = ifid.to_string();
+        state.game_dir = game_dir.clone();
         // Global default (base) is honor = true.
         state.honor_game_colours_base = true;
         state.config.honor_game_colours = true;
 
         // A per-game override of false wins over the global true.
-        crate::styles::write_per_game_honor(&dir, ifid, Some(false)).unwrap();
+        crate::styles::write_per_game_honor(&game_dir, Some(false)).unwrap();
         reload_style(&mut state);
         assert!(!state.config.honor_game_colours, "per-game false wins over global true");
 
         // `auto` (override cleared) falls back to the global base (true).
-        crate::styles::write_per_game_honor(&dir, ifid, None).unwrap();
+        crate::styles::write_per_game_honor(&game_dir, None).unwrap();
         reload_style(&mut state);
         assert!(state.config.honor_game_colours, "auto falls back to global base");
         let _ = std::fs::remove_dir_all(&dir);
@@ -190,12 +191,13 @@ mod tests {
     fn per_game_honor_wins_over_garglk_and_auto_falls_back_to_garglk() {
         let dir = temp_dir("honor-garglk");
         let global = seed_style(&dir);
-        let ifid = "ZCODE-1-HONOR-0002";
+        let game_dir = dir.join("game.save");
+        std::fs::create_dir_all(&game_dir).unwrap();
 
         let mut state = AppState::default();
         state.config.user_dir = dir.clone();
         state.config.style = Some(global.to_string_lossy().to_string());
-        state.ifid = ifid.to_string();
+        state.game_dir = game_dir.clone();
         // Global base true; a garglk.ini stylehint set honor = true.
         state.honor_game_colours_base = true;
         state.garglk_overlay = Some(crate::garglk_ini::GarglkOverlay {
@@ -204,12 +206,12 @@ mod tests {
         });
 
         // A per-game override of false wins over the garglk-set true.
-        crate::styles::write_per_game_honor(&dir, ifid, Some(false)).unwrap();
+        crate::styles::write_per_game_honor(&game_dir, Some(false)).unwrap();
         reload_style(&mut state);
         assert!(!state.config.honor_game_colours, "per-game false wins over garglk true");
 
         // `auto` falls back to the garglk value (true), not just the base.
-        crate::styles::write_per_game_honor(&dir, ifid, None).unwrap();
+        crate::styles::write_per_game_honor(&game_dir, None).unwrap();
         reload_style(&mut state);
         assert!(state.config.honor_game_colours, "auto falls back to garglk stylehint");
         let _ = std::fs::remove_dir_all(&dir);

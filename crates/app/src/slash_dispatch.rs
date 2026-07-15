@@ -308,7 +308,7 @@ pub(crate) fn dispatch_slash_outcome(
             // the live look + honor precedence from disk (SQ-0318). reload_style
             // applies `per_game > garglk.ini > global`, so an explicit choice wins
             // and `auto` falls back to garglk/global.
-            match app::styles::write_per_game_honor(&state.config.user_dir, ifid, opt) {
+            match app::styles::write_per_game_honor(game_dir, opt) {
                 Ok(()) => {
                     let _ = app::reload::reload_style(state);
                     let label = match opt {
@@ -331,10 +331,10 @@ pub(crate) fn dispatch_slash_outcome(
             // Persist the per-game borderless override (or clear it on `auto`),
             // then apply it live: the running Glulx session relayouts so windows
             // abut (or regain their border gutters) immediately. (SQ-0341)
-            match app::styles::write_per_game_borderless(&state.config.user_dir, ifid, opt) {
+            match app::styles::write_per_game_borderless(game_dir, opt) {
                 Ok(()) => {
                     let effective =
-                        app::styles::read_per_game_borderless(&state.config.user_dir, ifid).unwrap_or(false);
+                        app::styles::read_per_game_borderless(game_dir).unwrap_or(false);
                     if let Some(gs) = session.as_any_mut().downcast_mut::<app::glulx_session::GlulxSession>() {
                         gs.set_borderless(effective);
                     }

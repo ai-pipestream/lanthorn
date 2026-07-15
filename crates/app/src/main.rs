@@ -616,7 +616,7 @@ fn toggle_style_watch(
     {
         *watcher = app::watch::start(&p);
         if let Some(w) = watcher.as_mut() {
-            w.also_watch(&state.config.user_dir.join("styles"));
+            w.also_watch(&state.game_dir);
         }
         state.set_status(if watcher.is_some() {
             "style watch on"
@@ -744,7 +744,7 @@ fn main() {
         {
             style_watcher = app::watch::start(&p);
             if let Some(w) = style_watcher.as_mut() {
-                w.also_watch(&state.config.user_dir.join("styles"));
+                w.also_watch(&state.game_dir);
             }
         }
     }
@@ -2374,13 +2374,10 @@ fn main() {
 
         // After apply_action: if Save Game Style was used, write the live look
         // self-contained to the current game's per-game style file.
-        if style_save_game {
-            let user_dir = state.config.user_dir.clone();
-            if !state.ifid.is_empty() {
-                let _ = app::styles::save_per_game_style(
-                    &user_dir, &state.ifid, &state.colors, &state.symbols,
-                );
-            }
+        if style_save_game && !state.game_dir.as_os_str().is_empty() {
+            let _ = app::styles::save_per_game_style(
+                &state.game_dir, &state.colors, &state.symbols,
+            );
         }
     }
 

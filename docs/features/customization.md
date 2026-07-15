@@ -74,12 +74,13 @@
   segment bar, and the `[symbols]` overrides.
   Changes apply live: `/reload` re-reads `style.toml`, and `watch_style = true`
   in `config.toml` auto-reloads on save (`/watch` toggles it at runtime).
-  Per-game looks: run `/game-style` to scaffold `~/.babelmap/styles/<ifid>.toml`,
-  edit it, and `/reload` — it layers over `style.toml` for that game only
-  (including its own statusbar / transcript rules). The watcher picks up the
-  styles dir once it exists, so the very first file create may need one `/reload`.
-  A per-game field left at the terminal default now stays default on reload
-  instead of silently re-inheriting the global colour.
+  Per-game looks: use the style editor's **Save Game Style** button to write the
+  live look to the game's own `style.toml` in its save directory
+  (`<base>/<story-key>.save/style.toml`); it layers over the global `style.toml`
+  for that game only (including its own statusbar / transcript rules) and is
+  re-applied every time that story opens. A per-game field left at the terminal
+  default stays default on reload instead of silently re-inheriting the global
+  colour.
 - **Decorated panes** — configurable per-pane borders (`none`/`single`/`double`/
   `thick`/a notched **picture-frame**). The map defaults to the picture-frame; the
   story pane defaults to a single-line border. The map's top border carries

@@ -273,11 +273,11 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
 pub fn open_style_editor(state: &mut AppState) {
     let user_dir = state.config.user_dir.clone();
     let (global, _warnings) = crate::style::load_style(state.config.style.as_deref(), &user_dir);
-    // Layer the per-game override (user_dir/styles/<ifid>.toml) over the global so
+    // Layer the per-game override (<game_dir>/style.toml) over the global so
     // the editor opens showing the live look. A missing or unparseable per-game
     // file falls back to the global doc.
-    let doc = if !state.ifid.is_empty() {
-        let pg_path = crate::styles::per_game_style_path(&user_dir, &state.ifid);
+    let doc = if !state.game_dir.as_os_str().is_empty() {
+        let pg_path = crate::styles::per_game_style_path(&state.game_dir);
         match std::fs::read_to_string(&pg_path) {
             Ok(text) => match crate::style::parse_style_toml(&text) {
                 Ok(over) => crate::style::merge(&global, &over),

@@ -1434,7 +1434,7 @@ pub struct AppState {
     /// Per-game garglk.ini colour overlay (SQ-0319), discovered beside the story
     /// at boot. Kept here so `reload_style` can re-apply it over the freshly
     /// resolved `colors` (garglk sits between the global theme and the user's
-    /// `styles/<ifid>.toml`). `None` when no sidecar was found.
+    /// per-game `<game_dir>/style.toml`). `None` when no sidecar was found.
     pub garglk_overlay: Option<crate::garglk_ini::GarglkOverlay>,
 
     /// The global `honor_game_colours` default (from config.toml/CLI, before any
@@ -1550,9 +1550,15 @@ pub struct AppState {
     /// Set once at startup; used by pane chrome to label the story pane.
     pub title: String,
 
-    /// The current story's IFID (set at session creation). Keys the per-game
-    /// style override (`user_dir/styles/<ifid>.toml`). Empty until set.
+    /// The current story's IFID (set at session creation). Used for
+    /// title/hint lookup. Empty until set.
     pub ifid: String,
+
+    /// The per-game storage directory (`<data_base>/<story-key>.save/`) holding
+    /// this story's saves and sidecars, including the per-game `style.toml` and
+    /// `config.toml` overrides. Set once at startup; empty until then (no
+    /// per-game reads/writes happen against an empty path).
+    pub game_dir: std::path::PathBuf,
 
     // ── Inventory panel state ─────────────────────────────────────────────────
 
@@ -1742,6 +1748,7 @@ impl Default for AppState {
             history_draft: String::new(),
             title: String::new(),
             ifid: String::new(),
+            game_dir: std::path::PathBuf::new(),
             show_inventory: false,
             player_obj: None,
             inventory_fallback: Vec::new(),

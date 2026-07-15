@@ -1603,11 +1603,11 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ToggleMap => {
             state.toggle_map();
             // Persist the map panel's on/off state per-game so it's restored the
-            // next time this story opens (SQ-0304). No IFID → no sidecar (and
+            // next time this story opens (SQ-0304). No game_dir → no sidecar (and
             // keeps unit tests off the filesystem).
-            if !state.ifid.is_empty() {
+            if !state.game_dir.as_os_str().is_empty() {
                 let show = state.layout == crate::state::Layout::Split;
-                let _ = crate::styles::write_per_game_show_map(&state.config.user_dir, &state.ifid, Some(show));
+                let _ = crate::styles::write_per_game_show_map(&state.game_dir, Some(show));
             }
         }
         Action::ZoomIn => state.zoom_in(),
@@ -3032,24 +3032,24 @@ mod tests {
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir()
             .join(format!("bm-merge-open-{}-{}", std::process::id(), n));
-        let styles_dir = dir.join("styles");
-        std::fs::create_dir_all(&styles_dir).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
         // Global: room fg = white, connector fg = cyan.
         std::fs::write(
             dir.join("style.toml"),
             "[colors]\n\"room\" = { fg = \"white\" }\n\"connector\" = { fg = \"cyan\" }\n[symbols]\n",
         ).unwrap();
-        // Per-game override for IFID: room fg = red (connector untouched).
-        let ifid = "ZCODE-1-ABCDEF-0001";
+        // Per-game override in the game dir: room fg = red (connector untouched).
+        let game_dir = dir.join("game.save");
+        std::fs::create_dir_all(&game_dir).unwrap();
         std::fs::write(
-            styles_dir.join(format!("{ifid}.toml")),
+            game_dir.join("style.toml"),
             "[colors]\n\"room\" = { fg = \"red\" }\n[symbols]\n",
         ).unwrap();
 
         let mut s = AppState::default();
         s.config.user_dir = dir;
         s.config.style = None; // load global from user_dir/style.toml
-        s.ifid = ifid.to_string();
+        s.game_dir = game_dir;
         crate::style_actions::open_style_editor(&mut s);
 
         let ed = s.overlays.style_editor.as_ref().unwrap();

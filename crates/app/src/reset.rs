@@ -65,7 +65,7 @@ pub(crate) fn reset_game(
             let carry_vfs = if delete_data { Vec::new() } else { session.vfs_bytes() };
             // Preserve the per-game borderless-windows override across @restart (SQ-0341).
             let borderless =
-                app::styles::read_per_game_borderless(&state.config.user_dir, &state.ifid).unwrap_or(false);
+                app::styles::read_per_game_borderless(game_dir).unwrap_or(false);
             GlulxSession::new_in(
                 game_dir.to_path_buf(),
                 bytes,
