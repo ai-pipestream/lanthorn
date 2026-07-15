@@ -4786,6 +4786,273 @@ mod tests {
         m
     }
 
+
+    // ── SQ-0229: Glulx-Quetzal structural conformance ────────────────────────
+    //
+    // Nothing guarded the save FORMAT. The round-trip tests all restore through our OWN reader, so
+    // any layout drift they introduce cancels out — a save that no other interpreter could read
+    // would still pass them. These assert the BYTES against the Glulx spec (§1.8) instead.
+    //
+    // The limit is worth stating: this cannot catch a spec misreading shared by both the writer and
+    // the reader. Only a cross-load against a foreign interpreter can, and that is still open on
+    // SQ-0229 (it needs a headless glulxe built against cheapglk plus an authored fixture).
+
+    /// Walk an IFF chunk list, asserting the container and even-padding as it goes.
+    /// Returns `(id, data)` per chunk, in file order.
+    fn iff_chunks(blob: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+        assert!(blob.len() >= 12, "too short to be a FORM: {} bytes", blob.len());
+        assert_eq!(&blob[0..4], b"FORM", "container is a FORM");
+        assert_eq!(&blob[8..12], b"IFZS", "of type IFZS");
+        let form_len = u32::from_be_bytes([blob[4], blob[5], blob[6], blob[7]]) as usize;
+        assert_eq!(
+            form_len + 8,
+            blob.len(),
+            "FORM length must cover exactly the rest of the file (a short/long count is what makes \
+             a foreign reader give up)",
+        );
+
+        let mut out = Vec::new();
+        let mut p = 12;
+        while p < blob.len() {
+            assert!(p + 8 <= blob.len(), "chunk header runs off the end at {p}");
+            assert_eq!(p % 2, 0, "every chunk must start on an even offset; {p} is odd");
+            let id = [blob[p], blob[p + 1], blob[p + 2], blob[p + 3]];
+            let len =
+                u32::from_be_bytes([blob[p + 4], blob[p + 5], blob[p + 6], blob[p + 7]]) as usize;
+            let start = p + 8;
+            assert!(start + len <= blob.len(), "chunk {:?} overruns the file", String::from_utf8_lossy(&id));
+            out.push((id, blob[start..start + len].to_vec()));
+            if len % 2 == 1 {
+                assert_eq!(blob[start + len], 0, "the pad byte after an odd chunk must be zero");
+            }
+            p = start + len + (len & 1);
+        }
+        assert_eq!(p, blob.len(), "the chunk walk must land exactly on the end");
+        out
+    }
+
+    fn chunk_ids(chunks: &[([u8; 4], Vec<u8>)]) -> Vec<String> {
+        chunks.iter().map(|(id, _)| String::from_utf8_lossy(id).to_string()).collect()
+    }
+
+    /// Decompress a CMem body: 4-byte memsize, then RLE where `00 n` is (n+1) zero bytes and any
+    /// other byte is a literal (spec §1.8). Returns `(memsize, diff_bytes)`.
+    fn decompress_cmem(body: &[u8]) -> (u32, Vec<u8>) {
+        assert!(body.len() >= 4, "CMem must start with a 4-byte memsize");
+        let memsize = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+        let mut out = Vec::new();
+        let mut i = 4;
+        while i < body.len() {
+            if body[i] == 0 {
+                assert!(i + 1 < body.len(), "a zero-run marker needs its count byte");
+                let run = body[i + 1] as usize + 1;
+                out.extend(std::iter::repeat_n(0u8, run));
+                i += 2;
+            } else {
+                out.push(body[i]);
+                i += 1;
+            }
+        }
+        (memsize, out)
+    }
+
+    /// A machine that has actually RUN: RAM dirtied, a call frame live on the stack.
+    ///
+    /// Stepping matters — a freshly built machine has a pristine RAM image, so its CMem diff is all
+    /// zeroes and every assertion about the diff would hold vacuously.
+    fn conformance_machine() -> Machine {
+        let body = [
+            asm::ins(0x40, &[asm::Op::C32(0xDEAD_BEEF), asm::Op::Mem32(0x110)]), // copy → dirty RAM
+            asm::ins(0x40, &[asm::Op::C32(0x0BAD_F00D), asm::Op::Mem32(0x118)]),
+            asm::ins(0x120, &[]), // quit (never reached: we stop stepping before it)
+        ]
+        .concat();
+        let mut m = machine_with_body(&[(4, 2)], body);
+        for _ in 0..2 {
+            assert_eq!(m.step(), StepResult::Continue, "the fixture's copies must execute");
+        }
+        assert_eq!(m.mem.read32(0x110), Some(0xDEAD_BEEF), "RAM is genuinely dirty now");
+        m
+    }
+
+    #[test]
+    fn an_odd_length_chunk_is_padded_to_even() {
+        // IFF requires every chunk to occupy an even number of bytes, with the LENGTH field still
+        // reporting the unpadded size. Drop the pad and every following chunk starts one byte late
+        // — a foreign reader desyncs and gives up on the file.
+        //
+        // Tested on the writer directly, because no chunk a real save emits is odd-length: IFhd is
+        // 128, MAll is 8+8n, Stks is 4-aligned, and CMem is only incidentally odd. Asserting this
+        // through a save blob would pass whether or not the padding existed.
+        let mut out = Vec::new();
+        push_chunk(&mut out, b"TEST", &[1, 2, 3]);
+        assert_eq!(out.len(), 12, "4 id + 4 len + 3 data + 1 pad");
+        assert_eq!(&out[0..4], b"TEST");
+        assert_eq!(
+            u32::from_be_bytes([out[4], out[5], out[6], out[7]]),
+            3,
+            "the length field reports the UNPADDED size — the pad is not part of the chunk",
+        );
+        assert_eq!(out[11], 0, "the pad byte is zero");
+
+        let mut even = Vec::new();
+        push_chunk(&mut even, b"TEST", &[1, 2]);
+        assert_eq!(even.len(), 10, "an even-length chunk takes no pad");
+
+        // And the reader must skip the pad it just wrote — writer and reader agree.
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"FORM");
+        let mut body = Vec::new();
+        push_chunk(&mut body, b"AAAA", &[9]); // odd
+        push_chunk(&mut body, b"BBBB", &[7, 7]);
+        blob.extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
+        blob.extend_from_slice(b"IFZS");
+        blob.extend_from_slice(&body);
+        let chunks = parse_ifzs(&blob).expect("round-trips through our own reader");
+        assert_eq!(chunks.len(), 2, "the pad byte must not be mistaken for a chunk header");
+        assert_eq!(chunks[0].1, &[9], "odd chunk keeps its exact data");
+        assert_eq!(chunks[1].1, &[7, 7], "and the next chunk is found at the right offset");
+    }
+
+    #[test]
+    fn save_quetzal_is_a_wellformed_ifzs_container() {
+        let m = conformance_machine();
+        let blob = m.save_quetzal();
+        let chunks = iff_chunks(&blob); // asserts FORM/IFZS, lengths, even-padding
+
+        // The spec-conformant @save format is EXACTLY these four, in this order. A foreign
+        // interpreter reads this blob, so our own extensions must not leak into it.
+        assert_eq!(
+            chunk_ids(&chunks),
+            vec!["IFhd", "CMem", "Stks", "MAll"],
+            "@save emits the standard four chunks and nothing else",
+        );
+        for extra in ["GReg", "Glk "] {
+            assert!(
+                !chunk_ids(&chunks).contains(&extra.to_string()),
+                "{extra} is a babelmap extension and must stay out of the interop format",
+            );
+        }
+    }
+
+    #[test]
+    fn save_state_is_the_same_container_plus_our_own_chunks() {
+        // The host snapshot may carry extensions — a foreign terp is required to skip unknown
+        // chunks — but it must still be a well-formed IFZS, and the standard four must lead.
+        let m = conformance_machine();
+        let blob = m.save_state();
+        let chunks = iff_chunks(&blob);
+        assert_eq!(
+            chunk_ids(&chunks),
+            vec!["IFhd", "CMem", "Stks", "MAll", "GReg", "Glk "],
+            "the snapshot is the standard four, then our extensions",
+        );
+    }
+
+    #[test]
+    fn ifhd_is_the_first_128_bytes_of_memory() {
+        let m = conformance_machine();
+        for blob in [m.save_quetzal(), m.save_state()] {
+            let chunks = iff_chunks(&blob);
+            let (_, ifhd) = chunks.iter().find(|(id, _)| id == b"IFhd").expect("IFhd present");
+            assert_eq!(ifhd.len(), 128, "IFhd is exactly the 128-byte header");
+            let want: Vec<u8> = (0..128).map(|a| m.mem.read8(a).unwrap_or(0) as u8).collect();
+            assert_eq!(*ifhd, want, "IFhd must BE the header — it is the identity a restore checks");
+        }
+    }
+
+    #[test]
+    fn cmem_decompresses_to_exactly_the_ram_extent() {
+        let m = conformance_machine();
+        let blob = m.save_quetzal();
+        let chunks = iff_chunks(&blob);
+        let (_, cmem) = chunks.iter().find(|(id, _)| id == b"CMem").expect("CMem present");
+        let (memsize, diff) = decompress_cmem(cmem);
+
+        assert_eq!(memsize, m.mem.mem_size(), "CMem's memsize prefix is the live memory size");
+        assert_eq!(
+            diff.len() as u32,
+            memsize - m.mem.ramstart(),
+            "the RLE must decompress to precisely [RAMSTART, memsize) — a length mismatch is the \
+             classic silent corruption: a foreign terp restores a truncated or over-long RAM image",
+        );
+
+        // The diff is XOR-against-original, so it must reconstruct live RAM exactly.
+        for (i, d) in diff.iter().enumerate() {
+            let a = m.mem.ramstart() + i as u32;
+            let want = m.mem.read8(a).unwrap_or(0) as u8;
+            assert_eq!(d ^ m.mem.orig_byte(a), want, "RAM byte {a:#x} must round-trip through the diff");
+        }
+        assert!(diff.iter().any(|&b| b != 0), "the fixture actually dirtied RAM, so the test is not vacuous");
+    }
+
+    #[test]
+    fn stks_is_the_live_stack_and_its_bottom_frame_is_wellformed() {
+        let m = conformance_machine();
+        let blob = m.save_quetzal();
+        let chunks = iff_chunks(&blob);
+        let (_, stks) = chunks.iter().find(|(id, _)| id == b"Stks").expect("Stks present");
+
+        assert_eq!(stks.len(), m.sp, "Stks is exactly the live stack [0, sp)");
+        assert!(!stks.is_empty(), "the fixture is mid-call, so there is a frame to check");
+
+        // Bottom call frame, per the spec's diagram: FrameLen, LocalsPos, the locals-format list
+        // (pairs terminated by 0,0), the locals, then the value-stack region.
+        let r32 = |o: usize| u32::from_be_bytes([stks[o], stks[o + 1], stks[o + 2], stks[o + 3]]);
+        let frame_len = r32(0) as usize;
+        let locals_pos = r32(4) as usize;
+        assert!(frame_len >= 8, "FrameLen covers at least its own two header words: {frame_len}");
+        assert!(frame_len <= stks.len(), "FrameLen {frame_len} overruns the saved stack");
+        assert_eq!(frame_len % 4, 0, "FrameLen is 4-aligned (spec §1.3.2)");
+        assert!(locals_pos >= 8 && locals_pos <= frame_len, "LocalsPos {locals_pos} sits inside the frame");
+
+        // The format list must terminate with a (0,0) pair before the locals begin.
+        let mut p = 8;
+        let mut saw_terminator = false;
+        while p + 1 < locals_pos {
+            let (ty, count) = (stks[p], stks[p + 1]);
+            if ty == 0 && count == 0 {
+                saw_terminator = true;
+                break;
+            }
+            assert!(matches!(ty, 1 | 2 | 4), "a locals-format type is 1, 2 or 4; got {ty}");
+            p += 2;
+        }
+        assert!(saw_terminator, "the locals-format list must end with a (0,0) pair");
+    }
+
+    #[test]
+    fn mall_is_self_consistent() {
+        let m = conformance_machine();
+        let blob = m.save_quetzal();
+        let chunks = iff_chunks(&blob);
+        let (_, mall) = chunks.iter().find(|(id, _)| id == b"MAll").expect("MAll present");
+
+        assert!(mall.len() >= 8, "MAll carries at least heap-start and a block count");
+        let heap_start = u32::from_be_bytes([mall[0], mall[1], mall[2], mall[3]]);
+        let count = u32::from_be_bytes([mall[4], mall[5], mall[6], mall[7]]) as usize;
+        assert_eq!(heap_start, m.heap_start, "MAll's heap-start is the live one");
+        assert_eq!(
+            mall.len(),
+            8 + count * 8,
+            "MAll is heap-start + count + exactly count (addr,len) pairs — a count that disagrees \
+             with the body length is unrecoverable for a reader",
+        );
+    }
+
+    #[test]
+    fn a_save_survives_a_restore_byte_for_byte() {
+        // The strongest drift guard available without a foreign interpreter: save → restore → save
+        // must reproduce the identical blob. It catches any field the writer emits that the reader
+        // drops on the floor (or vice versa) — the two halves cannot quietly disagree.
+        let m = conformance_machine();
+        let first = m.save_state();
+        let mut m2 = conformance_machine();
+        m2.restore_state(&first).expect("our own snapshot restores");
+        let second = m2.save_state();
+        assert_eq!(first, second, "save → restore → save is a fixed point");
+    }
+
     /// A bare machine over a minimal image with a [`TestBackend`] and no
     /// windows opened — for tests that exercise `glk_gestalt`/`glk_open_window`
     /// directly without needing a printable window or a running program.
