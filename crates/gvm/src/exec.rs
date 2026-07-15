@@ -3786,6 +3786,21 @@ impl Machine {
         self.backend.window_tree(tree);
     }
 
+    /// Re-push the current window tree to the backend WITHOUT recomputing
+    /// geometry. A window's per-window colours come from the live style hints
+    /// (`window_style_colour`), which a game may set *after* the window opens
+    /// (e.g. Kerkerkruip paints its panel backgrounds, and Counterfeit Monkey its
+    /// black-on-white page, once the windows exist). The tree is otherwise only
+    /// re-pushed on a structural `relayout_glk`, so between relayouts the renderer
+    /// keeps each window's open-time colour snapshot and paints panes with
+    /// stale/absent backgrounds. The host calls this each time it rebuilds its
+    /// screen model so the render always reflects the live colours. Cheap: a pure
+    /// walk of the live window tree, no layout math.
+    pub fn sync_window_tree(&mut self) {
+        let tree = self.glk.window_tree();
+        self.backend.window_tree(tree);
+    }
+
     /// Deliver Glk output reference/struct values `vals` for the pointer argument
     /// `ptr`, following the Glulx Glk dispatch convention:
     /// * `ptr == 0` → a NULL pointer: discard (no result wanted).

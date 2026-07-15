@@ -314,7 +314,19 @@ impl AppGlk {
                 None => String::new(),
             }
         }
-        fn walk(node: &WinTree, depth: usize, primary: Option<u32>, out: &mut Vec<String>) {
+        // Per-graphics-window canvas diagnostics: size + how many pixels the game
+        // has actually painted (opaque). A window in the tree with `opaque=0` means
+        // the game hasn't drawn it (or a resize cleared it) — the source of "black/
+        // missing graphics". (SQ-0332)
+        let gfx: std::collections::BTreeMap<u32, String> = self
+            .graphics
+            .iter()
+            .map(|(id, c)| {
+                let opaque = c.img.pixels().filter(|p| p.0[3] != 0).count();
+                (*id, format!(" canvas={}x{} v{} opaque={}", c.img.width(), c.img.height(), c.version, opaque))
+            })
+            .collect();
+        fn walk(node: &WinTree, depth: usize, primary: Option<u32>, gfx: &std::collections::BTreeMap<u32, String>, out: &mut Vec<String>) {
             let indent = "  ".repeat(depth);
             match node {
                 WinTree::Leaf { id, wintype, rect, bg, fg } => {
@@ -325,10 +337,15 @@ impl AppGlk {
                         WinType::Pair => "Pair",
                     };
                     let prim = if primary == Some(*id) { " (primary)" } else { "" };
+                    let ginfo = if *wintype == WinType::Graphics {
+                        gfx.get(id).cloned().unwrap_or_else(|| " canvas=none".to_string())
+                    } else {
+                        String::new()
+                    };
                     out.push(format!(
-                        "{}{} id={}{}  {}x{} @({},{}){}{}",
+                        "{}{} id={}{}  {}x{} @({},{}){}{}{}",
                         indent, ty, id, prim, rect.width, rect.height, rect.left, rect.top,
-                        col("bg", *bg), col("fg", *fg),
+                        col("bg", *bg), col("fg", *fg), ginfo,
                     ));
                 }
                 WinTree::Pair { vertical, border, split, key_bg, first, second, .. } => {
@@ -338,12 +355,12 @@ impl AppGlk {
                         "{}Pair  {}  {}  split={}{}",
                         indent, orient, brd, split, col("key", *key_bg),
                     ));
-                    walk(first, depth + 1, primary, out);
-                    walk(second, depth + 1, primary, out);
+                    walk(first, depth + 1, primary, gfx, out);
+                    walk(second, depth + 1, primary, gfx, out);
                 }
             }
         }
-        walk(tree, 0, self.primary, &mut out);
+        walk(tree, 0, self.primary, &gfx, &mut out);
         out
     }
 

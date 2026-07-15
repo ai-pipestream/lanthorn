@@ -437,6 +437,12 @@ impl GlulxSession {
         // so a game that styles its text for a light interpreter (e.g.
         // CounterfeitMonkey's black-on-white intro) paints a matching pane while
         // each other window keeps its own colour on its node. (SQ-0196/SQ-0328)
+        // Re-push the live window tree first: a window's per-window colours can
+        // change after it opens (Kerkerkruip sets its panel backgrounds post-open),
+        // and the tree is otherwise only refreshed on a structural relayout — so
+        // without this the pane would render with stale/absent backgrounds until a
+        // manual resize forced a relayout (SQ-0332).
+        self.machine.sync_window_tree();
         let model = self.appglk().screen_model();
         self.screen_cache = model;
         self.window_dump_cache = self.appglk().window_dump_lines();

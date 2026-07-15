@@ -20,10 +20,17 @@ pub struct Canvas {
 
 impl Canvas {
     pub fn new(w: u32, h: u32) -> Canvas {
-        Canvas { img: RgbaImage::new(w.max(1), h.max(1)), bg: Rgba([0, 0, 0, 0xFF]), version: 1 }
+        // Default background is TRANSPARENT, not opaque black: a graphics window's
+        // pixels that the game hasn't painted (a fresh canvas, or one just cleared
+        // by a resize before the game's Arrange redraw lands) must show the pane
+        // underneath, never a solid black block. Games that want an opaque
+        // background set it via glk_window_set_background_color. (SQ-0332)
+        Canvas { img: RgbaImage::new(w.max(1), h.max(1)), bg: Rgba([0, 0, 0, 0x00]), version: 1 }
     }
 
-    /// Resize (preserving nothing — Glk redraws) if the pixel dims changed.
+    /// Resize (preserving nothing — Glk redraws) if the pixel dims changed. Cleared
+    /// to `bg` (transparent unless the game set one), so an un-redrawn window shows
+    /// the pane, not a black block.
     pub fn resize(&mut self, w: u32, h: u32) {
         if (self.img.width(), self.img.height()) != (w.max(1), h.max(1)) {
             self.img = RgbaImage::from_pixel(w.max(1), h.max(1), self.bg);

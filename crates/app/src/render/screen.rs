@@ -280,8 +280,13 @@ fn render_node(
             // Only rule between two VISIBLE siblings. A border before a collapsed
             // (zero-extent) window — e.g. Counterfeit Monkey's image pane before it
             // shows a letter — would otherwise draw a stray rule with nothing beyond
-            // it (SQ-0325).
-            if b > 0 && !a1.is_empty() && !a2.is_empty() {
+            // it (SQ-0325). And skip our separator entirely when the game draws its
+            // OWN divider as a graphics window adjacent to the gutter (Kerkerkruip),
+            // so we don't double the line — matching a pixel interpreter that leaves
+            // the border to the game's chrome (SQ-0332).
+            let game_divider = edge_touches_graphics(first, *vertical, true)
+                || edge_touches_graphics(second, *vertical, false);
+            if b > 0 && !a1.is_empty() && !a2.is_empty() && !game_divider {
                 draw_window_separator(sep, *vertical, *key_fg, *key_bg, grid_colors, buf);
             }
             let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input, links, grid_colors);
@@ -316,7 +321,13 @@ fn render_node(
             None
         }
         WinNode::Graphics(gw) => {
-            if let Some(picker) = state.game_picker.as_ref() {
+            // Solid/thin graphics windows (a game's chrome: panel dividers, colour
+            // bars, backgrounds) render directly as cell backgrounds — exact,
+            // grid-aligned, and legible even without an image protocol. A detailed
+            // canvas falls through to the image protocol (or a plain fill). (SQ-0332)
+            if crate::render::graphics::render_graphics_as_cells(gw, area, buf) {
+                // painted as cells
+            } else if let Some(picker) = state.game_picker.as_ref() {
                 state.graphics_render.borrow_mut().render(picker, gw, area, state.colors.graphics, buf);
             } else {
                 fill(area, buf, &state.colors);
@@ -402,6 +413,30 @@ fn subtract_rect(bounds: Rect, g: Rect) -> Rect {
         .into_iter()
         .max_by_key(|r| r.width as u32 * r.height as u32)
         .unwrap_or(bounds)
+}
+
+/// Whether the leaf touching a pair's separator gutter is a graphics window (the
+/// game's own divider). `vertical` is the PARENT pair's split orientation; `high`
+/// is true when the gutter lies on this node's high-coordinate edge (i.e. this is
+/// the pair's `first` child, whose far edge abuts the gutter).
+///
+/// Walks structurally: along the same split axis only the child on the gutter side
+/// touches it; across axes both children span the parent's edge, so either can. Used
+/// to suppress our redundant separator when a game (Kerkerkruip) draws its own
+/// graphics-window rule there. (SQ-0332)
+fn edge_touches_graphics(node: &WinNode, vertical: bool, high: bool) -> bool {
+    match node {
+        WinNode::Graphics(_) => true,
+        WinNode::Buffer(_) | WinNode::Grid(_) | WinNode::Blank => false,
+        WinNode::Pair { vertical: v, first, second, .. } => {
+            if *v == vertical {
+                let child = if high { second } else { first };
+                edge_touches_graphics(child, vertical, high)
+            } else {
+                edge_touches_graphics(first, vertical, high) || edge_touches_graphics(second, vertical, high)
+            }
+        }
+    }
 }
 
 /// Split `area` for a pair, reserving `border` cells (0 or 1) between the children
@@ -630,6 +665,85 @@ mod tests {
         (0..w)
             .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
             .collect()
+    }
+
+    /// SQ-0332: a deep, Kerkerkruip-shaped multi-window tree (nested bordered
+    /// pairs, side panels + a main window + graphics-rule separators) renders with
+    /// EVERY text pane painted in its own Normal-style background at its exact rect.
+    /// Reconstructed from a live `/dump-windows` (165×60). Guards the render math
+    /// (leaves must land on their dumped coordinates) and the per-window fills —
+    /// the visible corruption came from a STALE tree (`bg = None`), not this path.
+    #[test]
+    fn deep_multiwindow_tree_paints_every_pane() {
+        use ratatui::style::Color;
+        fn gfx() -> WinNode {
+            let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]));
+            WinNode::Graphics(crate::engine::GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1 })
+        }
+        fn buf(bg: u32, primary: bool) -> WinNode {
+            WinNode::Buffer(BufferWindow { lines: vec![], runs: vec![], para: vec![], images: vec![], scroll: 0, primary, bg: Some(bg), fg: None })
+        }
+        fn grid(bg: u32) -> WinNode {
+            let mut g = GridWindow::default();
+            g.resize(1, 1);
+            g.active_rows = 1;
+            g.bg = Some(bg);
+            WinNode::Grid(g)
+        }
+        fn pair(vertical: bool, split: u16, first: WinNode, second: WinNode) -> WinNode {
+            WinNode::Pair { vertical, split: Split { fixed: split }, border: true, key_bg: None, key_fg: None, first: Box::new(first), second: Box::new(second) }
+        }
+        let root =
+            pair(false, 123,
+                pair(false, 121,
+                    pair(false, 36,
+                        pair(false, 1, gfx(),
+                            pair(false, 32,
+                                pair(true, 58,
+                                    pair(true, 1, buf(0xDDDDDD, false),        // buf75 header @(2,0)
+                                        pair(true, 1, gfx(), buf(0xEEEEEE, false))), // buf67 body @(2,4)
+                                    gfx()),
+                                gfx())),
+                        pair(true, 1, grid(0xDDDDDD),                          // grid79 @(37,0)
+                            pair(true, 1, gfx(), buf(0xFFFFFF, true)))),        // buf4 main @(37,4)
+                    gfx()),
+                pair(false, 39,
+                    pair(true, 1, buf(0xDDDDDD, false),                        // buf53 @(124,0)
+                        pair(true, 1, gfx(),
+                            pair(true, 42,
+                                pair(true, 40, buf(0xEEEEEE, false), gfx()),   // buf47 @(124,4)
+                                pair(true, 11,
+                                    pair(true, 1, buf(0xDDDDDD, false),        // buf63 @(124,47)
+                                        pair(true, 1, gfx(), buf(0xEEEEEE, false))), // buf57 @(124,51)
+                                    gfx())))),
+                    gfx()));
+        let model = ScreenModel {
+            root,
+            status: StatusModel::HostManaged,
+            bg: crate::state::pack_zcolour(zvm::screen::ZColour::True24(0xFFFFFF)),
+            fg: 0,
+            content_size: (165, 60),
+        };
+        let mut colors = crate::colors::ColorScheme::terminal_default();
+        colors.transcript = ratatui::style::Style::new().bg(Color::Rgb(9, 9, 9)); // sentinel: an unpainted pane shows this
+        colors.upper_window = ratatui::style::Style::new().bg(Color::Rgb(9, 9, 9));
+        let mut state = AppState::default();
+        state.colors = colors;
+        state.config.honor_game_colours = true;
+        let area = Rect::new(0, 0, 165, 60);
+        let mut b = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut b);
+
+        let bgc = |x: u16, y: u16| b.cell((x, y)).unwrap().style().bg;
+        // Each pane paints its own Normal bg at its dumped rect (not the sentinel).
+        assert_eq!(bgc(3, 10), Some(Color::Rgb(0xEE, 0xEE, 0xEE)), "left panel body buf67 @(2,4)");
+        assert_eq!(bgc(3, 0), Some(Color::Rgb(0xDD, 0xDD, 0xDD)), "left panel header buf75 @(2,0)");
+        assert_eq!(bgc(60, 20), Some(Color::Rgb(0xFF, 0xFF, 0xFF)), "main window buf4 @(37,4)");
+        assert_eq!(bgc(130, 20), Some(Color::Rgb(0xEE, 0xEE, 0xEE)), "right panel buf47 @(124,4)");
+        assert_eq!(bgc(130, 53), Some(Color::Rgb(0xEE, 0xEE, 0xEE)), "lower-right buf57 @(124,51)");
+        assert_eq!(bgc(130, 47), Some(Color::Rgb(0xDD, 0xDD, 0xDD)), "lower-right header buf63 @(124,47)");
+        // No text pane left showing the sentinel (every pane painted).
+        assert_ne!(bgc(3, 10), Some(Color::Rgb(9, 9, 9)));
     }
 
     /// SQ-0325 follow-up: the between-siblings separator is drawn in the split's
@@ -928,9 +1042,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_story_pane(&model, false, None, &state, area, &mut buf);
 
-        // Frameless: NO box-drawing glyph anywhere in the pane.
+        // Frameless: NO box-drawing glyph in the grid/body columns [0,8). (Col 8 is
+        // the game's own graphics rule, which legitimately renders as a │ — SQ-0332.)
         for y in 0..10 {
-            for x in 0..20 {
+            for x in 0..8 {
                 let s = buf.cell((x, y)).unwrap().symbol();
                 assert!(
                     !"┌┐└┘─│".contains(s),
@@ -938,6 +1053,8 @@ mod tests {
                 );
             }
         }
+        // The graphics rule column (col 8) DOES draw a thin │ rule (the game's divider).
+        assert_eq!(buf.cell((8, 5)).unwrap().symbol(), "\u{2502}", "graphics window renders its own thin rule");
         // Grid "ST" sits frameless on row 0 (cols=2 centered in the 8-wide center
         // column: x_off=(8-2)/2=3).
         assert_eq!(buf.cell((3, 0)).unwrap().symbol(), "S", "grid content on row 0, no top border");
@@ -948,7 +1065,8 @@ mod tests {
         // Columns stay row-aligned: the SIDE panel's first line is on row 0, level
         // with the grid — the center column is not shifted down relative to it.
         let side = row_text(&buf, 0, 20);
-        assert!(side[9..].contains("SIDE"), "side panel level with grid on row 0: {side:?}");
+        let side_tail: String = side.chars().skip(9).collect();
+        assert!(side_tail.contains("SIDE"), "side panel level with grid on row 0: {side:?}");
     }
 
     /// SQ-0303 Stage 2 guard: the SIMPLE (Z-machine / lone-grid) path is unchanged
