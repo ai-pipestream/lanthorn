@@ -102,6 +102,13 @@ pub struct RoutedConnector {
     /// The paired back-edge's compass direction, set only when a bidirectional pairing
     /// collapsed into this connector (used for the far-end diagonal corner). `None` otherwise.
     pub entry_dir: Option<crate::direction::Direction>,
+    /// The box CORNER this connector arrives on, seen from the destination — `None` when it
+    /// arrives on an ordinary side doorway instead (SQ-0314).
+    ///
+    /// Resolved once, here, from [`entry_corner`] plus the corner-contention rule; the router
+    /// builds its polyline's far end from this and the renderer anchors its arrival from it, so
+    /// the two ends of a connector cannot disagree about where it lands.
+    pub entry_corner: Option<crate::direction::Direction>,
     /// True for a multi-edge MERGE STUB: an extra edge between an already-connected pair whose
     /// polyline routes from its box-edge exit and ENDS on the trunk (a T-junction) instead of
     /// drawing its own line to the destination. The renderer draws only its departure arrow.
@@ -514,6 +521,47 @@ pub fn entry_corner(exit_dir: Direction, entry_dir: Option<Direction>) -> Option
     }
 }
 
+/// Every `(room, direction)` that a diagonal DEPARTS from — i.e. every corner already spoken for by
+/// a room's own outgoing diagonal (SQ-0314). A set of lookups only; nothing iterates it, so the
+/// hash order never reaches the output.
+fn departure_corners(graph: &MapGraph) -> std::collections::HashSet<(RoomId, Direction)> {
+    graph
+        .connections()
+        .iter()
+        .filter(|c| is_diagonal(c.dir))
+        .map(|c| (c.origin, c.dir))
+        .collect()
+}
+
+/// Resolve where a connector ARRIVES: its corner, or `None` for an ordinary side doorway.
+///
+/// A corner hosts at most one connector, and a DEPARTURE outranks an arrival — a room's own
+/// outgoing diagonal keeps its corner, and an arrival that wanted the same one yields to a side
+/// slot (SQ-0314).
+///
+/// The rule only binds ONE-WAY arrivals. When a back edge exists, that edge IS this connector — the
+/// router collapsed the pair — so it owns the corner by definition and there is nothing to contend
+/// with: a room has a single edge per direction, so the back edge cannot also be some other
+/// connector's departure.
+///
+/// This contention is not a corner case; it is what an asymmetric diagonal passage *is*. `NE` from
+/// Cave to Ledge, then `SW` from Ledge to Pit rather than back to Cave: Ledge's SW corner is wanted
+/// by both the arrival from Cave and the departure to Pit. The `SW` edge is forced into distortion
+/// too, because Cave already occupies the cell it wants — three commands into a session, and the
+/// idiom every maze is built from.
+fn resolve_entry_corner(
+    exit_dir: Direction,
+    entry_dir: Option<Direction>,
+    dest: RoomId,
+    taken: &std::collections::HashSet<(RoomId, Direction)>,
+) -> Option<Direction> {
+    let want = entry_corner(exit_dir, entry_dir)?;
+    if entry_dir.is_none() && taken.contains(&(dest, want)) {
+        return None; // the destination's own diagonal departs this corner; yield to a side slot
+    }
+    Some(want)
+}
+
 /// The candidate entry sides for a NON-reciprocal connector from `a` to `b`: the
 /// geometric entry side plus the next-nearest side that still faces the origin, in a
 /// deterministic order. The geometric side is always first (the default), so when no
@@ -816,6 +864,10 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
     // Resolve direct-route line collisions up front so the LONGER connector keeps the straight line
     // and shorter rivals weave — independent of edge listing order.
     let direct_losers = direct_route_losers(&compass, &compass_pairs, graph, &occupied);
+    // Corners already spoken for by a room's own outgoing diagonal — an arrival that wants one of
+    // these yields to a side slot (SQ-0314). Derived from the graph, not from routing order, so it
+    // is the same for every connector.
+    let dep_corners = departure_corners(graph);
     let mut out: Vec<RoutedConnector> = Vec::new();
     // The trunk polyline per (unordered room pair, channel), recorded when its connector is built; a
     // later edge on the SAME pair AND channel becomes a MERGE STUB that joins this trunk. The channel
@@ -849,6 +901,7 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
                         reciprocal: false,
                         exit_dir: c.dir,
                         entry_dir: None,
+                        entry_corner: None, // a merge stub ends on the trunk, not at a box
                         merge: true,
                         secondary_exit: Vec::new(),
                         secondary_entry: Vec::new(),
@@ -888,6 +941,12 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             Some(bk) => route_side(bk.dir),
             None => oneway_entry_side(c.dir),
         };
+        // Where this connector arrives: a box corner, or an ordinary side doorway when it lost the
+        // corner to the destination's own outgoing diagonal (SQ-0314). Resolve it BEFORE the direct
+        // route is considered — an arrival that yields its corner is a plain orthogonal connector
+        // again, and may take the direct route it would otherwise have been barred from.
+        let arrive = resolve_entry_corner(c.dir, back.map(|bk| bk.dir), c.dest, &dep_corners);
+
         // A connector with a CORNER at either end never takes the direct route (SQ-0314).
         // `direct_route` runs its legs out of the rooms' centre row/column and anchors both ends
         // with `exit_point` — it has no notion of a corner. A diagonal departs from the box CORNER,
@@ -895,7 +954,7 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         // cardinal-out/diagonal-back pair (E out, NW back) would arrive at a corner the direct
         // route never routed to, stranding the arrival with a jog. Both fall through to the
         // corner-anchored lattice route below, which asks `anchor_point` for each end.
-        let corner_ended = is_diagonal(c.dir) || entry_corner(c.dir, back.map(|bk| bk.dir)).is_some();
+        let corner_ended = is_diagonal(c.dir) || arrive.is_some();
         let direct = if corner_ended { None } else { direct_route(a, exit, b, &occupied) };
         if let Some((sentry, pts)) = direct {
             // Reject if this straight run stomps an already-placed connector, or if the pre-pass
@@ -917,6 +976,7 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
                     reciprocal: has_reciprocal,
                     exit_dir: c.dir,
                     entry_dir: back.map(|bk| bk.dir),
+                    entry_corner: arrive,
                     merge: false,
                     secondary_exit: Vec::new(),
                     secondary_entry: Vec::new(),
@@ -971,9 +1031,9 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
                 // Default mode emits the canonical horizontal-first route via `build_points`;
                 // greedy mode also probes the vertical-first alternative.
                 // The connector's own directions decide where it leaves/arrives: a diagonal one
-                // anchors on the box corner (SQ-0314). `entry_dir` must match what lands on the
-                // connector below, since the renderer picks its arrival anchor from that field.
-                let arrive = entry_corner(c.dir, back.map(|bk| bk.dir));
+                // anchors on the box corner (SQ-0314). This is the SAME resolved `arrive` that
+                // lands on the connector below, so every candidate polyline is built for the end
+                // the renderer will actually anchor.
                 let pts = match orient {
                     Orient::HorizontalFirst => build_points(a, exit, b, entry, Some(c.dir), arrive),
                     Orient::VerticalFirst => {
@@ -1018,6 +1078,7 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             reciprocal: has_reciprocal,
             exit_dir: c.dir,
             entry_dir: back.map(|bk| bk.dir),
+            entry_corner: arrive,
             merge: false,
             secondary_exit: Vec::new(),
             secondary_entry: Vec::new(),
@@ -1110,10 +1171,14 @@ fn is_collinear(points: &[(i32, i32)]) -> bool {
 fn assign_side_slots(connectors: &mut [RoutedConnector], graph: &MapGraph) {
     // Collect every endpoint as (room, side, is_exit, connector index).
     //
-    // A DIAGONAL endpoint is skipped (SQ-0314): it anchors on the box CORNER, and the corner
-    // anchor ignores the slot entirely — so slotting one only burned a cell that nothing ever
-    // drew on, pushing the side's real endpoints off-centre for no reason. The corner is its
-    // own slot. Skipped endpoints keep the initial slot 0, which the corner path ignores.
+    // A CORNER endpoint is skipped (SQ-0314): it anchors on the box corner, and the corner anchor
+    // ignores the slot entirely — so slotting one only burned a cell that nothing ever drew on,
+    // pushing the side's real endpoints off-centre for no reason. The corner is its own slot.
+    // Skipped endpoints keep the initial slot 0, which the corner path ignores.
+    //
+    // The arrival test reads the RESOLVED `entry_corner`, not the raw direction: an arrival that
+    // lost its corner to the destination's own outgoing diagonal is back on a side doorway, and it
+    // needs a real slot there like any other side endpoint.
     let mut endpoints: Vec<(RoomId, Side, bool, usize)> = Vec::new();
     for (ci, c) in connectors.iter().enumerate() {
         if !is_diagonal(c.exit_dir) {
@@ -1121,7 +1186,7 @@ fn assign_side_slots(connectors: &mut [RoutedConnector], graph: &MapGraph) {
         }
         // A merge stub ends on the trunk (not at the destination box), so it has no arrival
         // endpoint to slot.
-        if !c.merge && !c.entry_dir.is_some_and(is_diagonal) {
+        if !c.merge && c.entry_corner.is_none() {
             endpoints.push((c.dest, c.entry, false, ci));
         }
     }
@@ -2176,6 +2241,79 @@ mod tests {
         // A diagonal carries no LaneSeg: every step of the route touches an even coord (room
         // centre) or is the corner itself, so `long_runs` finds nothing to lane.
         assert!(build(true).segs.is_empty(), "a pure diagonal occupies no channel lane");
+    }
+
+    #[test]
+    fn a_departure_outranks_an_arrival_for_a_contested_corner() {
+        // SQ-0314: a corner hosts at most one connector, and the room's OWN outgoing diagonal keeps
+        // it — the arrival yields to a side slot.
+        //
+        // This is what an asymmetric diagonal passage IS, not an exotic shape: NE from Cave lands
+        // in Ledge, but SW from Ledge goes to Pit rather than back to Cave. Ledge's SW corner is
+        // wanted by both the arrival from Cave and the departure to Pit. (Cave already occupies the
+        // cell Ledge's SW edge wants, so that edge is distorted too — `mark_distorted` lives in the
+        // mapper layer, above this hand-built graph, so the flag is not asserted here.)
+        use crate::direction::Direction;
+        let mut g = MapGraph::new();
+        for (id, n) in [(1u16, "Cave"), (2, "Ledge"), (3, "Pit")] {
+            g.upsert_room(id, n.into());
+        }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, -1)); // NE of Cave
+        g.set_pos(3, (-1, -1));
+        g.add_edge(1, Direction::NE, 2); // one-way in  -> wants Ledge's SW corner
+        g.add_edge(2, Direction::SW, 3); // one-way out <- departs Ledge's SW corner
+        let plan = route_lanes(&g);
+        let find = |o: RoomId| plan.connectors.iter().find(|c| c.origin == o).expect("connector");
+
+        let departure = find(2);
+        assert_eq!(departure.exit_dir, Direction::SW, "Ledge's own diagonal departs its SW corner");
+
+        let arrival = find(1);
+        assert_eq!(arrival.dest, 2);
+        assert_eq!(
+            entry_corner(arrival.exit_dir, arrival.entry_dir),
+            Some(Direction::SW),
+            "it wants Ledge's SW corner...",
+        );
+        assert_eq!(
+            arrival.entry_corner, None,
+            "...but yields it to Ledge's own outgoing SW diagonal and takes a side doorway",
+        );
+
+        // Having yielded, it is an ordinary side endpoint again — so it must be SLOTTED. Skipping
+        // it would leave it stacked on whatever else shares that side.
+        assert_eq!(arrival.entry, side_for(Direction::NE).map(|_| arrival.entry).unwrap());
+        let sharers = plan
+            .connectors
+            .iter()
+            .filter(|c| c.dest == 2 && c.entry_corner.is_none() && !c.merge)
+            .count();
+        assert_eq!(sharers, 1, "exactly the yielded arrival lands on Ledge's sides");
+    }
+
+    #[test]
+    fn a_reciprocal_diagonal_pair_keeps_its_contested_corner() {
+        // The yield rule must NOT fire for a reciprocal pair. Ledge's SW edge here IS the back edge
+        // of the same connector — the router collapsed the two — so it owns the corner by
+        // definition, and there is nothing to contend with. Reading `departure_corners` alone would
+        // see Ledge's SW edge and wrongly make the connector yield to itself.
+        use crate::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Cave".into());
+        g.upsert_room(2, "Ledge".into());
+        g.set_pos(1, (0, 1));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::NE, 2);
+        g.add_edge(2, Direction::SW, 1); // the reciprocal: same pair, collapses into ONE connector
+        let plan = route_lanes(&g);
+        assert_eq!(plan.connectors.len(), 1, "a reciprocal pair is one connector");
+        assert_eq!(
+            plan.connectors[0].entry_corner,
+            Some(Direction::SW),
+            "the reciprocal keeps the corner it is itself the back edge of",
+        );
+        assert_eq!(plan.connectors[0].points, vec![(0, 2), (1, 1), (2, 0)], "still one pure diagonal");
     }
 
     #[test]

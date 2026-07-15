@@ -1034,13 +1034,15 @@ fn plot_connector(
     // The arrival anchor does not depend on the departure geometry, so resolve it first: a
     // corner-to-corner diagonal aims its chain straight at it (SQ-0314), and so needs it up front.
     //
-    // The arrival sits on a box corner exactly when the ROUTER built its polyline to end there —
-    // `entry_corner` is the one rule both sides ask, so they cannot drift apart. It also covers the
-    // one-way diagonal, which has no back edge but still arrives on the corner facing its origin.
+    // The arrival sits on a box corner exactly when the ROUTER built its polyline to end there:
+    // `conn.entry_corner` is the router's own resolved answer, read rather than re-derived, so the
+    // two ends cannot drift apart. It covers the one-way diagonal (no back edge, but still arrives
+    // on the corner facing its origin) and the arrival that YIELDED its corner to the destination's
+    // own outgoing diagonal — that one is back on a side doorway, at a real slot.
     let arr_target = (!conn.merge).then(|| {
         let last = conn.points[conn.points.len() - 1];
         let dest_cell = (last.0.div_euclid(2), last.1.div_euclid(2));
-        match mapper::route::entry_corner(conn.exit_dir, conn.entry_dir) {
+        match conn.entry_corner {
             Some(d) => corner_anchor(cols, rows, dest_cell, d),
             None => box_edge_anchor(cols, rows, dest_cell, conn.entry, conn.entry_slot),
         }
@@ -1056,7 +1058,7 @@ fn plot_connector(
     //
     // With `diag` off, or for a non-diagonal exit, `bridge_from` stays the anchor and the geometry
     // below is the plain corner/edge-to-bridge route.
-    let arrive_dir = mapper::route::entry_corner(conn.exit_dir, conn.entry_dir);
+    let arrive_dir = conn.entry_corner;
     // "Pure" means the WHOLE connector is one diagonal, corner to corner — so BOTH ends must be
     // diagonal. Testing only the arrival was a bug: a cardinal-out/diagonal-in pair (E out, NW
     // back) between adjacent rooms also collapses to three points, and it would then take the pure
@@ -2952,6 +2954,53 @@ mod tests {
             }
         }
         n
+    }
+
+    #[test]
+    fn no_two_connectors_share_a_corner_anchor() {
+        use mapper::mapper::Mapper;
+        // The realistic sequence that exposed the collision: a 3-command asymmetric diagonal
+        // passage, with the layout engine choosing every position. Ledge's SW corner was claimed by
+        // BOTH the arrival from Cave and the departure to Pit, and the two chains overwrote each
+        // other. The departure keeps it; the arrival must have moved to a side doorway. (SQ-0314)
+        let mut m = Mapper::default();
+        m.observe_command(1, "Cave", "look");
+        m.observe_command(2, "Ledge", "northeast");
+        m.observe_command(3, "Pit", "southwest");
+        let plan = mapper::route::route_lanes(&m.graph);
+        let rm = mapper::render::render(&m.graph);
+        let (cols, rows) = boxes_axes(&plan, rm.bounds);
+
+        // Every corner-anchored endpoint, as (room, corner). No (room, corner) twice.
+        let mut claims: Vec<(mapper::graph::RoomId, Direction)> = Vec::new();
+        for c in &plan.connectors {
+            if mapper::direction::is_diagonal(c.exit_dir) {
+                claims.push((c.origin, c.exit_dir));
+            }
+            if let Some(d) = c.entry_corner {
+                claims.push((c.dest, d));
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        for claim in &claims {
+            assert!(seen.insert(*claim), "two connectors claim {claim:?}");
+        }
+
+        // And the same in PIXELS, which is what actually collides on screen.
+        let mut anchors: std::collections::HashMap<(i32, i32), usize> = std::collections::HashMap::new();
+        for c in &plan.connectors {
+            if let Some(plot) = plot_connector(c, &cols, &rows, None) {
+                if mapper::direction::is_diagonal(c.exit_dir) {
+                    *anchors.entry(plot.dep_anchor).or_default() += 1;
+                }
+                if c.entry_corner.is_some() {
+                    *anchors.entry(plot.arr_anchor).or_default() += 1;
+                }
+            }
+        }
+        for (pt, n) in &anchors {
+            assert_eq!(*n, 1, "{n} connectors anchor on the corner at {pt:?}");
+        }
     }
 
     #[test]
