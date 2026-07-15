@@ -121,6 +121,19 @@ pub enum Action {
     AnimExit,
     /// Jump to the next (+1) or previous (-1) stage_start frame in the animation.
     AnimStageJump(i32),
+    /// Move the input caret one char left.
+    CursorLeft,
+    /// Move the input caret one char right — or, at the end of the line with a suggestion
+    /// showing, accept that suggestion (SQ-0354). See `apply_action`.
+    CursorRight,
+    /// Move the input caret to the start of the line.
+    CursorHome,
+    /// Move the input caret to the end of the line.
+    CursorEnd,
+    /// Delete the char AT the caret (Backspace deletes the one before it).
+    DeleteChar,
+    /// Put the input caret on the char under a click at this screen column/row.
+    CursorToClick(u16, u16),
     /// Zoom the map in one VISIBLE step (more detail). A keypress must move the map.
     ZoomIn,
     /// Zoom the map out one VISIBLE step (less detail).
@@ -1041,6 +1054,14 @@ pub fn mouse_to_action(
         && row >= story.y && row < story.bottom();
 
     match kind {
+        // ── Left-down on the input line: place the caret ──────────────────────
+        // Must precede the story arm below: the input line sits inside the story pane, so a click
+        // on it would otherwise start a text selection instead of moving the caret (SQ-0354).
+        MouseEventKind::Down(MouseButton::Left)
+            if state.focus == Focus::Game && state.input_click_index(col, row).is_some() =>
+        {
+            Action::CursorToClick(col, row)
+        }
         // ── Left-down in story: activate game pane + begin text selection ─────
         MouseEventKind::Down(MouseButton::Left) if in_story => {
             Action::StartSelection(col, row)
@@ -1442,13 +1463,25 @@ fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
         // Plain Up/Down recall command history (shell-style).
         KeyCode::Up if key.modifiers == KeyModifiers::NONE => Action::HistoryPrev,
         KeyCode::Down if key.modifiers == KeyModifiers::NONE => Action::HistoryNext,
-        KeyCode::Home => Action::Recenter,
+        // Caret editing on the command line (SQ-0354). Plain Left/Right were unbound here and fell
+        // through to the Global keymap; they are text keys the moment the line has a caret.
+        //
+        // Safe against story-controlled input: when the story asks for a single keypress the run
+        // loop's char-mode gate forwards the key straight to the VM and never reaches this
+        // function. Shift+Arrows still pan the map, and plain Up/Down still recall history.
+        KeyCode::Left if key.modifiers == KeyModifiers::NONE => Action::CursorLeft,
+        KeyCode::Right if key.modifiers == KeyModifiers::NONE => Action::CursorRight,
+        KeyCode::Delete => Action::DeleteChar,
+        // Home/End are the conventional line-editing pair, matching every other text entry in the
+        // app. Home used to recenter the map; that keeps its `center-map` command and hotkey.
+        KeyCode::Home => Action::CursorHome,
+        KeyCode::End => Action::CursorEnd,
         // PageUp/PageDown page the transcript (toward older / newer). Zoom stays
         // on +/=/-/0, Ctrl+wheel, and /zoom-map.
         KeyCode::PageUp => Action::TranscriptScrollPage(1),
         KeyCode::PageDown => Action::TranscriptScrollPage(-1),
         // Enter submits the current input buffer content as the command.
-        KeyCode::Enter => Action::SubmitCommand(state.input.clone()),
+        KeyCode::Enter => Action::SubmitCommand(state.input.value.clone()),
         KeyCode::Backspace => Action::Backspace,
         KeyCode::Char(c)
             if key.modifiers == KeyModifiers::NONE
@@ -1555,23 +1588,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 }
                 let idx = state.suggestion_idx % len;
                 let completion = state.suggestions[idx].clone();
-                let prefix = state.config.command_prefix;
-                // Slash-command name suggestions hold the bare command name (no
-                // prefix). When completing the first token of a slash command,
-                // rebuild input as prefix + name so the leading prefix survives.
-                if state.input.starts_with(prefix)
-                    && !state.input[prefix.len_utf8()..].contains(' ')
-                {
-                    state.input.clear();
-                    state.input.push(prefix);
-                    state.input.push_str(&completion);
-                } else {
-                    // Replace the partial word at the end of input with the completion.
-                    let partial_len = state.current_partial().len();
-                    let new_len = state.input.len() - partial_len;
-                    state.input.truncate(new_len);
-                    state.input.push_str(&completion);
-                }
+                apply_completion(state, &completion);
             }
         }
         Action::AutocompletePrev => {
@@ -1589,19 +1606,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 }
                 let idx = state.suggestion_idx % len;
                 let completion = state.suggestions[idx].clone();
-                let prefix = state.config.command_prefix;
-                if state.input.starts_with(prefix)
-                    && !state.input[prefix.len_utf8()..].contains(' ')
-                {
-                    state.input.clear();
-                    state.input.push(prefix);
-                    state.input.push_str(&completion);
-                } else {
-                    let partial_len = state.current_partial().len();
-                    let new_len = state.input.len() - partial_len;
-                    state.input.truncate(new_len);
-                    state.input.push_str(&completion);
-                }
+                apply_completion(state, &completion);
             }
         }
         Action::HistoryPrev => state.history_prev(),
@@ -1615,6 +1620,35 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if !state.game_dir.as_os_str().is_empty() {
                 let show = state.layout == crate::state::Layout::Split;
                 let _ = crate::styles::write_per_game_show_map(&state.game_dir, Some(show));
+            }
+        }
+        Action::CursorLeft => state.input.left(),
+        Action::CursorHome => state.input.home(),
+        Action::CursorEnd => state.input.end(),
+        Action::DeleteChar => {
+            state.input.delete();
+            recompute_suggestions(state);
+        }
+        Action::CursorRight => {
+            // At the END of the line with a suggestion showing, Right ACCEPTS it (SQ-0354) — the
+            // fish/zsh gesture. There is no text to the right to move onto, so the keystroke would
+            // otherwise do nothing at all; taking the completion is the only useful reading.
+            //
+            // Applying it exactly as Tab does keeps the two paths honest: `suggestion_active`
+            // flips, so the bracketed preview reads as applied rather than still just a preview.
+            let at_end = state.input.cursor >= state.input.char_len();
+            match state.suggestions.get(state.suggestion_idx % state.suggestions.len().max(1)) {
+                Some(c) if at_end => {
+                    let completion = c.clone();
+                    state.suggestion_active = true;
+                    apply_completion(state, &completion);
+                }
+                _ => state.input.right(),
+            }
+        }
+        Action::CursorToClick(col, row) => {
+            if let Some(idx) = state.input_click_index(col, row) {
+                state.input.cursor = idx;
             }
         }
         Action::ZoomIn => state.zoom_in(),
@@ -2314,7 +2348,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 };
                 scroll.len(len);
                 scroll.select(idx, vp, &anim);
-                if let Some(t) = token { if !t.is_empty() { state.input.push_str(&t); state.input.push(' '); } }
+                if let Some(t) = token { if !t.is_empty() { state.input.insert_str(&t); state.input.insert(' '); } }
             }
         }
 
@@ -2330,8 +2364,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             if let Some(vm) = &state.overlays.verb_menu {
                 let token = vm.selected_token(VERB_MENU_VERBS, VERB_MENU_PREPS).to_owned();
                 if !token.is_empty() {
-                    state.input.push_str(&token);
-                    state.input.push(' ');
+                    state.input.insert_str(&token);
+                    state.input.insert(' ');
                 }
             }
         }
@@ -2735,6 +2769,32 @@ pub(crate) fn slash_suggestions(body_token: &str, names: &[String], limit: usize
     matches.into_iter().map(|(_, n)| n).collect()
 }
 
+/// Apply `completion` to the input line, replacing whatever the caret is currently completing:
+/// the whole slash-command name, or the partial word at the end. The caret lands after the
+/// inserted text.
+///
+/// Shared by Tab and Shift-Tab, which carried a verbatim copy of this each (SQ-0354).
+///
+/// Lengths are counted in CHARS, not bytes. The byte arithmetic this replaces would panic outright
+/// on a multi-byte partial word: `String::truncate` rejects a non-char boundary, and subtracting a
+/// byte length from a byte length lands on one as soon as the word holds anything non-ASCII.
+fn apply_completion(state: &mut AppState, completion: &str) {
+    let prefix = state.config.command_prefix;
+    // Slash-command suggestions hold the bare name (no prefix). When completing the first token of
+    // a slash command, rebuild the line as prefix + name so the leading prefix survives.
+    let is_slash_name = state.input.value.starts_with(prefix)
+        && !state.input.value[prefix.len_utf8()..].contains(' ');
+    if is_slash_name {
+        state.input.clear();
+        state.input.insert(prefix);
+    } else {
+        let keep = state.input.char_len() - state.current_partial().chars().count();
+        state.input.truncate_chars(keep);
+        state.input.end();
+    }
+    state.input.insert_str(completion);
+}
+
 /// Recompute `state.suggestions` from `state.dict_words`, the room words
 /// extracted from `state.transcript`, and the current partial word being typed.
 /// Called internally after every input character change in game focus.
@@ -2746,9 +2806,9 @@ pub(crate) fn recompute_suggestions(state: &mut AppState) {
     const SUGGESTION_LIMIT: usize = 6;
     let prefix = state.config.command_prefix;
     // Check if the whole input starts with the command prefix.
-    if state.input.starts_with(prefix) {
+    if state.input.value.starts_with(prefix) {
         // Extract the body (everything after the prefix).
-        let body = &state.input[prefix.len_utf8()..];
+        let body = &state.input.value[prefix.len_utf8()..];
         // Complete only the first token (before any space).
         let first_token = body.split_whitespace().next().unwrap_or("");
         // Only offer completions while the user is still on the first token
@@ -3152,7 +3212,13 @@ mod tests {
         // Map navigation works without leaving the story line.
         assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Home)), Action::Recenter));
+        // Home is a TEXT key now that the command line has a caret (SQ-0354) — it jumps to the
+        // start of the line, matching every other text entry in the app. Recenter keeps its
+        // `center-map` command and its hotkey; it just gives up the bare Home key.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Home)), Action::CursorHome));
+        assert!(matches!(key_to_action(&s, key(KeyCode::End)), Action::CursorEnd));
+        // Shift+Arrows still pan, so map nav survives without leaving the story line.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::CursorLeft));
         // PageUp/PageDown now page the transcript (older/newer), not zoom.
         assert!(matches!(key_to_action(&s, key(KeyCode::PageUp)), Action::TranscriptScrollPage(1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::PageDown)), Action::TranscriptScrollPage(-1)));
@@ -3869,7 +3935,7 @@ mod tests {
         // Game focus, non-empty partial, but no suggestions (dict not loaded) →
         // Tab is still ToggleFocus.
         let mut s = AppState::default();
-        s.input = "nor".to_string();
+        s.input.set("nor", true);
         // suggestions is empty by default
         assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
     }
@@ -3878,7 +3944,7 @@ mod tests {
     fn tab_is_autocomplete_when_suggestions_available() {
         // Game focus, non-empty partial, suggestions populated → Tab is Autocomplete.
         let mut s = AppState::default();
-        s.input = "nor".to_string();
+        s.input.set("nor", true);
         s.suggestions = vec!["north".to_string(), "northeast".to_string()];
         assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::Autocomplete));
     }
@@ -3896,12 +3962,12 @@ mod tests {
     fn autocomplete_action_replaces_partial_word() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        s.input = "go nor".to_string();
+        s.input.set("go nor", true);
         s.suggestions = vec!["north".to_string(), "northeast".to_string()];
         s.suggestion_idx = 0;
         apply_action(Action::Autocomplete, &mut s, &mut m);
         // "nor" should be replaced with "north" (index 0 suggestion).
-        assert_eq!(s.input, "go north");
+        assert_eq!(s.input.value, "go north");
         // The highlight stays on the applied candidate (index 0), so the bracket
         // matches the command line; the next Tab advances.
         assert_eq!(s.suggestion_idx, 0);
@@ -3913,12 +3979,12 @@ mod tests {
         let mut s = AppState::default();
         let mut m = Mapper::default();
         // Slash suggestions hold the bare command name (no prefix).
-        s.input = "/sav".to_string();
+        s.input.set("/sav", true);
         s.suggestions = vec!["save".to_string(), "save-as".to_string()];
         s.suggestion_idx = 0;
         apply_action(Action::Autocomplete, &mut s, &mut m);
         // The leading prefix must survive completion.
-        assert_eq!(s.input, "/save");
+        assert_eq!(s.input.value, "/save");
         assert_eq!(s.suggestion_idx, 0);
     }
 
@@ -3926,21 +3992,21 @@ mod tests {
     fn autocomplete_cycles_on_repeated_tab() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        s.input = "go nor".to_string();
+        s.input.set("go nor", true);
         s.suggestions = vec!["north".to_string(), "northeast".to_string()];
         s.suggestion_idx = 0;
         // First Tab: north (applies the highlighted candidate, no advance).
         apply_action(Action::Autocomplete, &mut s, &mut m);
-        assert_eq!(s.input, "go north");
+        assert_eq!(s.input.value, "go north");
         assert_eq!(s.suggestion_idx, 0);
         // Second Tab: advances to northeast, replacing the prior completion in
         // place (no need to retype the partial).
         apply_action(Action::Autocomplete, &mut s, &mut m);
-        assert_eq!(s.input, "go northeast");
+        assert_eq!(s.input.value, "go northeast");
         assert_eq!(s.suggestion_idx, 1);
         // Third Tab: wraps back to north.
         apply_action(Action::Autocomplete, &mut s, &mut m);
-        assert_eq!(s.input, "go north");
+        assert_eq!(s.input.value, "go north");
         assert_eq!(s.suggestion_idx, 0);
     }
 
@@ -3952,12 +4018,12 @@ mod tests {
         use crate::render::transcript::format_suggestion_line;
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        s.input = "go nor".to_string();
+        s.input.set("go nor", true);
         s.suggestions = vec!["north".to_string(), "northeast".to_string(), "nowhere".to_string()];
         s.suggestion_idx = 0;
         for expected in ["north", "northeast", "nowhere", "north"] {
             apply_action(Action::Autocomplete, &mut s, &mut m);
-            assert_eq!(s.input, format!("go {expected}"));
+            assert_eq!(s.input.value, format!("go {expected}"));
             // The bracketed entry on the suggestion line equals the applied word.
             let line = format_suggestion_line(&s.suggestions, s.suggestion_idx);
             assert!(
@@ -3974,7 +4040,7 @@ mod tests {
         // Game focus, non-empty partial, suggestions populated → Shift-Tab is
         // AutocompletePrev (the inverse of Tab's Autocomplete).
         let mut s = AppState::default();
-        s.input = "nor".to_string();
+        s.input.set("nor", true);
         s.suggestions = vec!["north".to_string(), "northeast".to_string()];
         assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::AutocompletePrev));
     }
@@ -3984,7 +4050,7 @@ mod tests {
         // Game focus, partial typed but no suggestions → Shift-Tab falls through, but
         // there's no default Global BackTab binding to land on → None.
         let mut s = AppState::default();
-        s.input = "nor".to_string();
+        s.input.set("nor", true);
         assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::None));
     }
 
@@ -4008,13 +4074,13 @@ mod tests {
     fn autocomplete_prev_action_replaces_partial_and_steps_back() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        s.input = "go nor".to_string();
+        s.input.set("go nor", true);
         s.suggestions = vec!["north".to_string(), "northeast".to_string()];
         s.suggestion_idx = 0;
         apply_action(Action::AutocompletePrev, &mut s, &mut m);
         // Applies the current (index 0) suggestion, like Autocomplete; the
         // highlight stays put so the bracket matches the command line.
-        assert_eq!(s.input, "go north");
+        assert_eq!(s.input.value, "go north");
         assert_eq!(s.suggestion_idx, 0);
         assert!(s.suggestion_active);
     }
@@ -4023,16 +4089,16 @@ mod tests {
     fn autocomplete_prev_cycles_backward_with_wrap() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        s.input = "go nor".to_string();
+        s.input.set("go nor", true);
         s.suggestions = vec!["north".to_string(), "northeast".to_string(), "nowhere".to_string()];
         s.suggestion_idx = 0;
         // First Shift-Tab: applies the highlighted index 0 (north), no step.
         apply_action(Action::AutocompletePrev, &mut s, &mut m);
-        assert_eq!(s.input, "go north");
+        assert_eq!(s.input.value, "go north");
         assert_eq!(s.suggestion_idx, 0);
         // Second Shift-Tab: steps backward to index 2 (nowhere), replacing in place.
         apply_action(Action::AutocompletePrev, &mut s, &mut m);
-        assert_eq!(s.input, "go nowhere");
+        assert_eq!(s.input.value, "go nowhere");
         assert_eq!(s.suggestion_idx, 2);
     }
 
@@ -4040,11 +4106,11 @@ mod tests {
     fn autocomplete_prev_slash_command_preserves_prefix() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        s.input = "/sav".to_string();
+        s.input.set("/sav", true);
         s.suggestions = vec!["save".to_string(), "save-as".to_string()];
         s.suggestion_idx = 0;
         apply_action(Action::AutocompletePrev, &mut s, &mut m);
-        assert_eq!(s.input, "/save");
+        assert_eq!(s.input.value, "/save");
         assert_eq!(s.suggestion_idx, 0);
     }
 
@@ -4053,7 +4119,7 @@ mod tests {
         let mut s = AppState::default();
         let mut m = Mapper::default();
         // Pre-load some suggestions and set idx > 0.
-        s.input = "no".to_string();
+        s.input.set("no", true);
         s.dict_words = vec!["north".to_string(), "northeast".to_string()];
         s.suggestion_idx = 1;
         // Type another character: should recompute suggestions and reset idx to 0.
@@ -4880,9 +4946,9 @@ mod tests {
         s.command_history = vec!["look".into(), "inventory".into()];
         s.input = "dr".into();
         apply_action(Action::HistoryPrev, &mut s, &mut m);
-        assert_eq!(s.input, "inventory");
+        assert_eq!(s.input.value, "inventory");
         apply_action(Action::HistoryNext, &mut s, &mut m);
-        assert_eq!(s.input, "dr"); // draft restored
+        assert_eq!(s.input.value, "dr"); // draft restored
     }
 
     // ── PageUp/PageDown transcript paging (feature C) ──────────────────────────
@@ -5458,11 +5524,11 @@ mod tests {
         // Select "unlock" (index 6 in VERB_MENU_VERBS).
         // Pick from Verbs pane (default on open) at verb_idx=0 → "look".
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input, "look ");
+        assert_eq!(s.input.value, "look ");
 
         // Pick again → "look look ".
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input, "look look ");
+        assert_eq!(s.input.value, "look look ");
     }
 
     #[test]
@@ -5480,34 +5546,34 @@ mod tests {
         // 1. Pick "unlock" from Verbs pane.
         s.overlays.verb_menu.as_mut().unwrap().verb_scroll.selected = unlock_idx;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input, "unlock ");
+        assert_eq!(s.input.value, "unlock ");
 
         // 2. Switch to Nouns pane and pick "door" (noun_idx=0).
         s.overlays.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input, "unlock door ");
+        assert_eq!(s.input.value, "unlock door ");
 
         // 3. Switch to Preps pane and pick "with".
         s.overlays.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Preps;
         s.overlays.verb_menu.as_mut().unwrap().prep_scroll.selected = with_idx;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input, "unlock door with ");
+        assert_eq!(s.input.value, "unlock door with ");
 
         // 4. Switch back to Nouns and pick "key" (noun_idx=1).
         s.overlays.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
         s.overlays.verb_menu.as_mut().unwrap().noun_scroll.selected = 1;
         apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input, "unlock door with key ");
+        assert_eq!(s.input.value, "unlock door with key ");
     }
 
     #[test]
     fn verb_menu_close_leaves_input_intact() {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
-        s.input = "unlock door ".to_string();
+        s.input.set("unlock door ", true);
         open_verb_menu_with_nouns(&mut s, vec![]);
         apply_action(Action::VerbMenuClose, &mut s, &mut mapper);
-        assert_eq!(s.input, "unlock door ", "input must be preserved");
+        assert_eq!(s.input.value, "unlock door ", "input must be preserved");
     }
 
     #[test]
@@ -5813,7 +5879,7 @@ mod tests {
         s.overlays.verb_menu.as_mut().unwrap().story_focused = true;
 
         apply_action(Action::VerbMenuClickToken(VerbMenuPane::Verbs, 2), &mut s, &mut mapper);
-        assert_eq!(s.input, format!("{} ", VERB_MENU_VERBS[2]));
+        assert_eq!(s.input.value, format!("{} ", VERB_MENU_VERBS[2]));
         assert!(s.overlays.verb_menu.as_ref().unwrap().story_focused, "click leaves story focus unchanged");
         assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 2, "click moves highlight");
     }
@@ -6528,6 +6594,119 @@ mod tests {
             matches!(a, Action::None),
             "outside-gallery click with room_panel also open must be swallowed (None), got {:?}", a
         );
+    }
+
+    // ── SQ-0354: caret editing on the command line ───────────────────────────
+
+    #[test]
+    fn arrows_move_the_caret_and_typing_lands_at_it() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        for c in "north".chars() {
+            apply_action(Action::InputChar(c), &mut s, &mut m);
+        }
+        assert_eq!(s.input.cursor, 5, "typing leaves the caret at the end");
+
+        apply_action(Action::CursorLeft, &mut s, &mut m);
+        apply_action(Action::CursorLeft, &mut s, &mut m);
+        assert_eq!(s.input.cursor, 3);
+        apply_action(Action::InputChar('X'), &mut s, &mut m);
+        assert_eq!(s.input.value, "norXth", "a typed char lands AT the caret, not at the end");
+
+        apply_action(Action::CursorHome, &mut s, &mut m);
+        assert_eq!(s.input.cursor, 0);
+        apply_action(Action::CursorEnd, &mut s, &mut m);
+        assert_eq!(s.input.cursor, 6);
+        // Clamped at both ends.
+        apply_action(Action::CursorRight, &mut s, &mut m);
+        assert_eq!(s.input.cursor, 6, "Right at the end does not run off");
+        apply_action(Action::CursorHome, &mut s, &mut m);
+        apply_action(Action::CursorLeft, &mut s, &mut m);
+        assert_eq!(s.input.cursor, 0, "Left at the start does not run off");
+    }
+
+    #[test]
+    fn backspace_and_delete_cut_opposite_sides_of_the_caret() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        for c in "abc".chars() {
+            apply_action(Action::InputChar(c), &mut s, &mut m);
+        }
+        apply_action(Action::CursorLeft, &mut s, &mut m); // between b and c
+        apply_action(Action::Backspace, &mut s, &mut m);
+        assert_eq!(s.input.value, "ac", "Backspace cuts the char BEFORE the caret");
+        apply_action(Action::DeleteChar, &mut s, &mut m);
+        assert_eq!(s.input.value, "a", "Delete cuts the char AT the caret");
+    }
+
+    #[test]
+    fn right_at_the_end_accepts_the_suggestion() {
+        // SQ-0354: at the end of the line there is nothing to move onto, so Right would be a dead
+        // key. Taking the showing suggestion is the only useful reading (the fish/zsh gesture).
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        for c in "/toggle-roo".chars() {
+            apply_action(Action::InputChar(c), &mut s, &mut m);
+        }
+        assert!(!s.suggestions.is_empty(), "a suggestion is showing: {:?}", s.suggestions);
+        let want = format!("/{}", s.suggestions[0]);
+        apply_action(Action::CursorRight, &mut s, &mut m);
+        assert_eq!(s.input.value, want, "Right at the end accepted the suggestion");
+        assert!(s.suggestion_active, "and marks it applied, exactly as Tab does");
+    }
+
+    #[test]
+    fn right_mid_line_moves_the_caret_even_with_a_suggestion_showing() {
+        // The accept gesture must not eat plain caret movement: it fires ONLY at the end.
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        for c in "/toggle-roo".chars() {
+            apply_action(Action::InputChar(c), &mut s, &mut m);
+        }
+        assert!(!s.suggestions.is_empty());
+        let before = s.input.value.clone();
+        apply_action(Action::CursorHome, &mut s, &mut m);
+        apply_action(Action::CursorRight, &mut s, &mut m);
+        assert_eq!(s.input.value, before, "mid-line Right leaves the text alone");
+        assert_eq!(s.input.cursor, 1, "it just moves the caret");
+    }
+
+    #[test]
+    fn a_click_on_the_input_line_places_the_caret() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        for c in "north".chars() {
+            apply_action(Action::InputChar(c), &mut s, &mut m);
+        }
+        // The renderer records where the text landed; without a frame there is nothing to click.
+        assert!(s.input_click_index(10, 5).is_none(), "no origin captured yet -> no mapping");
+        s.input_text_origin.set(Some((10, 5)));
+
+        assert_eq!(s.input_click_index(12, 5), Some(2), "click on the 3rd char");
+        assert_eq!(s.input_click_index(12, 4), None, "a different row is not the input line");
+        assert_eq!(s.input_click_index(9, 5), None, "left of the text is not the input line");
+        assert_eq!(s.input_click_index(99, 5), Some(5), "past the end clamps to the end");
+
+        apply_action(Action::CursorToClick(12, 5), &mut s, &mut m);
+        assert_eq!(s.input.cursor, 2, "the click moved the caret");
+    }
+
+    #[test]
+    fn multi_byte_input_survives_caret_editing() {
+        // The byte arithmetic this replaced would panic outright here: String::truncate rejects a
+        // non-char boundary, and every one of these chars is multi-byte.
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        for c in "héllo".chars() {
+            apply_action(Action::InputChar(c), &mut s, &mut m);
+        }
+        assert_eq!(s.input.char_len(), 5);
+        apply_action(Action::CursorHome, &mut s, &mut m);
+        apply_action(Action::CursorRight, &mut s, &mut m);
+        apply_action(Action::InputChar('X'), &mut s, &mut m);
+        assert_eq!(s.input.value, "hXéllo", "insert lands on a char boundary");
+        apply_action(Action::DeleteChar, &mut s, &mut m);
+        assert_eq!(s.input.value, "hXllo", "delete cuts a whole char, not a byte");
     }
 
     // ── slash_suggestions tests ───────────────────────────────────────────────

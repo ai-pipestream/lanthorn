@@ -91,6 +91,57 @@ impl TextField {
         self.value = value.into();
         self.cursor = if cursor_end { self.char_len() } else { 0 };
     }
+
+    /// The buffer as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.value
+    }
+
+    /// True when the buffer holds no characters.
+    pub fn is_empty(&self) -> bool {
+        self.value.is_empty()
+    }
+
+    /// Empty the buffer and put the caret back at the start.
+    pub fn clear(&mut self) {
+        self.value.clear();
+        self.cursor = 0;
+    }
+
+    /// Take the buffer's contents, leaving it empty with the caret at the start.
+    pub fn take(&mut self) -> String {
+        self.cursor = 0;
+        std::mem::take(&mut self.value)
+    }
+
+    /// Insert `s` at the caret and advance past it.
+    pub fn insert_str(&mut self, s: &str) {
+        let at = self.byte_of(self.cursor);
+        self.value.insert_str(at, s);
+        self.cursor += s.chars().count();
+    }
+
+    /// Keep the first `n` CHARS, dropping the rest. The caret is clamped to the new end.
+    ///
+    /// Chars, not bytes: `String::truncate` panics on a non-char boundary, which a byte count
+    /// derived from a multi-byte buffer can easily land on.
+    pub fn truncate_chars(&mut self, n: usize) {
+        let at = self.byte_of(n);
+        self.value.truncate(at);
+        self.cursor = self.cursor.min(self.char_len());
+    }
+}
+
+impl From<&str> for TextField {
+    fn from(value: &str) -> TextField {
+        TextField::new(value)
+    }
+}
+
+impl From<String> for TextField {
+    fn from(value: String) -> TextField {
+        TextField::new(value)
+    }
 }
 
 #[cfg(test)]

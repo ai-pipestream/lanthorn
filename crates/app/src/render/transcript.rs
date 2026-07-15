@@ -1164,14 +1164,27 @@ fn render_input_content(
     draw_str_clipped(buf, region.x, input_y, prefix_trunc, prompt_style, region);
     let text_x = region.x + prefix_trunc.chars().count() as u16;
     let text_w = w.saturating_sub(prefix_trunc.chars().count());
-    let input_trunc = truncate_line(&state.input, text_w);
+    let input_trunc = truncate_line(state.input.as_str(), text_w);
     draw_str_clipped(buf, text_x, input_y, input_trunc, text_style, region);
+    // Where the text actually landed, so a click can be mapped back to a caret index (SQ-0354).
+    state.input_text_origin.set(Some((text_x, input_y)));
 
     if state.focus == Focus::Game && !state.any_overlay_open() {
-        let cursor_x = text_x + input_trunc.chars().count() as u16;
+        // Draw the caret where it actually IS, not always after the last char (SQ-0354). Clamped to
+        // the drawn text: a long line is truncated to fit, and the caret must not be painted past
+        // what is on screen.
+        let drawn = input_trunc.chars().count();
+        let cursor_x = text_x + state.input.cursor.min(drawn) as u16;
         if cursor_x < region.right() {
             if let Some(cell) = buf.cell_mut((cursor_x, input_y)) {
-                cell.set_symbol("_").set_style(cursor_style(text_style, game_input));
+                // Mid-line, underscore the char the caret sits ON rather than replacing it — the
+                // text must stay readable while you edit it.
+                let style = cursor_style(text_style, game_input);
+                if state.input.cursor < drawn {
+                    cell.set_style(style);
+                } else {
+                    cell.set_symbol("_").set_style(style);
+                }
             }
         }
     }
@@ -1545,7 +1558,7 @@ fn render_middle(
             };
             let start_col = row_text_x + last.text.chars().count() as u16;
             let avail = body_area.right().saturating_sub(start_col) as usize;
-            let input_trunc = truncate_line(&state.input, avail);
+            let input_trunc = truncate_line(state.input.as_str(), avail);
             draw_str_clipped(buf, start_col, row_y, input_trunc, text_style, body_area);
             let cursor_x = start_col + input_trunc.chars().count() as u16;
             if cursor_x < body_area.right() {
@@ -2706,7 +2719,7 @@ mod tests {
             "You are in a hall.".to_string(),
             "It is dark.".to_string(),
         ];
-        state.input = "open mailbox".to_string();
+        state.input.set("open mailbox", true);
         state.focus = Focus::Game;
 
         let area = Rect::new(0, 0, 40, 10);
@@ -2738,7 +2751,7 @@ mod tests {
         use ratatui::style::Color;
         let mut state = AppState::default();
         state.config.honor_game_colours = true;
-        state.input = "x".to_string();
+        state.input.set("x", true);
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
         let game = Some(ratatui::style::Style::new().fg(Color::Cyan));
@@ -2769,7 +2782,7 @@ mod tests {
         let machine = minimal_machine();
         let mut state = AppState::default();
         state.config.command_bar = true; // this test exercises the dedicated bottom bar
-        state.input = "hi".to_string();
+        state.input.set("hi", true);
         state.focus = Focus::Game;
 
         let area = Rect::new(0, 0, 40, 5);
@@ -2790,7 +2803,7 @@ mod tests {
         let machine = minimal_machine();
         let mut state = AppState::default();
         state.config.command_bar = true; // this test exercises the dedicated bottom bar
-        state.input = "hi".to_string();
+        state.input.set("hi", true);
         state.focus = Focus::Map; // not focused on game
 
         let area = Rect::new(0, 0, 40, 5);
@@ -2807,7 +2820,7 @@ mod tests {
         let machine = minimal_machine();
         let mut state = AppState::default();
         state.config.command_bar = true; // this test exercises the dedicated bottom bar
-        state.input = "hi".to_string();
+        state.input.set("hi", true);
         state.focus = Focus::Game; // focused on game, but overlay is open
 
         // Open the hotkey dialog — the simplest boolean overlay.
@@ -2853,7 +2866,7 @@ mod tests {
         let mut state = AppState::default();
         state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.focus = Focus::Game;
-        state.input = "zq".to_string();
+        state.input.set("zq", true);
         state.colors.input_prompt = Style::new().fg(Color::Green);
         state.colors.input_text = Style::new().fg(Color::Red);
 
@@ -2893,7 +2906,7 @@ mod tests {
             "You are in a hall.".to_string(),
             ">".to_string(),
         ];
-        state.input = "look".to_string();
+        state.input.set("look", true);
         state.focus = Focus::Game;
 
         let area = Rect::new(0, 0, 40, 10);
@@ -2930,7 +2943,7 @@ mod tests {
         let machine = minimal_machine();
         let mut state = AppState::default();
         state.config.command_bar = true;
-        state.input = "look".to_string();
+        state.input.set("look", true);
         state.focus = Focus::Game;
 
         let area = Rect::new(0, 0, 40, 10);
@@ -2951,7 +2964,7 @@ mod tests {
         let mut state = AppState::default();
         state.config.command_bar = false;
         state.transcript = (0..50).map(|i| format!("L{}", i)).collect();
-        state.input = "SECRETCMD".to_string();
+        state.input.set("SECRETCMD", true);
         state.focus = Focus::Game;
         state.transcript_scroll = 5; // scrolled up from the bottom
         assert!(state.effective_transcript_scroll() > 0, "test must actually be scrolled up");
@@ -3119,7 +3132,7 @@ mod tests {
         let mut state = AppState::default();
         state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.focus = Focus::Game;
-        state.input = "nor".to_string();
+        state.input.set("nor", true);
         state.suggestions = vec!["north".to_string()];
         state.suggestion_idx = 0;
 
@@ -3333,7 +3346,7 @@ mod tests {
         let machine = minimal_machine();
         let mut state = AppState::default();
         state.config.command_bar = true; // this test exercises the dedicated bottom bar
-        state.input = "go north".to_string();
+        state.input.set("go north", true);
         state.focus = Focus::Game;
 
         // input_line_style defaults to None

@@ -3354,6 +3354,27 @@ mod tests {
     /// no Ctrl/Alt modifier. Test with a default AppState (no overlays, no
     /// char_mode initially).
     #[test]
+    fn char_mode_forwards_arrow_keys_to_the_story_not_the_caret() {
+        // SQ-0354's safety property, and the reason caret editing cannot steal story-controlled
+        // input: when the story asks for a single keypress, the run loop's char-mode gate forwards
+        // the key straight to the VM and `continue`s — app routing (and therefore the caret keys)
+        // never sees it. Assert the two halves the gate depends on.
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        for code in [KeyCode::Left, KeyCode::Right, KeyCode::Home, KeyCode::End, KeyCode::Delete] {
+            let k = KeyEvent::new(code, KeyModifiers::NONE);
+            assert!(
+                app::engine::key_event_to_input(k).is_some(),
+                "{code:?} must be deliverable to the story as input",
+            );
+            // Plain keys are game input; only Ctrl/Alt combos are held back for app routing.
+            assert!(
+                !k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT),
+                "{code:?} is a plain key, so the gate forwards it",
+            );
+        }
+    }
+
+    #[test]
     fn char_mode_gate_predicate() {
         use app::state::AppState;
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};

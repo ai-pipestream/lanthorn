@@ -210,7 +210,7 @@ pub fn draw_verb_menu(
     // Show current input composition in the bottom row of content.
     if !state.input.is_empty() {
         let input_y = content.bottom() - 1;
-        let input_text = format!("Input: {}_", state.input);
+        let input_text = format!("Input: {}_", state.input.as_str());
         let input_style = Style::new().fg(Color::Yellow).patch(base);
         crate::render::draw_str_clipped(buf, content.x, input_y, &input_text, input_style, content);
     }

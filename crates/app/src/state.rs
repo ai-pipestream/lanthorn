@@ -1329,12 +1329,26 @@ pub struct AppState {
     /// unchanged map reuses the routed model instead of re-running `render_layer`.
     /// See [`MapRenderCache`] and [`AppState::cached_map_render`]. (SQ-0305)
     pub(crate) map_render: std::cell::RefCell<Option<MapRenderCache>>,
+    /// Screen origin `(col, row)` of the input line's TEXT (just past the `"> "` prompt), captured
+    /// by the renderer each frame so a click can be mapped back to a caret position (SQ-0354).
+    ///
+    /// Only the renderer knows where the line landed: the prompt's width and the row both depend on
+    /// layout the input code cannot see. `None` before the first frame, or when the command bar is
+    /// hidden.
+    pub(crate) input_text_origin: std::cell::Cell<Option<(u16, u16)>>,
     /// List-row viewport (rows) of the currently-open selection-list modal,
     /// captured from the last render so `apply_action` nav can keep the
     /// selection visible and arm scroll animations (mirrors the transcript's
     /// `transcript_viewport_rows`). 0 when no list modal is open.
     pub modal_list_viewport: usize,
-    pub input: String,
+    /// The player's command line, with a caret (SQ-0354).
+    ///
+    /// A `TextField` like every other text entry in the app, so the caret arithmetic — char vs
+    /// byte indexing above all — lives in one tested place instead of being rewritten here.
+    /// Story-controlled input never lands in this buffer: when the story asks for a single
+    /// keypress the run loop's char-mode gate forwards the key straight to the VM, before app
+    /// routing sees it.
+    pub input: crate::text_field::TextField,
     /// Transient status message shown on the status line (cleared on next keypress/turn).
     pub status_msg: Option<String>,
     /// Modal / overlay UI cluster: every field whose presence means a
@@ -1693,8 +1707,9 @@ impl Default for AppState {
             transcript_gen: 0,
             transcript_wrap: std::cell::RefCell::new(None),
             map_render: std::cell::RefCell::new(None),
+            input_text_origin: std::cell::Cell::new(None),
             modal_list_viewport: 0,
-            input: String::new(),
+            input: crate::text_field::TextField::default(),
             status_msg: None,
             overlays: OverlayState::default(),
             show_alignment: false,
@@ -2739,14 +2754,14 @@ impl AppState {
         self.selected_room = room;
     }
 
-    /// Append a character to the input line.
+    /// Insert a character at the caret.
     pub fn push_input_char(&mut self, c: char) {
-        self.input.push(c);
+        self.input.insert(c);
     }
 
-    /// Remove the last character from the input line, if any.
+    /// Delete the character before the caret, if any.
     pub fn backspace(&mut self) {
-        self.input.pop();
+        self.input.backspace();
     }
 
     /// Return the current input line and clear it. Also clears autocomplete state.
@@ -2754,7 +2769,20 @@ impl AppState {
         self.suggestions.clear();
         self.suggestion_idx = 0;
         self.suggestion_active = false;
-        std::mem::take(&mut self.input)
+        self.input.take()
+    }
+
+    /// Char index in the input line under a click at screen `(col, row)`, or `None` when the click
+    /// is not on that line (SQ-0354).
+    ///
+    /// A click past the last character clamps to the end, which is what every other text field
+    /// does — clicking the empty space after a line puts the caret at its end.
+    pub fn input_click_index(&self, col: u16, row: u16) -> Option<usize> {
+        let (x0, y0) = self.input_text_origin.get()?;
+        if row != y0 || col < x0 {
+            return None;
+        }
+        Some(((col - x0) as usize).min(self.input.char_len()))
     }
 
     /// Clear the current autocomplete suggestions.
@@ -2768,9 +2796,9 @@ impl AppState {
     /// whitespace-delimited token in `input`).
     pub fn current_partial(&self) -> &str {
         // Find the last space; if none, the whole input is the partial word.
-        match self.input.rfind(' ') {
-            Some(pos) => &self.input[pos + 1..],
-            None => &self.input,
+        match self.input.value.rfind(' ') {
+            Some(pos) => &self.input.value[pos + 1..],
+            None => &self.input.value,
         }
     }
 
@@ -2808,14 +2836,14 @@ impl AppState {
         }
         let next = match self.history_cursor {
             None => {
-                self.history_draft = self.input.clone();
+                self.history_draft = self.input.value.clone();
                 self.command_history.len() - 1
             }
             Some(0) => return, // oldest: stay
             Some(i) => i - 1,
         };
         self.history_cursor = Some(next);
-        self.input = self.command_history[next].clone();
+        self.input.set(self.command_history[next].clone(), true);
         self.clear_suggestions();
     }
 
@@ -2830,11 +2858,11 @@ impl AppState {
         };
         if i + 1 < self.command_history.len() {
             self.history_cursor = Some(i + 1);
-            self.input = self.command_history[i + 1].clone();
+            self.input.set(self.command_history[i + 1].clone(), true);
         } else {
             // Past the newest entry: restore the draft.
             self.history_cursor = None;
-            self.input = std::mem::take(&mut self.history_draft);
+            self.input.set(std::mem::take(&mut self.history_draft), true);
         }
         self.clear_suggestions();
     }
@@ -3088,29 +3116,29 @@ mod tests {
 
         // First Up: save draft, recall newest ("three").
         s.history_prev();
-        assert_eq!(s.input, "three");
+        assert_eq!(s.input.value, "three");
         // Up again: "two".
         s.history_prev();
-        assert_eq!(s.input, "two");
+        assert_eq!(s.input.value, "two");
         // Up again: "one" (oldest).
         s.history_prev();
-        assert_eq!(s.input, "one");
+        assert_eq!(s.input.value, "one");
         // Up at oldest: no-op (stays).
         s.history_prev();
-        assert_eq!(s.input, "one");
+        assert_eq!(s.input.value, "one");
         // Down: "two".
         s.history_next();
-        assert_eq!(s.input, "two");
+        assert_eq!(s.input.value, "two");
         // Down: "three".
         s.history_next();
-        assert_eq!(s.input, "three");
+        assert_eq!(s.input.value, "three");
         // Down past newest: restore the saved draft.
         s.history_next();
-        assert_eq!(s.input, "partial");
+        assert_eq!(s.input.value, "partial");
         assert_eq!(s.history_cursor, None);
         // Down again while not navigating: no-op.
         s.history_next();
-        assert_eq!(s.input, "partial");
+        assert_eq!(s.input.value, "partial");
     }
 
     #[test]
@@ -3118,7 +3146,7 @@ mod tests {
         let mut s = AppState::default();
         s.input = "x".into();
         s.history_prev();
-        assert_eq!(s.input, "x");
+        assert_eq!(s.input.value, "x");
         assert_eq!(s.history_cursor, None);
     }
 
@@ -3876,10 +3904,10 @@ mod tests {
         s.push_input_char('g');
         s.push_input_char('o');
         s.backspace();
-        assert_eq!(s.input, "g");
+        assert_eq!(s.input.value, "g");
         let cmd = s.take_input();
         assert_eq!(cmd, "g");
-        assert_eq!(s.input, "");
+        assert_eq!(s.input.value, "");
         s.push_transcript("line1\nline2");
         assert_eq!(s.transcript.len(), 2);
     }
