@@ -327,6 +327,30 @@ pub(crate) fn dispatch_slash_outcome(
                 Err(e) => state.set_status(format!("set-game-colours failed: {e}")),
             }
         }
+        SlashOutcome::SetGameBorderless(opt) => {
+            // Persist the per-game borderless override (or clear it on `auto`),
+            // then apply it live: the running Glulx session relayouts so windows
+            // abut (or regain their border gutters) immediately. (SQ-0341)
+            match app::styles::write_per_game_borderless(&state.config.user_dir, ifid, opt) {
+                Ok(()) => {
+                    let effective =
+                        app::styles::read_per_game_borderless(&state.config.user_dir, ifid).unwrap_or(false);
+                    if let Some(gs) = session.as_any_mut().downcast_mut::<app::glulx_session::GlulxSession>() {
+                        gs.set_borderless(effective);
+                    }
+                    let label = match opt {
+                        Some(true) => "off (borderless)",
+                        Some(false) => "on",
+                        None => "auto (on)",
+                    };
+                    state.push_transcript_internal(
+                        &format!("window borders: {label}"),
+                        TranscriptKind::Meta,
+                    );
+                }
+                Err(e) => state.set_status(format!("set-game-borders failed: {e}")),
+            }
+        }
     }
     false
 }

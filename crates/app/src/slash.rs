@@ -73,6 +73,11 @@ pub enum SlashOutcome {
     /// per-game override (`None` = `auto`, fall back to garglk.ini/global).
     /// Persisted per-game; handled in `slash_dispatch`.
     SetGameColours(Option<bool>),
+    /// Set this game's `borderless_windows` override — the payload is the
+    /// borderless value: `Some(true)` = abut (no borders), `Some(false)` = keep
+    /// Glk borders, `None` = clear the override (default: bordered). Persisted
+    /// per-game; applied live to a running Glulx session. (SQ-0341)
+    SetGameBorderless(Option<bool>),
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -372,6 +377,16 @@ pub static COMMANDS: &[CommandSpec] = &[
             Some("off")  => SlashOutcome::SetGameColours(Some(false)),
             Some("auto") => SlashOutcome::SetGameColours(None),
             _ => err("set-game-colours requires an argument: on | off | auto"),
+        } },
+    CommandSpec { name: "set-game-borders", category: Category::Style, context: Context::Global,
+        usage: "set-game-borders on|off|auto", description: "show this game's Glk window borders (on), or render borderless/abutting (off); auto = default (on); persisted per-game",
+        // on = borders shown (default) → borderless=false; off = borderless/abut
+        // → borderless=true; auto = clear the override.
+        dispatch: |a| match a.first().copied() {
+            Some("on")   => SlashOutcome::SetGameBorderless(Some(false)),
+            Some("off")  => SlashOutcome::SetGameBorderless(Some(true)),
+            Some("auto") => SlashOutcome::SetGameBorderless(None),
+            _ => err("set-game-borders requires an argument: on | off | auto"),
         } },
 
     // ── Export ────────────────────────────────────────────────────────────
@@ -675,8 +690,8 @@ mod tests {
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
         // Total count matches the spec table (Game 12, Map 21, View 6,
-        // Transcript 3, Style 6, Export 3, Animation 4, Help 2).
-        assert_eq!(COMMANDS.len(), 57, "registry must match the spec's Full command table");
+        // Transcript 3, Style 7, Export 3, Animation 4, Help 2).
+        assert_eq!(COMMANDS.len(), 58, "registry must match the spec's Full command table");
     }
 
     #[test]
@@ -748,6 +763,17 @@ mod tests {
         assert!(matches!(parse("set-game-colours", '/'), SlashOutcome::Error(_)));
         assert!(matches!(parse("set-game-colours maybe", '/'), SlashOutcome::Error(_)));
         assert_eq!(find_command("set-game-colours").expect("set-game-colours").category, Category::Style);
+    }
+
+    #[test]
+    fn set_game_borders_parses_on_off_auto() {
+        // on = show borders (borderless=false); off = borderless (true); auto = clear.
+        assert!(matches!(parse("set-game-borders on", '/'), SlashOutcome::SetGameBorderless(Some(false))));
+        assert!(matches!(parse("set-game-borders off", '/'), SlashOutcome::SetGameBorderless(Some(true))));
+        assert!(matches!(parse("set-game-borders auto", '/'), SlashOutcome::SetGameBorderless(None)));
+        assert!(matches!(parse("set-game-borders", '/'), SlashOutcome::Error(_)));
+        assert!(matches!(parse("set-game-borders maybe", '/'), SlashOutcome::Error(_)));
+        assert_eq!(find_command("set-game-borders").expect("set-game-borders").category, Category::Style);
     }
 
     #[test]

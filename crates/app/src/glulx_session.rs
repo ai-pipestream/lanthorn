@@ -393,6 +393,22 @@ impl GlulxSession {
         self.refresh_screen();
     }
 
+    /// Toggle the per-game borderless-windows mode live and relayout so the
+    /// change shows immediately: gvm re-lays out its windows (with or without the
+    /// reserved gutter cells) and the game redraws to its next input request.
+    /// A no-op once the game has quit. (SQ-0341)
+    pub fn set_borderless(&mut self, on: bool) {
+        if self.quit {
+            return;
+        }
+        self.machine.set_borderless(on);
+        self.machine.rearrange();
+        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
+        self.pending = pending;
+        self.quit = quit;
+        self.refresh_screen();
+    }
+
     /// Drive one turn's worth of execution, updating `pending`/`quit`/`pending_io`.
     /// On an in-game `@save`/`@restore` the drive stops with `pending_io` set (and
     /// `pending`/`quit` left unchanged, since the game is mid-turn); the run loop
