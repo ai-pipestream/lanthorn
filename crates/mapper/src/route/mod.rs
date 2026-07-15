@@ -531,6 +531,40 @@ fn departure_corners(graph: &MapGraph) -> std::collections::HashSet<(RoomId, Dir
         .collect()
 }
 
+/// For every corner that two or more ONE-WAY diagonals want to arrive on, the `compass` index of
+/// the connector that keeps it (SQ-0314). Corners wanted by only one arrival are absent.
+///
+/// A corner holds one connector. `departure_corners` settles arrival-vs-DEPARTURE, but two arrivals
+/// can want the same corner with no departure in sight: two rooms both leading `NE` into the same
+/// hub both want its `SW` corner. It takes four commands to build — go NE into a room, leave it by
+/// a ladder, come back NE from somewhere else — so it is an ordinary shape, not a curiosity.
+///
+/// The winner is the UNDISTORTED arrival where there is one: its direction actually matches the
+/// geometry, so it has the better claim to the corner the geometry points at. Only one arrival CAN
+/// be undistorted — an undistorted `NE` requires the origin to sit SW-adjacent, and one cell holds
+/// one room — so this decides all but pathological ties, which fall back to the lowest index.
+/// Computed from the graph, so it does not depend on the order connectors happen to be routed in.
+///
+/// Reciprocals never appear here: a reciprocal owns its corner via its own back edge, and
+/// `departure_corners` already keeps one-ways off a corner the room departs from.
+fn arrival_corner_owners(compass: &[&Connection]) -> std::collections::HashMap<(RoomId, Direction), usize> {
+    let mut best: std::collections::HashMap<(RoomId, Direction), (bool, usize)> =
+        std::collections::HashMap::new();
+    for (ci, c) in compass.iter().enumerate() {
+        if !is_diagonal(c.dir) {
+            continue;
+        }
+        // Any reverse compass edge makes this a reciprocal, not a one-way arrival.
+        if compass.iter().any(|b| b.origin == c.dest && b.dest == c.origin) {
+            continue;
+        }
+        let key = (c.dest, opposite(c.dir));
+        let cand = (c.distorted, ci); // false < true: undistorted wins, then lowest index
+        best.entry(key).and_modify(|e| { if cand < *e { *e = cand } }).or_insert(cand);
+    }
+    best.into_iter().map(|(k, (_, ci))| (k, ci)).collect()
+}
+
 /// Resolve where a connector ARRIVES: its corner, or `None` for an ordinary side doorway.
 ///
 /// A corner hosts at most one connector, and a DEPARTURE outranks an arrival — a room's own
@@ -866,6 +900,8 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
     // these yields to a side slot (SQ-0314). Derived from the graph, not from routing order, so it
     // is the same for every connector.
     let dep_corners = departure_corners(graph);
+    // Which one-way arrival keeps each contested corner (SQ-0314); see `arrival_corner_owners`.
+    let arr_owners = arrival_corner_owners(&compass);
     let mut out: Vec<RoutedConnector> = Vec::new();
     // The trunk polyline per (unordered room pair, channel), recorded when its connector is built; a
     // later edge on the SAME pair AND channel becomes a MERGE STUB that joins this trunk. The channel
@@ -943,7 +979,11 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         // corner to the destination's own outgoing diagonal (SQ-0314). Resolve it BEFORE the direct
         // route is considered — an arrival that yields its corner is a plain orthogonal connector
         // again, and may take the direct route it would otherwise have been barred from.
-        let arrive = resolve_entry_corner(c.dir, back.map(|bk| bk.dir), c.dest, &dep_corners);
+        let arrive = resolve_entry_corner(c.dir, back.map(|bk| bk.dir), c.dest, &dep_corners)
+            // A corner holds ONE connector: a one-way arrival that lost the corner to another
+            // one-way arrival yields to a side slot, exactly as it would to a departure. Absent
+            // from the map => uncontested => kept.
+            .filter(|&d| arr_owners.get(&(c.dest, d)).is_none_or(|&w| w == ci));
 
         // A connector with a CORNER at either end never takes the direct route (SQ-0314).
         // `direct_route` runs its legs out of the rooms' centre row/column and anchors both ends
@@ -2239,6 +2279,105 @@ mod tests {
         // A diagonal carries no LaneSeg: every step of the route touches an even coord (room
         // centre) or is the corner itself, so `long_runs` finds nothing to lane.
         assert!(build(true).segs.is_empty(), "a pure diagonal occupies no channel lane");
+    }
+
+    #[test]
+    fn two_one_way_arrivals_cannot_claim_the_same_corner() {
+        // SQ-0314. `departure_corners` settles arrival-vs-departure, but two ARRIVALS can want the
+        // same corner with no departure involved — and this takes four ordinary commands:
+        //   at A, go northeast  -> Target   (one-way)
+        //   at Target, go up    -> B        (non-planar: no compass back-edge, so the next NE
+        //                                    cannot collapse into a reciprocal)
+        //   at B, go northeast  -> Target   (one-way)  <- a SECOND NE into the same room
+        // Both want Target's SW corner. Two rooms leading NE into a hub linked by a ladder is an
+        // ordinary map shape, not a curiosity.
+        use crate::direction::Direction;
+        use crate::mapper::Mapper;
+        let mut m = Mapper::default();
+        m.observe_command(1, "A", "look");
+        m.observe_command(2, "Target", "northeast");
+        m.observe_command(3, "B", "up");
+        m.observe_command(2, "Target", "northeast");
+        let plan = route_lanes(&m.graph);
+
+        let arrivals: Vec<_> = plan
+            .connectors
+            .iter()
+            .filter(|c| c.dest == 2 && c.exit_dir == Direction::NE)
+            .collect();
+        assert_eq!(arrivals.len(), 2, "both NE edges are drawn: {arrivals:?}");
+        let with_corner: Vec<_> = arrivals.iter().filter(|c| c.entry_corner.is_some()).collect();
+        assert_eq!(
+            with_corner.len(),
+            1,
+            "exactly ONE may hold Target's SW corner; the other yields to a side slot",
+        );
+
+        // And the winner is the UNDISTORTED arrival — its direction matches the geometry, so it has
+        // the better claim to the corner that geometry points at.
+        assert!(!with_corner[0].distorted, "the undistorted arrival keeps the corner");
+        assert_eq!(with_corner[0].entry_corner, Some(Direction::SW));
+        let yielded: Vec<_> = arrivals.iter().filter(|c| c.entry_corner.is_none()).collect();
+        assert!(yielded[0].distorted, "the distorted one is the one that yields");
+
+        // Corner claims across the whole map are unique.
+        let mut claims: Vec<(RoomId, Direction)> = Vec::new();
+        for c in &plan.connectors {
+            if is_diagonal(c.exit_dir) {
+                claims.push((c.origin, c.exit_dir));
+            }
+            if let Some(d) = c.entry_corner {
+                claims.push((c.dest, d));
+            }
+        }
+        // Direction derives Hash, not Ord, so this is a HashSet.
+        let mut seen = std::collections::HashSet::new();
+        for claim in &claims {
+            assert!(seen.insert(*claim), "two connectors claim {claim:?}: {claims:?}");
+        }
+    }
+
+    #[test]
+    fn the_arrival_corner_owner_prefers_the_undistorted_claim_whatever_the_order() {
+        // The winner is decided on merit, not on which edge happened to be discovered first, so the
+        // same map always renders the same way. Tested on the rule itself with explicit flags: a
+        // hand-built graph cannot produce real distortion marks (`mark_distorted` derives them from
+        // the layout's dropped-constraint set, not from geometry), and the integration test above
+        // covers the real-layout path.
+        use crate::direction::Direction;
+        let mk = |origin, dest, distorted| Connection { origin, dir: Direction::NE, dest, distorted };
+        let undistorted = mk(1, 2, false);
+        let distorted = mk(3, 2, true);
+
+        for order in [vec![&undistorted, &distorted], vec![&distorted, &undistorted]] {
+            let owners = arrival_corner_owners(&order);
+            let idx = owners[&(2, Direction::SW)];
+            assert!(!order[idx].distorted, "the undistorted claim keeps the corner");
+            assert_eq!(order[idx].origin, 1, "and it is always the same connector");
+        }
+    }
+
+    #[test]
+    fn an_uncontested_or_reciprocal_corner_is_left_alone() {
+        // The map holds only CONTESTED corners; everything else must pass through untouched.
+        use crate::direction::Direction;
+        let mk = |origin, dir, dest| Connection { origin, dir, dest, distorted: false };
+
+        // A lone one-way arrival contends with nobody.
+        let lone = mk(1, Direction::NE, 2);
+        assert_eq!(arrival_corner_owners(&[&lone]).len(), 1, "recorded, but uncontested");
+
+        // A reciprocal pair never enters the map: it owns its corner via its own back edge, and
+        // `departure_corners` already keeps one-ways off a corner the room departs from. Listing it
+        // here could make it yield its own corner to a stranger.
+        let out = mk(1, Direction::NE, 2);
+        let back = mk(2, Direction::SW, 1);
+        let owners = arrival_corner_owners(&[&out, &back]);
+        assert!(owners.is_empty(), "a reciprocal pair is not arrival-vs-arrival contention: {owners:?}");
+
+        // Cardinals have no corner to contend for.
+        let e = mk(1, Direction::E, 2);
+        assert!(arrival_corner_owners(&[&e]).is_empty());
     }
 
     #[test]
