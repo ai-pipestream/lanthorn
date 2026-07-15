@@ -591,7 +591,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // normal view the icons go on the interior right column; in portal view (show_portal_labels)
     // they move onto the border and the destination names float outside the box.
     if boxes {
-        draw_portal_icons(rm, &placed, state, state.show_portal_labels, state.show_room_numbers, (off_x, off_y), area, buf);
+        draw_portal_icons(rm, &placed, state, state.show_portal_labels, (off_x, off_y), area, buf);
     }
 
     // ── 5. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
@@ -1656,6 +1656,79 @@ fn draw_stub(
     put_str(buf, lx, ly, label, connector_style, area);
 }
 
+/// Which way a portal badge should be pulled inside its room box (SQ-0351, SQ-0223).
+///
+/// The DIRECTION is the source of truth wherever it has one — including Up/Down, which pull to the
+/// top/bottom of the box. Reading it straight from the compass beats deriving it from the rooms'
+/// cells: a distorted edge can leave its destination somewhere the direction plainly contradicts,
+/// and the badge should agree with the word the player typed, not with where the layout engine
+/// happened to put the other room.
+///
+/// `In`/`Out` are the exception: they carry no bearing at all, so the only thing that can aim them
+/// is the partner's cell — which is exactly SQ-0351's ask ("towards the room they connect with").
+/// `partner` is `None` when the destination is on another layer (a cross-layer `In`/`Out` has
+/// nothing to aim at on this plane) or has no position yet; the badge then stays centred.
+///
+/// Returned as a unit-ish `(dx, dy)` in room-cell space, y down.
+fn badge_bearing(dir: Direction, origin: (i32, i32), partner: Option<(i32, i32)>) -> Option<(i32, i32)> {
+    match dir {
+        Direction::Up => Some((0, -1)),
+        Direction::Down => Some((0, 1)),
+        Direction::In | Direction::Out | Direction::Unknown => {
+            let p = partner?;
+            let (dx, dy) = (p.0 - origin.0, p.1 - origin.1);
+            (dx != 0 || dy != 0).then_some((dx.signum(), dy.signum()))
+        }
+        // Every compass direction already knows its own bearing.
+        _ => mapper::direction::grid_offset(dir),
+    }
+}
+
+/// The blank interior cell of the box at `(bx, by)` furthest along `bearing` (SQ-0351).
+///
+/// "Blank" is read back from the BUFFER, after `draw_room` has written the name and id — so this is
+/// literally the closest empty spot, whatever the room happens to be called. Deriving it instead
+/// from the centring maths would mean a second copy of `draw_room`'s layout, free to drift from it.
+/// It also composes: each badge drawn fills a cell, so the next badge's scan sees it taken.
+///
+/// Cells are ranked by projection onto `bearing` (furthest that way wins), then by how close they
+/// stay to the box's centre line across it, then by position — so the choice is deterministic and
+/// hugs the middle rather than sliding into a corner. `None` when the interior is completely full;
+/// the caller then keeps its fixed placement rather than overwriting a character.
+fn nearest_free_interior(
+    buf: &Buffer,
+    (bx, by): (i32, i32),
+    bearing: Option<(i32, i32)>,
+    (off_x, off_y): (i32, i32),
+    area: Rect,
+) -> Option<(i32, i32)> {
+    let (dx, dy) = bearing.unwrap_or((0, 0));
+    // Interior of an 11x5 box: columns bx+1..=bx+9, rows by+1..=by+3.
+    let (cx, cy) = (bx + BOX_W / 2, by + BOX_H / 2);
+    let mut best: Option<((i32, i32, i32), (i32, i32))> = None;
+    for row in (by + 1)..=(by + BOX_H - 2) {
+        for col in (bx + 1)..=(bx + BOX_W - 2) {
+            let (sx, sy) = (col + off_x, row + off_y);
+            if !in_area(sx, sy, area) {
+                continue;
+            }
+            let blank = buf
+                .cell((sx as u16, sy as u16))
+                .is_some_and(|c| c.symbol() == " " || c.symbol().is_empty());
+            if !blank {
+                continue;
+            }
+            let along = (col - cx) * dx + (row - cy) * dy; // furthest toward the bearing
+            let across = ((col - cx) * dy).abs() + ((row - cy) * dx).abs(); // hug the centre line
+            let key = (-along, across, (row - by) * BOX_W + (col - bx));
+            if best.as_ref().is_none_or(|(k, _)| key < *k) {
+                best = Some((key, (col, row)));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 /// In-room icon slot for a portal direction: 0 = row 1 (Up), 1 = row 2 (mid: In/Out/Unknown),
 /// 2 = row 3 (Down). Cardinal directions have no portal slot.
 fn portal_slot(dir: Direction) -> Option<usize> {
@@ -1756,7 +1829,6 @@ fn draw_portal_icons(
     placed: &std::collections::HashMap<RoomId, VRect>,
     state: &AppState,
     show_labels: bool,
-    show_room_numbers: bool,
     offset: (i32, i32),
     area: Rect,
     buf: &mut Buffer,
@@ -1776,15 +1848,34 @@ fn draw_portal_icons(
         }
     };
 
+    // Room cells, so a badge can be aimed at the partner it connects to (SQ-0351).
+    let cell_of: HashMap<RoomId, (i32, i32)> = rm.rooms.iter().map(|r| (r.id, r.cell)).collect();
+
     // Per room, the chosen (glyph_char, dest_label) for each of the 3 slots; mid slot by precedence.
     let mut chosen: HashMap<RoomId, PortalSlots<'_>> = HashMap::new();
     let mut mid_rank: HashMap<RoomId, u8> = HashMap::new();
+    // The mid slot's own edge, kept so its badge can be aimed (the glyph alone can't say where).
+    let mut mid_edge: HashMap<RoomId, (Direction, RoomId)> = HashMap::new();
+    // Cross-layer portals: the direction of travel to the other layer, per room (SQ-0223).
+    let mut layer_badges: HashMap<RoomId, Vec<Direction>> = HashMap::new();
     for edge in &rm.edges {
         if !edge.is_stub {
             continue;
         }
         if edge.dir == Direction::Unknown {
             continue; // Unknown edges are non-spatial (e.g. death/respawn) — show no portal icon
+        }
+        // A cross-layer portal gets its own badge, placed by the same rule but marking a way OFF
+        // this layer (SQ-0223). It must not also feed the slots: its destination is not on this
+        // plane, so the slot machinery — which assumes a same-layer partner — cannot aim it.
+        //
+        // Portal view is exempt. There the icons live on the BORDER with the destination name
+        // floating outside, and a cross-layer badge already names its target layer ("Cellar ·
+        // Cellar") — a strictly better answer than a bare glyph. Diverting it there would delete
+        // that label, so in that view the edge keeps its old path through the slots.
+        if edge.is_interlayer && !show_labels {
+            layer_badges.entry(edge.origin).or_default().push(edge.dir);
+            continue;
         }
         let Some(slot) = portal_slot(edge.dir) else { continue };
         let glyph_ch = dir_glyph(edge.dir);
@@ -1796,18 +1887,42 @@ fn draw_portal_icons(
             if rank < *cur {
                 *cur = rank;
                 slots[1] = Some((glyph_ch, label));
+                mid_edge.insert(edge.origin, (edge.dir, edge.dest));
             }
         } else if slots[slot].is_none() {
             slots[slot] = Some((glyph_ch, label));
         }
     }
 
-    let icon_col = BOX_W - 2; // far-right interior column (normal view)
+    let icon_col = BOX_W - 2; // far-right interior column — the fallback when the interior is full
     for room in &rm.rooms {
-        let Some(slots) = chosen.get(&room.id) else { continue };
         let Some(&rect) = placed.get(&room.id) else { continue };
+        let empty: PortalSlots<'_> = [None, None, None];
+        let slots = chosen.get(&room.id).unwrap_or(&empty);
+        let layers: &[Direction] = layer_badges.get(&room.id).map_or(&[], |v| v.as_slice());
+        if slots.iter().all(Option::is_none) && layers.is_empty() {
+            continue;
+        }
         let style = room_style(room, state);
         let (bx, by) = (rect.x, rect.y);
+
+        // Place a badge on the free interior cell nearest the way it leads (SQ-0351/SQ-0223), and
+        // draw it immediately: the next badge's scan reads the buffer, so it sees this cell taken.
+        let place = |dir: Direction, dest: Option<RoomId>, glyph: char, buf: &mut Buffer| {
+            let partner = dest.and_then(|d| cell_of.get(&d).copied());
+            let bearing = badge_bearing(dir, room.cell, partner);
+            let at = nearest_free_interior(buf, (bx, by), bearing, (off_x, off_y), area);
+            let (col, row) = at.unwrap_or((bx + icon_col, by + 2)); // interior full: keep the old spot
+            put_str(buf, col + off_x, row + off_y, &glyph.to_string(), style, area);
+        };
+
+        // A cross-layer portal is drawn in every view: it marks a way OFF this layer, which the
+        // border icons below never expressed. Its glyph is the direction of travel (SQ-0223), so
+        // the badge reads as the move the player makes — ↑/↓ stairs, ⊙/⊗ a doorway.
+        for &dir in layers {
+            place(dir, None, dir_glyph(dir), buf);
+        }
+
         if show_labels {
             // Portal view: icons move onto the border; destination names float OUTSIDE the box.
             if let Some((glyph_ch, label)) = slots[0] {
@@ -1834,24 +1949,19 @@ fn draw_portal_icons(
                     }
                 }
             }
-        } else if show_room_numbers {
-            // Numbers shown: directional icon in the interior right column. Up/Down (slots 0/2)
-            // now show their glyph on the connector's border anchor instead (see
-            // `render_lane_connectors`), so only the mid slot (In/Out/Unknown) still draws here —
-            // and the notes marker (drawn by `draw_room` at this same row/col) is no longer
-            // overwritten, so it no longer needs to shift.
-            if let Some((glyph_ch, _label)) = slots[1] {
-                let gs = glyph_ch.to_string();
-                let row = by + 1 + 1; // mid slot's row
-                put_str(buf, bx + icon_col + off_x, row + off_y, &gs, style, area);
-            }
         } else {
-            // Numbers hidden: the mid-slot icon (In/Out/Unknown) on interior row 3, centered
-            // within the 9-wide interior. Up/Down (slots 0/2) now show their glyph on the
-            // connector's border anchor instead (see `render_lane_connectors`).
+            // Both in-room views now share one rule: the mid-slot icon (In/Out/Unknown) lands on
+            // the free interior cell nearest the room it leads to (SQ-0351) rather than on a fixed
+            // column. The old placements — far-right column with numbers on, centred with them off
+            // — ignored the partner entirely and silently overwrote the last letter of a long name
+            // (Zork's `◀  House ⊙▶`: "House" centres as "  House  " and the badge took column 9).
+            //
+            // Up/Down (slots 0/2) still show their glyph on the connector's border anchor instead
+            // (see `render_lane_connectors`), so only the mid slot draws here.
             if let Some((glyph_ch, _label)) = slots[1] {
-                let iw = (BOX_W - 2) as usize; // interior width = 9
-                put_str(buf, bx + 1 + off_x, by + 3 + off_y, &center(&glyph_ch.to_string(), iw), style, area);
+                let dest = mid_edge.get(&room.id).map(|&(_, d)| d);
+                let dir = mid_edge.get(&room.id).map_or(Direction::Unknown, |&(d, _)| d);
+                place(dir, dest, glyph_ch, buf);
             }
         }
     }
@@ -5369,24 +5479,23 @@ mod tests {
 
     #[test]
     fn room_number_visibility_toggles_id_and_icon_placement() {
-        // Build a one-room scene at Boxes zoom with an Out portal stub (mid slot — Up/Down now
-        // show their glyph on the connector's border anchor instead, so a non-spatial direction
-        // is used here to exercise the still-interior mid-slot icon placement).
-        // With show_room_numbers=false (default): the "#<id>" text is absent and the portal icon
-        //   appears on interior row 3 (the freed row), centered horizontally.
-        // With show_room_numbers=true: "#<id>" appears on interior row 3 and the portal icon
-        //   appears on the far-right interior column (col BOX_W-2 = 9), mid-slot row (row 2).
+        // Hall(0,0) has an Out portal to Cellar(0,1) — due SOUTH. `Out` carries no bearing of its
+        // own, so the badge is aimed at the partner's cell (SQ-0351), which puts it on the bottom
+        // interior row either way. What `show_room_numbers` changes is what OCCUPIES that row:
+        //   false -> "#1" absent, so the badge takes the centre of row 3;
+        //   true  -> "#1" holds the centre, so the badge steps aside to the nearest blank.
+        // The badge must never overwrite the id — the old rule dodged that by using a fixed column
+        // on a different row, which ignored the partner entirely.
         use mapper::graph::MapGraph;
 
         let mut g = MapGraph::new();
         g.upsert_room(1, "Hall".into());
         g.upsert_room(2, "Cellar".into());
         g.set_pos(1, (0, 0));
-        g.set_pos(2, (0, 1));
+        g.set_pos(2, (0, 1)); // due south of Hall
         g.add_edge(1, Direction::Out, 2);
         let rm = render(&g);
 
-        // Helper: render with a given show_room_numbers value and return the buffer.
         let render_buf = |show_room_numbers: bool| {
             let mut st = AppState::default(); // Boxes zoom, scroll (0,0), show_portal_labels off
             st.show_room_numbers = show_room_numbers;
@@ -5400,48 +5509,148 @@ mod tests {
         {
             let buf = render_buf(false);
             let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
-
-            // Interior row 3 should NOT contain "#1".
             let row3: String = (1u16..=9).map(|x| sym(x, 3)).collect();
-            assert!(
-                !row3.contains("#1"),
-                "show_room_numbers=false: #id must be absent from row 3; got '{row3}'"
-            );
-
-            // A portal glyph (⊗ for Out) should appear somewhere on interior row 3.
-            let has_out_glyph = (1u16..=9).any(|x| sym(x, 3) == "⊗");
-            assert!(
-                has_out_glyph,
-                "show_room_numbers=false: portal glyph '⊗' must appear on interior row 3; row3='{row3}'"
-            );
-
-            // The right interior column (col 9) on rows 1-3 should NOT have the out glyph.
-            let right_col_has_glyph = (1u16..=3).any(|y| sym(9, y) == "⊗");
-            assert!(
-                !right_col_has_glyph,
-                "show_room_numbers=false: portal glyph must NOT be in the right column"
-            );
+            assert!(!row3.contains("#1"), "numbers off: #id must be absent from row 3; got '{row3}'");
+            // Pulled south, and with row 3 empty it takes the centre column.
+            assert_eq!(sym(5, 3), "⊗", "numbers off: badge centres on row 3; row3='{row3}'");
         }
 
         // ── show_room_numbers = true ──────────────────────────────────────────────
         {
             let buf = render_buf(true);
             let sym = |x: u16, y: u16| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
-
-            // Interior row 3 should contain "#1".
             let row3: String = (1u16..=9).map(|x| sym(x, 3)).collect();
-            assert!(
-                row3.contains("#1"),
-                "show_room_numbers=true: #id must appear on row 3; got '{row3}'"
-            );
-
-            // The Out portal icon should be in the far-right interior column (col 9), mid-slot
-            // row (row 2 = by + 1 + 1).
-            assert_eq!(
-                sym(9, 2), "⊗",
-                "show_room_numbers=true: portal glyph '⊗' must be in the right interior column at row 2; got '{}'", sym(9, 2)
-            );
+            assert!(row3.contains("#1"), "numbers on: #id must appear on row 3; got '{row3}'");
+            // Still pulled south — but the id now holds the centre, so it takes the nearest blank
+            // beside it rather than landing on top of it.
+            let on_row3 = (1u16..=9).find(|&x| sym(x, 3) == "⊗");
+            assert!(on_row3.is_some(), "numbers on: badge stays on row 3, toward Cellar; row3='{row3}'");
+            assert!(row3.contains("#1"), "numbers on: the id survives the badge; got '{row3}'");
         }
+    }
+
+    /// The interior of the box at `(bx, by)` as 3 rows of 9 chars, for badge-placement asserts.
+    fn interior_rows(buf: &Buffer, bx: u16, by: u16) -> Vec<String> {
+        (1..=3)
+            .map(|dy| {
+                (1..=9)
+                    .map(|dx| {
+                        buf.cell((bx + dx, by + dy)).map(|c| c.symbol().to_string()).unwrap_or_default()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_in_out_badge_is_pulled_toward_the_room_it_connects_to() {
+        // SQ-0351. `In`/`Out` carry no bearing of their own, so the badge is aimed at the partner's
+        // cell. Two rooms side by side, each with a portal to the other, must put their badges on
+        // OPPOSITE sides — each facing the other room:
+        //
+        //     ╭─────────╮ ╭─────────╮
+        //     │  West   │ │  East   │
+        //     │        ⊗│ │⊙        │
+        //     ╰─────────╯ ╰─────────╯
+        //              └───┘ facing each other
+        //
+        // The old rule pinned both to a fixed column, so the westward badge pointed away from its
+        // partner — visible on Zork's Behind House, whose `⊙` sat on the east side while Kitchen,
+        // the room it leads to, is west.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "West".into());
+        g.upsert_room(2, "East".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0)); // due east of West
+        g.add_edge(1, Direction::Out, 2);
+        g.add_edge(2, Direction::In, 1);
+        let rm = render(&g);
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+
+        let west = interior_rows(&buf, 0, 0);
+        let east = interior_rows(&buf, (BOX_W + MIN_GUTTER) as u16, 0);
+        let col_of = |rows: &[String], want: &str| -> Option<usize> {
+            rows.iter().find_map(|r| r.chars().position(|c| c.to_string() == want))
+        };
+        let w = col_of(&west, "⊗").unwrap_or_else(|| panic!("West's ⊗ must render: {west:?}"));
+        let e = col_of(&east, "⊙").unwrap_or_else(|| panic!("East's ⊙ must render: {east:?}"));
+        assert!(w > e, "West's ⊗ leans east ({w}) and East's ⊙ leans west ({e}): {west:?} {east:?}");
+        assert_eq!(w, 8, "West's badge takes the last interior column, nearest East");
+        assert_eq!(e, 0, "East's badge takes the first interior column, nearest West");
+    }
+
+    #[test]
+    fn a_badge_never_overwrites_the_room_name() {
+        // SQ-0351's other half: "the closest EMPTY spot". Blankness is read back from the buffer
+        // after the name is drawn, so a badge lands in the name's padding instead of on a letter.
+        // The old fixed column silently clipped long names — Zork's `◀  House ⊙▶` is "House"
+        // centred as "  House  " with the badge sitting on column 9.
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Behind".into()); // 6 chars in a 9-wide interior: " Behind  "
+        g.upsert_room(2, "K".into());
+        g.set_pos(1, (1, 0));
+        g.set_pos(2, (0, 0)); // due WEST of Behind
+        g.add_edge(1, Direction::In, 2);
+        let rm = render(&g);
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+
+        let rows = interior_rows(&buf, (BOX_W + MIN_GUTTER) as u16, 0);
+        assert!(rows[0].contains("Behind"), "the name survives intact: {rows:?}");
+        assert!(
+            rows.iter().any(|r| r.contains("⊙")),
+            "the badge renders: {rows:?}"
+        );
+        // Every name character is still present — nothing was overwritten.
+        let all: String = rows.concat();
+        assert_eq!(all.matches("Behind").count(), 1, "name not clipped by the badge: {rows:?}");
+    }
+
+    #[test]
+    fn a_cross_layer_portal_shows_its_direction_of_travel_inside_the_room() {
+        // SQ-0223. A room with a staircase to another layer carries a badge of the direction the
+        // player travels — `Down` → `↓` — placed by SQ-0351's rule. `Down` HAS a bearing, so it is
+        // read straight off the compass and lands on the bottom row; no partner lookup, which
+        // matters because the destination is on another plane entirely.
+        use mapper::graph::MapGraph;
+        use mapper::layer::{peel_region, MAIN_LAYER};
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cellar".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, 1));
+        g.add_edge(1, Direction::Down, 2);
+        g.add_edge(2, Direction::Up, 1);
+        peel_region(&mut g, 2).expect("the cellar peels into its own layer");
+        let rm = mapper::render::render_layer(&g, MAIN_LAYER);
+        assert!(
+            rm.rooms.iter().find(|r| r.id == 1).unwrap().has_layer_portal,
+            "Hall owns the cross-layer portal",
+        );
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+
+        let rows = interior_rows(&buf, 0, 0);
+        assert!(
+            rows[2].contains("↓"),
+            "Down to another layer shows ↓ on the bottom interior row: {rows:?}",
+        );
+        // Before SQ-0223 a cross-layer portal drew NOTHING inside the room — same-layer Up/Down
+        // put their glyph on the connector's border anchor, and a cross-layer stub has no
+        // connector, so it fell through every branch.
+        assert!(!rows[0].contains("↓") && !rows[1].contains("↓"), "only one badge: {rows:?}");
     }
 
     #[test]

@@ -19,7 +19,7 @@ use ratatui::layout::Rect;
 use mapper::direction::{grid_offset, Direction};
 use mapper::graph::MapGraph;
 use mapper::layout::detect_chains;
-use mapper::render::render;
+use mapper::render::render_layer;
 
 use crate::render::map::{boxes_axes, portal_glyph, render_map};
 use crate::state::{AppState, Zoom};
@@ -49,8 +49,12 @@ fn dir_str(d: Direction) -> &'static str {
 /// Render the map to a line-art ASCII string (rooms as boxes, connectors as
 /// `─│┼` lines, exits as arrowheads).
 #[allow(clippy::field_reassign_with_default)]
-fn ascii_map(graph: &MapGraph) -> String {
-    let rm = render(graph);
+fn ascii_map(graph: &MapGraph, layer: mapper::layer::LayerId) -> String {
+    // `render_layer`, not `render` on a pre-sliced subgraph: only `render_layer` flags rooms that
+    // own a cross-layer portal and appends the interlayer badges. Rendering a subgraph through
+    // plain `render` silently dropped BOTH, so the dump showed a room with a staircase to another
+    // layer as an ordinary room — the one view where you'd most want to see it (SQ-0223).
+    let rm = render_layer(graph, layer);
     if rm.rooms.is_empty() {
         return "(empty map)".to_string();
     }
@@ -207,14 +211,16 @@ pub fn render_dump(graph: &MapGraph) -> String {
         .filter(|&l| !graph.rooms_in_layer(l).is_empty())
         .collect();
     if map_layers.len() <= 1 {
-        out.push_str(&ascii_map(graph));
+        // Keep rendering whichever layer actually holds the rooms — it is not always MAIN_LAYER.
+        let only = map_layers.first().copied().unwrap_or(mapper::layer::MAIN_LAYER);
+        out.push_str(&ascii_map(graph, only));
     } else {
         for (i, &l) in map_layers.iter().enumerate() {
             if i > 0 {
                 out.push('\n');
             }
             out.push_str(&format!("# --- layer {} ({}) ---\n", l, graph.layer_name(l)));
-            out.push_str(&ascii_map(&graph.layer_subgraph(l)));
+            out.push_str(&ascii_map(graph, l));
         }
     }
     out.push_str("\n#\n# Annotate problems below — lines starting with # are comments:\n#\n");

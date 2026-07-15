@@ -121,6 +121,7 @@ pub fn interlayer_badges(graph: &MapGraph, layer: LayerId) -> Vec<RoutedEdge> {
             label: Some(stub_label(dir).to_string()),
             arrival_dir: None,
             dest_label: dest_lbl,
+            is_interlayer: true, // interlayer_badges only ever emits cross-layer edges
         });
     }
     out
