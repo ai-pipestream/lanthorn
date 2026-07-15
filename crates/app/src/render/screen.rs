@@ -273,14 +273,22 @@ fn render_node(
         return None;
     }
     match node {
-        WinNode::Pair { vertical, split, border: _, key_bg: _, key_fg: _, first, second } => {
-            // Windows abut: the Glk border hint reserves no gutter cell in a cell
-            // terminal (SQ-0335), so there is no separator rect and no rule to draw
-            // — a game that wants a visible divider draws its own (Kerkerkruip's
-            // graphics rules). gvm's leaf rects already abut, so the render must
-            // reserve nothing here to stay aligned with them.
-            let (a1, _sep, a2) = split_area_bordered(area, *vertical, split.fixed, 0);
+        WinNode::Pair { vertical, split, border, key_bg, key_fg, first, second } => {
+            let b = if *border { 1 } else { 0 };
+            let (a1, sep, a2) = split_area_bordered(area, *vertical, split.fixed, b);
             let m1 = render_node(first, status, char_mode, introspect, state, a1, buf, game_input, links, grid_colors);
+            // Only rule between two VISIBLE siblings. A border before a collapsed
+            // (zero-extent) window — e.g. Counterfeit Monkey's image pane before it
+            // shows a letter — would otherwise draw a stray rule with nothing beyond
+            // it (SQ-0325). And skip our separator entirely when the game draws its
+            // OWN divider as a graphics window adjacent to the gutter (Kerkerkruip),
+            // so we don't double the line — matching a pixel interpreter that leaves
+            // the border to the game's chrome (SQ-0332).
+            let game_divider = edge_touches_painted_graphics(first, *vertical, true)
+                || edge_touches_painted_graphics(second, *vertical, false);
+            if b > 0 && !a1.is_empty() && !a2.is_empty() && !game_divider {
+                draw_window_separator(sep, *vertical, *key_fg, *key_bg, grid_colors, buf);
+            }
             let m2 = render_node(second, status, char_mode, introspect, state, a2, buf, game_input, links, grid_colors);
             m1.or(m2)
         }
@@ -407,11 +415,40 @@ fn subtract_rect(bounds: Rect, g: Rect) -> Rect {
         .unwrap_or(bounds)
 }
 
-/// Split `area` for a pair. Windows abut (SQ-0335): the Glk border hint reserves
-/// no gutter cell in a cell terminal, so `border` is always 0 — `first` gets
-/// `fixed` cells and `second` the rest, with an empty `sep` between. (Kept
-/// parameterised for the byte-identity of the split math; gvm's leaf rects abut
-/// to match.)
+/// Whether the leaf touching a pair's separator gutter is a PAINTED graphics
+/// window (the game's own drawn divider). `vertical` is the PARENT pair's split
+/// orientation; `high` is true when the gutter lies on this node's high-coordinate
+/// edge (i.e. this is the pair's `first` child, whose far edge abuts the gutter).
+///
+/// Walks structurally: along the same split axis only the child on the gutter side
+/// touches it; across axes both children span the parent's edge, so either can. Used
+/// to suppress our redundant separator when a game (Kerkerkruip) draws its own
+/// graphics-window rule there (SQ-0332) — but only when that window is actually
+/// painted, so a game's empty frame windows (narco) still get our rule (SQ-0340).
+fn edge_touches_painted_graphics(node: &WinNode, vertical: bool, high: bool) -> bool {
+    match node {
+        // Only a PAINTED graphics window counts as the game's own divider. A
+        // window the game opened but never drew into (narco frames its story with
+        // empty graphics windows) is NOT a divider — suppressing our separator
+        // there would leave the pane with no visible boundary at all. (SQ-0340)
+        WinNode::Graphics(g) => g.canvas.pixels().any(|p| p[3] >= 128),
+        WinNode::Buffer(_) | WinNode::Grid(_) | WinNode::Blank => false,
+        WinNode::Pair { vertical: v, first, second, .. } => {
+            if *v == vertical {
+                let child = if high { second } else { first };
+                edge_touches_painted_graphics(child, vertical, high)
+            } else {
+                edge_touches_painted_graphics(first, vertical, high)
+                    || edge_touches_painted_graphics(second, vertical, high)
+            }
+        }
+    }
+}
+
+/// Split `area` for a pair, reserving `border` cells (0 or 1) between the children
+/// for the separator rule. `first` gets `fixed` cells; the separator gets `border`;
+/// `second` gets the rest. gvm already reserved this 1-cell gutter between bordered
+/// siblings, so the two child areas never include it — the rule is drawn in `sep`.
 fn split_area_bordered(area: Rect, vertical: bool, fixed: u16, border: u16) -> (Rect, Rect, Rect) {
     if vertical {
         let f = fixed.min(area.height);
@@ -427,6 +464,43 @@ fn split_area_bordered(area: Rect, vertical: bool, fixed: u16, border: u16) -> (
         let sep = Rect::new(area.x + f, area.y, b, area.height);
         let second = Rect::new(area.x + f + b, area.y, area.width - f - b, area.height);
         (first, sep, second)
+    }
+}
+
+/// Fill every cell of the separator gutter `area` with the Glk inter-window
+/// rule: a horizontal `─` for a stacked/vertical pair (rule runs across the top
+/// child's bottom edge), a vertical `│` for a side-by-side/horizontal pair.
+///
+/// Glk provides no border styling, so this reuses the existing themeable
+/// window-border presentation rather than a dedicated selector: the rule is drawn
+/// in `colors.upper_window_border` (the same Style the status frame uses), and a
+/// user-set glyph override from `colors.upper_window_border_glyphs` — `.top` for a
+/// horizontal rule, `.left` for a vertical one — is honoured, else the box-drawing
+/// defaults. (A dedicated `window-border` selector can follow when the deferred
+/// style redesign lands — do NOT add a new selector here.)
+fn draw_window_separator(area: Rect, vertical: bool, key_fg: Option<u32>, key_bg: Option<u32>, colors: &ColorScheme, buf: &mut Buffer) {
+    let g = &colors.upper_window_border_glyphs;
+    let glyph = if vertical {
+        g.top.as_deref().unwrap_or("\u{2500}") // ─
+    } else {
+        g.left.as_deref().unwrap_or("\u{2502}") // │
+    };
+    // The separator adopts the split's KEY (new) window colour (SQ-0325 follow-up):
+    // draw the rule glyph in `key_fg` on `key_bg` when the game set them, falling
+    // back to the themed `upper_window_border` fg/bg per channel when `None`.
+    let mut style = colors.upper_window_border;
+    if let Some(rgb) = key_fg {
+        style = style.fg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), colors));
+    }
+    if let Some(rgb) = key_bg {
+        style = style.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), colors));
+    }
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(glyph).set_style(style);
+            }
+        }
     }
 }
 
@@ -666,17 +740,33 @@ mod tests {
         let mut b = Buffer::empty(area);
         render_story_pane(&model, false, None, &state, area, &mut b);
 
-        // Windows abut now (SQ-0335), so the leaves no longer land on the dumped
-        // (bordered) coordinates — but the guard is unchanged: every text pane must
-        // paint its own Normal bg somewhere, and no cell may be left showing the
-        // unpainted sentinel (the STALE-tree `bg = None` corruption this catches).
-        let count = |want: Color| {
-            (0..60).map(|y| (0..165).filter(|&x| b.cell((x, y)).unwrap().style().bg == Some(want)).count()).sum::<usize>()
-        };
-        assert!(count(Color::Rgb(0xEE, 0xEE, 0xEE)) > 0, "0xEEEEEE body panes painted");
-        assert!(count(Color::Rgb(0xDD, 0xDD, 0xDD)) > 0, "0xDDDDDD header panes painted");
-        assert!(count(Color::Rgb(0xFF, 0xFF, 0xFF)) > 0, "0xFFFFFF main window painted");
-        assert_eq!(count(Color::Rgb(9, 9, 9)), 0, "no pane left showing the unpainted sentinel");
+        let bgc = |x: u16, y: u16| b.cell((x, y)).unwrap().style().bg;
+        // Each pane paints its own Normal bg at its dumped rect (not the sentinel).
+        assert_eq!(bgc(3, 10), Some(Color::Rgb(0xEE, 0xEE, 0xEE)), "left panel body buf67 @(2,4)");
+        assert_eq!(bgc(3, 0), Some(Color::Rgb(0xDD, 0xDD, 0xDD)), "left panel header buf75 @(2,0)");
+        assert_eq!(bgc(60, 20), Some(Color::Rgb(0xFF, 0xFF, 0xFF)), "main window buf4 @(37,4)");
+        assert_eq!(bgc(130, 20), Some(Color::Rgb(0xEE, 0xEE, 0xEE)), "right panel buf47 @(124,4)");
+        assert_eq!(bgc(130, 53), Some(Color::Rgb(0xEE, 0xEE, 0xEE)), "lower-right buf57 @(124,51)");
+        assert_eq!(bgc(130, 47), Some(Color::Rgb(0xDD, 0xDD, 0xDD)), "lower-right header buf63 @(124,47)");
+        // No text pane left showing the sentinel (every pane painted).
+        assert_ne!(bgc(3, 10), Some(Color::Rgb(9, 9, 9)));
+    }
+
+    /// SQ-0325 follow-up: the between-siblings separator is drawn in the split's
+    /// KEY window colour — `key_fg` on `key_bg` — rather than the plain theme
+    /// border style. Each channel falls back to the theme when `None`.
+    #[test]
+    fn separator_adopts_key_window_colour() {
+        use ratatui::style::Color;
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 5, 1);
+        let mut buf = Buffer::empty(area);
+        // Vertical pair → horizontal rule; key fg red (0xFF0000), key bg blue (0x0000FF).
+        draw_window_separator(area, true, Some(0x00FF_0000), Some(0x0000_00FF), &colors, &mut buf);
+        let c = buf.cell((2, 0)).unwrap();
+        assert_eq!(c.style().fg, Some(Color::Rgb(0xFF, 0, 0)), "rule fg is the key window fg");
+        assert_eq!(c.style().bg, Some(Color::Rgb(0, 0, 0xFF)), "rule bg is the key window bg");
+        assert_eq!(c.symbol(), "\u{2500}", "vertical pair draws a horizontal rule glyph");
     }
 
     #[test]
@@ -1341,18 +1431,97 @@ mod tests {
         state
     }
 
-    /// SQ-0335: windows ABUT — the Glk border hint reserves no gutter cell in a
-    /// cell terminal, so NO separator glyph is ever drawn regardless of the pair's
-    /// `border` flag, and the children tile the pane edge-to-edge (`STATUS`/`GRID`
-    /// on the first cell, `BODY` immediately after, no rule between).
+    /// SQ-0325: a bordered STACKED pair (grid above an inline buffer, `border: true`,
+    /// nonzero `content_size` → generic path) draws a horizontal `─` rule filling the
+    /// gutter row between the two children, in the themed border colour; the grid sits
+    /// above it and the buffer below.
     #[test]
-    fn bordered_pairs_abut_with_no_separator() {
-        for (vertical, border) in [(true, true), (false, true), (true, false), (false, false)] {
+    fn vertical_bordered_pair_draws_horizontal_rule() {
+        let model = ScreenModel {
+            root: WinNode::Pair {
+                vertical: true,
+                split: Split { fixed: 1 },
+                border: true,
+                key_bg: None,
+                key_fg: None,
+                first: Box::new(WinNode::Grid(grid_with("STATUS"))),
+                second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (20, 6),
+        };
+        assert!(!is_simple(&model));
+
+        let state = frameless_state();
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // The gutter row (row 1) between grid (row 0) and buffer (rows 2..) is all `─`.
+        assert_eq!(row_text(&buf, 1, 20), "─".repeat(20), "gutter row filled with horizontal rule");
+        // In the themed border colour.
+        assert_eq!(
+            buf.cell((10, 1)).unwrap().style().fg,
+            state.colors.upper_window_border.fg,
+            "separator carries the themed window-border colour"
+        );
+        // Grid content on row 0, buffer below the rule on row 2.
+        assert!(row_text(&buf, 0, 20).contains("STATUS"), "grid above the rule: {:?}", row_text(&buf, 0, 20));
+        assert_eq!(row_text(&buf, 2, 4), "BODY", "buffer below the rule");
+    }
+
+    /// SQ-0325: a bordered SIDE-BY-SIDE pair (grid left of the primary buffer,
+    /// `border: true`) draws a vertical `│` rule filling the gutter column between
+    /// the children, in the themed border colour; the grid sits left of it.
+    #[test]
+    fn horizontal_bordered_pair_draws_vertical_rule() {
+        let model = ScreenModel {
+            root: WinNode::Pair {
+                vertical: false,
+                split: Split { fixed: 6 },
+                border: true,
+                key_bg: None,
+                key_fg: None,
+                first: Box::new(WinNode::Grid(grid_with("GRID"))),
+                second: Box::new(WinNode::Buffer(inline_buffer("BODY"))),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (20, 6),
+        };
+        assert!(!is_simple(&model));
+
+        let state = frameless_state();
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // The gutter column (col 6, after the 6-wide grid) is all `│` on every row.
+        for y in 0..6 {
+            assert_eq!(buf.cell((6, y)).unwrap().symbol(), "│", "vertical rule at split col, row {y}");
+        }
+        assert_eq!(
+            buf.cell((6, 0)).unwrap().style().fg,
+            state.colors.upper_window_border.fg,
+            "separator carries the themed window-border colour"
+        );
+        // Grid content left of the rule (cols < 6) on row 0.
+        assert!(row_text(&buf, 0, 6).contains("GRID"), "grid left of the rule: {:?}", row_text(&buf, 0, 6));
+    }
+
+    /// SQ-0325: `border: false` on the same shapes draws NO separator glyph — the
+    /// children abut with no gutter. Guards that the rule is gated on the flag.
+    #[test]
+    fn unbordered_pairs_draw_no_separator() {
+        for vertical in [true, false] {
             let model = ScreenModel {
                 root: WinNode::Pair {
                     vertical,
                     split: Split { fixed: if vertical { 1 } else { 6 } },
-                    border,
+                    border: false,
                     key_bg: None,
                     key_fg: None,
                     first: Box::new(WinNode::Grid(grid_with("GRID"))),
@@ -1372,18 +1541,46 @@ mod tests {
                     let s = buf.cell((x, y)).unwrap().symbol();
                     assert!(
                         !"─│".contains(s),
-                        "windows abut → no separator glyph (vertical={vertical}, border={border}), found {s:?} at ({x},{y})"
+                        "no separator glyph when border:false (vertical={vertical}), found {s:?} at ({x},{y})"
                     );
                 }
             }
-            // Children abut: for a stacked pair BODY sits on row 1 (no gutter row);
-            // for a side-by-side pair it starts at col 6 (right after the grid).
-            if vertical {
-                assert_eq!(row_text(&buf, 1, 4), "BODY", "buffer abuts the grid, no gutter row");
-            } else {
-                assert!(row_text(&buf, 0, 20).contains("GRID"), "grid on the left");
-            }
         }
+    }
+
+    #[test]
+    fn empty_graphics_neighbour_draws_separator_painted_one_suppresses() {
+        // narco frames its story with graphics windows it never paints; the frame
+        // must still get our separator rule. Kerkerkruip PAINTS its dividers, so
+        // those still suppress our rule (no doubling). (SQ-0340, refines SQ-0332)
+        let empty_graphics = || {
+            let img = image::RgbaImage::new(9, 57); // opened but never drawn → transparent
+            WinNode::Graphics(crate::engine::GraphicsWindow { win: 4, canvas: std::sync::Arc::new(img), version: 1 })
+        };
+        let make = |second: WinNode| ScreenModel {
+            root: WinNode::Pair {
+                vertical: false, // left/right split → a │ separator
+                split: Split { fixed: 10 },
+                border: true,
+                key_bg: None,
+                key_fg: None,
+                first: Box::new(WinNode::Buffer(inline_buffer("STORY"))),
+                second: Box::new(second),
+            },
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (20, 6),
+        };
+        let state = frameless_state();
+        let area = Rect::new(0, 0, 20, 6);
+        let has_rule = |m: &ScreenModel| {
+            let mut buf = Buffer::empty(area);
+            render_story_pane(m, false, None, &state, area, &mut buf);
+            (0..6).any(|y| (0..20).any(|x| buf.cell((x, y)).unwrap().symbol() == "\u{2502}"))
+        };
+        assert!(has_rule(&make(empty_graphics())), "empty graphics neighbour → our separator drawn");
+        assert!(!has_rule(&make(graphics_node())), "painted graphics divider → our separator suppressed");
     }
 
     #[test]

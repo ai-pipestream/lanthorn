@@ -1535,22 +1535,23 @@ mod tests {
     #[test]
     fn resize_rescales_graphics_canvas_and_game_survives_arrange() {
         // char_px = (2, 2): a 50%-height graphics window under an 80x24 screen.
-        // Borders reserve no gutter cell (SQ-0335), so the 24 rows divide into
-        // equal 12-row halves → the graphics window is 80 cols x 12 rows →
-        // 160 x 24 px. Shrinking the pane to 40 cols halves its width to 80 px
-        // (rows unchanged); the game re-suspends on its line request (not quit).
+        // The default-bordered split reserves one separator row (SQ-0325 T1), so
+        // gvm snaps the 24 rows to 23 and divides the 22-row content into equal
+        // 11-row halves → the graphics window is 80 cols x 11 rows → 160 x 22 px.
+        // Shrinking the pane to 40 cols halves its width to 80 px (rows
+        // unchanged); the game re-suspends on its line request (not quit).
         let mut sess =
             GlulxSession::new(graphics_split_line_image(), 80, 24, true, true, false, (2, 2), None, &[])
                 .expect("new");
         assert_eq!(sess.pending_input(), InputKind::Line);
         let (w0, h0) = graphics_canvas_dims(&sess.screen().root).expect("a graphics window");
-        assert_eq!((w0, h0), (160, 24), "initial canvas from the 80-col virtual screen");
+        assert_eq!((w0, h0), (160, 22), "initial canvas from the 80-col virtual screen");
 
         sess.resize(40, 24);
         assert_eq!(sess.pending_input(), InputKind::Line, "game re-suspended on its line request");
         assert!(!sess.has_quit(), "an Arrange must not end the game");
         let (w1, h1) = graphics_canvas_dims(&sess.screen().root).expect("a graphics window");
-        assert_eq!((w1, h1), (80, 24), "canvas tracks the narrower pane after resize");
+        assert_eq!((w1, h1), (80, 22), "canvas tracks the narrower pane after resize");
     }
 
     #[test]

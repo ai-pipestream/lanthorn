@@ -250,16 +250,16 @@ Pair  horizontal  border  split=93
     }
 
     // Render at NATIVE width (125): every non-primary pane's placeholder text must
-    // render. Windows abut now (SQ-0335), so panes no longer land on their dumped
-    // (bordered) origins — the guard is that each pane's multi-line content is
-    // drawn somewhere, proving the deep tree paints every pane.
+    // appear at its dumped origin, proving multi-line content renders in place.
     #[test]
     fn native_width_renders_pane_text() {
         let (rows, _buf) = render_to_text(DUMP_125, Rect::new(0, 0, 125, 60), 3);
-        let full: String = rows.iter().map(|r| r.iter().collect::<String>()).collect::<Vec<_>>().join("\n");
-        for pane in ["w63 line 0", "w43 line 0", "w53 line 0"] {
-            assert!(full.contains(pane), "pane text {pane:?} rendered somewhere");
-        }
+        // buf63 (left body @2,4) shows "w63 line 0" on row 4 starting at col 2.
+        assert!(span(&rows[4], 2, 20).starts_with("w63 line 0"), "left body row 4: {:?}", span(&rows[4], 0, 40));
+        // buf43 (right upper @94,4) shows "w43 line 0" on row 4 at col 94.
+        assert!(span(&rows[4], 94, 112).starts_with("w43 line 0"), "right body row 4: {:?}", span(&rows[4], 92, 125));
+        // buf53 (lower-right @94,51) shows its text on row 51.
+        assert!(span(&rows[51], 94, 112).starts_with("w53 line 0"), "lower-right row 51: {:?}", span(&rows[51], 92, 125));
     }
 
     // The graphics divider columns (Kerkerkruip's rules) render as thin line glyphs
