@@ -218,8 +218,10 @@ pub static COMMANDS: &[CommandSpec] = &[
                 Some("reset") => SlashOutcome::Action(Action::ZoomReset),
                 Some(s) => match s.parse::<i32>() {
                     Ok(0) => SlashOutcome::Action(Action::ZoomReset),
-                    Ok(n) if n > 0 => SlashOutcome::Action(Action::ZoomIn),
-                    Ok(_) => SlashOutcome::Action(Action::ZoomOut),
+                    // Keep the magnitude (SQ-0355): collapsing every n to a single step made the
+                    // usage's "step by signed n" a lie — `zoom-map 5` moved exactly as far as
+                    // `zoom-map in`.
+                    Ok(n) => SlashOutcome::Action(Action::ZoomBy(n)),
                     Err(_) => err(format!("zoom-map: expected in|out|reset|<integer>, got '{s}'")),
                 },
                 None => err("zoom-map requires an argument: in|out|reset|<n>"),
@@ -530,6 +532,15 @@ mod tests {
         assert!(matches!(parse("pan-map -1 0", '/'), SlashOutcome::Action(Action::Pan(-1, 0))));
         assert!(matches!(parse("pan-map 0 2", '/'), SlashOutcome::Action(Action::Pan(0, 2))));
         assert!(matches!(parse("zoom-map reset", '/'), SlashOutcome::Action(Action::ZoomReset)));
+        // SQ-0355: the usage promises "step by signed n", so the magnitude must survive parsing.
+        // It used to collapse to a single ZoomIn/ZoomOut, making `zoom-map 5` a synonym for
+        // `zoom-map in`.
+        assert!(matches!(parse("zoom-map 2", '/'), SlashOutcome::Action(Action::ZoomBy(2))));
+        assert!(matches!(parse("zoom-map -3", '/'), SlashOutcome::Action(Action::ZoomBy(-3))));
+        assert!(matches!(parse("zoom-map 1", '/'), SlashOutcome::Action(Action::ZoomBy(1))));
+        // 0 still means "reset", and a non-integer is still an error.
+        assert!(matches!(parse("zoom-map 0", '/'), SlashOutcome::Action(Action::ZoomReset)));
+        assert!(matches!(parse("zoom-map wat", '/'), SlashOutcome::Error(_)));
         assert!(matches!(parse("nudge-room -1 0", '/'), SlashOutcome::Action(Action::NudgeSelected(-1, 0))));
         assert!(matches!(parse("cycle-layer next", '/'), SlashOutcome::Action(Action::CycleLayer(1))));
         assert!(matches!(parse("save-state foo", '/'), SlashOutcome::Save(Some(_))));

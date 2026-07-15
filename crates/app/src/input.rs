@@ -138,6 +138,11 @@ pub enum Action {
     ZoomIn,
     /// Zoom the map out one VISIBLE step (less detail).
     ZoomOut,
+    /// Zoom by `n` VISIBLE steps: positive in (toward Boxes), negative out (SQ-0355).
+    ///
+    /// The `zoom-map <n>` form. `ZoomIn`/`ZoomOut` are the one-step keys; this carries the
+    /// magnitude the command's usage string has always promised.
+    ZoomBy(i32),
     /// Zoom in one FINE step — the wheel's gesture (SQ-0350).
     ///
     /// Three fine steps make one visible step, so a fast ctrl+scroll cannot skip past the middle
@@ -1653,6 +1658,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
         Action::ZoomIn => state.zoom_in(),
         Action::ZoomOut => state.zoom_out(),
+        Action::ZoomBy(n) => state.zoom_by(n),
         Action::ZoomInFine => state.zoom_in_fine(),
         Action::ZoomOutFine => state.zoom_out_fine(),
         Action::ZoomReset => state.zoom_reset(),

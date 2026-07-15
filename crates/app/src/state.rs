@@ -2218,6 +2218,21 @@ impl AppState {
         });
     }
 
+    /// Zoom by `n` VISIBLE steps: positive in (toward Boxes), negative out (SQ-0355).
+    ///
+    /// Repeats the one-step move rather than doing arithmetic on the fine level, so `zoom-map 5`
+    /// clamps at the most detailed view exactly as five presses of `+` would — the command and the
+    /// key cannot drift apart.
+    pub fn zoom_by(&mut self, n: i32) {
+        for _ in 0..n.unsigned_abs() {
+            if n > 0 {
+                self.zoom_in();
+            } else {
+                self.zoom_out();
+            }
+        }
+    }
+
     /// Jump to `z`, landing in the MIDDLE of its fine band (SQ-0350).
     ///
     /// A keypress must move the map, and only whole bands are visible: the nine fine levels
@@ -4147,6 +4162,40 @@ mod tests {
         s.zoom_out();
         assert_eq!(s.zoom_level, lvl, "+ then - returns to the same fine level");
         assert_eq!(s.zoom, z);
+    }
+
+    #[test]
+    fn zoom_by_honours_its_magnitude_and_clamps() {
+        // SQ-0355: `zoom-map <n>` promises "step by signed n". Every n used to collapse to one
+        // step, so `zoom-map 5` moved exactly as far as `zoom-map in`.
+        let mut s = AppState::default(); // Boxes
+        s.zoom_by(-1);
+        assert!(matches!(s.zoom, Zoom::Compact), "-1 is one step out");
+
+        let mut s = AppState::default();
+        s.zoom_by(-2);
+        assert!(matches!(s.zoom, Zoom::Overview), "-2 goes two steps, not one");
+
+        // Clamps exactly as the equivalent run of keypresses would.
+        let mut s = AppState::default();
+        s.zoom_by(-99);
+        assert!(matches!(s.zoom, Zoom::Overview), "over-stepping clamps, it does not wrap");
+        s.zoom_by(99);
+        assert!(matches!(s.zoom, Zoom::Boxes));
+
+        // n and a run of single steps must agree — the command and the key cannot drift apart.
+        let (mut by, mut steps) = (AppState::default(), AppState::default());
+        by.zoom_by(-2);
+        steps.zoom_out();
+        steps.zoom_out();
+        assert_eq!(by.zoom_level, steps.zoom_level);
+        assert_eq!(by.zoom, steps.zoom);
+
+        // 0 is a no-op here; the parser maps `zoom-map 0` to ZoomReset before it reaches this.
+        let mut s = AppState::default();
+        let before = s.zoom_level;
+        s.zoom_by(0);
+        assert_eq!(s.zoom_level, before);
     }
 
     #[test]
