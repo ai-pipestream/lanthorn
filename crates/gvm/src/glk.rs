@@ -1981,12 +1981,9 @@ impl Model {
         let dir = w.method & WINMETHOD_DIRMASK;
         let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
         if vertical != horizontal {
-            // This split divides the axis under test. A bordered split reserves
-            // one cell (the separator), so the proportional halves must divide
-            // the *content* (`size − border`), not the full extent — otherwise a
-            // bordered 50% split lands on unequal cells.
-            let border = if (w.method & WINMETHOD_BORDERMASK) != WINMETHOD_NOBORDER { 1 } else { 0 };
-            let content = size.saturating_sub(border);
+            // Borders reserve no gutter cell (SQ-0335), so a proportional split
+            // divides the full extent — no border subtraction.
+            let content = size;
             let proportional = (w.method & WINMETHOD_DIVISIONMASK) == WINMETHOD_PROPORTIONAL;
             if proportional && !(content * w.size).is_multiple_of(100) {
                 return false; // (content * pct) / 100 would truncate → fractional split
@@ -3469,8 +3466,13 @@ fn split_rect(rect: Rect, method: u32, size: u32) -> (Rect, Rect) {
     let division = method & WINMETHOD_DIVISIONMASK;
     let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
     let total = if vertical { rect.height } else { rect.width };
-    let border = if (method & WINMETHOD_BORDERMASK) != WINMETHOD_NOBORDER { 1 } else { 0 };
-    let border = border.min(total); // a degenerate 0-cell rect can't spare one
+    // Honor the Glk border hint as ZERO width in a cell terminal: the two
+    // children abut with no reserved gutter cell, matching a pixel interpreter
+    // (Gargoyle) whose border is a few pixels. Reserving a whole cell left a
+    // visible gap and doubled a game's own graphics-window dividers. The border
+    // hint still flows through the tree (SQ-0286) for `/dump`; it just reserves
+    // no space. (SQ-0335)
+    let border = 0;
     let content = total - border;
     let new_size = if division == WINMETHOD_PROPORTIONAL {
         (content * size) / 100
@@ -3765,16 +3767,17 @@ mod layout_snap_tests {
 
     // ── T1: a bordered split reserves one cell between the children ────────────
 
-    // Left|Fixed 20 with the default border: the fixed key keeps its exact 20
-    // columns; the reserved separator column comes out of the sibling.
+    // Left|Fixed 20 with the DEFAULT border: borders reserve no gutter cell in a
+    // cell terminal (SQ-0335), so the sibling gets the full remainder — same as
+    // NoBorder. The fixed key still keeps its exact 20 columns.
     #[test]
-    fn bordered_left_fixed_split_reserves_a_column() {
+    fn bordered_left_fixed_split_reserves_nothing() {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
         let grid = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_FIXED, 20, 4, 0).unwrap();
         m.relayout(80, 24, (1, 1));
         assert_eq!(m.window_size(grid).unwrap().0, 20, "fixed key keeps its exact 20 cols");
-        assert_eq!(m.window_size(buf).unwrap().0, 59, "sibling = 80 − 20 − 1 border");
+        assert_eq!(m.window_size(buf).unwrap().0, 60, "sibling = 80 − 20 (no reserved border)");
     }
 
     // Same split with winmethod_NoBorder: no separator, so the sibling gets the
@@ -3791,30 +3794,32 @@ mod layout_snap_tests {
         assert_eq!(m.window_size(buf).unwrap().0, 60, "no border reserved → 80 − 20");
     }
 
-    // Below|Fixed 3 rows with the default border: the border is a row this time.
+    // Below|Fixed 3 rows with the DEFAULT border: no reserved row (SQ-0335), so
+    // the sibling gets the full remainder.
     #[test]
-    fn bordered_below_fixed_split_reserves_a_row() {
+    fn bordered_below_fixed_split_reserves_nothing() {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         let grid = m.window_open(buf, WINMETHOD_BELOW | WINMETHOD_FIXED, 3, 4, 0).unwrap();
         m.relayout(80, 24, (1, 1));
         assert_eq!(m.window_size(grid).unwrap().1, 3, "fixed key keeps its 3 rows");
-        assert_eq!(m.window_size(buf).unwrap().1, 20, "sibling = 24 − 3 − 1 border");
+        assert_eq!(m.window_size(buf).unwrap().1, 21, "sibling = 24 − 3 (no reserved border)");
     }
 
-    // A bordered 50% split lands on equal whole cells once the border is
-    // reserved: the two halves divide the content and sum to extent − 1.
+    // A default-bordered 50% split reserves no border cell (SQ-0335), so the
+    // halves divide the FULL extent and sum to it. clean_dims snaps an odd extent
+    // to an even one so the halves stay equal.
     #[test]
-    fn bordered_proportional_half_split_is_equal_after_reserving_the_border() {
+    fn bordered_proportional_half_split_divides_full_extent() {
         let mut m = Model::new();
         let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
         let grid = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_PROPORTIONAL, 50, 4, 0).unwrap();
-        m.relayout(81, 24, (1, 1)); // content 80 is even → equal halves
+        m.relayout(81, 24, (1, 1)); // 81 is odd → snaps to 80 → equal 40|40 halves
         let gw = m.window_size(grid).unwrap().0;
         let bw = m.window_size(buf).unwrap().0;
         let total = m.window_size(m.root()).unwrap().0;
-        assert_eq!(gw, bw, "bordered 50% split lands on equal halves ({gw} vs {bw})");
-        assert_eq!(gw + bw, total - 1, "the two halves sum to the extent minus the reserved border");
+        assert_eq!(gw, bw, "50% split lands on equal halves ({gw} vs {bw})");
+        assert_eq!(gw + bw, total, "the two halves sum to the full extent (no reserved border)");
     }
 
     // ── T2: window_tree exposes the real pair tree ────────────────────────────
