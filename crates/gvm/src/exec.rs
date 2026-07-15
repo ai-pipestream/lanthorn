@@ -9065,6 +9065,37 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_resave_over_an_existing_slot_keeps_it() {
+        use asm::Op::{C8, Mem16};
+        // The other half of the cancel rule (SQ-0301): the revert is gated on
+        // `fresh`, so a cancelled save over a slot that ALREADY holds a save must
+        // leave that save alone — clearing it would lose a good save to a
+        // cancelled overwrite. (Write/0x01 truncates the recorded size to 0, so a
+        // re-save reaches complete_save with fresh=false only via an append/
+        // read-write open, which preserves the prior size.)
+        let body = asm::ins(0x123, &[C8(2), Mem16(0x0100)]); // @save 2 -> mem[0x100]
+        let mut m = machine_with_body(&[], body);
+        // A previous launch's save already occupies the slot.
+        m.glk.seed_saved_game_file("startup-data".to_string(), 4321);
+        let fref = m.glk.fileref_create(0x01, "startup-data".to_string(), 0);
+        let sid = m.glk.stream_open_file(fref, 0x05, false, 0); // ReadWrite -> keeps size
+        assert_eq!(sid, 2);
+        assert_eq!(m.glk.saved_game_size("startup-data"), Some(4321), "the open kept the prior size");
+        assert_eq!(m.step(), StepResult::SaveRequest);
+
+        // The player cancels the overwrite.
+        m.complete_save(false);
+
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "cancelled @save stores 1 into S1");
+        assert!(m.glk.fileref_exists(fref), "the pre-existing save survives a cancelled re-save");
+        assert_eq!(
+            m.glk.saved_game_size("startup-data"),
+            Some(4321),
+            "and keeps its original byte count — not reverted to absent like a fresh save",
+        );
+    }
+
+    #[test]
     fn completed_save_credits_stream_and_marks_existence_at_true_size() {
         use asm::Op::{C8, Mem16};
         // The success path (complete_save(true)) must credit the save stream now
