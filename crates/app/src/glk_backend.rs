@@ -298,6 +298,24 @@ impl AppGlk {
         self.primary
     }
 
+    /// Point the primary buffer — the window whose text becomes the scrollback
+    /// and over which the inline input prompt is drawn — at the window the game
+    /// is taking line input on. Most games take input on their sole
+    /// (first-opened) buffer, so this is a no-op; but a game whose real story +
+    /// prompt live in a later-opened window (narco opens a decorative pane
+    /// first, then does everything in its second buffer) would otherwise route
+    /// the prompt and transcript to the wrong, near-empty window. `None` (a
+    /// char-input turn or no pending request) and non-buffer/unknown windows
+    /// leave the current primary untouched, so the common single-buffer and
+    /// char-input paths are byte-identical. (SQ-0337)
+    pub fn set_input_window(&mut self, win: Option<u32>) {
+        if let Some(w) = win {
+            if self.buffers.contains_key(&w) {
+                self.primary = Some(w);
+            }
+        }
+    }
+
     /// Format the live Glk window tree as indented diagnostic lines for the
     /// `/dump-windows` command: one window per line with its type, id, size,
     /// origin, and any per-window `bg`/`fg` colour; each pair shows orientation,
@@ -1217,6 +1235,54 @@ mod tests {
         assert!(!*v2, "two side-by-side buffers form a horizontal pair");
         assert!(matches!(**f2, WinNode::Buffer(_)));
         assert!(matches!(**s2, WinNode::Buffer(_)));
+    }
+
+    #[test]
+    fn input_window_becomes_primary_over_first_opened() {
+        // narco's pattern: id 1 opens first (the default "primary") but is a
+        // near-empty decorative pane; the game does all its story, prompt and
+        // line input in id 2. The primary — the window the inline prompt and
+        // transcript follow — must track the LINE-INPUT window, not the
+        // first-opened one. (SQ-0337)
+        let mut glk = AppGlk::new(80, 24);
+        glk.window_open(1, WinType::TextBuffer); // first-opened default primary
+        glk.window_open(2, WinType::TextBuffer);
+        glk.window_layout(&[
+            (1, WinType::TextBuffer, rect(0, 0, 40, 24), Some(true)),
+            (2, WinType::TextBuffer, rect(40, 0, 40, 24), Some(true)),
+        ]);
+        glk.window_tree(Some(hpair(
+            40,
+            leaf(1, WinType::TextBuffer, rect(0, 0, 40, 24)),
+            leaf(2, WinType::TextBuffer, rect(40, 0, 40, 24)),
+        )));
+        assert_eq!(glk.primary(), Some(1), "first-opened is the default primary");
+        glk.set_input_window(Some(2));
+        assert_eq!(glk.primary(), Some(2), "line-input window overrides first-opened");
+        let model = glk.screen_model();
+        let WinNode::Pair { first, second, .. } = &model.root else { panic!("expected a Pair") };
+        let (WinNode::Buffer(b1), WinNode::Buffer(b2)) = (&**first, &**second) else {
+            panic!("expected two Buffer leaves");
+        };
+        assert!(!b1.primary, "first-opened buffer is no longer primary");
+        assert!(b2.primary, "the line-input buffer is now primary");
+    }
+
+    #[test]
+    fn set_input_window_ignores_none_and_non_buffers() {
+        // The fallback stays byte-identical for the common cases: a char-input
+        // turn (None), input on a non-buffer window, or an unknown id must all
+        // leave the first-opened primary untouched. (SQ-0337)
+        let mut glk = AppGlk::new(80, 24);
+        glk.window_open(1, WinType::TextBuffer);
+        glk.window_open(2, WinType::TextGrid);
+        assert_eq!(glk.primary(), Some(1));
+        glk.set_input_window(None);
+        assert_eq!(glk.primary(), Some(1), "None (char-input turn) leaves the default primary");
+        glk.set_input_window(Some(2));
+        assert_eq!(glk.primary(), Some(1), "input on a grid does not hijack the primary buffer");
+        glk.set_input_window(Some(99));
+        assert_eq!(glk.primary(), Some(1), "an unknown window id is ignored");
     }
 
     #[test]

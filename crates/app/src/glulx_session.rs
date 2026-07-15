@@ -443,15 +443,29 @@ impl GlulxSession {
         // without this the pane would render with stale/absent backgrounds until a
         // manual resize forced a relayout (SQ-0332).
         self.machine.sync_window_tree();
+        self.sync_input_window();
         let model = self.appglk().screen_model();
         self.screen_cache = model;
         self.window_dump_cache = self.appglk().window_dump_lines();
+    }
+
+    /// Point the backend's primary buffer at the window awaiting line input, so
+    /// the inline prompt + transcript follow the player's actual prompt window
+    /// (narco opens a decorative pane first, then does everything in its second
+    /// buffer). A no-op for the usual single-buffer game. (SQ-0337)
+    fn sync_input_window(&mut self) {
+        let win = self.machine.line_request_window();
+        self.appglk().set_input_window(win);
     }
 
     /// Drain the primary window output + refresh the screen, building the turn
     /// result. Shared by `submit`/`submit_key`/`resume_*`.
     fn finish_turn(&mut self) -> TurnResult {
         self.machine.flush();
+        // Point the primary at the window now awaiting line input BEFORE draining
+        // it: narco moves its line request between two buffers (right while
+        // "dreaming", left when awake), and the drain/prompt must follow. (SQ-0337)
+        self.sync_input_window();
         // Drain the primary window's ordered elements (text runs + inline
         // images). Derive the flat `raw`/`raw_runs` from the Text elements for
         // the existing consumers (banner-strip, location, tests): the

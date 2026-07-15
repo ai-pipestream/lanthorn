@@ -4486,6 +4486,14 @@ impl Machine {
         self.glk.window_echo_line(win)
     }
 
+    /// The window awaiting line input (lowest id if several), or `None`. The host
+    /// routes its inline prompt/echo and scrollback to this window — the one the
+    /// player is actually typing into — rather than assuming the first-opened
+    /// buffer. (SQ-0337)
+    pub fn line_request_window(&self) -> Option<u32> {
+        self.glk.first_line_request().map(|(w, _)| w)
+    }
+
     /// The resolved `GlkStyle::Input` colour for window `win` (for host input echo).
     pub fn window_input_colour(&self, win: u32) -> crate::glk::StyleColour {
         self.glk.window_input_colour(win)
