@@ -365,7 +365,7 @@ const DEFAULT_DIRECT_COMMANDS: &[&str] = &[
 
 /// Default groups for the hotkey dialog (title, authored leader-key + full command-string).
 const DEFAULT_GROUPS: &[(&str, &[(char, &str)])] = &[
-    ("Layout", &[('t', "tidy-map"), ('a', "animate-tidy"), ('l', "cycle-layout")]),
+    ("Layout", &[('t', "tidy-map"), ('a', "animate-tidy"), ('l', "toggle-map")]),
     ("Layers", &[('p', "peel-layer"), ('m', "merge-layer"), ('c', "cycle-layer next"), ('n', "rename-layer")]),
     ("Edit", &[('r', "rename-room"), ('o', "edit-notes"), ('d', "delete-connection"), ('e', "relabel-edge")]),
     ("Files", &[
@@ -624,8 +624,7 @@ mod tests {
         };
 
         // With no mid-word suggestions, the BackTab autocomplete intercept does not
-        // apply. cycle-layout reverse is leader-only now (SQ-0202), so BackTab has
-        // no default Global binding to fall through to.
+        // apply, and BackTab has no default Global binding to fall through to.
         state.focus = crate::state::Focus::Game;
         let action = key_to_action(&state, backtab);
         assert!(
@@ -918,9 +917,9 @@ mod tests {
     }
 
     #[test]
-    fn cycle_layout_reverse_not_direct() {
+    fn toggle_map_not_direct() {
         // Layout is not always-active anymore (SQ-0202); leader panel only.
-        assert!(!HotkeyLayout::default().is_direct_name("cycle-layout reverse"));
+        assert!(!HotkeyLayout::default().is_direct_name("toggle-map"));
     }
 
     #[test]

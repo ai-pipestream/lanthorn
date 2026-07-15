@@ -186,7 +186,6 @@ fn save_style_and_repoint(state: &mut AppState, user_dir: &std::path::Path) {
 
 /// Both pane inner-content rects returned by `draw_frame`.
 /// `map` is `Rect::default()` when the layout hides the map (TranscriptFull).
-/// `story` is `Rect::default()` when the layout hides the story (MapFull).
 /// `room_rects` maps each visible room to its drawn bounding rect in screen coords.
 /// `layer_tabs` pairs each visible layer tab with its hit-rect (click switches layers).
 /// `dialog` holds the last-drawn dialog chrome rects for mouse hit-testing.
@@ -232,7 +231,7 @@ struct PaneRects {
     /// can't over-scroll past the top.
     pub transcript_max_scroll: u16,
     /// Visible transcript rows this frame (the transcript viewport height). Used
-    /// to size a PageUp/PageDown step. 0 when no transcript is shown (MapFull).
+    /// to size a PageUp/PageDown step.
     pub transcript_viewport_rows: u16,
     /// List-row viewport of the open selection-list modal this frame, synced to
     /// `AppState.modal_list_viewport` so nav actions can window/animate. 0 when
@@ -377,52 +376,6 @@ fn draw_frame(
                 }
                 story_area = story_fp.content;
                 map_area = Rect::default();
-            }
-            Layout::MapFull => {
-                let graph = if let Some(g) = &replay_graph {
-                    g
-                } else {
-                    match &state.tidy_anim {
-                        Some(anim) => &anim.current().graph,
-                        None => &mapper.graph,
-                    }
-                };
-                let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
-                let active_layer = state.active_layer(graph);
-                let map_fp = draw_framed(buf, pane_layout.map, state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, state.colors.map_border, state.colors.map_header_on);
-                render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
-                if let Some(anim) = &state.tidy_anim {
-                    let tidy_ds = make_dialog_style(state);
-                    if let Some(dr) = draw_tidy_panel(anim.current(), map_fp.content, buf, &tidy_ds) {
-                        dialog_rects_out = Some(dr);
-                    }
-                }
-                map_area = map_fp.content;
-                story_area = Rect::default();
-                // Overlay layer tabs
-                let owned_segs = build_layer_segments(&layer_ids, active_layer,
-                    |id| format!("{}({})", graph.layer_name(id), graph.rooms_in_layer(id).len()));
-                let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
-                if let Some(hrect) = map_fp.header {
-                    let tab_rects = if map_fp.header_bordered {
-                        draw_top_inset(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
-                    } else {
-                        draw_header_plain(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
-                    };
-                    layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
-                }
-                // Apply pulsing border color overlay when a tidy job is in flight
-                if let Some(pulse_color) = map_border_override {
-                    let pulse_style = Style::default().fg(pulse_color);
-                    for cy in pane_layout.map.y..pane_layout.map.bottom() {
-                        if let Some(c) = buf.cell_mut((pane_layout.map.x, cy)) { c.set_style(pulse_style); }
-                        if let Some(c) = buf.cell_mut((pane_layout.map.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
-                    }
-                    for cx in pane_layout.map.x..pane_layout.map.right() {
-                        if let Some(c) = buf.cell_mut((cx, pane_layout.map.y)) { c.set_style(pulse_style); }
-                        if let Some(c) = buf.cell_mut((cx, pane_layout.map.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
-                    }
-                }
             }
             Layout::Split => {
                 // Split 50/50 horizontally with bordered blocks (no divider column).

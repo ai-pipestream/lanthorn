@@ -312,16 +312,9 @@ pub static COMMANDS: &[CommandSpec] = &[
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenGallery) },
 
     // ── View ──────────────────────────────────────────────────────────────
-    CommandSpec { name: "cycle-layout", category: Category::View, context: Context::Global,
-        usage: "cycle-layout [reverse]", description: "cycle the pane layout; 'reverse' cycles backward",
-        dispatch: |a| {
-            use crate::input::Action;
-            if a.first().copied() == Some("reverse") {
-                SlashOutcome::Action(Action::CycleLayoutReverse)
-            } else {
-                SlashOutcome::Action(Action::CycleLayout)
-            }
-        } },
+    CommandSpec { name: "toggle-map", category: Category::View, context: Context::Global,
+        usage: "toggle-map", description: "show or hide the map panel",
+        dispatch: |_a| SlashOutcome::Action(crate::input::Action::ToggleMap) },
     CommandSpec { name: "toggle-focus", category: Category::View, context: Context::Global,
         usage: "toggle-focus", description: "switch focus between panes",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleFocus) },

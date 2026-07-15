@@ -82,7 +82,6 @@ pub fn compute_pane_layout(area: Rect, state: &AppState, inv_item_count: usize) 
 
     let (story, map) = match state.layout {
         Layout::TranscriptFull => (panes_area, Rect::default()),
-        Layout::MapFull => (Rect::default(), panes_area),
         Layout::Split => {
             let chunks = RatatuiLayout::default()
                 .direction(Direction::Horizontal)
@@ -159,18 +158,8 @@ mod tests {
     }
 
     #[test]
-    fn map_full_hides_story() {
-        let mut state = AppState::default();
-        state.layout = Layout::MapFull;
-        let pl = compute_pane_layout(area80x24(), &state, 0);
-
-        assert_eq!(pl.story.width * pl.story.height, 0);
-        assert_eq!(pl.map, Rect::new(0, 0, 80, 23));
-    }
-
-    #[test]
     fn help_row_always_bottom_single_row() {
-        for layout in [Layout::Split, Layout::TranscriptFull, Layout::MapFull] {
+        for layout in [Layout::Split, Layout::TranscriptFull] {
             let mut state = AppState::default();
             state.layout = layout;
             let pl = compute_pane_layout(area80x24(), &state, 0);
@@ -234,7 +223,7 @@ mod tests {
 
     #[test]
     fn panes_area_reconstructs_union_across_layouts() {
-        for layout in [Layout::Split, Layout::TranscriptFull, Layout::MapFull] {
+        for layout in [Layout::Split, Layout::TranscriptFull] {
             let mut state = AppState::default();
             state.layout = layout;
             let pl = compute_pane_layout(area80x24(), &state, 0);

@@ -180,6 +180,9 @@ pub(crate) fn boot() -> BootResult {
     // SQ-0341: per-game borderless-windows override (default off → honor the Glk
     // border hint). Applies to Glulx layout from the first relayout at boot.
     let borderless = app::styles::read_per_game_borderless(&cfg.user_dir, &ifid).unwrap_or(false);
+    // SQ-0304: per-game map-panel visibility. `Some(false)` → start with the map
+    // hidden (captured here before `cfg` is moved into the engine build below).
+    let start_map_hidden = app::styles::read_per_game_show_map(&cfg.user_dir, &ifid) == Some(false);
     let theme_colours = app::glk_backend::theme_style_colours(&cs);
 
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
@@ -396,6 +399,11 @@ pub(crate) fn boot() -> BootResult {
     let banner_title = app::session::title_from_banner(&banner);
     state.title = app::session::resolve_title(None, &ifid, banner_title.as_deref(), &story_path);
     state.ifid = ifid.clone();
+    // Restore the per-game map-panel visibility (SQ-0304): if the user last hid
+    // the map for this story, start with it hidden.
+    if start_map_hidden {
+        state.layout = app::state::Layout::TranscriptFull;
+    }
     // Now that the IFID is known, re-resolve through reload_style so the per-game
     // override (styles/<ifid>.toml) is merged over the global at startup — the
     // initial resolve above is global-only (ifid wasn't set yet). On a per-game

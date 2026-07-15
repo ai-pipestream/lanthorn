@@ -102,8 +102,8 @@ pub enum Action {
     Backspace,
     /// Toggle between Game and Map focus.
     ToggleFocus,
-    /// Cycle the UI layout (Split → TranscriptFull → MapFull → Split).
-    CycleLayout,
+    /// Toggle the map panel on/off (Split ↔ TranscriptFull).
+    ToggleMap,
     /// Re-tidy the Auto layout: re-derive room positions (sort) then clean overlaps.
     /// No-op in Manual mode (positions are user-controlled and frozen).
     Retidy,
@@ -246,8 +246,6 @@ pub enum Action {
     GalleryExportStyle,
     /// Toggle the inventory strip at the bottom of the story pane.
     ToggleInventory,
-    /// Cycle the UI layout in reverse (Split → MapFull → TranscriptFull → Split).
-    CycleLayoutReverse,
     /// Open a confirmation prompt to reset the game to its opening state (keeps map).
     ResetGame,
     /// Open the verb/item token-palette modal, building the noun list from the current room and inventory.
@@ -1602,8 +1600,16 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::HistoryPrev => state.history_prev(),
         Action::HistoryNext => state.history_next(),
         Action::ToggleFocus => state.toggle_focus(),
-        Action::CycleLayout => state.cycle_layout(),
-        Action::CycleLayoutReverse => state.cycle_layout_reverse(),
+        Action::ToggleMap => {
+            state.toggle_map();
+            // Persist the map panel's on/off state per-game so it's restored the
+            // next time this story opens (SQ-0304). No IFID → no sidecar (and
+            // keeps unit tests off the filesystem).
+            if !state.ifid.is_empty() {
+                let show = state.layout == crate::state::Layout::Split;
+                let _ = crate::styles::write_per_game_show_map(&state.config.user_dir, &state.ifid, Some(show));
+            }
+        }
         Action::ZoomIn => state.zoom_in(),
         Action::ZoomOut => state.zoom_out(),
         Action::ZoomReset => state.zoom_reset(),
@@ -3218,7 +3224,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::ExportSvg(_)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::ExportDot(_)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::ExportDump(_)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::CycleLayout));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::ToggleMap));
     }
 
     #[test]
@@ -3943,7 +3949,7 @@ mod tests {
     #[test]
     fn shift_tab_is_none_with_no_suggestions() {
         // Game focus, partial typed but no suggestions → Shift-Tab falls through, but
-        // cycle-layout reverse no longer has a default binding (leader-only now) → None.
+        // there's no default Global BackTab binding to land on → None.
         let mut s = AppState::default();
         s.input = "nor".to_string();
         assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::None));
@@ -3958,7 +3964,7 @@ mod tests {
     #[test]
     fn shift_tab_is_none_in_map_focus_even_with_suggestions() {
         // Not in Game focus, so the autocomplete intercept does not apply. Shift-Tab
-        // has no default binding (cycle-layout reverse is leader-only now) → None.
+        // has no default Global binding to land on → None.
         let mut s = AppState::default();
         s.focus = Focus::Map;
         s.suggestions = vec!["north".to_string()];
@@ -5218,19 +5224,17 @@ mod tests {
         assert_eq!(s.selected_room, Some(2));
     }
 
-    // ── Leaf 1: CycleLayoutReverse ────────────────────────────────────────────
+    // ── Leaf 1: ToggleMap ─────────────────────────────────────────────────────
 
     #[test]
-    fn apply_action_cycle_layout_reverse() {
+    fn apply_action_toggle_map() {
         use crate::state::{AppState, Layout};
-        let mut s = AppState::default();
+        let mut s = AppState::default(); // empty ifid → no sidecar write
         let mut m = Mapper::default();
         assert!(matches!(s.layout, Layout::Split));
-        apply_action(Action::CycleLayoutReverse, &mut s, &mut m);
-        assert!(matches!(s.layout, Layout::MapFull));
-        apply_action(Action::CycleLayoutReverse, &mut s, &mut m);
+        apply_action(Action::ToggleMap, &mut s, &mut m);
         assert!(matches!(s.layout, Layout::TranscriptFull));
-        apply_action(Action::CycleLayoutReverse, &mut s, &mut m);
+        apply_action(Action::ToggleMap, &mut s, &mut m);
         assert!(matches!(s.layout, Layout::Split));
     }
 

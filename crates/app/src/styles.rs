@@ -39,15 +39,28 @@ pub fn read_per_game_borderless(user_dir: &Path, ifid: &str) -> Option<bool> {
         .and_then(|v| v.as_bool())
 }
 
+/// Read the per-game `show_map` override, if the user set one. `None` = no
+/// override (fall back to the default: the map panel is shown). When
+/// `Some(false)` the map panel starts hidden for this story (SQ-0304).
+pub fn read_per_game_show_map(user_dir: &Path, ifid: &str) -> Option<bool> {
+    let path = per_game_config_path(user_dir, ifid);
+    let text = std::fs::read_to_string(&path).ok()?;
+    text.parse::<toml::Value>()
+        .ok()?
+        .get("show_map")
+        .and_then(|v| v.as_bool())
+}
+
 /// Write the per-game config sidecar with the given overrides, omitting a `None`
-/// key and deleting the file entirely when both are `None`. Centralised so each
-/// key's writer preserves the other's value (SQ-0341). Creates `styles/` if
+/// key and deleting the file entirely when all are `None`. Centralised so each
+/// key's writer preserves the others' values (SQ-0341). Creates `styles/` if
 /// needed.
 fn write_per_game_config(
     user_dir: &Path,
     ifid: &str,
     honor: Option<bool>,
     borderless: Option<bool>,
+    show_map: Option<bool>,
 ) -> std::io::Result<()> {
     let path = per_game_config_path(user_dir, ifid);
     let mut body = String::new();
@@ -56,6 +69,9 @@ fn write_per_game_config(
     }
     if let Some(v) = borderless {
         body.push_str(&format!("borderless_windows = {v}\n"));
+    }
+    if let Some(v) = show_map {
+        body.push_str(&format!("show_map = {v}\n"));
     }
     if body.is_empty() {
         return match std::fs::remove_file(&path) {
@@ -74,13 +90,20 @@ fn write_per_game_config(
 /// `borderless_windows` override in the same sidecar. `Some(v)` writes it; `None`
 /// clears it (→ fall back to garglk.ini / the global default).
 pub fn write_per_game_honor(user_dir: &Path, ifid: &str, value: Option<bool>) -> std::io::Result<()> {
-    write_per_game_config(user_dir, ifid, value, read_per_game_borderless(user_dir, ifid))
+    write_per_game_config(user_dir, ifid, value, read_per_game_borderless(user_dir, ifid), read_per_game_show_map(user_dir, ifid))
 }
 
 /// Persist (or clear) the per-game `borderless_windows` override, preserving any
-/// `honor_game_colours` override in the same sidecar (SQ-0341).
+/// `honor_game_colours` / `show_map` override in the same sidecar (SQ-0341).
 pub fn write_per_game_borderless(user_dir: &Path, ifid: &str, value: Option<bool>) -> std::io::Result<()> {
-    write_per_game_config(user_dir, ifid, read_per_game_honor(user_dir, ifid), value)
+    write_per_game_config(user_dir, ifid, read_per_game_honor(user_dir, ifid), value, read_per_game_show_map(user_dir, ifid))
+}
+
+/// Persist (or clear) the per-game `show_map` override, preserving any
+/// `honor_game_colours` / `borderless_windows` override in the same sidecar
+/// (SQ-0304).
+pub fn write_per_game_show_map(user_dir: &Path, ifid: &str, value: Option<bool>) -> std::io::Result<()> {
+    write_per_game_config(user_dir, ifid, read_per_game_honor(user_dir, ifid), read_per_game_borderless(user_dir, ifid), value)
 }
 
 /// Write the live look self-contained to the current game's per-game style file
@@ -203,6 +226,27 @@ mod tests {
         // Clearing the last key removes the sidecar.
         write_per_game_honor(&dir, ifid, None).unwrap();
         assert!(!per_game_config_path(&dir, ifid).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn per_game_show_map_roundtrips_and_coexists_with_others() {
+        let dir = tmp("show_map");
+        let ifid = "GLUL-1-ABCDEF-0002";
+        assert_eq!(read_per_game_show_map(&dir, ifid), None);
+        // show_map persists and reads back.
+        write_per_game_show_map(&dir, ifid, Some(false)).unwrap();
+        assert_eq!(read_per_game_show_map(&dir, ifid), Some(false));
+        // Writing the other two keys must PRESERVE the show_map override.
+        write_per_game_honor(&dir, ifid, Some(true)).unwrap();
+        write_per_game_borderless(&dir, ifid, Some(true)).unwrap();
+        assert_eq!(read_per_game_show_map(&dir, ifid), Some(false), "sibling writes kept show_map");
+        assert_eq!(read_per_game_honor(&dir, ifid), Some(true));
+        assert_eq!(read_per_game_borderless(&dir, ifid), Some(true));
+        // Clearing show_map keeps the siblings.
+        write_per_game_show_map(&dir, ifid, None).unwrap();
+        assert_eq!(read_per_game_show_map(&dir, ifid), None);
+        assert_eq!(read_per_game_honor(&dir, ifid), Some(true), "show_map clear kept honor");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

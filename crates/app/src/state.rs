@@ -1057,9 +1057,10 @@ pub struct ConfigScreenState {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
+    /// Story and map panes side by side.
     Split,
+    /// Story only; the map panel is hidden.
     TranscriptFull,
-    MapFull,
 }
 
 /// Which pane the interactive resize mode is currently adjusting.
@@ -2101,30 +2102,31 @@ impl AppState {
         })
     }
 
-    /// Toggle focus between Game and Map panes.
+    /// Toggle focus between the game and map panes. The map pane is focusable
+    /// only when it's visible (`Split` layout); when the map panel is hidden,
+    /// focus stays on the game so Tab can't land on a hidden pane (SQ-0333).
     pub fn toggle_focus(&mut self) {
+        if self.layout != Layout::Split {
+            self.focus = Focus::Game;
+            return;
+        }
         self.focus = match self.focus {
             Focus::Game => Focus::Map,
             Focus::Map => Focus::Game,
         };
     }
 
-    /// Cycle layout: Split → TranscriptFull → MapFull → Split.
-    pub fn cycle_layout(&mut self) {
+    /// Toggle the map panel on (`Split`) / off (`TranscriptFull`). Hiding the
+    /// map pulls focus back to the game so Tab can't land on a hidden pane
+    /// (SQ-0333).
+    pub fn toggle_map(&mut self) {
         self.layout = match self.layout {
             Layout::Split => Layout::TranscriptFull,
-            Layout::TranscriptFull => Layout::MapFull,
-            Layout::MapFull => Layout::Split,
-        };
-    }
-
-    /// Cycle layout in reverse: Split → MapFull → TranscriptFull → Split.
-    pub fn cycle_layout_reverse(&mut self) {
-        self.layout = match self.layout {
-            Layout::Split => Layout::MapFull,
-            Layout::MapFull => Layout::TranscriptFull,
             Layout::TranscriptFull => Layout::Split,
         };
+        if self.layout == Layout::TranscriptFull {
+            self.focus = Focus::Game;
+        }
     }
 
     /// Which panes are currently visible and eligible for resize mode, in
@@ -3770,15 +3772,28 @@ mod tests {
     }
 
     #[test]
-    fn cycle_layout_reverse_goes_backwards() {
+    fn toggle_map_flips_panel_and_pulls_focus_off_hidden_map() {
         let mut s = AppState::default();
         assert!(matches!(s.layout, Layout::Split));
-        s.cycle_layout_reverse();
-        assert!(matches!(s.layout, Layout::MapFull));
-        s.cycle_layout_reverse();
+        // Focus the map, then hide it: focus must snap back to the game.
+        s.toggle_focus();
+        assert!(matches!(s.focus, Focus::Map));
+        s.toggle_map();
         assert!(matches!(s.layout, Layout::TranscriptFull));
-        s.cycle_layout_reverse();
+        assert!(matches!(s.focus, Focus::Game), "hiding the map pulls focus to the game");
+        // Toggle again: map returns; focus stays on the game (not auto-moved).
+        s.toggle_map();
         assert!(matches!(s.layout, Layout::Split));
+        assert!(matches!(s.focus, Focus::Game));
+    }
+
+    #[test]
+    fn toggle_focus_stays_on_game_when_map_hidden() {
+        let mut s = AppState::default();
+        s.toggle_map(); // → TranscriptFull, map hidden
+        assert!(matches!(s.layout, Layout::TranscriptFull));
+        s.toggle_focus();
+        assert!(matches!(s.focus, Focus::Game), "Tab can't focus a hidden map");
     }
 
     #[test]
@@ -3787,11 +3802,9 @@ mod tests {
         assert!(matches!(s.focus, Focus::Game));
         s.toggle_focus();
         assert!(matches!(s.focus, Focus::Map));
-        s.cycle_layout();
+        s.toggle_map();
         assert!(matches!(s.layout, Layout::TranscriptFull));
-        s.cycle_layout();
-        assert!(matches!(s.layout, Layout::MapFull));
-        s.cycle_layout();
+        s.toggle_map();
         assert!(matches!(s.layout, Layout::Split));
         // zoom clamps — now uses 9-level fine zoom (0-8); starts at level 7 (Boxes).
         // Level 7→6: still Boxes; 6→5: Compact; …; 0: Overview; clamped at 0.

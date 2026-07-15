@@ -115,7 +115,7 @@ mod tests {
         let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
         assert!(!line.contains("gallery"), "must not advertise gallery (dialog-only): {line}");
         assert!(!line.contains("inspector"), "must not advertise inspector (dialog-only): {line}");
-        assert!(!line.contains("layout"), "must not advertise cycle-layout (dialog-only): {line}");
+        assert!(!line.contains("hide the map"), "must not advertise toggle-map (dialog-only): {line}");
         // The working direct keys ARE present.
         assert!(line.contains("Tab: toggle focus"), "focus toggle present: {line}");
         assert!(line.contains("+: zoom"), "zoom present: {line}");
@@ -128,9 +128,9 @@ mod tests {
         let line = hint_bar(&km, &layout, Context::Global, GAME_HINTS, 200);
         // Ctrl+S → save-state; short label is "save state".
         assert!(line.contains("Ctrl+S: save state"), "expected 'Ctrl+S: save state' in '{line}'");
-        // cycle-layout was trimmed out of the always-active set (SQ-0202); it's
-        // leader-only now and must not appear in the Game hint bar.
-        assert!(!line.contains("cycle"), "Game hint bar must not contain 'cycle': '{line}'");
+        // toggle-map (formerly cycle-layout) was trimmed out of the always-active
+        // set (SQ-0202); it's leader-only now and must not appear in the Game hint bar.
+        assert!(!line.contains("hide the map"), "Game hint bar must not advertise toggle-map: '{line}'");
     }
 
     #[test]

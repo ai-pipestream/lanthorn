@@ -1353,7 +1353,7 @@ mod tests {
 
     #[test]
     fn dialog_bounds_ignores_graphics_when_story_pane_hidden() {
-        // MapFull: story pane isn't laid out (empty), so graphics aren't on screen
+        // Story pane isn't laid out (empty), so graphics aren't on screen
         // and the dialog centers over the whole frame.
         let model = model_with(WinNode::Pair {
             vertical: false,
