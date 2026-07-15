@@ -224,21 +224,83 @@ fn channel_width(lanes: u16) -> i32 {
 /// Build the (columns, rows) position tables from the plan and the room bounds.
 pub fn boxes_axes(plan: &RoutePlan, bounds: ((i32, i32), (i32, i32))) -> (PosTable, PosTable) {
     let ((min_c, min_r), (max_c, max_r)) = bounds;
-    let build = |lo: i32, hi: i32, box_dim: i32, lanes: &std::collections::BTreeMap<i32, u16>| {
+    let build = |lo: i32,
+                 hi: i32,
+                 box_dim: i32,
+                 lanes: &std::collections::BTreeMap<i32, u16>,
+                 floor: &std::collections::BTreeMap<i32, i32>| {
         let mut room_start = std::collections::BTreeMap::new();
         let mut channel_w = std::collections::BTreeMap::new();
         let mut x = 0;
         for idx in lo..=hi {
             room_start.insert(idx, x);
-            let w = channel_width(lanes.get(&idx).copied().unwrap_or(0));
+            let w = channel_width(lanes.get(&idx).copied().unwrap_or(0))
+                .max(floor.get(&idx).copied().unwrap_or(0));
             channel_w.insert(idx, w);
             x += box_dim + w;
         }
         PosTable { room_start, channel_w, lo, hi, box_dim }
     };
-    let cols = build(min_c, max_c, BOX_W, &plan.v_lanes);
-    let rows = build(min_r, max_r, BOX_H, &plan.h_lanes);
+    // Rows first: a diagonal's COLUMN demand is expressed relative to the row gap it must cross
+    // (SQ-0314), so the vertical spacing has to be known before the horizontal is sized.
+    //
+    // A route may leave the rooms' own bounds — an edge that wraps around its destination uses the
+    // channel beyond the last room. `build` only tabulates `lo..=hi` and `channel_span` answers
+    // `MIN_GUTTER` for anything outside, so a diagonal's floor out there would be silently dropped
+    // and the diagonal would vanish. Widen the range to cover every channel a diagonal uses.
+    let mut row_floor: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
+    for &(_, h) in &plan.diag_corners {
+        row_floor.insert(h, DIAG_GUTTER);
+    }
+    let (min_r, max_r) = span_over(min_r, max_r, plan.diag_corners.iter().map(|&(_, h)| h));
+    let rows = build(min_r, max_r, BOX_H, &plan.h_lanes, &row_floor);
+    let mut col_floor: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
+    for &(v, h) in &plan.diag_corners {
+        let need = diagonal_col_gap(rows.channel_span(h));
+        let slot = col_floor.entry(v).or_insert(0);
+        *slot = (*slot).max(need);
+    }
+    let (min_c, max_c) = span_over(min_c, max_c, plan.diag_corners.iter().map(|&(v, _)| v));
+    let cols = build(min_c, max_c, BOX_W, &plan.v_lanes, &col_floor);
     (cols, rows)
+}
+
+/// Widen `lo..=hi` to cover every channel index in `chans`. Channel `i` lies between grid lines `i`
+/// and `i+1`, so tabulating it needs both. Room positions are unaffected: `build` lays lines out in
+/// order from `lo`, and the extra lines only ever sit outside the rooms' own span.
+fn span_over(lo: i32, hi: i32, chans: impl Iterator<Item = i32>) -> (i32, i32) {
+    let (mut lo, mut hi) = (lo, hi);
+    for i in chans {
+        lo = lo.min(i);
+        hi = hi.max(i + 1);
+    }
+    (lo, hi)
+}
+
+/// Minimum gap on BOTH axes at a corner some diagonal passes through (SQ-0314).
+///
+/// `MIN_GUTTER` (2) is enough for the diagonally-ADJACENT case, which runs corner to corner and so
+/// spans `gap + 1`. It is not enough for any other diagonal: those hand off to a channel lane, and
+/// lane 0 sits `LANE_BASE` inside the gap, leaving only `gap - LANE_BASE` = 1 row to climb — too
+/// little for even one `🮣🮠` pair, so the diagonal would vanish into an orthogonal dogleg. One more
+/// cell of gutter buys the two rows a pair needs.
+const DIAG_GUTTER: i32 = 3;
+
+/// The column gap a diagonal needs to cross a row gap of `row_gap` without a dogleg (SQ-0314).
+///
+/// The Legacy Computing half-diagonals chain ONE column per row, not two: a `🮣🮠` pair enters the
+/// left cell's lower-centre and leaves the right cell's upper-centre, so the next pair up must
+/// start in the column it exited — consecutive pairs overlap by a column. Corner to corner spans
+/// `row_gap + 1` rows and `col_gap + 1` columns, so an unbroken chain wants `col_gap == row_gap`.
+/// Any surplus columns beyond that become a horizontal run where the chain runs out.
+///
+/// (This is a 63° climb, not 45°. A visual 45° would need two columns per row, and the glyph set
+/// has no shallow half-diagonal to express it — every single-cell diagonal spans half a cell
+/// across and a full cell down, and a terminal cell is about twice as tall as it is wide.)
+///
+/// Never below `MIN_GUTTER`, so this can only ever widen a gap.
+fn diagonal_col_gap(row_gap: i32) -> i32 {
+    row_gap.max(MIN_GUTTER)
 }
 
 
@@ -518,7 +580,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     //       the rooms drawn below them in step 2.
     let mut arrowheads: Vec<Arrowhead> = Vec::new();
     if let Some((cols, rows)) = &axes {
-        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.symbols.portal, &state.colors);
+        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.symbols.portal, &state.colors, state.symbols.diagonal_corners);
     }
 
     // ── 4. Draw rooms on top of the line-art (translate + clip) ───────────────
@@ -847,12 +909,95 @@ type Arrowhead = ((i32, i32), String, bool, bool, RoomId, bool);
 /// shared buffer, and tests re-derive per-connector ownership from the same geometry.
 struct ConnectorPlot {
     cells: Vec<((i32, i32), u8)>,
+    /// Explicit-glyph cells for a diagonal corner stub (SQ-0314), painted directly
+    /// rather than through the 4-bit orthogonal mask — a diagonal has no
+    /// representation in `glyph_for`'s N/E/S/W bits, and `dir_bit` would misfile a
+    /// (+1,+1) step as East. Empty unless `diagonal_corners` is on.
+    diag_cells: Vec<((i32, i32), char)>,
     dep_anchor: (i32, i32),
     arr_anchor: (i32, i32),
 }
 
+/// The chain of half-diagonals leaving a room's corner `anchor` toward `target` (SQ-0314), plus
+/// the point where an orthogonal path resumes. `None` when `dir` is not diagonal, or when the gap
+/// is too small to hold even one pair.
+///
+/// The chain starts at the cell DIAGONALLY aligned to the corner — for NE that is `(cx+1, cy-1)`,
+/// the cell the corner's `↗` points at — not the cell orthogonally beside it. That diagonal
+/// alignment is the whole point: it is what makes the corner a usable connector slot distinct from
+/// the side anchors.
+///
+/// Each half-diagonal joins two EDGE MIDPOINTS. Within a pair, the near cell enters on its
+/// lower-centre (for a N-ward exit; upper-centre for a S-ward one) and hands off at its
+/// middle-left/right; the far cell picks that up on its facing edge and exits at its upper/lower
+/// centre — exactly where `│` attaches, so the resume point continues an orthogonal path with no
+/// seam.
+///
+/// Pairs CHAIN by overlapping a column: pair `k` sits in row `cy + k*sy` across columns
+/// `cx + k*sx` and `cx + (k+1)*sx`, leaving the line attached at `(cx + (k+1)*sx, cy + (k+1)*sy)`
+/// — which is where pair `k+1` picks it up. So the first pair travels (2,2) and every pair after
+/// it travels (1,1): `n` pairs span `n+1` rows and `n+1` columns. That 1:1 cell ratio is a 63°
+/// climb, not 45°; see `diagonal_col_gap`.
+/// The direction bit that seams a `dir` chain to the orthogonal cell it hands off to (SQ-0314).
+///
+/// A chain leaves its last cell through that cell's upper- or lower-centre, and the handoff cell
+/// sits immediately beyond it. For the orthogonal glyph there to actually MEET the chain, it needs
+/// a stroke running from its centre back to the shared edge — i.e. pointing at the chain. A N-ward
+/// chain (NE/NW) hands off upward, so the cell above it needs `DIR_S`; a S-ward chain needs
+/// `DIR_N`. Without this bit the handoff cell draws a bare `─` through its middle and the diagonal
+/// visibly stops one half-cell short.
+fn chain_seam_bit(dir: Direction) -> u8 {
+    match dir {
+        Direction::NE | Direction::NW => DIR_S,
+        _ => DIR_N,
+    }
+}
+
+fn diagonal_chain(
+    anchor: (i32, i32),
+    target: (i32, i32),
+    dir: Direction,
+    g: &crate::symbols::PathGlyphs,
+) -> Option<(Vec<((i32, i32), char)>, (i32, i32))> {
+    // `(sx, sy)`: the chain's per-step direction. `(near, far)`: the pair's two glyphs, in the
+    // order the line travels through them.
+    let (sx, sy, near, far) = match dir {
+        Direction::NE => (1, -1, g.diag_lr, g.diag_ul),
+        Direction::NW => (-1, -1, g.diag_ll, g.diag_ur),
+        Direction::SE => (1, 1, g.diag_ur, g.diag_ll),
+        Direction::SW => (-1, 1, g.diag_ul, g.diag_lr),
+        _ => return None,
+    };
+    let (cx, cy) = anchor;
+    // `n` pairs reach `(cx + (n+1)*sx, cy + (n+1)*sy)`. Take as many as fit inside BOTH the row
+    // and the column budget, so the chain lands on `target` when the gaps are square and stops
+    // short — leaving the remainder to an orthogonal run — when they are not.
+    let n = ((target.1 - cy).abs() - 1).min((target.0 - cx).abs() - 1);
+    if n < 1 {
+        return None; // no room for even one pair; the caller keeps the orthogonal geometry
+    }
+    let mut cells = Vec::with_capacity(2 * n as usize);
+    for k in 1..=n {
+        let row = cy + k * sy;
+        cells.push(((cx + k * sx, row), near));
+        cells.push(((cx + (k + 1) * sx, row), far));
+    }
+    Some((cells, (cx + (n + 1) * sx, cy + (n + 1) * sy)))
+}
+
 /// Compute the virtual cells + per-cell masks a single connector occupies.
-fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: &PosTable) -> Option<ConnectorPlot> {
+///
+/// `diag` carries the path glyphs when `diagonal_corners` is on (SQ-0314): a diagonal exit then
+/// leaves its corner on a chain of half-diagonals before any orthogonal path resumes. `None`
+/// selects the fallback for terminals without those glyphs — the SAME corner anchor, walked
+/// orthogonally. The toggle picks glyphs, not geometry: where a connector departs and arrives is
+/// the router's business, and both settings ask it the same questions.
+fn plot_connector(
+    conn: &mapper::route::RoutedConnector,
+    cols: &PosTable,
+    rows: &PosTable,
+    diag: Option<&crate::symbols::PathGlyphs>,
+) -> Option<ConnectorPlot> {
     // Convert the doubled polyline to a virtual-pixel polyline, resolving each point's lane
     // against this connector's segments by channel + extent (a connector may have two runs
     // in one channel on different lanes).
@@ -885,23 +1030,99 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
     // give distinct border cells; the straight connector on each side keeps slot 0 (centre), so a
     // displaced connector crosses it as a single clean ┼ instead of a corner stomp.
     let first_interior = pix[1];
-    let dep_bridge = attach_bridge(dep_anchor, first_interior, conn.exit);
+
+    // The arrival anchor does not depend on the departure geometry, so resolve it first: a
+    // corner-to-corner diagonal aims its chain straight at it (SQ-0314), and so needs it up front.
+    //
+    // The arrival sits on a box corner exactly when the ROUTER built its polyline to end there —
+    // `entry_corner` is the one rule both sides ask, so they cannot drift apart. It also covers the
+    // one-way diagonal, which has no back edge but still arrives on the corner facing its origin.
+    let arr_target = (!conn.merge).then(|| {
+        let last = conn.points[conn.points.len() - 1];
+        let dest_cell = (last.0.div_euclid(2), last.1.div_euclid(2));
+        match mapper::route::entry_corner(conn.exit_dir, conn.entry_dir) {
+            Some(d) => corner_anchor(cols, rows, dest_cell, d),
+            None => box_edge_anchor(cols, rows, dest_cell, conn.entry, conn.entry_slot),
+        }
+    });
+
+    // SQ-0314: a diagonal exit leaves the corner on a chain of half-diagonals, and the orthogonal
+    // path resumes at the chain's far end (a │ attachment point).
+    //
+    // A PURE diagonal — centre → shared corner → centre, the diagonally-adjacent case the router
+    // collapses — aims the chain at the ARRIVAL corner and has no orthogonal leg at all when the
+    // two gaps are square. Every other diagonal chains a while and then bridges to its first
+    // interior channel point as usual.
+    //
+    // With `diag` off, or for a non-diagonal exit, `bridge_from` stays the anchor and the geometry
+    // below is the plain corner/edge-to-bridge route.
+    let arrive_dir = mapper::route::entry_corner(conn.exit_dir, conn.entry_dir);
+    // "Pure" means the WHOLE connector is one diagonal, corner to corner — so BOTH ends must be
+    // diagonal. Testing only the arrival was a bug: a cardinal-out/diagonal-in pair (E out, NW
+    // back) between adjacent rooms also collapses to three points, and it would then take the pure
+    // branch with an empty chain — suppressing the arrival diagonal and drawing nothing diagonal at
+    // all. (SQ-0314)
+    let pure_diagonal = arr_target.is_some()
+        && pix.len() == 3
+        && arrive_dir.is_some()
+        && mapper::direction::is_diagonal(conn.exit_dir);
+    let mut diag_cells: Vec<((i32, i32), char)> = Vec::new();
+    // Mask bits that seam a chain to the orthogonal cell it hands off to. The chain attaches at a
+    // cell EDGE midpoint, but an orthogonal run is drawn through the cell's CENTRE — so the
+    // handoff cell must also carry a stroke reaching the edge the chain arrives at, or the two
+    // leave a visible gap. `chain_seam_bit` names that edge.
+    let mut seams: Vec<((i32, i32), u8)> = Vec::new();
+    let mut bridge_from = dep_anchor;
+    if let Some(g) = diag {
+        if mapper::direction::is_diagonal(conn.exit_dir) {
+            let target = if pure_diagonal { arr_target.unwrap() } else { first_interior };
+            if let Some((chain, resume)) = diagonal_chain(dep_anchor, target, conn.exit_dir, g) {
+                diag_cells = chain;
+                bridge_from = resume;
+                if !pure_diagonal {
+                    seams.push((resume, chain_seam_bit(conn.exit_dir)));
+                }
+            }
+        }
+    }
+
+    // The ARRIVAL end mirrors the departure: the router emits a diagonal step INTO the destination
+    // corner too (SQ-0314), so a non-adjacent diagonal reads as diagonal-out, run, diagonal-in
+    // rather than losing its diagonals to doglegs at both ends. Chain BACKWARDS from the corner
+    // toward the last interior point — same helper, same geometry, just aimed the other way.
+    let mut bridge_to = arr_target;
+    if let (Some(g), Some(d), Some(aa)) = (diag, arrive_dir, arr_target) {
+        if !pure_diagonal && !conn.merge {
+            let last_interior = pix[pix.len() - 2];
+            if let Some((chain, resume)) = diagonal_chain(aa, last_interior, d, g) {
+                diag_cells.extend(chain);
+                bridge_to = Some(resume);
+                seams.push((resume, chain_seam_bit(d)));
+            }
+        }
+    }
 
     let mut inner_v: Vec<(i32, i32)> = Vec::with_capacity(pix.len() + 6);
-    inner_v.push(dep_anchor);
-    inner_v.extend_from_slice(&dep_bridge);
+    inner_v.push(bridge_from);
     let arr_anchor = if conn.merge {
         // A merge stub ENDS ON the trunk at the junction (`pix.last()`), not at a destination box —
         // no arrival anchor or bridge; the line simply reaches the junction (a T-junction).
+        inner_v.extend_from_slice(&attach_bridge(bridge_from, first_interior, conn.exit));
         inner_v.extend_from_slice(&pix[1..]);
         *pix.last().unwrap()
+    } else if pure_diagonal && !diag_cells.is_empty() {
+        // The chain IS the connector: corner to corner. `pix[1]` here is the corner lattice point
+        // — the channel intersection, which does not lie on the diagonal — so it must be skipped,
+        // not bridged to. `diagonal_chain` stops on whichever axis runs out first, so anything left
+        // over from a non-square gap is a single straight run to the arrival corner.
+        let aa = arr_target.unwrap();
+        inner_v.push(aa);
+        aa
     } else {
-        let last = conn.points[conn.points.len() - 1];
-        let dest_cell = (last.0.div_euclid(2), last.1.div_euclid(2));
-        let aa = match conn.entry_dir {
-            Some(d) if mapper::direction::is_diagonal(d) => corner_anchor(cols, rows, dest_cell, d),
-            _ => box_edge_anchor(cols, rows, dest_cell, conn.entry, conn.entry_slot),
-        };
+        inner_v.extend_from_slice(&attach_bridge(bridge_from, first_interior, conn.exit));
+        // `bridge_to` is the arrival corner, or — when a chain claimed the last stretch — the point
+        // where that chain picks the line up.
+        let aa = bridge_to.unwrap();
         let last_interior = pix[pix.len() - 2];
         let arr_bridge = attach_bridge(aa, last_interior, conn.entry);
         inner_v.extend_from_slice(&pix[1..pix.len() - 1]);
@@ -909,7 +1130,7 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
             inner_v.push(p);
         }
         inner_v.push(aa);
-        aa
+        arr_target.unwrap() // the ARROWHEAD still belongs on the box corner, not the chain's end
     };
     inner_v.dedup();
     let inner = &inner_v[..];
@@ -966,9 +1187,15 @@ fn plot_connector(conn: &mapper::route::RoutedConnector, cols: &PosTable, rows: 
         if i + 1 < run.len() {
             mask |= dir_bit(c, run[i + 1]);
         }
+        // Seam a chain's handoff cell to the chain (SQ-0314); see `chain_seam_bit`.
+        for &(at, bit) in &seams {
+            if at == c {
+                mask |= bit;
+            }
+        }
         cells.push((c, mask));
     }
-    Some(ConnectorPlot { cells, dep_anchor, arr_anchor })
+    Some(ConnectorPlot { cells, diag_cells, dep_anchor, arr_anchor })
 }
 
 /// Draw every plan connector as box-drawing line-art along its lanes, and RETURN the departure
@@ -997,8 +1224,12 @@ fn render_lane_connectors(
     path: &crate::symbols::PathGlyphs,
     portal: &crate::symbols::PortalGlyphs,
     colors: &crate::colors::ColorScheme,
+    diagonal_corners: bool,
 ) -> Vec<Arrowhead> {
     let (off_x, off_y) = offset;
+    // SQ-0314: when on, a diagonal exit leaves its corner on a chain of half-diagonals; `None`
+    // walks the same corner orthogonally for terminals that lack the glyphs.
+    let diag = diagonal_corners.then_some(path);
 
     // Per-cell accumulated direction mask. ORing masks means a perpendicular crossing of
     // two connectors (one ─, one │) combines to ┼; a connector revisiting its own cell is
@@ -1022,7 +1253,7 @@ fn render_lane_connectors(
     let mut arrowheads: Vec<Arrowhead> = Vec::new();
 
     for conn in plan.connectors.iter() {
-        let Some(plot) = plot_connector(conn, cols, rows) else { continue };
+        let Some(plot) = plot_connector(conn, cols, rows, diag) else { continue };
         let is_updown = matches!(conn.exit_dir, Direction::Up | Direction::Down);
         let has_secondary = !conn.secondary_exit.is_empty() || !conn.secondary_entry.is_empty();
         // Up/down connectors always use the portal selector (they're never distorted);
@@ -1053,6 +1284,21 @@ fn render_lane_connectors(
             let glyph_s = glyph_for(*entry, glyphs).unwrap_or('·').to_string();
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(&glyph_s).set_style(style);
+            }
+        }
+
+        // Diagonal corner stub (SQ-0314): explicit glyphs, painted AFTER this
+        // connector's mask cells. These deliberately do NOT enter `cell_map` — a
+        // half-diagonal has no 4-bit mask representation, and letting it OR into a
+        // neighbour's mask would corrupt that neighbour's glyph choice. Always
+        // empty when `diagonal_corners` is off.
+        for (c, ch) in &plot.diag_cells {
+            let (sx, sy) = (c.0 + off_x, c.1 + off_y);
+            if !in_area(sx, sy, area) {
+                continue;
+            }
+            if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
+                cell.set_symbol(&ch.to_string()).set_style(style);
             }
         }
 
@@ -1800,7 +2046,12 @@ pub(crate) fn overlap_stats(
     use std::collections::{BTreeMap, HashMap};
     let mut owners: HashMap<(i32, i32), BTreeMap<usize, u8>> = HashMap::new();
     for (ci, conn) in plan.connectors.iter().enumerate() {
-        if let Some(plot) = plot_connector(conn, cols, rows) {
+        // Deliberately the orthogonal reading (`None`, no half-diagonals): this metric scores the
+        // ROUTER's layout quality and feeds the tidy pipeline, so it must not move when a user
+        // toggles the `diagonal_corners` DISPLAY setting — otherwise tidy would make different
+        // layout decisions per theme. Both settings share the router's corner departure, so this
+        // sees the same route either way; only the glyphs differ. (SQ-0314)
+        if let Some(plot) = plot_connector(conn, cols, rows, None) {
             for (c, mask) in &plot.cells {
                 *owners.entry(*c).or_default().entry(ci).or_insert(0) |= *mask;
             }
@@ -2281,6 +2532,7 @@ mod tests {
             &state.symbols.path,
             &state.symbols.portal,
             &state.colors,
+            state.symbols.diagonal_corners,
         );
 
         let dep = arrowheads.iter().find(|(_, _, _, _, room, _)| *room == 1).expect("A's departure glyph");
@@ -2666,6 +2918,223 @@ mod tests {
         assert!(line_cells > 0, "connector must render box-drawing line-art");
     }
 
+    /// R1 at (0,1) with a NE exit up-right to R2 at (1,0). Both cells are >= the
+    /// bounds minimum, so the whole connector is on-screen (a room at a negative
+    /// row would put the path above the viewport and render nothing).
+    fn ne_graph() -> mapper::graph::MapGraph {
+        let mut g = mapper::graph::MapGraph::new();
+        g.upsert_room(1, "R1".into());
+        g.upsert_room(2, "R2".into());
+        g.set_pos(1, (0, 1));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::NE, 2);
+        g
+    }
+
+    fn render_ne(diagonal_corners: bool) -> Buffer {
+        let rm = mapper::render::render(&ne_graph());
+        let mut state = AppState::default();
+        state.symbols.diagonal_corners = diagonal_corners;
+        let area = Rect::new(0, 0, 80, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        buf
+    }
+
+    fn count_diag_glyphs(buf: &Buffer, area: Rect) -> usize {
+        let mut n = 0;
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let s = buf.cell((x, y)).unwrap().symbol();
+                if matches!(s, "🮠" | "🮡" | "🮢" | "🮣") {
+                    n += 1;
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn every_diagonal_direction_pair_actually_draws_a_diagonal() {
+        // SQ-0314: sweep all 64 reciprocal direction pairs between two adjacent rooms. If EITHER
+        // end of the connector is diagonal, the render must contain at least one half-diagonal —
+        // the corner is the whole point of the feature, and a diagonal that quietly degrades into
+        // an orthogonal dogleg is the bug this pins.
+        //
+        // Three separate faults each used to silence a slice of this matrix, and none of them were
+        // visible from the adjacent NE case alone:
+        //   * `direct_route` anchors both ends with `exit_point` and knows nothing of corners, so a
+        //     cardinal-out/diagonal-back pair (E out, NW back) never got a corner route at all.
+        //   * `pure_diagonal` only checked the ARRIVAL, so a cardinal exit took the pure branch
+        //     with an empty chain and suppressed the arrival diagonal too.
+        //   * a route that wraps around its destination uses a channel OUTSIDE the rooms' bounds,
+        //     where the diagonal's gutter floor was silently dropped (see `span_over`).
+        use Direction::*;
+        let dirs = [N, S, E, W, NE, NW, SE, SW];
+        let area = Rect::new(0, 0, 120, 40);
+        let mut missing = Vec::new();
+        for d1 in dirs {
+            for d2 in dirs {
+                let off = mapper::direction::grid_offset(d1).expect("compass dirs have an offset");
+                // Away from the origin so no part of the route falls outside the render area.
+                let p1 = (2i32, 2i32);
+                let mut g = mapper::graph::MapGraph::new();
+                g.upsert_room(1, "R1".into());
+                g.upsert_room(2, "R2".into());
+                g.set_pos(1, p1);
+                g.set_pos(2, (p1.0 + off.0, p1.1 + off.1));
+                g.add_edge(1, d1, 2);
+                g.add_edge(2, d2, 1);
+                let rm = mapper::render::render(&g);
+                let mut state = AppState::default();
+                state.symbols.diagonal_corners = true;
+                let mut buf = Buffer::empty(area);
+                render_map(&rm, &state, area, &mut buf);
+                let drew = count_diag_glyphs(&buf, area) > 0;
+                let wants = mapper::direction::is_diagonal(d1) || mapper::direction::is_diagonal(d2);
+                if wants && !drew {
+                    missing.push(format!("{d1:?}<->{d2:?}"));
+                }
+                // And the converse: a pair with no diagonal end must not sprout one.
+                if !wants {
+                    assert!(!drew, "{d1:?}<->{d2:?} has no diagonal end but drew a half-diagonal");
+                }
+            }
+        }
+        assert!(missing.is_empty(), "these pairs lost their diagonal: {missing:?}");
+    }
+
+    #[test]
+    fn diagonal_corners_on_draws_an_unbroken_corner_to_corner_diagonal() {
+        // SQ-0314: two diagonally-adjacent rooms render as ONE clean diagonal staircase from
+        // R1's top-right corner to R2's bottom-left corner, with no orthogonal jog anywhere:
+        //
+        //    4|              ↙─────────╯
+        //    5|             🮣🮠
+        //    6|            🮣🮠
+        //    7|           🮣🮠
+        //    8|╭─────────↗
+        //
+        // Each 🮣🮠 pair climbs one row and one column, and pairs overlap by a column, so the
+        // chain steps up-right cleanly. Every pair must be present: drawing only the first (the
+        // original fixed-length stub) leaves the line stranded mid-gap needing a dogleg home.
+        let area = Rect::new(0, 0, 80, 30);
+        let buf = render_ne(true);
+        assert_eq!(
+            count_diag_glyphs(&buf, area),
+            6,
+            "the chain runs corner to corner: three 🮣🮠 pairs across the DIAG_GUTTER-sized gap",
+        );
+
+        // Each pair is 🮣 immediately left of 🮠 on one row — the ascending order. And the pairs
+        // step: the second sits exactly one row up and one column right of the first.
+        let mut pairs: Vec<(u16, u16)> = Vec::new();
+        for y in 0..area.height {
+            for x in 0..area.width.saturating_sub(1) {
+                if buf.cell((x, y)).unwrap().symbol() == "🮣"
+                    && buf.cell((x + 1, y)).unwrap().symbol() == "🮠"
+                {
+                    pairs.push((x, y));
+                }
+            }
+        }
+        pairs.sort_by_key(|&(_, y)| std::cmp::Reverse(y));
+        assert_eq!(pairs.len(), 3, "three ascending 🮣🮠 pairs, found {pairs:?}");
+        for w in pairs.windows(2) {
+            assert_eq!(
+                (w[1].0, w[1].1),
+                (w[0].0 + 1, w[0].1 - 1),
+                "each pair steps one up and one right of the one below it: {pairs:?}",
+            );
+        }
+
+        // And no orthogonal line-art leaks in between: a jog would show up as a corner glyph.
+        for y in 0..area.height {
+            for x in 0..area.width {
+                let s = buf.cell((x, y)).unwrap().symbol();
+                assert!(
+                    !matches!(s, "└" | "┘" | "┌" | "┐" | "├" | "┤" | "┬" | "┴" | "┼"),
+                    "a pure diagonal draws no orthogonal jog, found {s:?} at ({x},{y})",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_diagonal_widens_its_column_gap_to_match_a_busy_row_gap() {
+        // SQ-0314: a diagonal carries NO lane, so nothing else asks its channels to be any wider
+        // than MIN_GUTTER — `diag_corners` is how it declares the space it needs. The chain climbs
+        // one column per row, so the column gap must keep up with the row gap or the diagonal runs
+        // out of columns mid-climb and finishes on a dogleg.
+        use mapper::route::RoutePlan;
+        let mut plan = RoutePlan::default();
+        plan.h_lanes.insert(0, 3); // a busy row channel: tall gap
+        plan.diag_corners.insert((0, 0)); // a diagonal crosses corner V(0)/H(0)
+        let (cols, rows) = boxes_axes(&plan, ((0, 0), (1, 1)));
+        assert_eq!(
+            cols.channel_span(0),
+            rows.channel_span(0),
+            "the diagonal's column gap tracks the row gap it must cross",
+        );
+
+        // Without the diagonal the same column channel stays at the bare minimum — so the widening
+        // is genuinely the diagonal's doing, and costs nothing on maps that have none.
+        let mut plain = RoutePlan::default();
+        plain.h_lanes.insert(0, 3);
+        let (plain_cols, _) = boxes_axes(&plain, ((0, 0), (1, 1)));
+        assert_eq!(plain_cols.channel_span(0), MIN_GUTTER);
+        assert!(cols.channel_span(0) > plain_cols.channel_span(0));
+    }
+
+    #[test]
+    fn diagonal_col_gap_never_narrows_a_channel() {
+        // It is a floor, not an override: a quiet row gap must not shrink the column gap below the
+        // minimum that keeps adjacent boxes from touching.
+        for row_gap in 0..8 {
+            assert!(diagonal_col_gap(row_gap) >= MIN_GUTTER, "row_gap={row_gap}");
+        }
+        assert_eq!(diagonal_col_gap(5), 5, "a square gap draws an unbroken chain");
+    }
+
+    #[test]
+    fn diagonal_corners_off_still_departs_the_corner_orthogonally() {
+        // The fallback contract (SQ-0314). The toggle picks GLYPHS, not geometry: leaving by the
+        // corner now lives in the ROUTER, so it happens either way, and a terminal without Unicode
+        // 13 Legacy Computing coverage still gets the corner slot — just walked orthogonally
+        // instead of on a diagonal. That is the user's "shift the room slot for these to be in the
+        // same place as our diagonal": same anchors, same corner, no exotic glyphs.
+        let area = Rect::new(0, 0, 80, 30);
+        let off = render_ne(false);
+        assert_eq!(count_diag_glyphs(&off, area), 0, "no diagonal glyphs when the toggle is off");
+
+        // The arrowhead still sits on the box CORNER, not a side midpoint.
+        let plan = mapper::route::route_lanes(&ne_graph());
+        let (cols, rows) = boxes_axes(&plan, ((0, 0), (1, 1)));
+        let corner = corner_anchor(&cols, &rows, (0, 1), Direction::NE);
+        let conn = &plan.connectors[0];
+        let plot = plot_connector(conn, &cols, &rows, None).expect("the NE connector plots");
+        assert_eq!(plot.dep_anchor, corner, "the fallback departs the same corner the diagonal does");
+        assert!(plot.diag_cells.is_empty(), "and draws no half-diagonals");
+
+        // The two renders genuinely differ, so the assertion above isn't vacuous.
+        let on = render_ne(true);
+        assert_ne!(
+            cells_of(&on, area), cells_of(&off, area),
+            "the toggle must actually change the render",
+        );
+    }
+
+    /// Every cell symbol in `area`, row-major — a cheap whole-buffer fingerprint.
+    fn cells_of(buf: &Buffer, area: Rect) -> Vec<String> {
+        let mut v = Vec::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                v.push(buf.cell((x, y)).unwrap().symbol().to_string());
+            }
+        }
+        v
+    }
+
     #[test]
     fn connector_departs_origin_correct_side() {
         // room1(0,0) →E→ room2(1,0). The departure gutter just right of room1's box
@@ -2854,7 +3323,9 @@ mod tests {
         let mut owners: std::collections::HashMap<(i32, i32), Vec<(usize, u8)>> =
             std::collections::HashMap::new();
         for (ci, conn) in plan.connectors.iter().enumerate() {
-            if let Some(plot) = plot_connector(conn, cols, rows) {
+            // The orthogonal reading, matching overlap_stats: this helper audits the router's
+            // ownership of cells, which the display toggle does not change.
+            if let Some(plot) = plot_connector(conn, cols, rows, None) {
                 for (c, mask) in &plot.cells {
                     owners.entry(*c).or_default().push((ci, *mask));
                 }

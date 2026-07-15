@@ -104,11 +104,12 @@ pub struct SymbolSet {
     pub meta_gutter: char,
     /// Gutter marker glyph for WARNING transcript lines.
     pub warning_gutter: char,
-    /// Draw a diagonal stub out of a room corner for ne/nw/se/sw exits, using the
-    /// `path.diag_*` glyphs, before handing off to the orthogonal path (SQ-0314).
-    /// On by default. Turn it off for a terminal/font without Unicode 13 Legacy
-    /// Computing coverage — the map then renders the pre-SQ-0314 look: the corner
-    /// arrow plus a purely orthogonal path.
+    /// Draw ne/nw/se/sw connectors as a chain of half-diagonals out of the room corner, using the
+    /// `path.diag_*` glyphs (SQ-0314). On by default.
+    ///
+    /// Turn it off for a terminal/font without Unicode 13 Legacy Computing coverage: the connector
+    /// still leaves and arrives on the same CORNERS — that part is the router's doing, not this
+    /// setting's — but walks between them orthogonally instead.
     pub diagonal_corners: bool,
 }
 

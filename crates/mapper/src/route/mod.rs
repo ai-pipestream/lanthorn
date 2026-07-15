@@ -3,10 +3,10 @@
 //! channels live on odd coordinates). Pixel-free — emits lane indices + per-channel
 //! lane counts that the renderer turns into gap widths.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use crate::direction::{grid_offset, is_diagonal, layout_offset, opposite, Direction};
 use crate::graph::{Connection, MapGraph, RoomId};
-use crate::router::{route_side, Side};
+use crate::router::{route_side, side_for, Side};
 
 /// One collapsed (secondary) compass edge: its unordered pair, its origin room, and its direction.
 struct Secondary {
@@ -120,6 +120,17 @@ pub struct RoutePlan {
     pub connectors: Vec<RoutedConnector>,
     pub h_lanes: BTreeMap<i32, u16>,
     pub v_lanes: BTreeMap<i32, u16>,
+    /// Gap-lattice corners a DIAGONAL passes through, as `(v_channel, h_channel)` index pairs
+    /// (SQ-0314).
+    ///
+    /// A diagonal carries NO lane: every step of its route touches a room centre or the corner
+    /// itself, so `long_runs` finds nothing to lane and both channels it crosses report zero. Left
+    /// at that, the renderer gives them the bare `MIN_GUTTER` and the 45° line is crushed into the
+    /// tightest gap on the map — the exact opposite of what it needs, since a diagonal wants MORE
+    /// room than an orthogonal line (a terminal cell is about twice as tall as it is wide, so a
+    /// visual 45° costs two columns per row). This set is how a diagonal declares the space it
+    /// needs; the renderer sizes those gaps from it.
+    pub diag_corners: BTreeSet<(i32, i32)>,
 }
 
 /// Room cell (c,r) → doubled-coordinate centre (2c, 2r).
@@ -136,6 +147,30 @@ pub fn exit_point(cell: (i32, i32), side: Side) -> (i32, i32) {
         Side::Top => (x, y - 1),
         Side::Bottom => (x, y + 1),
     }
+}
+
+/// The doubled-coord CORNER lattice cell for a diagonal direction: one doubled step out of the
+/// box on BOTH axes (NE → up-right, NW → up-left, SE → down-right, SW → down-left).
+///
+/// Unlike [`exit_point`], the result is already ALL-ODD — the corner *is* its own gap-lattice
+/// point, so `snap_to_lattice` is a no-op on it. That is the whole trick behind SQ-0314: a
+/// diagonal needs no perpendicular stub to reach the lattice, so it can leave the box corner on a
+/// 45° line and hand straight off to an ordinary orthogonal L.
+///
+/// Returns `None` for every non-diagonal direction.
+pub fn corner_point(cell: (i32, i32), dir: Direction) -> Option<(i32, i32)> {
+    if !is_diagonal(dir) {
+        return None;
+    }
+    let (dx, dy) = grid_offset(dir)?;
+    let (x, y) = cell_to_doubled(cell);
+    Some((x + dx, y + dy))
+}
+
+/// The lattice point a connector leaves `cell` from: the box CORNER for a diagonal (SQ-0314),
+/// otherwise the `side`'s perpendicular doorway stub.
+fn anchor_point(cell: (i32, i32), side: Side, dir: Option<Direction>) -> (i32, i32) {
+    dir.and_then(|d| corner_point(cell, d)).unwrap_or_else(|| exit_point(cell, side))
 }
 
 /// Pick the destination's entry side: the side of `b_cell` geometrically facing
@@ -167,8 +202,19 @@ enum Orient { HorizontalFirst, VerticalFirst }
 /// Build the doubled-coord polyline for one connector: centre → exit stub → lattice →
 /// horizontal run → vertical run → lattice → entry stub → centre. Horizontal-first by
 /// default; see `build_points_orient` to choose the other L.
-fn build_points(a_cell: (i32, i32), exit: Side, b_cell: (i32, i32), entry: Side) -> Vec<(i32, i32)> {
-    build_points_orient(a_cell, exit, b_cell, entry, Orient::HorizontalFirst)
+///
+/// `exit_dir`/`entry_dir` are the connector's compass directions; a DIAGONAL one leaves from the
+/// box corner instead of a side doorway (SQ-0314). Pass `None` when the direction is not known or
+/// not diagonal — the route is then exactly what it was before SQ-0314.
+fn build_points(
+    a_cell: (i32, i32),
+    exit: Side,
+    b_cell: (i32, i32),
+    entry: Side,
+    exit_dir: Option<Direction>,
+    entry_dir: Option<Direction>,
+) -> Vec<(i32, i32)> {
+    build_points_orient(a_cell, exit, b_cell, entry, Orient::HorizontalFirst, exit_dir, entry_dir)
 }
 
 /// Like `build_points` but lets the caller pick the L orientation. Both orientations keep
@@ -181,15 +227,21 @@ fn build_points_orient(
     b_cell: (i32, i32),
     entry: Side,
     orient: Orient,
+    exit_dir: Option<Direction>,
+    entry_dir: Option<Direction>,
 ) -> Vec<(i32, i32)> {
     let ca = cell_to_doubled(a_cell);
     let cb = cell_to_doubled(b_cell);
-    let ea = exit_point(a_cell, exit);
-    let eb = exit_point(b_cell, entry);
+    let ea = anchor_point(a_cell, exit, exit_dir);
+    let eb = anchor_point(b_cell, entry, entry_dir);
     // Adjacent facing rooms: the exit stub and entry stub are the SAME lattice cell
     // (the shared doorway between the two boxes). Route straight through it with no
     // lattice dip — there is no channel run, hence no lane. Dipping into the channel
     // and back to the same point would draw a dangling out-and-back tail.
+    //
+    // A reciprocal DIAGONAL pair on diagonally-adjacent rooms lands here too (SQ-0314): both
+    // corners resolve to the one shared corner cell between the boxes, so the route collapses to
+    // centre → corner → centre — a single pure diagonal, which is exactly the picture we want.
     if ea == eb {
         return vec![ca, ea, cb];
     }
@@ -418,24 +470,48 @@ fn polylines_overlap(a: &[(i32, i32)], b: &[(i32, i32)]) -> bool {
 /// The destination side a ONE-WAY connector arrives on, fixed by its compass direction so the
 /// arrow lands on the matching side regardless of the rooms' exact offset. A cardinal enters the
 /// side opposite the one it left — it reads as travelling straight through (N enters from the
-/// south, S from the north, E from the west, W from the east). A diagonal enters a chosen cardinal
-/// side: NW→N, NE→E, SE→S, SW→W. Up/Down enter opposite the side they departed, same as a
-/// cardinal (Up→Bottom, Down→Top). The remaining non-planar directions (In/Out/Unknown, already
-/// filtered from `compass`) → None.
+/// south, S from the north, E from the west, W from the east). Up/Down enter opposite the side
+/// they departed, same as a cardinal (Up→Bottom, Down→Top). The remaining non-planar directions
+/// (In/Out/Unknown, already filtered from `compass`) → None.
+///
+/// A DIAGONAL arrives on the corner FACING its origin, so its side is just the exit rule applied
+/// to the reversed direction: `side_for(opposite(dir))` — NE→Left, NW→Right, SE→Right, SW→Left
+/// (SQ-0314). The old rule rotated a diagonal onto a cardinal side (NW→N, NE→E, SE→S, SW→W),
+/// which was arbitrary but harmless while every diagonal left from a side midpoint. Once a
+/// diagonal leaves the box CORNER it is not harmless: an NE edge would leave its origin's
+/// top-right corner and then wrap all the way around the destination to enter it from the east.
+/// Mirroring the exit rule keeps departure and arrival on facing corners.
 fn oneway_entry_side(dir: Direction) -> Option<Side> {
+    if is_diagonal(dir) {
+        return side_for(opposite(dir));
+    }
     Some(match dir {
         Direction::N => Side::Bottom,
         Direction::S => Side::Top,
         Direction::E => Side::Left,
         Direction::W => Side::Right,
-        Direction::NW => Side::Top,
-        Direction::NE => Side::Right,
-        Direction::SE => Side::Bottom,
-        Direction::SW => Side::Left,
         Direction::Up => Side::Bottom,
         Direction::Down => Side::Top,
+        Direction::NE | Direction::NW | Direction::SE | Direction::SW => unreachable!("handled above"),
         Direction::In | Direction::Out | Direction::Unknown => return None,
     })
+}
+
+/// The corner a connector ARRIVES on, seen from the destination — `Some(dir)` when the arrival
+/// anchors on a box corner instead of a side doorway (SQ-0314). The renderer picks its arrival
+/// anchor with this, and the router builds the matching polyline endpoint with it, so the two
+/// cannot drift apart.
+///
+/// - A reciprocal DIAGONAL pair uses the back edge's own direction: a true NE/SW pair arrives on
+///   the SW corner, and both corners resolve to the one shared corner between adjacent boxes.
+/// - A ONE-WAY diagonal has no back edge but must still arrive on the corner facing its origin,
+///   so it uses `opposite(exit_dir)`.
+/// - A non-diagonal back edge (NE out, plain S back) keeps its ordinary side doorway.
+pub fn entry_corner(exit_dir: Direction, entry_dir: Option<Direction>) -> Option<Direction> {
+    match entry_dir {
+        Some(d) => is_diagonal(d).then_some(d),
+        None => is_diagonal(exit_dir).then(|| opposite(exit_dir)),
+    }
 }
 
 /// The candidate entry sides for a NON-reciprocal connector from `a` to `b`: the
@@ -812,7 +888,16 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             Some(bk) => route_side(bk.dir),
             None => oneway_entry_side(c.dir),
         };
-        if let Some((sentry, pts)) = direct_route(a, exit, b, &occupied) {
+        // A connector with a CORNER at either end never takes the direct route (SQ-0314).
+        // `direct_route` runs its legs out of the rooms' centre row/column and anchors both ends
+        // with `exit_point` — it has no notion of a corner. A diagonal departs from the box CORNER,
+        // so the two disagree and the connector visibly doubles back to reconcile them; and a
+        // cardinal-out/diagonal-back pair (E out, NW back) would arrive at a corner the direct
+        // route never routed to, stranding the arrival with a jog. Both fall through to the
+        // corner-anchored lattice route below, which asks `anchor_point` for each end.
+        let corner_ended = is_diagonal(c.dir) || entry_corner(c.dir, back.map(|bk| bk.dir)).is_some();
+        let direct = if corner_ended { None } else { direct_route(a, exit, b, &occupied) };
+        if let Some((sentry, pts)) = direct {
             // Reject if this straight run stomps an already-placed connector, or if the pre-pass
             // ruled this the shorter rival on a contested room line (so it weaves and the longer
             // connector keeps the line).
@@ -885,9 +970,15 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
             for (oi, &orient) in orients.iter().enumerate() {
                 // Default mode emits the canonical horizontal-first route via `build_points`;
                 // greedy mode also probes the vertical-first alternative.
+                // The connector's own directions decide where it leaves/arrives: a diagonal one
+                // anchors on the box corner (SQ-0314). `entry_dir` must match what lands on the
+                // connector below, since the renderer picks its arrival anchor from that field.
+                let arrive = entry_corner(c.dir, back.map(|bk| bk.dir));
                 let pts = match orient {
-                    Orient::HorizontalFirst => build_points(a, exit, b, entry),
-                    Orient::VerticalFirst => build_points_orient(a, exit, b, entry, orient),
+                    Orient::HorizontalFirst => build_points(a, exit, b, entry, Some(c.dir), arrive),
+                    Orient::VerticalFirst => {
+                        build_points_orient(a, exit, b, entry, orient, Some(c.dir), arrive)
+                    }
                 };
                 candidates.push((ei * 2 + oi, entry, pts));
             }
@@ -1148,7 +1239,34 @@ pub fn route_lanes(graph: &MapGraph) -> RoutePlan {
             Channel::V(c) => { v_lanes.insert(c, n); }
         }
     }
-    RoutePlan { connectors, h_lanes, v_lanes }
+    let diag_corners = diagonal_corners(&connectors);
+    RoutePlan { connectors, h_lanes, v_lanes, diag_corners }
+}
+
+/// Collect the gap-lattice corners every diagonal step passes through, as `(v_channel,
+/// h_channel)` index pairs (SQ-0314). See `RoutePlan::diag_corners` for why these must be
+/// reported separately from the lane counts.
+///
+/// Read off the POLYLINES rather than the connectors' directions: a step that changes both
+/// coordinates is a diagonal step by construction, whoever built it, so a future route that
+/// emits one is covered without having to remember this pass exists.
+fn diagonal_corners(connectors: &[RoutedConnector]) -> BTreeSet<(i32, i32)> {
+    let mut out = BTreeSet::new();
+    for c in connectors {
+        for w in c.points.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if a.0 == b.0 || a.1 == b.1 {
+                continue; // orthogonal step (or none) — the lane machinery already covers it
+            }
+            // The diagonal's all-odd endpoint IS the corner; the other end is a room centre.
+            for p in [a, b] {
+                if p.0 % 2 != 0 && p.1 % 2 != 0 {
+                    out.insert(((p.0 - 1).div_euclid(2), (p.1 - 1).div_euclid(2)));
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1385,11 +1503,20 @@ mod tests {
         assert_eq!(oneway_entry_side(S), Some(Side::Top));
         assert_eq!(oneway_entry_side(E), Some(Side::Left));
         assert_eq!(oneway_entry_side(W), Some(Side::Right));
-        // Diagonals: NW->N, NE->E, SE->S, SW->W.
-        assert_eq!(oneway_entry_side(NW), Some(Side::Top));
-        assert_eq!(oneway_entry_side(NE), Some(Side::Right));
-        assert_eq!(oneway_entry_side(SE), Some(Side::Bottom));
-        assert_eq!(oneway_entry_side(SW), Some(Side::Left));
+        // Diagonals arrive on the corner FACING the origin, so the rule mirrors the exit rule:
+        // `side_for(opposite(dir))` (SQ-0314). The old rotation onto a cardinal side (NW->N,
+        // NE->E, SE->S, SW->W) would wrap a corner-departing diagonal around the destination.
+        assert_eq!(oneway_entry_side(NE), Some(Side::Left));
+        assert_eq!(oneway_entry_side(SW), Some(Side::Right));
+        assert_eq!(oneway_entry_side(NW), Some(Side::Right));
+        assert_eq!(oneway_entry_side(SE), Some(Side::Left));
+        for d in [NE, NW, SE, SW] {
+            assert_eq!(
+                oneway_entry_side(d),
+                side_for(crate::direction::opposite(d)),
+                "{d:?}: a one-way diagonal's arrival side is its exit rule, reversed",
+            );
+        }
         // Up/Down enter opposite the side they departed, same as a cardinal.
         assert_eq!(oneway_entry_side(Up), Some(Side::Bottom));
         assert_eq!(oneway_entry_side(Down), Some(Side::Top));
@@ -1629,12 +1756,16 @@ mod tests {
     #[test]
     fn orientation_choice_reduces_crossings() {
         // Connector A is a short horizontal run H(0) on y=1 spanning x∈[1,3].
-        let a = build_points((0, 0), Side::Right, (2, 0), Side::Left);
+        let a = build_points((0, 0), Side::Right, (2, 0), Side::Left, None, None);
         // Connector B goes from (4,-2) to (0,2). The two L orientations route differently:
         //  - HORIZONTAL-FIRST drops its vertical leg at x=1, INSIDE A's x-span → crosses A.
         //  - VERTICAL-FIRST drops its vertical leg at x=7, OUTSIDE A's x-span → no crossing.
-        let hf = build_points_orient((4, -2), Side::Left, (0, 2), Side::Top, Orient::HorizontalFirst);
-        let vf = build_points_orient((4, -2), Side::Left, (0, 2), Side::Top, Orient::VerticalFirst);
+        let hf = build_points_orient(
+            (4, -2), Side::Left, (0, 2), Side::Top, Orient::HorizontalFirst, None, None,
+        );
+        let vf = build_points_orient(
+            (4, -2), Side::Left, (0, 2), Side::Top, Orient::VerticalFirst, None, None,
+        );
         assert_eq!(count_crossings(&a, &hf), 1, "horizontal-first must cross A once");
         assert_eq!(count_crossings(&a, &vf), 0, "vertical-first must avoid A");
         // The greedy chooser, presented both orientations against the already-placed A, must
@@ -2005,6 +2136,85 @@ mod tests {
         assert_ne!(slot(&west, Direction::Up), 0, "the offset is not the center winner");
         assert_eq!(slot(&west, Direction::Up) % 2, 0, "west-partner offset takes a − (even) slot");
         assert_eq!(slot(&east, Direction::Up) % 2, 1, "east-partner offset takes a + (odd) slot");
+    }
+
+    #[test]
+    fn diagonally_adjacent_rooms_route_as_one_pure_diagonal() {
+        // SQ-0314: the corner lattice cell is odd/odd — already ON the all-odd gap lattice — so a
+        // diagonal needs no perpendicular stub to reach it. For diagonally-adjacent rooms both
+        // boxes' corners resolve to the SAME shared corner, collapsing the route to
+        // centre → corner → centre: R1(0,1) doubled (0,2), the shared corner (1,1), R2(1,0)
+        // doubled (2,0). The corner is the exact midpoint, so it renders as one clean 45° line.
+        //
+        // The one-way and the reciprocal MUST agree here: an arrowhead is the only thing that
+        // should distinguish them, never the path itself.
+        use crate::direction::Direction;
+        let build = |reciprocal: bool| {
+            let mut g = MapGraph::new();
+            g.upsert_room(1, "R1".into());
+            g.upsert_room(2, "R2".into());
+            g.set_pos(1, (0, 1));
+            g.set_pos(2, (1, 0)); // up and to the right of R1
+            g.add_edge(1, Direction::NE, 2);
+            if reciprocal {
+                g.add_edge(2, Direction::SW, 1);
+            }
+            let plan = route_lanes(&g);
+            plan.connectors.iter().find(|c| c.origin == 1).expect("the NE connector").clone()
+        };
+        for reciprocal in [false, true] {
+            let c = build(reciprocal);
+            assert_eq!(
+                c.points,
+                vec![(0, 2), (1, 1), (2, 0)],
+                "reciprocal={reciprocal}: centre → shared corner → centre, no orthogonal dogleg",
+            );
+            assert_eq!(c.exit, Side::Right, "reciprocal={reciprocal}: NE departs the right side");
+            assert_eq!(c.entry, Side::Left, "reciprocal={reciprocal}: and arrives on the left");
+        }
+
+        // A diagonal carries no LaneSeg: every step of the route touches an even coord (room
+        // centre) or is the corner itself, so `long_runs` finds nothing to lane.
+        assert!(build(true).segs.is_empty(), "a pure diagonal occupies no channel lane");
+    }
+
+    #[test]
+    fn entry_corner_picks_the_corner_facing_the_origin() {
+        // The single rule the router and the renderer BOTH ask, so their two ends of the same
+        // connector cannot disagree about where it lands (SQ-0314).
+        use Direction::*;
+        // Reciprocal diagonal pair: the back edge's own direction.
+        assert_eq!(entry_corner(NE, Some(SW)), Some(SW));
+        // One-way diagonal: no back edge, but still the corner facing the origin.
+        assert_eq!(entry_corner(NE, None), Some(SW));
+        assert_eq!(entry_corner(SW, None), Some(NE));
+        assert_eq!(entry_corner(NW, None), Some(SE));
+        assert_eq!(entry_corner(SE, None), Some(NW));
+        // A non-diagonal back edge keeps its ordinary side doorway.
+        assert_eq!(entry_corner(NE, Some(S)), None);
+        // A cardinal is never a corner, back edge or not.
+        assert_eq!(entry_corner(E, None), None);
+        assert_eq!(entry_corner(E, Some(W)), None);
+    }
+
+    #[test]
+    fn corner_point_is_already_on_the_all_odd_lattice() {
+        // The property the whole corner route rests on: unlike `exit_point` (one even coord, needing
+        // a `snap_to_lattice` step), a corner is all-odd on arrival — so it IS its lattice point.
+        use Direction::*;
+        for d in [NE, NW, SE, SW] {
+            for cell in [(0, 0), (3, -2), (-1, 4)] {
+                let p = corner_point(cell, d).expect("diagonals have a corner");
+                assert!(p.0 % 2 != 0 && p.1 % 2 != 0, "{d:?} at {cell:?}: {p:?} must be all-odd");
+                assert_eq!(snap_to_lattice(p, (0, 0)), p, "{d:?}: snapping a corner is a no-op");
+            }
+        }
+        assert_eq!(corner_point((0, 0), NE), Some((1, -1)));
+        assert_eq!(corner_point((0, 0), SW), Some((-1, 1)));
+        // Non-diagonals have no corner — they leave through a side doorway.
+        for d in [N, S, E, W, Up, Down, In, Out, Unknown] {
+            assert_eq!(corner_point((0, 0), d), None, "{d:?} is not a corner exit");
+        }
     }
 
     #[test]
