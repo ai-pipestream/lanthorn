@@ -63,16 +63,26 @@ pub enum Side {
 /// Cardinal compass:
 /// - N → Top, S → Bottom, E → Right, W → Left
 ///
-/// Diagonal — north/south axis dominates:
-/// - NE → Top, SE → Bottom, NW → Top, SW → Bottom
+/// Diagonal — EAST/WEST axis dominates (SQ-0314):
+/// - NE → Right, SE → Right, NW → Left, SW → Left
+///
+/// A diagonal anchors on the box CORNER (`corner_anchor`), not a side midpoint,
+/// and leaves it diagonally. The east/west choice is what makes the rest of the
+/// route agree with that corner: `attach_bridge` runs its perpendicular leg along
+/// the anchor's own ROW, i.e. straight out from the corner in the direction the
+/// exit actually points. The previous north/south collapse sent an NE connector's
+/// leg up the room's CENTRE column, so the line left the top-right corner and
+/// immediately doubled back west — a contradiction the corner arrow hid and a
+/// diagonal stub makes plainly visible. This also settles a standing
+/// inconsistency: `oneway_entry_side` already routes NE arrivals to Right.
 ///
 /// Non-planar (Up, Down, In, Out, Unknown) → `None` (rendered as stubs).
 pub fn side_for(dir: Direction) -> Option<Side> {
     match dir {
-        Direction::N | Direction::NE | Direction::NW => Some(Side::Top),
-        Direction::S | Direction::SE | Direction::SW => Some(Side::Bottom),
-        Direction::E => Some(Side::Right),
-        Direction::W => Some(Side::Left),
+        Direction::N => Some(Side::Top),
+        Direction::S => Some(Side::Bottom),
+        Direction::E | Direction::NE | Direction::SE => Some(Side::Right),
+        Direction::W | Direction::NW | Direction::SW => Some(Side::Left),
         Direction::Up | Direction::Down | Direction::In | Direction::Out | Direction::Unknown => {
             None
         }
@@ -351,11 +361,20 @@ mod tests {
     }
 
     #[test]
-    fn side_for_diagonals_north_axis_wins() {
-        assert_eq!(side_for(Direction::NE), Some(Side::Top));
-        assert_eq!(side_for(Direction::SE), Some(Side::Bottom));
-        assert_eq!(side_for(Direction::NW), Some(Side::Top));
-        assert_eq!(side_for(Direction::SW), Some(Side::Bottom));
+    fn side_for_diagonals_east_west_axis_wins() {
+        // SQ-0314: a diagonal anchors on the box CORNER and leaves it diagonally, so
+        // its side must be the one that agrees with that corner — attach_bridge then
+        // runs its leg along the anchor's own row, straight out from the corner.
+        // The old north/south collapse sent an NE connector up the room's centre
+        // column, so the line left the top-right corner and doubled straight back
+        // west. This also matches oneway_entry_side, which already enters NE at Right.
+        assert_eq!(side_for(Direction::NE), Some(Side::Right));
+        assert_eq!(side_for(Direction::SE), Some(Side::Right));
+        assert_eq!(side_for(Direction::NW), Some(Side::Left));
+        assert_eq!(side_for(Direction::SW), Some(Side::Left));
+        // Cardinals are untouched.
+        assert_eq!(side_for(Direction::N), Some(Side::Top));
+        assert_eq!(side_for(Direction::S), Some(Side::Bottom));
     }
 
     #[test]

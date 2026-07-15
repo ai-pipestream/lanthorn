@@ -4,7 +4,7 @@
 //! lane counts that the renderer turns into gap widths.
 
 use std::collections::BTreeMap;
-use crate::direction::{grid_offset, layout_offset, opposite, Direction};
+use crate::direction::{grid_offset, is_diagonal, layout_offset, opposite, Direction};
 use crate::graph::{Connection, MapGraph, RoomId};
 use crate::router::{route_side, Side};
 
@@ -1018,12 +1018,19 @@ fn is_collinear(points: &[(i32, i32)]) -> bool {
 
 fn assign_side_slots(connectors: &mut [RoutedConnector], graph: &MapGraph) {
     // Collect every endpoint as (room, side, is_exit, connector index).
+    //
+    // A DIAGONAL endpoint is skipped (SQ-0314): it anchors on the box CORNER, and the corner
+    // anchor ignores the slot entirely — so slotting one only burned a cell that nothing ever
+    // drew on, pushing the side's real endpoints off-centre for no reason. The corner is its
+    // own slot. Skipped endpoints keep the initial slot 0, which the corner path ignores.
     let mut endpoints: Vec<(RoomId, Side, bool, usize)> = Vec::new();
     for (ci, c) in connectors.iter().enumerate() {
-        endpoints.push((c.origin, c.exit, true, ci));
+        if !is_diagonal(c.exit_dir) {
+            endpoints.push((c.origin, c.exit, true, ci));
+        }
         // A merge stub ends on the trunk (not at the destination box), so it has no arrival
         // endpoint to slot.
-        if !c.merge {
+        if !c.merge && !c.entry_dir.is_some_and(is_diagonal) {
             endpoints.push((c.dest, c.entry, false, ci));
         }
     }
@@ -1973,8 +1980,12 @@ mod tests {
         // offset stub bends toward its partner instead of across the center line (SQ-0224 Part B).
         // Both are magnitude-1 cells, always clamp-safe. (With more than one offset the assignment
         // falls back to the original sequential interleave, so partner-bias is a single-offset rule.)
+        //
+        // The offset here is an Up edge — `route_side(Up)` is Top, so it shares the side with the
+        // N reciprocal and yields the center to it (SQ-0222). A diagonal cannot play this role:
+        // diagonals anchor on the corner and no longer take a side slot at all (SQ-0314).
         use crate::direction::Direction;
-        let build = |offset_dir: Direction, partner_x: i32| {
+        let build = |partner_x: i32| {
             let mut g = MapGraph::new();
             for id in [1u16, 2, 3] { g.upsert_room(id, "r".into()); }
             g.set_pos(1, (0, 0));
@@ -1982,18 +1993,51 @@ mod tests {
             g.set_pos(3, (partner_x, -1)); // the single offset's partner (east or west)
             g.add_edge(1, Direction::N, 2);
             g.add_edge(2, Direction::S, 1);
-            g.add_edge(1, offset_dir, 3);
+            g.add_edge(1, Direction::Up, 3);
             route_lanes(&g)
         };
         let slot = |plan: &RoutePlan, dir: Direction| {
             plan.connectors.iter().find(|c| c.origin == 1 && c.exit_dir == dir).map(|c| c.exit_slot).unwrap()
         };
-        let west = build(Direction::NW, -1);
-        let east = build(Direction::NE, 1);
+        let west = build(-1);
+        let east = build(1);
         assert_eq!(slot(&west, Direction::N), 0, "the straight N reciprocal keeps the center slot");
-        assert_ne!(slot(&west, Direction::NW), 0, "the offset is not the center winner");
-        assert_eq!(slot(&west, Direction::NW) % 2, 0, "west-partner offset takes a − (even) slot");
-        assert_eq!(slot(&east, Direction::NE) % 2, 1, "east-partner offset takes a + (odd) slot");
+        assert_ne!(slot(&west, Direction::Up), 0, "the offset is not the center winner");
+        assert_eq!(slot(&west, Direction::Up) % 2, 0, "west-partner offset takes a − (even) slot");
+        assert_eq!(slot(&east, Direction::Up) % 2, 1, "east-partner offset takes a + (odd) slot");
+    }
+
+    #[test]
+    fn a_diagonal_does_not_consume_a_side_slot() {
+        // SQ-0314: a diagonal anchors on the box CORNER, which ignores the slot. So it must not
+        // displace the endpoints that DO render on that side. Room 1 has a straight E reciprocal
+        // (to room 2, due east) plus an NE and an SE diagonal — every one of them routes to the
+        // Right side. Before SQ-0314 the two diagonals ate Right slots they never drew on, forcing
+        // the E line off-centre; now the E line keeps the centre and the corners are free.
+        use crate::direction::Direction;
+        let mut g = MapGraph::new();
+        for id in [1u16, 2, 3, 4] { g.upsert_room(id, "r".into()); }
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0)); // due east: straight E/W reciprocal
+        g.set_pos(3, (1, -1)); // NE
+        g.set_pos(4, (1, 1)); // SE
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        g.add_edge(1, Direction::NE, 3);
+        g.add_edge(1, Direction::SE, 4);
+        let plan = route_lanes(&g);
+        let exit = |dir: Direction| {
+            plan.connectors.iter().find(|c| c.origin == 1 && c.exit_dir == dir).expect("connector")
+        };
+        assert_eq!(exit(Direction::E).exit, Side::Right);
+        assert_eq!(exit(Direction::NE).exit, Side::Right);
+        assert_eq!(exit(Direction::SE).exit, Side::Right);
+        assert_eq!(
+            exit(Direction::E).exit_slot,
+            0,
+            "the straight E line keeps the centre slot: the diagonals leave via the corners, so \
+             they never contend for it"
+        );
     }
 
     #[test]
