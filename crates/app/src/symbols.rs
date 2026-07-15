@@ -46,6 +46,21 @@ pub struct PathGlyphs {
     pub ews: char,
     pub ewn: char,
     pub nesw: char,
+    // ── Diagonal corner-exit stubs (SQ-0314) ─────────────────────────────────
+    // Half-diagonals from the Legacy Computing block, named for their two
+    // endpoints (matching their Unicode names). Unlike ╱/╲ (U+2571/2572), which
+    // run corner-to-corner, EVERY endpoint here is an edge MIDPOINT — the same
+    // points ─ attaches at (middle left/right) and │ attaches at (upper/lower
+    // centre). That is what lets a diagonal stub hand off to an orthogonal path
+    // cleanly. Used only when `diagonal_corners` is on.
+    /// Upper-centre ↔ middle-left (U+1FBA0 🮠).
+    pub diag_ul: char,
+    /// Upper-centre ↔ middle-right (U+1FBA1 🮡).
+    pub diag_ur: char,
+    /// Middle-left ↔ lower-centre (U+1FBA2 🮢).
+    pub diag_ll: char,
+    /// Middle-right ↔ lower-centre (U+1FBA3 🮣).
+    pub diag_lr: char,
 }
 
 /// Portal icon glyphs: directional markers + connector path char.
@@ -89,6 +104,12 @@ pub struct SymbolSet {
     pub meta_gutter: char,
     /// Gutter marker glyph for WARNING transcript lines.
     pub warning_gutter: char,
+    /// Draw a diagonal stub out of a room corner for ne/nw/se/sw exits, using the
+    /// `path.diag_*` glyphs, before handing off to the orthogonal path (SQ-0314).
+    /// On by default. Turn it off for a terminal/font without Unicode 13 Legacy
+    /// Computing coverage — the map then renders the pre-SQ-0314 look: the corner
+    /// arrow plus a purely orthogonal path.
+    pub diagonal_corners: bool,
 }
 
 impl Default for SymbolSet {
@@ -121,6 +142,10 @@ impl Default for SymbolSet {
                 ews: '┬',
                 ewn: '┴',
                 nesw: '┼',
+                diag_ul: '🮠',
+                diag_ur: '🮡',
+                diag_ll: '🮢',
+                diag_lr: '🮣',
             },
             portal: PortalGlyphs {
                 marker: '●',
@@ -134,6 +159,7 @@ impl Default for SymbolSet {
             },
             meta_gutter: '▏',
             warning_gutter: '!',
+            diagonal_corners: true,
         }
     }
 }
@@ -268,19 +294,29 @@ impl PathGlyphs {
     /// - "dotted" — dotted/dashed box-drawing lines ╌╎┄┆ with fallbacks
     pub fn preset(name: &str) -> Option<PathGlyphs> {
         Some(match name {
+            // The four diag_* slots are identical across every preset: the Legacy
+            // Computing block has only LIGHT half-diagonals — no heavy or dotted
+            // variants exist — so they fall back the same way "dotted" already
+            // falls back to light corners for its turns. (SQ-0314)
             "light" => PathGlyphs {
                 ew: '─', ns: '│', se: '┌', sw: '┐', ne: '└', nw: '┘',
                 nse: '├', nsw: '┤', ews: '┬', ewn: '┴', nesw: '┼',
+                diag_ul: '🮠', diag_ur: '🮡',
+                diag_ll: '🮢', diag_lr: '🮣',
             },
             "heavy" => PathGlyphs {
                 ew: '━', ns: '┃', se: '┏', sw: '┓', ne: '┗', nw: '┛',
                 nse: '┣', nsw: '┫', ews: '┳', ewn: '┻', nesw: '╋',
+                diag_ul: '🮠', diag_ur: '🮡',
+                diag_ll: '🮢', diag_lr: '🮣',
             },
             "dotted" => PathGlyphs {
                 // Quadruple-dash light for straights; turns fall back to light corners
                 // since Unicode has no dotted corner glyphs.
                 ew: '┄', ns: '┆', se: '┌', sw: '┐', ne: '└', nw: '┘',
                 nse: '├', nsw: '┤', ews: '┬', ewn: '┴', nesw: '┼',
+                diag_ul: '🮠', diag_ur: '🮡',
+                diag_ll: '🮢', diag_lr: '🮣',
             },
             _ => return None,
         })
@@ -364,6 +400,7 @@ impl SymbolSet {
             portal: PortalGlyphs::preset(&cfg.portal_icons).unwrap_or_else(|| SymbolSet::default().portal),
             meta_gutter: SymbolSet::default().meta_gutter,
             warning_gutter: SymbolSet::default().warning_gutter,
+            diagonal_corners: cfg.diagonal_corners,
         };
 
         for (key, val) in &cfg.overrides {
@@ -392,6 +429,7 @@ impl SymbolSet {
             badge_blorb: crate::config::default_badge_blorb(),
             badge_save: crate::config::default_badge_save(),
             badge_hint: crate::config::default_badge_hint(),
+            diagonal_corners: crate::config::default_diagonal_corners(),
             overrides: std::collections::BTreeMap::new(),
         };
         SymbolSet::resolve(&cfg)
@@ -404,6 +442,13 @@ impl SymbolSet {
 /// shapes are always accepted.
 pub(crate) fn is_wide_estimate(c: char) -> bool {
     let cp = c as u32;
+    // U+1FBA0..=U+1FBAF are the Legacy Computing box-drawing half-diagonals: narrow
+    // line-art, not emoji, despite sitting inside the blanket 0x1F000..=0x1FFFF
+    // reject below. Carve them out or `path.diag_*` overrides are silently dropped
+    // and the slots stop being themeable. (SQ-0314)
+    if (0x1FBA0..=0x1FBAF).contains(&cp) {
+        return false;
+    }
     matches!(cp,
         0x1100..=0x115F  // Hangul Jamo
         | 0x2E80..=0x2EFF  // CJK Radicals
@@ -481,6 +526,10 @@ fn apply_override(s: &mut SymbolSet, key: &str, ch: char) {
         "path.ews"         => s.path.ews = ch,
         "path.ewn"         => s.path.ewn = ch,
         "path.cross"       => s.path.nesw = ch,
+        "path.diag_ul"     => s.path.diag_ul = ch,
+        "path.diag_ur"     => s.path.diag_ur = ch,
+        "path.diag_ll"     => s.path.diag_ll = ch,
+        "path.diag_lr"     => s.path.diag_lr = ch,
         "portal.up"        => s.portal.up = ch,
         "portal.down"      => s.portal.down = ch,
         "portal.in"        => s.portal.in_ = ch,
@@ -568,6 +617,52 @@ mod tests {
     }
 
     #[test]
+    fn legacy_computing_diagonals_are_not_rejected_as_wide() {
+        // SQ-0314: U+1FBA0..=U+1FBAF sit inside the blanket 0x1F000..=0x1FFFF
+        // "emoji" reject, but they are NARROW box-drawing half-diagonals. Without
+        // the carve-out every `path.diag_*` override is silently dropped and the
+        // slots stop being themeable.
+        for cp in 0x1FBA0..=0x1FBAFu32 {
+            let ch = char::from_u32(cp).unwrap();
+            assert!(!is_wide_estimate(ch), "U+{cp:05X} {ch:?} must be accepted as narrow");
+        }
+        // The guard is surgical: a neighbouring real emoji is still rejected.
+        assert!(is_wide_estimate('\u{1F600}'), "emoji outside the carve-out stay rejected");
+        assert!(is_wide_estimate('\u{1FB00}'), "0x1FB00 is below the carve-out and stays rejected");
+    }
+
+    #[test]
+    fn diagonal_slots_default_to_legacy_computing_and_accept_overrides() {
+        // Defaults are the four half-diagonals, and every preset carries them
+        // (Legacy Computing has no heavy/dotted variants, so all presets share them).
+        let d = SymbolSet::default().path;
+        assert_eq!((d.diag_ul, d.diag_ur, d.diag_ll, d.diag_lr),
+                   ('🮠', '🮡', '🮢', '🮣'));
+        for name in PathGlyphs::preset_names() {
+            let p = PathGlyphs::preset(name).unwrap();
+            assert_eq!((p.diag_ul, p.diag_ur, p.diag_ll, p.diag_lr),
+                       ('🮠', '🮡', '🮢', '🮣'), "preset {name}");
+        }
+        // And they are themeable: an override reaches the slot (proving the
+        // is_wide_estimate carve-out and the apply_override key are both wired).
+        let mut cfg = crate::config::SymbolConfig::default();
+        cfg.overrides.insert("path.diag_ul".into(), "🮣".into());
+        cfg.overrides.insert("path.diag_lr".into(), "/".into());
+        let s = SymbolSet::resolve(&cfg);
+        assert_eq!(s.path.diag_ul, '🮣', "a Legacy Computing override is accepted");
+        assert_eq!(s.path.diag_lr, '/', "an ASCII override is accepted");
+    }
+
+    #[test]
+    fn diagonal_corners_defaults_on_and_follows_config() {
+        assert!(SymbolSet::default().diagonal_corners, "diagonals are on out of the box");
+        assert!(SymbolSet::resolve(&crate::config::SymbolConfig::default()).diagonal_corners);
+        // Turning it off is what a font without Unicode 13 coverage does.
+        let cfg = crate::config::SymbolConfig { diagonal_corners: false, ..Default::default() };
+        assert!(!SymbolSet::resolve(&cfg).diagonal_corners);
+    }
+
+    #[test]
     fn preset_names_cover_all_known_presets() {
         assert!(BoxStyle::preset_names().contains(&"ascii"));
         assert!(BoxStyle::preset_names().contains(&"rounded"));
@@ -588,6 +683,7 @@ mod tests {
             badge_blorb: crate::config::default_badge_blorb(),
             badge_save: crate::config::default_badge_save(),
             badge_hint: crate::config::default_badge_hint(),
+            diagonal_corners: crate::config::default_diagonal_corners(),
             overrides: std::collections::BTreeMap::new(),
         };
         let expected = SymbolSet::resolve(&cfg);

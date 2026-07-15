@@ -132,6 +132,10 @@ pub struct StyleSymbols {
     pub badge_blorb: Option<String>,
     pub badge_save: Option<String>,
     pub badge_hint: Option<String>,
+    /// Draw diagonal stubs out of room corners for ne/nw/se/sw exits (SQ-0314).
+    /// `None` → the config default (on). Set false for a font without Unicode 13
+    /// Legacy Computing coverage.
+    pub diagonal_corners: Option<bool>,
     #[serde(default)]
     pub overrides: BTreeMap<String, String>,
 }
@@ -153,6 +157,7 @@ pub fn finalize_symbols(s: &StyleSymbols) -> crate::config::SymbolConfig {
         badge_blorb: s.badge_blorb.clone().unwrap_or_else(crate::config::default_badge_blorb),
         badge_save: s.badge_save.clone().unwrap_or_else(crate::config::default_badge_save),
         badge_hint: s.badge_hint.clone().unwrap_or_else(crate::config::default_badge_hint),
+        diagonal_corners: s.diagonal_corners.unwrap_or_else(crate::config::default_diagonal_corners),
         overrides: s.overrides.clone(),
     }
 }
@@ -661,6 +666,7 @@ pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc {
         badge_blorb: over.symbols.badge_blorb.clone().or(base.symbols.badge_blorb.clone()),
         badge_save: over.symbols.badge_save.clone().or(base.symbols.badge_save.clone()),
         badge_hint: over.symbols.badge_hint.clone().or(base.symbols.badge_hint.clone()),
+        diagonal_corners: over.symbols.diagonal_corners.or(base.symbols.diagonal_corners),
         overrides: {
             let mut ov = base.symbols.overrides.clone();
             ov.extend(over.symbols.overrides.clone());
@@ -1200,6 +1206,12 @@ pub fn write_style(path: &std::path::Path, doc: &StyleDoc) -> std::io::Result<()
         write_preset!(portal_icons, "portal_icons");
         write_preset!(path_style,   "path_style");
 
+        // Diagonal corner stubs (SQ-0314) — a bool, not a preset name.
+        match doc.symbols.diagonal_corners {
+            Some(v) => { symbols["diagonal_corners"] = toml_edit::value(v); }
+            None    => { symbols.remove("diagonal_corners"); }
+        }
+
         // [symbols.overrides] — get or create sub-table.
         if !doc.symbols.overrides.is_empty() {
             let overrides = symbols.entry("overrides")
@@ -1429,6 +1441,8 @@ pub fn write_style_full(
     doc.symbols.arrow_set    = Some(crate::config::default_arrow_set());
     doc.symbols.portal_icons = Some(crate::config::default_portal_icons());
     doc.symbols.path_style   = Some(crate::config::default_path_style());
+    // Not a preset/slot — carry the live value so a saved style round-trips it.
+    doc.symbols.diagonal_corners = Some(set.diagonal_corners);
 
     // Write every slot key so that overrides fully define the resolved SymbolSet.
     let ov = &mut doc.symbols.overrides;
@@ -1478,6 +1492,10 @@ pub fn write_style_full(
     ov.insert("path.ews".to_string(),   set.path.ews.to_string());
     ov.insert("path.ewn".to_string(),   set.path.ewn.to_string());
     ov.insert("path.cross".to_string(), set.path.nesw.to_string());
+    ov.insert("path.diag_ul".to_string(), set.path.diag_ul.to_string());
+    ov.insert("path.diag_ur".to_string(), set.path.diag_ur.to_string());
+    ov.insert("path.diag_ll".to_string(), set.path.diag_ll.to_string());
+    ov.insert("path.diag_lr".to_string(), set.path.diag_lr.to_string());
     // Portal glyphs
     ov.insert("portal.up".to_string(),      set.portal.up.to_string());
     ov.insert("portal.down".to_string(),    set.portal.down.to_string());
