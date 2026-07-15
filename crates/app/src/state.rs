@@ -2186,14 +2186,55 @@ impl AppState {
         self.config.inv_dock_pct = self.pane_sizes.inv_dock_pct;
     }
 
-    /// Zoom in one fine step (toward Boxes). Clamps at level 8 (Boxes).
+    /// Zoom in one VISIBLE step (toward Boxes). Already at Boxes → no change; it is the most
+    /// detailed view there is.
     pub fn zoom_in(&mut self) {
+        self.zoom_to(match self.zoom {
+            Zoom::Overview => Zoom::Compact,
+            Zoom::Compact | Zoom::Boxes => Zoom::Boxes,
+        });
+    }
+
+    /// Zoom out one VISIBLE step (toward Overview). Already at Overview → no change.
+    pub fn zoom_out(&mut self) {
+        self.zoom_to(match self.zoom {
+            Zoom::Boxes => Zoom::Compact,
+            Zoom::Compact | Zoom::Overview => Zoom::Overview,
+        });
+    }
+
+    /// Jump to `z`, landing in the MIDDLE of its fine band (SQ-0350).
+    ///
+    /// A keypress must move the map, and only whole bands are visible: the nine fine levels
+    /// collapse to three views (0–2 Overview, 3–5 Compact, 6–8 Boxes). Stepping one fine level per
+    /// press meant the default (level 7, mid-Boxes) needed TWO presses of `-` before anything
+    /// happened, and `+` did nothing at all, ever — 7→8 is still Boxes. That is the whole of "the
+    /// zoom keys are not responsive": the keys always fired, they just moved a counter nobody
+    /// could see.
+    ///
+    /// Landing mid-band rather than on its edge keeps `+` and `-` exact inverses, and leaves the
+    /// wheel (which still steps one fine level at a time, see `zoom_in_fine`) equal room either way
+    /// before it tips into the next view.
+    fn zoom_to(&mut self, z: Zoom) {
+        self.zoom_level = match z {
+            Zoom::Overview => 1,
+            Zoom::Compact => 4,
+            Zoom::Boxes => 7,
+        };
+        self.zoom = z;
+    }
+
+    /// Zoom in one FINE step (toward Boxes). Clamps at level 8.
+    ///
+    /// The wheel's step, not the keyboard's: fine levels exist so a fast ctrl+scroll cannot skip
+    /// straight past Compact. A keypress uses `zoom_in`, which moves a whole band.
+    pub fn zoom_in_fine(&mut self) {
         self.zoom_level = self.zoom_level.saturating_add(1).min(8);
         self.zoom = zoom_from_level(self.zoom_level);
     }
 
-    /// Zoom out one fine step (toward Overview). Clamps at level 0 (Overview).
-    pub fn zoom_out(&mut self) {
+    /// Zoom out one FINE step (toward Overview). Clamps at level 0. See `zoom_in_fine`.
+    pub fn zoom_out_fine(&mut self) {
         self.zoom_level = self.zoom_level.saturating_sub(1);
         self.zoom = zoom_from_level(self.zoom_level);
     }
@@ -3814,27 +3855,18 @@ mod tests {
         assert!(matches!(s.layout, Layout::TranscriptFull));
         s.toggle_map();
         assert!(matches!(s.layout, Layout::Split));
-        // zoom clamps — now uses 9-level fine zoom (0-8); starts at level 7 (Boxes).
-        // Level 7→6: still Boxes; 6→5: Compact; …; 0: Overview; clamped at 0.
-        // Zoom out to level 5 (first Compact level).
-        s.zoom_out(); // 7→6: Boxes
-        s.zoom_out(); // 6→5: Compact
+        // Zoom clamps. A keypress moves one VISIBLE step (SQ-0350); the fine 0-8 counter is
+        // the wheel's, not the keyboard's.
+        s.zoom_out();
         assert!(matches!(s.zoom, Zoom::Compact));
-        // Zoom out to level 0 (Overview).
-        s.zoom_out(); // 5→4: Compact
-        s.zoom_out(); // 4→3: Compact
-        s.zoom_out(); // 3→2: Overview
-        s.zoom_out(); // 2→1: Overview
-        s.zoom_out(); // 1→0: Overview
+        s.zoom_out();
         assert!(matches!(s.zoom, Zoom::Overview));
-        s.zoom_out(); // clamp at 0
+        s.zoom_out();
         assert!(matches!(s.zoom, Zoom::Overview)); // clamped
-        // Zoom back to Boxes (need 8 zoom_in steps from 0).
-        for _ in 0..8 {
-            s.zoom_in();
-        }
+        s.zoom_in();
+        s.zoom_in();
         assert!(matches!(s.zoom, Zoom::Boxes));
-        s.zoom_in(); // clamp at 8
+        s.zoom_in();
         assert!(matches!(s.zoom, Zoom::Boxes)); // clamped
     }
 
@@ -4049,39 +4081,79 @@ mod tests {
     }
 
     #[test]
-    fn zoom_in_increments_level_and_clamps() {
-        let mut s = AppState::default(); // level 7
-        s.zoom_in(); // 7 -> 8
-        assert_eq!(s.zoom_level, 8);
+    fn a_zoom_keypress_always_moves_the_map() {
+        // SQ-0350: the zoom keys "did not respond". They always fired — they just moved a fine
+        // counter nobody could see. Nine fine levels collapse to three views (0-2 Overview,
+        // 3-5 Compact, 6-8 Boxes) and the default sits at 7, mid-Boxes: so `-` needed TWO presses
+        // for the first visible change, and `+` never did anything at all (7 -> 8 is still Boxes).
+        // One press must now equal one visible step.
+        let mut s = AppState::default();
+        assert!(matches!(s.zoom, Zoom::Boxes), "default is the most detailed view");
+
+        s.zoom_out();
+        assert!(matches!(s.zoom, Zoom::Compact), "one press of `-` moves the map");
+        s.zoom_out();
+        assert!(matches!(s.zoom, Zoom::Overview), "and again");
+        s.zoom_out();
+        assert!(matches!(s.zoom, Zoom::Overview), "clamped at the least detailed view");
+
+        s.zoom_in();
+        assert!(matches!(s.zoom, Zoom::Compact), "one press of `+` moves it back");
+        s.zoom_in();
         assert!(matches!(s.zoom, Zoom::Boxes));
-        s.zoom_in(); // clamp at 8
-        assert_eq!(s.zoom_level, 8);
+        s.zoom_in();
+        assert!(matches!(s.zoom, Zoom::Boxes), "clamped at the most detailed view");
     }
 
     #[test]
-    fn zoom_out_decrements_level_and_clamps() {
-        let mut s = AppState::default(); // level 7
-        s.zoom_out(); // 7 -> 6: Boxes
-        assert_eq!(s.zoom_level, 6);
-        assert!(matches!(s.zoom, Zoom::Boxes));
-        s.zoom_out(); // 6 -> 5: Compact
-        assert_eq!(s.zoom_level, 5);
-        assert!(matches!(s.zoom, Zoom::Compact));
-        // Go all the way to 0
-        for _ in 0..5 {
+    fn zoom_keypresses_are_exact_inverses() {
+        // Landing mid-band is what makes this hold: an edge landing would let `+` then `-` drift
+        // into a different view than it started in, and the wheel would tip over a boundary on its
+        // very first notch.
+        let mut s = AppState::default();
+        for _ in 0..2 {
             s.zoom_out();
+        }
+        let (lvl, z) = (s.zoom_level, s.zoom);
+        s.zoom_in();
+        s.zoom_out();
+        assert_eq!(s.zoom_level, lvl, "+ then - returns to the same fine level");
+        assert_eq!(s.zoom, z);
+    }
+
+    #[test]
+    fn the_wheel_still_steps_finely() {
+        // The fine levels exist so a fast ctrl+scroll cannot skip straight past Compact. Fixing the
+        // KEYBOARD must not flatten the wheel into the same coarse step.
+        let mut s = AppState::default(); // level 7, Boxes
+        s.zoom_out_fine();
+        assert_eq!(s.zoom_level, 6);
+        assert!(matches!(s.zoom, Zoom::Boxes), "one notch stays inside the band");
+        s.zoom_out_fine();
+        assert_eq!(s.zoom_level, 5);
+        assert!(matches!(s.zoom, Zoom::Compact), "the third notch tips into the next view");
+        for _ in 0..5 {
+            s.zoom_out_fine();
         }
         assert_eq!(s.zoom_level, 0);
         assert!(matches!(s.zoom, Zoom::Overview));
-        s.zoom_out(); // clamp at 0
-        assert_eq!(s.zoom_level, 0);
+        s.zoom_out_fine();
+        assert_eq!(s.zoom_level, 0, "clamped at 0");
+
+        for _ in 0..8 {
+            s.zoom_in_fine();
+        }
+        assert_eq!(s.zoom_level, 8);
+        assert!(matches!(s.zoom, Zoom::Boxes));
+        s.zoom_in_fine();
+        assert_eq!(s.zoom_level, 8, "clamped at 8");
     }
 
     #[test]
     fn zoom_reset_returns_to_default_level() {
         let mut s = AppState::default();
-        // Go to Overview
-        for _ in 0..7 {
+        // Go to Overview (two visible steps from Boxes).
+        for _ in 0..2 {
             s.zoom_out();
         }
         assert!(matches!(s.zoom, Zoom::Overview));

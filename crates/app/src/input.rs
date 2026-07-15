@@ -121,10 +121,17 @@ pub enum Action {
     AnimExit,
     /// Jump to the next (+1) or previous (-1) stage_start frame in the animation.
     AnimStageJump(i32),
-    /// Zoom the map in (more detail).
+    /// Zoom the map in one VISIBLE step (more detail). A keypress must move the map.
     ZoomIn,
-    /// Zoom the map out (less detail).
+    /// Zoom the map out one VISIBLE step (less detail).
     ZoomOut,
+    /// Zoom in one FINE step — the wheel's gesture (SQ-0350).
+    ///
+    /// Three fine steps make one visible step, so a fast ctrl+scroll cannot skip past the middle
+    /// view. The keyboard uses `ZoomIn`/`ZoomOut` instead: one press, one visible change.
+    ZoomInFine,
+    /// Zoom out one FINE step — the wheel's gesture. See `ZoomInFine`.
+    ZoomOutFine,
     /// Reset zoom to the default level (Boxes) and clear the char-pan offset.
     ZoomReset,
     /// Pan the map scroll by (dx, dy).
@@ -1075,7 +1082,7 @@ pub fn mouse_to_action(
         // ── Wheel in map: pan or zoom ─────────────────────────────────────────
         MouseEventKind::ScrollUp if in_map => {
             if ctrl {
-                Action::ZoomIn
+                Action::ZoomInFine
             } else if shift {
                 Action::Pan(-1, 0)
             } else {
@@ -1084,7 +1091,7 @@ pub fn mouse_to_action(
         }
         MouseEventKind::ScrollDown if in_map => {
             if ctrl {
-                Action::ZoomOut
+                Action::ZoomOutFine
             } else if shift {
                 Action::Pan(1, 0)
             } else {
@@ -1612,6 +1619,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
         Action::ZoomIn => state.zoom_in(),
         Action::ZoomOut => state.zoom_out(),
+        Action::ZoomInFine => state.zoom_in_fine(),
+        Action::ZoomOutFine => state.zoom_out_fine(),
         Action::ZoomReset => state.zoom_reset(),
         Action::Pan(dx, dy) => state.pan(dx, dy),
         Action::Recenter => apply_recenter(state, mapper),
@@ -5100,7 +5109,9 @@ mod tests {
         let s = AppState::default();
         let m = mouse_event(MouseEventKind::ScrollUp, 10, 10, KeyModifiers::CONTROL);
         let action = mouse_to_action(&s, m, map_rect(), story_rect(), &[], &None);
-        assert!(matches!(action, Action::ZoomIn), "scroll up + Ctrl -> ZoomIn");
+        // The wheel keeps the FINE step (SQ-0350): three notches to a visible change, so a fast
+        // ctrl+scroll cannot skip past Compact. The keyboard's `+`/`-` move a whole step instead.
+        assert!(matches!(action, Action::ZoomInFine), "scroll up + Ctrl -> ZoomInFine");
     }
 
     #[test]
