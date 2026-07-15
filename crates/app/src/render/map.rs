@@ -922,10 +922,10 @@ struct ConnectorPlot {
 /// the point where an orthogonal path resumes. `None` when `dir` is not diagonal, or when the gap
 /// is too small to hold even one pair.
 ///
-/// The chain starts at the cell DIAGONALLY aligned to the corner — for NE that is `(cx+1, cy-1)`,
-/// the cell the corner's `↗` points at — not the cell orthogonally beside it. That diagonal
-/// alignment is the whole point: it is what makes the corner a usable connector slot distinct from
-/// the side anchors.
+/// The chain starts in the corner's OWN row, one column along — for NE that is `(cx+1, cy)`. The
+/// glyph there joins the corner's middle-right edge to the cell above's bottom edge, so the line
+/// leaves the corner edge-to-edge with no seam, and the corner stays a usable connector slot
+/// distinct from the side anchors.
 ///
 /// Each half-diagonal joins two EDGE MIDPOINTS. Within a pair, the near cell enters on its
 /// lower-centre (for a N-ward exit; upper-centre for a S-ward one) and hands off at its
@@ -933,11 +933,18 @@ struct ConnectorPlot {
 /// centre — exactly where `│` attaches, so the resume point continues an orthogonal path with no
 /// seam.
 ///
-/// Pairs CHAIN by overlapping a column: pair `k` sits in row `cy + k*sy` across columns
-/// `cx + k*sx` and `cx + (k+1)*sx`, leaving the line attached at `(cx + (k+1)*sx, cy + (k+1)*sy)`
-/// — which is where pair `k+1` picks it up. So the first pair travels (2,2) and every pair after
-/// it travels (1,1): `n` pairs span `n+1` rows and `n+1` columns. That 1:1 cell ratio is a 63°
-/// climb, not 45°; see `diagonal_col_gap`.
+/// Pairs CHAIN by overlapping a column: step `k` sits in row `cy + k*sy` with its far glyph at
+/// column `cx + (k+1)*sx`, leaving the line attached at `(cx + (k+1)*sx, cy + (k+1)*sy)` — which is
+/// where step `k+1` picks it up. `n` steps span `n+1` rows and `n+1` columns: a 1:1 cell ratio,
+/// which is a 63° climb, not 45°; see `diagonal_col_gap`.
+///
+/// Step 0 is a HALF pair — the far glyph only, since its near cell would be the corner itself. That
+/// is also what makes `n = 0` meaningful: a single glyph crossing one row. Without it a one-row hop
+/// could not be drawn at all and the arrival fell back to an orthogonal bridge, leaving a stray
+/// one-cell line dangling off the corner. One row is not a rare case — a connector handing off to
+/// lane 1 or beyond of a channel has only that much room, because higher lanes sit closer to the
+/// next box.
+
 /// The direction bit that seams a `dir` chain to the orthogonal cell it hands off to (SQ-0314).
 ///
 /// A chain leaves its last cell through that cell's upper- or lower-centre, and the handoff cell
@@ -969,17 +976,20 @@ fn diagonal_chain(
         _ => return None,
     };
     let (cx, cy) = anchor;
-    // `n` pairs reach `(cx + (n+1)*sx, cy + (n+1)*sy)`. Take as many as fit inside BOTH the row
-    // and the column budget, so the chain lands on `target` when the gaps are square and stops
-    // short — leaving the remainder to an orthogonal run — when they are not.
+    // `n` steps reach `(cx + (n+1)*sx, cy + (n+1)*sy)`. Take as many as fit inside BOTH the row and
+    // the column budget, so the chain lands on `target` when the gaps are square and stops short —
+    // leaving the remainder to an orthogonal run — when they are not.
     let n = ((target.1 - cy).abs() - 1).min((target.0 - cx).abs() - 1);
-    if n < 1 {
-        return None; // no room for even one pair; the caller keeps the orthogonal geometry
+    if n < 0 {
+        return None; // the target is level with the corner; nothing diagonal to draw
     }
-    let mut cells = Vec::with_capacity(2 * n as usize);
-    for k in 1..=n {
+    let mut cells = Vec::with_capacity(2 * n as usize + 1);
+    for k in 0..=n {
         let row = cy + k * sy;
-        cells.push(((cx + k * sx, row), near));
+        // Step 0's near cell would BE the corner, so it contributes its far glyph only.
+        if k > 0 {
+            cells.push(((cx + k * sx, row), near));
+        }
         cells.push(((cx + (k + 1) * sx, row), far));
     }
     Some((cells, (cx + (n + 1) * sx, cy + (n + 1) * sy)))
@@ -2957,6 +2967,58 @@ mod tests {
     }
 
     #[test]
+    fn a_one_row_hop_draws_a_single_half_diagonal() {
+        // SQ-0314. Found on Zork's #217 "South of House" <-> #89 "Behind House": a dangling
+        // eastward line hung off #217's top corner.
+        //
+        // The connector handed off to LANE 1 of its channel, not lane 0 — higher lanes sit closer
+        // to the next box, so only ONE row separated the corner from the run. The chain required a
+        // full pair (two rows), bailed, and the arrival fell back to the orthogonal bridge: it came
+        // into the corner sideways, leaving a stray one-cell `─` beside it. `DIAG_GUTTER` cannot
+        // fix this — it sizes the gap, but the lane's position inside the gap is what bites.
+        //
+        // A single half-diagonal in the corner's OWN row spans exactly one row, and joins the
+        // corner edge-to-edge: 🮠's middle-left meets the corner's middle-right, and its
+        // upper-centre meets the bottom of the cell holding the run.
+        let g = AppState::default().symbols.path;
+        let (cells, resume) =
+            diagonal_chain((40, 41), (42, 40), Direction::NE, &g).expect("a one-row hop draws");
+        assert_eq!(cells, vec![((41, 41), g.diag_ul)], "a single 🮠, in the corner's own row");
+        assert_eq!(resume, (41, 40), "handing the line up to the run's row");
+
+        // Level with the corner there is genuinely nothing diagonal to draw, and the caller keeps
+        // its orthogonal geometry.
+        assert!(diagonal_chain((40, 41), (42, 41), Direction::NE, &g).is_none(), "zero rows");
+    }
+
+    #[test]
+    fn a_chain_starts_edge_to_edge_with_its_corner() {
+        // Step 0 is a HALF pair: its near cell would be the corner itself, so it contributes only
+        // its far glyph, in the corner's own row. That is what makes the chain touch the corner
+        // rather than start diagonally offset from it with a visible seam.
+        let g = AppState::default().symbols.path;
+        for (dir, first) in [
+            (Direction::NE, ((41, 40), g.diag_ul)),
+            (Direction::NW, ((39, 40), g.diag_ur)),
+            (Direction::SE, ((41, 40), g.diag_ll)),
+            (Direction::SW, ((39, 40), g.diag_lr)),
+        ] {
+            let (sx, sy) = match dir {
+                Direction::NE => (1, -1),
+                Direction::NW => (-1, -1),
+                Direction::SE => (1, 1),
+                _ => (-1, 1),
+            };
+            let target = (40 + 4 * sx, 40 + 4 * sy);
+            let (cells, _) = diagonal_chain((40, 40), target, dir, &g).expect("draws");
+            assert_eq!(cells[0].0, (40 + sx, 40), "{dir:?}: step 0 sits in the corner's OWN row");
+            assert_eq!(cells[0], first, "{dir:?}: and carries the far glyph");
+            // n steps emit 2n+1 glyphs — the half pair plus n full ones.
+            assert_eq!(cells.len(), 2 * 3 + 1, "{dir:?}: {cells:?}");
+        }
+    }
+
+    #[test]
     fn no_two_connectors_share_a_corner_anchor() {
         use mapper::mapper::Mapper;
         // The realistic sequence that exposed the collision: a 3-command asymmetric diagonal
@@ -3062,17 +3124,20 @@ mod tests {
         //    5|             🮣🮠
         //    6|            🮣🮠
         //    7|           🮣🮠
-        //    8|╭─────────↗
+        //    8|╭─────────↗🮠
         //
-        // Each 🮣🮠 pair climbs one row and one column, and pairs overlap by a column, so the
-        // chain steps up-right cleanly. Every pair must be present: drawing only the first (the
-        // original fixed-length stub) leaves the line stranded mid-gap needing a dogleg home.
+        // Each 🮣🮠 pair climbs one row and one column, and pairs overlap by a column, so the chain
+        // steps up-right cleanly. Every step must be present: drawing only the first (the original
+        // fixed-length stub) leaves the line stranded mid-gap needing a dogleg home.
+        //
+        // `n` steps emit `2n+1` glyphs, not `2n`: step 0 is a HALF pair sitting in the corner's own
+        // row, whose single glyph joins the corner edge-to-edge.
         let area = Rect::new(0, 0, 80, 30);
         let buf = render_ne(true);
         assert_eq!(
             count_diag_glyphs(&buf, area),
-            6,
-            "the chain runs corner to corner: three 🮣🮠 pairs across the DIAG_GUTTER-sized gap",
+            7,
+            "corner to corner across the DIAG_GUTTER-sized gap: a half pair, then three full ones",
         );
 
         // Each pair is 🮣 immediately left of 🮠 on one row — the ascending order. And the pairs
