@@ -2970,6 +2970,12 @@ impl Model {
                     }
                     w(&mut out, win.mouse_req as u32);
                     w(&mut out, win.hyperlink_req as u32);
+                    // Per-window Normal-style colour snapshot (SQ-0334, v6): a HOST
+                    // snapshot resumes the VM without the game re-establishing hints,
+                    // so the window's own colours must survive the round-trip.
+                    for sc in &win.styles {
+                        put_style_colour(&mut out, sc);
+                    }
                 }
             }
         }
@@ -3073,6 +3079,20 @@ impl Model {
             w(&mut out, rs.unicode as u32);
             w(&mut out, rs.text as u32);
         }
+        // (e) global style state (SQ-0334, v6): the wintype-global colour hints and
+        // rendered attributes. A host snapshot resumes mid-game without the game
+        // re-running its `glk_stylehint_set` calls, so these must round-trip (fixed
+        // arity — two wintype rows × NUMSTYLES).
+        for row in &self.style_hints {
+            for sc in row {
+                put_style_colour(&mut out, sc);
+            }
+        }
+        for row in &self.style_attrs {
+            for sa in row {
+                put_style_attrs(&mut out, sa);
+            }
+        }
         out
     }
 
@@ -3085,7 +3105,7 @@ impl Model {
         let version = r.u32()?;
         // Version 4 snapshots (pre resource streams, SQ-0308) lack the trailing
         // resource_streams table and stream-kind tag 4; still restorable.
-        if version != 4 && version != GLK_SNAPSHOT_VERSION {
+        if !(4..=GLK_SNAPSHOT_VERSION).contains(&version) {
             return Err(format!("unsupported Glk snapshot version {version}"));
         }
         let root = r.u32()?;
@@ -3118,12 +3138,18 @@ impl Model {
             let char_req = if r.u32()? != 0 { Some(CharReq { unicode: r.u32()? != 0 }) } else { None };
             let mouse_req = r.u32()? != 0;
             let hyperlink_req = r.u32()? != 0;
+            // Per-window Normal-style colour snapshot (v6+). Older snapshots default
+            // (the game repaints on its own @restore); a host snapshot carries them.
+            let mut styles = [StyleColour::default(); NUMSTYLES as usize];
+            if version >= 6 {
+                for sc in &mut styles {
+                    *sc = read_style_colour(&mut r)?;
+                }
+            }
             windows.push(Some(Window {
                 id, wintype, rock, parent, stream, rect, grid, line_req, char_req, mouse_req,
                 hyperlink_req, terminators: Vec::new(), echo_line: true, echo: 0, child1, child2, key, method, size,
-                // Reset to defaults on restore (like `style_hints`); the game
-                // re-establishes its hints and repaints. Not serialized.
-                styles: [StyleColour::default(); NUMSTYLES as usize],
+                styles,
             }));
         }
 
@@ -3218,6 +3244,22 @@ impl Model {
             }
         }
 
+        // (e) global style state (v6+): wintype-global colour hints + attributes.
+        let mut style_hints = [[StyleColour::default(); NUMSTYLES as usize]; 2];
+        let mut style_attrs = [[StyleAttrs::default(); NUMSTYLES as usize]; 2];
+        if version >= 6 {
+            for row in &mut style_hints {
+                for sc in row {
+                    *sc = read_style_colour(&mut r)?;
+                }
+            }
+            for row in &mut style_attrs {
+                for sa in row {
+                    *sa = read_style_attrs(&mut r)?;
+                }
+            }
+        }
+
         if !r.done() {
             return Err("Glk snapshot: trailing bytes".to_string());
         }
@@ -3230,8 +3272,8 @@ impl Model {
             root,
             cur_stream,
             events: std::collections::VecDeque::new(),
-            style_hints: [[StyleColour::default(); NUMSTYLES as usize]; 2],
-            style_attrs: [[StyleAttrs::default(); NUMSTYLES as usize]; 2],
+            style_hints,
+            style_attrs,
             char_px: (1, 1),
             vfs_dirty: false,
             saved_game_files: std::collections::BTreeMap::new(),
@@ -3312,7 +3354,7 @@ fn read_blob(bytes: &[u8], p: &mut usize) -> Option<Vec<u8>> {
 }
 
 /// Version tag at the head of a `Glk ` snapshot chunk (bumped on a format change).
-const GLK_SNAPSHOT_VERSION: u32 = 5;
+const GLK_SNAPSHOT_VERSION: u32 = 6;
 
 /// Sequential big-endian-`u32` reader over a `Glk ` snapshot chunk. Underflow is
 /// an error, never a panic.
@@ -3351,6 +3393,51 @@ impl<'a> SnapReader<'a> {
     fn done(&self) -> bool {
         self.pos == self.data.len()
     }
+    /// Read an `Option<u32>` written by [`put_opt_u32`]: a presence flag then the
+    /// value (0 when absent).
+    fn opt_u32(&mut self) -> Result<Option<u32>, String> {
+        let present = self.u32()? != 0;
+        let v = self.u32()?;
+        Ok(present.then_some(v))
+    }
+}
+
+// ── style-state (de)serialization helpers (SQ-0334) ─────────────────────────────
+
+/// Append an `Option<u32>`: a `u32` presence flag (1/0) then the value (0 if `None`).
+fn put_opt_u32(out: &mut Vec<u8>, o: Option<u32>) {
+    out.extend_from_slice(&(o.is_some() as u32).to_be_bytes());
+    out.extend_from_slice(&o.unwrap_or(0).to_be_bytes());
+}
+
+fn put_style_colour(out: &mut Vec<u8>, sc: &StyleColour) {
+    put_opt_u32(out, sc.fg);
+    put_opt_u32(out, sc.bg);
+    out.extend_from_slice(&(sc.reverse as u32).to_be_bytes());
+}
+
+fn put_style_attrs(out: &mut Vec<u8>, sa: &StyleAttrs) {
+    put_opt_u32(out, sa.weight);
+    put_opt_u32(out, sa.oblique);
+    put_opt_u32(out, sa.indent.map(|v| v as u32));
+    put_opt_u32(out, sa.para_indent.map(|v| v as u32));
+    put_opt_u32(out, sa.justify);
+}
+
+fn read_style_colour(r: &mut SnapReader) -> Result<StyleColour, String> {
+    let fg = r.opt_u32()?;
+    let bg = r.opt_u32()?;
+    let reverse = r.u32()? != 0;
+    Ok(StyleColour { fg, bg, reverse })
+}
+
+fn read_style_attrs(r: &mut SnapReader) -> Result<StyleAttrs, String> {
+    let weight = r.opt_u32()?;
+    let oblique = r.opt_u32()?;
+    let indent = r.opt_u32()?.map(|v| v as i32);
+    let para_indent = r.opt_u32()?.map(|v| v as i32);
+    let justify = r.opt_u32()?;
+    Ok(StyleAttrs { weight, oblique, indent, para_indent, justify })
 }
 
 /// Split `rect` into `(rect_for_old_window, rect_for_new_window)` per a
@@ -3435,6 +3522,27 @@ mod layout_snap_tests {
         m.relayout(80, 40, (9, 19));
         assert_eq!(m.window_size(gfx).unwrap().0, 40);
         assert_eq!(m.window_size(buf).unwrap().0, 40);
+    }
+
+    // SQ-0332: a game may set a window's Normal-style background AFTER the window
+    // opens (Kerkerkruip paints its panels; Counterfeit Monkey its page). The live
+    // window tree must reflect that current global hint on the leaf's `bg` — the
+    // host re-pushes the tree (Machine::sync_window_tree) so the pane paints the
+    // right colour without waiting for a structural relayout.
+    #[test]
+    fn window_tree_reflects_stylehint_set_after_open() {
+        let mut m = Model::new();
+        let _buf = m.window_open(0, 0, 0, 3, 0).unwrap(); // TextBuffer root
+        m.relayout(80, 24, (1, 1));
+        // Normal (style 0) BackColor (hint 8) for buffer windows (wintype 3),
+        // set AFTER the window already opened.
+        m.set_style_hint(3, 0, 8, 0x00EE_EEEE);
+        match m.window_tree().expect("a root window exists") {
+            WinTree::Leaf { bg, .. } => {
+                assert_eq!(bg, Some(0x00EE_EEEE), "late global stylehint reflected in the tree leaf bg");
+            }
+            other => panic!("a lone buffer must be a leaf, got {other:?}"),
+        }
     }
 
     // A vertical proportional split constrains rows, not columns. With the
@@ -3807,6 +3915,27 @@ mod layout_snap_tests {
             Some(0x0022_2222),
             "B has its own, later snapshot — distinct from A",
         );
+    }
+
+    // SQ-0334: a HOST snapshot resumes mid-game without the game re-running its
+    // stylehint calls, so per-window colour snapshots AND the wintype-global hints
+    // (colour + attributes) must survive save → restore.
+    #[test]
+    fn style_state_round_trips_through_host_snapshot() {
+        let mut m = Model::new();
+        m.set_style_hint(3, 0, 8, 0x00AA_AAAA); // buffer Normal BackColor (global)
+        let a = m.window_open(0, 0, 0, 3, 0).unwrap(); // A snapshots 0xAAAAAA
+        m.set_style_hint(3, 0, 8, 0x0022_2222); // change global (A's snapshot stays)
+        let b = m.window_open(a, WINMETHOD_BELOW | WINMETHOD_PROPORTIONAL, 50, 3, 0).unwrap();
+        m.set_style_hint(3, 0, 4, 700); // Weight attribute on buffer Normal (global)
+        m.set_style_hint(4, 1, 7, 0x0000_00FF); // grid Emphasized TextColor (global grid row)
+
+        let restored = Model::deserialize(&m.serialize()).expect("round-trip");
+        assert_eq!(restored.window_style_colour(a, GlkStyle::Normal).bg, Some(0x00AA_AAAA), "A's per-window snapshot survived");
+        assert_eq!(restored.window_style_colour(b, GlkStyle::Normal).bg, Some(0x0022_2222), "B's per-window snapshot survived");
+        assert_eq!(restored.style_colour(WinType::TextBuffer, GlkStyle::Normal).bg, Some(0x0022_2222), "global buffer colour hint survived");
+        assert_eq!(restored.style_colour(WinType::TextGrid, GlkStyle::Emphasized).fg, Some(0x0000_00FF), "global grid colour hint survived");
+        assert_eq!(restored.style_attrs(WinType::TextBuffer, GlkStyle::Normal).weight, Some(700), "global attribute hint survived");
     }
 
     // A missing id or a pair window has no snapshot → default (all-None).
