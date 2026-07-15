@@ -34,6 +34,15 @@ pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffe
     if cw == 0 || ch == 0 {
         return false;
     }
+    // A window with no opaque pixel anywhere is blank — the game opened it but
+    // never painted it (narco frames its story with graphics windows it leaves
+    // empty). Report it HANDLED (painting nothing) so it does NOT fall through to
+    // the image protocol, which would garble a transparent image into stray
+    // chars/lines over the neighbouring windows. The scan short-circuits on the
+    // first opaque pixel, so a real image pays almost nothing. (SQ-0338)
+    if !gw.canvas.pixels().any(|p| p[3] >= 128) {
+        return true;
+    }
     // A cell's colour is the AVERAGE of the OPAQUE pixels in its canvas region, or
     // `None` if the region has none. Scanning the whole region (not just the centre
     // pixel) is essential: games draw their rules as 1–2px lines that rarely sit at
@@ -278,6 +287,22 @@ mod tests {
         let area = Rect::new(0, 0, 10, 10);
         let mut buf = Buffer::empty(area);
         assert!(!render_graphics_as_cells(&gw, area, &mut buf), "detailed image → protocol, not cells");
+    }
+
+    #[test]
+    fn large_fully_transparent_is_handled_not_sent_to_protocol() {
+        // narco opens big border frames around its story but never paints them.
+        // A blank (all-transparent) window must be reported HANDLED (painting
+        // nothing), NOT bounced to the image protocol — a transparent image gets
+        // garbled into artifacts (stray chars/lines) over the neighbouring
+        // windows in a real terminal. (SQ-0338)
+        let img = image::RgbaImage::new(90, 190); // 10×10 cells, all transparent
+        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1 };
+        let area = Rect::new(0, 0, 10, 10);
+        let mut buf = Buffer::empty(area);
+        buf.cell_mut((5, 5)).unwrap().set_style(Style::default().bg(Color::Rgb(1, 2, 3)));
+        assert!(render_graphics_as_cells(&gw, area, &mut buf), "blank window → handled, not protocol");
+        assert_eq!(buf.cell((5, 5)).unwrap().style().bg, Some(Color::Rgb(1, 2, 3)), "blank → underlying kept");
     }
 
     #[test]
