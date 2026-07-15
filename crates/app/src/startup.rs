@@ -177,6 +177,9 @@ pub(crate) fn boot() -> BootResult {
     if let Some(v) = app::styles::read_per_game_honor(&cfg.user_dir, &ifid) {
         cfg.honor_game_colours = v;
     }
+    // SQ-0341: per-game borderless-windows override (default off → honor the Glk
+    // border hint). Applies to Glulx layout from the first relayout at boot.
+    let borderless = app::styles::read_per_game_borderless(&cfg.user_dir, &ifid).unwrap_or(false);
     let theme_colours = app::glk_backend::theme_style_colours(&cs);
 
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
@@ -219,6 +222,7 @@ pub(crate) fn boot() -> BootResult {
                 cfg.acceleration,
                 cfg.images,
                 cfg.enable_sound,
+                borderless,
                 char_px,
                 pict_blorb,
                 &vfs_sidecar,

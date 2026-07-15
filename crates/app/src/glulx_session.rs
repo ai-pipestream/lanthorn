@@ -283,7 +283,7 @@ impl GlulxSession {
         // (style_measure of an unhinted colour reports unknown). Used by tests.
         Self::new_in(
             std::path::PathBuf::new(), image, cols, rows, acceleration,
-            graphics_enabled, sound_enabled, char_px, pict_blorb, vfs_bytes,
+            graphics_enabled, sound_enabled, false, char_px, pict_blorb, vfs_bytes,
             ((None, None), (None, None)),
         )
     }
@@ -302,6 +302,7 @@ impl GlulxSession {
         acceleration: bool,
         graphics_enabled: bool,
         sound_enabled: bool,
+        borderless: bool,
         char_px: (u32, u32),
         pict_blorb: Option<blorb::Blorb>,
         vfs_bytes: &[u8],
@@ -318,6 +319,9 @@ impl GlulxSession {
         machine.set_acceleration(acceleration);
         machine.set_graphics(graphics_enabled);
         machine.set_sound(sound_enabled);
+        // Per-game borderless-windows mode: applies from the first relayout at
+        // boot, so the game's windows abut with no reserved gutter (SQ-0341).
+        machine.set_borderless(borderless);
         // Load the per-story Glk file VFS sidecar BEFORE booting: a Glulx game
         // may read a cache during boot (e.g. CM skips its long init) or write one
         // (leaving vfs_dirty set), so the sidecar must be in place first (SQ-0290).
@@ -1096,7 +1100,7 @@ mod tests {
         std::fs::write(dir.join("foo.qzl"), b"pretend-save-bytes").expect("write foo.qzl");
 
         let mut sess = GlulxSession::new_in(
-            dir.clone(), image_for(body, 3), 80, 24, true, false, false, (1, 1), None, &[],
+            dir.clone(), image_for(body, 3), 80, 24, true, false, false, false, (1, 1), None, &[],
             ((None, None), (None, None)),
         )
         .expect("new_in");
@@ -1330,7 +1334,7 @@ mod tests {
         body.extend(enc(0x120, &[])); // quit
 
         let sess = GlulxSession::new_in(
-            dir.clone(), image_for(body, 2), 80, 24, true, false, false, (1, 1), None, &[],
+            dir.clone(), image_for(body, 2), 80, 24, true, false, false, false, (1, 1), None, &[],
             ((None, None), (None, None)),
         )
         .expect("new");

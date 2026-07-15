@@ -1249,6 +1249,13 @@ pub struct Model {
     /// Open Blorb data-resource streams keyed by stream id (the owned bytes +
     /// read cursor for each [`StreamKind::Resource`] stream).
     resource_streams: std::collections::BTreeMap<u32, ResourceStream>,
+    /// When true, honor every window border as ZERO width: splits reserve no
+    /// gutter cell and the tree reports `border: false`, so windows abut like a
+    /// pixel interpreter (Gargoyle). A per-game opt-in for layouts whose full-cell
+    /// gutters read as gaps or double a game's own graphics dividers (narco).
+    /// Default false → the Glk border hint is honored (bordered → 1-cell gutter,
+    /// NoBorder → none). (SQ-0341)
+    borderless: bool,
 }
 
 /// The read state of an open Blorb data-resource stream (see
@@ -1306,6 +1313,24 @@ impl Model {
             saved_game_files: std::collections::BTreeMap::new(),
             savegame_streams: std::collections::BTreeMap::new(),
             resource_streams: std::collections::BTreeMap::new(),
+            borderless: false,
+        }
+    }
+
+    /// Set the per-game borderless-windows mode (SQ-0341): `true` makes every
+    /// split abut with no reserved gutter and no reported border.
+    pub fn set_borderless(&mut self, on: bool) {
+        self.borderless = on;
+    }
+
+    /// The gutter width (cells) reserved for a split's border under the current
+    /// mode: 0 when [`borderless`](Self::borderless), else 1 for a bordered split
+    /// (the Glk default) and 0 for `winmethod_NoBorder`. (SQ-0341)
+    fn split_border(&self, method: u32) -> u32 {
+        if self.borderless || (method & WINMETHOD_BORDERMASK) == WINMETHOD_NOBORDER {
+            0
+        } else {
+            1
         }
     }
 
@@ -1984,9 +2009,9 @@ impl Model {
             // This split divides the axis under test. A bordered split reserves
             // one cell (the separator), so the proportional halves must divide
             // the *content* (`size − border`), not the full extent — otherwise a
-            // bordered 50% split lands on unequal cells.
-            let border = if (w.method & WINMETHOD_BORDERMASK) != WINMETHOD_NOBORDER { 1 } else { 0 };
-            let content = size.saturating_sub(border);
+            // bordered 50% split lands on unequal cells. Borderless mode reserves
+            // nothing, so the halves divide the full extent (SQ-0341).
+            let content = size.saturating_sub(self.split_border(w.method));
             let proportional = (w.method & WINMETHOD_DIVISIONMASK) == WINMETHOD_PROPORTIONAL;
             if proportional && !(content * w.size).is_multiple_of(100) {
                 return false; // (content * pct) / 100 would truncate → fractional split
@@ -2050,7 +2075,7 @@ impl Model {
                 } else {
                     size
                 };
-                let (r_old, r_new) = split_rect(rect, method, eff_size);
+                let (r_old, r_new) = split_rect(rect, method, eff_size, self.split_border(method));
                 self.layout_window(child1, r_old);
                 self.layout_window(child2, r_new);
             }
@@ -2103,7 +2128,8 @@ impl Model {
         }
         let dir = w.method & WINMETHOD_DIRMASK;
         let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
-        let border = (w.method & WINMETHOD_BORDERMASK) != WINMETHOD_NOBORDER;
+        // Borderless mode reports no border, so the app render abuts (SQ-0341).
+        let border = self.split_border(w.method) > 0;
         let c1 = self.build_win_tree(w.child1);
         let c2 = self.build_win_tree(w.child2);
         // Glk's child1/child2 are old/key, not position; order them by on-screen
@@ -3291,6 +3317,9 @@ impl Model {
             saved_game_files: std::collections::BTreeMap::new(),
             savegame_streams: std::collections::BTreeMap::new(),
             resource_streams,
+            // Runtime per-game setting, not part of the snapshot: the host
+            // re-applies it after restore (SQ-0341).
+            borderless: false,
         })
     }
 }
@@ -3464,12 +3493,11 @@ fn read_style_attrs(r: &mut SnapReader) -> Result<StyleAttrs, String> {
 /// requested size and the border comes out of the sibling's share. So the
 /// content apportioned between the children is `total − 1`, and the two
 /// children sit on either side of the reserved cell.
-fn split_rect(rect: Rect, method: u32, size: u32) -> (Rect, Rect) {
+fn split_rect(rect: Rect, method: u32, size: u32, border: u32) -> (Rect, Rect) {
     let dir = method & WINMETHOD_DIRMASK;
     let division = method & WINMETHOD_DIVISIONMASK;
     let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;
     let total = if vertical { rect.height } else { rect.width };
-    let border = if (method & WINMETHOD_BORDERMASK) != WINMETHOD_NOBORDER { 1 } else { 0 };
     let border = border.min(total); // a degenerate 0-cell rect can't spare one
     let content = total - border;
     let new_size = if division == WINMETHOD_PROPORTIONAL {
@@ -3789,6 +3817,24 @@ mod layout_snap_tests {
         m.relayout(80, 24, (1, 1));
         assert_eq!(m.window_size(grid).unwrap().0, 20);
         assert_eq!(m.window_size(buf).unwrap().0, 60, "no border reserved → 80 − 20");
+    }
+
+    // SQ-0341: with the per-game borderless mode on, a DEFAULT-bordered split
+    // reserves no gutter (like NoBorder) AND the tree reports border=false, so the
+    // app render abuts — a proportional half-split divides the full extent.
+    #[test]
+    fn borderless_mode_makes_bordered_splits_abut() {
+        let mut m = Model::new();
+        m.set_borderless(true);
+        let buf = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let grid = m.window_open(buf, WINMETHOD_LEFT | WINMETHOD_FIXED, 20, 4, 0).unwrap(); // default border
+        m.relayout(80, 24, (1, 1));
+        assert_eq!(m.window_size(grid).unwrap().0, 20, "fixed key keeps its 20 cols");
+        assert_eq!(m.window_size(buf).unwrap().0, 60, "borderless → sibling gets 80 − 20 (no gutter)");
+        match m.window_tree().expect("a root pair") {
+            WinTree::Pair { border, .. } => assert!(!border, "borderless → tree reports no border"),
+            other => panic!("root should be a pair, got {other:?}"),
+        }
     }
 
     // Below|Fixed 3 rows with the default border: the border is a row this time.

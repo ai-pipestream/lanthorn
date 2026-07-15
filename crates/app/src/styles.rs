@@ -27,24 +27,60 @@ pub fn read_per_game_honor(user_dir: &Path, ifid: &str) -> Option<bool> {
         .and_then(|v| v.as_bool())
 }
 
-/// Persist (or clear) the per-game `honor_game_colours` override. `Some(v)` writes
-/// the sidecar (creating `styles/` if needed); `None` clears it (deletes the
-/// sidecar → fall back to garglk.ini / the global default).
-pub fn write_per_game_honor(user_dir: &Path, ifid: &str, value: Option<bool>) -> std::io::Result<()> {
+/// Read the per-game `borderless_windows` override, if the user set one. `None`
+/// = no override (fall back to the default: honor the Glk border hint). When
+/// `Some(true)`, all window splits abut with no reserved gutter (SQ-0341).
+pub fn read_per_game_borderless(user_dir: &Path, ifid: &str) -> Option<bool> {
     let path = per_game_config_path(user_dir, ifid);
-    match value {
-        Some(v) => {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            std::fs::write(&path, format!("honor_game_colours = {v}\n"))
-        }
-        None => match std::fs::remove_file(&path) {
+    let text = std::fs::read_to_string(&path).ok()?;
+    text.parse::<toml::Value>()
+        .ok()?
+        .get("borderless_windows")
+        .and_then(|v| v.as_bool())
+}
+
+/// Write the per-game config sidecar with the given overrides, omitting a `None`
+/// key and deleting the file entirely when both are `None`. Centralised so each
+/// key's writer preserves the other's value (SQ-0341). Creates `styles/` if
+/// needed.
+fn write_per_game_config(
+    user_dir: &Path,
+    ifid: &str,
+    honor: Option<bool>,
+    borderless: Option<bool>,
+) -> std::io::Result<()> {
+    let path = per_game_config_path(user_dir, ifid);
+    let mut body = String::new();
+    if let Some(v) = honor {
+        body.push_str(&format!("honor_game_colours = {v}\n"));
+    }
+    if let Some(v) = borderless {
+        body.push_str(&format!("borderless_windows = {v}\n"));
+    }
+    if body.is_empty() {
+        return match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
-        },
+        };
     }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, body)
+}
+
+/// Persist (or clear) the per-game `honor_game_colours` override, preserving any
+/// `borderless_windows` override in the same sidecar. `Some(v)` writes it; `None`
+/// clears it (→ fall back to garglk.ini / the global default).
+pub fn write_per_game_honor(user_dir: &Path, ifid: &str, value: Option<bool>) -> std::io::Result<()> {
+    write_per_game_config(user_dir, ifid, value, read_per_game_borderless(user_dir, ifid))
+}
+
+/// Persist (or clear) the per-game `borderless_windows` override, preserving any
+/// `honor_game_colours` override in the same sidecar (SQ-0341).
+pub fn write_per_game_borderless(user_dir: &Path, ifid: &str, value: Option<bool>) -> std::io::Result<()> {
+    write_per_game_config(user_dir, ifid, read_per_game_honor(user_dir, ifid), value)
 }
 
 /// Write the live look self-contained to the current game's per-game style file
@@ -145,6 +181,28 @@ mod tests {
         assert!(!per_game_config_path(&dir, ifid).exists());
         // Clearing when already absent is a no-op, not an error.
         write_per_game_honor(&dir, ifid, None).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn per_game_borderless_roundtrips_and_coexists_with_honor() {
+        let dir = tmp("borderless");
+        let ifid = "GLUL-1-ABCDEF-0001";
+        assert_eq!(read_per_game_borderless(&dir, ifid), None);
+        // Borderless persists and reads back.
+        write_per_game_borderless(&dir, ifid, Some(true)).unwrap();
+        assert_eq!(read_per_game_borderless(&dir, ifid), Some(true));
+        // Setting honor must PRESERVE the borderless override (shared sidecar).
+        write_per_game_honor(&dir, ifid, Some(false)).unwrap();
+        assert_eq!(read_per_game_honor(&dir, ifid), Some(false));
+        assert_eq!(read_per_game_borderless(&dir, ifid), Some(true), "honor write kept borderless");
+        // Clearing borderless keeps honor.
+        write_per_game_borderless(&dir, ifid, None).unwrap();
+        assert_eq!(read_per_game_borderless(&dir, ifid), None);
+        assert_eq!(read_per_game_honor(&dir, ifid), Some(false), "borderless clear kept honor");
+        // Clearing the last key removes the sidecar.
+        write_per_game_honor(&dir, ifid, None).unwrap();
+        assert!(!per_game_config_path(&dir, ifid).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

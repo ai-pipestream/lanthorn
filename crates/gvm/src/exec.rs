@@ -2076,6 +2076,12 @@ impl Machine {
         self.graphics_enabled
     }
 
+    /// Set the per-game borderless-windows mode: `true` makes all window splits
+    /// abut with no reserved gutter cell and no reported border (SQ-0341).
+    pub fn set_borderless(&mut self, on: bool) {
+        self.glk.set_borderless(on);
+    }
+
     /// Enable/disable Glk sound (gestalt + schannel opcodes).
     pub fn set_sound(&mut self, on: bool) {
         self.sound_enabled = on;

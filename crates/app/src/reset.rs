@@ -63,6 +63,9 @@ pub(crate) fn reset_game(
             // full initialization (deleting default.glkvfs on disk is not enough —
             // the cache also lives in memory and would otherwise be carried over).
             let carry_vfs = if delete_data { Vec::new() } else { session.vfs_bytes() };
+            // Preserve the per-game borderless-windows override across @restart (SQ-0341).
+            let borderless =
+                app::styles::read_per_game_borderless(&state.config.user_dir, &state.ifid).unwrap_or(false);
             GlulxSession::new_in(
                 game_dir.to_path_buf(),
                 bytes,
@@ -71,6 +74,7 @@ pub(crate) fn reset_game(
                 state.config.acceleration,
                 state.config.images,
                 state.config.enable_sound,
+                borderless,
                 char_px,
                 pict_blorb,
                 &carry_vfs,
