@@ -750,6 +750,17 @@ impl Machine {
             // Undo (in-memory; @save/@restore stream opcodes are sub-project 3).
             0x125 => self.op_saveundo(),
             0x126 => self.op_restoreundo(),
+            // ExtUndo (Glulx 3.1.3): query / discard the temporary undo state.
+            0x128 => {
+                // hasundo — S1 = 0 if a restoreundo would succeed (a state is saved), else 1.
+                let (_, s) = self.read_operands(0, 1)?;
+                self.store(s[0], u32::from(self.undo_stack.is_empty()))
+            }
+            // discardundo — drop the most recent saved state; a no-op if none. Zero operands.
+            0x129 => {
+                self.undo_stack.pop();
+                Ok(())
+            }
             // Protect a RAM range across restore/restoreundo (L2 == 0 clears).
             0x127 => {
                 let (l, _) = self.read_operands(2, 0)?;
@@ -1561,6 +1572,7 @@ impl Machine {
             9 => 1,                                    // Acceleration: interception implemented
             10 => u32::from(crate::accel::accel_impl_supported(arg)), // AccelFunc: implemented function numbers
             11 => 1,                                   // Float
+            12 => 1,                                   // ExtUndo (hasundo / discardundo)
             _ => 0,
         }
     }
@@ -7273,6 +7285,30 @@ mod tests {
         assert_eq!(m.mem.read32(0x110).unwrap(), 0); // prior state restored
         assert_eq!(m.local_load(0).unwrap(), 0xFFFF_FFFF); // saveundo "returns" -1
         assert_eq!(m.mem.read32(0x104).unwrap(), 0); // restoreundo stored nothing on success
+    }
+
+    #[test]
+    fn hasundo_and_discardundo_track_the_undo_stack() {
+        // hasundo→mem (empty), saveundo, hasundo→mem (available), discardundo,
+        // hasundo→mem (empty again), quit.
+        let mut body = asm::ins(0x128, &[asm::Op::Mem16(0x0100)]);   // hasundo → mem[0x100]
+        body.extend(asm::ins(0x125, &[asm::Op::Mem16(0x0104)]));     // saveundo → mem[0x104]
+        body.extend(asm::ins(0x128, &[asm::Op::Mem16(0x0108)]));     // hasundo → mem[0x108]
+        body.extend(asm::ins(0x129, &[]));                           // discardundo
+        body.extend(asm::ins(0x128, &[asm::Op::Mem16(0x010C)]));     // hasundo → mem[0x10C]
+        body.extend(asm::ins(0x120, &[]));                           // quit
+        let mut m = machine_with_body(&[(4, 1)], body);
+
+        m.step_once().unwrap(); // hasundo (empty)
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "no undo state yet → 1");
+
+        m.step_once().unwrap(); // saveundo
+        m.step_once().unwrap(); // hasundo (available)
+        assert_eq!(m.mem.read32(0x108).unwrap(), 0, "undo state available → 0");
+
+        m.step_once().unwrap(); // discardundo
+        m.step_once().unwrap(); // hasundo (empty again)
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 1, "undo state discarded → 1");
     }
 
     #[test]
