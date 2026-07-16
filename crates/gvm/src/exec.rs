@@ -722,13 +722,9 @@ impl Machine {
             }
             0x111 => {
                 let (l, _) = self.read_operands(1, 0)?;
-                if l[0] == 0 {
-                    self.rng = Self::DEFAULT_SEED;
-                    self.diagnostics
-                        .push("setrandom(0): true-entropy seeding deferred; using a fixed seed".to_string());
-                } else {
-                    self.rng = l[0];
-                }
+                // setrandom(0) seeds from a genuinely unpredictable source; a nonzero
+                // argument seeds deterministically (reproducible runs / testing).
+                self.rng = if l[0] == 0 { Self::entropy_seed() } else { l[0] };
                 Ok(())
             }
             // Acceleration (storage only; interception deferred — GLULX_NOTES §17).
@@ -2288,6 +2284,17 @@ impl Machine {
     /// work done by intercepted functions when acceleration is enabled.
     pub fn insn_count(&self) -> u64 {
         self.insn_count
+    }
+
+    /// A best-effort entropy seed for `setrandom(0)`, drawn from std's
+    /// OS-seeded `RandomState` so gvm stays dependency-free and cross-platform.
+    /// Guaranteed nonzero so xorshift32 can never get stuck at 0.
+    fn entropy_seed() -> u32 {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u32(0x9E37_79B9); // fixed salt; the entropy lives in the random keys
+        let s = h.finish() as u32;
+        if s == 0 { Self::DEFAULT_SEED } else { s }
     }
 
     /// Advance the xorshift32 PRNG and return the next 32-bit value.
@@ -7609,7 +7616,7 @@ mod tests {
         };
         assert_eq!(run(0x1234), run(0x1234)); // same seed → same sequence
         assert_ne!(run(0x1234), run(0x4321)); // different seed → different sequence
-        assert_eq!(run(0), run(0)); // setrandom(0): deterministic reseed (entropy deferred)
+        assert_ne!(run(0), run(0)); // setrandom(0): entropy-seeded, non-reproducible
     }
 
     #[test]
