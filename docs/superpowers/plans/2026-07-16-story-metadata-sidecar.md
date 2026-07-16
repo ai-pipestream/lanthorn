@@ -702,7 +702,7 @@ Notes:
 - Build one `ureq::Agent` per client via `Agent::config_builder().timeout_global(Some(TIMEOUT)).build()`, reused across requests.
 - Map results:
   - `Ok(resp)` → read body (capped at `MAX_XML`), `ifiction::parse` → `Ok(Found(f))`. **A parse failure is `Err(Transport)`, not `NotFound`** — a story with no record must not be conflated with a response we failed to read.
-  - IFDB may also answer 200 with an `<ifindex>` containing **no** `<story>` — `ifiction::parse` returns `NotIFiction` for that. Treat *that specific* error as `Ok(NotFound)`. Confirm the real shape by hitting a junk IFID by hand once (`curl 'https://ifdb.org/viewgame?ifiction&ifid=ZCODE-1-000000-0000'`) and match the code to what it actually returns — do not assume.
+  - VERIFIED 2026-07-16 by curl: IFDB's not-found is a genuine **HTTP 404** with a `<viewgame><errorCode>notFound</errorCode>` body, so the `StatusCode(404) → Ok(NotFound)` line handles it directly. Keep the `NotIFiction → Ok(NotFound)` mapping too, as defence in case another query path returns a 200 with no `<story>`.
   - `Err(ureq::Error::StatusCode(404))` → `Ok(NotFound)`.
   - Any other `Err` → `Err(Transport(e.to_string()))`.
 - Body caps: check `cargo doc -p ureq` for the 3.x limit API on `Body` (e.g. `.body_mut().with_config().limit(n).read_to_vec()`); if unclear, cap by reading through `.as_reader().take(n)`. Do not read unbounded.
