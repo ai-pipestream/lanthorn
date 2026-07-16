@@ -1,7 +1,9 @@
 //! Cover-art decoding + terminal-protocol caching for the story picker.
 //!
-//! `load_cover` pulls a blorb's `Fspc` frontispiece image and decodes it;
-//! `CoverState` holds a bounded LRU cache of decoded images and lazily builds
+//! `load_cover` pulls a blorb's `Fspc` frontispiece image and decodes it,
+//! falling back to a fetched `cover.png` sidecar (SQ-0348) when the story has
+//! none of its own; `CoverState` holds a bounded LRU cache of decoded images
+//! and lazily builds
 //! (and caches) a `ratatui-image` protocol scaled to the panel's cover region
 //! for the currently-selected story. `CoverDecoder` owns a background worker
 //! thread that runs `load_cover` off the main loop so scrolling never stalls.
@@ -23,7 +25,7 @@ pub fn decode(bytes: &[u8]) -> Option<image::DynamicImage> {
 /// Read `path`; if it is a blorb declaring an `Fspc` frontispiece, fetch and
 /// decode that Pict. `None` when the file isn't a blorb, has no frontispiece,
 /// the referenced Pict is missing, or the image doesn't decode.
-pub fn load_cover(path: &Path) -> Option<image::DynamicImage> {
+fn frontispiece_cover(path: &Path) -> Option<image::DynamicImage> {
     let bytes = std::fs::read(path).ok()?;
     if !blorb::Blorb::is_blorb(&bytes) {
         return None;
@@ -32,6 +34,20 @@ pub fn load_cover(path: &Path) -> Option<image::DynamicImage> {
     let n = b.frontispiece()?;
     let (_ty, data) = b.resource(b"Pict", n)?;
     decode(data)
+}
+
+/// `path`'s cover, by precedence: the story's own `Fspc` frontispiece always
+/// wins; a fetched `<game_dir>/cover.png` (written by the fetch worker,
+/// SQ-0348) is used only when the story has none. `game_dir` is `None` when
+/// no fallback source is available (e.g. the IFDB-precedence check in
+/// `fetch_worker`, which only cares whether a story already has its own
+/// cover). `None` when neither source yields a decodable image.
+pub fn load_cover(path: &Path, game_dir: Option<&Path>) -> Option<image::DynamicImage> {
+    if let Some(img) = frontispiece_cover(path) {
+        return Some(img);
+    }
+    let bytes = std::fs::read(game_dir?.join("cover.png")).ok()?;
+    decode(&bytes)
 }
 
 /// Cache capacity: how many decoded covers `CoverState` retains before the
@@ -120,19 +136,19 @@ impl CoverState {
 /// when the `CoverDecoder` is dropped (dropping `req_tx` makes the worker's
 /// `recv()` err, ending its loop).
 pub struct CoverDecoder {
-    req_tx: std::sync::mpsc::Sender<PathBuf>,
+    req_tx: std::sync::mpsc::Sender<(PathBuf, PathBuf)>,
     res_rx: std::sync::mpsc::Receiver<(PathBuf, Option<image::DynamicImage>)>,
     _worker: std::thread::JoinHandle<()>,
 }
 
 impl CoverDecoder {
     pub fn new() -> Self {
-        let (req_tx, req_rx) = std::sync::mpsc::channel::<PathBuf>();
+        let (req_tx, req_rx) = std::sync::mpsc::channel::<(PathBuf, PathBuf)>();
         let (res_tx, res_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            while let Ok(path) = req_rx.recv() {
+            while let Ok((path, game_dir)) = req_rx.recv() {
                 // ends when req_tx drops (picker exits)
-                let img = load_cover(&path);
+                let img = load_cover(&path, Some(&game_dir));
                 if res_tx.send((path, img)).is_err() {
                     break;
                 }
@@ -141,10 +157,11 @@ impl CoverDecoder {
         Self { req_tx, res_rx, _worker: worker }
     }
 
-    /// Queue `path` for background decoding. Silently dropped if the worker has
-    /// already exited.
-    pub fn request(&self, path: PathBuf) {
-        let _ = self.req_tx.send(path);
+    /// Queue `path` for background decoding, with `game_dir` as the fetched-cover
+    /// fallback source when `path` has no `Fspc` of its own. Silently dropped if
+    /// the worker has already exited.
+    pub fn request(&self, path: PathBuf, game_dir: PathBuf) {
+        let _ = self.req_tx.send((path, game_dir));
     }
 
     /// Non-blocking drain of all decoded results ready so far.
@@ -176,6 +193,67 @@ mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
+
+    /// A solid-color 2x2 PNG, encoded via the `image` crate.
+    fn png_bytes_colored(rgb: [u8; 3]) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(2, 2, image::Rgb(rgb));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    /// A minimal, structurally valid blorb (`RIdx` with zero entries, no
+    /// `Fspc`) — a story that carries no frontispiece of its own, so the
+    /// fetched-cover fallback is the only source.
+    fn minimal_blorb_no_fspc() -> Vec<u8> {
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"IFRS");
+        let ridx_body = 0u32.to_be_bytes(); // count = 0
+        inner.extend_from_slice(b"RIdx");
+        inner.extend_from_slice(&(ridx_body.len() as u32).to_be_bytes());
+        inner.extend_from_slice(&ridx_body);
+        let mut file = Vec::new();
+        file.extend_from_slice(b"FORM");
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+        file
+    }
+
+    /// A blorb declaring its own `Fspc` frontispiece pointing at a `Pict`
+    /// resource holding `png`. Mirrors `fetch_worker::tests::blorb_with_fspc_and_cover`
+    /// (duplicated here, test-only, to keep this module's fixtures self-contained).
+    fn blorb_with_fspc(png: &[u8]) -> Vec<u8> {
+        fn iff_chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(ty);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                v.push(0);
+            }
+            v
+        }
+        let mut ridx = Vec::new();
+        ridx.extend_from_slice(&1u32.to_be_bytes()); // count
+        ridx.extend_from_slice(b"Pict");
+        ridx.extend_from_slice(&7u32.to_be_bytes()); // number
+        let ridx_chunk_len = 8 + (4 + 12);
+        let fspc_chunk_len = 8 + 4;
+        let pict_off = 12 + ridx_chunk_len + fspc_chunk_len;
+        ridx.extend_from_slice(&(pict_off as u32).to_be_bytes()); // start
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"IFRS");
+        inner.extend_from_slice(&iff_chunk(b"RIdx", &ridx));
+        inner.extend_from_slice(&iff_chunk(b"Fspc", &7u32.to_be_bytes()));
+        inner.extend_from_slice(&iff_chunk(b"PNG ", png));
+        let mut file = Vec::new();
+        file.extend_from_slice(b"FORM");
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+        file
+    }
 
     /// A valid 2x2 red PNG, encoded via the `image` crate.
     fn png_bytes() -> Vec<u8> {
@@ -313,6 +391,50 @@ mod tests {
         assert_ne!(size_settled, size_a, "settled frame should rebuild at the new area");
     }
 
+    /// Set up a temp story file + its `<key>.save/` game dir, cleaned up by the
+    /// caller via the returned dir's parent.
+    fn temp_story_and_game_dir(name: &str, story_bytes: &[u8]) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir()
+            .join(format!("babelmap-cover-fallback-{}-{}", std::process::id(), name));
+        std::fs::create_dir_all(&base).unwrap();
+        let story_path = base.join("game.gblorb");
+        std::fs::write(&story_path, story_bytes).unwrap();
+        let game_dir = base.join("game.gblorb.save");
+        std::fs::create_dir_all(&game_dir).unwrap();
+        (story_path, game_dir)
+    }
+
+    #[test]
+    fn load_cover_falls_back_to_fetched_cover_png_when_no_frontispiece() {
+        let (story_path, game_dir) =
+            temp_story_and_game_dir("fallback", &minimal_blorb_no_fspc());
+        std::fs::write(game_dir.join("cover.png"), png_bytes_colored([1, 2, 3])).unwrap();
+
+        // No fallback source offered: nothing to show.
+        assert!(load_cover(&story_path, None).is_none(), "no Fspc and no fallback source");
+
+        // Fallback source offered: the fetched cover.png is used.
+        let img = load_cover(&story_path, Some(&game_dir)).expect("fetched cover should load");
+        let px = img.to_rgb8().get_pixel(0, 0).0;
+        assert_eq!(px, [1, 2, 3], "fallback cover's pixels should decode");
+
+        let _ = std::fs::remove_dir_all(story_path.parent().unwrap());
+    }
+
+    #[test]
+    fn load_cover_prefers_its_own_frontispiece_over_a_fetched_cover_png() {
+        let own = png_bytes_colored([200, 50, 50]);
+        let fetched = png_bytes_colored([1, 2, 3]);
+        let (story_path, game_dir) = temp_story_and_game_dir("precedence", &blorb_with_fspc(&own));
+        std::fs::write(game_dir.join("cover.png"), &fetched).unwrap();
+
+        let img = load_cover(&story_path, Some(&game_dir)).expect("own frontispiece should load");
+        let px = img.to_rgb8().get_pixel(0, 0).0;
+        assert_eq!(px, [200, 50, 50], "the story's own Fspc must win over a fetched cover.png");
+
+        let _ = std::fs::remove_dir_all(story_path.parent().unwrap());
+    }
+
     #[test]
     fn decoder_round_trips_a_non_blorb_as_none() {
         // A real file that isn't a blorb: `load_cover` returns `None`, so the
@@ -323,7 +445,7 @@ mod tests {
         std::fs::write(&path, b"not a blorb").unwrap();
 
         let d = CoverDecoder::new();
-        d.request(path.clone());
+        d.request(path.clone(), dir.join("no-such-game-dir"));
 
         let mut got = None;
         // Bounded poll: worker is near-instant, but don't spin forever.

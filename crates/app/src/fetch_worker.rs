@@ -232,7 +232,7 @@ fn maybe_fetch_cover(
     iff: &IFiction,
 ) -> Option<String> {
     let url = iff.ifdb.as_ref()?.cover_url.clone()?;
-    if crate::cover::load_cover(path).is_some() {
+    if crate::cover::load_cover(path, None).is_some() {
         return None; // the story already carries its own frontispiece
     }
     let bytes = source.fetch_cover(&url).ok()?;

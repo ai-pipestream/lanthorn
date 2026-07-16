@@ -91,6 +91,39 @@ fn truncate_to_width(s: &str, max_w: usize) -> String {
     out
 }
 
+/// Word-wrap `s` to at most `width` display columns per line (unicode-aware,
+/// same width rule as `truncate_to_width`), splitting greedily on whitespace.
+/// A blank line in `s` (a paragraph break) is preserved as an empty output
+/// line. A single word wider than `width` is placed on its own line rather
+/// than broken mid-word — same as any other overlong field, it is left for
+/// the renderer to clip. `width == 0` returns `s` verbatim as one line.
+fn wrap_to_width(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut lines = Vec::new();
+    for para in s.split('\n') {
+        let mut cur = String::new();
+        let mut cur_w = 0usize;
+        for word in para.split_whitespace() {
+            let word_w = UnicodeWidthStr::width(word);
+            let sep_w = if cur.is_empty() { 0 } else { 1 };
+            if !cur.is_empty() && cur_w + sep_w + word_w > width {
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+                cur_w += 1;
+            }
+            cur.push_str(word);
+            cur_w += word_w;
+        }
+        lines.push(cur);
+    }
+    lines
+}
+
 /// Column header text plus whether it's the active sort column — the
 /// direction arrow is shown only on the active column.
 fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) -> (String, bool) {
@@ -416,7 +449,8 @@ pub(crate) fn run_story_picker(
                 sel_changed_at.elapsed(),
                 COVER_DEBOUNCE,
             ) {
-                decoder.request(sel.clone());
+                let game_dir = app::storage::game_dir(data_base, &app::storage::story_key(&sel));
+                decoder.request(sel.clone(), game_dir);
                 requested.insert(sel);
             }
         }
@@ -960,6 +994,25 @@ fn draw_info_panel(
     }
     // ifid.
     lines.push((format!("IFID {}", meta.ifid), cs.story_info_value));
+    // author · year · genre (SQ-0348): one line, present parts only — a story
+    // with none of the three renders no line at all, so a no-metadata panel
+    // is unchanged from before this field existed.
+    let meta_bits: Vec<&str> = [meta.author.as_deref(), meta.year.as_deref(), meta.genre.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !meta_bits.is_empty() {
+        lines.push((meta_bits.join(" · "), cs.story_info_value));
+    }
+    // blurb (SQ-0348): word-wrapped to the panel's content width, each
+    // wrapped row pushed as its own entry so it rides the same
+    // scroll/overflow accounting as every other panel line below.
+    if let Some(desc) = meta.description.as_deref().filter(|s| !s.is_empty()) {
+        for row in wrap_to_width(desc, inner.width as usize) {
+            lines.push((row, cs.story_info_blurb));
+        }
+    }
     // features line (present badges only).
     let feats = feature_words(&meta.features, aux);
     if !feats.is_empty() {
@@ -1639,6 +1692,110 @@ mod tests {
             features: app::picker::Features::default(), self_blorb: None,
             author: None, year: None, genre: None, language: None, description: None,
         }
+    }
+
+    // ── SQ-0348: author/year/genre + blurb ──────────────────────────────────────
+
+    /// A story with NO fetched/embedded metadata must render exactly as it did
+    /// before this feature existed: no empty "Author:" label, no stray blank
+    /// line, no separator with nothing either side of it. The IFID line and
+    /// the Features line (present since `minimal_story_meta` has no features by
+    /// default, so give it one) must land on directly adjacent rows.
+    #[test]
+    fn info_panel_no_metadata_leaves_ifid_and_features_adjacent() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let mut meta = minimal_story_meta();
+        meta.features = app::picker::Features { sound: true, ..Default::default() };
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("game.gblorb");
+        super::draw_info_panel(
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+        );
+        let text = buffer_to_string(&buf, area);
+        let lines: Vec<&str> = text.lines().collect();
+        // Row 0 is the panel's own top border (with the " Info " title baked
+        // into it); content starts at row 1: title, filename/size,
+        // format/version, IFID, Features (no serial, no metadata).
+        assert!(lines[4].contains("IFID"), "row 4 should be the IFID line: {:?}", lines[4]);
+        assert!(
+            lines[5].trim_start_matches('│').trim().starts_with("Features:"),
+            "no line should be inserted between IFID and Features when metadata is absent: {:?}",
+            lines[5]
+        );
+        assert!(!text.contains("Author"), "no metadata label should appear: {text:?}");
+    }
+
+    /// With author/year/genre and a blurb present, a combined "author · year ·
+    /// genre" line and the wrapped blurb text land between IFID and Features,
+    /// disturbing neither.
+    #[test]
+    fn info_panel_renders_author_year_genre_and_blurb_between_ifid_and_features() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let mut meta = minimal_story_meta();
+        meta.author = Some("Michael S. Gentry".into());
+        meta.year = Some("1998".into());
+        meta.genre = Some("Horror".into());
+        meta.description = Some("A tale of terror in a small town.".into());
+        meta.features = app::picker::Features { sound: true, ..Default::default() };
+        let area = Rect::new(0, 0, 50, 14);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("game.gblorb");
+        super::draw_info_panel(
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+        );
+        let text = buffer_to_string(&buf, area);
+        assert!(text.contains("Michael S. Gentry"), "author should render: {text:?}");
+        assert!(text.contains("1998"), "year should render: {text:?}");
+        assert!(text.contains("Horror"), "genre should render: {text:?}");
+        assert!(text.contains("A tale of terror in a small town."), "blurb should render: {text:?}");
+
+        let ifid_pos = text.find("IFID").expect("IFID line present");
+        let author_pos = text.find("Michael S. Gentry").expect("author present");
+        let blurb_pos = text.find("A tale of terror").expect("blurb present");
+        let features_pos = text.find("Features:").expect("features present");
+        assert!(ifid_pos < author_pos, "author line must come after IFID");
+        assert!(author_pos < blurb_pos, "blurb must come after the author/year/genre line");
+        assert!(blurb_pos < features_pos, "blurb must come before Features");
+    }
+
+    /// A long blurb wraps to the panel's content width and, when it overflows
+    /// the panel height, scrolls with the SAME `panel_scroll`/`panel_max`
+    /// mechanism as the rest of the info panel (no second scroll system).
+    #[test]
+    fn info_panel_blurb_wraps_and_participates_in_panel_scroll() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let mut meta = minimal_story_meta();
+        meta.description = Some(
+            "one two three four five six seven eight nine ten eleven twelve \
+             thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty"
+                .into(),
+        );
+        // Narrow + short so the wrapped blurb both wraps to multiple lines and
+        // overflows the panel height.
+        let area = Rect::new(0, 0, 20, 8);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("game.gblorb");
+        let max_scroll = super::draw_info_panel(
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+        );
+        assert!(max_scroll > 0, "a long wrapped blurb should overflow an 8-row panel");
+        let text_top = buffer_to_string(&buf, area);
+        assert!(!text_top.contains("twenty"), "late blurb word should be offscreen at scroll 0: {text_top:?}");
+
+        let mut buf2 = Buffer::empty(area);
+        let max_scroll2 = super::draw_info_panel(
+            "Game", "game.gblorb", &meta, None, max_scroll, area, None, &mut cover, entry_path, false, &cs, &mut buf2,
+        );
+        assert_eq!(max_scroll2, max_scroll, "max_scroll must be stable across scroll positions");
+        let text_scrolled = buffer_to_string(&buf2, area);
+        assert!(text_scrolled.contains("twenty"), "late blurb word should be visible once scrolled: {text_scrolled:?}");
     }
 
     #[test]

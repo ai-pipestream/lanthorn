@@ -201,6 +201,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "story_info:title",
     "story_info:label",
     "story_info:value",
+    "story_info:blurb",
     "story_info:cover",
     "story_badge",
     "story_header",
@@ -255,7 +256,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ]),
     ("Story picker", &[
         "story_info", "story_info:title", "story_info:label",
-        "story_info:value", "story_info:cover", "story_badge",
+        "story_info:value", "story_info:blurb", "story_info:cover", "story_badge",
         "story_header", "story_header:active", "story_author",
         "story_year", "story_no_metadata",
     ]),
@@ -322,6 +323,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "story_info:title"  => cs.story_info_title,
         "story_info:label"  => cs.story_info_label,
         "story_info:value"  => cs.story_info_value,
+        "story_info:blurb"  => cs.story_info_blurb,
         "story_info:cover"  => cs.story_info_cover,
         "story_badge"       => cs.story_badge,
         "story_header"        => cs.story_header,
@@ -483,6 +485,7 @@ pub fn apply_color_decls(
             "story_info:title"  => cs.story_info_title = cs.story_info_title.patch(style),
             "story_info:label"  => cs.story_info_label = cs.story_info_label.patch(style),
             "story_info:value"  => cs.story_info_value = cs.story_info_value.patch(style),
+            "story_info:blurb"  => cs.story_info_blurb = cs.story_info_blurb.patch(style),
             "story_info:cover"  => cs.story_info_cover = cs.story_info_cover.patch(style),
             "story_badge"       => cs.story_badge = cs.story_badge.patch(style),
             "story_header"        => cs.story_header = cs.story_header.patch(style),
@@ -1388,6 +1391,7 @@ pub fn write_style_full(
     doc.colors.selectors.insert("story_info:title".to_string(),   style_to_decl(&cs.story_info_title));
     doc.colors.selectors.insert("story_info:label".to_string(),   style_to_decl(&cs.story_info_label));
     doc.colors.selectors.insert("story_info:value".to_string(),   style_to_decl(&cs.story_info_value));
+    doc.colors.selectors.insert("story_info:blurb".to_string(),   style_to_decl(&cs.story_info_blurb));
     doc.colors.selectors.insert("story_info:cover".to_string(),   style_to_decl(&cs.story_info_cover));
     doc.colors.selectors.insert("story_badge".to_string(),        style_to_decl(&cs.story_badge));
     doc.colors.selectors.insert("story_header".to_string(),        style_to_decl(&cs.story_header));

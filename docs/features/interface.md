@@ -66,23 +66,34 @@
 Launching with a directory instead of a story file (`babelmap path/to/stories/`)
 opens a picker: each row shows the title/filename plus right-aligned badges —
 story type (**Z**/**G**) and present artifacts (bundled/sibling **B**lorb,
-existing **S**ave, available **H**int file). `i` or `Tab` slides in a themeable
-info side-panel for the highlighted story (format/version/release/serial,
-IFID, feature flags, bundled resources, and saves), animated per the
+existing **S**ave, available **H**int file). The list is sortable by title,
+author, or year — click a column header (or press `s`/`d`) to change the
+column/direction. `i` or `Tab` slides in a themeable info side-panel for the
+highlighted story (format/version/release/serial, IFID, author/year/genre,
+a blurb, feature flags, bundled resources, and saves), animated per the
 `animation` config and closed by default each launch; it refuses to open on
 terminals too narrow for both list and panel. The badge glyphs are configurable
 in `[symbols]` (`badge_zcode`/`badge_glulx`/`badge_blorb`/`badge_save`/`badge_hint`),
 and both the badge cluster and the panel are themeable via the `story_badge` and
-`story_info` (`:title`/`:label`/`:value`) style selectors. `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End
+`story_info` (`:title`/`:label`/`:value`/`:blurb`) style selectors. `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End
 navigate, `Enter` or a click opens the story, `q`/`Esc` quits back to the shell. When
-the panel is open and its content overflows, scroll it with the mouse wheel over
-the panel or `Shift`+`↑`/`↓`/PgUp/PgDn (plain arrow/PgUp/PgDn keep navigating the
-list); the scroll position resets whenever the highlighted story changes.
+the panel is open and its content overflows — including a long, word-wrapped
+blurb — scroll it with the mouse wheel over the panel or `Shift`+`↑`/`↓`/PgUp/PgDn
+(plain arrow/PgUp/PgDn keep navigating the list); the scroll position resets
+whenever the highlighted story changes.
 
+- **Metadata fetch (IFDB).** Press `f` to fetch author/year/genre/description/
+  cover art for the highlighted story from IFDB, or `r` to sweep every story in
+  the library (skipping any already at the current fetch version); `Esc`
+  cancels a running sweep. Results are cached in a per-game sidecar so a repeat
+  `r` makes no network requests. A blorb's own `IFmd`/`Fspc` always take
+  precedence over fetched data.
 - **Cover art in the story picker.** Blorb games with a frontispiece show their
   cover image in the picker's info panel, using the terminal's best graphics
-  protocol (Kitty / iTerm2 / Sixel) with a universal half-block fallback.
-  Force a mode with `--image-protocol <auto|halfblocks|kitty|sixel|iterm2>`.
+  protocol (Kitty / iTerm2 / Sixel) with a universal half-block fallback. A
+  story with no frontispiece of its own shows a fetched cover instead, once
+  metadata has been fetched. Force a mode with
+  `--image-protocol <auto|halfblocks|kitty|sixel|iterm2>`.
 - **In-game graphics (Glulx).** Games that open graphics windows now render
   their filled shapes and images in the terminal, using the best graphics
   protocol (Kitty / iTerm2 / Sixel) with a half-block fallback. Disable all
