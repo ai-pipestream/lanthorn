@@ -283,8 +283,17 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "relabel-edge", description: "relabel the selected edge",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::RelabelSelectedEdge) },
     CommandSpec { name: "peel-layer", category: Category::Map, context: Context::Map,
-        usage: "peel-layer", description: "peel the selected layer into its own view",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::PeelLayer) },
+        usage: "peel-layer [direction]", description: "peel a region into its own layer; a direction cuts at that passage",
+        dispatch: |a| {
+            use crate::input::Action;
+            match a.first().copied() {
+                None => SlashOutcome::Action(Action::PeelLayer(None)),
+                Some(s) => match mapper::direction::parse_direction(s) {
+                    Some(d) => SlashOutcome::Action(Action::PeelLayer(Some(d))),
+                    None => err(format!("peel-layer: '{s}' is not a direction")),
+                },
+            }
+        } },
     CommandSpec { name: "merge-layer", category: Category::Map, context: Context::Map,
         usage: "merge-layer", description: "merge the selected layer down",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::MergeLayer) },
@@ -525,6 +534,24 @@ pub fn help_for_command(prefix: char, name: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SQ-0360: `peel-layer` takes an optional direction naming the seam to cut at.
+    #[test]
+    fn peel_layer_takes_an_optional_direction() {
+        use crate::input::Action;
+        use mapper::direction::Direction;
+        assert!(matches!(parse("peel-layer", '/'), SlashOutcome::Action(Action::PeelLayer(None))));
+        assert!(matches!(
+            parse("peel-layer east", '/'),
+            SlashOutcome::Action(Action::PeelLayer(Some(Direction::E)))
+        ));
+        // Whatever `parse_direction` accepts for a game command works here too — one vocabulary.
+        assert!(matches!(
+            parse("peel-layer nw", '/'),
+            SlashOutcome::Action(Action::PeelLayer(Some(Direction::NW)))
+        ));
+        assert!(matches!(parse("peel-layer sideways", '/'), SlashOutcome::Error(_)));
+    }
 
     #[test]
     fn parse_registry_and_errors() {

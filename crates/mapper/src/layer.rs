@@ -24,7 +24,7 @@ impl LayerMeta {
     }
 }
 
-use crate::direction::grid_offset;
+use crate::direction::{grid_offset, opposite, Direction};
 use crate::graph::{Connection, MapGraph, RoomId};
 use crate::router::{fine_cell, stub_label, RoutedEdge};
 
@@ -32,6 +32,16 @@ use crate::router::{fine_cell, stub_label, RoutedEdge};
 /// staying within `start`'s current layer. Portal edges (Up/Down/In/Out/Unknown) are
 /// not traversed — they are the cut. Edges are treated as undirected for reachability.
 pub fn planar_region(graph: &MapGraph, start: RoomId) -> BTreeSet<RoomId> {
+    region_with_cut(graph, start, &|_| false)
+}
+
+/// [`planar_region`], plus `cut`: any connection it accepts is severed too, on top of the
+/// portal-edge cut. Lets a caller name its own seam (SQ-0360).
+fn region_with_cut(
+    graph: &MapGraph,
+    start: RoomId,
+    cut: &dyn Fn(&Connection) -> bool,
+) -> BTreeSet<RoomId> {
     let layer = graph.layer_of(start);
     let mut seen = BTreeSet::new();
     seen.insert(start);
@@ -39,8 +49,8 @@ pub fn planar_region(graph: &MapGraph, start: RoomId) -> BTreeSet<RoomId> {
     q.push_back(start);
     while let Some(cur) = q.pop_front() {
         for c in graph.connections() {
-            if grid_offset(c.dir).is_none() {
-                continue; // portal edge → cut
+            if grid_offset(c.dir).is_none() || cut(c) {
+                continue; // portal edge, or the caller's own seam → cut
             }
             let other = if c.origin == cur {
                 c.dest
@@ -57,21 +67,83 @@ pub fn planar_region(graph: &MapGraph, start: RoomId) -> BTreeSet<RoomId> {
     seen
 }
 
-/// Peel `start`'s planar region into a fresh layer. Returns the new `LayerId`, or `None`
-/// when the region already spans the whole source layer (nothing to separate).
-pub fn peel_region(graph: &mut MapGraph, start: RoomId) -> Option<LayerId> {
+/// Why a peel could not happen. Each variant is a distinct thing to tell the player — a peel that
+/// refuses without saying why reads as a broken command (SQ-0360).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PeelRefusal {
+    /// The region already spans its whole layer: there is nothing to separate it FROM.
+    WholeLayer,
+    /// The room has no passage that way.
+    NoSuchPassage,
+    /// The passage exists, but its two ends stay connected by some other route, so cutting it
+    /// separates nothing.
+    NotASeam,
+    /// The passage leads out of the layer. Peeling divides a layer; it does not cross one.
+    LeavesLayer,
+}
+
+/// Peel at a NAMED seam: sever the `dir` passage out of `from`, and peel whatever is left on the
+/// far side into a fresh layer under `from`'s. Returns the new `LayerId` (SQ-0360).
+///
+/// [`peel_region`] can only cut where a portal edge already divides a layer, so it is powerless on
+/// a layer that is one connected sprawl — Zork's underground being 35 rooms of solid compass maze.
+/// This lets the player say where the boundary is instead of waiting for one to exist.
+///
+/// The cut takes the passage's RECIPROCAL with it. A passage is normally two connections
+/// (`A -E-> B` and `B -W-> A`), so severing only the named one leaves the back-edge holding the two
+/// halves together and no seam could ever cut. It is deliberately just that pair, not every edge
+/// between the rooms: if `A` also reaches `B` another way, that is a second passage, the boundary
+/// is not real, and `NotASeam` says so.
+pub fn peel_at_edge(
+    graph: &mut MapGraph,
+    from: RoomId,
+    dir: Direction,
+) -> Result<LayerId, PeelRefusal> {
+    if grid_offset(dir).is_none() {
+        // A portal is already a cut: `peel_region` is the operation for those.
+        return Err(PeelRefusal::NoSuchPassage);
+    }
+    let dest = graph
+        .connections()
+        .iter()
+        .find(|c| c.origin == from && c.dir == dir)
+        .map(|c| c.dest)
+        .ok_or(PeelRefusal::NoSuchPassage)?;
+    let src = graph.layer_of(from);
+    if graph.layer_of(dest) != src {
+        return Err(PeelRefusal::LeavesLayer);
+    }
+    let back = opposite(dir);
+    let region = region_with_cut(graph, dest, &|c: &Connection| {
+        (c.origin == from && c.dir == dir) || (c.origin == dest && c.dir == back)
+    });
+    if region.contains(&from) {
+        return Err(PeelRefusal::NotASeam);
+    }
+    let name = graph.room(dest).map(|r| r.label().to_string()).unwrap_or_default();
+    let new = graph.new_layer(Some(src), name);
+    for id in region {
+        graph.set_room_layer(id, new);
+    }
+    Ok(new)
+}
+
+/// Peel `start`'s planar region into a fresh layer. Returns the new `LayerId`, or
+/// [`PeelRefusal::WholeLayer`] when the region already spans the whole source layer (nothing to
+/// separate). To divide a layer that has no portal seam in it, name one with [`peel_at_edge`].
+pub fn peel_region(graph: &mut MapGraph, start: RoomId) -> Result<LayerId, PeelRefusal> {
     let src = graph.layer_of(start);
     let region = planar_region(graph, start);
     let whole_layer: BTreeSet<RoomId> = graph.rooms_in_layer(src).into_iter().collect();
     if region == whole_layer {
-        return None;
+        return Err(PeelRefusal::WholeLayer);
     }
     let name = graph.room(start).map(|r| r.label().to_string()).unwrap_or_default();
     let new = graph.new_layer(Some(src), name);
     for id in region {
         graph.set_room_layer(id, new);
     }
-    Some(new)
+    Ok(new)
 }
 
 /// True iff the connection's endpoints are in different layers.
@@ -167,6 +239,84 @@ mod tests {
         assert_eq!(g.layer_name(l), "Cellar");
     }
 
+    // ── SQ-0360: peel at a named seam ────────────────────────────────────────
+
+    /// A chain A-B-C-D with no portal in it: `peel_region` is powerless (one region), but naming
+    /// the B→C passage cuts there. This is Zork's Cellar in miniature — 35 rooms of compass maze
+    /// with no portal seam to find.
+    #[test]
+    fn naming_a_passage_cuts_a_layer_that_has_no_portal_seam() {
+        let mut g = MapGraph::new();
+        for (id, n) in [(1, "A"), (2, "B"), (3, "C"), (4, "D")] {
+            g.upsert_room(id, n.into());
+        }
+        for (a, b) in [(1, 2), (2, 3), (3, 4)] {
+            g.add_edge(a, Direction::E, b);
+            g.add_edge(b, Direction::W, a);
+        }
+        assert_eq!(
+            peel_region(&mut g, 1),
+            Err(PeelRefusal::WholeLayer),
+            "one connected region: the automatic peel has nothing to cut on"
+        );
+
+        let l = peel_at_edge(&mut g, 2, Direction::E).expect("the B→C passage is a seam");
+        assert_eq!(g.layers()[&l].parent, Some(MAIN_LAYER), "the new layer hangs off the one it left");
+        assert_eq!(g.layer_name(l), "C", "named for the room the cut leads to");
+        assert_eq!(g.rooms_in_layer(l), vec![3, 4], "everything beyond the seam moves");
+        assert_eq!(g.rooms_in_layer(MAIN_LAYER), vec![1, 2], "everything before it stays");
+    }
+
+    /// The cut must take the passage's RECIPROCAL with it. Severing only `B -E-> C` would leave
+    /// `C -W-> B` holding the halves together, and no seam could ever cut.
+    #[test]
+    fn cutting_a_passage_severs_its_back_edge_too() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1); // the reciprocal
+        let l = peel_at_edge(&mut g, 1, Direction::E).expect("a lone passage is a seam");
+        assert_eq!(g.rooms_in_layer(l), vec![2]);
+    }
+
+    /// A passage whose ends stay connected another way is not a boundary, and says so.
+    #[test]
+    fn a_passage_with_a_way_round_is_not_a_seam() {
+        // A→B directly, and A→C→B as well: cutting A-B separates nothing.
+        let mut g = MapGraph::new();
+        for (id, n) in [(1, "A"), (2, "B"), (3, "C")] {
+            g.upsert_room(id, n.into());
+        }
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        g.add_edge(1, Direction::N, 3);
+        g.add_edge(3, Direction::E, 2);
+        assert_eq!(peel_at_edge(&mut g, 1, Direction::E), Err(PeelRefusal::NotASeam));
+        assert_eq!(g.layers().len(), 1, "and nothing was peeled");
+    }
+
+    #[test]
+    fn peel_at_edge_needs_a_planar_passage_inside_the_layer() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.upsert_room(2, "B".into());
+        g.add_edge(1, Direction::Down, 2); // a portal: already a cut, so not this command's job
+        assert_eq!(peel_at_edge(&mut g, 1, Direction::Down), Err(PeelRefusal::NoSuchPassage));
+        assert_eq!(peel_at_edge(&mut g, 1, Direction::W), Err(PeelRefusal::NoSuchPassage), "no such exit");
+
+        // A passage that already leaves the layer divides nothing within it.
+        let mut g = MapGraph::new();
+        for (id, n) in [(1, "A"), (2, "B"), (3, "C")] {
+            g.upsert_room(id, n.into());
+        }
+        g.add_edge(1, Direction::Down, 2);
+        g.add_edge(2, Direction::E, 3);
+        let l = peel_region(&mut g, 2).expect("B/C peel off on the portal");
+        assert_eq!(g.layer_of(2), l);
+        assert_eq!(peel_at_edge(&mut g, 1, Direction::Down), Err(PeelRefusal::NoSuchPassage));
+    }
+
     #[test]
     fn peel_whole_layer_is_noop() {
         let mut g = MapGraph::new();
@@ -174,7 +324,7 @@ mod tests {
         g.upsert_room(2, "B".into());
         g.add_edge(1, Direction::E, 2);
         g.add_edge(2, Direction::W, 1);
-        assert_eq!(peel_region(&mut g, 1), None, "region is the whole layer → no-op");
+        assert_eq!(peel_region(&mut g, 1), Err(PeelRefusal::WholeLayer), "region is the whole layer → refused, and it says why");
     }
 
     #[test]

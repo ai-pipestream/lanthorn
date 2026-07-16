@@ -467,7 +467,7 @@ mod tests {
         ] {
             g.add_edge(o, d, dst);
         }
-        mapper::layer::peel_region(&mut g, 27); // the user's scenario: 27/136 in their own layer
+        let _ = mapper::layer::peel_region(&mut g, 27); // the user's scenario: 27/136 in their own layer
         run_tidy_pipeline(&mut g, 0, None);
         let p = |id: u16| g.room(id).unwrap().pos.unwrap();
         let (a, b, c) = (p(180), p(80), p(81));

@@ -30,6 +30,7 @@
 //!   - `Quit` — caller exits the event loop.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use mapper::direction::Direction;
 use mapper::mapper::Mapper;
 
 use crate::complete::{room_words_from_text, suggest};
@@ -207,7 +208,9 @@ pub enum Action {
     /// Select a specific layer as the viewed one (a click on its map layer tab).
     SetViewedLayer(mapper::layer::LayerId),
     /// Peel the selected (or current) room's region into a new child layer.
-    PeelLayer,
+    /// Peel a layer. `Some(dir)` cuts at that passage out of the selected room; `None` looks for a
+    /// portal seam already dividing the layer (SQ-0360).
+    PeelLayer(Option<Direction>),
     /// Merge the active layer into its parent layer.
     MergeLayer,
     /// Advance autocomplete to the next suggestion, applying the current one to
@@ -1667,12 +1670,25 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::SelectNext => select_adjacent(state, mapper, 1),
         Action::SelectPrev => select_adjacent(state, mapper, -1),
 
-        Action::PeelLayer => {
-            if let Some(room) = state.selected_room.or_else(|| mapper.graph.current()) {
-                if let Some(new) = mapper::layer::peel_region(&mut mapper.graph, room) {
+        Action::PeelLayer(dir) => {
+            let Some(room) = state.selected_room.or_else(|| mapper.graph.current()) else {
+                state.status_msg = Some("peel-layer: no room selected".into());
+                return;
+            };
+            // With a direction, the player names the seam; without one, peel looks for a portal
+            // seam already dividing the layer (SQ-0360).
+            let peeled = match dir {
+                Some(d) => mapper::layer::peel_at_edge(&mut mapper.graph, room, d),
+                None => mapper::layer::peel_region(&mut mapper.graph, room),
+            };
+            match peeled {
+                Ok(new) => {
                     state.bump_graph_gen(); // rooms peeled into a new layer → invalidate memo (SQ-0305)
                     state.set_viewed_layer(Some(new));
                 }
+                // A refusal used to be silent, which reads as a broken command — say which of the
+                // several quite different reasons it was (SQ-0360).
+                Err(why) => state.status_msg = Some(peel_refusal_message(&mapper.graph, room, dir, why)),
             }
         }
         Action::MergeLayer => {
@@ -2942,6 +2958,42 @@ fn select_adjacent(state: &mut AppState, mapper: &Mapper, delta: i32) {
 /// `apply_action` never sees the run loop's `last_panes`. Falls back to 80×24 only before the first
 /// frame, or while the map pane is hidden: `recenter_on` divides the pane by the zoom step, so a
 /// guessed size puts the target off-centre on any real pane (SQ-0349).
+/// Say why a peel refused, in the player's terms (SQ-0360).
+///
+/// The refusals are not variations on "no": a layer with no seam in it needs a DIFFERENT command
+/// (`peel-layer <dir>`), while a passage that is not a seam means the boundary the player picked
+/// is not real. Each message therefore names the room or passage at issue and, where there is a
+/// way forward, points at it.
+fn peel_refusal_message(
+    graph: &mapper::graph::MapGraph,
+    room: mapper::graph::RoomId,
+    dir: Option<Direction>,
+    why: mapper::layer::PeelRefusal,
+) -> String {
+    use mapper::layer::PeelRefusal as R;
+    let here = graph.room(room).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{room}"));
+    let layer = graph.layer_name(graph.layer_of(room));
+    match why {
+        R::WholeLayer => format!(
+            "peel-layer: {layer} is one connected region — nothing to separate. \
+             Use peel-layer <direction> to cut at a passage."
+        ),
+        R::NoSuchPassage => match dir {
+            Some(d) => format!("peel-layer: {here} has no {d:?} passage."),
+            None => format!("peel-layer: {here} has no passage to cut."),
+        },
+        R::NotASeam => format!(
+            "peel-layer: {here}'s {:?} passage is not a boundary — both sides stay connected \
+             another way.",
+            dir.unwrap_or(Direction::Unknown)
+        ),
+        R::LeavesLayer => format!(
+            "peel-layer: {here}'s {:?} passage already leaves {layer}. Peeling divides one layer.",
+            dir.unwrap_or(Direction::Unknown)
+        ),
+    }
+}
+
 fn apply_recenter(state: &mut AppState, mapper: &Mapper) {
     let target = recenter_target(state, &mapper.graph);
     let (pw, ph) = state.map_pane_size.get().unwrap_or((80, 24));
@@ -3941,7 +3993,7 @@ mod tests {
         // Open dialog: authored leader letters 'p'/'m' fire the commands
         // (Shift+P/Shift+M are no longer authored leader letters).
         s.overlays.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::PeelLayer));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::PeelLayer(None)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('m'))), Action::MergeLayer));
     }
 
@@ -4309,7 +4361,7 @@ mod tests {
         s.overlays.hotkey_dialog = true;
         // Dialog-only commands now fire via their authored leader letters.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::RenameLayer));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::PeelLayer));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::PeelLayer(None)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('m'))), Action::MergeLayer));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
         // Unauthored keys (shift-modified letters, brackets) close the dialog
@@ -6631,6 +6683,59 @@ mod tests {
         m.graph.set_pos(2, (7, 7));
         m.graph.set_current(1);
         (AppState::default(), m)
+    }
+
+    // ── SQ-0360: peel at a named seam, and say why a peel refused ────────────
+
+    /// A layer with no portal seam in it (Zork's Cellar: 35 rooms of solid compass maze) could not
+    /// be divided at all, and the refusal was SILENT — the command simply did nothing.
+    #[test]
+    fn peel_layer_with_a_direction_cuts_a_layer_that_refuses_the_plain_peel() {
+        let mut m = Mapper::default();
+        m.observe(1, "Round Room", None);
+        m.observe(2, "Loud Room", Some(Direction::E));
+        m.observe(3, "Damp Cave", Some(Direction::E));
+        let mut s = AppState::default();
+        s.select_room(Some(1));
+
+        // Plain peel: one connected region, so it refuses — and now explains itself.
+        apply_action(Action::PeelLayer(None), &mut s, &mut m);
+        assert_eq!(m.graph.layers().len(), 1, "nothing peeled");
+        let msg = s.status_msg.clone().expect("a refusal must not be silent");
+        assert!(msg.contains("one connected region"), "says why: {msg:?}");
+        assert!(msg.contains("peel-layer <direction>"), "and points at the way forward: {msg:?}");
+
+        // Naming the seam cuts there.
+        s.status_msg = None;
+        apply_action(Action::PeelLayer(Some(Direction::E)), &mut s, &mut m);
+        assert_eq!(s.status_msg, None, "no complaint when it works");
+        let new = s.viewed_layer.expect("the peeled layer is now in view");
+        assert_eq!(m.graph.rooms_in_layer(new), vec![2, 3], "everything beyond the seam");
+        assert_eq!(m.graph.rooms_in_layer(0), vec![1], "and the near side stays put");
+    }
+
+    #[test]
+    fn peel_layer_explains_a_passage_that_is_not_a_seam() {
+        // A→B directly and A→C→B as well: cutting A-B separates nothing.
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(Direction::E));
+        m.graph.add_edge(1, Direction::N, 3);
+        m.graph.upsert_room(3, "C".into());
+        m.graph.add_edge(3, Direction::E, 2);
+        let mut s = AppState::default();
+        s.select_room(Some(1));
+
+        apply_action(Action::PeelLayer(Some(Direction::E)), &mut s, &mut m);
+        let msg = s.status_msg.clone().expect("refusal must speak");
+        assert!(msg.contains("not a boundary"), "{msg:?}");
+        assert_eq!(m.graph.layers().len(), 1, "nothing peeled");
+
+        // And a direction with no passage at all is a different complaint.
+        s.status_msg = None;
+        apply_action(Action::PeelLayer(Some(Direction::W)), &mut s, &mut m);
+        let msg = s.status_msg.clone().expect("refusal must speak");
+        assert!(msg.contains("no W passage"), "{msg:?}");
     }
 
     #[test]
