@@ -61,6 +61,9 @@ pub struct StoryMeta {
     pub description: Option<String>,
     /// The story's IFDB page URL, present only once fetched (no IFmd equivalent).
     pub ifdb_link: Option<String>,
+    /// A fetch ran but IFDB had no record for this IFID — so the panel offers a
+    /// manual IFDB search link instead of a dead end (SQ-0371).
+    pub fetch_not_found: bool,
 }
 
 /// One selectable story in the picker.
@@ -467,6 +470,7 @@ struct Resolved {
     language: Option<String>,
     description: Option<String>,
     ifdb_link: Option<String>,
+    fetch_not_found: bool,
 }
 
 /// The publication year from a Treaty of Babel `<firstpublished>`, which is
@@ -513,7 +517,8 @@ fn resolve(
         .or_else(|| fetched.and_then(|f| f.description.clone()));
     // IFDB-only: the page link exists solely in a fetched block.
     let ifdb_link = fetched.and_then(|f| f.ifdb_link.clone());
-    Resolved { title, author, year, genre, language, description, ifdb_link }
+    let fetch_not_found = fetched.map(|f| f.not_found).unwrap_or(false);
+    Resolved { title, author, year, genre, language, description, ifdb_link, fetch_not_found }
 }
 
 /// Scan `dir` (top level, non-recursive) for **launchable** Z-machine stories,
@@ -649,6 +654,7 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
         language: resolved.language,
         description: resolved.description,
         ifdb_link: resolved.ifdb_link,
+        fetch_not_found: resolved.fetch_not_found,
     };
     Some(StoryEntry { path: path.to_path_buf(), title, filename, meta })
 }
@@ -672,6 +678,23 @@ impl Default for Sort {
     fn default() -> Self {
         Sort { key: SortKey::Title, desc: false }
     }
+}
+
+/// A lowercased title sort key with a leading English article dropped, so
+/// "The Lurking Horror" files under L and "A Mind Forever Voyaging" under M —
+/// standard bibliographic ordering (SQ-0373). Only strips an article that is
+/// followed by more text (a story literally titled "The" keeps it).
+fn bibliographic_key(title: &str) -> String {
+    let lower = title.trim().to_lowercase();
+    for article in ["the ", "a ", "an "] {
+        if let Some(rest) = lower.strip_prefix(article) {
+            let rest = rest.trim_start();
+            if !rest.is_empty() {
+                return rest.to_string();
+            }
+        }
+    }
+    lower
 }
 
 /// Order `stories` in place by `sort`. Blanks (no author / no year, or a
@@ -702,7 +725,7 @@ pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
     }
 
     fn title_key(e: &StoryEntry) -> (bool, String) {
-        let t = e.title.to_lowercase();
+        let t = bibliographic_key(&e.title);
         (t.is_empty(), t)
     }
 
@@ -915,7 +938,7 @@ mod tests {
                 year: year.map(|s| s.to_string()),
                 genre: None,
                 language: None,
-                description: None, ifdb_link: None,
+                description: None, ifdb_link: None, fetch_not_found: false,
             },
         }
     }
@@ -933,6 +956,34 @@ mod tests {
         ];
         sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
         assert_eq!(titles_of(&stories), vec!["apple", "Mango", "Zebra"]);
+    }
+
+    #[test]
+    fn sort_stories_title_ignores_leading_articles() {
+        // SQ-0373: bibliographic ordering. "The Lurking Horror" files under L,
+        // "A Mind Forever Voyaging" under M — but the full title still displays.
+        let mut stories = vec![
+            story("The Lurking Horror", "lh.z3", None, None),
+            story("A Mind Forever Voyaging", "amfv.z4", None, None),
+            story("Bureaucracy", "bur.z3", None, None),
+            story("An Act of Murder", "aom.z5", None, None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
+        assert_eq!(
+            titles_of(&stories),
+            vec!["An Act of Murder", "Bureaucracy", "The Lurking Horror", "A Mind Forever Voyaging"],
+        );
+    }
+
+    #[test]
+    fn bibliographic_key_strips_only_a_real_leading_article() {
+        assert_eq!(super::bibliographic_key("The Lurking Horror"), "lurking horror");
+        assert_eq!(super::bibliographic_key("A Mind Forever Voyaging"), "mind forever voyaging");
+        assert_eq!(super::bibliographic_key("An Act of Murder"), "act of murder");
+        // "Theatre" starts with "the" but isn't the article "the ".
+        assert_eq!(super::bibliographic_key("Theatre"), "theatre");
+        // A story literally titled "The" keeps it (nothing follows the article).
+        assert_eq!(super::bibliographic_key("The"), "the");
     }
 
     #[test]
@@ -1294,7 +1345,7 @@ mod tests {
                 format: "Z-code".into(), version: Some("5".into()),
                 serial: None, release: None, ifid: ifid.into(),
                 features: Features::default(), self_blorb,
-                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
+                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
             },
         }
     }

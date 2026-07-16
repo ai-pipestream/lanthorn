@@ -33,6 +33,9 @@ const COL_GAP: u16 = 2;
 const AUTHOR_COL_W: u16 = 20;
 const AUTHOR_MAX_W: u16 = 40;
 const YEAR_COL_W: u16 = 6;
+/// Interpreter/format column ("Z5", "Z5 (blorb)", "G3.1.2"): fixed width, sits
+/// just left of the badge cluster. `Z8 (blorb)` (10) is the widest (SQ-0369).
+const INTERP_COL_W: u16 = 10;
 const TITLE_MIN_W: u16 = 8;
 /// Title keeps this much before the author column is allowed to grow past its
 /// base width — title has priority for the shared space, so a long author name
@@ -78,6 +81,32 @@ fn compute_columns(text_w: u16, want_author_w: u16) -> ListColumns {
         ListColumns { title_w: cols_space - author_w, author_w, year_w: 0 }
     } else {
         ListColumns { title_w: avail, author_w: 0, year_w: 0 }
+    }
+}
+
+/// Short interpreter/format label for the story-list TYPE column, type letter
+/// plus the detected VM version: `Z<v>` for Z-code ("Z5", "Z3") and `G<v>` for
+/// Glulx ("G3.1.2", from the Glulx header version). A blorb-wrapped Z-machine
+/// story gets a " (blorb)" suffix ("Z5 (blorb)"), which subsumes the old B
+/// badge; Glulx is omitted since Glulx games are effectively always blorbed
+/// (SQ-0369). Bare "Z"/"Glulx" when the version is unknown.
+fn interp_label(meta: &app::picker::StoryMeta, blorb: bool) -> String {
+    match meta.engine {
+        app::picker::Engine::ZCode => {
+            let base = match meta.version.as_deref() {
+                Some(v) if !v.is_empty() => format!("Z{v}"),
+                _ => "Z".to_string(),
+            };
+            if blorb {
+                format!("{base} (blorb)")
+            } else {
+                base
+            }
+        }
+        app::picker::Engine::Glulx => match meta.version.as_deref() {
+            Some(v) if !v.is_empty() => format!("G{v}"),
+            _ => "Glulx".to_string(),
+        },
     }
 }
 
@@ -159,11 +188,12 @@ fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) 
 /// core hints; the rest are dropped — `PgUp/PgDn` goes first since it's a
 /// standard convention nobody needs told, `f`/`r` survive narrowest since
 /// they name behavior no key convention predicts.
-const FOOTER_OPTIONAL: [&str; 5] = ["f: fetch", "r: refresh", "s: sort", "d: reverse", "PgUp/PgDn"];
+const FOOTER_OPTIONAL: [&str; 6] =
+    ["f: fetch", "r: refresh", "u: IFDB url", "s: sort", "d: reverse", "PgUp/PgDn"];
 
 fn build_footer(width: u16) -> String {
     const CORE_LEFT: &str = " ↑/↓ or j/k: move";
-    const CORE_RIGHT: &str = "Enter / click: open   i/Tab: info   q / Esc: quit";
+    const CORE_RIGHT: &str = "Enter / 2×click: open   i/Tab: info   q / Esc: quit";
     let mut footer = CORE_LEFT.to_string();
     for seg in FOOTER_OPTIONAL {
         let candidate = format!("{footer}   {seg}   {CORE_RIGHT}");
@@ -363,6 +393,10 @@ pub(crate) fn run_story_picker(
     // message's shape (`f`: found/not-found/failed; `r`: a tallied summary).
     let mut fetch_is_single = false;
     let (mut sweep_fetched, mut sweep_skipped, mut sweep_not_found, mut sweep_failed) = (0u32, 0u32, 0u32, 0u32);
+    // Manual IFDB-page entry (SQ-0371): `Some` while the user is typing an IFDB
+    // URL/id for the selected story; keystrokes route to the field, Enter
+    // submits a fetch-by-id, Esc cancels.
+    let mut manual_ifdb: Option<app::text_field::TextField> = None;
 
     // Info panel: always starts closed each launch (session-only state).
     let mut slide = PanelSlide::closed();
@@ -385,6 +419,10 @@ pub(crate) fn run_story_picker(
     let mut last_sel = usize::MAX;
     let mut sel_changed_at = Instant::now();
     const COVER_DEBOUNCE: Duration = Duration::from_millis(90);
+    // Story-list clicks: first click selects, a second on the same row within
+    // this window launches it (SQ-0366).
+    let mut last_click: Option<(usize, Instant)> = None;
+    const DOUBLE_CLICK: Duration = Duration::from_millis(400);
     // A physical wheel notch emits several events, all delivered to the input
     // buffer together. Record the direction here and apply exactly one selection
     // step once the buffer drains (at the loop top), so one notch = one story
@@ -418,9 +456,12 @@ pub(crate) fn run_story_picker(
             row_rects = rects;
             viewport = vp;
             header_rects = hrects;
-            // A fetch in flight (or its just-landed result) replaces the
-            // normal footer hints with a live status line.
-            if let Some(msg) = &progress_line {
+            // The manual IFDB-entry prompt (SQ-0371) takes the footer row while
+            // active; otherwise a fetch's status line, otherwise the hints.
+            if let Some(field) = &manual_ifdb {
+                let prompt = format!("IFDB URL or id (Enter to fetch, Esc to cancel): {}▏", field.as_str());
+                draw_progress_line(buf, list_area, &prompt, cs.story_header_active);
+            } else if let Some(msg) = &progress_line {
                 draw_progress_line(buf, list_area, msg, cs.story_header_active);
             }
             if panel_area.width > 0 {
@@ -578,7 +619,49 @@ pub(crate) fn run_story_picker(
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                 use crossterm::event::KeyCode::*;
                 let shift = k.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
-                if slide.open && shift {
+                // Manual IFDB-page entry (SQ-0371) intercepts every key while
+                // active: keystrokes edit the field, Enter submits a fetch-by-id,
+                // Esc cancels.
+                if let Some(field) = manual_ifdb.as_mut() {
+                    match k.code {
+                        Esc => {
+                            manual_ifdb = None;
+                            progress_line = None;
+                        }
+                        Enter => {
+                            let input = field.take();
+                            manual_ifdb = None;
+                            if let Some(entry) = stories.get(list.selected) {
+                                match app::ifdb::extract_tuid(&input) {
+                                    Some(tuid) => {
+                                        fetch_is_single = true;
+                                        sweep_fetched = 0;
+                                        sweep_skipped = 0;
+                                        sweep_not_found = 0;
+                                        sweep_failed = 0;
+                                        progress_line = Some(format!("Fetching {} from IFDB…", entry.title));
+                                        fetcher.request(app::fetch_worker::FetchOrder {
+                                            stories: vec![(entry.path.clone(), entry.meta.ifid.clone())],
+                                            forced: true,
+                                            id_override: Some(tuid),
+                                        });
+                                    }
+                                    None => {
+                                        progress_line = Some("Not an IFDB URL or id".to_string());
+                                    }
+                                }
+                            }
+                        }
+                        Backspace => field.backspace(),
+                        Delete => field.delete(),
+                        Left => field.left(),
+                        Right => field.right(),
+                        Home => field.home(),
+                        End => field.end(),
+                        Char(c) => field.insert(c),
+                        _ => {}
+                    }
+                } else if slide.open && shift {
                     let page = (last_panel_area.height.saturating_sub(2)).max(1) as usize;
                     match k.code {
                         Up => panel_scroll = panel_scroll.saturating_sub(1),
@@ -639,6 +722,7 @@ pub(crate) fn run_story_picker(
                                 fetcher.request(app::fetch_worker::FetchOrder {
                                     stories: vec![(entry.path.clone(), entry.meta.ifid.clone())],
                                     forced: true,
+                                    id_override: None,
                                 });
                             }
                         }
@@ -655,7 +739,14 @@ pub(crate) fn run_story_picker(
                             sweep_not_found = 0;
                             sweep_failed = 0;
                             progress_line = Some(format!("Fetching 0/{total}"));
-                            fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false });
+                            fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false, id_override: None });
+                        }
+                        // `u`: point the selected story at an IFDB page by hand
+                        // (for a story whose IFID IFDB doesn't index). Opens the
+                        // manual-entry field; ignored mid-sweep (SQ-0371).
+                        Char('u') if !fetcher.busy() => {
+                            manual_ifdb = Some(app::text_field::TextField::new(""));
+                            progress_line = None;
                         }
                         // `s`: cycle the sort column, keeping direction. `d`:
                         // toggle direction, keeping the column. Both preserve
@@ -689,7 +780,21 @@ pub(crate) fn run_story_picker(
                 if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
                     if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
-                        break Some(stories[*idx].path.clone());
+                        let idx = *idx;
+                        let now = Instant::now();
+                        // Second click on the already-selected row within the
+                        // window → launch; otherwise just select it (SQ-0366).
+                        let double = last_click
+                            .is_some_and(|(li, lt)| li == idx && now.duration_since(lt) < DOUBLE_CLICK);
+                        if double {
+                            break Some(stories[idx].path.clone());
+                        }
+                        panel_scroll = 0;
+                        list.select(idx, viewport, anim);
+                        if slide.open {
+                            ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
+                        }
+                        last_click = Some((idx, now));
                     } else if let Some((key, _)) = header_rects.iter().find(|(_, r)| r.contains(pt)) {
                         // Click the active header → reverse; click another → sort
                         // by it, ascending.
@@ -789,14 +894,17 @@ fn draw_story_picker(
 
     // Badge cluster width depends only on the configured glyphs, not the
     // entry, so it's computed once and reused both to size the text columns
-    // and to place each row's cluster.
-    let type_w = glyphs.zcode.chars().count().max(glyphs.glulx.chars().count()) as u16;
-    let blorb_w = glyphs.blorb.chars().count() as u16;
+    // and to place each row's cluster. Both the interpreter/format AND the
+    // blorb indicator moved into the TYPE column (SQ-0369: "Z5 (blorb)"), so
+    // the cluster is now just [save][hint].
     let save_w = glyphs.save.chars().count() as u16;
     let hint_w = glyphs.hint.chars().count() as u16;
-    let cluster_w = type_w + blorb_w + save_w + hint_w;
-    let badges_shown = cluster_w + 2 < row_w;
-    let badge_reserved = if badges_shown { cluster_w + 1 } else { 0 };
+    let cluster_w = save_w + hint_w;
+    // The TYPE column rides in the same right-hand zone as the badges, one gap
+    // to their left; both are shown together or dropped together.
+    let right_zone = INTERP_COL_W + COL_GAP + cluster_w;
+    let badges_shown = right_zone + 2 < row_w;
+    let badge_reserved = if badges_shown { right_zone + 1 } else { 0 };
     let text_w = row_w.saturating_sub(badge_reserved);
     // Widest author name across the WHOLE list (not just the visible page), so
     // the author column doesn't jump width as the user scrolls.
@@ -830,6 +938,12 @@ fn draw_story_picker(
         let year_hstyle = if year_active { cs.story_header_active } else { cs.story_header };
         draw_str_clipped(buf, year_x, header_y, &year_label, year_hstyle, area);
         header_rects.push((SortKey::Year, Rect::new(year_x, header_y, cols.year_w, 1)));
+    }
+    // TYPE column header, above the interpreter labels in the right-hand zone.
+    // Not sortable, so no header rect — just a dimmed label (SQ-0369).
+    if badges_shown {
+        let interp_hx = area.left() + row_w - 1 - cluster_w - COL_GAP - INTERP_COL_W;
+        draw_str_clipped(buf, interp_hx, header_y, "TYPE", cs.story_header, area);
     }
 
     for (i, entry) in stories.iter().enumerate().skip(first).take(rows) {
@@ -873,15 +987,20 @@ fn draw_story_picker(
             }
         }
 
-        // Right-aligned badge cluster: fixed columns for [type][blorb][save][hint],
-        // no separators, so present badges stay vertically aligned across rows.
+        // Right-hand zone: the TYPE column then the badge cluster
+        // [blorb][save][hint]. No separators within the cluster, so present
+        // badges stay vertically aligned across rows.
         let b = badges.get(i).copied().unwrap_or_default();
-        let type_glyph = match entry.meta.engine {
-            app::picker::Engine::ZCode => glyphs.zcode,
-            app::picker::Engine::Glulx => glyphs.glulx,
-        };
         if badges_shown {
             let bx = area.left() + row_w - 1 - cluster_w;
+            // TYPE column, one gap to the left of the badges. Plain colour (not
+            // the badge's reverse-block treatment); selection wins like the
+            // other text columns.
+            let interp_x = bx - COL_GAP - INTERP_COL_W;
+            let interp_txt =
+                truncate_to_width(&interp_label(&entry.meta, b.blorb), INTERP_COL_W as usize);
+            let interp_style = if sel { style } else { cs.story_badge };
+            draw_str_clipped(buf, interp_x, y, &interp_txt, interp_style, row_rect);
             // On the selection bar the plain badge fg (e.g. green) is low-contrast
             // against the highlight, so reverse it into a block: the badge colour
             // becomes the background and the selection bar's text colour the glyph
@@ -895,15 +1014,11 @@ fn draw_story_picker(
             } else {
                 cs.story_badge
             };
-            draw_str_clipped(buf, bx, y, type_glyph, badge_style, row_rect);
-            if b.blorb {
-                draw_str_clipped(buf, bx + type_w, y, glyphs.blorb, badge_style, row_rect);
-            }
             if b.save {
-                draw_str_clipped(buf, bx + type_w + blorb_w, y, glyphs.save, badge_style, row_rect);
+                draw_str_clipped(buf, bx, y, glyphs.save, badge_style, row_rect);
             }
             if b.hint {
-                draw_str_clipped(buf, bx + type_w + blorb_w + save_w, y, glyphs.hint, badge_style, row_rect);
+                draw_str_clipped(buf, bx + save_w, y, glyphs.hint, badge_style, row_rect);
             }
         }
     }
@@ -1011,6 +1126,10 @@ fn draw_info_panel(
     }
 
     let mut lines: Vec<(String, ratatui::style::Style)> = Vec::new();
+    // Line index → full URL for lines that should render as OSC 8 hyperlinks
+    // (SQ-0367): the visible text may truncate, but the whole visible label
+    // stays clickable and opens the full URL.
+    let mut link_urls: Vec<(usize, String)> = Vec::new();
 
     // Title.
     lines.push((title.to_string(), cs.story_info_title));
@@ -1065,10 +1184,18 @@ fn draw_info_panel(
             }
         }
     }
-    // IFDB page link (SQ-0348): rendered as the bare URL so terminals that
-    // detect URLs make it click/⌘-clickable; only present once fetched.
+    // IFDB page link (SQ-0348): a real OSC 8 hyperlink (SQ-0367) so the visible
+    // text is clickable even when the URL truncates; only present once fetched.
     if let Some(link) = meta.ifdb_link.as_deref().filter(|s| !s.is_empty()) {
+        link_urls.push((lines.len(), link.to_string()));
         lines.push((format!("IFDB: {link}"), cs.story_info_link));
+    } else if meta.fetch_not_found {
+        // A fetch ran but IFDB had no record for this IFID (common for Infocom
+        // releases IFDB indexes under a different IFID). Offer a manual search
+        // by title so the user isn't at a dead end (SQ-0371).
+        let url = app::ifdb::search_url(title);
+        link_urls.push((lines.len(), url.clone()));
+        lines.push((format!("IFDB search: {url}"), cs.story_info_link));
     }
     // features line (present badges only).
     let feats = feature_words(&meta.features, aux);
@@ -1149,8 +1276,18 @@ fn draw_info_panel(
     let max_scroll = lines.len().saturating_sub(content_height);
     let eff = scroll.min(max_scroll);
     let end = (eff + content_height).min(lines.len());
-    for (i, (text, style)) in lines[eff..end].iter().enumerate() {
-        let y = inner.y + i as u16;
+    for (vi, (text, style)) in lines[eff..end].iter().enumerate() {
+        let li = eff + vi;
+        let y = inner.y + vi as u16;
+        if let Some((_, url)) = link_urls.iter().find(|(idx, _)| *idx == li) {
+            // OSC 8 hyperlink (SQ-0367): the whole visible label is clickable and
+            // opens the full URL, so a truncated URL still works. Degrades to
+            // plain styled text on terminals without hyperlink support.
+            let rect = Rect::new(text_area.x, y, text_area.width, 1);
+            let link = hyperrat::Link::new(text.as_str(), url.as_str()).style(*style);
+            ratatui::widgets::Widget::render(link, rect, buf);
+            continue;
+        }
         draw_str_clipped(buf, text_area.x, y, text, *style, text_area);
     }
     if overflow {
@@ -1230,6 +1367,26 @@ fn feature_words(f: &app::picker::Features, aux: Option<&app::picker::StoryAux>)
 mod tests {
     // ── Story-picker row badges (type + present artifacts) ─────────────────────
 
+    #[test]
+    fn interp_label_formats_type_version_and_blorb() {
+        use app::picker::{Engine, Features, StoryMeta};
+        let meta = |engine: Engine, version: Option<&str>| StoryMeta {
+            size_bytes: 0, modified: None, engine, format: String::new(),
+            version: version.map(String::from), serial: None, release: None, ifid: String::new(),
+            features: Features::default(), self_blorb: None, author: None, year: None,
+            genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
+        };
+        // Z-code: "Z<v>", plus " (blorb)" only when blorb'd.
+        assert_eq!(super::interp_label(&meta(Engine::ZCode, Some("5")), false), "Z5");
+        assert_eq!(super::interp_label(&meta(Engine::ZCode, Some("3")), true), "Z3 (blorb)");
+        assert_eq!(super::interp_label(&meta(Engine::ZCode, None), false), "Z");
+        // Glulx: "G<v>", never a blorb suffix (Glulx is effectively always blorbed).
+        assert_eq!(super::interp_label(&meta(Engine::Glulx, Some("3.1.2")), true), "G3.1.2");
+        assert_eq!(super::interp_label(&meta(Engine::Glulx, None), false), "Glulx");
+        // Widest label fits the column.
+        assert!(super::interp_label(&meta(Engine::ZCode, Some("8")), true).len() <= super::INTERP_COL_W as usize);
+    }
+
     fn row_text(buf: &ratatui::buffer::Buffer, y: u16, area: ratatui::layout::Rect) -> String {
         (area.left()..area.right())
             .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
@@ -1254,7 +1411,7 @@ mod tests {
                 size_bytes: 1, modified: None, engine, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None,
-                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
+                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
             },
         };
         vec![mk("Zork", Engine::ZCode), mk("Anchorhead", Engine::Glulx)]
@@ -1273,7 +1430,7 @@ mod tests {
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None,
                 author: author.map(String::from), year: year.map(String::from),
-                genre: None, language: None, description: None, ifdb_link: None,
+                genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
             },
         }
     }
@@ -1303,10 +1460,15 @@ mod tests {
 
         let row0 = row_text(&buf, 2, area); // list starts at area.y + 2
         let row1 = row_text(&buf, 3, area);
-        assert!(row0.contains("ZBSH"), "adjacent, no separators: {row0:?}");
+        // Type AND blorb moved into the TYPE column (SQ-0369), so the badge
+        // cluster is just [save][hint], adjacent and no separators.
+        assert!(row0.contains("SH"), "save+hint adjacent, no type/blorb glyph: {row0:?}");
         assert!(row1.contains("S"), "got: {row1:?}");
-        assert!(!row1.contains("B"), "absent blorb omitted: {row1:?}");
         assert!(!row1.contains("H"), "absent hint omitted: {row1:?}");
+        // The blorb'd Z-code story shows "(blorb)" in its TYPE column; the Glulx
+        // story shows its interpreter label. Neither shows a B badge.
+        assert!(row0.contains("(blorb)"), "blorb'd Z story tagged in TYPE column: {row0:?}");
+        assert!(row1.contains("Glulx"), "Glulx story shows its type label: {row1:?}");
 
         // Fixed-slot alignment: the save glyph must land at the same column
         // in both rows regardless of which other artifacts are present.
@@ -1321,13 +1483,14 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect};
         let cs = app::colors::ColorScheme::terminal_default();
         let mut sym = app::config::SymbolConfig::default();
-        sym.badge_zcode = "z!".into();
-        sym.badge_blorb = "◆".into();
+        sym.badge_zcode = "z!".into();  // moved to the TYPE column (SQ-0369)
+        sym.badge_blorb = "◆".into();   // ditto, as " (blorb)"
+        sym.badge_save = "§".into();
         let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
 
         let stories = make_two_test_stories();
         let badges = vec![
-            app::picker::RowBadges { blorb: true, save: false, hint: false },
+            app::picker::RowBadges { blorb: true, save: true, hint: false },
             app::picker::RowBadges::default(),
         ];
         let mut list = app::list_scroll::ListScroll::new();
@@ -1337,7 +1500,13 @@ mod tests {
         super::draw_story_picker(&stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
                           &cs, app::picker::Sort::default(), area, &mut buf);
         let row0 = row_text(&buf, 2, area);
-        assert!(row0.contains("z!◆"), "configured glyphs used, no separators: {row0:?}");
+        // The configured save glyph is used for the artifact badge. Type and
+        // blorb are no longer badges (they're the TYPE column), so their
+        // configured glyphs must NOT appear as badges in the row.
+        assert!(row0.contains('§'), "configured save glyph used: {row0:?}");
+        assert!(!row0.contains("z!"), "type is the TYPE column now, not a badge: {row0:?}");
+        assert!(!row0.contains('◆'), "blorb is the TYPE column now, not a badge: {row0:?}");
+        assert!(row0.contains("(blorb)"), "blorb shown as a TYPE suffix instead: {row0:?}");
     }
 
     // ── Story-picker list: columns, header, sort ────────────────────────────────
@@ -1462,19 +1631,17 @@ mod tests {
         let badges = vec![app::picker::RowBadges::default()];
         let mut list = app::list_scroll::ListScroll::new();
         list.len(1);
-        let cluster_w: u16 = 4; // default glyphs: 1-col type + blorb + save + hint
 
-        // (width, author shown, year shown) — thresholds per compute_columns:
-        // year needs width >= 45, author needs width >= 37, below that:
-        // title + badges only. No width in between should show a gap: the
-        // badge cluster's column (checked below) never moves off its
-        // width-derived formula regardless of which text columns show.
+        // (width, author shown, year shown). Right zone = INTERP_COL_W(10) +
+        // COL_GAP(2) + cluster_w(save+hint=2) = 14, reserved 15; so avail =
+        // width - 17. year needs avail >= 38 (width >= 55); author needs avail
+        // >= 30 (width >= 47). Below that: title + right-zone only.
         for &(width, want_author, want_year) in &[
-            (60u16, true, true),
-            (45, true, true),
-            (44, true, false),
-            (37, true, false),
-            (36, false, false),
+            (70u16, true, true),
+            (55, true, true),
+            (54, true, false),
+            (47, true, false),
+            (46, false, false),
             (30, false, false),
         ] {
             let area = Rect::new(0, 0, width, 10);
@@ -1487,12 +1654,13 @@ mod tests {
             assert_eq!(row.contains("Michael S. Gentry"), want_author, "width {width}: {row:?}");
             assert_eq!(row.contains("1998"), want_year, "width {width}: {row:?}");
 
-            // Badges stay right-aligned at the same formula regardless of
-            // which text columns are shown — proves no gap opened in front
-            // of them as columns drop.
-            let bx = width - 1 - cluster_w;
-            let cell = buf.cell((bx, 2)).unwrap();
-            assert_eq!(cell.symbol(), "Z", "badge cluster must start at col {bx} for width {width}: {row:?}");
+            // The TYPE column stays right-aligned at a fixed offset regardless of
+            // which text columns show — proving no gap opened in front of the
+            // right-hand zone as columns drop. This story is ZCode/no-version/
+            // no-blorb, so its interpreter label is "Z".
+            let interp_x = width - 1 - 2 /*cluster*/ - super::COL_GAP - super::INTERP_COL_W;
+            let cell = buf.cell((interp_x, 2)).unwrap();
+            assert_eq!(cell.symbol(), "Z", "TYPE column at col {interp_x} for width {width}: {row:?}");
         }
     }
 
@@ -1517,10 +1685,11 @@ mod tests {
         assert!(!row0.contains(long_author), "long author must be truncated: {row0:?}");
         assert!(row0.contains('…'), "truncated author ends with an ellipsis: {row0:?}");
         assert!(row0.contains("1980"), "year column unaffected by the author overrun: {row0:?}");
-        let bx = 60u16 - 1 - 4;
+        // TYPE column ("Z" here) stays put at its fixed right-zone offset.
+        let interp_x = 60u16 - 1 - 2 - super::COL_GAP - super::INTERP_COL_W;
         assert_eq!(
-            buf.cell((bx, 2)).unwrap().symbol(), "Z",
-            "badge cluster unaffected by the author overrun"
+            buf.cell((interp_x, 2)).unwrap().symbol(), "Z",
+            "TYPE column unaffected by the author overrun"
         );
     }
 
@@ -1589,23 +1758,23 @@ mod tests {
         assert!(narrow.contains("move") && narrow.contains("open") && narrow.contains("info") && narrow.contains("quit"));
         assert!(!narrow.contains("f: fetch") && !narrow.contains("PgUp/PgDn"), "{narrow:?}");
 
-        // f/r (least guessable) survive down to the narrowest widths that fit
-        // them at all; s/d/PgUp/PgDn need progressively more room.
-        let at_80 = super::build_footer(80);
-        assert!(at_80.contains("f: fetch"), "{at_80:?}");
-        assert!(!at_80.contains("r: refresh"), "{at_80:?}");
-
-        let at_93 = super::build_footer(93);
-        assert!(at_93.contains("r: refresh") && !at_93.contains("s: sort"), "{at_93:?}");
-
-        let at_103 = super::build_footer(103);
-        assert!(at_103.contains("s: sort") && !at_103.contains("d: reverse"), "{at_103:?}");
-
-        let at_116 = super::build_footer(116);
-        assert!(at_116.contains("d: reverse") && !at_116.contains("PgUp/PgDn"), "{at_116:?}");
-
-        let at_128 = super::build_footer(128);
-        assert!(at_128.contains("PgUp/PgDn"), "{at_128:?}");
+        // Segments appear in FOOTER_OPTIONAL order as width grows (least-
+        // guessable first): each one's minimum fitting width is >= the previous
+        // one's, and the core is always present. Robust to segment-set changes.
+        let min_width = |seg: &str| -> u16 {
+            (10u16..=240).find(|&w| super::build_footer(w).contains(seg)).unwrap_or(u16::MAX)
+        };
+        let widths: Vec<u16> = super::FOOTER_OPTIONAL.iter().map(|s| min_width(s)).collect();
+        for pair in widths.windows(2) {
+            assert!(pair[0] <= pair[1], "segments appear in declared order: {widths:?}");
+        }
+        // f: fetch (first, least guessable) appears well before PgUp/PgDn (last).
+        assert!(widths[0] < *widths.last().unwrap(), "{widths:?}");
+        // At a wide-enough terminal, every optional hint (incl. the new u) shows.
+        let wide = super::build_footer(200);
+        for seg in super::FOOTER_OPTIONAL {
+            assert!(wide.contains(seg), "wide footer shows {seg:?}: {wide:?}");
+        }
     }
 
     // ── Story-picker info panel ─────────────────────────────────────────────────
@@ -1644,7 +1813,7 @@ mod tests {
                     detail: Some("15.4 kHz · 8-bit · mono · 2.2s".into()),
                 },
             ]),
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
         };
         let game_dir = std::path::PathBuf::from("/tmp/babelmap-info-panel-saves/zork1.z3");
         let aux = app::picker::StoryAux {
@@ -1735,7 +1904,7 @@ mod tests {
             ifid: "ZCODE-88-840726".into(),
             features: app::picker::Features::default(),
             self_blorb: Some(chunks),
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
         };
         let area = Rect::new(0, 0, 34, 10);
         let mut buf = Buffer::empty(area);
@@ -1772,7 +1941,7 @@ mod tests {
             format: "Blorb (Glulx)".into(), version: Some("3.1.2".into()),
             serial: None, release: None, ifid: "IFID-X".into(),
             features: app::picker::Features::default(), self_blorb: None,
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
         }
     }
 
@@ -1869,6 +2038,39 @@ mod tests {
             render(&fetched).contains("https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro"),
             "the IFDB URL renders once present"
         );
+    }
+
+    /// SQ-0371: a fetch that found nothing offers a manual IFDB search link (by
+    /// title) instead of a dead end — but a never-fetched story shows neither.
+    #[test]
+    fn info_panel_offers_a_search_link_when_the_fetch_found_nothing() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 60, 14);
+        let render = |title: &str, meta: &app::picker::StoryMeta| {
+            let mut buf = Buffer::empty(area);
+            let mut cover = app::cover::CoverState::default();
+            super::draw_info_panel(
+                title, "game.z5", meta, None, 0, area, None, &mut cover,
+                std::path::Path::new("game.z5"), false, &cs, &mut buf,
+            );
+            buffer_to_string(&buf, area)
+        };
+        // Never fetched → no search link (only `f`/`r` offers a fetch).
+        let bare = minimal_story_meta();
+        assert!(!render("Zork I", &bare).contains("IFDB search:"), "no search link before a fetch");
+        // Fetch ran, found nothing → a search-by-title link appears.
+        let mut nf = minimal_story_meta();
+        nf.fetch_not_found = true;
+        let out = render("Zork I", &nf);
+        assert!(out.contains("IFDB search:"), "not-found offers a manual search: {out:?}");
+        assert!(out.contains("ifdb.org/search?searchfor=Zork"), "search is by title: {out:?}");
+        // A successful link takes precedence over the search fallback.
+        let mut found = minimal_story_meta();
+        found.fetch_not_found = true; // even if the flag is stale
+        found.ifdb_link = Some("https://ifdb.org/viewgame?id=abc".into());
+        let out = render("Zork I", &found);
+        assert!(out.contains("viewgame?id=abc") && !out.contains("IFDB search:"), "link wins: {out:?}");
     }
 
     /// A long blurb wraps to the panel's content width and, when it overflows
@@ -2150,6 +2352,9 @@ mod tests {
                 None => Ok(app::ifdb::FetchOutcome::NotFound),
             }
         }
+        fn fetch_by_id(&self, _tuid: &str) -> Result<app::ifdb::FetchOutcome, app::ifdb::FetchError> {
+            Ok(app::ifdb::FetchOutcome::NotFound)
+        }
         fn fetch_cover(&self, _url: &str) -> Result<Vec<u8>, app::ifdb::FetchError> {
             Ok(Vec::new())
         }
@@ -2188,7 +2393,7 @@ mod tests {
         );
         let order: Vec<(std::path::PathBuf, String)> =
             stories.iter().map(|e| (e.path.clone(), e.meta.ifid.clone())).collect();
-        fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: true });
+        fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: true, id_override: None });
 
         // Bounded drain (mirrors fetch_worker's own test pattern): collect
         // progress until both stories report in, or give up after ~2s.

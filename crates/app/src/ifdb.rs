@@ -44,6 +44,9 @@ pub enum FetchError {
 
 pub trait MetadataSource: Send + Sync {
     fn fetch(&self, ifid: &str) -> Result<FetchOutcome, FetchError>;
+    /// Fetch by IFDB page id (tuid), for a story the user pointed at an IFDB
+    /// page by hand when the automatic IFID lookup found nothing (SQ-0371).
+    fn fetch_by_id(&self, tuid: &str) -> Result<FetchOutcome, FetchError>;
     fn fetch_cover(&self, url: &str) -> Result<Vec<u8>, FetchError>;
 }
 
@@ -68,9 +71,9 @@ impl Default for IfdbClient {
 }
 
 impl IfdbClient {
-    /// One IFDB lookup for exactly this IFID string.
-    fn fetch_one(&self, ifid: &str) -> Result<FetchOutcome, FetchError> {
-        match self.agent.get(ifiction_url(ifid)).call() {
+    /// GET an IFDB `viewgame?ifiction…` URL and interpret the response.
+    fn get_ifiction(&self, url: String) -> Result<FetchOutcome, FetchError> {
+        match self.agent.get(url).call() {
             Ok(mut resp) => {
                 let bytes = resp
                     .body_mut()
@@ -93,6 +96,11 @@ impl IfdbClient {
             Err(e) => Err(FetchError::Transport(e.to_string())),
         }
     }
+
+    /// One IFDB lookup for exactly this IFID string.
+    fn fetch_one(&self, ifid: &str) -> Result<FetchOutcome, FetchError> {
+        self.get_ifiction(ifiction_url(ifid))
+    }
 }
 
 impl MetadataSource for IfdbClient {
@@ -111,6 +119,10 @@ impl MetadataSource for IfdbClient {
             }
         }
         Ok(outcome)
+    }
+
+    fn fetch_by_id(&self, tuid: &str) -> Result<FetchOutcome, FetchError> {
+        self.get_ifiction(ifiction_id_url(tuid))
     }
 
     fn fetch_cover(&self, url: &str) -> Result<Vec<u8>, FetchError> {
@@ -132,6 +144,27 @@ fn ifiction_url(ifid: &str) -> String {
     format!("https://ifdb.org/viewgame?ifiction&ifid={}", percent_encode(ifid))
 }
 
+/// iFiction by IFDB page id (tuid). Verified 2026-07-16: `?ifiction&id=<tuid>`
+/// returns the game's iFiction XML.
+fn ifiction_id_url(tuid: &str) -> String {
+    format!("https://ifdb.org/viewgame?ifiction&id={}", percent_encode(tuid))
+}
+
+/// Pull an IFDB page id (tuid) out of what a user pasted: a full page URL
+/// (`https://ifdb.org/viewgame?id=<tuid>`, optionally with `&version=…`), a bare
+/// `?id=<tuid>` query, or the tuid on its own. `None` if nothing tuid-shaped is
+/// found (SQ-0371). The `?id=`/`&id=` boundary avoids matching the `ifid=` of an
+/// iFiction URL.
+pub fn extract_tuid(input: &str) -> Option<String> {
+    let s = input.trim();
+    if let Some(start) = ["?id=", "&id="].iter().find_map(|m| s.find(m).map(|i| i + m.len())) {
+        let tuid: String = s[start..].chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        return (!tuid.is_empty()).then_some(tuid);
+    }
+    // A bare tuid: all-alphanumeric, no scheme or query punctuation.
+    (!s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric())).then(|| s.to_string())
+}
+
 /// A `ZCODE-<release>-<serial>-<checksum>` IFID with its trailing 4-hex-digit
 /// header checksum removed, giving the bare `ZCODE-<release>-<serial>` form
 /// IFDB commonly indexes. `None` for anything else — a bare ZCODE IFID (the
@@ -146,6 +179,13 @@ fn strip_zcode_checksum(ifid: &str) -> Option<String> {
         return None;
     }
     (last.len() == 4 && last.bytes().all(|b| b.is_ascii_hexdigit())).then(|| prefix.to_string())
+}
+
+/// A human IFDB search page for `query` (a title). Offered when an automatic
+/// fetch found nothing, so the user can look the story up by hand (SQ-0371).
+/// Verified 2026-07-16: `ifdb.org/search?searchfor=…` returns 200.
+pub fn search_url(query: &str) -> String {
+    format!("https://ifdb.org/search?searchfor={}", percent_encode(query))
 }
 
 /// Hand-rolled: the one call site (an IFID reaching us from story bytes,
@@ -203,6 +243,33 @@ mod tests {
             f.ifdb.unwrap().cover_url.as_deref(),
             Some("https://ifdb.org/coverart?id=0dbnusxunq7fw5ro&version=45")
         );
+    }
+
+    #[test]
+    fn extract_tuid_handles_urls_and_bare_ids() {
+        let t = "0dbnusxunq7fw5ro";
+        assert_eq!(extract_tuid(&format!("https://ifdb.org/viewgame?id={t}")).as_deref(), Some(t));
+        assert_eq!(extract_tuid(&format!("https://ifdb.org/coverart?id={t}&version=45")).as_deref(), Some(t));
+        assert_eq!(extract_tuid(&format!("  {t}  ")).as_deref(), Some(t), "bare id, trimmed");
+        // Must not mistake the `ifid=` of an iFiction URL for an `id=`.
+        assert_eq!(extract_tuid("https://ifdb.org/viewgame?ifiction&ifid=ZCODE-5-1"), None);
+        // Nothing tuid-shaped.
+        assert_eq!(extract_tuid("not a url"), None);
+        assert_eq!(extract_tuid(""), None);
+    }
+
+    #[test]
+    fn ifiction_id_url_targets_the_page_id_endpoint() {
+        assert_eq!(
+            ifiction_id_url("0dbnusxunq7fw5ro"),
+            "https://ifdb.org/viewgame?ifiction&id=0dbnusxunq7fw5ro"
+        );
+    }
+
+    #[test]
+    fn search_url_encodes_the_title_query() {
+        assert_eq!(search_url("Zork I"), "https://ifdb.org/search?searchfor=Zork%20I");
+        assert!(search_url("A&B").ends_with("searchfor=A%26B"));
     }
 
     #[test]
