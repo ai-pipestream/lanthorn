@@ -1222,12 +1222,18 @@ fn draw_info_panel(
     // scroll/overflow accounting as every other panel line below. Split on the
     // paragraph breaks html_to_text left in, wrapping each independently so a
     // `<br/>` in the source stays a visible break rather than collapsing.
+    //
+    // Reserve the scrollbar's gutter column when wrapping: whether the panel
+    // overflows depends on the wrapped line count, so it can't be known here —
+    // always wrap to the narrower width so a wrapped line is never clipped by
+    // (or drawn under) the scrollbar in the overflow case.
+    let wrap_w = (inner.width as usize).saturating_sub(1);
     if let Some(desc) = meta.description.as_deref().filter(|s| !s.is_empty()) {
         for para in desc.lines() {
             if para.trim().is_empty() {
                 lines.push((String::new(), cs.story_info_blurb));
             } else {
-                for row in wrap_to_width(para, inner.width as usize) {
+                for row in wrap_to_width(para, wrap_w) {
                     lines.push((row, cs.story_info_blurb));
                 }
             }
@@ -2230,6 +2236,37 @@ mod tests {
         assert_eq!(max_scroll2, max_scroll, "max_scroll must be stable across scroll positions");
         let text_scrolled = buffer_to_string(&buf2, area);
         assert!(text_scrolled.contains("twenty"), "late blurb word should be visible once scrolled: {text_scrolled:?}");
+    }
+
+    /// Regression (word-wrap vs scrollbar): when the blurb overflows and the
+    /// scrollbar claims the last column, the wrap must reserve that gutter so a
+    /// word landing on the panel's right edge is not clipped by one character.
+    #[test]
+    fn info_panel_blurb_wrap_reserves_the_scrollbar_gutter() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let mut meta = minimal_story_meta();
+        // In the 18-col inner width, "aaaaaaaa bbbbbbbbb" is exactly 18 wide: it
+        // fills the full inner width but not the width-1 text area left once the
+        // scrollbar takes a column. Wrapping to the full width clips the last
+        // 'b'; reserving the gutter pushes "bbbbbbbbb" to its own line intact.
+        meta.description = Some(
+            "aaaaaaaa bbbbbbbbb cccccccc dddddddd eeeeeeee ffffffff gggggggg hhhhhhhh iiiiiiii jjjjjjjj"
+                .into(),
+        );
+        let area = Rect::new(0, 0, 20, 10); // inner 18x8 → 10 content lines overflow
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("game.gblorb");
+        let max_scroll = super::draw_info_panel(
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
+        );
+        assert!(max_scroll > 0, "blurb should overflow so the scrollbar shows");
+        let text = buffer_to_string(&buf, area);
+        assert!(
+            text.contains("bbbbbbbbb"),
+            "the 9-char word must not be clipped by the scrollbar column: {text:?}"
+        );
     }
 
     #[test]
