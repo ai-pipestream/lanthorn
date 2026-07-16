@@ -722,13 +722,9 @@ impl Machine {
             }
             0x111 => {
                 let (l, _) = self.read_operands(1, 0)?;
-                if l[0] == 0 {
-                    self.rng = Self::DEFAULT_SEED;
-                    self.diagnostics
-                        .push("setrandom(0): true-entropy seeding deferred; using a fixed seed".to_string());
-                } else {
-                    self.rng = l[0];
-                }
+                // setrandom(0) seeds from a genuinely unpredictable source; a nonzero
+                // argument seeds deterministically (reproducible runs / testing).
+                self.rng = if l[0] == 0 { Self::entropy_seed() } else { l[0] };
                 Ok(())
             }
             // Acceleration (storage only; interception deferred — GLULX_NOTES §17).
@@ -750,6 +746,17 @@ impl Machine {
             // Undo (in-memory; @save/@restore stream opcodes are sub-project 3).
             0x125 => self.op_saveundo(),
             0x126 => self.op_restoreundo(),
+            // ExtUndo (Glulx 3.1.3): query / discard the temporary undo state.
+            0x128 => {
+                // hasundo — S1 = 0 if a restoreundo would succeed (a state is saved), else 1.
+                let (_, s) = self.read_operands(0, 1)?;
+                self.store(s[0], u32::from(self.undo_stack.is_empty()))
+            }
+            // discardundo — drop the most recent saved state; a no-op if none. Zero operands.
+            0x129 => {
+                self.undo_stack.pop();
+                Ok(())
+            }
             // Protect a RAM range across restore/restoreundo (L2 == 0 clears).
             0x127 => {
                 let (l, _) = self.read_operands(2, 0)?;
@@ -932,6 +939,111 @@ impl Machine {
             0x1C5 => self.branch2(|x, y| Self::dec(x) >= Self::dec(y)),
             0x1C8 => self.branch1(|x| Self::dec(x).is_nan()),
             0x1C9 => self.branch1(|x| Self::dec(x).is_infinite()),
+            // Floating point (double-precision, GLULX spec 3.1.3 §2.13). A double
+            // occupies two words; reads take the high word first, stores write the
+            // low word first (see dec64 / store64).
+            0x200 => {
+                // numtod L1 -> S1:S2 — signed int to nearest double.
+                let (l, s) = self.read_operands(1, 2)?;
+                self.store64(&s, l[0] as i32 as f64)
+            }
+            0x201 => {
+                // dtonumz L1:L2 -> S1 — double to int, truncating toward zero.
+                let (l, s) = self.read_operands(2, 1)?;
+                let v = Self::dec64(l[0], l[1]);
+                let r = if v.is_nan() { 0x7FFF_FFFF } else { v as i32 as u32 };
+                self.store(s[0], r)
+            }
+            0x202 => {
+                // dtonumn L1:L2 -> S1 — double to int, rounding to nearest.
+                let (l, s) = self.read_operands(2, 1)?;
+                let v = Self::dec64(l[0], l[1]);
+                let r = if v.is_nan() { 0x7FFF_FFFF } else { v.round() as i32 as u32 };
+                self.store(s[0], r)
+            }
+            0x203 => {
+                // ftod L1 (float) -> S1:S2 (double) — exact widening.
+                let (l, s) = self.read_operands(1, 2)?;
+                self.store64(&s, Self::dec(l[0]) as f64)
+            }
+            0x204 => {
+                // dtof L1:L2 -> S1 (float) — round to nearest.
+                let (l, s) = self.read_operands(2, 1)?;
+                self.store(s[0], (Self::dec64(l[0], l[1]) as f32).to_bits())
+            }
+            0x208 => self.dunop(f64::ceil),
+            0x209 => self.dunop(f64::floor),
+            0x210 => self.dbinop(|a, b| a + b),
+            0x211 => self.dbinop(|a, b| a - b),
+            0x212 => self.dbinop(|a, b| a * b),
+            0x213 => self.dbinop(|a, b| a / b),
+            0x214 => {
+                // dmodr L1:L2 L3:L4 -> S1:S2 — remainder (sign of the dividend).
+                let (l, s) = self.read_operands(4, 2)?;
+                let (a, b) = (Self::dec64(l[0], l[1]), Self::dec64(l[2], l[3]));
+                self.store64(&s, a - (a / b).trunc() * b)
+            }
+            0x215 => {
+                // dmodq L1:L2 L3:L4 -> S1:S2 — quotient truncated toward zero.
+                let (l, s) = self.read_operands(4, 2)?;
+                let (a, b) = (Self::dec64(l[0], l[1]), Self::dec64(l[2], l[3]));
+                self.store64(&s, (a / b).trunc())
+            }
+            0x218 => self.dunop(f64::sqrt),
+            0x219 => self.dunop(f64::exp),
+            0x21A => self.dunop(f64::ln),
+            0x21B => self.dbinop(f64::powf),
+            0x220 => self.dunop(f64::sin),
+            0x221 => self.dunop(f64::cos),
+            0x222 => self.dunop(f64::tan),
+            0x223 => self.dunop(f64::asin),
+            0x224 => self.dunop(f64::acos),
+            0x225 => self.dunop(f64::atan),
+            0x226 => self.dbinop(f64::atan2),
+            0x230 => {
+                // jdeq L1:L2 L3:L4 L5:L6(eps) L7(offset) — fuzzy double equality.
+                let (l, _) = self.read_operands(7, 0)?;
+                let taken = Self::deq(Self::dec64(l[0], l[1]), Self::dec64(l[2], l[3]), Self::dec64(l[4], l[5]));
+                self.branch(l[6], taken)
+            }
+            0x231 => {
+                // jdne — inverse of jdeq (branches on any NaN input).
+                let (l, _) = self.read_operands(7, 0)?;
+                let taken = !Self::deq(Self::dec64(l[0], l[1]), Self::dec64(l[2], l[3]), Self::dec64(l[4], l[5]));
+                self.branch(l[6], taken)
+            }
+            0x232 => {
+                let (l, _) = self.read_operands(5, 0)?;
+                let taken = Self::dec64(l[0], l[1]) < Self::dec64(l[2], l[3]);
+                self.branch(l[4], taken)
+            }
+            0x233 => {
+                let (l, _) = self.read_operands(5, 0)?;
+                let taken = Self::dec64(l[0], l[1]) <= Self::dec64(l[2], l[3]);
+                self.branch(l[4], taken)
+            }
+            0x234 => {
+                let (l, _) = self.read_operands(5, 0)?;
+                let taken = Self::dec64(l[0], l[1]) > Self::dec64(l[2], l[3]);
+                self.branch(l[4], taken)
+            }
+            0x235 => {
+                let (l, _) = self.read_operands(5, 0)?;
+                let taken = Self::dec64(l[0], l[1]) >= Self::dec64(l[2], l[3]);
+                self.branch(l[4], taken)
+            }
+            0x238 => {
+                // jdisnan L1:L2 L3(offset).
+                let (l, _) = self.read_operands(3, 0)?;
+                let taken = Self::dec64(l[0], l[1]).is_nan();
+                self.branch(l[2], taken)
+            }
+            0x239 => {
+                // jdisinf L1:L2 L3(offset).
+                let (l, _) = self.read_operands(3, 0)?;
+                let taken = Self::dec64(l[0], l[1]).is_infinite();
+                self.branch(l[2], taken)
+            }
             other => Err(format!("illegal/unimplemented opcode {other:#x}")),
         }
     }
@@ -971,6 +1083,44 @@ impl Machine {
     /// infinities are equal (opposite-signed are not); otherwise the values are
     /// equal if `|a - b| <= |tolerance|`.
     fn feq(a: f32, b: f32, c: f32) -> bool {
+        if a.is_nan() || b.is_nan() || c.is_nan() {
+            return false;
+        }
+        if a.is_infinite() && b.is_infinite() {
+            return a == b;
+        }
+        (a - b).abs() <= c.abs()
+    }
+
+    /// Decode a Glulx (high, low) word pair as the IEEE-754 double it holds.
+    /// Glulx reads doubles high word first.
+    fn dec64(hi: u32, lo: u32) -> f64 {
+        f64::from_bits((u64::from(hi) << 32) | u64::from(lo))
+    }
+
+    /// Store a double to two dests, low word first (the Glulx write convention).
+    fn store64(&mut self, s: &[Dest], v: f64) -> R<()> {
+        let b = v.to_bits();
+        self.store(s[0], b as u32)?;
+        self.store(s[1], (b >> 32) as u32)
+    }
+
+    /// A 1-double op (dsqrt, dsin, …): read (2,2), decode hi:lo, apply, store lo:hi.
+    fn dunop(&mut self, f: impl Fn(f64) -> f64) -> R<()> {
+        let (l, s) = self.read_operands(2, 2)?;
+        let v = f(Self::dec64(l[0], l[1]));
+        self.store64(&s, v)
+    }
+
+    /// A 2-double op (dadd…ddiv, dpow, datan2): read (4,2), decode both, store lo:hi.
+    fn dbinop(&mut self, f: impl Fn(f64, f64) -> f64) -> R<()> {
+        let (l, s) = self.read_operands(4, 2)?;
+        let v = f(Self::dec64(l[0], l[1]), Self::dec64(l[2], l[3]));
+        self.store64(&s, v)
+    }
+
+    /// `jdeq`'s fuzzy double equality — the f64 analog of [`Self::feq`].
+    fn deq(a: f64, b: f64, c: f64) -> bool {
         if a.is_nan() || b.is_nan() || c.is_nan() {
             return false;
         }
@@ -1539,8 +1689,8 @@ impl Machine {
 
     // ── gestalt (GLULX_NOTES §13) ─────────────────────────────────────────────
 
-    /// Version of the Glulx spec this VM targets (3.1.2).
-    const GLULX_VERSION: u32 = 0x0003_0102;
+    /// Version of the Glulx spec this VM targets (3.1.3).
+    const GLULX_VERSION: u32 = 0x0003_0103;
     /// This interpreter's own version (0.1.0).
     const TERP_VERSION: u32 = 0x0000_0100;
 
@@ -1561,6 +1711,8 @@ impl Machine {
             9 => 1,                                    // Acceleration: interception implemented
             10 => u32::from(crate::accel::accel_impl_supported(arg)), // AccelFunc: implemented function numbers
             11 => 1,                                   // Float
+            12 => 1,                                   // ExtUndo (hasundo / discardundo)
+            13 => 1,                                   // Double (double-precision opcodes)
             _ => 0,
         }
     }
@@ -2132,6 +2284,17 @@ impl Machine {
     /// work done by intercepted functions when acceleration is enabled.
     pub fn insn_count(&self) -> u64 {
         self.insn_count
+    }
+
+    /// A best-effort entropy seed for `setrandom(0)`, drawn from std's
+    /// OS-seeded `RandomState` so gvm stays dependency-free and cross-platform.
+    /// Guaranteed nonzero so xorshift32 can never get stuck at 0.
+    fn entropy_seed() -> u32 {
+        use std::hash::{BuildHasher, Hasher};
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u32(0x9E37_79B9); // fixed salt; the entropy lives in the random keys
+        let s = h.finish() as u32;
+        if s == 0 { Self::DEFAULT_SEED } else { s }
     }
 
     /// Advance the xorshift32 PRNG and return the next 32-bit value.
@@ -6820,7 +6983,7 @@ mod tests {
     #[test]
     fn gestalt_reports_capabilities() {
         let m = machine_with_body(&[], vec![]);
-        assert_eq!(m.gestalt(0, 0), 0x0003_0102); // GlulxVersion 3.1.2
+        assert_eq!(m.gestalt(0, 0), 0x0003_0103); // GlulxVersion 3.1.3
         assert_eq!(m.gestalt(1, 0), 0x0000_0100); // TerpVersion 0.1.0
         assert_eq!(m.gestalt(2, 0), 1); // ResizeMem
         assert_eq!(m.gestalt(3, 0), 1); // Undo (saveundo/restoreundo)
@@ -6841,14 +7004,14 @@ mod tests {
     #[test]
     fn gestalt_opcode_and_mallocheap() {
         use asm::Op::{C8, Mem16, Zero};
-        // gestalt(0,0) via the opcode → 0x00030102.
+        // gestalt(0,0) via the opcode → 0x00030103.
         let mut body = asm::ins(0x100, &[Zero, Zero, Mem16(0x0100)]);
         // malloc 16 (activates heap), then gestalt(8) → heap-start address.
         body.extend(asm::ins(0x178, &[C8(16), Mem16(0x0104)]));
         body.extend(asm::ins(0x100, &[C8(8), Zero, Mem16(0x0108)]));
         body.extend(asm::ins(0x120, &[]));
         let m = run_program(body);
-        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0003_0102);
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0003_0103);
         let heap_start = m.mem.read32(0x108).unwrap();
         assert_eq!(heap_start, m.mem.read32(0x104).unwrap()); // == first block addr
         assert_eq!(heap_start, m.heap_start);
@@ -7276,6 +7439,30 @@ mod tests {
     }
 
     #[test]
+    fn hasundo_and_discardundo_track_the_undo_stack() {
+        // hasundo→mem (empty), saveundo, hasundo→mem (available), discardundo,
+        // hasundo→mem (empty again), quit.
+        let mut body = asm::ins(0x128, &[asm::Op::Mem16(0x0100)]);   // hasundo → mem[0x100]
+        body.extend(asm::ins(0x125, &[asm::Op::Mem16(0x0104)]));     // saveundo → mem[0x104]
+        body.extend(asm::ins(0x128, &[asm::Op::Mem16(0x0108)]));     // hasundo → mem[0x108]
+        body.extend(asm::ins(0x129, &[]));                           // discardundo
+        body.extend(asm::ins(0x128, &[asm::Op::Mem16(0x010C)]));     // hasundo → mem[0x10C]
+        body.extend(asm::ins(0x120, &[]));                           // quit
+        let mut m = machine_with_body(&[(4, 1)], body);
+
+        m.step_once().unwrap(); // hasundo (empty)
+        assert_eq!(m.mem.read32(0x100).unwrap(), 1, "no undo state yet → 1");
+
+        m.step_once().unwrap(); // saveundo
+        m.step_once().unwrap(); // hasundo (available)
+        assert_eq!(m.mem.read32(0x108).unwrap(), 0, "undo state available → 0");
+
+        m.step_once().unwrap(); // discardundo
+        m.step_once().unwrap(); // hasundo (empty again)
+        assert_eq!(m.mem.read32(0x10C).unwrap(), 1, "undo state discarded → 1");
+    }
+
+    #[test]
     fn restoreundo_empty_fails_with_one() {
         let mut body = asm::ins(0x126, &[asm::Op::Mem16(0x0100)]); // no prior saveundo
         body.extend(asm::ins(0x120, &[]));
@@ -7429,7 +7616,7 @@ mod tests {
         };
         assert_eq!(run(0x1234), run(0x1234)); // same seed → same sequence
         assert_ne!(run(0x1234), run(0x4321)); // different seed → different sequence
-        assert_eq!(run(0), run(0)); // setrandom(0): deterministic reseed (entropy deferred)
+        assert_ne!(run(0), run(0)); // setrandom(0): entropy-seeded, non-reproducible
     }
 
     #[test]
@@ -10177,6 +10364,124 @@ mod tests {
         let pc0 = m.pc;
         m.step_once().unwrap();
         m.pc != pc0 + blen
+    }
+
+    // ── double-precision (3.1.3) test helpers ─────────────────────────────────
+    /// A double as its two operand words in Glulx read order: high, then low.
+    fn d64c(v: f64) -> [asm::Op; 2] {
+        let b = v.to_bits();
+        [asm::Op::C32((b >> 32) as u32), asm::Op::C32(b as u32)]
+    }
+
+    /// Run a double op taking `loads` doubles and storing one double; return it.
+    fn deval(op: u32, loads: &[f64]) -> f64 {
+        let mut ops: Vec<asm::Op> = loads.iter().flat_map(|&v| d64c(v)).collect();
+        ops.push(asm::Op::Mem16(0x0100)); // low word
+        ops.push(asm::Op::Mem16(0x0104)); // high word
+        let mut body = asm::ins(op, &ops);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[(4, 1)], body);
+        m.step_once().unwrap();
+        let lo = m.mem.read32(0x100).unwrap();
+        let hi = m.mem.read32(0x104).unwrap();
+        f64::from_bits((u64::from(hi) << 32) | u64::from(lo))
+    }
+
+    /// Run a double→int op (one store word); return the stored word.
+    fn dtonum(op: u32, v: f64) -> u32 {
+        let mut ops = d64c(v).to_vec();
+        ops.push(asm::Op::Mem16(0x0100));
+        let mut body = asm::ins(op, &ops);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[(4, 1)], body);
+        m.step_once().unwrap();
+        m.mem.read32(0x100).unwrap()
+    }
+
+    /// Whether a double jump op branches for `loads` doubles (mirror of ftaken).
+    fn dtaken(op: u32, loads: &[f64]) -> bool {
+        let mut ops: Vec<asm::Op> = loads.iter().flat_map(|&v| d64c(v)).collect();
+        ops.push(asm::Op::C8(40));
+        let body = asm::ins(op, &ops);
+        let blen = body.len() as u32;
+        let mut m = machine_with_body(&[], body);
+        let pc0 = m.pc;
+        m.step_once().unwrap();
+        m.pc != pc0 + blen
+    }
+
+    #[test]
+    fn numtod_encodes_low_word_first() {
+        // numtod 3 -> mem[0x100]=low, mem[0x104]=high. 3.0 = 0x4008_0000_0000_0000.
+        let mut body = asm::ins(0x200, &[asm::Op::C32(3), asm::Op::Mem16(0x0100), asm::Op::Mem16(0x0104)]);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[(4, 1)], body);
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap(), 0x0000_0000, "low word stored first");
+        assert_eq!(m.mem.read32(0x104).unwrap(), 0x4008_0000, "high word stored second");
+    }
+
+    #[test]
+    fn double_to_int_conversions() {
+        assert_eq!(dtonum(0x201, 3.75), 3, "dtonumz truncates toward zero");
+        assert_eq!(dtonum(0x201, -3.75) as i32, -3, "dtonumz truncates negatives toward zero");
+        assert_eq!(dtonum(0x202, 3.75), 4, "dtonumn rounds to nearest");
+        assert_eq!(dtonum(0x201, f64::NAN), 0x7FFF_FFFF, "NaN -> 0x7FFFFFFF");
+    }
+
+    #[test]
+    fn double_arithmetic_reads_hi_first_stores_lo_first() {
+        assert_eq!(deval(0x210, &[2.0, 3.0]), 5.0, "dadd");
+        assert_eq!(deval(0x211, &[5.0, 3.0]), 2.0, "dsub");
+        assert_eq!(deval(0x212, &[2.0, 3.0]), 6.0, "dmul");
+        assert_eq!(deval(0x213, &[6.0, 3.0]), 2.0, "ddiv");
+        assert_eq!(deval(0x218, &[9.0]), 3.0, "dsqrt");
+        assert_eq!(deval(0x21B, &[2.0, 10.0]), 1024.0, "dpow");
+        assert_eq!(deval(0x208, &[2.3]), 3.0, "dceil");
+        assert_eq!(deval(0x209, &[2.7]), 2.0, "dfloor");
+        assert_eq!(deval(0x214, &[7.0, 3.0]), 1.0, "dmodr remainder");
+        assert_eq!(deval(0x215, &[7.0, 3.0]), 2.0, "dmodq quotient");
+    }
+
+    #[test]
+    fn float_double_conversions_round_trip() {
+        // ftod(2.5f32) -> double 2.5.
+        let f = 2.5f32;
+        let mut body = asm::ins(0x203, &[asm::Op::C32(f.to_bits()), asm::Op::Mem16(0x0100), asm::Op::Mem16(0x0104)]);
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[(4, 1)], body);
+        m.step_once().unwrap();
+        let lo = m.mem.read32(0x100).unwrap();
+        let hi = m.mem.read32(0x104).unwrap();
+        assert_eq!(f64::from_bits((u64::from(hi) << 32) | u64::from(lo)), 2.5, "ftod widens exactly");
+        // dtof(2.5) -> float 2.5.
+        assert_eq!(f32::from_bits(dtonum(0x204, 2.5)), 2.5, "dtof narrows exactly");
+    }
+
+    #[test]
+    fn double_comparisons_branch_correctly() {
+        assert!(dtaken(0x232, &[2.0, 3.0]), "jdlt 2<3");
+        assert!(!dtaken(0x232, &[3.0, 2.0]), "jdlt 3<2 is false");
+        assert!(dtaken(0x233, &[3.0, 3.0]), "jdle 3<=3");
+        assert!(dtaken(0x234, &[3.0, 2.0]), "jdgt 3>2");
+        assert!(dtaken(0x235, &[3.0, 3.0]), "jdge 3>=3");
+        assert!(!dtaken(0x232, &[f64::NAN, 3.0]), "NaN makes ordered comparison false");
+        // jdeq fuzzy equality within tolerance; jdne is its inverse.
+        assert!(dtaken(0x230, &[2.0, 2.05, 0.1]), "jdeq within tolerance");
+        assert!(!dtaken(0x230, &[2.0, 3.0, 0.1]), "jdeq outside tolerance");
+        assert!(dtaken(0x231, &[2.0, 3.0, 0.1]), "jdne outside tolerance");
+        // jdisnan / jdisinf.
+        assert!(dtaken(0x238, &[f64::NAN]), "jdisnan on NaN");
+        assert!(!dtaken(0x238, &[1.0]), "jdisnan on a number is false");
+        assert!(dtaken(0x239, &[f64::INFINITY]), "jdisinf on inf");
+        assert!(!dtaken(0x239, &[1.0]), "jdisinf on a number is false");
+    }
+
+    #[test]
+    fn gestalt_reports_double_supported() {
+        let m = machine_with_body(&[], vec![]);
+        assert_eq!(m.gestalt(13, 0), 1, "Double gestalt supported");
+        assert_eq!(m.gestalt(0, 0), 0x0003_0103, "version bumped to 3.1.3");
     }
 
     #[test]
