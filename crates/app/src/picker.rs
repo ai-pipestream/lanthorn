@@ -623,13 +623,98 @@ pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
         };
         out.push(StoryEntry { path, title, filename, meta });
     }
-    out.sort_by(|a, b| {
-        a.title
-            .to_lowercase()
-            .cmp(&b.title.to_lowercase())
-            .then_with(|| a.filename.cmp(&b.filename))
-    });
+    sort_stories(&mut out, Sort { key: SortKey::Title, desc: false });
     out
+}
+
+/// Column a story list can be sorted by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SortKey {
+    Title,
+    Author,
+    Year,
+}
+
+/// A sort column plus direction.
+#[derive(Clone, Copy)]
+pub struct Sort {
+    pub key: SortKey,
+    pub desc: bool,
+}
+
+impl Default for Sort {
+    fn default() -> Self {
+        Sort { key: SortKey::Title, desc: false }
+    }
+}
+
+/// Order `stories` in place by `sort`. Blanks (no author / no year, or a
+/// non-numeric year) always sort last, in both ascending and descending
+/// order — only the non-blank comparison reverses with `desc`. Filename is
+/// the tie-break in every case.
+pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
+    use std::cmp::Ordering;
+
+    /// Compares two `(is_blank, value)` keys: blank entries always sort last,
+    /// non-blank entries compare by `value` (reversed when `desc`).
+    fn cmp_blank_last<T: Ord>(
+        a_blank: bool,
+        a_val: &T,
+        b_blank: bool,
+        b_val: &T,
+        desc: bool,
+    ) -> Ordering {
+        match (a_blank, b_blank) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => {
+                let ord = a_val.cmp(b_val);
+                if desc { ord.reverse() } else { ord }
+            }
+        }
+    }
+
+    fn title_key(e: &StoryEntry) -> (bool, String) {
+        let t = e.title.to_lowercase();
+        (t.is_empty(), t)
+    }
+
+    fn author_key(e: &StoryEntry) -> (bool, String) {
+        // Case-insensitive, like the title sort: a plain byte sort would file
+        // every capitalised author ahead of every lowercase one ("Zarf" before
+        // "adam cadre"), which reads as broken in a name list.
+        let a = e.meta.author.clone().unwrap_or_default();
+        (a.is_empty(), a.to_lowercase())
+    }
+
+    fn year_key(e: &StoryEntry) -> (bool, i64) {
+        match e.meta.year.as_deref().and_then(|s| s.trim().parse::<i64>().ok()) {
+            Some(n) => (false, n),
+            None => (true, 0),
+        }
+    }
+
+    stories.sort_by(|a, b| {
+        let ord = match sort.key {
+            SortKey::Title => {
+                let (a_blank, a_val) = title_key(a);
+                let (b_blank, b_val) = title_key(b);
+                cmp_blank_last(a_blank, &a_val, b_blank, &b_val, sort.desc)
+            }
+            SortKey::Author => {
+                let (a_blank, a_val) = author_key(a);
+                let (b_blank, b_val) = author_key(b);
+                cmp_blank_last(a_blank, &a_val, b_blank, &b_val, sort.desc)
+            }
+            SortKey::Year => {
+                let (a_blank, a_val) = year_key(a);
+                let (b_blank, b_val) = year_key(b);
+                cmp_blank_last(a_blank, &a_val, b_blank, &b_val, sort.desc)
+            }
+        };
+        ord.then_with(|| a.filename.cmp(&b.filename))
+    });
 }
 
 /// Cheap existence flags shown on every list row (panel-independent).
@@ -768,6 +853,146 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let titles: Vec<&str> = stories.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, vec!["apple", "zebra"]);
+    }
+
+    /// Builds a bare-bones `StoryEntry` for `sort_stories` tests: only
+    /// title/filename/author/year vary, everything else is a placeholder.
+    fn story(title: &str, filename: &str, author: Option<&str>, year: Option<&str>) -> StoryEntry {
+        StoryEntry {
+            path: PathBuf::from(filename),
+            title: title.to_string(),
+            filename: filename.to_string(),
+            meta: StoryMeta {
+                size_bytes: 0,
+                modified: None,
+                engine: Engine::ZCode,
+                format: "Z-code".to_string(),
+                version: None,
+                serial: None,
+                release: None,
+                ifid: String::new(),
+                features: Features::default(),
+                self_blorb: None,
+                author: author.map(|s| s.to_string()),
+                year: year.map(|s| s.to_string()),
+                genre: None,
+                language: None,
+                description: None,
+            },
+        }
+    }
+
+    fn titles_of(stories: &[StoryEntry]) -> Vec<&str> {
+        stories.iter().map(|s| s.title.as_str()).collect()
+    }
+
+    #[test]
+    fn sort_stories_title_ascending_case_insensitive() {
+        let mut stories = vec![
+            story("Zebra", "z.z5", None, None),
+            story("apple", "a.z5", None, None),
+            story("Mango", "m.z5", None, None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
+        assert_eq!(titles_of(&stories), vec!["apple", "Mango", "Zebra"]);
+    }
+
+    #[test]
+    fn sort_stories_title_descending() {
+        let mut stories = vec![
+            story("Zebra", "z.z5", None, None),
+            story("apple", "a.z5", None, None),
+            story("Mango", "m.z5", None, None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: true });
+        assert_eq!(titles_of(&stories), vec!["Zebra", "Mango", "apple"]);
+    }
+
+    #[test]
+    fn sort_stories_title_filename_tiebreak() {
+        let mut stories = vec![
+            story("Same", "b.z5", None, None),
+            story("Same", "a.z5", None, None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
+        let filenames: Vec<&str> = stories.iter().map(|s| s.filename.as_str()).collect();
+        assert_eq!(filenames, vec!["a.z5", "b.z5"]);
+    }
+
+    #[test]
+    fn sort_stories_author_blanks_last_ascending() {
+        // A naive sort_by_key on the raw (possibly-empty) string would put the
+        // blank author first ("" < "Adams"). It must sort LAST instead.
+        let mut stories = vec![
+            story("Unfetched", "u.z5", None, None),
+            story("Hitchhiker", "h.z5", Some("Adams"), None),
+            story("Zork", "z.z5", Some("Blank, Marc"), None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Author, desc: false });
+        assert_eq!(titles_of(&stories), vec!["Hitchhiker", "Zork", "Unfetched"]);
+    }
+
+    #[test]
+    fn sort_stories_author_blanks_last_descending() {
+        // Blanks sort last in BOTH directions — descending must not flip the
+        // blank entry to the front just because the whole tuple got reversed.
+        let mut stories = vec![
+            story("Unfetched", "u.z5", None, None),
+            story("Hitchhiker", "h.z5", Some("Adams"), None),
+            story("Zork", "z.z5", Some("Blank, Marc"), None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Author, desc: true });
+        assert_eq!(titles_of(&stories), vec!["Zork", "Hitchhiker", "Unfetched"]);
+    }
+
+    #[test]
+    fn sort_stories_author_case_insensitive() {
+        // Byte order puts capitals before lowercase (all uppercase < any
+        // lowercase), so a case-sensitive sort would file "Zarf" ahead of
+        // "adam cadre". The list sorts by name, not by ASCII code.
+        let mut stories = vec![
+            story("Spider", "s.z5", Some("Zarf"), None),
+            story("Photopia", "p.z5", Some("adam cadre"), None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Author, desc: false });
+        assert_eq!(titles_of(&stories), vec!["Photopia", "Spider"]);
+    }
+
+    #[test]
+    fn sort_stories_year_numeric_not_lexical() {
+        // Lexical comparison would put "1980" after "1998" is fine, but would
+        // put "700" before "80" — assert numeric ordering explicitly.
+        let mut stories = vec![
+            story("B", "b.z5", None, Some("1998")),
+            story("A", "a.z5", None, Some("1980")),
+            story("C", "c.z5", None, Some("700")),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Year, desc: false });
+        assert_eq!(titles_of(&stories), vec!["C", "A", "B"]);
+    }
+
+    #[test]
+    fn sort_stories_year_blank_and_non_numeric_last_both_directions() {
+        let mut stories = vec![
+            story("NoYear", "n.z5", None, None),
+            story("BadYear", "x.z5", None, Some("circa 1990")),
+            story("Old", "o.z5", None, Some("1980")),
+            story("New", "y.z5", None, Some("1998")),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Year, desc: false });
+        // Blanks/non-numeric sort last; among themselves order is stable per
+        // the filename tie-break ("n.z5" < "x.z5").
+        assert_eq!(titles_of(&stories), vec!["Old", "New", "NoYear", "BadYear"]);
+
+        sort_stories(&mut stories, Sort { key: SortKey::Year, desc: true });
+        assert_eq!(titles_of(&stories), vec!["New", "Old", "NoYear", "BadYear"]);
+    }
+
+    #[test]
+    fn sort_stories_default_is_title_ascending() {
+        let default = Sort::default();
+        assert_eq!(default.key, SortKey::Title);
+        assert!(!default.desc);
     }
 
     #[test]
