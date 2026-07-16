@@ -2396,7 +2396,7 @@ fn main() {
 /// restart: path-based (self-contained blorb, same-stem sidecar, or dir scan).
 fn resolve_pict_blorb(story_path: &std::path::Path, images: bool) -> Option<blorb::Blorb> {
     if images {
-        blorb::resolve_sound_blorb(story_path).map(|(b, _)| b)
+        blorb::resolve_resource_blorb(story_path).map(|(b, _)| b)
     } else {
         None
     }
@@ -2825,7 +2825,7 @@ mod tests {
     fn resolve_pict_blorb_finds_sidecar_for_bare_ulx() {
         // Regression test for SQ-0173: restart's Pict-blorb resolution must find
         // a same-stem sidecar .blorb for a bare .ulx the same path-based way as
-        // launch (blorb::resolve_sound_blorb), not the old bytes-only
+        // launch (blorb::resolve_resource_blorb), not the old bytes-only
         // blorb::Blorb::parse(story_bytes), which only ever finds images inside
         // a self-contained .gblorb.
         fn png_bytes() -> Vec<u8> {
@@ -2849,14 +2849,13 @@ mod tests {
             v
         }
 
-        // Build a minimal FORM/IFRS blorb with a Pict (PNG) resource and a Snd
-        // resource. resolve_sound_blorb's same-stem sidecar step only accepts a
-        // sidecar that has_sounds(), so a Snd entry is required even though only
-        // the Pict resource matters for this test (mirrors blorb::lib's own
-        // build_blorb test helper).
+        // Build a minimal FORM/IFRS blorb with only a Pict (PNG) resource — no
+        // sound. resolve_resource_blorb accepts a resource sidecar that carries
+        // pictures OR sounds (SQ-0372), so a graphics-only sidecar like Beyond
+        // Zork's `beyondzork.blb` resolves without needing a dummy Snd entry.
         fn build_sidecar_blorb(png: &[u8]) -> Vec<u8> {
-            let res: [(&[u8; 4], u32, &[u8; 4], &[u8]); 2] =
-                [(b"Pict", 0, b"PNG ", png), (b"Snd ", 1, b"FORM", b"xy")];
+            let res: [(&[u8; 4], u32, &[u8; 4], &[u8]); 1] =
+                [(b"Pict", 0, b"PNG ", png)];
             let ridx_data_len = 4 + 12 * res.len();
             let first_res_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
             let mut offsets = Vec::new();

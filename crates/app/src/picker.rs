@@ -184,7 +184,7 @@ pub fn resolve_aux(
 ) -> StoryAux {
     // Only record an ASSOCIATED blorb (a different file); the self-blorb case is
     // already carried in StoryMeta.self_blorb.
-    let assoc_blorb = match blorb::resolve_sound_blorb(&entry.path) {
+    let assoc_blorb = match blorb::resolve_resource_blorb(&entry.path) {
         Some((b, src)) if src != entry.path => Some((src, chunks_of(&b))),
         _ => None,
     };
@@ -1386,7 +1386,7 @@ mod tests {
         assert_eq!((c.blorb, c.save, c.hint), (false, false, false));
     }
 
-    // Minimal blorb with one Snd resource so resolve_sound_blorb accepts a sibling.
+    // Minimal blorb with one Snd resource so resolve_resource_blorb accepts a sibling.
     fn blorb_with_sound() -> Vec<u8> {
         fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
             let mut v = Vec::new();

@@ -366,9 +366,9 @@ pub(crate) fn boot() -> BootResult {
 
     // Resolve the sound container + construct the audio backend (silent if the
     // feature is off, there is no device, or sound is disabled in config).
-    state.sound_blorb = match blorb::resolve_sound_blorb(&story_path) {
+    state.sound_blorb = match blorb::resolve_resource_blorb(&story_path) {
         Some((b, path)) => {
-            eprintln!("babelmap: loaded sound resources from {}", path.display());
+            eprintln!("babelmap: loaded resources from {}", path.display());
             Some(b)
         }
         None => None,
