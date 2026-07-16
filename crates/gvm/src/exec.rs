@@ -3463,6 +3463,9 @@ impl Machine {
                 self.halted = true;
                 0
             }
+            // glk_tick — a periodic housekeeping hook with nothing to do on a modern
+            // host. Explicit no-op so the constant calls don't spam the diagnostics log.
+            0x0003 => 0,
             // ── filerefs (in-memory VFS) ────────────────────────────────────────
             0x0060 => self.glk.fileref_create_temp(a(0), a(1)), // glk_fileref_create_temp(usage, rock)
             0x0061 => {
@@ -4531,8 +4534,9 @@ impl Machine {
             3 => 2,                 // gestalt_CharOutput → ExactPrint for any char
             15 => 1,                // gestalt_Unicode
             16 => 1,                // gestalt_UnicodeNorm → canon_decompose/normalize supported
-            17 => 1,                // gestalt_LineTerminators → set_terminators supported
-            18 => glk::keycode::is_terminator(val) as u32, // gestalt_LineTerminatorKey(keycode)
+            17 => 1,                // gestalt_LineInputEcho → set_echo_line_event supported
+            18 => 1,                // gestalt_LineTerminators → set_terminators_line_event supported
+            19 => glk::keycode::is_terminator(val) as u32, // gestalt_LineTerminatorKey(keycode)
             4 => 1,                 // gestalt_MouseInput → supported (grid + graphics)
             5 => 1,                 // gestalt_Timer → supported
             6 => self.graphics_enabled as u32,                // gestalt_Graphics
@@ -8110,15 +8114,26 @@ mod tests {
     fn glk_gestalt_reports_line_terminator_support() {
         use crate::glk::keycode;
         let m = machine_with_body(&[], vec![]);
-        // gestalt_LineTerminators (17): the call is supported.
-        assert_eq!(m.glk_gestalt(17, 0), 1, "gestalt_LineTerminators supported");
-        // gestalt_LineTerminatorKey (18): TRUE only for Escape + the function keys.
-        assert_eq!(m.glk_gestalt(18, keycode::FUNC1), 1, "Func1 is a valid terminator");
-        assert_eq!(m.glk_gestalt(18, keycode::FUNC12), 1, "Func12 is a valid terminator");
-        assert_eq!(m.glk_gestalt(18, keycode::ESCAPE), 1, "Escape is a valid terminator");
-        assert_eq!(m.glk_gestalt(18, keycode::RETURN), 0, "Return is never a terminator");
-        assert_eq!(m.glk_gestalt(18, keycode::LEFT), 0, "arrow keys are not terminators");
-        assert_eq!(m.glk_gestalt(18, b'a' as u32), 0, "a printable char is not a terminator");
+        // gestalt_LineInputEcho (17): echo control is supported.
+        assert_eq!(m.glk_gestalt(17, 0), 1, "gestalt_LineInputEcho supported");
+        // gestalt_LineTerminators (18): the call is supported.
+        assert_eq!(m.glk_gestalt(18, 0), 1, "gestalt_LineTerminators supported");
+        // gestalt_LineTerminatorKey (19): TRUE only for Escape + the function keys.
+        assert_eq!(m.glk_gestalt(19, keycode::FUNC1), 1, "Func1 is a valid terminator");
+        assert_eq!(m.glk_gestalt(19, keycode::FUNC12), 1, "Func12 is a valid terminator");
+        assert_eq!(m.glk_gestalt(19, keycode::ESCAPE), 1, "Escape is a valid terminator");
+        assert_eq!(m.glk_gestalt(19, keycode::RETURN), 0, "Return is never a terminator");
+        assert_eq!(m.glk_gestalt(19, keycode::LEFT), 0, "arrow keys are not terminators");
+        assert_eq!(m.glk_gestalt(19, b'a' as u32), 0, "a printable char is not a terminator");
+    }
+
+    #[test]
+    fn glk_tick_is_a_silent_no_op() {
+        let mut m = machine_with_body(&[], vec![]);
+        // glk_tick returns 0 and, being an explicit arm, records no diagnostic —
+        // unlike the unknown-selector default which would log on every call.
+        assert_eq!(m.glk_dispatch(0x0003, &[]).unwrap(), 0);
+        assert!(m.diagnostics.is_empty(), "glk_tick must not touch the diagnostics log");
     }
 
     #[test]
