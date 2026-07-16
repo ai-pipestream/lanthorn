@@ -181,7 +181,7 @@ pub(crate) fn poll_tidy_jobs(
                     // animation — it only used the off-thread build for the progress
                     // bar. (SQ-0261)
                     if job.animate {
-                        state.tidy_anim = Some(TidyAnim::new(frames));
+                        state.tidy_anim = Some(TidyAnim::new(frames, job.layer));
                     }
                     // Re-center on the current room if it moved (mirrors the tidy_job path).
                     if let Some(rid) = mapper.graph.current() {

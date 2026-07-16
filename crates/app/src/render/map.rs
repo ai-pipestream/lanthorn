@@ -5837,7 +5837,7 @@ mod tests {
             stats: TidyStats::default(),
             stage_start: true,
             manifest: Some(vec!["Foyer \u{2192}N\u{2192} Hall".into()]),
-        }]));
+        }], mapper::layer::MAIN_LAYER));
 
         // Empty render map, built with the same helper the neighboring tests use.
         let rm = mapper::render::render(&MapGraph::new());
@@ -5867,7 +5867,7 @@ mod tests {
             stats: TidyStats::default(),
             stage_start: true,
             manifest: Some(vec!["Foyer \u{2192}N\u{2192} Hall".into()]),
-        }]));
+        }], mapper::layer::MAIN_LAYER));
 
         // Pane large enough for the tidy transport panel (>= PANEL_W x PANEL_H), so the
         // manifest must be offset below the panel rows instead of under it.

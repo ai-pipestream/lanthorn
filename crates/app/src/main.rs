@@ -300,16 +300,16 @@ fn draw_frame(
         // The live graph's routed model is memoized on (graph_gen, layer) — see `cached_map_render` —
         // so an animation / transcript / mouse-move redraw of an unchanged map skips re-routing.
         // Replay and tidy-animation graphs are not tracked by `graph_gen`, so they are built fresh.
+        // `frame_layer`, not `active_layer(g)`: an animation frame's graph is a layer SUBGRAPH and
+        // cannot be asked which layer it is — it always answers main, and the map draws blank
+        // (SQ-0359).
+        let layer = state.frame_layer(&mapper.graph, replay_graph.as_ref());
         let rm = if let Some(g) = &replay_graph {
-            FrameRenderMap::Owned(render_layer(g, state.active_layer(g)))
+            FrameRenderMap::Owned(render_layer(g, layer))
         } else {
             match &state.tidy_anim {
-                Some(anim) => {
-                    let g = &anim.current().graph;
-                    FrameRenderMap::Owned(render_layer(g, state.active_layer(g)))
-                }
+                Some(anim) => FrameRenderMap::Owned(render_layer(&anim.current().graph, layer)),
                 None => {
-                    let layer = state.active_layer(&mapper.graph);
                     FrameRenderMap::Cached(state.cached_map_render(layer, || render_layer(&mapper.graph, layer)))
                 }
             }
@@ -411,16 +411,13 @@ fn draw_frame(
                 map_area = map_fp.content;
                 // Overlay layer tabs
                 {
-                    let graph = if let Some(g) = &replay_graph {
-                        g
-                    } else {
-                        match &state.tidy_anim {
-                            Some(anim) => &anim.current().graph,
-                            None => &mapper.graph,
-                        }
-                    };
+                    // The tab strip names every layer, so it reads the LIVE graph — never an
+                    // animation frame. A frame is a `layer_subgraph`, whose `layers()` is always
+                    // main-only, so asking it made the tidied layer's own tab vanish mid-animation
+                    // (SQ-0359). `layer` (from `frame_layer`) marks the active tab.
+                    let graph = if let Some(g) = &replay_graph { g } else { &mapper.graph };
                     let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
-                    let active_layer = state.active_layer(graph);
+                    let active_layer = layer;
                     let owned_segs = build_layer_segments(&layer_ids, active_layer,
                     |id| format!("{}({})", graph.layer_name(id), graph.rooms_in_layer(id).len()));
                     let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();

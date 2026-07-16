@@ -446,12 +446,17 @@ pub struct TidyAnim {
     pub frames: Vec<TidyFrame>,
     pub idx: usize,
     pub playing: bool,
+    /// The layer these frames tidy. Carried explicitly because a frame's graph CANNOT answer it:
+    /// every frame is a `layer_subgraph`, whose rooms keep their real layer while its `layers()`
+    /// map always reports main-only — so asking the frame yields `MAIN_LAYER`, a layer it holds no
+    /// rooms for, and the map draws blank (SQ-0359).
+    pub layer: LayerId,
     last_advance: Instant,
 }
 
 impl TidyAnim {
-    pub fn new(frames: Vec<TidyFrame>) -> Self {
-        Self { frames, idx: 0, playing: true, last_advance: Instant::now() }
+    pub fn new(frames: Vec<TidyFrame>, layer: LayerId) -> Self {
+        Self { frames, idx: 0, playing: true, layer, last_advance: Instant::now() }
     }
 
     pub fn current(&self) -> &TidyFrame {
@@ -2094,6 +2099,25 @@ impl AppState {
     /// Set the explicit layer override. `None` means follow the current room's layer.
     pub fn set_viewed_layer(&mut self, layer: Option<LayerId>) {
         self.viewed_layer = layer;
+    }
+
+    /// The layer the map pane must draw THIS frame, for the graph it is drawing.
+    ///
+    /// A tidy animation is the case [`active_layer`](Self::active_layer) cannot serve. Its frames
+    /// are `layer_subgraph`s, and a subgraph reports `layers()` as main-only whatever layer it
+    /// holds — so `active_layer` finds `viewed_layer` "absent", falls back to `MAIN_LAYER`, and the
+    /// map draws every room of a layer the subgraph has none of: blank. The animation therefore
+    /// states its own layer rather than letting the frame be asked (SQ-0359).
+    ///
+    /// `replay` takes precedence over an animation, matching the map pane's own order.
+    pub fn frame_layer(&self, live: &MapGraph, replay: Option<&MapGraph>) -> LayerId {
+        if let Some(g) = replay {
+            return self.active_layer(g);
+        }
+        match &self.tidy_anim {
+            Some(anim) => anim.layer,
+            None => self.active_layer(live),
+        }
     }
 
     /// Return the layer to render the map with.
@@ -3851,7 +3875,7 @@ mod tests {
             stats: mapper::layout::TidyStats::default(),
             stage_start: false,
             manifest: None,
-        }]));
+        }], mapper::layer::MAIN_LAYER));
         assert!(s.any_overlay_open(), "tidy_anim active => any_overlay_open true");
         s.tidy_anim = None;
 
@@ -4000,6 +4024,105 @@ mod tests {
         assert_eq!(s.active_layer(&g), l, "explicit view wins");
         s.set_viewed_layer(Some(999)); // stale id (no such layer)
         assert_eq!(s.active_layer(&g), 0, "stale view falls back to current room's layer");
+    }
+
+    /// SQ-0359: the bug in one assertion. A tidy animation's frames are `layer_subgraph`s, and a
+    /// subgraph reports `layers()` as main-only however it was built — so asking the FRAME which
+    /// layer to draw answers `MAIN_LAYER`, which it holds no rooms for, and the map goes blank.
+    #[test]
+    fn frame_layer_takes_an_animations_layer_from_the_animation_not_its_subgraph() {
+        use mapper::graph::MapGraph;
+        use mapper::layer::MAIN_LAYER;
+
+        let mut live = MapGraph::new();
+        live.upsert_room(1, "Hall".into());
+        live.set_current(1);
+        live.set_pos(1, (0, 0));
+        let cellar = live.new_layer(Some(0), "Cellar".into());
+        live.upsert_room(2, "Cellar".into());
+        live.set_room_layer(2, cellar);
+        live.set_pos(2, (0, 0)); // placed: `render` only emits rooms that have a position
+
+        let mut s = AppState::default();
+        s.set_viewed_layer(Some(cellar));
+
+        // The frame the animation would carry: the Cellar layer, extracted.
+        let sub = live.layer_subgraph(cellar);
+        assert!(
+            !sub.layers().contains_key(&cellar),
+            "a subgraph does not admit which layer it is — the whole reason for this field"
+        );
+        assert_eq!(
+            s.active_layer(&sub),
+            MAIN_LAYER,
+            "so asking the frame yields main: the blank-map bug"
+        );
+        // And that is not a cosmetic mislabel — it is the blank map the user reported.
+        assert!(
+            mapper::render::render_layer(&sub, MAIN_LAYER).rooms.is_empty(),
+            "the frame holds no main-layer rooms, so drawing it as main draws nothing"
+        );
+        assert!(
+            !mapper::render::render_layer(&sub, cellar).rooms.is_empty(),
+            "drawn as the layer it actually is, the frame has rooms"
+        );
+
+        s.tidy_anim = Some(TidyAnim::new(
+            vec![TidyFrame {
+                label: "Build".into(),
+                graph: sub,
+                description: String::new(),
+                stats: Default::default(),
+                stage_start: true,
+                manifest: None,
+            }],
+            cellar,
+        ));
+        assert_eq!(
+            s.frame_layer(&live, None),
+            cellar,
+            "the animation states its own layer, so the map draws the rooms being tidied"
+        );
+
+        // With no animation, nothing changes: the live graph still answers for itself.
+        s.tidy_anim = None;
+        assert_eq!(s.frame_layer(&live, None), cellar, "viewed layer still wins on the live graph");
+        s.set_viewed_layer(None);
+        assert_eq!(s.frame_layer(&live, None), MAIN_LAYER, "falls back to the current room's layer");
+    }
+
+    /// Replay outranks an animation, matching the map pane's own order.
+    #[test]
+    fn frame_layer_prefers_a_replay_graph_over_an_animation() {
+        use mapper::graph::MapGraph;
+        use mapper::layer::MAIN_LAYER;
+
+        let mut live = MapGraph::new();
+        live.upsert_room(1, "Hall".into());
+        live.set_current(1);
+        let cellar = live.new_layer(Some(0), "Cellar".into());
+
+        let mut replay = MapGraph::new();
+        replay.upsert_room(1, "Hall".into());
+        replay.set_current(1);
+
+        let mut s = AppState::default();
+        s.tidy_anim = Some(TidyAnim::new(
+            vec![TidyFrame {
+                label: "Build".into(),
+                graph: MapGraph::new(),
+                description: String::new(),
+                stats: Default::default(),
+                stage_start: true,
+                manifest: None,
+            }],
+            cellar,
+        ));
+        assert_eq!(
+            s.frame_layer(&live, Some(&replay)),
+            MAIN_LAYER,
+            "replay is what's on screen, so it picks the layer — not the stale animation"
+        );
     }
 
     #[test]

@@ -3731,7 +3731,7 @@ mod tests {
                 stats: Default::default(),
                 stage_start: true,
                 manifest: None,
-            }]));
+            }], mapper::layer::MAIN_LAYER));
             apply_action(Action::AnimateTidy, &mut s, &mut m);
             assert!(s.anim_build_job.is_none(), "no build job while an animation plays");
         }
@@ -3746,7 +3746,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(..)));
         // Animation active: arrows step, Space toggles, Esc exits.
         let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false, manifest: None };
-        s.tidy_anim = Some(TidyAnim::new(vec![frame("a"), frame("b")]));
+        s.tidy_anim = Some(TidyAnim::new(vec![frame("a"), frame("b")], mapper::layer::MAIN_LAYER));
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::AnimStep(-1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::AnimStep(1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char(' '))), Action::AnimTogglePlay));
@@ -3767,7 +3767,7 @@ mod tests {
         use crate::state::{TidyAnim, TidyFrame};
         use std::time::Duration;
         let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false, manifest: None };
-        let mut a = TidyAnim::new(vec![frame("a"), frame("b"), frame("c")]);
+        let mut a = TidyAnim::new(vec![frame("a"), frame("b"), frame("c")], mapper::layer::MAIN_LAYER);
         assert!(a.playing && a.idx == 0);
         a.step(-1); // clamps at 0, and a manual step pauses
         assert_eq!(a.idx, 0);
@@ -4330,7 +4330,7 @@ mod tests {
         let mut s = AppState::default();
         s.focus = Focus::Map;
         let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false, manifest: None };
-        s.tidy_anim = Some(TidyAnim::new(vec![frame("a"), frame("b")]));
+        s.tidy_anim = Some(TidyAnim::new(vec![frame("a"), frame("b")], mapper::layer::MAIN_LAYER));
         // Step
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::AnimStep(-1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::AnimStep(1)));
@@ -7112,7 +7112,7 @@ mod tests {
             stats: mapper::layout::TidyStats::default(),
             stage_start: false,
             manifest: None,
-        }]));
+        }], mapper::layer::MAIN_LAYER));
 
         let map   = Rect::default();
         let story = Rect::default();
