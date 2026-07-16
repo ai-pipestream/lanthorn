@@ -298,6 +298,10 @@ pub struct ColorScheme {
     /// Story-picker row: "(no metadata yet)" placeholder shown in the author
     /// column when a story has no fetched/embedded author.
     pub story_no_metadata: Style,
+    /// Story-picker cover-gallery tile caption (title under an unselected cover).
+    pub story_tile: Style,
+    /// Story-picker cover-gallery tile caption for the selected cover.
+    pub story_tile_selected: Style,
     /// Map layer tab (inactive).
     pub map_layer_tab: Style,
     /// Map layer tab (active).
@@ -463,6 +467,11 @@ impl ColorScheme {
             story_author: Style::new().fg(Color::White),
             story_year: Style::new().fg(Color::White),
             story_no_metadata: Style::new().fg(Color::DarkGray),
+            story_tile: Style::new().fg(Color::White),
+            story_tile_selected: Style::new()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
             // The shown layer reads brighter than the others: inactive tabs are
             // dimmed, the active one is the bold accent colour. Both themeable.
             map_layer_tab: Style::new().fg(Color::DarkGray),
@@ -664,6 +673,11 @@ impl ColorScheme {
             story_author: Style::new().fg(fg),
             story_year: Style::new().fg(fg),
             story_no_metadata: Style::new().fg(fg).add_modifier(Modifier::DIM),
+            story_tile: Style::new().fg(fg),
+            story_tile_selected: Style::new()
+                .fg(bg)
+                .bg(scheme.palette[6])
+                .add_modifier(Modifier::BOLD),
             map_layer_tab: Style::new().fg(fg).add_modifier(Modifier::DIM),
             map_layer_tab_active: Style::new().fg(scheme.palette[6]).add_modifier(Modifier::BOLD),
             status_header: Style::new(),
