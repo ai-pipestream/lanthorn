@@ -188,7 +188,7 @@ Quest: SQ-0348"
 
 Context: IFDB and a blorb's `IFmd` chunk serve the **same** format, so one parser serves both. The fixture is a real IFDB response captured 2026-07-16 from `ifdb.org/viewgame?ifiction&ifid=ZCODE-88-840726-A129`.
 
-**The trap this task exists to avoid:** the fixture contains **eight** `<title>` elements — one bibliographic, seven inside `<downloads><link>`. A naive descendant search returns the wrong one. Match on local name **within the Babel namespace** (`http://babel.ifarchive.org/protocol/iFiction/`) and **only as a direct child of `<bibliographic>`**.
+**The trap this task exists to avoid:** the fixture contains **26** `<title>` elements — one bibliographic, the rest inside `<downloads><link>`. A naive descendant search returns the wrong one. Match on local name **within the Babel namespace** (`http://babel.ifarchive.org/protocol/iFiction/`) and **only as a direct child of `<bibliographic>`**.
 
 - [ ] **Step 1: Add the dep**
 
@@ -207,8 +207,8 @@ mod tests {
 
     const ZORK: &[u8] = include_bytes!("../tests/fixtures/ifdb-zork1.xml");
 
-    /// The live IFDB response. Guards the eight-<title> trap: seven of them are
-    /// inside <downloads><link>, and only <bibliographic><title> is the game's.
+    /// The live IFDB response. Guards the 26-<title> trap: all but one are
+    /// inside <downloads><link>; only <bibliographic><title> is the game's.
     #[test]
     fn parses_the_live_ifdb_response() {
         let f = parse(ZORK).expect("fixture parses");

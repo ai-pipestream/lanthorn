@@ -133,9 +133,9 @@ pub fn parse(xml: &[u8]) -> Result<IFiction, IFictionError>;
 ```
 
 Namespace-aware (`roxmltree` gives this): match on local name **within** the Babel
-namespace, so a `<title>` nested in `<downloads><link>` — the live response has several —
+namespace, so a `<title>` nested in `<downloads><link>` — the live response has 25 —
 can never be mistaken for the bibliographic title. This is a real trap, not a hypothetical:
-the Zork response contains eight `<title>` elements, only one of which is the game's.
+the Zork response contains 26 `<title>` elements, only one of which is the game's.
 
 ### `app::story_info` — the sidecar
 
@@ -472,7 +472,7 @@ The blurb wraps to the panel width and participates in the existing panel scroll
 Unit, no network:
 
 - `ifiction::parse` on a captured IFDB response fixture (the live Zork XML above) → asserts
-  title/author/description/tuid/cover_url, and that the eight `<title>` elements do not
+  title/author/description/tuid/cover_url, and that the 25 download `<title>` elements do not
   confuse the bibliographic one.
 - `ifiction::parse` on a minimal IFmd chunk carrying only `<title>` → all other fields
   `None`, no error.
