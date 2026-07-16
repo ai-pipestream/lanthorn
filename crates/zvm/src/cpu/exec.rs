@@ -1138,6 +1138,16 @@ impl Machine {
                 }
                 StepResult::Continue
             }
+            // VAR:0x14 input_stream — select input source: 0 = keyboard (default), 1 = command
+            // file. The engine only records the selection; sourcing input from a file is a host
+            // concern (the app drives all reads via supply_line). Other values are ignored per spec.
+            0x14 => {
+                let stream = ops.first().copied().unwrap_or(0) as i16;
+                if stream == 0 || stream == 1 {
+                    self.streams.input_stream = stream as u8;
+                }
+                StepResult::Continue
+            }
             // VAR:0x10 get_cursor — write (row, col) of the upper-window cursor into a 2-word array.
             0x10 => {
                 let array = ops.first().copied().unwrap_or(0) as u32;
@@ -5143,24 +5153,43 @@ pub(crate) mod tests {
     #[test]
     fn unimplemented_var_opcode_records_diagnostic_not_stderr() {
         let mut m = build_test_machine(&[]);
-        // 0x14 has no arm in exec_var -> hits the unimplemented fallthrough.
+        // Every VAR opcode number 0x00..=0x1F now has an arm, so probe the defensive
+        // fallthrough with an out-of-range number no valid VAR encoding can produce.
         assert!(m.diagnostics.is_empty());
-        m.exec_var(0x14, &[], None, None);
+        m.exec_var(0xFF, &[], None, None);
         assert_eq!(m.diagnostics.len(), 1, "fallthrough records one diagnostic line");
-        assert!(m.diagnostics[0].contains("0x14"), "diagnostic names the opcode");
-        m.exec_var(0x14, &[], None, None); // second call must not duplicate
+        assert!(m.diagnostics[0].contains("0xFF"), "diagnostic names the opcode");
+        m.exec_var(0xFF, &[], None, None); // second call must not duplicate
         assert_eq!(m.diagnostics.len(), 1, "warn-once: no duplicate diagnostic");
     }
 
     #[test]
     fn unimplemented_var_opcode_is_warned_once() {
         let mut m = build_test_machine(&[]);
-        // 0x14 is an undefined/unimplemented VAR opcode
+        // Out-of-range VAR opcode number: no arm, hits the defensive fallthrough.
         assert!(m.warned_var_opcodes.is_empty());
-        m.exec_var(0x14, &[], None, None);
-        assert!(m.warned_var_opcodes.contains(&0x14), "fallthrough records the opcode");
-        m.exec_var(0x14, &[], None, None); // second call must not duplicate
+        m.exec_var(0xFF, &[], None, None);
+        assert!(m.warned_var_opcodes.contains(&0xFF), "fallthrough records the opcode");
+        m.exec_var(0xFF, &[], None, None); // second call must not duplicate
         assert_eq!(m.warned_var_opcodes.len(), 1, "warned at most once per opcode");
+    }
+
+    #[test]
+    fn input_stream_records_selection_without_warning() {
+        let mut m = build_test_machine(&[]);
+        assert_eq!(m.streams.input_stream, 0, "defaults to keyboard");
+        // Select the command-file input stream.
+        m.exec_var(0x14, &[1], None, None);
+        assert_eq!(m.streams.input_stream, 1, "input_stream 1 selects the command file");
+        // Back to the keyboard.
+        m.exec_var(0x14, &[0], None, None);
+        assert_eq!(m.streams.input_stream, 0, "input_stream 0 selects the keyboard");
+        // Out-of-spec values are ignored, leaving the selection unchanged.
+        m.exec_var(0x14, &[7], None, None);
+        assert_eq!(m.streams.input_stream, 0, "out-of-range stream ignored");
+        // The opcode is implemented, so it must not record an unimplemented diagnostic.
+        assert!(m.diagnostics.is_empty(), "input_stream is implemented, no warning");
+        assert!(!m.warned_var_opcodes.contains(&0x14));
     }
 
     #[test]

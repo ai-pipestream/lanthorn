@@ -205,11 +205,13 @@ struct Stream3Frame {
     buf: Vec<u8>,
 }
 
-/// Manages all four Z-machine output streams.
+/// Manages all four Z-machine output streams plus the selected input stream.
 ///
 /// Streams 1 (screen) and 2 (transcript) are on/off flags; only stream 1
 /// defaults to on.  Stream 3 redirects text to a memory table and can nest.
-/// Stream 4 (command log) is flag-only.
+/// Stream 4 (command log) is flag-only.  The input stream (`input_stream`
+/// opcode) is recorded here too; the engine drives all input through the host,
+/// so this field only remembers the game's selection.
 pub struct StreamState {
     /// Stream 1 (screen) active.
     pub stream1: bool,
@@ -217,6 +219,9 @@ pub struct StreamState {
     pub stream2: bool,
     /// Stream 4 (command log) active.
     pub stream4: bool,
+    /// Selected input stream: 0 = keyboard (default), 1 = command file.
+    /// Recorded for the host; the engine never reads input from a file itself.
+    pub input_stream: u8,
     /// Stack of active stream-3 frames (nested up to 16).
     stream3_stack: Vec<Stream3Frame>,
 }
@@ -233,6 +238,7 @@ impl StreamState {
             stream1: true,
             stream2: false,
             stream4: false,
+            input_stream: 0,
             stream3_stack: Vec::new(),
         }
     }
