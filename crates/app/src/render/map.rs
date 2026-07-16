@@ -821,6 +821,25 @@ const DIR_E: u8 = 2;
 const DIR_S: u8 = 4;
 const DIR_W: u8 = 8;
 
+/// The cell-edge midpoints a chain glyph reaches, as direction bits — `None` for a glyph
+/// `diagonal_chain` never emits.
+///
+/// Every half-diagonal endpoint is an edge MIDPOINT, exactly where `─` and `│` attach, so a
+/// chain glyph and an orthogonal run through the same cell describe strokes to the SAME points.
+/// That is what lets the two merge into one mask rather than one overwriting the other
+/// (SQ-0356). Matched against `path`, not against literals: every glyph here is themeable.
+fn chain_glyph_bits(ch: char, path: &crate::symbols::PathGlyphs) -> Option<u8> {
+    Some(match ch {
+        c if c == path.diag_ul => DIR_N | DIR_W,
+        c if c == path.diag_ur => DIR_N | DIR_E,
+        c if c == path.diag_ll => DIR_S | DIR_W,
+        c if c == path.diag_lr => DIR_S | DIR_E,
+        c if c == path.ns => DIR_N | DIR_S,
+        c if c == path.ew => DIR_E | DIR_W,
+        _ => return None,
+    })
+}
+
 /// Box-drawing glyph for a set of direction bits.
 fn glyph_for(mask: u8, path: &crate::symbols::PathGlyphs) -> Option<char> {
     Some(match mask {
@@ -1295,8 +1314,23 @@ fn render_lane_connectors(
     // instead of `colors.connector`/`colors.connector_distorted`.
     let mut arrowheads: Vec<Arrowhead> = Vec::new();
 
-    for conn in plan.connectors.iter() {
-        let Some(plot) = plot_connector(conn, cols, rows, diag) else { continue };
+    // Plot every connector up front: the diagonal-chain merge below needs to know whether ANY
+    // connector claims a cell with compass line-art, which a single pass painting as it goes
+    // cannot answer for connectors it has not reached yet.
+    let plots: Vec<(&mapper::route::RoutedConnector, ConnectorPlot)> = plan
+        .connectors
+        .iter()
+        .filter_map(|c| plot_connector(c, cols, rows, diag).map(|p| (c, p)))
+        .collect();
+    // Cells carrying compass line-art. Up/down connectors are excluded: they accumulate in their
+    // own mask with their own dotted glyphs, so a chain has nothing there to merge WITH.
+    let compass_cells: std::collections::HashSet<(i32, i32)> = plots
+        .iter()
+        .filter(|(c, _)| !matches!(c.exit_dir, Direction::Up | Direction::Down))
+        .flat_map(|(_, p)| p.cells.iter().map(|(c, _)| *c))
+        .collect();
+
+    for (conn, plot) in plots.iter() {
         let is_updown = matches!(conn.exit_dir, Direction::Up | Direction::Down);
         let has_secondary = !conn.secondary_exit.is_empty() || !conn.secondary_entry.is_empty();
         // Up/down connectors always use the portal selector (they're never distorted);
@@ -1330,18 +1364,35 @@ fn render_lane_connectors(
             }
         }
 
-        // Diagonal corner stub (SQ-0314): explicit glyphs, painted AFTER this
-        // connector's mask cells. These deliberately do NOT enter `cell_map` — a
-        // half-diagonal has no 4-bit mask representation, and letting it OR into a
-        // neighbour's mask would corrupt that neighbour's glyph choice. Always
-        // empty when `diagonal_corners` is off.
+        // Diagonal corner stub (SQ-0314): explicit glyphs, painted AFTER this connector's mask
+        // cells. On a cell of its own these do NOT enter `cell_map` — a half-diagonal has no
+        // 4-bit mask representation, and letting it OR into a neighbour's mask would corrupt
+        // that neighbour's glyph choice. Always empty when `diagonal_corners` is off.
+        //
+        // On a cell some OTHER connector runs orthogonal line-art through, there is no glyph
+        // for "half-diagonal crossing a line", so the chain MERGES instead: its endpoint bits
+        // OR into the shared mask and the cell renders as the junction that joins them — the
+        // diagonal flattens for that one cell rather than either line losing it (SQ-0356).
+        // Merging via the mask (not by painting a glyph) is what makes this order-independent:
+        // a connector painting the cell later ORs on top and the chain's bits survive.
         for (c, ch) in &plot.diag_cells {
             let (sx, sy) = (c.0 + off_x, c.1 + off_y);
             if !in_area(sx, sy, area) {
                 continue;
             }
+            let merge = (!is_updown && compass_cells.contains(c))
+                .then(|| chain_glyph_bits(*ch, glyphs))
+                .flatten();
+            let glyph_s = match merge {
+                Some(bits) => {
+                    let entry = cell_map.entry(*c).or_insert(0);
+                    *entry |= bits;
+                    glyph_for(*entry, glyphs).unwrap_or(*ch).to_string()
+                }
+                None => ch.to_string(),
+            };
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
-                cell.set_symbol(&ch.to_string()).set_style(style);
+                cell.set_symbol(&glyph_s).set_style(style);
             }
         }
 
@@ -2584,6 +2635,96 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
+    /// The two edge-midpoints each half-diagonal reaches, per its Unicode name. Guards the
+    /// bits table against the endpoints actually being somewhere else (SQ-0356).
+    #[test]
+    fn chain_glyph_bits_name_each_half_diagonals_own_endpoints() {
+        let p = crate::symbols::SymbolSet::default().path;
+        // U+1FBA0 upper-centre ↔ middle-left; U+1FBA1 upper-centre ↔ middle-right;
+        // U+1FBA2 middle-left ↔ lower-centre; U+1FBA3 middle-right ↔ lower-centre.
+        assert_eq!(chain_glyph_bits(p.diag_ul, &p), Some(DIR_N | DIR_W));
+        assert_eq!(chain_glyph_bits(p.diag_ur, &p), Some(DIR_N | DIR_E));
+        assert_eq!(chain_glyph_bits(p.diag_ll, &p), Some(DIR_S | DIR_W));
+        assert_eq!(chain_glyph_bits(p.diag_lr, &p), Some(DIR_S | DIR_E));
+        // The fill glyphs a chain also emits reach the same midpoints ─/│ always do.
+        assert_eq!(chain_glyph_bits(p.ns, &p), Some(DIR_N | DIR_S));
+        assert_eq!(chain_glyph_bits(p.ew, &p), Some(DIR_E | DIR_W));
+        // Anything a chain never emits has no merge reading.
+        assert_eq!(chain_glyph_bits(p.nesw, &p), None);
+        assert_eq!(chain_glyph_bits('x', &p), None);
+    }
+
+    /// SQ-0356: a chain cell landing on another connector's orthogonal run must MERGE with it.
+    ///
+    /// Fixture is real Zork geometry: "West of House" (#68) and "North of House" (#143) are
+    /// joined by a reciprocal NE/SW diagonal AND a second, distorted W edge back. The two
+    /// connectors share a lane, and the diagonal's last chain cell lands on the W route's
+    /// vertical run — the only such collision on the whole Zork map.
+    #[test]
+    fn a_chain_cell_on_another_connectors_run_merges_into_a_junction() {
+        use mapper::graph::MapGraph;
+        use mapper::render::render;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(68, "West of House".into());
+        g.upsert_room(143, "North of House".into());
+        g.set_pos(68, (-2, 3));
+        g.set_pos(143, (1, 2));
+        g.add_edge(68, Direction::NE, 143);
+        g.add_edge(143, Direction::SW, 68); // reciprocal: collapses with the NE into one diagonal
+        g.add_edge(143, Direction::W, 68); // second edge home, lane-routed past the diagonal
+
+        let rm = render(&g);
+        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
+        let glyphs = crate::symbols::SymbolSet::default().path;
+
+        // Find where a chain cell and an orthogonal run want the same cell. Derived from the
+        // plots, not hard-coded, so a geometry change relocates the assertion instead of
+        // silently aiming it at blank space.
+        let mut chain: std::collections::HashMap<(i32, i32), char> = std::collections::HashMap::new();
+        let mut orth: std::collections::HashSet<(i32, i32)> = std::collections::HashSet::new();
+        for conn in rm.plan.connectors.iter() {
+            let Some(plot) = plot_connector(conn, &cols, &rows, Some(&glyphs)) else { continue };
+            orth.extend(plot.cells.iter().map(|(c, _)| *c));
+            chain.extend(plot.diag_cells.iter().cloned());
+        }
+        let hits: Vec<(i32, i32)> =
+            chain.keys().filter(|c| orth.contains(c)).cloned().collect();
+        assert_eq!(hits.len(), 1, "fixture must still produce exactly one collision");
+        let hit = hits[0];
+        assert_eq!(
+            chain[&hit], glyphs.diag_lr,
+            "the colliding chain cell is the diagonal's middle-right/lower-centre turn"
+        );
+
+        // Render the whole map off-screen, the way `map_dump::ascii_map` does.
+        let ((min_col, min_row), _) = rm.bounds;
+        let pad_w = cols.room_pixel(min_col) - cols.room_pixel(min_col - 2);
+        let pad_h = rows.room_pixel(min_row) - rows.room_pixel(min_row - 2);
+        let area = Rect::new(
+            0,
+            0,
+            (cols.total_pixels() + pad_w + 30) as u16,
+            (rows.total_pixels() + pad_h + 20) as u16,
+        );
+        let mut state = AppState::default();
+        state.zoom = Zoom::Boxes;
+        state.scroll = (min_col - 2, min_row - 2);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+
+        let sx = hit.0 - cols.room_pixel(min_col - 2);
+        let sy = hit.1 - rows.room_pixel(min_row - 2);
+        let sym = buf.cell((sx as u16, sy as u16)).unwrap().symbol();
+
+        // The vertical run carries N|S; the chain's turn reaches E|S. Both strokes survive as ├.
+        // Neither line may lose the cell: `│` is the vertical winning, `🮣` the chain winning.
+        assert_eq!(
+            sym,
+            glyphs.nse.to_string(),
+            "chain-on-run cell must render as the junction carrying both strokes, got {sym:?}"
+        );
+    }
 
     #[test]
     fn up_connector_draws_updown_glyph_on_border_not_arrow() {
