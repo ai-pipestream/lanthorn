@@ -82,12 +82,18 @@ pub enum PeelRefusal {
     LeavesLayer,
 }
 
-/// Peel at a NAMED seam: sever the `dir` passage out of `from`, and peel whatever is left on the
-/// far side into a fresh layer under `from`'s. Returns the new `LayerId` (SQ-0360).
+/// Peel at a NAMED seam: sever the `dir` passage out of `from`, and peel `from`'s OWN region into
+/// a fresh layer under the one it left. Returns the new `LayerId` (SQ-0360).
 ///
 /// [`peel_region`] can only cut where a portal edge already divides a layer, so it is powerless on
 /// a layer that is one connected sprawl — Zork's underground being 35 rooms of solid compass maze.
 /// This lets the player say where the boundary is instead of waiting for one to exist.
+///
+/// It peels `from`'s side, exactly as [`peel_region`] peels `start`'s. Taking the FAR side instead
+/// made one command mean two opposite things depending on which end of the passage you stood at —
+/// and worse, left the peeled-from room behind while its neighbours moved, so the new layer became
+/// a SIBLING of the rooms it connects to rather than a child of them. Merging then threw those
+/// rooms up to a layer they have no connection to at all (SQ-0364).
 ///
 /// The cut takes the passage's RECIPROCAL with it. A passage is normally two connections
 /// (`A -E-> B` and `B -W-> A`), so severing only the named one leaves the back-edge holding the two
@@ -114,13 +120,13 @@ pub fn peel_at_edge(
         return Err(PeelRefusal::LeavesLayer);
     }
     let back = opposite(dir);
-    let region = region_with_cut(graph, dest, &|c: &Connection| {
+    let region = region_with_cut(graph, from, &|c: &Connection| {
         (c.origin == from && c.dir == dir) || (c.origin == dest && c.dir == back)
     });
-    if region.contains(&from) {
+    if region.contains(&dest) {
         return Err(PeelRefusal::NotASeam);
     }
-    let name = graph.room(dest).map(|r| r.label().to_string()).unwrap_or_default();
+    let name = graph.room(from).map(|r| r.label().to_string()).unwrap_or_default();
     let new = graph.new_layer(Some(src), name);
     for id in region {
         graph.set_room_layer(id, new);
@@ -260,11 +266,65 @@ mod tests {
             "one connected region: the automatic peel has nothing to cut on"
         );
 
+        // Peel from B, cutting east: B's OWN side leaves — the same side `peel_region` would take.
         let l = peel_at_edge(&mut g, 2, Direction::E).expect("the B→C passage is a seam");
         assert_eq!(g.layers()[&l].parent, Some(MAIN_LAYER), "the new layer hangs off the one it left");
-        assert_eq!(g.layer_name(l), "C", "named for the room the cut leads to");
-        assert_eq!(g.rooms_in_layer(l), vec![3, 4], "everything beyond the seam moves");
-        assert_eq!(g.rooms_in_layer(MAIN_LAYER), vec![1, 2], "everything before it stays");
+        assert_eq!(g.layer_name(l), "B", "named for the room peeled, as peel_region names for `start`");
+        assert_eq!(g.rooms_in_layer(l), vec![1, 2], "B's side leaves, B included");
+        assert_eq!(g.rooms_in_layer(MAIN_LAYER), vec![3, 4], "the far side stays put");
+
+        // Standing at the other end of the SAME passage peels the other side — and each time it is
+        // the side you are standing on, never a coin flip about which end you happened to pick.
+        let mut g2 = MapGraph::new();
+        for (id, n) in [(1, "A"), (2, "B"), (3, "C"), (4, "D")] {
+            g2.upsert_room(id, n.into());
+        }
+        for (a, b) in [(1, 2), (2, 3), (3, 4)] {
+            g2.add_edge(a, Direction::E, b);
+            g2.add_edge(b, Direction::W, a);
+        }
+        let l2 = peel_at_edge(&mut g2, 3, Direction::W).expect("same seam, other end");
+        assert_eq!(g2.rooms_in_layer(l2), vec![3, 4], "C's side leaves, C included");
+    }
+
+    /// SQ-0364: peeling at a seam must leave the new layer a CHILD of the rooms it still connects
+    /// to, so merging puts it back where its connections are.
+    ///
+    /// Taking the FAR side broke that: the room you peeled FROM stayed behind while its neighbours
+    /// moved, making the new layer a sibling of everything it touches. Zork's case — peel east from
+    /// a Maze room and the Maze stays on the Cellar while the other 24 rooms leave — then merged
+    /// the Maze up to Main, a layer it has no connection to whatsoever.
+    #[test]
+    fn peeling_at_a_seam_then_merging_puts_the_rooms_back_where_they_were() {
+        let mut g = MapGraph::new();
+        for (id, n) in [(1, "Troll Room"), (2, "Maze"), (3, "Maze2")] {
+            g.upsert_room(id, n.into());
+        }
+        for (a, b) in [(1, 2), (2, 3)] {
+            g.add_edge(a, Direction::W, b);
+            g.add_edge(b, Direction::E, a);
+        }
+        // Everything starts on a sub-layer, as Zork's underground does.
+        let cellar = g.new_layer(Some(MAIN_LAYER), "Cellar".into());
+        for id in [1, 2, 3] {
+            g.set_room_layer(id, cellar);
+        }
+
+        // Peel the Maze by standing IN it and cutting the way back out.
+        let maze = peel_at_edge(&mut g, 2, Direction::E).expect("seam");
+        assert_eq!(g.rooms_in_layer(maze), vec![2, 3], "the Maze leaves, both its rooms");
+        assert_eq!(g.rooms_in_layer(cellar), vec![1], "the Troll Room stays");
+        assert_eq!(
+            g.layers()[&maze].parent,
+            Some(cellar),
+            "the Maze hangs off the Cellar — where the room it still connects to lives"
+        );
+
+        // So merging returns it to its connections, not to some layer it never touched.
+        let back = merge_layer(&mut g, maze);
+        assert_eq!(back, cellar);
+        assert_eq!(g.layer_of(2), cellar, "the Maze is back beside the Troll Room");
+        assert_ne!(g.layer_of(2), MAIN_LAYER, "and never lands on Main, which it has no edge to");
     }
 
     /// The cut must take the passage's RECIPROCAL with it. Severing only `B -E-> C` would leave
@@ -277,7 +337,7 @@ mod tests {
         g.add_edge(1, Direction::E, 2);
         g.add_edge(2, Direction::W, 1); // the reciprocal
         let l = peel_at_edge(&mut g, 1, Direction::E).expect("a lone passage is a seam");
-        assert_eq!(g.rooms_in_layer(l), vec![2]);
+        assert_eq!(g.rooms_in_layer(l), vec![1], "A peels itself off; B stays");
     }
 
     /// A passage whose ends stay connected another way is not a boundary, and says so.

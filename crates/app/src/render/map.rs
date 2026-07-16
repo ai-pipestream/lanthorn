@@ -5809,7 +5809,10 @@ mod tests {
             g.set_pos(2, cell);
             g.add_edge(1, dir, 2);
             g.add_edge(2, mapper::direction::opposite(dir), 1);
-            mapper::layer::peel_at_edge(&mut g, 1, dir).expect("cut at the seam");
+            // Peel the VAULT's side (SQ-0364: a peel takes the selected room's own side), so
+            // Here stays on Main and its `dir` passage is the one that crosses.
+            mapper::layer::peel_at_edge(&mut g, 2, mapper::direction::opposite(dir))
+                .expect("cut at the seam");
 
             let rm = render_layer(&g, mapper::layer::MAIN_LAYER);
             let mut st = AppState::default();
@@ -5856,8 +5859,11 @@ mod tests {
         g.set_pos(2, (1, 0));
         g.add_edge(1, Direction::E, 2);
         g.add_edge(2, Direction::W, 1);
-        let peeled = mapper::layer::peel_at_edge(&mut g, 1, Direction::E).expect("cut at the seam");
+        // Peel THERE's side, so HERE stays on Main and its east passage crosses layers. A peel
+        // takes the selected room's OWN side (SQ-0364), hence standing at the far end.
+        let peeled = mapper::layer::peel_at_edge(&mut g, 2, Direction::W).expect("cut at the seam");
         assert_eq!(g.layer_of(2), peeled, "There is now a layer away, across a COMPASS edge");
+        assert_eq!(g.layer_of(1), mapper::layer::MAIN_LAYER, "Here stayed put");
 
         let rm = render_layer(&g, mapper::layer::MAIN_LAYER);
         let mut st = AppState::default();

@@ -6701,8 +6701,11 @@ mod tests {
         let mut s = AppState::default();
         apply_action(Action::PeelLayer(None), &mut s, &mut m); // Cellar -> L1
         m.observe(3, "Vault", Some(Direction::E)); // joins L1
-        s.select_room(Some(2));
-        apply_action(Action::PeelLayer(Some(Direction::E)), &mut s, &mut m); // Vault -> L2
+        m.observe(2, "Cellar", Some(Direction::W)); // walk back, so the Vault has a way out to cut
+        // Peel the Vault by standing IN it and cutting the way back out: a peel takes the selected
+        // room's own side (SQ-0364).
+        s.select_room(Some(3));
+        apply_action(Action::PeelLayer(Some(Direction::W)), &mut s, &mut m); // Vault -> L2
         let vault_layer = m.graph.layer_of(3);
         assert_eq!(m.graph.layers()[&vault_layer].parent, Some(1), "L2 was peeled out of L1");
 
@@ -6746,8 +6749,10 @@ mod tests {
         apply_action(Action::PeelLayer(Some(Direction::E)), &mut s, &mut m);
         assert_eq!(s.status_msg, None, "no complaint when it works");
         let new = s.viewed_layer.expect("the peeled layer is now in view");
-        assert_eq!(m.graph.rooms_in_layer(new), vec![2, 3], "everything beyond the seam");
-        assert_eq!(m.graph.rooms_in_layer(0), vec![1], "and the near side stays put");
+        // #1 is selected, so #1's own side leaves — the same side plain `peel-layer` would take
+        // (SQ-0364). The far side is what stays.
+        assert_eq!(m.graph.rooms_in_layer(new), vec![1], "the selected room's side leaves");
+        assert_eq!(m.graph.rooms_in_layer(0), vec![2, 3], "the far side stays put");
     }
 
     #[test]
