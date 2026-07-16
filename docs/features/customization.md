@@ -82,8 +82,8 @@
   default stays default on reload instead of silently re-inheriting the global
   colour.
 - **Decorated panes** — configurable per-pane borders (`none`/`single`/`double`/
-  `thick`/a notched **picture-frame**). The map defaults to the picture-frame; the
-  story pane defaults to a single-line border. The map's top border carries
+  `thick`/`rounded`). The map and story panes both default to a single-line
+  border. The map's top border carries
   a centered **layer-tab strip** (active layer highlighted); the story's top
   border shows the **adventure title** (taken from an override, the game's opening
   banner, or the filename). The status line and input prompt can be boxed too —

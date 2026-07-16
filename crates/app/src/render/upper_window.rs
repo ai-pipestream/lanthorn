@@ -120,7 +120,6 @@ pub fn draw_grid(
         return 0;
     }
 
-    let border_style = colors.virtual_window_border;
     // Per-window background override (Glulx window colour, SQ-0328): when the grid
     // carries its own `bg`, the content fill and each cell's default background use
     // it instead of the theme's `upper_window` bg. `None` (Z-machine simple path,
@@ -159,7 +158,7 @@ pub fn draw_grid(
     let uw_area = Rect::new(area.x + x_off, area.y, uw_w, needed);
 
     // Draw the optional border and get the inner content rect.
-    let frame = draw_framed(buf, uw_area, border_style, sides, &colors.upper_window_border_glyphs, border_color, false);
+    let frame = draw_framed(buf, uw_area, sides, &colors.upper_window_border_glyphs, border_color, false);
     let content = frame.content;
 
     if content.height == 0 || content.width == 0 {

@@ -408,8 +408,6 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
             let col1 = prop.x + 5;
             let col2 = prop.x + 9;
 
-            let is_picture_frame = style_name == "picture-frame";
-
             // Helper: get the display glyph for a zone.
             let zone_glyph = |zone: BorderZone| -> String {
                 // Override from decl takes priority.
@@ -447,7 +445,7 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
                             BorderZone::Bl => "╰", BorderZone::Br => "╯",
                         },
                         "none" => " ",
-                        _ => match zone { // single, picture-frame, unknown
+                        _ => match zone { // single, unknown
                             BorderZone::Top | BorderZone::Bottom => "─",
                             BorderZone::Left | BorderZone::Right => "│",
                             BorderZone::Tl => "┌", BorderZone::Tr => "┐",
@@ -489,9 +487,7 @@ pub fn draw_style_editor(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
                         BorderZone::Br     => d.glyph_br.is_some(),
                     });
 
-                    let base_style = if is_picture_frame {
-                        normal_style.add_modifier(Modifier::DIM)
-                    } else if is_cursor {
+                    let base_style = if is_cursor {
                         active_style
                     } else if has_override {
                         normal_style.add_modifier(Modifier::BOLD)

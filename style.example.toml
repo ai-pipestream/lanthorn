@@ -26,7 +26,7 @@
 "connector:distorted"  = { fg = "magenta" }     # one-way / distorted
 "connector:portal"     = { fg = "cyan" }        # up/down/in/out portals
 "shared_path"          = { fg = "light-cyan" }  # collapsed multi-direction connector + its markers
-"map_border"           = { style = "picture-frame", fg = "cyan" }
+"map_border"           = { style = "single", fg = "cyan" }
 # Per-side borders: override individual sides (none/single/double/thick); a side
 # falls back to `style`. `header = false` hides the title / layer-tab strip.
 # "map_border"  = { style = "none", style_left = "single", style_right = "single" }
@@ -90,7 +90,7 @@ fg = "red"
 # A segment with no placeholder is always shown; a segment whose placeholders all
 # resolve empty is hidden (so score segments vanish on clock games and vice-versa).
 [statusbar]
-border = "none"          # none | single | double | thick | picture-frame
+border = "none"          # none | single | double | thick | rounded
 # border_fg = "cyan"
 
 [[statusbar.segment]]

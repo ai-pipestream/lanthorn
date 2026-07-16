@@ -27,7 +27,7 @@ pub struct Decl {
     pub underline: Option<bool>,
     pub dim: Option<bool>,
     pub reversed: Option<bool>,
-    /// Optional border-style name (e.g. `"picture-frame"`, `"single"`, etc.).
+    /// Optional border-style name (e.g. `"single"`, `"double"`, etc.).
     /// Only interpreted for border selectors; ignored for others.
     #[serde(default)]
     pub style: Option<String>,
@@ -370,29 +370,20 @@ pub fn describe_scheme(cs: &colors::ColorScheme) -> Vec<(String, Option<Style>)>
 /// Unknown selectors are collected into the returned warnings vec.
 /// Resolve a base border style + per-side overrides into a `PaneSides`. Each side
 /// uses its `style_<side>` override (parsed as a line style) or falls back to
-/// `base`. A per-side value of `picture-frame` is invalid → warns, uses `base`.
-fn resolve_sides(base: paneframe::BorderStyle, decl: &Decl) -> (paneframe::PaneSides, Vec<String>) {
-    let mut warnings = Vec::new();
-    let side = |ov: &Option<String>, warnings: &mut Vec<String>| -> paneframe::BorderStyle {
+/// `base`.
+fn resolve_sides(base: paneframe::BorderStyle, decl: &Decl) -> paneframe::PaneSides {
+    let side = |ov: &Option<String>| -> paneframe::BorderStyle {
         match ov {
             None => base,
-            Some(s) => {
-                if s == "picture-frame" {
-                    warnings.push("per-side 'picture-frame' is invalid; using base style".to_string());
-                    base
-                } else {
-                    paneframe::parse_border_style(s)
-                }
-            }
+            Some(s) => paneframe::parse_border_style(s),
         }
     };
-    let sides = paneframe::PaneSides {
-        top: side(&decl.style_top, &mut warnings),
-        bottom: side(&decl.style_bottom, &mut warnings),
-        left: side(&decl.style_left, &mut warnings),
-        right: side(&decl.style_right, &mut warnings),
-    };
-    (sides, warnings)
+    paneframe::PaneSides {
+        top: side(&decl.style_top),
+        bottom: side(&decl.style_bottom),
+        left: side(&decl.style_left),
+        right: side(&decl.style_right),
+    }
 }
 
 /// Map the 8 glyph fields of a [`Decl`] into a [`PaneGlyphs`].
@@ -445,7 +436,7 @@ pub fn apply_color_decls(
                 // selector (which sorts before it).
                 let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.suggestion_line_style);
                 cs.suggestion_line_style = base;
-                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                let sides = resolve_sides(base, decl);
                 cs.suggestion_line_sides = sides;
                 cs.suggestion_line_glyphs = decl_glyphs(decl);
             }
@@ -460,7 +451,7 @@ pub fn apply_color_decls(
                 cs.map_border = cs.map_border.patch(style);
                 let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.map_border_style);
                 cs.map_border_style = base;
-                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                let sides = resolve_sides(base, decl);
                 cs.map_border_sides = sides;
                 cs.map_border_glyphs = decl_glyphs(decl);
                 if let Some(h) = decl.header { cs.map_header_on = h; }
@@ -469,7 +460,7 @@ pub fn apply_color_decls(
                 cs.story_border = cs.story_border.patch(style);
                 let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.story_border_style);
                 cs.story_border_style = base;
-                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                let sides = resolve_sides(base, decl);
                 cs.story_border_sides = sides;
                 cs.story_border_glyphs = decl_glyphs(decl);
                 if let Some(h) = decl.header { cs.story_header_on = h; }
@@ -490,7 +481,7 @@ pub fn apply_color_decls(
                 cs.status_header = cs.status_header.patch(style);
                 let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.status_header_style);
                 cs.status_header_style = base;
-                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                let sides = resolve_sides(base, decl);
                 cs.status_header_sides = sides;
                 cs.status_header_glyphs = decl_glyphs(decl);
             }
@@ -498,7 +489,7 @@ pub fn apply_color_decls(
                 cs.input_line = cs.input_line.patch(style);
                 let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.input_line_style);
                 cs.input_line_style = base;
-                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                let sides = resolve_sides(base, decl);
                 cs.input_line_sides = sides;
                 cs.input_line_glyphs = decl_glyphs(decl);
             }
@@ -528,7 +519,7 @@ pub fn apply_color_decls(
                 cs.upper_window_border = cs.upper_window_border.patch(style);
                 let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.virtual_window_border);
                 cs.virtual_window_border = base;
-                let (sides, w) = resolve_sides(base, decl); warnings.extend(w);
+                let sides = resolve_sides(base, decl);
                 cs.upper_window_border_sides = sides;
                 cs.upper_window_border_glyphs = decl_glyphs(decl);
             }
@@ -930,15 +921,14 @@ pub fn resolve(
 
 /// The embedded built-in `default` style.
 ///
-/// Sets a picture-frame map border and a single-line story border as the default look.
+/// Sets single-line map and story borders as the default look.
 /// An empty `[symbols]` means all presets resolve to their factory defaults via finalize_symbols.
 pub const DEFAULT_STYLE_TOML: &str = r#"# babelmap built-in default style
-# map_border = picture-frame; story_border = single (titled book header without the
-# ornate frame); other selectors use terminal defaults.
+# map_border / story_border = single; other selectors use terminal defaults.
 # Empty [symbols] means all presets resolve to their factory defaults via finalize_symbols.
 
 [colors]
-"map_border" = { style = "picture-frame" }
+"map_border" = { style = "single" }
 "story_border" = { style = "single" }
 "dialog" = { style = "single", bg = "black" }
 "dialog:title" = { fg = "cyan" }
@@ -1551,18 +1541,6 @@ mod tests {
         assert_eq!(cs.story_border_sides.top, BorderStyle::Thick);
         assert_eq!(cs.story_border_sides.left, BorderStyle::Single);
         assert!(!cs.story_header_on);
-    }
-
-    #[test]
-    fn per_side_picture_frame_warns_and_falls_back() {
-        let doc = parse_style_toml(
-            "[colors]\n\"map_border\" = { style = \"single\", style_top = \"picture-frame\" }\n"
-        ).unwrap();
-        let (cs, _set, warnings) = resolve(&doc, std::path::Path::new("."));
-        use crate::render::paneframe::BorderStyle;
-        // invalid per-side picture-frame → falls back to base (single) + warns.
-        assert_eq!(cs.map_border_sides.top, BorderStyle::Single);
-        assert!(warnings.iter().any(|w| w.contains("picture-frame")), "{warnings:?}");
     }
 
     #[test]
@@ -2248,11 +2226,11 @@ box_style = "rounded"
     }
 
     #[test]
-    fn resolve_sets_border_style_and_default_is_picture_frame() {
-        // default doc (DEFAULT_STYLE_TOML) => picture-frame map, single story
+    fn resolve_sets_border_style_and_default_is_single() {
+        // default doc (DEFAULT_STYLE_TOML) => single map, single story (SQ-0357)
         let doc = parse_style_toml(DEFAULT_STYLE_TOML).unwrap();
         let (cs, _set, _w) = resolve(&doc, std::path::Path::new("."));
-        assert!(matches!(cs.map_border_style, crate::render::paneframe::BorderStyle::PictureFrame));
+        assert!(matches!(cs.map_border_style, crate::render::paneframe::BorderStyle::Single));
         assert!(matches!(cs.story_border_style, crate::render::paneframe::BorderStyle::Single));
     }
 
@@ -2339,7 +2317,7 @@ box_style = "rounded"
 
         // Build a ColorScheme with non-None border styles.
         let mut cs = crate::colors::ColorScheme::terminal_default();
-        cs.map_border_style   = BorderStyle::PictureFrame;
+        cs.map_border_style   = BorderStyle::Rounded;
         cs.story_border_style = BorderStyle::Double;
 
         let set = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
@@ -2350,7 +2328,7 @@ box_style = "rounded"
         let (cs2, _set2, _w) = resolve(&doc, &dir);
 
         assert!(
-            matches!(cs2.map_border_style, BorderStyle::PictureFrame),
+            matches!(cs2.map_border_style, BorderStyle::Rounded),
             "map_border_style must survive write_style_full -> parse -> resolve; got {:?}",
             cs2.map_border_style
         );

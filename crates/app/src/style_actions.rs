@@ -210,7 +210,7 @@ pub(crate) fn apply_style_action(action: Action, state: &mut AppState) {
         }
 
         Action::StyleBorderTypeCycle(d) => {
-            const STYLES: &[&str] = &["none", "single", "double", "rounded", "thick", "picture-frame"];
+            const STYLES: &[&str] = &["none", "single", "double", "rounded", "thick"];
             let dir = state.config.user_dir.clone();
             if let Some(ed) = &mut state.overlays.style_editor {
                 let sel = ed.selectors[ed.active].to_string();

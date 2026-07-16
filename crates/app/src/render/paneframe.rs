@@ -10,7 +10,6 @@ pub enum BorderStyle {
     Single,
     Double,
     Thick,
-    PictureFrame,
     Rounded,
 }
 
@@ -20,7 +19,6 @@ pub fn parse_border_style(s: &str) -> BorderStyle {
         "single" => BorderStyle::Single,
         "double" => BorderStyle::Double,
         "thick" => BorderStyle::Thick,
-        "picture-frame" => BorderStyle::PictureFrame,
         "rounded" => BorderStyle::Rounded,
         _ => BorderStyle::Single,
     }
@@ -33,7 +31,6 @@ pub fn border_style_name(style: BorderStyle) -> &'static str {
         BorderStyle::Single => "single",
         BorderStyle::Double => "double",
         BorderStyle::Thick => "thick",
-        BorderStyle::PictureFrame => "picture-frame",
         BorderStyle::Rounded => "rounded",
     }
 }
@@ -63,76 +60,6 @@ const DOUBLE:  Glyphs = Glyphs { tl: "╔", top: "═", tr: "╗", side: "║", 
 const THICK:   Glyphs = Glyphs { tl: "┏", top: "━", tr: "┓", side: "┃", bl: "┗", br: "┛" };
 const ROUNDED: Glyphs = Glyphs { tl: "╭", top: "─", tr: "╮", side: "│", bl: "╰", br: "╯" };
 
-// Picture-frame outer-border block glyphs.
-// `RAMP` is the lower one-eighth block series, level 1 (thin) .. 8 (full). These
-// fill from the bottom of the cell, so the painted mass hugs the inner frame
-// below — the top border ramps up to crest at the centred layer-tab strip.
-const RAMP: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
-// Thin one-eighth blocks for the sides and bottom, each positioned to sit flush
-// against the inner frame: ▕ (right eighth) on the left, ▏ (left eighth) on the
-// right, ▔ (upper eighth) along the bottom.
-const PF_SIDE_L: &str = "▕";
-const PF_SIDE_R: &str = "▏";
-const PF_BOTTOM: &str = "▔";
-
-// ── draw_picture_frame ────────────────────────────────────────────────────────
-
-fn draw_picture_frame(buf: &mut Buffer, area: Rect, color: Style) -> PaneFrame {
-    let x = area.x;
-    let y = area.y;
-    let w = area.width;
-    let h = area.height;
-    let right = x + w - 1;   // outer right col
-    let bottom = y + h - 1;  // outer bottom row
-
-    // ── Top outer border: stepped lower-block ramp ─────────────────────────────
-    // Each cell rises one level per two cells from the nearest corner, capping at
-    // a full block. The ramp crests at the centre, where the layer-tab strip is
-    // later overlaid via `draw_top_inset` (the strip overwrites the peak cells).
-    for cx in x..=right {
-        let from_corner = (cx - x).min(right - cx) as usize;
-        let level = (1 + from_corner / 2).min(8);
-        if let Some(c) = buf.cell_mut((cx, y)) { c.set_symbol(RAMP[level - 1]).set_style(color); }
-    }
-
-    // ── Thin side blocks (hug the inner frame) ─────────────────────────────────
-    for cy in (y + 1)..bottom {
-        if let Some(c) = buf.cell_mut((x, cy))     { c.set_symbol(PF_SIDE_L).set_style(color); }
-        if let Some(c) = buf.cell_mut((right, cy))  { c.set_symbol(PF_SIDE_R).set_style(color); }
-    }
-
-    // ── Thin bottom block ──────────────────────────────────────────────────────
-    for cx in x..=right {
-        if let Some(c) = buf.cell_mut((cx, bottom)) { c.set_symbol(PF_BOTTOM).set_style(color); }
-    }
-
-    // ── Inner single-line frame ────────────────────────────────────────────────
-    let il = x + 1;        // inner left col
-    let ir = right - 1;    // inner right col
-    let it = y + 1;        // inner top row
-    let ib = bottom - 1;   // inner bottom row
-    if let Some(c) = buf.cell_mut((il, it)) { c.set_symbol("┌").set_style(color); }
-    if let Some(c) = buf.cell_mut((ir, it)) { c.set_symbol("┐").set_style(color); }
-    if let Some(c) = buf.cell_mut((il, ib)) { c.set_symbol("└").set_style(color); }
-    if let Some(c) = buf.cell_mut((ir, ib)) { c.set_symbol("┘").set_style(color); }
-    for cx in (il + 1)..ir {
-        if let Some(c) = buf.cell_mut((cx, it)) { c.set_symbol("─").set_style(color); }
-        if let Some(c) = buf.cell_mut((cx, ib)) { c.set_symbol("─").set_style(color); }
-    }
-    for cy in (it + 1)..ib {
-        if let Some(c) = buf.cell_mut((il, cy)) { c.set_symbol("│").set_style(color); }
-        if let Some(c) = buf.cell_mut((ir, cy)) { c.set_symbol("│").set_style(color); }
-    }
-
-    // ── Content and top_inset ──────────────────────────────────────────────────
-    // Content lives inside the inner single-line frame.
-    let content = Rect::new(x + 2, y + 2, w - 4, h - 4);
-    // The layer-tab strip crests at the top outer row, centred over the inner span.
-    let top_inset = Rect::new(x + 1, y, w.saturating_sub(2), 1);
-
-    PaneFrame { area, content, top_inset }
-}
-
 // ── draw_pane_frame ────────────────────────────────────────────────────────────
 
 pub fn draw_pane_frame(buf: &mut Buffer, area: Rect, style: BorderStyle, glyphs: &PaneGlyphs, color: Style) -> PaneFrame {
@@ -141,14 +68,6 @@ pub fn draw_pane_frame(buf: &mut Buffer, area: Rect, style: BorderStyle, glyphs:
             // No border drawn; content == area; top_inset is the top row
             let top_inset = Rect::new(area.x, area.y, area.width, 1.min(area.height));
             return PaneFrame { area, content: area, top_inset };
-        }
-        BorderStyle::PictureFrame => {
-            // Degrade to Single for tiny panes
-            if area.width < 7 || area.height < 7 {
-                BorderStyle::Single
-            } else {
-                return draw_picture_frame(buf, area, color);
-            }
         }
         other => other,
     };
@@ -256,7 +175,7 @@ fn border_weight(s: BorderStyle) -> u8 {
         BorderStyle::Thick => 3,
         BorderStyle::Double => 2,
         BorderStyle::Single | BorderStyle::Rounded => 1,
-        _ => 0, // None / PictureFrame never reach the per-side corner path
+        _ => 0, // None never reaches the per-side corner path
     }
 }
 
@@ -726,17 +645,8 @@ pub struct FramedPane {
     pub header_bordered: bool,
 }
 
-/// Draw a pane frame choosing the composited path for `picture-frame` or the
-/// per-side path otherwise, and resolve header placement from `header_on`.
-pub fn draw_framed(buf: &mut Buffer, area: Rect, base: BorderStyle, sides: PaneSides, glyphs: &PaneGlyphs, color: Style, header_on: bool) -> FramedPane {
-    if base == BorderStyle::PictureFrame {
-        let frame = draw_pane_frame(buf, area, BorderStyle::PictureFrame, glyphs, color);
-        return FramedPane {
-            content: frame.content,
-            header: if header_on { Some(frame.top_inset) } else { None },
-            header_bordered: true,
-        };
-    }
+/// Draw a pane frame via the per-side path, and resolve header placement from `header_on`.
+pub fn draw_framed(buf: &mut Buffer, area: Rect, sides: PaneSides, glyphs: &PaneGlyphs, color: Style, header_on: bool) -> FramedPane {
     let frame = draw_pane_frame_sides(buf, area, sides, glyphs, color);
     let top_present = sides.top != BorderStyle::None;
     if !header_on {
@@ -820,44 +730,7 @@ mod tests {
     #[test]
     fn parse_border_style_known_and_unknown() {
         assert!(matches!(parse_border_style("double"), BorderStyle::Double));
-        assert!(matches!(parse_border_style("picture-frame"), BorderStyle::PictureFrame));
         assert!(matches!(parse_border_style("bogus"), BorderStyle::Single));
-    }
-
-    #[test]
-    fn picture_frame_exact_glyphs_and_content() {
-        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-        let area = Rect::new(0,0,9,8); // w=9,h=8,right=8,bottom=7
-        let mut buf = Buffer::empty(area);
-        let f = draw_pane_frame(&mut buf, area, BorderStyle::PictureFrame, &PaneGlyphs::default(), Style::default());
-        // Top outer border: lower-block ramp, thin at the corners rising to centre.
-        assert_eq!(buf.cell((0,0)).unwrap().symbol(), "▁"); // corner, level 1
-        assert_eq!(buf.cell((8,0)).unwrap().symbol(), "▁"); // corner, level 1
-        assert_eq!(buf.cell((4,0)).unwrap().symbol(), "▃"); // centre, from_corner=4 -> level 3
-        // Thin side blocks hug the inner frame.
-        assert_eq!(buf.cell((0,3)).unwrap().symbol(), "▕"); // left side
-        assert_eq!(buf.cell((8,3)).unwrap().symbol(), "▏"); // right side
-        // Thin bottom block.
-        assert_eq!(buf.cell((4,7)).unwrap().symbol(), "▔");
-        // Inner single-line frame: corners at (1,1),(7,1),(1,6),(7,6).
-        assert_eq!(buf.cell((1,1)).unwrap().symbol(), "┌");
-        assert_eq!(buf.cell((7,1)).unwrap().symbol(), "┐");
-        assert_eq!(buf.cell((1,6)).unwrap().symbol(), "└");
-        assert_eq!(buf.cell((7,6)).unwrap().symbol(), "┘");
-        assert_eq!(buf.cell((1,3)).unwrap().symbol(), "│"); // inner side
-        assert_eq!(f.content, Rect::new(2,2,5,4)); // inside the inner frame
-        // top_inset is the top outer row (row 0), inner span.
-        assert_eq!(f.top_inset, Rect::new(1,0,7,1));
-    }
-
-    #[test]
-    fn picture_frame_tiny_pane_degrades_to_single() {
-        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
-        let area = Rect::new(0,0,5,5);
-        let mut buf = Buffer::empty(area);
-        let f = draw_pane_frame(&mut buf, area, BorderStyle::PictureFrame, &PaneGlyphs::default(), Style::default());
-        assert_eq!(buf.cell((0,0)).unwrap().symbol(), "┌"); // single, not ┏
-        assert_eq!(f.content, Rect::new(1,1,3,3));
     }
 
     #[test]
@@ -956,7 +829,7 @@ mod tests {
 
         // header on + top present → header is the top border row (bordered).
         let mut b1 = Buffer::empty(area);
-        let f1 = draw_framed(&mut b1, area, BorderStyle::Single, PaneSides::all(BorderStyle::Single), &PaneGlyphs::default(), Style::default(), true);
+        let f1 = draw_framed(&mut b1, area, PaneSides::all(BorderStyle::Single), &PaneGlyphs::default(), Style::default(), true);
         assert!(f1.header_bordered);
         assert_eq!(f1.header.unwrap().y, 0);
         assert_eq!(f1.content, Rect::new(1, 1, 10, 4));
@@ -964,7 +837,7 @@ mod tests {
         // header on + top none → header on reclaimed first content row (plain); content drops a row.
         let sides_no_top = PaneSides { top: BorderStyle::None, bottom: BorderStyle::Single, left: BorderStyle::Single, right: BorderStyle::Single };
         let mut b2 = Buffer::empty(area);
-        let f2 = draw_framed(&mut b2, area, BorderStyle::None, sides_no_top, &PaneGlyphs::default(), Style::default(), true);
+        let f2 = draw_framed(&mut b2, area, sides_no_top, &PaneGlyphs::default(), Style::default(), true);
         assert!(!f2.header_bordered);
         let h2 = f2.header.unwrap();
         assert_eq!(h2.height, 1);
@@ -973,7 +846,7 @@ mod tests {
 
         // header off → no header; content uses the inner area.
         let mut b3 = Buffer::empty(area);
-        let f3 = draw_framed(&mut b3, area, BorderStyle::Single, PaneSides::all(BorderStyle::Single), &PaneGlyphs::default(), Style::default(), false);
+        let f3 = draw_framed(&mut b3, area, PaneSides::all(BorderStyle::Single), &PaneGlyphs::default(), Style::default(), false);
         assert!(f3.header.is_none());
         assert_eq!(f3.content, Rect::new(1, 1, 10, 4));
     }

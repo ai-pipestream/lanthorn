@@ -360,7 +360,7 @@ fn draw_frame(
 
         match state.layout {
             Layout::TranscriptFull => {
-                let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
+                let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                 let c = story_fp.content;
                 let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                 transcript_max_scroll = m.max_scroll;
@@ -384,7 +384,7 @@ fn draw_frame(
                 let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
                 let story_border_color = if resize_split_hl { state.colors.focused_border } else { story_border_style };
                 let map_border_color = if resize_split_hl { state.colors.focused_border } else { state.colors.map_border };
-                let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_style, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
+                let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
                 let c = story_fp.content;
                 let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                 transcript_max_scroll = m.max_scroll;
@@ -400,7 +400,7 @@ fn draw_frame(
                 }
                 story_area = story_fp.content;
 
-                let map_fp = draw_framed(buf, pane_layout.map, state.colors.map_border_style, state.colors.map_border_sides, &state.colors.map_border_glyphs, map_border_color, state.colors.map_header_on);
+                let map_fp = draw_framed(buf, pane_layout.map, state.colors.map_border_sides, &state.colors.map_border_glyphs, map_border_color, state.colors.map_header_on);
                 render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                 if let Some(anim) = &state.tidy_anim {
                     let tidy_ds = make_dialog_style(state);
@@ -2924,13 +2924,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&no_sidecar_dir);
     }
 
-    // ── TestBackend: map pane shows picture-frame top-left by default ──────────
+    // ── TestBackend: map pane shows a single-line border by default ───────────
 
-    /// Verify that the DEFAULT_STYLE_TOML-resolved ColorScheme configures
-    /// `map_border_style` as picture-frame, and that rendering it produces the
-    /// block outer border (ramp corner ▁, thin side ▕) and the inner-frame content.
+    /// SQ-0357: the map pane's default is a plain single-line border. It used to be an ornate
+    /// picture-frame — a frame within a frame, which cost two columns and two rows of map to
+    /// draw a second box around the first one.
     #[test]
-    fn map_pane_default_shows_picture_frame_corner() {
+    fn map_pane_default_is_a_single_line_border() {
         // Resolve the default look from DEFAULT_STYLE_TOML (same path as startup).
         let doc = app::style::parse_style_toml(app::style::DEFAULT_STYLE_TOML)
             .expect("DEFAULT_STYLE_TOML must parse");
@@ -2939,23 +2939,14 @@ mod tests {
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
         let frame = draw_pane_frame(&mut buf, area, cs.map_border_style, &PaneGlyphs::default(), cs.map_border);
-        // DEFAULT_STYLE_TOML sets map_border to picture-frame: top outer row is the
-        // lower-block ramp (▁ at the corner), the sides are thin one-eighth blocks.
-        assert_eq!(
-            buf.cell((0, 0)).unwrap().symbol(),
-            "▁",
-            "default map border (from DEFAULT_STYLE_TOML) must be picture-frame (ramp ▁ at top-left)"
-        );
-        assert_eq!(
-            buf.cell((0, 3)).unwrap().symbol(),
-            "▕",
-            "picture-frame left side must be the thin ▕ block"
-        );
-        // Content lives inside the inner frame (20-4=16, 10-4=6).
-        assert_eq!(frame.content, Rect::new(2, 2, 16, 6));
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "┌", "default map border is single-line");
+        assert_eq!(buf.cell((0, 3)).unwrap().symbol(), "│");
+        // Content is everything inside that one border — two more rows and columns of map than
+        // the picture-frame left (which nested a second frame inside the first).
+        assert_eq!(frame.content, Rect::new(1, 1, 18, 8));
     }
 
-    // ── TestBackend: story pane shows adventure title in picture-frame border ─────
+    // ── TestBackend: story pane shows adventure title in its border ───────────────
 
     /// Verify that the DEFAULT_STYLE_TOML-resolved ColorScheme configures
     /// story_border_style as single, that rendering it produces the ┌ outer
@@ -3213,7 +3204,7 @@ mod tests {
     fn pulse_overlay_touches_only_outer_perimeter_not_inner_tab_row() {
         use ratatui::style::{Color, Style};
 
-        // Use a 30x15 area (large enough for picture-frame: requires w>=7, h>=7).
+        // Use a 30x15 area.
         let area = Rect::new(0, 0, 30, 15);
         let mut buf = Buffer::empty(area);
 

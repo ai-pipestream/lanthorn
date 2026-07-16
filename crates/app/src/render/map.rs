@@ -5578,7 +5578,7 @@ mod tests {
         g
     }
 
-    /// With a picture-frame border active (`map_border_style != None`) and 2+ layers,
+    /// With a border active (`map_border_style != None`) and 2+ layers,
     /// `render_map_layered` must NOT draw the in-content strip (no lost content row).
     /// The in-content strip uses REVERSED modifier on tab labels; with a border active,
     /// no REVERSED cells should appear in the content area row 0.
@@ -5591,9 +5591,9 @@ mod tests {
         let area = Rect::new(0, 0, 60, 20);
         let mut buf = Buffer::empty(area);
 
-        // State with a non-None border style (picture-frame).
+        // State with a non-None border style.
         let mut state = AppState::default();
-        state.colors.map_border_style = BorderStyle::PictureFrame;
+        state.colors.map_border_style = BorderStyle::Single;
 
         render_map_layered(&rm, &g, &state, area, &mut buf);
 

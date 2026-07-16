@@ -1010,7 +1010,7 @@ pub fn render_transcript(
 
     if status_boxed {
         // Draw a pane frame around the status region.
-        let frame = draw_framed(buf, status_region, status_style_kind, state.colors.status_header_sides, &state.colors.status_header_glyphs, state.colors.status_header, false);
+        let frame = draw_framed(buf, status_region, state.colors.status_header_sides, &state.colors.status_header_glyphs, state.colors.status_header, false);
         // Render status text into the inner content row.
         render_status_content(status, state, buf, frame.content);
     } else {
@@ -1031,7 +1031,7 @@ pub fn render_transcript(
     // after the last transcript row (the game's kept `>` prompt).
     if state.config.command_bar {
         if input_boxed {
-            let frame = draw_framed(buf, input_region, input_style_kind, state.colors.input_line_sides, &state.colors.input_line_glyphs, state.colors.input_line, false);
+            let frame = draw_framed(buf, input_region, state.colors.input_line_sides, &state.colors.input_line_glyphs, state.colors.input_line, false);
             render_input_content(state, buf, frame.content, normal_style, game_input);
         } else {
             render_input_content(state, buf, input_region, normal_style, game_input);
@@ -1230,7 +1230,7 @@ fn render_middle(
         // Draw a pane frame around the 3-row popup region, then render the
         // suggestion strip into the inner content row.
         let box_region = Rect::new(area.x, box_top, area.width, 3);
-        let frame = draw_framed(buf, box_region, sug_style_kind, state.colors.suggestion_line_sides, &state.colors.suggestion_line_glyphs, state.colors.suggestion, false);
+        let frame = draw_framed(buf, box_region, state.colors.suggestion_line_sides, &state.colors.suggestion_line_glyphs, state.colors.suggestion, false);
         let content = frame.content;
         if content.height >= 1 && content.width >= 1 {
             let sug_line = visible_suggestion_line(&state.suggestions, state.suggestion_idx, content.width as usize);

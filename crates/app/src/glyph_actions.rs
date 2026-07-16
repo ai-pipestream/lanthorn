@@ -12,26 +12,19 @@ pub(crate) fn apply_glyph_action(action: Action, state: &mut AppState) {
         Action::StyleOpenGlyphPicker(zone) => {
             if let Some(ed) = &state.overlays.style_editor {
                 let target_selector = ed.selectors[ed.active].to_string();
-                // Picture-frame is a composite border; per-zone glyph overrides don't apply.
-                let is_picture_frame = ed.doc.colors.selectors.get(&target_selector)
-                    .and_then(|d| d.style.as_deref())
-                    .unwrap_or("single") == "picture-frame";
-                if !is_picture_frame {
-                    let user_dir = state.config.user_dir.clone();
-                    let mru = crate::style_mru::load_glyph_mru(&user_dir);
-                    state.overlays.glyph_picker = Some(crate::state::GlyphPickerState {
-                        target_selector,
-                        target_zone: zone,
-                        block: 0,
-                        custom_start: None,
-                        custom_focus: false,
-                        custom_buf: String::new(),
-                        cursor: 0,
-                        pending: None,
-                        mru,
-                    });
-                }
-                // picture-frame: leave state.overlays.glyph_picker as None (no-op).
+                let user_dir = state.config.user_dir.clone();
+                let mru = crate::style_mru::load_glyph_mru(&user_dir);
+                state.overlays.glyph_picker = Some(crate::state::GlyphPickerState {
+                    target_selector,
+                    target_zone: zone,
+                    block: 0,
+                    custom_start: None,
+                    custom_focus: false,
+                    custom_buf: String::new(),
+                    cursor: 0,
+                    pending: None,
+                    mru,
+                });
             }
         }
 
