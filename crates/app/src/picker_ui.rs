@@ -193,7 +193,7 @@ const FOOTER_OPTIONAL: [&str; 6] =
 
 fn build_footer(width: u16) -> String {
     const CORE_LEFT: &str = " ↑/↓ or j/k: move";
-    const CORE_RIGHT: &str = "Enter / click: open   i/Tab: info   q / Esc: quit";
+    const CORE_RIGHT: &str = "Enter / 2×click: open   i/Tab: info   q / Esc: quit";
     let mut footer = CORE_LEFT.to_string();
     for seg in FOOTER_OPTIONAL {
         let candidate = format!("{footer}   {seg}   {CORE_RIGHT}");
@@ -419,6 +419,10 @@ pub(crate) fn run_story_picker(
     let mut last_sel = usize::MAX;
     let mut sel_changed_at = Instant::now();
     const COVER_DEBOUNCE: Duration = Duration::from_millis(90);
+    // Story-list clicks: first click selects, a second on the same row within
+    // this window launches it (SQ-0366).
+    let mut last_click: Option<(usize, Instant)> = None;
+    const DOUBLE_CLICK: Duration = Duration::from_millis(400);
     // A physical wheel notch emits several events, all delivered to the input
     // buffer together. Record the direction here and apply exactly one selection
     // step once the buffer drains (at the loop top), so one notch = one story
@@ -776,7 +780,21 @@ pub(crate) fn run_story_picker(
                 if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
                     if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
-                        break Some(stories[*idx].path.clone());
+                        let idx = *idx;
+                        let now = Instant::now();
+                        // Second click on the already-selected row within the
+                        // window → launch; otherwise just select it (SQ-0366).
+                        let double = last_click
+                            .is_some_and(|(li, lt)| li == idx && now.duration_since(lt) < DOUBLE_CLICK);
+                        if double {
+                            break Some(stories[idx].path.clone());
+                        }
+                        panel_scroll = 0;
+                        list.select(idx, viewport, anim);
+                        if slide.open {
+                            ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
+                        }
+                        last_click = Some((idx, now));
                     } else if let Some((key, _)) = header_rects.iter().find(|(_, r)| r.contains(pt)) {
                         // Click the active header → reverse; click another → sort
                         // by it, ascending.
