@@ -61,6 +61,9 @@ pub struct StoryMeta {
     pub description: Option<String>,
     /// The story's IFDB page URL, present only once fetched (no IFmd equivalent).
     pub ifdb_link: Option<String>,
+    /// A fetch ran but IFDB had no record for this IFID — so the panel offers a
+    /// manual IFDB search link instead of a dead end (SQ-0371).
+    pub fetch_not_found: bool,
 }
 
 /// One selectable story in the picker.
@@ -467,6 +470,7 @@ struct Resolved {
     language: Option<String>,
     description: Option<String>,
     ifdb_link: Option<String>,
+    fetch_not_found: bool,
 }
 
 /// The publication year from a Treaty of Babel `<firstpublished>`, which is
@@ -513,7 +517,8 @@ fn resolve(
         .or_else(|| fetched.and_then(|f| f.description.clone()));
     // IFDB-only: the page link exists solely in a fetched block.
     let ifdb_link = fetched.and_then(|f| f.ifdb_link.clone());
-    Resolved { title, author, year, genre, language, description, ifdb_link }
+    let fetch_not_found = fetched.map(|f| f.not_found).unwrap_or(false);
+    Resolved { title, author, year, genre, language, description, ifdb_link, fetch_not_found }
 }
 
 /// Scan `dir` (top level, non-recursive) for **launchable** Z-machine stories,
@@ -649,6 +654,7 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
         language: resolved.language,
         description: resolved.description,
         ifdb_link: resolved.ifdb_link,
+        fetch_not_found: resolved.fetch_not_found,
     };
     Some(StoryEntry { path: path.to_path_buf(), title, filename, meta })
 }
@@ -915,7 +921,7 @@ mod tests {
                 year: year.map(|s| s.to_string()),
                 genre: None,
                 language: None,
-                description: None, ifdb_link: None,
+                description: None, ifdb_link: None, fetch_not_found: false,
             },
         }
     }
@@ -1294,7 +1300,7 @@ mod tests {
                 format: "Z-code".into(), version: Some("5".into()),
                 serial: None, release: None, ifid: ifid.into(),
                 features: Features::default(), self_blorb,
-                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
+                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
             },
         }
     }

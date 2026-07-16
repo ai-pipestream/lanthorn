@@ -1069,6 +1069,12 @@ fn draw_info_panel(
     // detect URLs make it click/⌘-clickable; only present once fetched.
     if let Some(link) = meta.ifdb_link.as_deref().filter(|s| !s.is_empty()) {
         lines.push((format!("IFDB: {link}"), cs.story_info_link));
+    } else if meta.fetch_not_found {
+        // A fetch ran but IFDB had no record for this IFID (common for Infocom
+        // releases IFDB indexes under a different IFID). Offer a manual search
+        // by title so the user isn't at a dead end (SQ-0371).
+        let url = app::ifdb::search_url(title);
+        lines.push((format!("IFDB search: {url}"), cs.story_info_link));
     }
     // features line (present badges only).
     let feats = feature_words(&meta.features, aux);
@@ -1254,7 +1260,7 @@ mod tests {
                 size_bytes: 1, modified: None, engine, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None,
-                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
+                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
             },
         };
         vec![mk("Zork", Engine::ZCode), mk("Anchorhead", Engine::Glulx)]
@@ -1273,7 +1279,7 @@ mod tests {
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None,
                 author: author.map(String::from), year: year.map(String::from),
-                genre: None, language: None, description: None, ifdb_link: None,
+                genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
             },
         }
     }
@@ -1644,7 +1650,7 @@ mod tests {
                     detail: Some("15.4 kHz · 8-bit · mono · 2.2s".into()),
                 },
             ]),
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
         };
         let game_dir = std::path::PathBuf::from("/tmp/babelmap-info-panel-saves/zork1.z3");
         let aux = app::picker::StoryAux {
@@ -1735,7 +1741,7 @@ mod tests {
             ifid: "ZCODE-88-840726".into(),
             features: app::picker::Features::default(),
             self_blorb: Some(chunks),
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
         };
         let area = Rect::new(0, 0, 34, 10);
         let mut buf = Buffer::empty(area);
@@ -1772,7 +1778,7 @@ mod tests {
             format: "Blorb (Glulx)".into(), version: Some("3.1.2".into()),
             serial: None, release: None, ifid: "IFID-X".into(),
             features: app::picker::Features::default(), self_blorb: None,
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
         }
     }
 
@@ -1869,6 +1875,39 @@ mod tests {
             render(&fetched).contains("https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro"),
             "the IFDB URL renders once present"
         );
+    }
+
+    /// SQ-0371: a fetch that found nothing offers a manual IFDB search link (by
+    /// title) instead of a dead end — but a never-fetched story shows neither.
+    #[test]
+    fn info_panel_offers_a_search_link_when_the_fetch_found_nothing() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 60, 14);
+        let render = |title: &str, meta: &app::picker::StoryMeta| {
+            let mut buf = Buffer::empty(area);
+            let mut cover = app::cover::CoverState::default();
+            super::draw_info_panel(
+                title, "game.z5", meta, None, 0, area, None, &mut cover,
+                std::path::Path::new("game.z5"), false, &cs, &mut buf,
+            );
+            buffer_to_string(&buf, area)
+        };
+        // Never fetched → no search link (only `f`/`r` offers a fetch).
+        let bare = minimal_story_meta();
+        assert!(!render("Zork I", &bare).contains("IFDB search:"), "no search link before a fetch");
+        // Fetch ran, found nothing → a search-by-title link appears.
+        let mut nf = minimal_story_meta();
+        nf.fetch_not_found = true;
+        let out = render("Zork I", &nf);
+        assert!(out.contains("IFDB search:"), "not-found offers a manual search: {out:?}");
+        assert!(out.contains("ifdb.org/search?searchfor=Zork"), "search is by title: {out:?}");
+        // A successful link takes precedence over the search fallback.
+        let mut found = minimal_story_meta();
+        found.fetch_not_found = true; // even if the flag is stale
+        found.ifdb_link = Some("https://ifdb.org/viewgame?id=abc".into());
+        let out = render("Zork I", &found);
+        assert!(out.contains("viewgame?id=abc") && !out.contains("IFDB search:"), "link wins: {out:?}");
     }
 
     /// A long blurb wraps to the panel's content width and, when it overflows

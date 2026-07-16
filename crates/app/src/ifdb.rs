@@ -148,6 +148,13 @@ fn strip_zcode_checksum(ifid: &str) -> Option<String> {
     (last.len() == 4 && last.bytes().all(|b| b.is_ascii_hexdigit())).then(|| prefix.to_string())
 }
 
+/// A human IFDB search page for `query` (a title). Offered when an automatic
+/// fetch found nothing, so the user can look the story up by hand (SQ-0371).
+/// Verified 2026-07-16: `ifdb.org/search?searchfor=…` returns 200.
+pub fn search_url(query: &str) -> String {
+    format!("https://ifdb.org/search?searchfor={}", percent_encode(query))
+}
+
 /// Hand-rolled: the one call site (an IFID reaching us from story bytes,
 /// not guaranteed URL-safe) doesn't justify a `percent-encoding` dependency.
 fn percent_encode(s: &str) -> String {
@@ -203,6 +210,12 @@ mod tests {
             f.ifdb.unwrap().cover_url.as_deref(),
             Some("https://ifdb.org/coverart?id=0dbnusxunq7fw5ro&version=45")
         );
+    }
+
+    #[test]
+    fn search_url_encodes_the_title_query() {
+        assert_eq!(search_url("Zork I"), "https://ifdb.org/search?searchfor=Zork%20I");
+        assert!(search_url("A&B").ends_with("searchfor=A%26B"));
     }
 
     #[test]
