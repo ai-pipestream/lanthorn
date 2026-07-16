@@ -42,6 +42,7 @@ pub mod storage;
 pub mod style;
 pub mod style_actions;
 pub mod style_mru;
+pub mod story_info;
 pub mod styles;
 pub mod symbols;
 pub mod text_field;
