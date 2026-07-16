@@ -713,6 +713,12 @@ pub fn render_map_layered(
     buf: &mut Buffer,
 ) {
     use crate::render::paneframe::BorderStyle;
+    // Hand the pane's size to input handlers that never see a pane rect (`Action::Recenter`).
+    // Recorded here, from the rect actually drawn into, so it cannot drift from what the player
+    // is looking at. `area`, not `body_area`: the run loop's own recentres measure the whole
+    // content rect via `map_pane_dims(last_panes.map)`, and a key recentre must agree with them
+    // rather than differ by the layer strip's row (SQ-0349).
+    state.map_pane_size.set(Some((area.width, area.height)));
     let body_area = if state.colors.map_border_style == BorderStyle::None {
         draw_layer_strip(graph, state, area, buf)
     } else {
@@ -2895,6 +2901,27 @@ mod tests {
         assert_eq!(loc_method_label(StatusName), "via name match");
         assert_eq!(loc_method_label(NameOnly), "via name (unlinked)");
         assert_eq!(loc_method_label(RoomHeading), "via room heading");
+    }
+
+    /// SQ-0349: the far half of the recentre wiring. `Action::Recenter` reads
+    /// `state.map_pane_size`; nothing centres correctly unless the renderer writes it.
+    #[test]
+    fn rendering_the_map_records_the_pane_size_for_recentring() {
+        use mapper::graph::MapGraph;
+        let g = MapGraph::default();
+        let rm = mapper::render::render(&g);
+        let state = AppState::default();
+        assert!(state.map_pane_size.get().is_none(), "nothing measured before a render");
+
+        let area = Rect::new(3, 2, 140, 48); // offset origin: the SIZE is what recentring needs
+        let mut buf = Buffer::empty(Rect::new(0, 0, 200, 60));
+        render_map_layered(&rm, &g, &state, area, &mut buf);
+
+        assert_eq!(
+            state.map_pane_size.get(),
+            Some((140, 48)),
+            "the pane actually drawn into is what a later recentre must measure"
+        );
     }
 
     #[test]

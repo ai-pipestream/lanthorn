@@ -1336,6 +1336,15 @@ pub struct AppState {
     /// layout the input code cannot see. `None` before the first frame, or when the command bar is
     /// hidden.
     pub(crate) input_text_origin: std::cell::Cell<Option<(u16, u16)>>,
+    /// Size `(cols, rows)` of the map pane's inner content, captured by the renderer each frame
+    /// so `Action::Recenter` can centre against the pane the player is actually looking at
+    /// (SQ-0349).
+    ///
+    /// Every other recentre path runs in the event loop, which holds the pane rects `draw_frame`
+    /// returns; a key action reaches `apply_action`, which does not. It used to assume 80×24, and
+    /// `recenter_on` divides the pane by the zoom step to place the view — so on any other pane
+    /// size the target landed off-centre. `None` before the first frame.
+    pub(crate) map_pane_size: std::cell::Cell<Option<(u16, u16)>>,
     /// List-row viewport (rows) of the currently-open selection-list modal,
     /// captured from the last render so `apply_action` nav can keep the
     /// selection visible and arm scroll animations (mirrors the transcript's
@@ -1708,6 +1717,7 @@ impl Default for AppState {
             transcript_wrap: std::cell::RefCell::new(None),
             map_render: std::cell::RefCell::new(None),
             input_text_origin: std::cell::Cell::new(None),
+            map_pane_size: std::cell::Cell::new(None),
             modal_list_viewport: 0,
             input: crate::text_field::TextField::default(),
             status_msg: None,

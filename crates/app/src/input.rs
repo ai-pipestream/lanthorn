@@ -2938,11 +2938,14 @@ fn select_adjacent(state: &mut AppState, mapper: &Mapper, delta: i32) {
 /// that has no position falls through to the current room for the same reason — it cannot be
 /// centred on, but the origin is not a better answer than where the player is standing.
 ///
-/// Uses a fallback pane size of 80×24: the real size lives in the run loop's `last_panes`, which
-/// `apply_action` has no access to.
+/// Centres against `state.map_pane_size` — the map pane as the renderer last measured it, since
+/// `apply_action` never sees the run loop's `last_panes`. Falls back to 80×24 only before the first
+/// frame, or while the map pane is hidden: `recenter_on` divides the pane by the zoom step, so a
+/// guessed size puts the target off-centre on any real pane (SQ-0349).
 fn apply_recenter(state: &mut AppState, mapper: &Mapper) {
     let target = recenter_target(state, &mapper.graph);
-    state.recenter_on(target, 80, 24);
+    let (pw, ph) = state.map_pane_size.get().unwrap_or((80, 24));
+    state.recenter_on(target, pw, ph);
 }
 
 /// The cell the map view should sit on: the selected room, else the room the player is in, else the
@@ -6638,6 +6641,39 @@ mod tests {
         let mut want = AppState::default();
         want.recenter_on((7, 7), 80, 24);
         assert_eq!(s.scroll, want.scroll, "centred on the SELECTED room, not the current one");
+    }
+
+    #[test]
+    fn center_map_measures_the_real_map_pane_not_a_guess() {
+        // SQ-0349: `apply_recenter` assumed 80×24, because `apply_action` cannot reach the run
+        // loop's pane rects. `recenter_on` divides the pane by the zoom step to place the view,
+        // so on any other pane size the target landed off-centre — which is what made pressing
+        // `c` look like it centred on something other than the selected room.
+        let (mut s, mut m) = recenter_fixture();
+        s.select_room(Some(2));
+        s.map_pane_size.set(Some((140, 48))); // what the renderer measured this frame
+        apply_action(Action::Recenter, &mut s, &mut m);
+
+        let mut want = AppState::default();
+        want.recenter_on((7, 7), 140, 48);
+        assert_eq!(s.scroll, want.scroll, "centred against the pane that was actually drawn");
+
+        let mut guessed = AppState::default();
+        guessed.recenter_on((7, 7), 80, 24);
+        assert_ne!(s.scroll, guessed.scroll, "and not against the old 80×24 guess");
+    }
+
+    #[test]
+    fn center_map_falls_back_to_eighty_by_twentyfour_before_the_first_frame() {
+        // No frame has been drawn, so there is no pane to measure. The old constant is still the
+        // only answer available — but it is now a fallback, not the assumption.
+        let (mut s, mut m) = recenter_fixture();
+        s.select_room(Some(2));
+        assert!(s.map_pane_size.get().is_none(), "renderer has not run");
+        apply_action(Action::Recenter, &mut s, &mut m);
+        let mut want = AppState::default();
+        want.recenter_on((7, 7), 80, 24);
+        assert_eq!(s.scroll, want.scroll);
     }
 
     #[test]
