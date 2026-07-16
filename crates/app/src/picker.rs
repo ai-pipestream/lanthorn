@@ -1,8 +1,10 @@
 //! Pre-game story picker: when a directory is passed at launch instead of a
 //! story file, scan it for Z-machine stories and let the user choose one.
 //!
-//! Titles are resolved cheaply (no game is run): the known-title table keyed by
-//! the IFID, falling back to the filename stem.
+//! Metadata (title, author, …) is resolved cheaply (no game is run) by
+//! precedence, per field: a blorb's own `IFmd` chunk, then a fetched IFDB
+//! sidecar, then (title only) the known-title table keyed by the IFID, then
+//! the filename stem. See `resolve`.
 
 use std::path::{Path, PathBuf};
 
@@ -50,6 +52,15 @@ pub struct StoryMeta {
     pub ifid: String,
     pub features: Features,
     pub self_blorb: Option<Vec<ChunkInfo>>, // Some when the story file itself is a blorb
+    /// Resolved per `resolve`'s precedence: IFmd > fetched sidecar. No TSV/stem
+    /// source for these (title-only), so absent means genuinely unknown.
+    pub author: Option<String>,
+    pub year: Option<String>, // from iFiction's `first_published`
+    pub genre: Option<String>,
+    pub language: Option<String>,
+    pub description: Option<String>,
+    /// The story's IFDB page URL, present only once fetched (no IFmd equivalent).
+    pub ifdb_link: Option<String>,
 }
 
 /// One selectable story in the picker.
@@ -445,11 +456,75 @@ fn glulx_features(self_blorb: Option<&[ChunkInfo]>) -> Features {
     f
 }
 
+/// Per-field metadata resolution, produced once by [`resolve`] and read
+/// verbatim by everything downstream (list, sort, info panel).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Resolved {
+    title: String,
+    author: Option<String>,
+    year: Option<String>,
+    genre: Option<String>,
+    language: Option<String>,
+    description: Option<String>,
+    ifdb_link: Option<String>,
+}
+
+/// The publication year from a Treaty of Babel `<firstpublished>`, which is
+/// `YYYY` or `YYYY-MM-DD` (iFiction allows the full ISO date). Keep just the
+/// leading four-digit year, so the value both sorts numerically and fits the
+/// narrow YEAR column; anything without a 4-digit lead is dropped as unusable.
+fn leading_year(s: &str) -> Option<String> {
+    let y: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    (y.len() == 4).then_some(y)
+}
+
+/// SPEC "Precedence": per field, independently, first non-empty wins —
+/// `ifmd` (the file's own `IFmd` chunk) > `fetched` (an IFDB sidecar) >
+/// `tsv` (the bundled known-title table) > `stem` (the filename). `tsv` and
+/// `stem` apply to `title` only: the other fields have no such source.
+///
+/// Pure so the whole table is testable without touching a filesystem.
+fn resolve(
+    ifmd: Option<&crate::ifiction::IFiction>,
+    fetched: Option<&crate::story_info::FetchedMeta>,
+    tsv: Option<&str>,
+    stem: &str,
+) -> Resolved {
+    let title = ifmd
+        .and_then(|i| i.title.clone())
+        .or_else(|| fetched.and_then(|f| f.title.clone()))
+        .or_else(|| tsv.map(str::to_string))
+        .unwrap_or_else(|| stem.to_string());
+    let author = ifmd
+        .and_then(|i| i.author.clone())
+        .or_else(|| fetched.and_then(|f| f.author.clone()));
+    let year = ifmd
+        .and_then(|i| i.first_published.clone())
+        .or_else(|| fetched.and_then(|f| f.first_published.clone()))
+        .and_then(|s| leading_year(&s));
+    let genre = ifmd
+        .and_then(|i| i.genre.clone())
+        .or_else(|| fetched.and_then(|f| f.genre.clone()));
+    let language = ifmd
+        .and_then(|i| i.language.clone())
+        .or_else(|| fetched.and_then(|f| f.language.clone()));
+    let description = ifmd
+        .and_then(|i| i.description.clone())
+        .or_else(|| fetched.and_then(|f| f.description.clone()));
+    // IFDB-only: the page link exists solely in a fetched block.
+    let ifdb_link = fetched.and_then(|f| f.ifdb_link.clone());
+    Resolved { title, author, year, genre, language, description, ifdb_link }
+}
+
 /// Scan `dir` (top level, non-recursive) for **launchable** Z-machine stories,
 /// resolving a display title for each. Files that don't load or don't parse as
 /// a supported story (incl. v6) are silently skipped. Sorted by title
 /// (case-insensitive), then filename.
-pub fn scan_stories(dir: &Path) -> Vec<StoryEntry> {
+///
+/// `data_base` is the storage base (as passed to `ensure_aux`/`compute_row_badges`),
+/// used to locate each story's per-game `info.json` sidecar (SQ-0348's fetched
+/// metadata) for precedence resolution.
+pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
     let mut out: Vec<StoryEntry> = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;
@@ -459,101 +534,225 @@ pub fn scan_stories(dir: &Path) -> Vec<StoryEntry> {
         if !path.is_file() || !has_story_ext(&path) {
             continue;
         }
-        let Ok(loaded) = crate::hints::load_story(&path) else {
-            continue;
-        };
-        // Only list stories babelmap can actually launch: Z-code via the
-        // Z-machine loader (accepts v3/4/5/7/8, rejects v6/v1/v2), Glulx via the
-        // Glulx loader.
-        let bytes = loaded.bytes().to_vec();
-        let launchable = match &loaded {
-            crate::hints::LoadedStory::ZCode(b) => zvm::memory::Memory::new(b.clone()).is_ok(),
-            crate::hints::LoadedStory::Glulx(b) => gvm::Memory::new(b.clone()).is_ok(),
-        };
-        if !launchable {
-            continue;
+        if let Some(entry) = resolve_entry(&path, data_base) {
+            out.push(entry);
         }
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let ifid = crate::ifid::compute_ifid(&bytes);
-        let title = crate::session::known_title(&ifid)
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&filename)
-                    .to_string()
-            });
-
-        // fs metadata: size + mtime → "YYYY-MM-DD".
-        let fs_meta = std::fs::metadata(&path).ok();
-        let size_bytes = fs_meta.as_ref().map(|m| m.len()).unwrap_or(0);
-        let modified = fs_meta
-            .as_ref()
-            .and_then(|m| m.modified().ok())
-            .and_then(format_mtime_ymd);
-
-        // Self-blorb chunks: only blorb-container files carry a resource index,
-        // and extraction (`load_story`) discards it — re-read the raw file for
-        // those extensions only, so plain .z* files stay single-read.
-        let self_blorb = if is_blorb_ext(&path) {
-            std::fs::read(&path).ok().and_then(|raw| {
-                if blorb::Blorb::is_blorb(&raw) {
-                    blorb::Blorb::parse(raw).ok().map(|b| chunks_of(&b))
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        };
-
-        let engine = match &loaded {
-            crate::hints::LoadedStory::ZCode(_) => Engine::ZCode,
-            crate::hints::LoadedStory::Glulx(_) => Engine::Glulx,
-        };
-        let is_container = self_blorb.is_some();
-        let (version, serial, release, features, format) = match engine {
-            Engine::ZCode => {
-                let version = z_version(&bytes).map(|v| v.to_string());
-                let serial = z_serial(&bytes);
-                let release = z_release(&bytes);
-                let features = z_features(&bytes, self_blorb.as_deref());
-                let format = if is_container { "Blorb (Z-code)" } else { "Z-code" };
-                (version, serial, release, features, format.to_string())
-            }
-            Engine::Glulx => {
-                let version = glulx_version(&bytes);
-                let features = glulx_features(self_blorb.as_deref());
-                let format = if is_container { "Blorb (Glulx)" } else { "Glulx" };
-                (version, None, None, features, format.to_string())
-            }
-        };
-
-        let meta = StoryMeta {
-            size_bytes,
-            modified,
-            engine,
-            format,
-            version,
-            serial,
-            release,
-            ifid,
-            features,
-            self_blorb,
-        };
-        out.push(StoryEntry { path, title, filename, meta });
     }
-    out.sort_by(|a, b| {
-        a.title
-            .to_lowercase()
-            .cmp(&b.title.to_lowercase())
-            .then_with(|| a.filename.cmp(&b.filename))
-    });
+    sort_stories(&mut out, Sort { key: SortKey::Title, desc: false });
     out
+}
+
+/// Resolve one story file into a [`StoryEntry`], re-reading its bytes and its
+/// (possibly just-updated) IFDB sidecar. `None` if the file doesn't load or
+/// isn't launchable. Shared by `scan_stories` (the initial directory scan) and
+/// the picker's fetch-progress handler (SQ-0348), which re-resolves a single
+/// story right after its sidecar is (re)written so a completed fetch's title/
+/// author/year land in the list without a full re-scan.
+pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
+    let loaded = crate::hints::load_story(path).ok()?;
+    // Only list stories babelmap can actually launch: Z-code via the
+    // Z-machine loader (accepts v3/4/5/7/8, rejects v6/v1/v2), Glulx via the
+    // Glulx loader.
+    let bytes = loaded.bytes().to_vec();
+    let launchable = match &loaded {
+        crate::hints::LoadedStory::ZCode(b) => zvm::memory::Memory::new(b.clone()).is_ok(),
+        crate::hints::LoadedStory::Glulx(b) => gvm::Memory::new(b.clone()).is_ok(),
+    };
+    if !launchable {
+        return None;
+    }
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let ifid = crate::ifid::compute_ifid(&bytes);
+
+    // fs metadata: size + mtime → "YYYY-MM-DD".
+    let fs_meta = std::fs::metadata(path).ok();
+    let size_bytes = fs_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+    let modified = fs_meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(format_mtime_ymd);
+
+    // Self-blorb chunks: only blorb-container files carry a resource index,
+    // and extraction (`load_story`) discards it — re-read the raw file for
+    // those extensions only, so plain .z* files stay single-read. The same
+    // parse yields the `IFmd` chunk (if any) for precedence resolution below.
+    let mut ifmd: Option<crate::ifiction::IFiction> = None;
+    let self_blorb = if is_blorb_ext(path) {
+        std::fs::read(path).ok().and_then(|raw| {
+            if blorb::Blorb::is_blorb(&raw) {
+                blorb::Blorb::parse(raw).ok().map(|b| {
+                    if let Some(xml) = b.metadata() {
+                        ifmd = crate::ifiction::parse(xml).ok();
+                    }
+                    chunks_of(&b)
+                })
+            } else {
+                None
+            }
+        })
+    } else {
+        None
+    };
+
+    // Fetched IFDB sidecar: absent (never fetched, unreadable, malformed,
+    // wrong IFID) is simply no metadata, never a scan error.
+    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(path));
+    let fetched = crate::story_info::load(&game_dir, &ifid).and_then(|info| info.fetched);
+    let tsv_title = crate::session::known_title(&ifid);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&filename);
+    let resolved = resolve(ifmd.as_ref(), fetched.as_ref(), tsv_title, stem);
+    let title = resolved.title;
+
+    let engine = match &loaded {
+        crate::hints::LoadedStory::ZCode(_) => Engine::ZCode,
+        crate::hints::LoadedStory::Glulx(_) => Engine::Glulx,
+    };
+    let is_container = self_blorb.is_some();
+    let (version, serial, release, features, format) = match engine {
+        Engine::ZCode => {
+            let version = z_version(&bytes).map(|v| v.to_string());
+            let serial = z_serial(&bytes);
+            let release = z_release(&bytes);
+            let features = z_features(&bytes, self_blorb.as_deref());
+            let format = if is_container { "Blorb (Z-code)" } else { "Z-code" };
+            (version, serial, release, features, format.to_string())
+        }
+        Engine::Glulx => {
+            let version = glulx_version(&bytes);
+            let features = glulx_features(self_blorb.as_deref());
+            let format = if is_container { "Blorb (Glulx)" } else { "Glulx" };
+            (version, None, None, features, format.to_string())
+        }
+    };
+
+    let meta = StoryMeta {
+        size_bytes,
+        modified,
+        engine,
+        format,
+        version,
+        serial,
+        release,
+        ifid,
+        features,
+        self_blorb,
+        author: resolved.author,
+        year: resolved.year,
+        genre: resolved.genre,
+        language: resolved.language,
+        description: resolved.description,
+        ifdb_link: resolved.ifdb_link,
+    };
+    Some(StoryEntry { path: path.to_path_buf(), title, filename, meta })
+}
+
+/// Column a story list can be sorted by.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SortKey {
+    Title,
+    Author,
+    Year,
+}
+
+/// A sort column plus direction.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Sort {
+    pub key: SortKey,
+    pub desc: bool,
+}
+
+impl Default for Sort {
+    fn default() -> Self {
+        Sort { key: SortKey::Title, desc: false }
+    }
+}
+
+/// Order `stories` in place by `sort`. Blanks (no author / no year, or a
+/// non-numeric year) always sort last, in both ascending and descending
+/// order — only the non-blank comparison reverses with `desc`. Filename is
+/// the tie-break in every case.
+pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
+    use std::cmp::Ordering;
+
+    /// Compares two `(is_blank, value)` keys: blank entries always sort last,
+    /// non-blank entries compare by `value` (reversed when `desc`).
+    fn cmp_blank_last<T: Ord>(
+        a_blank: bool,
+        a_val: &T,
+        b_blank: bool,
+        b_val: &T,
+        desc: bool,
+    ) -> Ordering {
+        match (a_blank, b_blank) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => {
+                let ord = a_val.cmp(b_val);
+                if desc { ord.reverse() } else { ord }
+            }
+        }
+    }
+
+    fn title_key(e: &StoryEntry) -> (bool, String) {
+        let t = e.title.to_lowercase();
+        (t.is_empty(), t)
+    }
+
+    fn author_key(e: &StoryEntry) -> (bool, String) {
+        // Case-insensitive, like the title sort: a plain byte sort would file
+        // every capitalised author ahead of every lowercase one ("Zarf" before
+        // "adam cadre"), which reads as broken in a name list.
+        let a = e.meta.author.clone().unwrap_or_default();
+        (a.is_empty(), a.to_lowercase())
+    }
+
+    fn year_key(e: &StoryEntry) -> (bool, i64) {
+        match e.meta.year.as_deref().and_then(|s| s.trim().parse::<i64>().ok()) {
+            Some(n) => (false, n),
+            None => (true, 0),
+        }
+    }
+
+    stories.sort_by(|a, b| {
+        let ord = match sort.key {
+            SortKey::Title => {
+                let (a_blank, a_val) = title_key(a);
+                let (b_blank, b_val) = title_key(b);
+                cmp_blank_last(a_blank, &a_val, b_blank, &b_val, sort.desc)
+            }
+            SortKey::Author => {
+                let (a_blank, a_val) = author_key(a);
+                let (b_blank, b_val) = author_key(b);
+                cmp_blank_last(a_blank, &a_val, b_blank, &b_val, sort.desc)
+            }
+            SortKey::Year => {
+                let (a_blank, a_val) = year_key(a);
+                let (b_blank, b_val) = year_key(b);
+                cmp_blank_last(a_blank, &a_val, b_blank, &b_val, sort.desc)
+            }
+        };
+        ord.then_with(|| a.filename.cmp(&b.filename))
+    });
+}
+
+/// Reorder `stories` by `sort`, keeping the selection on the same story — by
+/// path, never by index. Three things reorder the picker's list (changing the
+/// sort key, toggling direction, and an `r` sweep landing new titles under a
+/// cursor the user isn't touching), and every one of them must not silently
+/// move the cursor to a different game. Returns the new index of the
+/// previously-selected story (or `0` if it's gone, e.g. an empty list).
+pub fn resort_preserving_selection(stories: &mut [StoryEntry], selected: usize, sort: Sort) -> usize {
+    let keep = stories.get(selected).map(|e| e.path.clone());
+    sort_stories(stories, sort);
+    keep.and_then(|p| stories.iter().position(|e| e.path == p)).unwrap_or(0)
 }
 
 /// Cheap existence flags shown on every list row (panel-independent).
@@ -658,7 +857,7 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), b"not a story").unwrap();   // wrong ext
         std::fs::write(dir.join("broken.z5"), b"garbage").unwrap();       // bad header
 
-        let stories = scan_stories(&dir);
+        let stories = scan_stories(&dir, &dir);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(stories.len(), 1, "only the valid .z5 is listed");
@@ -678,7 +877,7 @@ mod tests {
         v6b[0x00] = 6;
         std::fs::write(dir.join("graphic.z5"), &v6b).unwrap(); // v6 bytes, .z5 ext
 
-        let stories = scan_stories(&dir);
+        let stories = scan_stories(&dir, &dir);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(stories.is_empty(), "v6 stories are not listed (can't launch)");
     }
@@ -688,10 +887,240 @@ mod tests {
         let dir = temp_dir("sort");
         std::fs::write(dir.join("zebra.z5"), minimal_v3_story()).unwrap();
         std::fs::write(dir.join("apple.z5"), minimal_v3_story()).unwrap();
-        let stories = scan_stories(&dir);
+        let stories = scan_stories(&dir, &dir);
         let _ = std::fs::remove_dir_all(&dir);
         let titles: Vec<&str> = stories.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, vec!["apple", "zebra"]);
+    }
+
+    /// Builds a bare-bones `StoryEntry` for `sort_stories` tests: only
+    /// title/filename/author/year vary, everything else is a placeholder.
+    fn story(title: &str, filename: &str, author: Option<&str>, year: Option<&str>) -> StoryEntry {
+        StoryEntry {
+            path: PathBuf::from(filename),
+            title: title.to_string(),
+            filename: filename.to_string(),
+            meta: StoryMeta {
+                size_bytes: 0,
+                modified: None,
+                engine: Engine::ZCode,
+                format: "Z-code".to_string(),
+                version: None,
+                serial: None,
+                release: None,
+                ifid: String::new(),
+                features: Features::default(),
+                self_blorb: None,
+                author: author.map(|s| s.to_string()),
+                year: year.map(|s| s.to_string()),
+                genre: None,
+                language: None,
+                description: None, ifdb_link: None,
+            },
+        }
+    }
+
+    fn titles_of(stories: &[StoryEntry]) -> Vec<&str> {
+        stories.iter().map(|s| s.title.as_str()).collect()
+    }
+
+    #[test]
+    fn sort_stories_title_ascending_case_insensitive() {
+        let mut stories = vec![
+            story("Zebra", "z.z5", None, None),
+            story("apple", "a.z5", None, None),
+            story("Mango", "m.z5", None, None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
+        assert_eq!(titles_of(&stories), vec!["apple", "Mango", "Zebra"]);
+    }
+
+    #[test]
+    fn sort_stories_title_descending() {
+        let mut stories = vec![
+            story("Zebra", "z.z5", None, None),
+            story("apple", "a.z5", None, None),
+            story("Mango", "m.z5", None, None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: true });
+        assert_eq!(titles_of(&stories), vec!["Zebra", "Mango", "apple"]);
+    }
+
+    #[test]
+    fn sort_stories_title_filename_tiebreak() {
+        let mut stories = vec![
+            story("Same", "b.z5", None, None),
+            story("Same", "a.z5", None, None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
+        let filenames: Vec<&str> = stories.iter().map(|s| s.filename.as_str()).collect();
+        assert_eq!(filenames, vec!["a.z5", "b.z5"]);
+    }
+
+    #[test]
+    fn sort_stories_author_blanks_last_ascending() {
+        // A naive sort_by_key on the raw (possibly-empty) string would put the
+        // blank author first ("" < "Adams"). It must sort LAST instead.
+        let mut stories = vec![
+            story("Unfetched", "u.z5", None, None),
+            story("Hitchhiker", "h.z5", Some("Adams"), None),
+            story("Zork", "z.z5", Some("Blank, Marc"), None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Author, desc: false });
+        assert_eq!(titles_of(&stories), vec!["Hitchhiker", "Zork", "Unfetched"]);
+    }
+
+    #[test]
+    fn sort_stories_author_blanks_last_descending() {
+        // Blanks sort last in BOTH directions — descending must not flip the
+        // blank entry to the front just because the whole tuple got reversed.
+        let mut stories = vec![
+            story("Unfetched", "u.z5", None, None),
+            story("Hitchhiker", "h.z5", Some("Adams"), None),
+            story("Zork", "z.z5", Some("Blank, Marc"), None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Author, desc: true });
+        assert_eq!(titles_of(&stories), vec!["Zork", "Hitchhiker", "Unfetched"]);
+    }
+
+    #[test]
+    fn sort_stories_author_case_insensitive() {
+        // Byte order puts capitals before lowercase (all uppercase < any
+        // lowercase), so a case-sensitive sort would file "Zarf" ahead of
+        // "adam cadre". The list sorts by name, not by ASCII code.
+        let mut stories = vec![
+            story("Spider", "s.z5", Some("Zarf"), None),
+            story("Photopia", "p.z5", Some("adam cadre"), None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Author, desc: false });
+        assert_eq!(titles_of(&stories), vec!["Photopia", "Spider"]);
+    }
+
+    #[test]
+    fn sort_stories_year_numeric_not_lexical() {
+        // Lexical comparison would put "1980" after "1998" is fine, but would
+        // put "700" before "80" — assert numeric ordering explicitly.
+        let mut stories = vec![
+            story("B", "b.z5", None, Some("1998")),
+            story("A", "a.z5", None, Some("1980")),
+            story("C", "c.z5", None, Some("700")),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Year, desc: false });
+        assert_eq!(titles_of(&stories), vec!["C", "A", "B"]);
+    }
+
+    #[test]
+    fn sort_stories_year_blank_and_non_numeric_last_both_directions() {
+        let mut stories = vec![
+            story("NoYear", "n.z5", None, None),
+            story("BadYear", "x.z5", None, Some("circa 1990")),
+            story("Old", "o.z5", None, Some("1980")),
+            story("New", "y.z5", None, Some("1998")),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Year, desc: false });
+        // Blanks/non-numeric sort last; among themselves order is stable per
+        // the filename tie-break ("n.z5" < "x.z5").
+        assert_eq!(titles_of(&stories), vec!["Old", "New", "NoYear", "BadYear"]);
+
+        sort_stories(&mut stories, Sort { key: SortKey::Year, desc: true });
+        assert_eq!(titles_of(&stories), vec!["New", "Old", "NoYear", "BadYear"]);
+    }
+
+    #[test]
+    fn sort_stories_default_is_title_ascending() {
+        let default = Sort::default();
+        assert_eq!(default.key, SortKey::Title);
+        assert!(!default.desc);
+    }
+
+    // ── resort_preserving_selection: THE highest-value property in the quest ───
+    //
+    // Selection is an index. Reordering the list under it (a sort-key change,
+    // a direction toggle, or a background fetch sweep rewriting titles) must
+    // never silently move the cursor to a different story.
+
+    #[test]
+    fn resort_preserving_selection_survives_a_sort_key_change() {
+        // Chosen so the selected story lands at a DIFFERENT index under the new
+        // sort (title-order index 2, author-order index 1) — a naive
+        // index-clamping "helper" would silently land on the wrong story here.
+        let mut stories = vec![
+            story("Anchorhead", "a.z5", Some("Zed"), None),
+            story("Curses", "c.z5", Some("Amy"), None),
+            story("Zebra", "z.z5", Some("Cara"), None),
+        ];
+        // Title-ascending: Anchorhead(0), Curses(1), Zebra(2) — select "Zebra".
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
+        let selected = stories.iter().position(|e| e.title == "Zebra").unwrap();
+        assert_eq!(selected, 2);
+
+        // Switch to Author-ascending: Amy(Curses,0), Cara(Zebra,1), Zed(Anchorhead,2).
+        let new_idx = resort_preserving_selection(
+            &mut stories,
+            selected,
+            Sort { key: SortKey::Author, desc: false },
+        );
+        assert_eq!(new_idx, 1, "Zebra must land at its new author-sorted index");
+        assert_eq!(stories[new_idx].title, "Zebra", "selection must still point at Zebra");
+        assert_eq!(stories[new_idx].path, PathBuf::from("z.z5"));
+    }
+
+    #[test]
+    fn resort_preserving_selection_survives_a_direction_toggle() {
+        // Four items (even count) so reversing genuinely moves every index,
+        // including the selected one — with three items the middle entry's
+        // index is unchanged by a reversal, which would hide an index-based bug.
+        let mut stories = vec![
+            story("Anchorhead", "a.z5", None, None),
+            story("Bogus", "b.z5", None, None),
+            story("Curses", "c.z5", None, None),
+            story("Zebra", "z.z5", None, None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
+        let selected = 0; // "Anchorhead"
+        assert_eq!(stories[selected].title, "Anchorhead");
+
+        let new_idx = resort_preserving_selection(
+            &mut stories,
+            selected,
+            Sort { key: SortKey::Title, desc: true },
+        );
+        assert_eq!(new_idx, 3, "descending reverses the list, moving index 0 to the end");
+        assert_eq!(stories[new_idx].title, "Anchorhead");
+        assert_eq!(stories[new_idx].path, PathBuf::from("a.z5"));
+    }
+
+    #[test]
+    fn resort_preserving_selection_survives_a_sweep_rewriting_titles() {
+        // Simulates an `r` sweep landing new (fetched) titles mid-flight: the
+        // selected story's title changes to something that now sorts
+        // elsewhere, while the cursor stays untouched by the user.
+        let mut stories = vec![
+            story("zork2-r63-s860811", "b.z5", None, None), // stem title, not yet fetched
+            story("Anchorhead", "a.z5", None, None),
+            story("Curses", "c.z5", None, None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
+        // Alphabetically: Anchorhead(0), Curses(1), zork2-r63-s860811(2) (case-fold
+        // puts the lowercase stem after the capitalized titles).
+        let selected = stories.iter().position(|e| e.path == PathBuf::from("b.z5")).unwrap();
+        assert_eq!(selected, 2);
+
+        // The sweep just fetched this story's real title — one that now sorts
+        // FIRST, so a naive index-clamp would land on the wrong (unrelated) story.
+        stories[selected].title = "AAA Zork II".to_string();
+
+        let new_idx = resort_preserving_selection(&mut stories, selected, Sort::default());
+        assert_eq!(new_idx, 0, "the rewritten title now sorts first");
+        assert_eq!(stories[new_idx].path, PathBuf::from("b.z5"), "selection follows the story by path");
+        assert_eq!(stories[new_idx].title, "AAA Zork II");
+    }
+
+    #[test]
+    fn resort_preserving_selection_defaults_to_zero_when_the_story_is_gone() {
+        let mut stories = vec![story("Anchorhead", "a.z5", None, None)];
+        let new_idx = resort_preserving_selection(&mut stories, 5, Sort::default());
+        assert_eq!(new_idx, 0);
     }
 
     #[test]
@@ -730,7 +1159,7 @@ mod tests {
         b[0x10] = 0x00; b[0x11] = 0x40;                 // colour bit set
         std::fs::write(dir.join("game.z3"), &b).unwrap();
 
-        let stories = scan_stories(&dir);
+        let stories = scan_stories(&dir, &dir);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(stories.len(), 1);
@@ -745,6 +1174,115 @@ mod tests {
         assert!(m.self_blorb.is_none());
     }
 
+    // ── `resolve` precedence (pure, no filesystem) ─────────────────────────
+
+    use crate::ifiction::IFiction;
+    use crate::story_info::FetchedMeta;
+
+    /// A fetch that ran to completion but found nothing worth reporting: every
+    /// field absent, `not_found: false` (callers override per-test).
+    fn fetched_stub() -> FetchedMeta {
+        FetchedMeta {
+            scanned_at: "2026-07-16T00:00:00Z".into(),
+            fetch_version: crate::story_info::FETCH_VERSION,
+            source: "ifdb".into(),
+            title: None,
+            author: None,
+            language: None,
+            first_published: None,
+            genre: None,
+            description: None,
+            ifdb_tuid: None,
+            ifdb_link: None,
+            cover: None,
+            not_found: false,
+        }
+    }
+
+    /// SPEC "Precedence". Resolution happens ONCE, here — everything downstream
+    /// reads plain fields and never asks where a value came from.
+    #[test]
+    fn ifmd_outranks_a_fetched_sidecar_field_by_field() {
+        let ifmd = IFiction { title: Some("From IFmd".into()), author: None, ..Default::default() };
+        let fetched = FetchedMeta { title: Some("From IFDB".into()), author: Some("From IFDB".into()), ..fetched_stub() };
+        let r = resolve(Some(&ifmd), Some(&fetched), None, "stem");
+        assert_eq!(r.title, "From IFmd", "the file's own metadata wins");
+        assert_eq!(r.author.as_deref(), Some("From IFDB"), "but IFDB fills the gap IFmd left");
+    }
+
+    #[test]
+    fn tsv_then_stem_when_nothing_else_has_a_title() {
+        assert_eq!(resolve(None, None, Some("From TSV"), "stem").title, "From TSV");
+        assert_eq!(resolve(None, None, None, "stem").title, "stem");
+    }
+
+    #[test]
+    fn a_not_found_block_contributes_nothing_but_is_not_an_error() {
+        let nf = FetchedMeta { not_found: true, title: None, ..fetched_stub() };
+        assert_eq!(resolve(None, Some(&nf), Some("From TSV"), "stem").title, "From TSV");
+    }
+
+    #[test]
+    fn leading_year_takes_the_year_from_a_bare_or_iso_firstpublished() {
+        assert_eq!(leading_year("1984"), Some("1984".to_string()));
+        // iFiction allows a full ISO date; the YEAR column and numeric sort
+        // want just the year, not "1984-06-01".
+        assert_eq!(leading_year("1984-06-01"), Some("1984".to_string()));
+        assert_eq!(leading_year("  1980 "), Some("1980".to_string()));
+        // Nothing usable → dropped, so it sorts/displays as "unknown", not "0".
+        assert_eq!(leading_year("forthcoming"), None);
+        assert_eq!(leading_year("198"), None, "a 3-digit lead is not a year");
+    }
+
+    // ── `scan_stories` integration: sidecar resolution end-to-end ──────────
+
+    #[test]
+    fn scan_resolves_title_from_a_fetched_sidecar() {
+        let dir = temp_dir("sidecar-fetched");
+        let bytes = minimal_v3_story();
+        std::fs::write(dir.join("game.z5"), &bytes).unwrap();
+        let ifid = crate::ifid::compute_ifid(&bytes);
+
+        let data_base = dir.join("data");
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&dir.join("game.z5")));
+        let info = crate::story_info::StoryInfo {
+            format_version: crate::story_info::FORMAT_VERSION,
+            ifid: ifid.clone(),
+            fetched: Some(FetchedMeta { title: Some("Fetched Title".into()), ..fetched_stub() }),
+            probe: None,
+        };
+        crate::story_info::save(&game_dir, &info).unwrap();
+
+        let stories = scan_stories(&dir, &data_base);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(stories.len(), 1);
+        assert_eq!(stories[0].title, "Fetched Title");
+    }
+
+    #[test]
+    fn scan_falls_back_past_a_wrong_ifid_sidecar() {
+        let dir = temp_dir("sidecar-wrong-ifid");
+        let bytes = minimal_v3_story();
+        std::fs::write(dir.join("game.z5"), &bytes).unwrap();
+
+        let data_base = dir.join("data");
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&dir.join("game.z5")));
+        let info = crate::story_info::StoryInfo {
+            format_version: crate::story_info::FORMAT_VERSION,
+            ifid: "WRONG-IFID".into(), // doesn't match the story's real IFID
+            fetched: Some(FetchedMeta { title: Some("Should Not Appear".into()), ..fetched_stub() }),
+            probe: None,
+        };
+        crate::story_info::save(&game_dir, &info).unwrap();
+
+        let stories = scan_stories(&dir, &data_base);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(stories.len(), 1);
+        assert_eq!(stories[0].title, "game", "wrong-IFID sidecar ignored entirely; falls to the stem");
+    }
+
     // Build a StoryEntry with a controllable ifid + self_blorb, on a synthetic path.
     fn entry_with(ifid: &str, path: PathBuf, self_blorb: Option<Vec<ChunkInfo>>) -> StoryEntry {
         StoryEntry {
@@ -756,6 +1294,7 @@ mod tests {
                 format: "Z-code".into(), version: Some("5".into()),
                 serial: None, release: None, ifid: ifid.into(),
                 features: Features::default(), self_blorb,
+                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
             },
         }
     }

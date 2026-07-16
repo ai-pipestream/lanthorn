@@ -60,6 +60,8 @@ pub struct Blorb {
     index: Vec<ResourceEntry>,
     /// Frontispiece (cover) Pict resource number from the top-level `Fspc` chunk.
     fspc: Option<u32>,
+    /// `(start, len)` of the top-level `IFmd` chunk's data, if present.
+    ifmd: Option<(usize, usize)>,
 }
 
 fn be_u32(b: &[u8], off: usize) -> Result<u32, BlorbError> {
@@ -91,6 +93,7 @@ impl Blorb {
         // Walk top-level chunks (start at 12, after FORM+len+IFRS) to find RIdx.
         let mut ridx: Option<(usize, usize)> = None; // (entries_start, count)
         let mut fspc: Option<u32> = None;
+        let mut ifmd: Option<(usize, usize)> = None;
         let mut pos = 12;
         while pos + 8 <= end {
             let ctype = [bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]];
@@ -104,6 +107,8 @@ impl Blorb {
                 ridx = Some((data_start + 4, count));
             } else if &ctype == b"Fspc" && clen >= 4 {
                 fspc = be_u32(&bytes, data_start).ok();
+            } else if &ctype == b"IFmd" {
+                ifmd = Some((data_start, clen));
             }
             pos = data_start + clen + (clen & 1);
         }
@@ -124,7 +129,7 @@ impl Blorb {
             index.push(ResourceEntry { usage, number, start, chunk_type, len });
             p += 12;
         }
-        Ok(Blorb { bytes, index, fspc })
+        Ok(Blorb { bytes, index, fspc, ifmd })
     }
 
     /// The parsed resource index (for enumeration).
@@ -137,6 +142,13 @@ impl Blorb {
     /// the image bytes: `blorb.resource(b"Pict", blorb.frontispiece()?)`.
     pub fn frontispiece(&self) -> Option<u32> {
         self.fspc
+    }
+
+    /// The raw `IFmd` metadata chunk body (a Treaty of Babel `ifindex` XML
+    /// document), if the blorb declares one via a top-level `IFmd` chunk.
+    /// Returned uninterpreted — parsing is a caller's concern.
+    pub fn metadata(&self) -> Option<&[u8]> {
+        self.ifmd.map(|(s, l)| &self.bytes[s..s + l])
     }
 
     fn chunk_data(&self, e: &ResourceEntry) -> &[u8] {
@@ -343,11 +355,24 @@ mod tests {
     /// (usage, number, chunk_type, data). Returns the file bytes.
     type BlorbRes<'a> = (&'a [u8; 4], u32, &'a [u8; 4], &'a [u8]);
     fn build_blorb(res: &[BlorbRes]) -> Vec<u8> {
-        // Lay out the resource chunks after the RIdx chunk to compute offsets.
+        build_blorb_with_top(res, &[])
+    }
+
+    /// `top` = extra top-level chunks as (type, data), emitted after RIdx.
+    /// Resource offsets must account for their size — hence the shared body layout.
+    fn build_blorb_with_top(res: &[BlorbRes], top: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        // Lay out the resource chunks after the RIdx chunk (and any top-level
+        // chunks) to compute offsets.
         let count = res.len() as u32;
         let ridx_data_len = 4 + 12 * res.len();
-        // RIdx chunk header (8) sits at file offset 12 (after FORM+len+IFRS).
-        let first_res_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
+        let mut top_chunks = Vec::new();
+        for (ty, data) in top {
+            top_chunks.extend_from_slice(&chunk(ty, data));
+        }
+        // RIdx chunk header (8) sits at file offset 12 (after FORM+len+IFRS);
+        // resources follow RIdx AND the top-level chunks.
+        let first_res_off =
+            12 + 8 + ridx_data_len + (ridx_data_len % 2) + top_chunks.len();
         let mut offsets = Vec::new();
         let mut cursor = first_res_off;
         let mut body = Vec::new();
@@ -370,6 +395,7 @@ mod tests {
         let mut inner = Vec::new();
         inner.extend_from_slice(b"IFRS");
         inner.extend_from_slice(&ridx_chunk);
+        inner.extend_from_slice(&top_chunks);
         inner.extend_from_slice(&body);
         let mut file = Vec::new();
         file.extend_from_slice(b"FORM");
@@ -470,6 +496,49 @@ mod tests {
     fn frontispiece_absent_is_none() {
         let b = Blorb::parse(build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd")])).unwrap();
         assert_eq!(b.frontispiece(), None);
+    }
+
+    #[test]
+    fn ifmd_chunk_is_exposed_verbatim() {
+        let xml = br#"<ifindex version="1.0"><story><bibliographic><title>T</title></bibliographic></story></ifindex>"#;
+        let b = Blorb::parse(build_blorb_with_top(
+            &[(b"Exec", 0, b"ZCOD", b"abcd")],
+            &[(b"IFmd", xml)],
+        ))
+        .unwrap();
+        assert_eq!(b.metadata(), Some(&xml[..]), "IFmd bytes returned uninterpreted");
+    }
+
+    #[test]
+    fn blorb_without_ifmd_has_no_metadata() {
+        let b = Blorb::parse(build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd")])).unwrap();
+        assert_eq!(b.metadata(), None);
+    }
+
+    /// An odd-length IFmd is padded to even in the container; the returned slice
+    /// must be the DECLARED length, not the padded one, or the XML gains a NUL
+    /// byte and roxmltree rejects it.
+    #[test]
+    fn odd_length_ifmd_excludes_its_pad_byte() {
+        let odd = b"<ifindex></ifindex>"; // 19 bytes → forces a pad byte
+        assert_eq!(odd.len() % 2, 1, "the fixture must be odd for this test to mean anything");
+        let b = Blorb::parse(build_blorb_with_top(
+            &[(b"Exec", 0, b"ZCOD", b"abcd")],
+            &[(b"IFmd", odd)],
+        ))
+        .unwrap();
+        assert_eq!(b.metadata(), Some(&odd[..]), "no trailing pad byte");
+    }
+
+    /// Adding a top-level chunk must not break resource offset resolution.
+    #[test]
+    fn resources_still_resolve_with_an_ifmd_present() {
+        let b = Blorb::parse(build_blorb_with_top(
+            &[(b"Pict", 1, b"PNG ", b"pngdata")],
+            &[(b"IFmd", b"<ifindex/>")],
+        ))
+        .unwrap();
+        assert_eq!(b.resource(b"Pict", 1).map(|r| r.1), Some(&b"pngdata"[..]));
     }
 
     #[test]

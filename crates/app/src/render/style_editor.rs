@@ -619,8 +619,10 @@ mod tests {
     fn style_editor_board_renders_samples_and_highlights_active() {
         let mut s = AppState::default();
         crate::input::open_style_editor_hermetic(&mut s);
-        // Use a large area so all selectors fit and get drawn.
-        let area = Rect::new(0, 0, 120, 70);
+        // Use a large area so all selectors fit and get drawn (must stay
+        // ahead of SELECTOR_GROUPS growth — bumped for SQ-0348's 5 new
+        // story-list selectors).
+        let area = Rect::new(0, 0, 120, 90);
         let mut buf = Buffer::empty(area);
         let rects = draw_style_editor(&s, area, &mut buf).expect("drawn");
         assert!(!rects.samples.is_empty(), "samples have hit-rects");

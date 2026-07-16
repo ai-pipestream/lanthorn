@@ -12,6 +12,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use app::anim::PanelSlide;
 use app::render::draw_str_clipped;
 
@@ -21,6 +23,161 @@ use crate::{abbreviate_home, exit_if_terminated, restore_terminal};
 /// The panel refuses to open when the terminal is narrower than their sum.
 const LIST_MIN_W: u16 = 24;
 const PANEL_MIN_W: u16 = 28;
+
+/// Story-list row layout: the selection-marker glyph column, the gap between
+/// text columns, and each data column's target width. Year drops first as
+/// the row narrows, then author, leaving title + badges at the narrowest —
+/// see `compute_columns`.
+const ROW_MARKER_W: u16 = 2;
+const COL_GAP: u16 = 2;
+const AUTHOR_COL_W: u16 = 20;
+const AUTHOR_MAX_W: u16 = 40;
+const YEAR_COL_W: u16 = 6;
+const TITLE_MIN_W: u16 = 8;
+/// Title keeps this much before the author column is allowed to grow past its
+/// base width — title has priority for the shared space, so a long author name
+/// never squeezes the title down to `TITLE_MIN_W`.
+const TITLE_PREFERRED_W: u16 = 24;
+
+/// Resolved column widths for one draw, given `text_w` — the row width left
+/// for marker+title+author+year once the badge cluster's fixed columns (and
+/// its lead-in gap) are excluded by the caller. Title always absorbs
+/// whatever space the shown columns don't use, so there is never a gap
+/// before the badges.
+struct ListColumns {
+    title_w: u16,
+    author_w: u16,
+    year_w: u16,
+}
+
+/// `want_author_w` is the widest author display width to show in full; the
+/// author column grows from `AUTHOR_COL_W` toward it, but never so far that
+/// title would drop below `TITLE_MIN_W`, and never past `AUTHOR_MAX_W` so one
+/// very long name can't swallow the row. Title still absorbs any leftover, so
+/// there is no gap before the badges.
+fn compute_columns(text_w: u16, want_author_w: u16) -> ListColumns {
+    let avail = text_w.saturating_sub(ROW_MARKER_W);
+    let need_year = TITLE_MIN_W + COL_GAP + AUTHOR_COL_W + COL_GAP + YEAR_COL_W;
+    let need_author = TITLE_MIN_W + COL_GAP + AUTHOR_COL_W;
+    let grow = |cols_space: u16| -> u16 {
+        // Space shared by title+author (year already excluded). Author gets at
+        // least AUTHOR_COL_W and grows toward want_author_w, but only into space
+        // left after title keeps TITLE_PREFERRED_W — title has priority, so a
+        // long name can't shrink the title below a comfortable width. Capped at
+        // AUTHOR_MAX_W so one very long name can't swallow the row either.
+        let ceiling = AUTHOR_MAX_W.min(cols_space.saturating_sub(TITLE_PREFERRED_W));
+        want_author_w.clamp(AUTHOR_COL_W, ceiling.max(AUTHOR_COL_W))
+    };
+    if avail >= need_year {
+        let cols_space = avail - COL_GAP - COL_GAP - YEAR_COL_W;
+        let author_w = grow(cols_space);
+        ListColumns { title_w: cols_space - author_w, author_w, year_w: YEAR_COL_W }
+    } else if avail >= need_author {
+        let cols_space = avail - COL_GAP;
+        let author_w = grow(cols_space);
+        ListColumns { title_w: cols_space - author_w, author_w, year_w: 0 }
+    } else {
+        ListColumns { title_w: avail, author_w: 0, year_w: 0 }
+    }
+}
+
+/// Truncate `s` to at most `max_w` display columns (unicode display width,
+/// not char count — a CJK title is 2 cells per char and `chars().count()`
+/// would misalign every column to its right), appending `…` when it doesn't
+/// fit.
+fn truncate_to_width(s: &str, max_w: usize) -> String {
+    if max_w == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(s) <= max_w {
+        return s.to_string();
+    }
+    if max_w == 1 {
+        return "…".to_string();
+    }
+    let target = max_w - 1; // room for the 1-wide ellipsis
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > target {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// Word-wrap `s` to at most `width` display columns per line (unicode-aware,
+/// same width rule as `truncate_to_width`), splitting greedily on whitespace.
+/// A blank line in `s` (a paragraph break) is preserved as an empty output
+/// line. A single word wider than `width` is placed on its own line rather
+/// than broken mid-word — same as any other overlong field, it is left for
+/// the renderer to clip. `width == 0` returns `s` verbatim as one line.
+fn wrap_to_width(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut lines = Vec::new();
+    for para in s.split('\n') {
+        let mut cur = String::new();
+        let mut cur_w = 0usize;
+        for word in para.split_whitespace() {
+            let word_w = UnicodeWidthStr::width(word);
+            let sep_w = if cur.is_empty() { 0 } else { 1 };
+            if !cur.is_empty() && cur_w + sep_w + word_w > width {
+                lines.push(std::mem::take(&mut cur));
+                cur_w = 0;
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+                cur_w += 1;
+            }
+            cur.push_str(word);
+            cur_w += word_w;
+        }
+        lines.push(cur);
+    }
+    lines
+}
+
+/// Column header text plus whether it's the active sort column — the
+/// direction arrow is shown only on the active column.
+fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) -> (String, bool) {
+    if sort.key == key {
+        let arrow = if sort.desc { "▼" } else { "▲" };
+        (format!("{name} {arrow}"), true)
+    } else {
+        (name.to_string(), false)
+    }
+}
+
+/// Optional footer hint segments, most-important (least-guessable) first.
+/// Included left-to-right while they still fit next to the always-shown
+/// core hints; the rest are dropped — `PgUp/PgDn` goes first since it's a
+/// standard convention nobody needs told, `f`/`r` survive narrowest since
+/// they name behavior no key convention predicts.
+const FOOTER_OPTIONAL: [&str; 5] = ["f: fetch", "r: refresh", "s: sort", "d: reverse", "PgUp/PgDn"];
+
+fn build_footer(width: u16) -> String {
+    const CORE_LEFT: &str = " ↑/↓ or j/k: move";
+    const CORE_RIGHT: &str = "Enter / click: open   i/Tab: info   q / Esc: quit";
+    let mut footer = CORE_LEFT.to_string();
+    for seg in FOOTER_OPTIONAL {
+        let candidate = format!("{footer}   {seg}   {CORE_RIGHT}");
+        if UnicodeWidthStr::width(candidate.as_str()) as u16 <= width {
+            footer.push_str("   ");
+            footer.push_str(seg);
+        } else {
+            break;
+        }
+    }
+    footer.push_str("   ");
+    footer.push_str(CORE_RIGHT);
+    footer
+}
 
 /// True if the terminal is wide enough to show list + panel.
 fn can_open_panel(width: u16) -> bool {
@@ -60,6 +217,51 @@ fn ensure_aux(
     }
 }
 
+/// Reorder `stories` by `sort`, keeping the selection on the same story (by
+/// path — see `resort_preserving_selection`), and keep the per-index caches
+/// (`row_badges`, `aux_cache`) aligned with the new order. Every reorder in
+/// the picker loop — `s`, `d`, a header click, and a fetch sweep landing new
+/// titles — routes through this one function so no caller can forget to
+/// invalidate the caches.
+#[allow(clippy::too_many_arguments)]
+fn resort_list(
+    stories: &mut [app::picker::StoryEntry],
+    selected: usize,
+    sort: app::picker::Sort,
+    row_badges: &mut Vec<app::picker::RowBadges>,
+    aux_cache: &mut Vec<Option<app::picker::StoryAux>>,
+    data_base: &std::path::Path,
+    hint_index: &app::hints::HintIndex,
+) -> usize {
+    let new_idx = app::picker::resort_preserving_selection(stories, selected, sort);
+    *row_badges = stories
+        .iter()
+        .map(|e| app::picker::compute_row_badges(e, data_base, hint_index))
+        .collect();
+    *aux_cache = (0..stories.len()).map(|_| None).collect();
+    new_idx
+}
+
+/// Overlay a transient status line (fetch progress) onto the list's footer
+/// row, replacing the normal footer hint text while a message is active.
+fn draw_progress_line(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    text: &str,
+    style: ratatui::style::Style,
+) {
+    if area.height < 4 {
+        return; // matches draw_story_picker's own too-small-for-a-footer guard
+    }
+    let y = area.bottom().saturating_sub(1);
+    for x in area.left()..area.right() {
+        if let Some(c) = buf.cell_mut((x, y)) {
+            c.set_symbol(" ").set_style(style);
+        }
+    }
+    draw_str_clipped(buf, area.x, y, text, style, area);
+}
+
 /// Build the ratatui-image picker for cover art per the CLI mode. `Auto`
 /// queries the terminal (falling back to half-blocks); forced modes query for
 /// font size then pin the protocol. Returns `None` only if construction fails.
@@ -90,7 +292,7 @@ pub(crate) fn run_story_picker(
     cfg: &app::config::Config,
     data_base: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let stories = app::picker::scan_stories(dir);
+    let mut stories = app::picker::scan_stories(dir, data_base);
     if stories.is_empty() {
         eprintln!("babelmap: no Z-machine story files found in '{}'", dir.display());
         std::process::exit(1);
@@ -101,9 +303,10 @@ pub(crate) fn run_story_picker(
     let (cs, _set, _w2) = app::style::resolve(&base, &cfg.user_dir);
 
     // Row badges: each story's per-game dir under `data_base` + one shared hint
-    // index, computed once (SQ-0284).
+    // index, computed once (SQ-0284). Recomputed by `resort_list` whenever the
+    // list reorders, so it stays index-aligned with `stories`.
     let hint_index = app::hints::load_hint_index(&cfg.user_dir);
-    let row_badges: Vec<app::picker::RowBadges> = stories
+    let mut row_badges: Vec<app::picker::RowBadges> = stories
         .iter()
         .map(|e| app::picker::compute_row_badges(e, data_base, &hint_index))
         .collect();
@@ -140,7 +343,26 @@ pub(crate) fn run_story_picker(
     list.len(stories.len());
     let anim = &cfg.animation;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
+    let mut header_rects: Vec<(app::picker::SortKey, Rect)> = Vec::new();
     let mut viewport: usize = 0;
+    let mut sort = app::picker::Sort::default();
+
+    // IFDB fetch worker (SQ-0348): `f` (this story, forced) and `r` (whole
+    // library, skip current-version) share one background worker. Live only
+    // while this loop runs — dropping `fetcher` at the end drops its request
+    // sender, which ends the worker thread's `recv()` loop.
+    let fetcher = app::fetch_worker::Fetcher::new(
+        Box::new(app::ifdb::IfdbClient::new()),
+        data_base.to_path_buf(),
+        Duration::from_millis(500),
+    );
+    // The footer-row status line while a fetch is in flight (or just finished);
+    // `None` shows the normal footer hints instead.
+    let mut progress_line: Option<String> = None;
+    // True for an `f` order (single story, forced) — controls the completion
+    // message's shape (`f`: found/not-found/failed; `r`: a tallied summary).
+    let mut fetch_is_single = false;
+    let (mut sweep_fetched, mut sweep_skipped, mut sweep_not_found, mut sweep_failed) = (0u32, 0u32, 0u32, 0u32);
 
     // Info panel: always starts closed each launch (session-only state).
     let mut slide = PanelSlide::closed();
@@ -189,11 +411,18 @@ pub(crate) fn run_story_picker(
             last_area = area;
             let buf = f.buffer_mut();
             let (list_area, panel_area) = split_picker_area(area, slide.fraction());
-            let (rects, vp) = draw_story_picker(
-                &stories, &list, &row_badges, &badge_glyphs, dir, &cs, list_area, buf,
+            let (rects, vp, hrects) = draw_story_picker(
+                &stories, &list, &row_badges, &badge_glyphs, dir, &cs,
+                sort, list_area, buf,
             );
             row_rects = rects;
             viewport = vp;
+            header_rects = hrects;
+            // A fetch in flight (or its just-landed result) replaces the
+            // normal footer hints with a live status line.
+            if let Some(msg) = &progress_line {
+                draw_progress_line(buf, list_area, msg, cs.story_header_active);
+            }
             if panel_area.width > 0 {
                 if let Some(entry) = stories.get(list.selected) {
                     last_panel_area = panel_area;
@@ -239,28 +468,92 @@ pub(crate) fn run_story_picker(
                 sel_changed_at.elapsed(),
                 COVER_DEBOUNCE,
             ) {
-                decoder.request(sel.clone());
+                let game_dir = app::storage::game_dir(data_base, &app::storage::story_key(&sel));
+                decoder.request(sel.clone(), game_dir);
                 requested.insert(sel);
             }
+        }
+
+        // Drain fetch progress (SQ-0348): each completed story's sidecar may
+        // have just been (re)written, so re-resolve its entry in place — same
+        // path both `f` and `r` take, since a single-story order is just an
+        // order of length one — then re-sort through the one shared helper so
+        // the cursor stays on whatever story the user is actually looking at,
+        // not wherever its index happened to land.
+        let mut fetch_arrived = false;
+        for p in fetcher.drain() {
+            fetch_arrived = true;
+            match &p.outcome {
+                app::fetch_worker::Outcome::Fetched => sweep_fetched += 1,
+                app::fetch_worker::Outcome::Skipped => sweep_skipped += 1,
+                app::fetch_worker::Outcome::NotFound => sweep_not_found += 1,
+                app::fetch_worker::Outcome::Failed(_) => sweep_failed += 1,
+            }
+            // Only Fetched/NotFound actually (re)write the sidecar (a Skipped
+            // story's cache was already current; a Failed story's write is
+            // withheld so a later `r` retries it) — no point re-reading disk
+            // for the other two.
+            let rewrote_sidecar =
+                matches!(p.outcome, app::fetch_worker::Outcome::Fetched | app::fetch_worker::Outcome::NotFound);
+            if rewrote_sidecar {
+                if let Some(fresh) = app::picker::resolve_entry(&p.path, data_base) {
+                    if let Some(slot) = stories.iter_mut().find(|e| e.path == p.path) {
+                        *slot = fresh;
+                    }
+                }
+                // A fetch may have just written a cover.png; drop any cached
+                // "coverless" decode so the panel re-reads and shows it now,
+                // rather than only after the picker is reopened.
+                if matches!(p.outcome, app::fetch_worker::Outcome::Fetched) {
+                    cover.forget(&p.path);
+                    requested.remove(&p.path);
+                }
+            }
+            progress_line = Some(if fetch_is_single {
+                match &p.outcome {
+                    app::fetch_worker::Outcome::Fetched => format!("Fetched {}", p.title),
+                    app::fetch_worker::Outcome::Skipped => format!("Fetched {}", p.title),
+                    app::fetch_worker::Outcome::NotFound => format!("No IFDB record for {}", p.title),
+                    app::fetch_worker::Outcome::Failed(reason) => format!("Fetch failed: {reason}"),
+                }
+            } else if p.done < p.total {
+                format!("Fetching {}/{} — {}", p.done, p.total, p.title)
+            } else {
+                let mut msg = format!(
+                    "Fetched {}, skipped {}, not found {}",
+                    sweep_fetched, sweep_skipped, sweep_not_found
+                );
+                if sweep_failed > 0 {
+                    msg.push_str(&format!(", failed {sweep_failed}"));
+                }
+                msg
+            });
+        }
+        if fetch_arrived {
+            list.select(
+                resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                viewport,
+                anim,
+            );
         }
 
         // A decode just landed: loop back to redraw so the cover paints now. The
         // draw is at the top of the loop, and once the result is cached
         // `cover_busy` goes false — without this the loop would block on `read()`
         // and the new cover wouldn't appear until the next input event.
-        if cover_arrived {
+        if cover_arrived || fetch_arrived {
             list.finalize_if_done();
             continue;
         }
 
         // Tick while a scroll or panel-slide animation eases so the motion is
-        // visible, or while a cover decode is in flight / still needed so results
-        // drain and the debounced request fires without a keypress; otherwise
-        // block until the next event.
+        // visible, or while a cover decode is in flight / still needed, or a
+        // fetch sweep is running, so results drain and redraw without a
+        // keypress; otherwise block until the next event.
         let sel_now = stories.get(list.selected).map(|e| &e.path);
         let cover_busy = slide.open
             && sel_now.is_some_and(|p| !requested.is_empty() || !cover.has(p));
-        if (list.has_active_animation() || slide.active() || cover_busy)
+        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy())
             && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
         {
             list.finalize_if_done();
@@ -295,6 +588,13 @@ pub(crate) fn run_story_picker(
                         _ => {}
                     }
                 } else {
+                    // A finished fetch leaves its summary on the footer row; the
+                    // next keypress (once nothing is in flight) clears it so the
+                    // normal hints return — otherwise the summary would sit there
+                    // for the rest of the session, hiding the key legend.
+                    if !fetcher.busy() {
+                        progress_line = None;
+                    }
                     match k.code {
                         Up | Char('k') => { panel_scroll = 0; list.move_by(-1, viewport, anim) }
                         Down | Char('j') => { panel_scroll = 0; list.move_by(1, viewport, anim) }
@@ -303,7 +603,16 @@ pub(crate) fn run_story_picker(
                         Home => { panel_scroll = 0; list.home(viewport, anim) }
                         End => { panel_scroll = 0; list.end(stories.len(), viewport, anim) }
                         Enter => break Some(stories[list.selected].path.clone()),
-                        Esc | Char('q') => break None,
+                        Char('q') => break None,
+                        // Esc cancels a running sweep first; only quits when
+                        // nothing is in flight.
+                        Esc => {
+                            if fetcher.busy() {
+                                fetcher.cancel();
+                            } else {
+                                break None;
+                            }
+                        }
                         Char('i') | Tab => {
                             let target = !slide.open;
                             if !target || can_open_panel(last_area.width) {
@@ -316,6 +625,61 @@ pub(crate) fn run_story_picker(
                                 }
                             }
                         }
+                        // `f`: refetch only the selected story, ignoring its
+                        // cache. Ignored while a sweep is already running, so a
+                        // second press can't garble the in-flight progress line.
+                        Char('f') if !fetcher.busy() => {
+                            if let Some(entry) = stories.get(list.selected) {
+                                fetch_is_single = true;
+                                sweep_fetched = 0;
+                                sweep_skipped = 0;
+                                sweep_not_found = 0;
+                                sweep_failed = 0;
+                                progress_line = Some(format!("Fetching {}…", entry.title));
+                                fetcher.request(app::fetch_worker::FetchOrder {
+                                    stories: vec![(entry.path.clone(), entry.meta.ifid.clone())],
+                                    forced: true,
+                                });
+                            }
+                        }
+                        // `r`: sweep the whole library; the worker itself skips
+                        // any story already at the current FETCH_VERSION. Ignored
+                        // while a sweep is already running (see `f`).
+                        Char('r') if !fetcher.busy() => {
+                            let total = stories.len();
+                            let order: Vec<(PathBuf, String)> =
+                                stories.iter().map(|e| (e.path.clone(), e.meta.ifid.clone())).collect();
+                            fetch_is_single = false;
+                            sweep_fetched = 0;
+                            sweep_skipped = 0;
+                            sweep_not_found = 0;
+                            sweep_failed = 0;
+                            progress_line = Some(format!("Fetching 0/{total}"));
+                            fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false });
+                        }
+                        // `s`: cycle the sort column, keeping direction. `d`:
+                        // toggle direction, keeping the column. Both preserve
+                        // the selection by path, never by index.
+                        Char('s') => {
+                            sort.key = match sort.key {
+                                app::picker::SortKey::Title => app::picker::SortKey::Author,
+                                app::picker::SortKey::Author => app::picker::SortKey::Year,
+                                app::picker::SortKey::Year => app::picker::SortKey::Title,
+                            };
+                            list.select(
+                                resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                                viewport,
+                                anim,
+                            );
+                        }
+                        Char('d') => {
+                            sort.desc = !sort.desc;
+                            list.select(
+                                resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                                viewport,
+                                anim,
+                            );
+                        }
                         _ => {}
                     }
                 }
@@ -326,6 +690,20 @@ pub(crate) fn run_story_picker(
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
                     if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
                         break Some(stories[*idx].path.clone());
+                    } else if let Some((key, _)) = header_rects.iter().find(|(_, r)| r.contains(pt)) {
+                        // Click the active header → reverse; click another → sort
+                        // by it, ascending.
+                        if sort.key == *key {
+                            sort.desc = !sort.desc;
+                        } else {
+                            sort.key = *key;
+                            sort.desc = false;
+                        }
+                        list.select(
+                            resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                            viewport,
+                            anim,
+                        );
                     }
                 } else if let Some(d) = app::input::wheel_delta(m.kind, cfg.mouse_wheel_invert) {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
@@ -357,8 +735,9 @@ pub(crate) fn run_story_picker(
     chosen
 }
 
-/// Draw the story-picker screen. Returns the per-row hit-rects (index, rect) for
-/// mouse selection.
+/// Draw the story-picker screen. Returns the per-row hit-rects (index, rect)
+/// for mouse selection, the row count, and the column-header hit-rects
+/// (Task 9 hit-tests these for click-to-sort).
 fn draw_story_picker(
     stories: &[app::picker::StoryEntry],
     list: &app::list_scroll::ListScroll,
@@ -366,12 +745,15 @@ fn draw_story_picker(
     glyphs: &app::picker::BadgeGlyphs,
     dir: &std::path::Path,
     cs: &app::colors::ColorScheme,
+    sort: app::picker::Sort,
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
-) -> (Vec<(usize, Rect)>, usize) {
+) -> (Vec<(usize, Rect)>, usize, Vec<(app::picker::SortKey, Rect)>) {
+    use app::picker::SortKey;
     use ratatui::style::{Color, Style};
     let selected = list.selected;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
+    let mut header_rects: Vec<(SortKey, Rect)> = Vec::new();
 
     // Background fill.
     for y in area.top()..area.bottom() {
@@ -390,11 +772,11 @@ fn draw_story_picker(
     );
     draw_str_clipped(buf, area.x, area.y, &header, cs.dialog_title, area);
 
-    // List region (header + blank row at top, footer at bottom).
+    // List region (title bar + column-header row at top, footer at bottom).
     let list_top = area.y + 2;
     let list_bottom = area.bottom().saturating_sub(1);
     if list_bottom <= list_top {
-        return (row_rects, 0);
+        return (row_rects, 0, header_rects);
     }
     let rows = (list_bottom - list_top) as usize;
     let total = stories.len();
@@ -404,6 +786,51 @@ fn draw_story_picker(
         app::render::scroll::needs_scrollbar(total, rows) && area.width >= 2;
     let row_w = if scrollbar_visible { area.width.saturating_sub(1) } else { area.width };
     let first = list.display_offset();
+
+    // Badge cluster width depends only on the configured glyphs, not the
+    // entry, so it's computed once and reused both to size the text columns
+    // and to place each row's cluster.
+    let type_w = glyphs.zcode.chars().count().max(glyphs.glulx.chars().count()) as u16;
+    let blorb_w = glyphs.blorb.chars().count() as u16;
+    let save_w = glyphs.save.chars().count() as u16;
+    let hint_w = glyphs.hint.chars().count() as u16;
+    let cluster_w = type_w + blorb_w + save_w + hint_w;
+    let badges_shown = cluster_w + 2 < row_w;
+    let badge_reserved = if badges_shown { cluster_w + 1 } else { 0 };
+    let text_w = row_w.saturating_sub(badge_reserved);
+    // Widest author name across the WHOLE list (not just the visible page), so
+    // the author column doesn't jump width as the user scrolls.
+    let want_author_w = stories
+        .iter()
+        .filter_map(|e| e.meta.author.as_deref())
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0) as u16;
+    let cols = compute_columns(text_w, want_author_w);
+
+    let title_x = area.left() + ROW_MARKER_W;
+    let author_x = title_x + cols.title_w + COL_GAP;
+    let year_x = author_x + cols.author_w + COL_GAP;
+
+    // Column-header row: dimmed, except the active sort column, which shows
+    // its direction arrow.
+    let header_y = area.y + 1;
+    let (title_label, title_active) = header_label("TITLE", SortKey::Title, sort);
+    let title_hstyle = if title_active { cs.story_header_active } else { cs.story_header };
+    draw_str_clipped(buf, title_x, header_y, &title_label, title_hstyle, area);
+    header_rects.push((SortKey::Title, Rect::new(title_x, header_y, cols.title_w, 1)));
+    if cols.author_w > 0 {
+        let (author_label, author_active) = header_label("AUTHOR", SortKey::Author, sort);
+        let author_hstyle = if author_active { cs.story_header_active } else { cs.story_header };
+        draw_str_clipped(buf, author_x, header_y, &author_label, author_hstyle, area);
+        header_rects.push((SortKey::Author, Rect::new(author_x, header_y, cols.author_w, 1)));
+    }
+    if cols.year_w > 0 {
+        let (year_label, year_active) = header_label("YEAR", SortKey::Year, sort);
+        let year_hstyle = if year_active { cs.story_header_active } else { cs.story_header };
+        draw_str_clipped(buf, year_x, header_y, &year_label, year_hstyle, area);
+        header_rects.push((SortKey::Year, Rect::new(year_x, header_y, cols.year_w, 1)));
+    }
 
     for (i, entry) in stories.iter().enumerate().skip(first).take(rows) {
         let y = list_top + (i - first) as u16;
@@ -417,8 +844,34 @@ fn draw_story_picker(
             }
         }
         let marker = if sel { "▸ " } else { "  " };
-        let line = format!("{}{}   ({})", marker, entry.title, entry.filename);
-        draw_str_clipped(buf, area.x, y, &line, style, row_rect);
+        draw_str_clipped(buf, area.x, y, marker, style, row_rect);
+
+        let title_txt = truncate_to_width(&entry.title, cols.title_w as usize);
+        draw_str_clipped(buf, title_x, y, &title_txt, style, row_rect);
+
+        if cols.author_w > 0 {
+            let (author_txt, author_style) = match entry.meta.author.as_deref() {
+                Some(a) if !a.is_empty() => {
+                    (truncate_to_width(a, cols.author_w as usize), cs.story_author)
+                }
+                _ => (
+                    truncate_to_width("(no metadata yet)", cols.author_w as usize),
+                    cs.story_no_metadata,
+                ),
+            };
+            // Selection highlight wins over the column's own color, same as
+            // the title text above — the whole row reads as one bar.
+            let author_style = if sel { style } else { author_style };
+            draw_str_clipped(buf, author_x, y, &author_txt, author_style, row_rect);
+        }
+
+        if cols.year_w > 0 {
+            if let Some(yr) = entry.meta.year.as_deref().filter(|s| !s.is_empty()) {
+                let year_txt = truncate_to_width(yr, cols.year_w as usize);
+                let year_style = if sel { style } else { cs.story_year };
+                draw_str_clipped(buf, year_x, y, &year_txt, year_style, row_rect);
+            }
+        }
 
         // Right-aligned badge cluster: fixed columns for [type][blorb][save][hint],
         // no separators, so present badges stay vertically aligned across rows.
@@ -427,12 +880,7 @@ fn draw_story_picker(
             app::picker::Engine::ZCode => glyphs.zcode,
             app::picker::Engine::Glulx => glyphs.glulx,
         };
-        let type_w = glyphs.zcode.chars().count().max(glyphs.glulx.chars().count()) as u16;
-        let blorb_w = glyphs.blorb.chars().count() as u16;
-        let save_w = glyphs.save.chars().count() as u16;
-        let hint_w = glyphs.hint.chars().count() as u16;
-        let cluster_w = type_w + blorb_w + save_w + hint_w;
-        if cluster_w + 2 < row_w {
+        if badges_shown {
             let bx = area.left() + row_w - 1 - cluster_w;
             // On the selection bar the plain badge fg (e.g. green) is low-contrast
             // against the highlight, so reverse it into a block: the badge colour
@@ -466,11 +914,11 @@ fn draw_story_picker(
     }
 
     // Footer hint.
-    let footer = " ↑/↓ or j/k: move   PgUp/PgDn   Enter / click: open   i/Tab: info   q / Esc: quit";
+    let footer = build_footer(area.width);
     let fstyle = Style::new().fg(Color::DarkGray).patch(cs.dialog);
-    draw_str_clipped(buf, area.x, list_bottom, footer, fstyle, area);
+    draw_str_clipped(buf, area.x, list_bottom, &footer, fstyle, area);
 
-    (row_rects, rows)
+    (row_rects, rows, header_rects)
 }
 
 /// Draw the highlighted story's metadata panel: title, filesystem info,
@@ -590,6 +1038,38 @@ fn draw_info_panel(
     }
     // ifid.
     lines.push((format!("IFID {}", meta.ifid), cs.story_info_value));
+    // author · year · genre (SQ-0348): one line, present parts only — a story
+    // with none of the three renders no line at all, so a no-metadata panel
+    // is unchanged from before this field existed.
+    let meta_bits: Vec<&str> = [meta.author.as_deref(), meta.year.as_deref(), meta.genre.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .collect();
+    if !meta_bits.is_empty() {
+        lines.push((meta_bits.join(" · "), cs.story_info_value));
+    }
+    // blurb (SQ-0348): word-wrapped to the panel's content width, each
+    // wrapped row pushed as its own entry so it rides the same
+    // scroll/overflow accounting as every other panel line below. Split on the
+    // paragraph breaks html_to_text left in, wrapping each independently so a
+    // `<br/>` in the source stays a visible break rather than collapsing.
+    if let Some(desc) = meta.description.as_deref().filter(|s| !s.is_empty()) {
+        for para in desc.lines() {
+            if para.trim().is_empty() {
+                lines.push((String::new(), cs.story_info_blurb));
+            } else {
+                for row in wrap_to_width(para, inner.width as usize) {
+                    lines.push((row, cs.story_info_blurb));
+                }
+            }
+        }
+    }
+    // IFDB page link (SQ-0348): rendered as the bare URL so terminals that
+    // detect URLs make it click/⌘-clickable; only present once fetched.
+    if let Some(link) = meta.ifdb_link.as_deref().filter(|s| !s.is_empty()) {
+        lines.push((format!("IFDB: {link}"), cs.story_info_link));
+    }
     // features line (present badges only).
     let feats = feature_words(&meta.features, aux);
     if !feats.is_empty() {
@@ -756,6 +1236,14 @@ mod tests {
             .collect()
     }
 
+    /// `needle`'s CHAR (column) index within `row_text`'s output, not its byte
+    /// index — a preceding multi-byte cell (e.g. the "▸" selection marker)
+    /// would otherwise overcount a plain `.find()`.
+    fn char_pos(row: &str, needle: &str) -> usize {
+        let byte_idx = row.find(needle).unwrap_or_else(|| panic!("{needle:?} not found in {row:?}"));
+        row[..byte_idx].chars().count()
+    }
+
     fn make_two_test_stories() -> Vec<app::picker::StoryEntry> {
         use app::picker::{Engine, Features, StoryEntry, StoryMeta};
         let mk = |title: &str, engine: Engine| StoryEntry {
@@ -766,9 +1254,28 @@ mod tests {
                 size_bytes: 1, modified: None, engine, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None,
+                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
             },
         };
         vec![mk("Zork", Engine::ZCode), mk("Anchorhead", Engine::Glulx)]
+    }
+
+    /// Build a story entry with an explicit author/year (or none), for the
+    /// column-layout tests below.
+    fn story_with_meta(title: &str, author: Option<&str>, year: Option<&str>) -> app::picker::StoryEntry {
+        use app::picker::{Engine, Features, StoryEntry, StoryMeta};
+        StoryEntry {
+            path: std::path::PathBuf::from(format!("/tmp/{title}.z5")),
+            title: title.into(),
+            filename: format!("{title}.z5"),
+            meta: StoryMeta {
+                size_bytes: 1, modified: None, engine: Engine::ZCode, format: "Z-code".into(),
+                version: None, serial: None, release: None, ifid: title.into(),
+                features: Features::default(), self_blorb: None,
+                author: author.map(String::from), year: year.map(String::from),
+                genre: None, language: None, description: None, ifdb_link: None,
+            },
+        }
     }
 
     #[test]
@@ -790,7 +1297,9 @@ mod tests {
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
         let dir = std::path::Path::new("/tmp");
-        super::draw_story_picker(&stories, &list, &badges, &glyphs, dir, &cs, area, &mut buf);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, dir, &cs, app::picker::Sort::default(), area, &mut buf,
+        );
 
         let row0 = row_text(&buf, 2, area); // list starts at area.y + 2
         let row1 = row_text(&buf, 3, area);
@@ -826,9 +1335,277 @@ mod tests {
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(&stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-                          &cs, area, &mut buf);
+                          &cs, app::picker::Sort::default(), area, &mut buf);
         let row0 = row_text(&buf, 2, area);
         assert!(row0.contains("z!◆"), "configured glyphs used, no separators: {row0:?}");
+    }
+
+    // ── Story-picker list: columns, header, sort ────────────────────────────────
+
+    #[test]
+    fn header_row_shows_columns_and_active_direction_arrow() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = vec![
+            story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998")),
+            story_with_meta("Curses", Some("Graham Nelson"), Some("1993")),
+        ];
+        let badges = vec![app::picker::RowBadges::default(); 2];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(stories.len());
+        let area = Rect::new(0, 0, 60, 10);
+
+        // Default sort (Title, ascending): only TITLE carries an arrow.
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        let header = row_text(&buf, 1, area); // header row is area.y + 1
+        assert!(header.contains("TITLE ▲"), "active column shows the ascending arrow: {header:?}");
+        assert!(header.contains("AUTHOR"), "author header present: {header:?}");
+        assert!(!header.contains("AUTHOR ▲") && !header.contains("AUTHOR ▼"), "inactive column has no arrow: {header:?}");
+        assert!(header.contains("YEAR"), "year header present: {header:?}");
+        assert!(!header.contains("YEAR ▲") && !header.contains("YEAR ▼"), "inactive column has no arrow: {header:?}");
+
+        // Sort by Year, descending: only YEAR carries the down arrow.
+        let mut buf2 = Buffer::empty(area);
+        let sort2 = app::picker::Sort { key: app::picker::SortKey::Year, desc: true };
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, sort2, area, &mut buf2,
+        );
+        let header2 = row_text(&buf2, 1, area);
+        assert!(header2.contains("YEAR ▼"), "active column shows the descending arrow: {header2:?}");
+        assert!(!header2.contains("TITLE ▲") && !header2.contains("TITLE ▼"), "{header2:?}");
+    }
+
+    #[test]
+    fn row_renders_author_and_year_aligned_across_rows() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = vec![
+            story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998")),
+            story_with_meta("Curses", Some("Graham Nelson"), Some("1993")),
+        ];
+        let badges = vec![app::picker::RowBadges::default(); 2];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(stories.len());
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        let row0 = row_text(&buf, 2, area);
+        let row1 = row_text(&buf, 3, area);
+        assert!(row0.contains("Michael S. Gentry"), "{row0:?}");
+        assert!(row0.contains("1998"), "{row0:?}");
+        assert!(row1.contains("Graham Nelson"), "{row1:?}");
+        assert!(row1.contains("1993"), "{row1:?}");
+
+        let author_x0 = char_pos(&row0, "Michael");
+        let author_x1 = char_pos(&row1, "Graham");
+        assert_eq!(author_x0, author_x1, "author column must align across rows");
+        let year_x0 = char_pos(&row0, "1998");
+        let year_x1 = char_pos(&row1, "1993");
+        assert_eq!(year_x0, year_x1, "year column must align across rows");
+    }
+
+    #[test]
+    fn row_with_no_author_shows_no_metadata_placeholder_styled_correctly() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        // A fresh bare-z file with no fetched/embedded metadata — the common
+        // case for a library nobody has run a fetch on yet, not an edge case.
+        // A second, unrelated story keeps the no-metadata row UNSELECTED
+        // (selection highlight intentionally overrides column colors, same
+        // as the badge cluster does — so this checks the plain-row style).
+        let stories = vec![
+            story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998")),
+            story_with_meta("zork2-r63-s860811", None, None),
+        ];
+        let badges = vec![app::picker::RowBadges::default(); 2];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(2);
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        let row1 = row_text(&buf, 3, area);
+        assert!(row1.contains("(no metadata yet)"), "reads as 'nothing fetched yet': {row1:?}");
+
+        // Styled via cs.story_no_metadata, not cs.story_author — terminal_default
+        // gives them distinct fg colors (DarkGray vs White), so this checks the
+        // right field was actually applied, not just that text is present.
+        let x = char_pos(&row1, "(no metadata yet)") as u16;
+        let cell = buf.cell((area.left() + x, 3)).unwrap();
+        assert_eq!(cell.fg, cs.story_no_metadata.fg.unwrap(), "placeholder must use story_no_metadata's color");
+        assert_ne!(cs.story_no_metadata.fg, cs.story_author.fg, "sanity: the two styles must actually differ");
+    }
+
+    #[test]
+    fn columns_drop_year_then_author_as_width_narrows() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = vec![story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998"))];
+        let badges = vec![app::picker::RowBadges::default()];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(1);
+        let cluster_w: u16 = 4; // default glyphs: 1-col type + blorb + save + hint
+
+        // (width, author shown, year shown) — thresholds per compute_columns:
+        // year needs width >= 45, author needs width >= 37, below that:
+        // title + badges only. No width in between should show a gap: the
+        // badge cluster's column (checked below) never moves off its
+        // width-derived formula regardless of which text columns show.
+        for &(width, want_author, want_year) in &[
+            (60u16, true, true),
+            (45, true, true),
+            (44, true, false),
+            (37, true, false),
+            (36, false, false),
+            (30, false, false),
+        ] {
+            let area = Rect::new(0, 0, width, 10);
+            let mut buf = Buffer::empty(area);
+            super::draw_story_picker(
+                &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+                &cs, app::picker::Sort::default(), area, &mut buf,
+            );
+            let row = row_text(&buf, 2, area);
+            assert_eq!(row.contains("Michael S. Gentry"), want_author, "width {width}: {row:?}");
+            assert_eq!(row.contains("1998"), want_year, "width {width}: {row:?}");
+
+            // Badges stay right-aligned at the same formula regardless of
+            // which text columns are shown — proves no gap opened in front
+            // of them as columns drop.
+            let bx = width - 1 - cluster_w;
+            let cell = buf.cell((bx, 2)).unwrap();
+            assert_eq!(cell.symbol(), "Z", "badge cluster must start at col {bx} for width {width}: {row:?}");
+        }
+    }
+
+    #[test]
+    fn long_author_truncates_with_ellipsis_within_column() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let long_author = "Marc Blank and Dave Lebling and a Whole Lot More People";
+        let stories = vec![story_with_meta("Zork I", Some(long_author), Some("1980"))];
+        let badges = vec![app::picker::RowBadges::default()];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(1);
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        let row0 = row_text(&buf, 2, area);
+        assert!(!row0.contains(long_author), "long author must be truncated: {row0:?}");
+        assert!(row0.contains('…'), "truncated author ends with an ellipsis: {row0:?}");
+        assert!(row0.contains("1980"), "year column unaffected by the author overrun: {row0:?}");
+        let bx = 60u16 - 1 - 4;
+        assert_eq!(
+            buf.cell((bx, 2)).unwrap().symbol(), "Z",
+            "badge cluster unaffected by the author overrun"
+        );
+    }
+
+    #[test]
+    fn author_column_grows_to_show_a_longer_name_when_there_is_room() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        // 27 wide — past the old fixed 20-col author column, but under the cap.
+        let author = "Brian Moriarty (Infocom)  X";
+        let stories = vec![story_with_meta("Trinity", Some(author), Some("1986"))];
+        let badges = vec![app::picker::RowBadges::default()];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(1);
+        // A wide terminal: title's minimum is easily met, so the author column
+        // should grow to show the whole name rather than truncate at 20.
+        let area = Rect::new(0, 0, 100, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        let row = row_text(&buf, 2, area);
+        assert!(row.contains(author), "author shown in full when there is room: {row:?}");
+        assert!(!row.contains('…'), "no ellipsis when the column grew to fit: {row:?}");
+    }
+
+    #[test]
+    fn header_rects_line_up_with_drawn_header_text() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = vec![story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998"))];
+        let badges = vec![app::picker::RowBadges::default()];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(1);
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        let (_, _, header_rects) = super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        assert_eq!(header_rects.len(), 3, "all three columns are shown at this width: {header_rects:?}");
+        for (key, rect) in &header_rects {
+            let expected_char = match key {
+                app::picker::SortKey::Title => "T",
+                app::picker::SortKey::Author => "A",
+                app::picker::SortKey::Year => "Y",
+            };
+            let cell = buf.cell((rect.x, rect.y)).unwrap();
+            assert_eq!(
+                cell.symbol(), expected_char,
+                "{key:?} rect at ({}, {}) must start where its header text is actually drawn",
+                rect.x, rect.y
+            );
+        }
+    }
+
+    #[test]
+    fn footer_hints_drop_right_to_left_keeping_f_and_r_longest() {
+        // Narrow: none of the new hints fit, but the existing core (move/open/
+        // info/quit) is always present.
+        let narrow = super::build_footer(60);
+        assert!(narrow.contains("move") && narrow.contains("open") && narrow.contains("info") && narrow.contains("quit"));
+        assert!(!narrow.contains("f: fetch") && !narrow.contains("PgUp/PgDn"), "{narrow:?}");
+
+        // f/r (least guessable) survive down to the narrowest widths that fit
+        // them at all; s/d/PgUp/PgDn need progressively more room.
+        let at_80 = super::build_footer(80);
+        assert!(at_80.contains("f: fetch"), "{at_80:?}");
+        assert!(!at_80.contains("r: refresh"), "{at_80:?}");
+
+        let at_93 = super::build_footer(93);
+        assert!(at_93.contains("r: refresh") && !at_93.contains("s: sort"), "{at_93:?}");
+
+        let at_103 = super::build_footer(103);
+        assert!(at_103.contains("s: sort") && !at_103.contains("d: reverse"), "{at_103:?}");
+
+        let at_116 = super::build_footer(116);
+        assert!(at_116.contains("d: reverse") && !at_116.contains("PgUp/PgDn"), "{at_116:?}");
+
+        let at_128 = super::build_footer(128);
+        assert!(at_128.contains("PgUp/PgDn"), "{at_128:?}");
     }
 
     // ── Story-picker info panel ─────────────────────────────────────────────────
@@ -867,6 +1644,7 @@ mod tests {
                     detail: Some("15.4 kHz · 8-bit · mono · 2.2s".into()),
                 },
             ]),
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
         };
         let game_dir = std::path::PathBuf::from("/tmp/babelmap-info-panel-saves/zork1.z3");
         let aux = app::picker::StoryAux {
@@ -957,6 +1735,7 @@ mod tests {
             ifid: "ZCODE-88-840726".into(),
             features: app::picker::Features::default(),
             self_blorb: Some(chunks),
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
         };
         let area = Rect::new(0, 0, 34, 10);
         let mut buf = Buffer::empty(area);
@@ -993,7 +1772,138 @@ mod tests {
             format: "Blorb (Glulx)".into(), version: Some("3.1.2".into()),
             serial: None, release: None, ifid: "IFID-X".into(),
             features: app::picker::Features::default(), self_blorb: None,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
         }
+    }
+
+    // ── SQ-0348: author/year/genre + blurb ──────────────────────────────────────
+
+    /// A story with NO fetched/embedded metadata must render exactly as it did
+    /// before this feature existed: no empty "Author:" label, no stray blank
+    /// line, no separator with nothing either side of it. The IFID line and
+    /// the Features line (present since `minimal_story_meta` has no features by
+    /// default, so give it one) must land on directly adjacent rows.
+    #[test]
+    fn info_panel_no_metadata_leaves_ifid_and_features_adjacent() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let mut meta = minimal_story_meta();
+        meta.features = app::picker::Features { sound: true, ..Default::default() };
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("game.gblorb");
+        super::draw_info_panel(
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+        );
+        let text = buffer_to_string(&buf, area);
+        let lines: Vec<&str> = text.lines().collect();
+        // Row 0 is the panel's own top border (with the " Info " title baked
+        // into it); content starts at row 1: title, filename/size,
+        // format/version, IFID, Features (no serial, no metadata).
+        assert!(lines[4].contains("IFID"), "row 4 should be the IFID line: {:?}", lines[4]);
+        assert!(
+            lines[5].trim_start_matches('│').trim().starts_with("Features:"),
+            "no line should be inserted between IFID and Features when metadata is absent: {:?}",
+            lines[5]
+        );
+        assert!(!text.contains("Author"), "no metadata label should appear: {text:?}");
+    }
+
+    /// With author/year/genre and a blurb present, a combined "author · year ·
+    /// genre" line and the wrapped blurb text land between IFID and Features,
+    /// disturbing neither.
+    #[test]
+    fn info_panel_renders_author_year_genre_and_blurb_between_ifid_and_features() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let mut meta = minimal_story_meta();
+        meta.author = Some("Michael S. Gentry".into());
+        meta.year = Some("1998".into());
+        meta.genre = Some("Horror".into());
+        meta.description = Some("A tale of terror in a small town.".into());
+        meta.features = app::picker::Features { sound: true, ..Default::default() };
+        let area = Rect::new(0, 0, 50, 14);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("game.gblorb");
+        super::draw_info_panel(
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+        );
+        let text = buffer_to_string(&buf, area);
+        assert!(text.contains("Michael S. Gentry"), "author should render: {text:?}");
+        assert!(text.contains("1998"), "year should render: {text:?}");
+        assert!(text.contains("Horror"), "genre should render: {text:?}");
+        assert!(text.contains("A tale of terror in a small town."), "blurb should render: {text:?}");
+
+        let ifid_pos = text.find("IFID").expect("IFID line present");
+        let author_pos = text.find("Michael S. Gentry").expect("author present");
+        let blurb_pos = text.find("A tale of terror").expect("blurb present");
+        let features_pos = text.find("Features:").expect("features present");
+        assert!(ifid_pos < author_pos, "author line must come after IFID");
+        assert!(author_pos < blurb_pos, "blurb must come after the author/year/genre line");
+        assert!(blurb_pos < features_pos, "blurb must come before Features");
+    }
+
+    #[test]
+    fn info_panel_shows_the_ifdb_link_only_once_fetched() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 60, 14);
+        let render = |meta: &app::picker::StoryMeta| {
+            let mut buf = Buffer::empty(area);
+            let mut cover = app::cover::CoverState::default();
+            super::draw_info_panel(
+                "Game", "game.z5", meta, None, 0, area, None, &mut cover,
+                std::path::Path::new("game.z5"), false, &cs, &mut buf,
+            );
+            buffer_to_string(&buf, area)
+        };
+        // Not fetched → no IFDB line at all.
+        let bare = minimal_story_meta();
+        assert!(!render(&bare).contains("IFDB:"), "no link before a fetch");
+        // Fetched → the bare URL renders (terminals auto-link it).
+        let mut fetched = minimal_story_meta();
+        fetched.ifdb_link = Some("https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro".into());
+        assert!(
+            render(&fetched).contains("https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro"),
+            "the IFDB URL renders once present"
+        );
+    }
+
+    /// A long blurb wraps to the panel's content width and, when it overflows
+    /// the panel height, scrolls with the SAME `panel_scroll`/`panel_max`
+    /// mechanism as the rest of the info panel (no second scroll system).
+    #[test]
+    fn info_panel_blurb_wraps_and_participates_in_panel_scroll() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let mut meta = minimal_story_meta();
+        meta.description = Some(
+            "one two three four five six seven eight nine ten eleven twelve \
+             thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty"
+                .into(),
+        );
+        // Narrow + short so the wrapped blurb both wraps to multiple lines and
+        // overflows the panel height.
+        let area = Rect::new(0, 0, 20, 8);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("game.gblorb");
+        let max_scroll = super::draw_info_panel(
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+        );
+        assert!(max_scroll > 0, "a long wrapped blurb should overflow an 8-row panel");
+        let text_top = buffer_to_string(&buf, area);
+        assert!(!text_top.contains("twenty"), "late blurb word should be offscreen at scroll 0: {text_top:?}");
+
+        let mut buf2 = Buffer::empty(area);
+        let max_scroll2 = super::draw_info_panel(
+            "Game", "game.gblorb", &meta, None, max_scroll, area, None, &mut cover, entry_path, false, &cs, &mut buf2,
+        );
+        assert_eq!(max_scroll2, max_scroll, "max_scroll must be stable across scroll positions");
+        let text_scrolled = buffer_to_string(&buf2, area);
+        assert!(text_scrolled.contains("twenty"), "late blurb word should be visible once scrolled: {text_scrolled:?}");
     }
 
     #[test]
@@ -1121,5 +2031,194 @@ mod tests {
         assert!(list_area.width < area.width);
         assert!(panel_area.width >= super::PANEL_MIN_W);
         let _ = (&stories, &badges, &glyphs, &cs, &mut buf, &mut list);
+    }
+
+    // ── SQ-0348: fetch-progress wiring ──────────────────────────────────────────
+    //
+    // `run_story_picker` itself can't be unit-tested (it owns a real terminal),
+    // so these exercise the pieces the loop wires together: `resort_list`
+    // (the caches stay index-aligned with `stories`), the progress-line
+    // overlay, and — the important one — a simulated `Fetcher` sweep driving
+    // `resolve_entry` + `resort_preserving_selection` exactly as the loop's
+    // drain handler does, proving the selection survives titles landing mid-sweep.
+
+    /// Minimal valid v3 story bytes (mirrors `picker.rs`'s private test fixture
+    /// of the same name — not reusable across modules, so duplicated here).
+    fn minimal_v3_story() -> Vec<u8> {
+        let mut buf = vec![0u8; 0x0800];
+        buf[0x00] = 3;
+        buf[0x04] = 0x00; buf[0x05] = 0x40;
+        buf[0x06] = 0x00; buf[0x07] = 0x40;
+        buf[0x0A] = 0x00; buf[0x0B] = 0x80;
+        buf[0x0C] = 0x01; buf[0x0D] = 0x00;
+        buf[0x0E] = 0x03; buf[0x0F] = 0x00;
+        buf[0x08] = 0x04; buf[0x09] = 0x00;
+        buf[0x18] = 0x00; buf[0x19] = 0x60;
+        buf[0x0080] = 0; buf[0x0081] = 4; buf[0x0082] = 0; buf[0x0083] = 0;
+        buf
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let mut d = std::env::temp_dir();
+        d.push(format!("babelmap-picker-ui-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn resort_list_keeps_row_badges_and_aux_cache_aligned_with_the_new_order() {
+        let stories_dir = temp_dir("resort-align");
+        std::fs::write(stories_dir.join("a.z5"), minimal_v3_story()).unwrap();
+        let mut b_bytes = minimal_v3_story();
+        b_bytes[0x12] = b'9'; // distinct serial → distinct IFID from a.z5
+        std::fs::write(stories_dir.join("b.z5"), b_bytes).unwrap();
+        let data_base = temp_dir("resort-align-data");
+        let hint_index = app::hints::load_hint_index(&data_base);
+
+        let mut stories = app::picker::scan_stories(&stories_dir, &data_base);
+        assert_eq!(stories.len(), 2);
+        let mut row_badges: Vec<app::picker::RowBadges> = stories
+            .iter()
+            .map(|e| app::picker::compute_row_badges(e, &data_base, &hint_index))
+            .collect();
+        let mut aux_cache: Vec<Option<app::picker::StoryAux>> = vec![Some(app::picker::resolve_aux(
+            &stories[0],
+            &data_base,
+            &hint_index,
+        ))];
+        aux_cache.push(None);
+        let selected_path = stories[0].path.clone();
+
+        let new_idx = super::resort_list(
+            &mut stories,
+            0,
+            app::picker::Sort { key: app::picker::SortKey::Title, desc: true },
+            &mut row_badges,
+            &mut aux_cache,
+            &data_base,
+            &hint_index,
+        );
+
+        assert_eq!(stories[new_idx].path, selected_path, "selection follows its story");
+        assert_eq!(row_badges.len(), stories.len(), "row_badges stays index-aligned");
+        assert_eq!(aux_cache.len(), stories.len(), "aux_cache stays index-aligned");
+        assert!(aux_cache.iter().all(Option::is_none), "a reorder invalidates every cached aux slot");
+
+        let _ = std::fs::remove_dir_all(&stories_dir);
+        let _ = std::fs::remove_dir_all(&data_base);
+    }
+
+    #[test]
+    fn progress_line_overlays_the_footer_row() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        // Pre-fill the footer row with something the overlay must fully replace,
+        // proving it clears trailing characters rather than just prefixing.
+        for x in area.left()..area.right() {
+            if let Some(c) = buf.cell_mut((x, area.bottom() - 1)) {
+                c.set_symbol("#");
+            }
+        }
+        super::draw_progress_line(&mut buf, area, "Fetching 7/23 — Zork I", cs.story_header_active);
+        let row = row_text(&buf, area.bottom() - 1, area);
+        assert!(row.contains("Fetching 7/23 — Zork I"), "{row:?}");
+        assert!(!row.contains('#'), "the overlay must clear the whole row, not just prefix it: {row:?}");
+        let cell = buf.cell((area.left(), area.bottom() - 1)).unwrap();
+        assert_eq!(
+            Some(cell.fg), cs.story_header_active.fg,
+            "progress line must use a themed style, not a hard-coded color"
+        );
+    }
+
+    /// A `MetadataSource` fake local to this module (the one in
+    /// `fetch_worker`'s tests is private to that module) — canned responses
+    /// keyed by IFID, never touching the network.
+    struct FakeSource {
+        title_by_ifid: std::collections::HashMap<String, String>,
+    }
+
+    impl app::ifdb::MetadataSource for FakeSource {
+        fn fetch(&self, ifid: &str) -> Result<app::ifdb::FetchOutcome, app::ifdb::FetchError> {
+            match self.title_by_ifid.get(ifid) {
+                Some(title) => Ok(app::ifdb::FetchOutcome::Found(Box::new(app::ifiction::IFiction {
+                    title: Some(title.clone()),
+                    ..Default::default()
+                }))),
+                None => Ok(app::ifdb::FetchOutcome::NotFound),
+            }
+        }
+        fn fetch_cover(&self, _url: &str) -> Result<Vec<u8>, app::ifdb::FetchError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// THE highest-value integration test in this task: drives a real
+    /// `Fetcher` (with a fake source, zero delay) over two stories, then runs
+    /// the exact same drain-handling pipeline the picker loop uses —
+    /// `resolve_entry` to pick up the freshly-written sidecar, then
+    /// `resort_preserving_selection` — and checks the selection followed its
+    /// story through a title-driven reorder, not its index.
+    #[test]
+    fn a_simulated_sweep_lands_new_titles_and_the_selection_follows_its_story() {
+        let stories_dir = temp_dir("sweep");
+        // "zork2.z5" starts as a bare stem title that sorts LAST (after the
+        // untouched "other.z5" control story); the sweep gives it a fetched
+        // title that sorts FIRST, so a naive index-based cursor would end up
+        // pointing at the wrong (unrelated) story once the sweep lands.
+        std::fs::write(stories_dir.join("other.z5"), minimal_v3_story()).unwrap();
+        let mut b_bytes = minimal_v3_story();
+        b_bytes[0x12] = b'9';
+        std::fs::write(stories_dir.join("zork2.z5"), b_bytes.clone()).unwrap();
+        let data_base = temp_dir("sweep-data");
+
+        let mut stories = app::picker::scan_stories(&stories_dir, &data_base);
+        assert_eq!(stories.len(), 2);
+        let selected = stories.iter().position(|e| e.path.ends_with("zork2.z5")).unwrap();
+        let ifid_b = stories[selected].meta.ifid.clone();
+
+        let mut title_by_ifid = std::collections::HashMap::new();
+        title_by_ifid.insert(ifid_b, "AAA Brand New Title".to_string());
+        let fetcher = app::fetch_worker::Fetcher::new(
+            Box::new(FakeSource { title_by_ifid }),
+            data_base.clone(),
+            std::time::Duration::ZERO,
+        );
+        let order: Vec<(std::path::PathBuf, String)> =
+            stories.iter().map(|e| (e.path.clone(), e.meta.ifid.clone())).collect();
+        fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: true });
+
+        // Bounded drain (mirrors fetch_worker's own test pattern): collect
+        // progress until both stories report in, or give up after ~2s.
+        let mut progress = Vec::new();
+        for _ in 0..2000 {
+            progress.extend(fetcher.drain());
+            if progress.len() >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(progress.len(), 2, "both stories must report a completed fetch");
+
+        // Exactly what the picker loop's drain handler does per progress item.
+        for p in &progress {
+            if let Some(fresh) = app::picker::resolve_entry(&p.path, &data_base) {
+                if let Some(slot) = stories.iter_mut().find(|e| e.path == p.path) {
+                    *slot = fresh;
+                }
+            }
+        }
+        assert_eq!(stories[selected].title, "AAA Brand New Title", "the sidecar write landed");
+
+        let new_idx =
+            app::picker::resort_preserving_selection(&mut stories, selected, app::picker::Sort::default());
+        assert_eq!(new_idx, 0, "the new title now sorts first");
+        assert!(stories[new_idx].path.ends_with("zork2.z5"), "selection followed its story, not its old index");
+        assert_eq!(stories[new_idx].title, "AAA Brand New Title");
+
+        let _ = std::fs::remove_dir_all(&stories_dir);
+        let _ = std::fs::remove_dir_all(&data_base);
     }
 }
