@@ -223,16 +223,31 @@ impl Blorb {
     pub fn has_sounds(&self) -> bool {
         self.resources().iter().any(|r| &r.usage == b"Snd ")
     }
+
+    /// True if this Blorb carries any `Pict` image resource.
+    pub fn has_pictures(&self) -> bool {
+        self.resources().iter().any(|r| &r.usage == b"Pict")
+    }
+
+    /// True if this Blorb embeds its own `Exec` executable — i.e. it is a
+    /// self-contained game rather than a resource-only sidecar.
+    pub fn has_executable(&self) -> bool {
+        self.resources().iter().any(|r| &r.usage == b"Exec")
+    }
 }
 
-/// Read + parse `path` into a Blorb only if it is a Blorb that carries sounds.
-fn read_sound_blorb(path: &std::path::Path) -> Option<Blorb> {
+/// Read + parse `path` into a Blorb only if it is a story's resource *sidecar*:
+/// a Blorb that carries resources but embeds no `Exec` of its own. We don't
+/// filter by resource type — sounds, images, and data are all shown — but a
+/// blorb that is itself a game (has an `Exec`) is a different story, not this
+/// one's sidecar, so it is excluded from the sibling scan.
+fn read_resource_blorb(path: &std::path::Path) -> Option<Blorb> {
     let bytes = std::fs::read(path).ok()?;
     if !Blorb::is_blorb(&bytes) {
         return None;
     }
     let b = Blorb::parse(bytes).ok()?;
-    if b.has_sounds() {
+    if !b.resources().is_empty() && !b.has_executable() {
         Some(b)
     } else {
         None
@@ -248,7 +263,7 @@ fn common_prefix_len(a: &str, b: &str) -> usize {
 /// prefix — but only if that prefix is >=3 chars and no other candidate ties
 /// it (a tie for the longest is a real collision, so return `None` rather than
 /// pick by directory order). `None` if nothing reaches 3. Shared by
-/// [`resolve_sound_blorb`]'s directory scan and [`sibling_blorb_by_name`] so the
+/// [`resolve_resource_blorb`]'s directory scan and [`sibling_blorb_by_name`] so the
 /// prefix/ambiguity rule lives in one place.
 fn best_unambiguous_prefix<T>(candidates: Vec<(usize, T)>) -> Option<T> {
     let max_plen = candidates.iter().map(|(plen, _)| *plen).filter(|plen| *plen >= 3).max()?;
@@ -261,15 +276,16 @@ fn best_unambiguous_prefix<T>(candidates: Vec<(usize, T)>) -> Option<T> {
     }
 }
 
-/// Resolve the Blorb holding a story's sound resources, plus the path it was
-/// read from, or `None`.
+/// Resolve the Blorb holding a story's media resources (sounds and/or
+/// pictures), plus the path it was read from, or `None`.
 ///
 /// Order: (1) the story file itself if it is a Blorb; (2) a same-stem
-/// `<story>.blb`/`.blorb` sibling with sounds; (3) a directory-scan fallback
-/// over blorb-extension files that carry `Snd ` resources, picking the best
-/// stem-prefix match (>=3 chars) or the sole candidate — else `None`
-/// (ambiguous ⇒ no sound rather than the wrong game's sound).
-pub fn resolve_sound_blorb(
+/// `<story>.blb`/`.blorb` sibling with resources; (3) a directory-scan fallback
+/// over blorb-extension files that carry `Snd `/`Pict` resources, picking the
+/// best stem-prefix match (>=3 chars) or the sole candidate — else `None`
+/// (ambiguous ⇒ no resources rather than the wrong game's). Not sound-only:
+/// image-only sidecars (e.g. Beyond Zork's `beyondzork.blb`) resolve too.
+pub fn resolve_resource_blorb(
     story_path: &std::path::Path,
 ) -> Option<(Blorb, std::path::PathBuf)> {
     // 1. Story file is itself a Blorb.
@@ -284,12 +300,12 @@ pub fn resolve_sound_blorb(
     for ext in ["blb", "blorb"] {
         let cand = story_path.with_extension(ext);
         if cand != story_path && cand.exists() {
-            if let Some(b) = read_sound_blorb(&cand) {
+            if let Some(b) = read_resource_blorb(&cand) {
                 return Some((b, cand));
             }
         }
     }
-    // 3. Directory-scan fallback (blorb-extension files with sounds only).
+    // 3. Directory-scan fallback (blorb-extension files with resources only).
     let dir = story_path.parent()?;
     let story_stem = story_path
         .file_stem()?
@@ -312,7 +328,7 @@ pub fn resolve_sound_blorb(
         if !ext_ok {
             continue;
         }
-        let Some(b) = read_sound_blorb(&path) else {
+        let Some(b) = read_resource_blorb(&path) else {
             continue;
         };
         let cand_stem = path
@@ -322,9 +338,9 @@ pub fn resolve_sound_blorb(
         let plen = common_prefix_len(&story_stem, &cand_stem);
         candidates.push((plen, (b, path)));
     }
-    // A sole sound blorb in the directory is it, even with an unrelated name
-    // (has_sounds already vouched for it); otherwise require an unambiguous
-    // stem-prefix match so we never grab the wrong game's sounds.
+    // A sole resource blorb in the directory is it, even with an unrelated name
+    // (having resources already vouched for it); otherwise require an
+    // unambiguous stem-prefix match so we never grab the wrong game's resources.
     if candidates.len() == 1 {
         return Some(candidates.pop().unwrap().1);
     }
@@ -333,11 +349,11 @@ pub fn resolve_sound_blorb(
 
 /// The associated resource-blorb sibling of `story_path`, matched by FILENAME
 /// ONLY (no file read), for the cheap per-row "(blorb)" tag which can't afford
-/// to parse every blorb. Same match order as [`resolve_sound_blorb`]: an exact
+/// to parse every blorb. Same match order as [`resolve_resource_blorb`]: an exact
 /// same-stem `.blb`/`.blorb`/`.zblorb` sibling first, else the best
 /// unambiguous stem-prefix (>=3 chars) match among the directory's resource
 /// blorbs — `None` if there is none or the longest prefix is a tie. Unlike
-/// `resolve_sound_blorb` it does not verify the file has sounds, so it lights
+/// `resolve_resource_blorb` it does not verify the file has sounds, so it lights
 /// for any associated resource blorb (e.g. a graphics-only one).
 pub fn sibling_blorb_by_name(
     story_path: &std::path::Path,
@@ -376,7 +392,7 @@ pub fn sibling_blorb_by_name(
             .unwrap_or_default();
         candidates.push((common_prefix_len(&story_stem, &cand_stem), path));
     }
-    // Unlike resolve_sound_blorb there is no sole-candidate fallback: without a
+    // Unlike resolve_resource_blorb there is no sole-candidate fallback: without a
     // has_sounds check, a lone unrelated blorb must not light every story's tag.
     best_unambiguous_prefix(candidates)
 }
@@ -701,7 +717,7 @@ mod tests {
         assert!(blorb.resources().iter().any(|r| &r.usage == b"Exec"));
     }
 
-    // ── resolve_sound_blorb / has_sounds ────────────────────────────────────
+    // ── resolve_resource_blorb / has_sounds ────────────────────────────────────
 
     /// RAII guard that removes a temp directory (and its contents) on drop.
     struct TempDir(std::path::PathBuf);
@@ -734,23 +750,69 @@ mod tests {
         sound_blorb_tagged(b"aiffdata")
     }
 
-    /// A sound Blorb whose `Snd ` payload is exactly `tag`, so tests can tell
-    /// which file the resolver actually picked among several candidates. Uses an
-    /// `OGGV` chunk (not `FORM`) so `sound()` returns the payload verbatim — a
-    /// `FORM` resource would retain its 8-byte header (see `sound()`).
+    /// A resource-only sound sidecar (a `Snd ` resource, no `Exec` — a real
+    /// sidecar is not a game of its own). The `Snd ` payload is exactly `tag`,
+    /// so tests can tell which file the resolver picked among several candidates.
+    /// Uses an `OGGV` chunk (not `FORM`) so `sound()` returns the payload
+    /// verbatim — a `FORM` resource would retain its 8-byte header (see `sound()`).
     fn sound_blorb_tagged(tag: &[u8]) -> Vec<u8> {
-        build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd"), (b"Snd ", 1, b"OGGV", tag)])
+        build_blorb(&[(b"Snd ", 1, b"OGGV", tag)])
+    }
+
+    /// A self-contained game Blorb (has an `Exec`) — NOT a sidecar. The sibling
+    /// scan must skip these so a story next to an unrelated game isn't paired
+    /// with it.
+    fn game_blorb() -> Vec<u8> {
+        build_blorb(&[(b"Exec", 0, b"ZCOD", b"abcd"), (b"Snd ", 1, b"OGGV", b"x")])
+    }
+
+    /// A picture-only Blorb (one `Pict` resource, no `Snd `), mirroring a
+    /// graphics sidecar like Beyond Zork's `beyondzork.blb`.
+    fn pict_blorb() -> Vec<u8> {
+        build_blorb(&[(b"Pict", 1, b"PNG ", b"fakepngdata")])
+    }
+
+    #[test]
+    fn resolve_finds_picture_only_sidecar() {
+        // SQ-0372: a no-sound game (Beyond Zork) ships an images-only resource
+        // blorb with a different stem; the resolver must accept it rather than
+        // gate on has_sounds() and miss it.
+        let dir = TempDir::new("pict-only");
+        let story = dir.join("beyondzork-r57-s871221.z5");
+        std::fs::write(&story, b"not a blorb").unwrap();
+        let sibling = dir.join("beyondzork.blb");
+        std::fs::write(&sibling, pict_blorb()).unwrap();
+
+        let (b, path) = resolve_resource_blorb(&story).expect("images-only sidecar resolves");
+        assert!(!b.has_sounds() && b.has_pictures(), "picture-only blorb");
+        assert_eq!(path, sibling);
     }
 
     #[test]
     fn resolve_prefers_story_that_is_itself_a_blorb() {
+        // The story file itself is a self-contained game blorb (has Exec); step 1
+        // returns it directly — the not-a-game sibling gate never applies here.
         let dir = TempDir::new("self-blorb");
         let game = dir.join("game.blb");
-        std::fs::write(&game, sound_blorb()).unwrap();
+        std::fs::write(&game, game_blorb()).unwrap();
 
-        let (b, path) = resolve_sound_blorb(&game).expect("resolves the story's own Blorb");
+        let (b, path) = resolve_resource_blorb(&game).expect("resolves the story's own Blorb");
         assert!(b.has_sounds());
         assert_eq!(path, game);
+    }
+
+    #[test]
+    fn resolve_skips_a_sibling_that_is_itself_a_game() {
+        // A prefix-matching sibling that embeds its own Exec is a different game,
+        // not this story's resource sidecar — it must not be paired.
+        let dir = TempDir::new("game-sibling");
+        let story = dir.join("zork1.z3");
+        std::fs::write(&story, b"not a blorb").unwrap();
+        std::fs::write(dir.join("zork1-sequel.blorb"), game_blorb()).unwrap();
+        assert!(
+            resolve_resource_blorb(&story).is_none(),
+            "an Exec-bearing sibling is a game, not a sidecar"
+        );
     }
 
     #[test]
@@ -761,7 +823,7 @@ mod tests {
         let sibling = dir.join("game.blb");
         std::fs::write(&sibling, sound_blorb()).unwrap();
 
-        let (b, path) = resolve_sound_blorb(&story).expect("resolves the same-stem sibling");
+        let (b, path) = resolve_resource_blorb(&story).expect("resolves the same-stem sibling");
         assert!(b.has_sounds());
         assert_eq!(path, sibling);
     }
@@ -776,7 +838,7 @@ mod tests {
         let unrelated = dir.join("arthur.blb");
         std::fs::write(&unrelated, sound_blorb_tagged(b"arthur-data")).unwrap();
 
-        let (b, path) = resolve_sound_blorb(&story).expect("resolves the prefix-matching blorb");
+        let (b, path) = resolve_resource_blorb(&story).expect("resolves the prefix-matching blorb");
         assert!(b.has_sounds());
         assert_eq!(
             b.sound(1).unwrap().0,
@@ -797,7 +859,7 @@ mod tests {
         std::fs::write(dir.join("lurking-sounds.blorb"), sound_blorb_tagged(b"a")).unwrap();
         std::fs::write(dir.join("lurking-audio.blorb"), sound_blorb_tagged(b"b")).unwrap();
         assert!(
-            resolve_sound_blorb(&story).is_none(),
+            resolve_resource_blorb(&story).is_none(),
             "tie for longest prefix must be ambiguous"
         );
     }
@@ -857,7 +919,7 @@ mod tests {
         std::fs::write(dir.join("foo.blb"), sound_blorb()).unwrap();
         std::fs::write(dir.join("bar.blorb"), sound_blorb()).unwrap();
 
-        assert!(resolve_sound_blorb(&story).is_none());
+        assert!(resolve_resource_blorb(&story).is_none());
     }
 
     #[test]
@@ -866,7 +928,7 @@ mod tests {
         let story = dir.join("plain.z5");
         std::fs::write(&story, b"not a blorb").unwrap();
 
-        assert!(resolve_sound_blorb(&story).is_none());
+        assert!(resolve_resource_blorb(&story).is_none());
     }
 
     #[test]

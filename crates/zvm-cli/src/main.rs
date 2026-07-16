@@ -824,7 +824,7 @@ fn main() {
     aux_preload(&mut machine, &aux_file, args.no_aux);
 
     let mut sound: Option<CliSound> = if sound_enabled {
-        let blorb = match blorb::resolve_sound_blorb(&story_path) {
+        let blorb = match blorb::resolve_resource_blorb(&story_path) {
             Some((b, path)) => {
                 eprintln!("zvm: loaded sound resources from {}", path.display());
                 Some(b)
