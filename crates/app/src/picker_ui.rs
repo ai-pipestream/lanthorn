@@ -1069,6 +1069,11 @@ pub(crate) fn run_story_picker(
     chosen
 }
 
+/// Per-row hit-rects (row index, rect) for mouse selection.
+type RowHitRects = Vec<(usize, Rect)>;
+/// Column-header hit-rects (sort key, rect) for click-to-sort.
+type HeaderHitRects = Vec<(app::picker::SortKey, Rect)>;
+
 /// Draw the story-picker screen. Returns the per-row hit-rects (index, rect)
 /// for mouse selection, the row count, and the column-header hit-rects
 /// (Task 9 hit-tests these for click-to-sort).
@@ -1082,7 +1087,7 @@ fn draw_story_picker(
     sort: app::picker::Sort,
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
-) -> (Vec<(usize, Rect)>, usize, Vec<(app::picker::SortKey, Rect)>) {
+) -> (RowHitRects, usize, HeaderHitRects) {
     use app::picker::SortKey;
     use ratatui::style::{Color, Style};
     let selected = list.selected;

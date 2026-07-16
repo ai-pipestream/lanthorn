@@ -2707,8 +2707,8 @@ impl AppState {
         // Resolve per char: (bits, fg, bg, link, glk_style). Unstyled chars take the fill.
         let mut per: Vec<(u8, u32, u32, u32, u8)> = vec![(0, fg, bg, 0, 0); len];
         for r in self.transcript_runs.get(idx).cloned().unwrap_or_default() {
-            for c in r.start..r.end.min(len) {
-                per[c] = (
+            for item in per.iter_mut().take(r.end.min(len)).skip(r.start) {
+                *item = (
                     r.bits,
                     if r.fg != 0 { r.fg } else { fg },
                     if r.bg != 0 { r.bg } else { bg },

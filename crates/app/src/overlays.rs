@@ -309,9 +309,7 @@ impl Overlay for AuxOverlay {
         let in_archive = ad.archive.is_some_and(|r| r.contains(pt));
         let in_global = ad.global.is_some_and(|r| r.contains(pt));
         let in_dialog = ad.area.contains(pt);
-        if in_close || (!in_archive && !in_global && !in_dialog) {
-            OverlayOutcome::Act(OverlayAct::AuxArchive)
-        } else if in_archive {
+        if in_close || in_archive || (!in_global && !in_dialog) {
             OverlayOutcome::Act(OverlayAct::AuxArchive)
         } else if in_global {
             OverlayOutcome::Act(OverlayAct::AuxGlobal)
@@ -620,6 +618,7 @@ mod tests {
         assert!(topmost_common_dialog(&ov).is_none());
 
         // Each overlay alone resolves to itself, in ladder order.
+        #[allow(clippy::type_complexity)]
         let cases: &[(fn(&mut OverlayState), OverlayKind)] = &[
             (|o| o.aux_prompt = true, OverlayKind::Aux),
             (|o| o.reset_dialog = true, OverlayKind::Reset),

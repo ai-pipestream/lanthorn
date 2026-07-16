@@ -1155,7 +1155,7 @@ mod tests {
         sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
         // Alphabetically: Anchorhead(0), Curses(1), zork2-r63-s860811(2) (case-fold
         // puts the lowercase stem after the capitalized titles).
-        let selected = stories.iter().position(|e| e.path == PathBuf::from("b.z5")).unwrap();
+        let selected = stories.iter().position(|e| e.path == *"b.z5").unwrap();
         assert_eq!(selected, 2);
 
         // The sweep just fetched this story's real title — one that now sorts

@@ -2404,10 +2404,10 @@ fn main() {
 
 // ── Reset helper ──────────────────────────────────────────────────────────────
 
-/// Rebuild the session from `story_bytes`, reset all ephemeral state, and
-/// re-seed the mapper with the start room.  When `clear_map` is true, the
-/// accumulated map is wiped first (same effect as `/reset map`) so only the
-/// start room remains after the re-seed.
+// Rebuild the session from `story_bytes`, reset all ephemeral state, and
+// re-seed the mapper with the start room.  When `clear_map` is true, the
+// accumulated map is wiped first (same effect as `/reset map`) so only the
+// start room remains after the re-seed.
 
 /// Resolve the Pict/graphics blorb for a story the same way at launch and
 /// restart: path-based (self-contained blorb, same-stem sidecar, or dir scan).
@@ -2782,12 +2782,10 @@ mod tests {
             saved_at: ts.to_string(),
             is_default: false,
         };
-        let mut v = vec![
-            mk("old", "2026-06-01T10:00:00Z"),
+        let mut v = [mk("old", "2026-06-01T10:00:00Z"),
             mk("legacy", ""),
             mk("new", "2026-07-09T12:00:00Z"),
-            mk("mid", "2026-06-30T08:00:00Z"),
-        ];
+            mk("mid", "2026-06-30T08:00:00Z")];
         // Same comparator combined_saves uses (RFC3339 sorts chronologically).
         v.sort_by(|a, b| b.saved_at.cmp(&a.saved_at));
         let order: Vec<&str> = v.iter().map(|s| s.name.as_str()).collect();
@@ -2871,6 +2869,7 @@ mod tests {
         // pictures OR sounds (SQ-0372), so a graphics-only sidecar like Beyond
         // Zork's `beyondzork.blb` resolves without needing a dummy Snd entry.
         fn build_sidecar_blorb(png: &[u8]) -> Vec<u8> {
+            #[allow(clippy::type_complexity)]
             let res: [(&[u8; 4], u32, &[u8; 4], &[u8]); 1] =
                 [(b"Pict", 0, b"PNG ", png)];
             let ridx_data_len = 4 + 12 * res.len();

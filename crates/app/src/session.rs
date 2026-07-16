@@ -67,9 +67,12 @@ pub struct FilenameReq {
 /// `para` is the paragraph layout format (always [`ParaFmt::default`] on the
 /// Z-machine path — the Glulx buffer path is the only source of non-default
 /// layout, carried via [`crate::glk_backend::AppGlk::take_transcript_elems`]).
+/// One captured `(char_count, text_style_bits, fg, bg, link, para, ...)` chunk.
+type CaptureRun = (usize, u8, ZColour, ZColour, u32, ParaFmt, u8);
+
 pub struct CaptureSink {
     pub text: String,
-    pub runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)>,
+    pub runs: Vec<CaptureRun>,
 }
 
 impl CaptureSink {
@@ -78,7 +81,7 @@ impl CaptureSink {
     }
 
     /// Drain accumulated text and style runs together, leaving both empty.
-    pub fn take_styled(&mut self) -> (String, Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)>) {
+    pub fn take_styled(&mut self) -> (String, Vec<CaptureRun>) {
         (std::mem::take(&mut self.text), std::mem::take(&mut self.runs))
     }
 

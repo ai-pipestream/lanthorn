@@ -982,8 +982,8 @@ mod tests {
         for i in [1usize, 2, 3, 5, 6, 7, 9, 10] {
             assert_eq!(styles[0][i], GlkStyleColour::default(), "buffer slot {i} inherits");
         }
-        for i in 0..11 {
-            assert_eq!(styles[1][i], GlkStyleColour::default(), "grid slot {i} inherits (row 1 unseeded)");
+        for (i, slot) in styles[1].iter().enumerate() {
+            assert_eq!(*slot, GlkStyleColour::default(), "grid slot {i} inherits (row 1 unseeded)");
         }
     }
 

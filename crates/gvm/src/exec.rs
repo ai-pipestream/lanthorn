@@ -7194,7 +7194,7 @@ mod tests {
         let mut body_chunks = Vec::new();
         push_chunk(&mut body_chunks, b"IFhd", &ifhd);
         push_chunk(&mut body_chunks, b"UMem", &umem_body);
-        push_chunk(&mut body_chunks, b"Stks", &m.stack[..m.sp].to_vec());
+        push_chunk(&mut body_chunks, b"Stks", &m.stack[..m.sp]);
         push_chunk(&mut body_chunks, b"MAll", &[]);
         let mut blob = Vec::new();
         blob.extend_from_slice(b"FORM");

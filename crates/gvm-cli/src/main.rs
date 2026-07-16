@@ -169,13 +169,12 @@ fn read_line_raw(is_tty: bool, echo: LineEcho) -> (String, u32) {
                     echoed += 1;
                     let _ = io::Write::flush(&mut io::stdout());
                 }
-                KeyCode::Backspace => {
-                    if buf.pop().is_some() {
+                KeyCode::Backspace
+                    if buf.pop().is_some() => {
                         print!("\x08 \x08");
                         echoed = echoed.saturating_sub(1);
                         let _ = io::Write::flush(&mut io::stdout());
                     }
-                }
                 _ => {} // other special keys consumed (no on-screen garbage)
             },
             Ok(Event::Resize(..)) => {} // caught by next before_input size poll

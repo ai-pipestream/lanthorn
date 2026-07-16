@@ -31,7 +31,7 @@ const N_COUNT: u32 = V_COUNT * T_COUNT; // 588
 const S_COUNT: u32 = L_COUNT * N_COUNT; // 11172
 
 fn is_hangul_syllable(cp: u32) -> bool {
-    cp >= S_BASE && cp < S_BASE + S_COUNT
+    (S_BASE..S_BASE + S_COUNT).contains(&cp)
 }
 
 /// The Unicode titlecase mapping of `cp`, but only where it differs from the
@@ -133,11 +133,10 @@ fn compose_pair(a: u32, b: u32) -> Option<u32> {
         return Some(S_BASE + (l_index * V_COUNT + v_index) * T_COUNT);
     }
     // Hangul LV + T
-    if is_hangul_syllable(a) && (a - S_BASE) % T_COUNT == 0 {
-        if (T_BASE + 1..T_BASE + T_COUNT).contains(&b) {
+    if is_hangul_syllable(a) && (a - S_BASE).is_multiple_of(T_COUNT)
+        && (T_BASE + 1..T_BASE + T_COUNT).contains(&b) {
             return Some(a + (b - T_BASE));
         }
-    }
     let key = ((a as u64) << 21) | b as u64;
     match t::COMPOSE_KEYS.binary_search(&key) {
         Ok(i) => Some(t::COMPOSE_VALS[i]),

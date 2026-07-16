@@ -261,7 +261,7 @@ fn append_borders(out: &mut String, tree: &WinTree) {
                 // Horizontal rule across the reserved gutter row.
                 let row = rect.top + split + 1;
                 out.push_str(&format!("\x1b[{};{}H", row, rect.left + 1));
-                out.extend(std::iter::repeat(H_RULE).take(rect.width as usize));
+                out.extend(std::iter::repeat_n(H_RULE, rect.width as usize));
             } else {
                 // Vertical rule down the reserved gutter column.
                 let col = rect.left + split + 1;
