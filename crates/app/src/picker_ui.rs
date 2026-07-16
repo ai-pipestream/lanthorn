@@ -33,6 +33,9 @@ const COL_GAP: u16 = 2;
 const AUTHOR_COL_W: u16 = 20;
 const AUTHOR_MAX_W: u16 = 40;
 const YEAR_COL_W: u16 = 6;
+/// Interpreter/format column ("Z5", "Z5 (blorb)", "G3.1.2"): fixed width, sits
+/// just left of the badge cluster. `Z8 (blorb)` (10) is the widest (SQ-0369).
+const INTERP_COL_W: u16 = 10;
 const TITLE_MIN_W: u16 = 8;
 /// Title keeps this much before the author column is allowed to grow past its
 /// base width — title has priority for the shared space, so a long author name
@@ -78,6 +81,32 @@ fn compute_columns(text_w: u16, want_author_w: u16) -> ListColumns {
         ListColumns { title_w: cols_space - author_w, author_w, year_w: 0 }
     } else {
         ListColumns { title_w: avail, author_w: 0, year_w: 0 }
+    }
+}
+
+/// Short interpreter/format label for the story-list TYPE column, type letter
+/// plus the detected VM version: `Z<v>` for Z-code ("Z5", "Z3") and `G<v>` for
+/// Glulx ("G3.1.2", from the Glulx header version). A blorb-wrapped Z-machine
+/// story gets a " (blorb)" suffix ("Z5 (blorb)"), which subsumes the old B
+/// badge; Glulx is omitted since Glulx games are effectively always blorbed
+/// (SQ-0369). Bare "Z"/"Glulx" when the version is unknown.
+fn interp_label(meta: &app::picker::StoryMeta, blorb: bool) -> String {
+    match meta.engine {
+        app::picker::Engine::ZCode => {
+            let base = match meta.version.as_deref() {
+                Some(v) if !v.is_empty() => format!("Z{v}"),
+                _ => "Z".to_string(),
+            };
+            if blorb {
+                format!("{base} (blorb)")
+            } else {
+                base
+            }
+        }
+        app::picker::Engine::Glulx => match meta.version.as_deref() {
+            Some(v) if !v.is_empty() => format!("G{v}"),
+            _ => "Glulx".to_string(),
+        },
     }
 }
 
@@ -789,14 +818,17 @@ fn draw_story_picker(
 
     // Badge cluster width depends only on the configured glyphs, not the
     // entry, so it's computed once and reused both to size the text columns
-    // and to place each row's cluster.
-    let type_w = glyphs.zcode.chars().count().max(glyphs.glulx.chars().count()) as u16;
-    let blorb_w = glyphs.blorb.chars().count() as u16;
+    // and to place each row's cluster. Both the interpreter/format AND the
+    // blorb indicator moved into the TYPE column (SQ-0369: "Z5 (blorb)"), so
+    // the cluster is now just [save][hint].
     let save_w = glyphs.save.chars().count() as u16;
     let hint_w = glyphs.hint.chars().count() as u16;
-    let cluster_w = type_w + blorb_w + save_w + hint_w;
-    let badges_shown = cluster_w + 2 < row_w;
-    let badge_reserved = if badges_shown { cluster_w + 1 } else { 0 };
+    let cluster_w = save_w + hint_w;
+    // The TYPE column rides in the same right-hand zone as the badges, one gap
+    // to their left; both are shown together or dropped together.
+    let right_zone = INTERP_COL_W + COL_GAP + cluster_w;
+    let badges_shown = right_zone + 2 < row_w;
+    let badge_reserved = if badges_shown { right_zone + 1 } else { 0 };
     let text_w = row_w.saturating_sub(badge_reserved);
     // Widest author name across the WHOLE list (not just the visible page), so
     // the author column doesn't jump width as the user scrolls.
@@ -830,6 +862,12 @@ fn draw_story_picker(
         let year_hstyle = if year_active { cs.story_header_active } else { cs.story_header };
         draw_str_clipped(buf, year_x, header_y, &year_label, year_hstyle, area);
         header_rects.push((SortKey::Year, Rect::new(year_x, header_y, cols.year_w, 1)));
+    }
+    // TYPE column header, above the interpreter labels in the right-hand zone.
+    // Not sortable, so no header rect — just a dimmed label (SQ-0369).
+    if badges_shown {
+        let interp_hx = area.left() + row_w - 1 - cluster_w - COL_GAP - INTERP_COL_W;
+        draw_str_clipped(buf, interp_hx, header_y, "TYPE", cs.story_header, area);
     }
 
     for (i, entry) in stories.iter().enumerate().skip(first).take(rows) {
@@ -873,15 +911,20 @@ fn draw_story_picker(
             }
         }
 
-        // Right-aligned badge cluster: fixed columns for [type][blorb][save][hint],
-        // no separators, so present badges stay vertically aligned across rows.
+        // Right-hand zone: the TYPE column then the badge cluster
+        // [blorb][save][hint]. No separators within the cluster, so present
+        // badges stay vertically aligned across rows.
         let b = badges.get(i).copied().unwrap_or_default();
-        let type_glyph = match entry.meta.engine {
-            app::picker::Engine::ZCode => glyphs.zcode,
-            app::picker::Engine::Glulx => glyphs.glulx,
-        };
         if badges_shown {
             let bx = area.left() + row_w - 1 - cluster_w;
+            // TYPE column, one gap to the left of the badges. Plain colour (not
+            // the badge's reverse-block treatment); selection wins like the
+            // other text columns.
+            let interp_x = bx - COL_GAP - INTERP_COL_W;
+            let interp_txt =
+                truncate_to_width(&interp_label(&entry.meta, b.blorb), INTERP_COL_W as usize);
+            let interp_style = if sel { style } else { cs.story_badge };
+            draw_str_clipped(buf, interp_x, y, &interp_txt, interp_style, row_rect);
             // On the selection bar the plain badge fg (e.g. green) is low-contrast
             // against the highlight, so reverse it into a block: the badge colour
             // becomes the background and the selection bar's text colour the glyph
@@ -895,15 +938,11 @@ fn draw_story_picker(
             } else {
                 cs.story_badge
             };
-            draw_str_clipped(buf, bx, y, type_glyph, badge_style, row_rect);
-            if b.blorb {
-                draw_str_clipped(buf, bx + type_w, y, glyphs.blorb, badge_style, row_rect);
-            }
             if b.save {
-                draw_str_clipped(buf, bx + type_w + blorb_w, y, glyphs.save, badge_style, row_rect);
+                draw_str_clipped(buf, bx, y, glyphs.save, badge_style, row_rect);
             }
             if b.hint {
-                draw_str_clipped(buf, bx + type_w + blorb_w + save_w, y, glyphs.hint, badge_style, row_rect);
+                draw_str_clipped(buf, bx + save_w, y, glyphs.hint, badge_style, row_rect);
             }
         }
     }
@@ -1236,6 +1275,26 @@ fn feature_words(f: &app::picker::Features, aux: Option<&app::picker::StoryAux>)
 mod tests {
     // ── Story-picker row badges (type + present artifacts) ─────────────────────
 
+    #[test]
+    fn interp_label_formats_type_version_and_blorb() {
+        use app::picker::{Engine, Features, StoryMeta};
+        let meta = |engine: Engine, version: Option<&str>| StoryMeta {
+            size_bytes: 0, modified: None, engine, format: String::new(),
+            version: version.map(String::from), serial: None, release: None, ifid: String::new(),
+            features: Features::default(), self_blorb: None, author: None, year: None,
+            genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
+        };
+        // Z-code: "Z<v>", plus " (blorb)" only when blorb'd.
+        assert_eq!(super::interp_label(&meta(Engine::ZCode, Some("5")), false), "Z5");
+        assert_eq!(super::interp_label(&meta(Engine::ZCode, Some("3")), true), "Z3 (blorb)");
+        assert_eq!(super::interp_label(&meta(Engine::ZCode, None), false), "Z");
+        // Glulx: "G<v>", never a blorb suffix (Glulx is effectively always blorbed).
+        assert_eq!(super::interp_label(&meta(Engine::Glulx, Some("3.1.2")), true), "G3.1.2");
+        assert_eq!(super::interp_label(&meta(Engine::Glulx, None), false), "Glulx");
+        // Widest label fits the column.
+        assert!(super::interp_label(&meta(Engine::ZCode, Some("8")), true).len() <= super::INTERP_COL_W as usize);
+    }
+
     fn row_text(buf: &ratatui::buffer::Buffer, y: u16, area: ratatui::layout::Rect) -> String {
         (area.left()..area.right())
             .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
@@ -1309,10 +1368,15 @@ mod tests {
 
         let row0 = row_text(&buf, 2, area); // list starts at area.y + 2
         let row1 = row_text(&buf, 3, area);
-        assert!(row0.contains("ZBSH"), "adjacent, no separators: {row0:?}");
+        // Type AND blorb moved into the TYPE column (SQ-0369), so the badge
+        // cluster is just [save][hint], adjacent and no separators.
+        assert!(row0.contains("SH"), "save+hint adjacent, no type/blorb glyph: {row0:?}");
         assert!(row1.contains("S"), "got: {row1:?}");
-        assert!(!row1.contains("B"), "absent blorb omitted: {row1:?}");
         assert!(!row1.contains("H"), "absent hint omitted: {row1:?}");
+        // The blorb'd Z-code story shows "(blorb)" in its TYPE column; the Glulx
+        // story shows its interpreter label. Neither shows a B badge.
+        assert!(row0.contains("(blorb)"), "blorb'd Z story tagged in TYPE column: {row0:?}");
+        assert!(row1.contains("Glulx"), "Glulx story shows its type label: {row1:?}");
 
         // Fixed-slot alignment: the save glyph must land at the same column
         // in both rows regardless of which other artifacts are present.
@@ -1327,13 +1391,14 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect};
         let cs = app::colors::ColorScheme::terminal_default();
         let mut sym = app::config::SymbolConfig::default();
-        sym.badge_zcode = "z!".into();
-        sym.badge_blorb = "◆".into();
+        sym.badge_zcode = "z!".into();  // moved to the TYPE column (SQ-0369)
+        sym.badge_blorb = "◆".into();   // ditto, as " (blorb)"
+        sym.badge_save = "§".into();
         let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
 
         let stories = make_two_test_stories();
         let badges = vec![
-            app::picker::RowBadges { blorb: true, save: false, hint: false },
+            app::picker::RowBadges { blorb: true, save: true, hint: false },
             app::picker::RowBadges::default(),
         ];
         let mut list = app::list_scroll::ListScroll::new();
@@ -1343,7 +1408,13 @@ mod tests {
         super::draw_story_picker(&stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
                           &cs, app::picker::Sort::default(), area, &mut buf);
         let row0 = row_text(&buf, 2, area);
-        assert!(row0.contains("z!◆"), "configured glyphs used, no separators: {row0:?}");
+        // The configured save glyph is used for the artifact badge. Type and
+        // blorb are no longer badges (they're the TYPE column), so their
+        // configured glyphs must NOT appear as badges in the row.
+        assert!(row0.contains('§'), "configured save glyph used: {row0:?}");
+        assert!(!row0.contains("z!"), "type is the TYPE column now, not a badge: {row0:?}");
+        assert!(!row0.contains('◆'), "blorb is the TYPE column now, not a badge: {row0:?}");
+        assert!(row0.contains("(blorb)"), "blorb shown as a TYPE suffix instead: {row0:?}");
     }
 
     // ── Story-picker list: columns, header, sort ────────────────────────────────
@@ -1468,19 +1539,17 @@ mod tests {
         let badges = vec![app::picker::RowBadges::default()];
         let mut list = app::list_scroll::ListScroll::new();
         list.len(1);
-        let cluster_w: u16 = 4; // default glyphs: 1-col type + blorb + save + hint
 
-        // (width, author shown, year shown) — thresholds per compute_columns:
-        // year needs width >= 45, author needs width >= 37, below that:
-        // title + badges only. No width in between should show a gap: the
-        // badge cluster's column (checked below) never moves off its
-        // width-derived formula regardless of which text columns show.
+        // (width, author shown, year shown). Right zone = INTERP_COL_W(10) +
+        // COL_GAP(2) + cluster_w(save+hint=2) = 14, reserved 15; so avail =
+        // width - 17. year needs avail >= 38 (width >= 55); author needs avail
+        // >= 30 (width >= 47). Below that: title + right-zone only.
         for &(width, want_author, want_year) in &[
-            (60u16, true, true),
-            (45, true, true),
-            (44, true, false),
-            (37, true, false),
-            (36, false, false),
+            (70u16, true, true),
+            (55, true, true),
+            (54, true, false),
+            (47, true, false),
+            (46, false, false),
             (30, false, false),
         ] {
             let area = Rect::new(0, 0, width, 10);
@@ -1493,12 +1562,13 @@ mod tests {
             assert_eq!(row.contains("Michael S. Gentry"), want_author, "width {width}: {row:?}");
             assert_eq!(row.contains("1998"), want_year, "width {width}: {row:?}");
 
-            // Badges stay right-aligned at the same formula regardless of
-            // which text columns are shown — proves no gap opened in front
-            // of them as columns drop.
-            let bx = width - 1 - cluster_w;
-            let cell = buf.cell((bx, 2)).unwrap();
-            assert_eq!(cell.symbol(), "Z", "badge cluster must start at col {bx} for width {width}: {row:?}");
+            // The TYPE column stays right-aligned at a fixed offset regardless of
+            // which text columns show — proving no gap opened in front of the
+            // right-hand zone as columns drop. This story is ZCode/no-version/
+            // no-blorb, so its interpreter label is "Z".
+            let interp_x = width - 1 - 2 /*cluster*/ - super::COL_GAP - super::INTERP_COL_W;
+            let cell = buf.cell((interp_x, 2)).unwrap();
+            assert_eq!(cell.symbol(), "Z", "TYPE column at col {interp_x} for width {width}: {row:?}");
         }
     }
 
@@ -1523,10 +1593,11 @@ mod tests {
         assert!(!row0.contains(long_author), "long author must be truncated: {row0:?}");
         assert!(row0.contains('…'), "truncated author ends with an ellipsis: {row0:?}");
         assert!(row0.contains("1980"), "year column unaffected by the author overrun: {row0:?}");
-        let bx = 60u16 - 1 - 4;
+        // TYPE column ("Z" here) stays put at its fixed right-zone offset.
+        let interp_x = 60u16 - 1 - 2 - super::COL_GAP - super::INTERP_COL_W;
         assert_eq!(
-            buf.cell((bx, 2)).unwrap().symbol(), "Z",
-            "badge cluster unaffected by the author overrun"
+            buf.cell((interp_x, 2)).unwrap().symbol(), "Z",
+            "TYPE column unaffected by the author overrun"
         );
     }
 
