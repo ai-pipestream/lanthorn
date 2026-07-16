@@ -24,6 +24,7 @@ pub mod inline_image;
 pub mod inventory;
 pub mod export_dot;
 pub mod export_svg;
+pub mod fetch_worker;
 pub mod ifdb;
 pub mod ifiction;
 pub mod ifid;
