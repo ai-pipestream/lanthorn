@@ -283,6 +283,18 @@ pub struct ColorScheme {
     pub inline_image: Style,
     /// Story-picker row badge cluster (type badge + artifact letters); fg + bg.
     pub story_badge: Style,
+    /// Story-picker column header row (inactive sort column).
+    pub story_header: Style,
+    /// Story-picker column header row: the active sort column (shows its
+    /// direction arrow).
+    pub story_header_active: Style,
+    /// Story-picker row: author column text.
+    pub story_author: Style,
+    /// Story-picker row: year column text.
+    pub story_year: Style,
+    /// Story-picker row: "(no metadata yet)" placeholder shown in the author
+    /// column when a story has no fetched/embedded author.
+    pub story_no_metadata: Style,
     /// Map layer tab (inactive).
     pub map_layer_tab: Style,
     /// Map layer tab (active).
@@ -441,6 +453,11 @@ impl ColorScheme {
             graphics: Style::new().bg(Color::Black),
             inline_image: Style::new().bg(Color::Black),
             story_badge: Style::new().fg(Color::Blue),
+            story_header: Style::new().fg(Color::DarkGray),
+            story_header_active: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            story_author: Style::new().fg(Color::White),
+            story_year: Style::new().fg(Color::White),
+            story_no_metadata: Style::new().fg(Color::DarkGray),
             // The shown layer reads brighter than the others: inactive tabs are
             // dimmed, the active one is the bold accent colour. Both themeable.
             map_layer_tab: Style::new().fg(Color::DarkGray),
@@ -635,6 +652,11 @@ impl ColorScheme {
             graphics: Style::new().bg(bg),
             inline_image: Style::new().bg(bg),
             story_badge: Style::new().fg(scheme.palette[4]),
+            story_header: Style::new().fg(fg).add_modifier(Modifier::DIM),
+            story_header_active: Style::new().fg(scheme.palette[6]).add_modifier(Modifier::BOLD),
+            story_author: Style::new().fg(fg),
+            story_year: Style::new().fg(fg),
+            story_no_metadata: Style::new().fg(fg).add_modifier(Modifier::DIM),
             map_layer_tab: Style::new().fg(fg).add_modifier(Modifier::DIM),
             map_layer_tab_active: Style::new().fg(scheme.palette[6]).add_modifier(Modifier::BOLD),
             status_header: Style::new(),

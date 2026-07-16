@@ -12,6 +12,8 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::Terminal;
 
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use app::anim::PanelSlide;
 use app::render::draw_str_clipped;
 
@@ -21,6 +23,109 @@ use crate::{abbreviate_home, exit_if_terminated, restore_terminal};
 /// The panel refuses to open when the terminal is narrower than their sum.
 const LIST_MIN_W: u16 = 24;
 const PANEL_MIN_W: u16 = 28;
+
+/// Story-list row layout: the selection-marker glyph column, the gap between
+/// text columns, and each data column's target width. Year drops first as
+/// the row narrows, then author, leaving title + badges at the narrowest —
+/// see `compute_columns`.
+const ROW_MARKER_W: u16 = 2;
+const COL_GAP: u16 = 2;
+const AUTHOR_COL_W: u16 = 20;
+const YEAR_COL_W: u16 = 6;
+const TITLE_MIN_W: u16 = 8;
+
+/// Resolved column widths for one draw, given `text_w` — the row width left
+/// for marker+title+author+year once the badge cluster's fixed columns (and
+/// its lead-in gap) are excluded by the caller. Title always absorbs
+/// whatever space the shown columns don't use, so there is never a gap
+/// before the badges.
+struct ListColumns {
+    title_w: u16,
+    author_w: u16,
+    year_w: u16,
+}
+
+fn compute_columns(text_w: u16) -> ListColumns {
+    let avail = text_w.saturating_sub(ROW_MARKER_W);
+    let need_year = TITLE_MIN_W + COL_GAP + AUTHOR_COL_W + COL_GAP + YEAR_COL_W;
+    let need_author = TITLE_MIN_W + COL_GAP + AUTHOR_COL_W;
+    if avail >= need_year {
+        ListColumns {
+            title_w: avail - COL_GAP - AUTHOR_COL_W - COL_GAP - YEAR_COL_W,
+            author_w: AUTHOR_COL_W,
+            year_w: YEAR_COL_W,
+        }
+    } else if avail >= need_author {
+        ListColumns { title_w: avail - COL_GAP - AUTHOR_COL_W, author_w: AUTHOR_COL_W, year_w: 0 }
+    } else {
+        ListColumns { title_w: avail, author_w: 0, year_w: 0 }
+    }
+}
+
+/// Truncate `s` to at most `max_w` display columns (unicode display width,
+/// not char count — a CJK title is 2 cells per char and `chars().count()`
+/// would misalign every column to its right), appending `…` when it doesn't
+/// fit.
+fn truncate_to_width(s: &str, max_w: usize) -> String {
+    if max_w == 0 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(s) <= max_w {
+        return s.to_string();
+    }
+    if max_w == 1 {
+        return "…".to_string();
+    }
+    let target = max_w - 1; // room for the 1-wide ellipsis
+    let mut out = String::new();
+    let mut w = 0usize;
+    for ch in s.chars() {
+        let cw = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if w + cw > target {
+            break;
+        }
+        out.push(ch);
+        w += cw;
+    }
+    out.push('…');
+    out
+}
+
+/// Column header text plus whether it's the active sort column — the
+/// direction arrow is shown only on the active column.
+fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) -> (String, bool) {
+    if sort.key == key {
+        let arrow = if sort.desc { "▼" } else { "▲" };
+        (format!("{name} {arrow}"), true)
+    } else {
+        (name.to_string(), false)
+    }
+}
+
+/// Optional footer hint segments, most-important (least-guessable) first.
+/// Included left-to-right while they still fit next to the always-shown
+/// core hints; the rest are dropped — `PgUp/PgDn` goes first since it's a
+/// standard convention nobody needs told, `f`/`r` survive narrowest since
+/// they name behavior no key convention predicts.
+const FOOTER_OPTIONAL: [&str; 5] = ["f: fetch", "r: refresh", "s: sort", "d: reverse", "PgUp/PgDn"];
+
+fn build_footer(width: u16) -> String {
+    const CORE_LEFT: &str = " ↑/↓ or j/k: move";
+    const CORE_RIGHT: &str = "Enter / click: open   i/Tab: info   q / Esc: quit";
+    let mut footer = CORE_LEFT.to_string();
+    for seg in FOOTER_OPTIONAL {
+        let candidate = format!("{footer}   {seg}   {CORE_RIGHT}");
+        if UnicodeWidthStr::width(candidate.as_str()) as u16 <= width {
+            footer.push_str("   ");
+            footer.push_str(seg);
+        } else {
+            break;
+        }
+    }
+    footer.push_str("   ");
+    footer.push_str(CORE_RIGHT);
+    footer
+}
 
 /// True if the terminal is wide enough to show list + panel.
 fn can_open_panel(width: u16) -> bool {
@@ -140,6 +245,7 @@ pub(crate) fn run_story_picker(
     list.len(stories.len());
     let anim = &cfg.animation;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
+    let mut header_rects: Vec<(app::picker::SortKey, Rect)> = Vec::new();
     let mut viewport: usize = 0;
 
     // Info panel: always starts closed each launch (session-only state).
@@ -189,11 +295,15 @@ pub(crate) fn run_story_picker(
             last_area = area;
             let buf = f.buffer_mut();
             let (list_area, panel_area) = split_picker_area(area, slide.fraction());
-            let (rects, vp) = draw_story_picker(
-                &stories, &list, &row_badges, &badge_glyphs, dir, &cs, list_area, buf,
+            // Task 9 wires an actual sort state through the keys/clicks; for
+            // now this is always the Task 7 default (Title, ascending).
+            let (rects, vp, hrects) = draw_story_picker(
+                &stories, &list, &row_badges, &badge_glyphs, dir, &cs,
+                app::picker::Sort::default(), list_area, buf,
             );
             row_rects = rects;
             viewport = vp;
+            header_rects = hrects;
             if panel_area.width > 0 {
                 if let Some(entry) = stories.get(list.selected) {
                     last_panel_area = panel_area;
@@ -357,8 +467,9 @@ pub(crate) fn run_story_picker(
     chosen
 }
 
-/// Draw the story-picker screen. Returns the per-row hit-rects (index, rect) for
-/// mouse selection.
+/// Draw the story-picker screen. Returns the per-row hit-rects (index, rect)
+/// for mouse selection, the row count, and the column-header hit-rects
+/// (Task 9 hit-tests these for click-to-sort).
 fn draw_story_picker(
     stories: &[app::picker::StoryEntry],
     list: &app::list_scroll::ListScroll,
@@ -366,12 +477,15 @@ fn draw_story_picker(
     glyphs: &app::picker::BadgeGlyphs,
     dir: &std::path::Path,
     cs: &app::colors::ColorScheme,
+    sort: app::picker::Sort,
     area: Rect,
     buf: &mut ratatui::buffer::Buffer,
-) -> (Vec<(usize, Rect)>, usize) {
+) -> (Vec<(usize, Rect)>, usize, Vec<(app::picker::SortKey, Rect)>) {
+    use app::picker::SortKey;
     use ratatui::style::{Color, Style};
     let selected = list.selected;
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
+    let mut header_rects: Vec<(SortKey, Rect)> = Vec::new();
 
     // Background fill.
     for y in area.top()..area.bottom() {
@@ -390,11 +504,11 @@ fn draw_story_picker(
     );
     draw_str_clipped(buf, area.x, area.y, &header, cs.dialog_title, area);
 
-    // List region (header + blank row at top, footer at bottom).
+    // List region (title bar + column-header row at top, footer at bottom).
     let list_top = area.y + 2;
     let list_bottom = area.bottom().saturating_sub(1);
     if list_bottom <= list_top {
-        return (row_rects, 0);
+        return (row_rects, 0, header_rects);
     }
     let rows = (list_bottom - list_top) as usize;
     let total = stories.len();
@@ -404,6 +518,43 @@ fn draw_story_picker(
         app::render::scroll::needs_scrollbar(total, rows) && area.width >= 2;
     let row_w = if scrollbar_visible { area.width.saturating_sub(1) } else { area.width };
     let first = list.display_offset();
+
+    // Badge cluster width depends only on the configured glyphs, not the
+    // entry, so it's computed once and reused both to size the text columns
+    // and to place each row's cluster.
+    let type_w = glyphs.zcode.chars().count().max(glyphs.glulx.chars().count()) as u16;
+    let blorb_w = glyphs.blorb.chars().count() as u16;
+    let save_w = glyphs.save.chars().count() as u16;
+    let hint_w = glyphs.hint.chars().count() as u16;
+    let cluster_w = type_w + blorb_w + save_w + hint_w;
+    let badges_shown = cluster_w + 2 < row_w;
+    let badge_reserved = if badges_shown { cluster_w + 1 } else { 0 };
+    let text_w = row_w.saturating_sub(badge_reserved);
+    let cols = compute_columns(text_w);
+
+    let title_x = area.left() + ROW_MARKER_W;
+    let author_x = title_x + cols.title_w + COL_GAP;
+    let year_x = author_x + cols.author_w + COL_GAP;
+
+    // Column-header row: dimmed, except the active sort column, which shows
+    // its direction arrow.
+    let header_y = area.y + 1;
+    let (title_label, title_active) = header_label("TITLE", SortKey::Title, sort);
+    let title_hstyle = if title_active { cs.story_header_active } else { cs.story_header };
+    draw_str_clipped(buf, title_x, header_y, &title_label, title_hstyle, area);
+    header_rects.push((SortKey::Title, Rect::new(title_x, header_y, cols.title_w, 1)));
+    if cols.author_w > 0 {
+        let (author_label, author_active) = header_label("AUTHOR", SortKey::Author, sort);
+        let author_hstyle = if author_active { cs.story_header_active } else { cs.story_header };
+        draw_str_clipped(buf, author_x, header_y, &author_label, author_hstyle, area);
+        header_rects.push((SortKey::Author, Rect::new(author_x, header_y, cols.author_w, 1)));
+    }
+    if cols.year_w > 0 {
+        let (year_label, year_active) = header_label("YEAR", SortKey::Year, sort);
+        let year_hstyle = if year_active { cs.story_header_active } else { cs.story_header };
+        draw_str_clipped(buf, year_x, header_y, &year_label, year_hstyle, area);
+        header_rects.push((SortKey::Year, Rect::new(year_x, header_y, cols.year_w, 1)));
+    }
 
     for (i, entry) in stories.iter().enumerate().skip(first).take(rows) {
         let y = list_top + (i - first) as u16;
@@ -417,8 +568,34 @@ fn draw_story_picker(
             }
         }
         let marker = if sel { "▸ " } else { "  " };
-        let line = format!("{}{}   ({})", marker, entry.title, entry.filename);
-        draw_str_clipped(buf, area.x, y, &line, style, row_rect);
+        draw_str_clipped(buf, area.x, y, marker, style, row_rect);
+
+        let title_txt = truncate_to_width(&entry.title, cols.title_w as usize);
+        draw_str_clipped(buf, title_x, y, &title_txt, style, row_rect);
+
+        if cols.author_w > 0 {
+            let (author_txt, author_style) = match entry.meta.author.as_deref() {
+                Some(a) if !a.is_empty() => {
+                    (truncate_to_width(a, cols.author_w as usize), cs.story_author)
+                }
+                _ => (
+                    truncate_to_width("(no metadata yet)", cols.author_w as usize),
+                    cs.story_no_metadata,
+                ),
+            };
+            // Selection highlight wins over the column's own color, same as
+            // the title text above — the whole row reads as one bar.
+            let author_style = if sel { style } else { author_style };
+            draw_str_clipped(buf, author_x, y, &author_txt, author_style, row_rect);
+        }
+
+        if cols.year_w > 0 {
+            if let Some(yr) = entry.meta.year.as_deref().filter(|s| !s.is_empty()) {
+                let year_txt = truncate_to_width(yr, cols.year_w as usize);
+                let year_style = if sel { style } else { cs.story_year };
+                draw_str_clipped(buf, year_x, y, &year_txt, year_style, row_rect);
+            }
+        }
 
         // Right-aligned badge cluster: fixed columns for [type][blorb][save][hint],
         // no separators, so present badges stay vertically aligned across rows.
@@ -427,12 +604,7 @@ fn draw_story_picker(
             app::picker::Engine::ZCode => glyphs.zcode,
             app::picker::Engine::Glulx => glyphs.glulx,
         };
-        let type_w = glyphs.zcode.chars().count().max(glyphs.glulx.chars().count()) as u16;
-        let blorb_w = glyphs.blorb.chars().count() as u16;
-        let save_w = glyphs.save.chars().count() as u16;
-        let hint_w = glyphs.hint.chars().count() as u16;
-        let cluster_w = type_w + blorb_w + save_w + hint_w;
-        if cluster_w + 2 < row_w {
+        if badges_shown {
             let bx = area.left() + row_w - 1 - cluster_w;
             // On the selection bar the plain badge fg (e.g. green) is low-contrast
             // against the highlight, so reverse it into a block: the badge colour
@@ -466,11 +638,11 @@ fn draw_story_picker(
     }
 
     // Footer hint.
-    let footer = " ↑/↓ or j/k: move   PgUp/PgDn   Enter / click: open   i/Tab: info   q / Esc: quit";
+    let footer = build_footer(area.width);
     let fstyle = Style::new().fg(Color::DarkGray).patch(cs.dialog);
-    draw_str_clipped(buf, area.x, list_bottom, footer, fstyle, area);
+    draw_str_clipped(buf, area.x, list_bottom, &footer, fstyle, area);
 
-    (row_rects, rows)
+    (row_rects, rows, header_rects)
 }
 
 /// Draw the highlighted story's metadata panel: title, filesystem info,
@@ -756,6 +928,14 @@ mod tests {
             .collect()
     }
 
+    /// `needle`'s CHAR (column) index within `row_text`'s output, not its byte
+    /// index — a preceding multi-byte cell (e.g. the "▸" selection marker)
+    /// would otherwise overcount a plain `.find()`.
+    fn char_pos(row: &str, needle: &str) -> usize {
+        let byte_idx = row.find(needle).unwrap_or_else(|| panic!("{needle:?} not found in {row:?}"));
+        row[..byte_idx].chars().count()
+    }
+
     fn make_two_test_stories() -> Vec<app::picker::StoryEntry> {
         use app::picker::{Engine, Features, StoryEntry, StoryMeta};
         let mk = |title: &str, engine: Engine| StoryEntry {
@@ -770,6 +950,24 @@ mod tests {
             },
         };
         vec![mk("Zork", Engine::ZCode), mk("Anchorhead", Engine::Glulx)]
+    }
+
+    /// Build a story entry with an explicit author/year (or none), for the
+    /// column-layout tests below.
+    fn story_with_meta(title: &str, author: Option<&str>, year: Option<&str>) -> app::picker::StoryEntry {
+        use app::picker::{Engine, Features, StoryEntry, StoryMeta};
+        StoryEntry {
+            path: std::path::PathBuf::from(format!("/tmp/{title}.z5")),
+            title: title.into(),
+            filename: format!("{title}.z5"),
+            meta: StoryMeta {
+                size_bytes: 1, modified: None, engine: Engine::ZCode, format: "Z-code".into(),
+                version: None, serial: None, release: None, ifid: title.into(),
+                features: Features::default(), self_blorb: None,
+                author: author.map(String::from), year: year.map(String::from),
+                genre: None, language: None, description: None,
+            },
+        }
     }
 
     #[test]
@@ -791,7 +989,9 @@ mod tests {
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
         let dir = std::path::Path::new("/tmp");
-        super::draw_story_picker(&stories, &list, &badges, &glyphs, dir, &cs, area, &mut buf);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, dir, &cs, app::picker::Sort::default(), area, &mut buf,
+        );
 
         let row0 = row_text(&buf, 2, area); // list starts at area.y + 2
         let row1 = row_text(&buf, 3, area);
@@ -827,9 +1027,252 @@ mod tests {
         let area = Rect::new(0, 0, 60, 10);
         let mut buf = Buffer::empty(area);
         super::draw_story_picker(&stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
-                          &cs, area, &mut buf);
+                          &cs, app::picker::Sort::default(), area, &mut buf);
         let row0 = row_text(&buf, 2, area);
         assert!(row0.contains("z!◆"), "configured glyphs used, no separators: {row0:?}");
+    }
+
+    // ── Story-picker list: columns, header, sort ────────────────────────────────
+
+    #[test]
+    fn header_row_shows_columns_and_active_direction_arrow() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = vec![
+            story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998")),
+            story_with_meta("Curses", Some("Graham Nelson"), Some("1993")),
+        ];
+        let badges = vec![app::picker::RowBadges::default(); 2];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(stories.len());
+        let area = Rect::new(0, 0, 60, 10);
+
+        // Default sort (Title, ascending): only TITLE carries an arrow.
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        let header = row_text(&buf, 1, area); // header row is area.y + 1
+        assert!(header.contains("TITLE ▲"), "active column shows the ascending arrow: {header:?}");
+        assert!(header.contains("AUTHOR"), "author header present: {header:?}");
+        assert!(!header.contains("AUTHOR ▲") && !header.contains("AUTHOR ▼"), "inactive column has no arrow: {header:?}");
+        assert!(header.contains("YEAR"), "year header present: {header:?}");
+        assert!(!header.contains("YEAR ▲") && !header.contains("YEAR ▼"), "inactive column has no arrow: {header:?}");
+
+        // Sort by Year, descending: only YEAR carries the down arrow.
+        let mut buf2 = Buffer::empty(area);
+        let sort2 = app::picker::Sort { key: app::picker::SortKey::Year, desc: true };
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, sort2, area, &mut buf2,
+        );
+        let header2 = row_text(&buf2, 1, area);
+        assert!(header2.contains("YEAR ▼"), "active column shows the descending arrow: {header2:?}");
+        assert!(!header2.contains("TITLE ▲") && !header2.contains("TITLE ▼"), "{header2:?}");
+    }
+
+    #[test]
+    fn row_renders_author_and_year_aligned_across_rows() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = vec![
+            story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998")),
+            story_with_meta("Curses", Some("Graham Nelson"), Some("1993")),
+        ];
+        let badges = vec![app::picker::RowBadges::default(); 2];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(stories.len());
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        let row0 = row_text(&buf, 2, area);
+        let row1 = row_text(&buf, 3, area);
+        assert!(row0.contains("Michael S. Gentry"), "{row0:?}");
+        assert!(row0.contains("1998"), "{row0:?}");
+        assert!(row1.contains("Graham Nelson"), "{row1:?}");
+        assert!(row1.contains("1993"), "{row1:?}");
+
+        let author_x0 = char_pos(&row0, "Michael");
+        let author_x1 = char_pos(&row1, "Graham");
+        assert_eq!(author_x0, author_x1, "author column must align across rows");
+        let year_x0 = char_pos(&row0, "1998");
+        let year_x1 = char_pos(&row1, "1993");
+        assert_eq!(year_x0, year_x1, "year column must align across rows");
+    }
+
+    #[test]
+    fn row_with_no_author_shows_no_metadata_placeholder_styled_correctly() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        // A fresh bare-z file with no fetched/embedded metadata — the common
+        // case for a library nobody has run a fetch on yet, not an edge case.
+        // A second, unrelated story keeps the no-metadata row UNSELECTED
+        // (selection highlight intentionally overrides column colors, same
+        // as the badge cluster does — so this checks the plain-row style).
+        let stories = vec![
+            story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998")),
+            story_with_meta("zork2-r63-s860811", None, None),
+        ];
+        let badges = vec![app::picker::RowBadges::default(); 2];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(2);
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        let row1 = row_text(&buf, 3, area);
+        assert!(row1.contains("(no metadata yet)"), "reads as 'nothing fetched yet': {row1:?}");
+
+        // Styled via cs.story_no_metadata, not cs.story_author — terminal_default
+        // gives them distinct fg colors (DarkGray vs White), so this checks the
+        // right field was actually applied, not just that text is present.
+        let x = char_pos(&row1, "(no metadata yet)") as u16;
+        let cell = buf.cell((area.left() + x, 3)).unwrap();
+        assert_eq!(cell.fg, cs.story_no_metadata.fg.unwrap(), "placeholder must use story_no_metadata's color");
+        assert_ne!(cs.story_no_metadata.fg, cs.story_author.fg, "sanity: the two styles must actually differ");
+    }
+
+    #[test]
+    fn columns_drop_year_then_author_as_width_narrows() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = vec![story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998"))];
+        let badges = vec![app::picker::RowBadges::default()];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(1);
+        let cluster_w: u16 = 4; // default glyphs: 1-col type + blorb + save + hint
+
+        // (width, author shown, year shown) — thresholds per compute_columns:
+        // year needs width >= 45, author needs width >= 37, below that:
+        // title + badges only. No width in between should show a gap: the
+        // badge cluster's column (checked below) never moves off its
+        // width-derived formula regardless of which text columns show.
+        for &(width, want_author, want_year) in &[
+            (60u16, true, true),
+            (45, true, true),
+            (44, true, false),
+            (37, true, false),
+            (36, false, false),
+            (30, false, false),
+        ] {
+            let area = Rect::new(0, 0, width, 10);
+            let mut buf = Buffer::empty(area);
+            super::draw_story_picker(
+                &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+                &cs, app::picker::Sort::default(), area, &mut buf,
+            );
+            let row = row_text(&buf, 2, area);
+            assert_eq!(row.contains("Michael S. Gentry"), want_author, "width {width}: {row:?}");
+            assert_eq!(row.contains("1998"), want_year, "width {width}: {row:?}");
+
+            // Badges stay right-aligned at the same formula regardless of
+            // which text columns are shown — proves no gap opened in front
+            // of them as columns drop.
+            let bx = width - 1 - cluster_w;
+            let cell = buf.cell((bx, 2)).unwrap();
+            assert_eq!(cell.symbol(), "Z", "badge cluster must start at col {bx} for width {width}: {row:?}");
+        }
+    }
+
+    #[test]
+    fn long_author_truncates_with_ellipsis_within_column() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let long_author = "Marc Blank and Dave Lebling and a Whole Lot More People";
+        let stories = vec![story_with_meta("Zork I", Some(long_author), Some("1980"))];
+        let badges = vec![app::picker::RowBadges::default()];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(1);
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        let row0 = row_text(&buf, 2, area);
+        assert!(!row0.contains(long_author), "long author must be truncated: {row0:?}");
+        assert!(row0.contains('…'), "truncated author ends with an ellipsis: {row0:?}");
+        assert!(row0.contains("1980"), "year column unaffected by the author overrun: {row0:?}");
+        let bx = 60u16 - 1 - 4;
+        assert_eq!(
+            buf.cell((bx, 2)).unwrap().symbol(), "Z",
+            "badge cluster unaffected by the author overrun"
+        );
+    }
+
+    #[test]
+    fn header_rects_line_up_with_drawn_header_text() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = vec![story_with_meta("Anchorhead", Some("Michael S. Gentry"), Some("1998"))];
+        let badges = vec![app::picker::RowBadges::default()];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(1);
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        let (_, _, header_rects) = super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        assert_eq!(header_rects.len(), 3, "all three columns are shown at this width: {header_rects:?}");
+        for (key, rect) in &header_rects {
+            let expected_char = match key {
+                app::picker::SortKey::Title => "T",
+                app::picker::SortKey::Author => "A",
+                app::picker::SortKey::Year => "Y",
+            };
+            let cell = buf.cell((rect.x, rect.y)).unwrap();
+            assert_eq!(
+                cell.symbol(), expected_char,
+                "{key:?} rect at ({}, {}) must start where its header text is actually drawn",
+                rect.x, rect.y
+            );
+        }
+    }
+
+    #[test]
+    fn footer_hints_drop_right_to_left_keeping_f_and_r_longest() {
+        // Narrow: none of the new hints fit, but the existing core (move/open/
+        // info/quit) is always present.
+        let narrow = super::build_footer(60);
+        assert!(narrow.contains("move") && narrow.contains("open") && narrow.contains("info") && narrow.contains("quit"));
+        assert!(!narrow.contains("f: fetch") && !narrow.contains("PgUp/PgDn"), "{narrow:?}");
+
+        // f/r (least guessable) survive down to the narrowest widths that fit
+        // them at all; s/d/PgUp/PgDn need progressively more room.
+        let at_80 = super::build_footer(80);
+        assert!(at_80.contains("f: fetch"), "{at_80:?}");
+        assert!(!at_80.contains("r: refresh"), "{at_80:?}");
+
+        let at_93 = super::build_footer(93);
+        assert!(at_93.contains("r: refresh") && !at_93.contains("s: sort"), "{at_93:?}");
+
+        let at_103 = super::build_footer(103);
+        assert!(at_103.contains("s: sort") && !at_103.contains("d: reverse"), "{at_103:?}");
+
+        let at_116 = super::build_footer(116);
+        assert!(at_116.contains("d: reverse") && !at_116.contains("PgUp/PgDn"), "{at_116:?}");
+
+        let at_128 = super::build_footer(128);
+        assert!(at_128.contains("PgUp/PgDn"), "{at_128:?}");
     }
 
     // ── Story-picker info panel ─────────────────────────────────────────────────
