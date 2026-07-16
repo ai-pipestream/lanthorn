@@ -466,6 +466,15 @@ struct Resolved {
     description: Option<String>,
 }
 
+/// The publication year from a Treaty of Babel `<firstpublished>`, which is
+/// `YYYY` or `YYYY-MM-DD` (iFiction allows the full ISO date). Keep just the
+/// leading four-digit year, so the value both sorts numerically and fits the
+/// narrow YEAR column; anything without a 4-digit lead is dropped as unusable.
+fn leading_year(s: &str) -> Option<String> {
+    let y: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    (y.len() == 4).then_some(y)
+}
+
 /// SPEC "Precedence": per field, independently, first non-empty wins —
 /// `ifmd` (the file's own `IFmd` chunk) > `fetched` (an IFDB sidecar) >
 /// `tsv` (the bundled known-title table) > `stem` (the filename). `tsv` and
@@ -488,7 +497,8 @@ fn resolve(
         .or_else(|| fetched.and_then(|f| f.author.clone()));
     let year = ifmd
         .and_then(|i| i.first_published.clone())
-        .or_else(|| fetched.and_then(|f| f.first_published.clone()));
+        .or_else(|| fetched.and_then(|f| f.first_published.clone()))
+        .and_then(|s| leading_year(&s));
     let genre = ifmd
         .and_then(|i| i.genre.clone())
         .or_else(|| fetched.and_then(|f| f.genre.clone()));
@@ -1204,6 +1214,18 @@ mod tests {
     fn a_not_found_block_contributes_nothing_but_is_not_an_error() {
         let nf = FetchedMeta { not_found: true, title: None, ..fetched_stub() };
         assert_eq!(resolve(None, Some(&nf), Some("From TSV"), "stem").title, "From TSV");
+    }
+
+    #[test]
+    fn leading_year_takes_the_year_from_a_bare_or_iso_firstpublished() {
+        assert_eq!(leading_year("1984"), Some("1984".to_string()));
+        // iFiction allows a full ISO date; the YEAR column and numeric sort
+        // want just the year, not "1984-06-01".
+        assert_eq!(leading_year("1984-06-01"), Some("1984".to_string()));
+        assert_eq!(leading_year("  1980 "), Some("1980".to_string()));
+        // Nothing usable → dropped, so it sorts/displays as "unknown", not "0".
+        assert_eq!(leading_year("forthcoming"), None);
+        assert_eq!(leading_year("198"), None, "a 3-digit lead is not a year");
     }
 
     // ── `scan_stories` integration: sidecar resolution end-to-end ──────────

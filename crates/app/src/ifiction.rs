@@ -123,8 +123,9 @@ mod tests {
 
     const ZORK: &[u8] = include_bytes!("../tests/fixtures/ifdb-zork1.xml");
 
-    /// The live IFDB response. Guards the eight-<title> trap: seven of them are
-    /// inside <downloads><link>, and only <bibliographic><title> is the game's.
+    /// The live IFDB response. Guards the many-<title> trap: the fixture has 26
+    /// <title> elements, all but one inside <downloads><link>, and only
+    /// <bibliographic><title> is the game's.
     #[test]
     fn parses_the_live_ifdb_response() {
         let f = parse(ZORK).expect("fixture parses");

@@ -33,7 +33,7 @@ const MAX_XML: u64 = 1024 * 1024; // 1 MiB
 const MAX_COVER: u64 = 8 * 1024 * 1024; // 8 MiB
 
 pub enum FetchOutcome {
-    Found(IFiction),
+    Found(Box<IFiction>),
     NotFound,
 }
 
@@ -78,7 +78,7 @@ impl MetadataSource for IfdbClient {
                     .read_to_vec()
                     .map_err(|e| FetchError::Transport(e.to_string()))?;
                 match ifiction::parse(&bytes) {
-                    Ok(f) => Ok(FetchOutcome::Found(f)),
+                    Ok(f) => Ok(FetchOutcome::Found(Box::new(f))),
                     // A well-formed response with no <story> is IFDB's "no
                     // record" answer, not a failure to read the response.
                     Err(IFictionError::NotIFiction) => Ok(FetchOutcome::NotFound),

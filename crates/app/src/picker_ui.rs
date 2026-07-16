@@ -2035,10 +2035,10 @@ mod tests {
     impl app::ifdb::MetadataSource for FakeSource {
         fn fetch(&self, ifid: &str) -> Result<app::ifdb::FetchOutcome, app::ifdb::FetchError> {
             match self.title_by_ifid.get(ifid) {
-                Some(title) => Ok(app::ifdb::FetchOutcome::Found(app::ifiction::IFiction {
+                Some(title) => Ok(app::ifdb::FetchOutcome::Found(Box::new(app::ifiction::IFiction {
                     title: Some(title.clone()),
                     ..Default::default()
-                })),
+                }))),
                 None => Ok(app::ifdb::FetchOutcome::NotFound),
             }
         }

@@ -269,7 +269,7 @@ mod tests {
 
     #[derive(Clone)]
     enum FakeResp {
-        Found(IFiction),
+        Found(Box<IFiction>),
         NotFound,
         Err(String),
     }
@@ -387,7 +387,7 @@ mod tests {
         let mut responses = HashMap::new();
         responses.insert(
             ifid.clone(),
-            FakeResp::Found(IFiction { title: Some("Refreshed".into()), ..Default::default() }),
+            FakeResp::Found(Box::new(IFiction { title: Some("Refreshed".into()), ..Default::default() })),
         );
         let fake = Fake::new(responses);
         let calls = Arc::clone(&fake.calls);
@@ -474,7 +474,7 @@ mod tests {
         for ifid in [&ifid1, &ifid2, &ifid3] {
             responses.insert(
                 ifid.clone(),
-                FakeResp::Found(IFiction { title: Some(format!("Story {ifid}")), ..Default::default() }),
+                FakeResp::Found(Box::new(IFiction { title: Some(format!("Story {ifid}")), ..Default::default() })),
             );
         }
         let mut fake = Fake::new(responses);
@@ -562,7 +562,7 @@ mod tests {
         let mut responses = HashMap::new();
         responses.insert(
             ifid.clone(),
-            FakeResp::Found(IFiction { title: Some("Title".into()), ..Default::default() }),
+            FakeResp::Found(Box::new(IFiction { title: Some("Title".into()), ..Default::default() })),
         );
         let fake = Fake::new(responses);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
@@ -596,7 +596,7 @@ mod tests {
             ..Default::default()
         };
         let mut responses = HashMap::new();
-        responses.insert(ifid.clone(), FakeResp::Found(iff));
+        responses.insert(ifid.clone(), FakeResp::Found(Box::new(iff)));
         let fake = Fake::new(responses);
         let cover_calls = Arc::clone(&fake.cover_calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
@@ -631,7 +631,7 @@ mod tests {
             ..Default::default()
         };
         let mut responses = HashMap::new();
-        responses.insert(ifid.clone(), FakeResp::Found(iff));
+        responses.insert(ifid.clone(), FakeResp::Found(Box::new(iff)));
         let fake = Fake::new(responses);
         let cover_calls = Arc::clone(&fake.cover_calls);
         let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
