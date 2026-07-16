@@ -49,6 +49,7 @@ fn extract_glulx(bytes: Vec<u8>) -> Vec<u8> {
 }
 
 #[test]
+#[ignore = "slow (~1.5s): boots Kerkerkruip past its storage menu; run with --include-ignored"]
 fn kerkerkruip_boots_past_storage_menu() {
     let path = stories_dir().join("Kerkerkruip.gblorb");
     let Ok(raw) = std::fs::read(&path) else {

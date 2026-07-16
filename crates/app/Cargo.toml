@@ -6,6 +6,9 @@ edition = "2021"
 [lib]
 name = "app"
 path = "src/lib.rs"
+# No doctests in this crate; skip the rustdoc doctest pass (it costs seconds of
+# harness compilation for zero tests). Drop this if real doctests are added.
+doctest = false
 
 [[bin]]
 name = "babelmap"

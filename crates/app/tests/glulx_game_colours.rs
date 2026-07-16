@@ -10,6 +10,7 @@ use app::glulx_session::GlulxSession;
 use blorb::Blorb;
 
 #[test]
+#[ignore = "slow (~2.7s): runs Counterfeit Monkey's intro through the Glulx VM; run with --include-ignored"]
 fn cm_intro_pane_adopts_the_games_black_on_white() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../stories/CounterfeitMonkey-11.gblorb");

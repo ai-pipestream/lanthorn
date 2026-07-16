@@ -3,4 +3,9 @@ name = "blorb"
 version = "0.1.0"
 edition = "2021"
 
+
+[lib]
+# No doctests here; skip the rustdoc doctest pass (seconds of harness
+# compilation for zero tests). Remove if real doctests are added.
+doctest = false
 [dependencies]
