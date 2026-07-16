@@ -51,18 +51,28 @@ pub fn load_cover(path: &Path, game_dir: Option<&Path>) -> Option<image::Dynamic
 }
 
 /// Cache capacity: how many decoded covers `CoverState` retains before the
-/// least-recently-inserted one is evicted.
-const CAP: usize = 32;
+/// least-recently-inserted one is evicted. Sized to hold a whole screenful of
+/// gallery tiles (SQ-0374) — even a very wide terminal shows well under this —
+/// so scrolling/paging the cover grid never evicts a still-visible cover and
+/// forces a re-decode. The list/info-panel path only ever needs one at a time.
+const CAP: usize = 128;
+
+/// How many built tile protocols `CoverState` keeps for the gallery view
+/// (SQ-0374). Keyed by `(path, cols, rows)`; least-recently-used evicted first.
+/// Matches `CAP` so a screenful of rasters survives alongside their images.
+const TILE_CAP: usize = 128;
 
 /// Selection-scoped cover state: a bounded LRU map of decoded images (one entry
-/// per visited story; `None` records a coverless story so it isn't re-decoded)
-/// plus a protocol cached by `(path, cols, rows)` so it is rebuilt only when the
-/// selected story or the cover region's size changes.
+/// per visited story; `None` records a coverless story so it isn't re-decoded),
+/// a single protocol cached by `(path, cols, rows)` for the info panel, and a
+/// bounded LRU of tile protocols for the cover-gallery grid (many on screen at
+/// once).
 #[derive(Default)]
 pub struct CoverState {
     decoded: HashMap<PathBuf, Option<image::DynamicImage>>,
     order: VecDeque<PathBuf>,
     proto: Option<(PathBuf, u16, u16, Protocol)>,
+    tiles: VecDeque<(PathBuf, u16, u16, Protocol)>,
 }
 
 impl CoverState {
@@ -81,11 +91,13 @@ impl CoverState {
     /// protocol for that path so `protocol()` rebuilds from the new image.
     pub fn insert(&mut self, path: PathBuf, img: Option<image::DynamicImage>) {
         if self.decoded.insert(path.clone(), img).is_some() {
-            // Existing key: move it to most-recent, and invalidate a stale raster.
+            // Existing key: move it to most-recent, and invalidate a stale raster
+            // (both the info-panel proto and any gallery tiles for this path).
             self.order.retain(|p| p != &path);
             if matches!(&self.proto, Some((p, _, _, _)) if *p == path) {
                 self.proto = None;
             }
+            self.tiles.retain(|(p, _, _, _)| p != &path);
         }
         self.order.push_back(path);
         while self.decoded.len() > CAP {
@@ -108,6 +120,7 @@ impl CoverState {
         if matches!(&self.proto, Some((p, _, _, _)) if p == path) {
             self.proto = None;
         }
+        self.tiles.retain(|(p, _, _, _)| p != path);
     }
 
     /// Build-or-reuse a protocol for `path`'s cover, fitted (aspect-preserved)
@@ -141,6 +154,39 @@ impl CoverState {
             self.proto = Some((path.to_path_buf(), area.width, area.height, built));
         }
         self.proto.as_ref().map(|(_, _, _, p)| p)
+    }
+
+    /// Build-or-reuse a gallery-tile protocol for `path`'s cover, fitted into
+    /// `area`. Unlike [`protocol`], many of these coexist (one per visible tile),
+    /// so they live in a bounded LRU keyed by `(path, cols, rows)` rather than a
+    /// single slot. `None` when `path` has no decoded cover or the build fails.
+    ///
+    /// [`protocol`]: Self::protocol
+    pub fn tile_protocol(
+        &mut self,
+        picker: &Picker,
+        path: &Path,
+        area: Rect,
+    ) -> Option<&Protocol> {
+        if let Some(pos) = self
+            .tiles
+            .iter()
+            .position(|(p, w, h, _)| p == path && *w == area.width && *h == area.height)
+        {
+            // Cache hit: promote to most-recently-used and hand it back.
+            let entry = self.tiles.remove(pos).unwrap();
+            self.tiles.push_back(entry);
+            return self.tiles.back().map(|(_, _, _, p)| p);
+        }
+        let img = self.decoded.get(path).and_then(|o| o.as_ref())?;
+        let built = picker
+            .new_protocol(img.clone(), Size::new(area.width, area.height), Resize::Fit(None))
+            .ok()?;
+        self.tiles.push_back((path.to_path_buf(), area.width, area.height, built));
+        while self.tiles.len() > TILE_CAP {
+            self.tiles.pop_front();
+        }
+        self.tiles.back().map(|(_, _, _, p)| p)
     }
 }
 
@@ -349,6 +395,48 @@ mod tests {
         assert!(st.has(&paths[0]), "refreshed key must survive eviction");
         assert!(!st.has(&paths[1]), "the genuine oldest must be evicted");
         assert!(st.has(Path::new("new.gblorb")));
+    }
+
+    #[test]
+    fn tile_protocol_caches_multiple_covers_at_once() {
+        // The gallery needs several covers rastered simultaneously — unlike the
+        // single-slot info-panel proto, tile protocols coexist.
+        let mut st = CoverState::default();
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let area = Rect::new(0, 0, 16, 8);
+        let a = Path::new("a.gblorb");
+        let b = Path::new("b.gblorb");
+        st.insert(a.to_path_buf(), decode(&png_bytes()));
+        st.insert(b.to_path_buf(), decode(&png_bytes()));
+
+        assert!(st.tile_protocol(&picker, a, area).is_some());
+        assert!(st.tile_protocol(&picker, b, area).is_some());
+        // Both remain cached (2 distinct tiles held at once).
+        assert_eq!(st.tiles.len(), 2);
+        // A coverless / undecoded path yields nothing.
+        assert!(st.tile_protocol(&picker, Path::new("missing.gblorb"), area).is_none());
+    }
+
+    #[test]
+    fn tile_protocol_dropped_when_image_is_replaced_or_forgotten() {
+        let mut st = CoverState::default();
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let area = Rect::new(0, 0, 16, 8);
+        let p = Path::new("game.gblorb");
+
+        st.insert(p.to_path_buf(), decode(&png_bytes()));
+        assert!(st.tile_protocol(&picker, p, area).is_some());
+        assert_eq!(st.tiles.len(), 1);
+
+        // Re-decoding the same path (e.g. after a fetch writes a new cover)
+        // must invalidate its stale tile raster.
+        st.insert(p.to_path_buf(), decode(&png_bytes()));
+        assert_eq!(st.tiles.len(), 0, "replacing the image drops its tile raster");
+
+        st.tile_protocol(&picker, p, area);
+        assert_eq!(st.tiles.len(), 1);
+        st.forget(p);
+        assert_eq!(st.tiles.len(), 0, "forget drops the tile raster too");
     }
 
     #[test]
