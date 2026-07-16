@@ -310,7 +310,7 @@ fn draw_frame(
             match &state.tidy_anim {
                 Some(anim) => FrameRenderMap::Owned(render_layer(&anim.current().graph, layer)),
                 None => {
-                    FrameRenderMap::Cached(state.cached_map_render(layer, &mapper.graph, || render_layer(&mapper.graph, layer)))
+                    FrameRenderMap::Cached(state.cached_map_render(layer, &mapper.graph))
                 }
             }
         };
@@ -325,11 +325,11 @@ fn draw_frame(
         };
         let pane_layout = app::layout::compute_pane_layout(full, state, inv_items.len());
 
-        // When a background tidy job is in flight, the map pane border pulses between
-        // red and green. This overrides the normal border color (focused or unfocused).
-        let map_border_override: Option<ratatui::style::Color> = state.tidy_job.as_ref().map(|job| {
-            pulse_border_color(job.started.elapsed())
-        });
+        // While any background map job is in flight — a tidy relayout or the
+        // async re-route worker (SQ-0379) — the map pane border pulses between red
+        // and green, overriding the normal (focused/unfocused) border color.
+        let map_border_override: Option<ratatui::style::Color> =
+            state.map_job_pulse_elapsed().map(pulse_border_color);
 
         // Resolve the story-border color: a live sound pulse overrides the fg.
         let story_border_style = {
@@ -440,6 +440,22 @@ fn draw_frame(
                     for cx in pane_layout.map.x..pane_layout.map.right() {
                         if let Some(c) = buf.cell_mut((cx, pane_layout.map.y)) { c.set_style(pulse_style); }
                         if let Some(c) = buf.cell_mut((cx, pane_layout.map.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
+                    }
+                }
+
+                // While the async map-render worker runs, list each phase it has
+                // started in the map's top-right corner so the source of any map
+                // update delay is visible; the trace clears when the job lands
+                // (SQ-0379). The inner content rect keeps it off the pulsing border.
+                if state.map_render_in_flight() {
+                    let area = map_fp.content;
+                    let style = state.colors.map_layer_tab;
+                    for (i, step) in state.render_steps_snapshot().iter().enumerate() {
+                        let y = area.y + i as u16;
+                        if y >= area.bottom() { break; }
+                        let w = (step.chars().count() as u16).min(area.width);
+                        let x = area.right().saturating_sub(w);
+                        buf.set_stringn(x, y, step, w as usize, style);
                     }
                 }
 
@@ -786,6 +802,7 @@ fn main() {
             &mut vm_story_size,
         );
         needs_redraw |= loop_tick::poll_tidy_jobs(&mut state, &mut mapper, &last_panes);
+        needs_redraw |= state.poll_render_job();
         needs_redraw |= loop_tick::refresh_engine_input(&mut state, &*session);
         needs_redraw |= loop_tick::expire_sound_and_settle_dock(&mut state);
 
