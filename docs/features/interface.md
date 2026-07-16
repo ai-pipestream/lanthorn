@@ -74,8 +74,11 @@ a blurb, feature flags, bundled resources, and saves), animated per the
 `animation` config and closed by default each launch; it refuses to open on
 terminals too narrow for both list and panel. The badge glyphs are configurable
 in `[symbols]` (`badge_zcode`/`badge_glulx`/`badge_blorb`/`badge_save`/`badge_hint`),
-and both the badge cluster and the panel are themeable via the `story_badge` and
-`story_info` (`:title`/`:label`/`:value`/`:blurb`) style selectors. `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End
+and the badge cluster, sortable column headers, and info panel are themeable via
+the `story_badge`, `story_header`/`story_header:active` (the active sort
+column), `story_author`, `story_year`, `story_no_metadata` (the "(no metadata
+yet)" placeholder), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/`:cover`)
+style selectors. `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End
 navigate, `Enter` or a click opens the story, `q`/`Esc` quits back to the shell. When
 the panel is open and its content overflows — including a long, word-wrapped
 blurb — scroll it with the mouse wheel over the panel or `Shift`+`↑`/`↓`/PgUp/PgDn
