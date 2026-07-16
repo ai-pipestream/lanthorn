@@ -77,7 +77,8 @@ in `[symbols]` (`badge_zcode`/`badge_glulx`/`badge_blorb`/`badge_save`/`badge_hi
 and the badge cluster, sortable column headers, and info panel are themeable via
 the `story_badge`, `story_header`/`story_header:active` (the active sort
 column), `story_author`, `story_year`, `story_no_metadata` (the "(no metadata
-yet)" placeholder), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/`:cover`)
+yet)" placeholder), `story_tile`/`story_tile:selected` (the cover-gallery
+captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/`:cover`)
 style selectors. `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End
 navigate, `Enter` or a click opens the story, `q`/`Esc` quits back to the shell. When
 the panel is open and its content overflows — including a long, word-wrapped
@@ -97,6 +98,13 @@ whenever the highlighted story changes.
   story with no frontispiece of its own shows a fetched cover instead, once
   metadata has been fetched. Force a mode with
   `--image-protocol <auto|halfblocks|kitty|sixel|iterm2>`.
+- **Cover gallery.** Press `g` to swap the metadata list for a grid of cover
+  thumbnails (auto-fitting as many ~16-column tiles as the pane is wide, each
+  with the title captioned below and the selected cover highlighted). Arrow
+  keys or `h`/`j`/`k`/`l` move a 2D cursor, PgUp/PgDn jump a screen of rows,
+  the wheel scrolls a row at a time, and a click (or second click) selects (or
+  opens) a cover. The info panel still toggles independently with `i`/`Tab`,
+  and `g` returns to the list; the selection carries across both views.
 - **In-game graphics (Glulx).** Games that open graphics windows now render
   their filled shapes and images in the terminal, using the best graphics
   protocol (Kitty / iTerm2 / Sixel) with a half-block fallback. Disable all

@@ -24,6 +24,15 @@ use crate::{abbreviate_home, exit_if_terminated, restore_terminal};
 const LIST_MIN_W: u16 = 24;
 const PANEL_MIN_W: u16 = 28;
 
+/// Which story-picker view is active. `List` is the metadata table (default);
+/// `Gallery` is the cover-thumbnail grid (SQ-0374). Toggled with `g`; the info
+/// panel toggles independently (`i`/`Tab`) in both views.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PickerView {
+    List,
+    Gallery,
+}
+
 /// Story-list row layout: the selection-marker glyph column, the gap between
 /// text columns, and each data column's target width. Year drops first as
 /// the row narrows, then author, leaving title + badges at the narrowest —
@@ -188,8 +197,8 @@ fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) 
 /// core hints; the rest are dropped — `PgUp/PgDn` goes first since it's a
 /// standard convention nobody needs told, `f`/`r` survive narrowest since
 /// they name behavior no key convention predicts.
-const FOOTER_OPTIONAL: [&str; 6] =
-    ["f: fetch", "r: refresh", "u: IFDB url", "s: sort", "d: reverse", "PgUp/PgDn"];
+const FOOTER_OPTIONAL: [&str; 7] =
+    ["g: covers", "f: fetch", "r: refresh", "u: IFDB url", "s: sort", "d: reverse", "PgUp/PgDn"];
 
 fn build_footer(width: u16) -> String {
     const CORE_LEFT: &str = " ↑/↓ or j/k: move";
@@ -377,6 +386,15 @@ pub(crate) fn run_story_picker(
     let mut viewport: usize = 0;
     let mut sort = app::picker::Sort::default();
 
+    // Cover-gallery view state (SQ-0374): `view` selects list-vs-grid; the rest
+    // is grid geometry from the last gallery draw, read by input handling
+    // (2D navigation, paging) and the per-frame visible-tile cover requests.
+    let mut view = PickerView::List;
+    let mut gallery_first_row: usize = 0;
+    let mut gallery_cols: usize = 1;
+    let mut gallery_vis: usize = 1;
+    let mut gallery_visible: Vec<usize> = Vec::new();
+
     // IFDB fetch worker (SQ-0348): `f` (this story, forced) and `r` (whole
     // library, skip current-version) share one background worker. Live only
     // while this loop runs — dropping `fetcher` at the end drops its request
@@ -444,7 +462,15 @@ pub(crate) fn run_story_picker(
             if !crossterm::event::poll(Duration::ZERO).unwrap_or(false) {
                 pending_wheel = None;
                 panel_scroll = 0;
-                list.move_by(d, viewport, anim);
+                if matches!(view, PickerView::Gallery) {
+                    // One notch = one grid row (a whole row of tiles).
+                    let ni = app::cover_gallery::move_index(
+                        list.selected, gallery_cols, stories.len(), 0, d,
+                    );
+                    list.select(ni, viewport, anim);
+                } else {
+                    list.move_by(d, viewport, anim);
+                }
             }
         }
 
@@ -453,13 +479,31 @@ pub(crate) fn run_story_picker(
             last_area = area;
             let buf = f.buffer_mut();
             let (list_area, panel_area) = split_picker_area(area, slide.fraction());
-            let (rects, vp, hrects) = draw_story_picker(
-                &stories, &list, &row_badges, &badge_glyphs, dir, &cs,
-                sort, list_area, buf,
-            );
-            row_rects = rects;
-            viewport = vp;
-            header_rects = hrects;
+            match view {
+                PickerView::List => {
+                    let (rects, vp, hrects) = draw_story_picker(
+                        &stories, &list, &row_badges, &badge_glyphs, dir, &cs,
+                        sort, list_area, buf,
+                    );
+                    row_rects = rects;
+                    viewport = vp;
+                    header_rects = hrects;
+                }
+                PickerView::Gallery => {
+                    let (rects, cols, vis) = draw_story_gallery(
+                        &stories, list.selected, &mut gallery_first_row, dir, &cs,
+                        cover_picker.as_ref(), &mut cover, list_area, buf,
+                    );
+                    gallery_cols = cols.max(1);
+                    gallery_vis = vis.max(1);
+                    gallery_visible = rects.iter().map(|(i, _)| *i).collect();
+                    // A viewport analogue for ListScroll's easing while it holds
+                    // the shared selection; the grid does its own scrolling.
+                    viewport = (cols * vis).max(1);
+                    row_rects = rects;
+                    header_rects = Vec::new();
+                }
+            }
             // The manual IFDB-entry prompt (SQ-0371) takes the footer row while
             // active; otherwise a fetch's status line, otherwise the hints.
             if let Some(field) = &manual_ifdb {
@@ -521,6 +565,21 @@ pub(crate) fn run_story_picker(
                 let game_dir = app::storage::game_dir(data_base, &app::storage::story_key(&sel));
                 decoder.request(sel.clone(), game_dir);
                 requested.insert(sel);
+            }
+        }
+        // Gallery view (SQ-0374): decode every visible tile's cover, not just the
+        // selection — the whole grid shows art. No settle-debounce here: the user
+        // wants them all, and the worker decodes them one at a time as it can.
+        if view == PickerView::Gallery {
+            for &idx in &gallery_visible {
+                if let Some(entry) = stories.get(idx) {
+                    let p = entry.path.clone();
+                    if !cover.has(&p) && !requested.contains(&p) {
+                        let game_dir = app::storage::game_dir(data_base, &app::storage::story_key(&p));
+                        decoder.request(p.clone(), game_dir);
+                        requested.insert(p);
+                    }
+                }
             }
         }
 
@@ -601,8 +660,12 @@ pub(crate) fn run_story_picker(
         // fetch sweep is running, so results drain and redraw without a
         // keypress; otherwise block until the next event.
         let sel_now = stories.get(list.selected).map(|e| &e.path);
-        let cover_busy = slide.open
+        let panel_busy = slide.open
             && sel_now.is_some_and(|p| !requested.is_empty() || !cover.has(p));
+        // Gallery keeps ticking while any tile cover is still decoding so the
+        // grid fills in without needing a keypress.
+        let gallery_busy = matches!(view, PickerView::Gallery) && !requested.is_empty();
+        let cover_busy = panel_busy || gallery_busy;
         if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy())
             && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
         {
@@ -687,13 +750,71 @@ pub(crate) fn run_story_picker(
                     if !fetcher.busy() {
                         progress_line = None;
                     }
+                    // Gallery navigation moves a 2D cursor over the same shared
+                    // selection; the list moves it linearly. `gm` computes the
+                    // clamped grid target for a (dx, dy) step.
+                    let gm = |sel: usize, dx: isize, dy: isize| {
+                        app::cover_gallery::move_index(sel, gallery_cols, stories.len(), dx, dy)
+                    };
+                    let gallery = matches!(view, PickerView::Gallery);
                     match k.code {
-                        Up | Char('k') => { panel_scroll = 0; list.move_by(-1, viewport, anim) }
-                        Down | Char('j') => { panel_scroll = 0; list.move_by(1, viewport, anim) }
-                        PageUp => { panel_scroll = 0; list.page(-1, viewport, anim) }
-                        PageDown => { panel_scroll = 0; list.page(1, viewport, anim) }
-                        Home => { panel_scroll = 0; list.home(viewport, anim) }
-                        End => { panel_scroll = 0; list.end(stories.len(), viewport, anim) }
+                        // Horizontal movement exists only in the grid.
+                        Left | Char('h') if gallery => {
+                            panel_scroll = 0;
+                            list.select(gm(list.selected, -1, 0), viewport, anim);
+                        }
+                        Right | Char('l') if gallery => {
+                            panel_scroll = 0;
+                            list.select(gm(list.selected, 1, 0), viewport, anim);
+                        }
+                        Up | Char('k') => {
+                            panel_scroll = 0;
+                            if gallery {
+                                list.select(gm(list.selected, 0, -1), viewport, anim);
+                            } else {
+                                list.move_by(-1, viewport, anim);
+                            }
+                        }
+                        Down | Char('j') => {
+                            panel_scroll = 0;
+                            if gallery {
+                                list.select(gm(list.selected, 0, 1), viewport, anim);
+                            } else {
+                                list.move_by(1, viewport, anim);
+                            }
+                        }
+                        PageUp => {
+                            panel_scroll = 0;
+                            if gallery {
+                                list.select(gm(list.selected, 0, -(gallery_vis as isize)), viewport, anim);
+                            } else {
+                                list.page(-1, viewport, anim);
+                            }
+                        }
+                        PageDown => {
+                            panel_scroll = 0;
+                            if gallery {
+                                list.select(gm(list.selected, 0, gallery_vis as isize), viewport, anim);
+                            } else {
+                                list.page(1, viewport, anim);
+                            }
+                        }
+                        Home => {
+                            panel_scroll = 0;
+                            if gallery {
+                                list.select(0, viewport, anim);
+                            } else {
+                                list.home(viewport, anim);
+                            }
+                        }
+                        End => {
+                            panel_scroll = 0;
+                            if gallery {
+                                list.select(stories.len().saturating_sub(1), viewport, anim);
+                            } else {
+                                list.end(stories.len(), viewport, anim);
+                            }
+                        }
                         Enter => break Some(stories[list.selected].path.clone()),
                         Char('q') => break None,
                         // Esc cancels a running sweep first; only quits when
@@ -716,6 +837,16 @@ pub(crate) fn run_story_picker(
                                     ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
                                 }
                             }
+                        }
+                        // `g`: toggle the cover-gallery grid (SQ-0374). Selection
+                        // carries over; reset the grid scroll so the selected
+                        // cover is framed on entry (the next draw scrolls to it).
+                        Char('g') => {
+                            view = match view {
+                                PickerView::List => PickerView::Gallery,
+                                PickerView::Gallery => PickerView::List,
+                            };
+                            gallery_first_row = 0;
                         }
                         // `f`: refetch only the selected story, ignoring its
                         // cache. Ignored while a sweep is already running, so a
@@ -884,7 +1015,7 @@ fn draw_story_picker(
 
     // Header.
     let header = format!(
-        " babelmap — choose a story  ({} found in {})   [i: info]",
+        " babelmap — choose a story  ({} found in {})   [i: info · g: covers]",
         stories.len(),
         dir.display()
     );
@@ -1047,6 +1178,131 @@ fn draw_story_picker(
     draw_str_clipped(buf, area.x, list_bottom, &footer, fstyle, area);
 
     (row_rects, rows, header_rects)
+}
+
+/// Draw the cover-gallery view (SQ-0374): a grid of story cover thumbnails, each
+/// a fitted frontispiece over a one-row title caption, with the selected tile's
+/// caption highlighted. `first_row` is the grid's scroll row (in/out — updated
+/// to keep `selected` on screen). Returns each visible tile's `(index, rect)`
+/// for click selection (the whole tile is the hit target), plus the resolved
+/// column and visible-row counts the caller feeds back into navigation. Covers
+/// paint only for tiles already decoded into `cover`; undecoded/coverless tiles
+/// show a plain letterbox until the async decoder fills them in.
+#[allow(clippy::too_many_arguments)]
+fn draw_story_gallery(
+    stories: &[app::picker::StoryEntry],
+    selected: usize,
+    first_row: &mut usize,
+    dir: &std::path::Path,
+    cs: &app::colors::ColorScheme,
+    picker: Option<&ratatui_image::picker::Picker>,
+    cover: &mut app::cover::CoverState,
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+) -> (Vec<(usize, Rect)>, usize, usize) {
+    use app::cover_gallery as g;
+    let mut tile_rects: Vec<(usize, Rect)> = Vec::new();
+
+    // Background fill.
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            if let Some(c) = buf.cell_mut((x, y)) {
+                c.set_symbol(" ").set_style(cs.dialog);
+            }
+        }
+    }
+
+    // Header (matches the list view's, with the toggle hint flipped).
+    let header = format!(
+        " babelmap — choose a story  ({} found in {})   [i: info · g: list]",
+        stories.len(),
+        dir.display()
+    );
+    draw_str_clipped(buf, area.x, area.y, &header, cs.dialog_title, area);
+
+    // Grid region: below the header, above the footer row.
+    let grid_top = area.y + 2;
+    let grid_bottom = area.bottom().saturating_sub(1);
+    if grid_bottom <= grid_top || area.width < g::TILE_W {
+        return (tile_rects, 1, 1);
+    }
+    let grid = Rect::new(area.x, grid_top, area.width, grid_bottom - grid_top);
+    let cols = g::columns(grid.width);
+    let vis = g::visible_rows(grid.height);
+    *first_row = g::scroll_to(selected, cols, vis, *first_row);
+    let total = stories.len();
+    let total_rows = total.div_ceil(cols);
+
+    for vr in 0..vis {
+        for col in 0..cols {
+            let idx = (*first_row + vr) * cols + col;
+            if idx >= total {
+                continue;
+            }
+            let entry = &stories[idx];
+            let tile = g::tile_rect(grid, col, vr);
+            tile_rects.push((idx, tile));
+
+            // Cover band: letterbox fill, then the fitted image centred in it.
+            let cover_rect = Rect::new(tile.x, tile.y, g::TILE_W, g::TILE_COVER_H);
+            for y in cover_rect.top()..cover_rect.bottom() {
+                for x in cover_rect.left()..cover_rect.right() {
+                    if let Some(c) = buf.cell_mut((x, y)) {
+                        c.set_symbol(" ").set_style(cs.story_info_cover);
+                    }
+                }
+            }
+            if let Some(picker) = picker {
+                if cover.has(&entry.path) {
+                    if let Some(proto) = cover.tile_protocol(picker, &entry.path, cover_rect) {
+                        let sz = proto.size();
+                        let used_w = sz.width.min(cover_rect.width);
+                        let used_h = sz.height.min(cover_rect.height);
+                        let dest = Rect::new(
+                            cover_rect.x + (cover_rect.width - used_w) / 2,
+                            cover_rect.y + (cover_rect.height - used_h) / 2,
+                            used_w,
+                            used_h,
+                        );
+                        ratatui::widgets::Widget::render(
+                            ratatui_image::Image::new(proto),
+                            dest,
+                            buf,
+                        );
+                    }
+                }
+            }
+
+            // Caption row: the title, highlighted when this is the selection.
+            let cap_y = tile.y + g::TILE_COVER_H;
+            let sel = idx == selected;
+            let cap_style = if sel { cs.story_tile_selected } else { cs.story_tile };
+            for x in tile.x..tile.x + g::TILE_W {
+                if let Some(c) = buf.cell_mut((x, cap_y)) {
+                    c.set_symbol(" ").set_style(cap_style);
+                }
+            }
+            let title = truncate_to_width(&entry.title, g::TILE_W as usize);
+            let cap_rect = Rect::new(tile.x, cap_y, g::TILE_W, 1);
+            draw_str_clipped(buf, tile.x, cap_y, &title, cap_style, cap_rect);
+        }
+    }
+
+    // Scrollbar in the spare width to the grid's right when the grid overflows.
+    if total_rows > vis {
+        let sb_area = Rect::new(area.right().saturating_sub(1), grid.y, 1, grid.height);
+        app::render::scroll::draw_scrollbar(buf, sb_area, total_rows, vis, *first_row, cs.scrollbar);
+    }
+
+    // Footer hint.
+    let footer = " ←/→/↑/↓: move   Enter / 2×click: open   i/Tab: info   g: list   q / Esc: quit";
+    let fstyle = ratatui::style::Style::new()
+        .fg(ratatui::style::Color::DarkGray)
+        .patch(cs.dialog);
+    let footer_txt = truncate_to_width(footer, area.width as usize);
+    draw_str_clipped(buf, area.x, grid_bottom, &footer_txt, fstyle, area);
+
+    (tile_rects, cols, vis)
 }
 
 /// Open a URL in the user's default browser. The picker holds mouse capture
@@ -2625,5 +2881,63 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&stories_dir);
         let _ = std::fs::remove_dir_all(&data_base);
+    }
+
+    #[test]
+    fn gallery_renders_captions_and_highlights_the_selection() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let stories = vec![
+            story_with_meta("Zork", None, None),
+            story_with_meta("Anchorhead", None, None),
+            story_with_meta("Curses", None, None),
+        ];
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let mut first_row = 0usize;
+        // No picker → placeholder letterboxes; captions still render.
+        let (rects, cols, vis) = super::draw_story_gallery(
+            &stories, 1, &mut first_row, std::path::Path::new("/tmp"), &cs, None, &mut cover, area, &mut buf,
+        );
+
+        assert!(cols >= 1 && vis >= 1);
+        assert_eq!(rects.len(), 3, "one hit-rect per story tile");
+        // Titles appear as captions on the caption row (cover band is TILE_COVER_H tall).
+        let whole: String = (area.top()..area.bottom())
+            .map(|y| row_text(&buf, y, area))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(whole.contains("Zork"), "first cover's caption: {whole:?}");
+        assert!(whole.contains("Anchorhead"));
+        assert!(whole.contains("Curses"));
+
+        // The selected tile (index 1) caption is drawn with the selected style,
+        // which — unlike the unselected caption — carries a background colour.
+        let sel_tile = rects.iter().find(|(i, _)| *i == 1).unwrap().1;
+        let cap_y = sel_tile.y + app::cover_gallery::TILE_COVER_H;
+        let sel_cell = buf.cell((sel_tile.x, cap_y)).unwrap();
+        assert_eq!(sel_cell.style().bg, cs.story_tile_selected.bg, "selected caption uses the highlight style");
+        let unsel_tile = rects.iter().find(|(i, _)| *i == 0).unwrap().1;
+        let unsel_cell = buf.cell((unsel_tile.x, unsel_tile.y + app::cover_gallery::TILE_COVER_H)).unwrap();
+        assert_ne!(unsel_cell.style().bg, cs.story_tile_selected.bg, "unselected caption is not highlighted");
+    }
+
+    #[test]
+    fn gallery_scroll_follows_selection_offscreen() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        // Enough stories that a low selection is on a grid row below the fold.
+        let stories: Vec<_> = (0..40).map(|i| story_with_meta(&format!("S{i}"), None, None)).collect();
+        // Small area → few visible rows, so a late index forces a scroll.
+        let area = Rect::new(0, 0, 40, 22);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let mut first_row = 0usize;
+        let (rects, _cols, _vis) = super::draw_story_gallery(
+            &stories, 39, &mut first_row, std::path::Path::new("/tmp"), &cs, None, &mut cover, area, &mut buf,
+        );
+        assert!(first_row > 0, "grid scrolled down to keep the last cover visible");
+        assert!(rects.iter().any(|(i, _)| *i == 39), "the selected tile is on screen");
     }
 }

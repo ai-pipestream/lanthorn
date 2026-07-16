@@ -210,6 +210,8 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "story_author",
     "story_year",
     "story_no_metadata",
+    "story_tile",
+    "story_tile:selected",
     "graphics",
     "inline_image",
     "map_layer_tab",
@@ -259,7 +261,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
         "story_info", "story_info:title", "story_info:label",
         "story_info:value", "story_info:blurb", "story_info:link", "story_info:cover", "story_badge",
         "story_header", "story_header:active", "story_author",
-        "story_year", "story_no_metadata",
+        "story_year", "story_no_metadata", "story_tile", "story_tile:selected",
     ]),
     ("Dialogs", &[
         "dialog", "dialog:title", "hotkey:key", "dialog:button", "dialog:button:active", "dialog:shadow",
@@ -333,6 +335,8 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "story_author"        => cs.story_author,
         "story_year"          => cs.story_year,
         "story_no_metadata"   => cs.story_no_metadata,
+        "story_tile"          => cs.story_tile,
+        "story_tile:selected" => cs.story_tile_selected,
         "graphics"          => cs.graphics,
         "inline_image"      => cs.inline_image,
         // Composite selectors: each has a single color-bearing Style field.
@@ -496,6 +500,8 @@ pub fn apply_color_decls(
             "story_author"        => cs.story_author = cs.story_author.patch(style),
             "story_year"          => cs.story_year = cs.story_year.patch(style),
             "story_no_metadata"   => cs.story_no_metadata = cs.story_no_metadata.patch(style),
+            "story_tile"          => cs.story_tile = cs.story_tile.patch(style),
+            "story_tile:selected" => cs.story_tile_selected = cs.story_tile_selected.patch(style),
             "graphics"          => cs.graphics = cs.graphics.patch(style),
             "inline_image"      => cs.inline_image = cs.inline_image.patch(style),
             "map_layer_tab"      => cs.map_layer_tab = cs.map_layer_tab.patch(style),
@@ -1403,6 +1409,8 @@ pub fn write_style_full(
     doc.colors.selectors.insert("story_author".to_string(),        style_to_decl(&cs.story_author));
     doc.colors.selectors.insert("story_year".to_string(),          style_to_decl(&cs.story_year));
     doc.colors.selectors.insert("story_no_metadata".to_string(),   style_to_decl(&cs.story_no_metadata));
+    doc.colors.selectors.insert("story_tile".to_string(),          style_to_decl(&cs.story_tile));
+    doc.colors.selectors.insert("story_tile:selected".to_string(), style_to_decl(&cs.story_tile_selected));
     doc.colors.selectors.insert("graphics".to_string(),           style_to_decl(&cs.graphics));
     doc.colors.selectors.insert("inline_image".to_string(),       style_to_decl(&cs.inline_image));
     {
