@@ -217,6 +217,41 @@ fn nearest_matching_ancestor(machine: &Machine, start: u16, name: &str) -> Optio
     None
 }
 
+/// The player's real room when the status line has gone STALE — i.e. no avatar's ancestor chain
+/// reaches the room the status line names, so the TEXT and the OBJECT TREE disagree (SQ-0358).
+///
+/// The tree is the game's own state; the status line is a rendering the game may simply not have
+/// refreshed. Zork's Loud Room is the case in point: its echo routine intercepts input, so the
+/// status line keeps naming the room you *came from* for as long as you stand there, while
+/// `cretin`'s parent points squarely at the Loud Room the whole time.
+///
+/// Nothing about a room's identity is hard-coded. The status line names a room we CAN resolve, so
+/// its object teaches us what a room looks like structurally — its CONTAINER — and the player's
+/// nearest ancestor sharing that container is the room they are actually in. Zork keeps every room
+/// under one container object, and Inform keeps rooms at the top level (container 0); both fall out
+/// of the same rule.
+///
+/// Candidates are tried in order and the first that yields a room wins, which is what rejects
+/// decorative avatars: Zork's `you` hangs off `it` at the top level and never reaches the room
+/// container, while `cretin` does.
+fn player_room_beside(machine: &Machine, shown: &ObjectSnapshot) -> Option<ObjectSnapshot> {
+    let mem = &machine.mem;
+    for player in player_candidates(machine) {
+        let mut cur = get_parent(mem, player);
+        for _ in 0..32 {
+            // Depth-bounded like `nearest_matching_ancestor`, to tolerate cycles.
+            if cur == 0 {
+                break;
+            }
+            if get_parent(mem, cur) == shown.parent {
+                return Some(object_snapshot(mem, cur));
+            }
+            cur = get_parent(mem, cur);
+        }
+    }
+    None
+}
+
 /// The object whose short name matches `name` (longest match wins; ties -> lowest
 /// number), or None.
 fn resolve_room_object(machine: &Machine, name: &str) -> Option<ObjectSnapshot> {
@@ -278,7 +313,8 @@ impl Location {
 
 /// Best-effort current room, version-gated:
 /// - v3 and below: global variable 0 -> GlobalVar0, or None.
-/// - v4+: validated player-parent -> status-name -> name-only -> None.
+/// - v4+: validated player-parent -> player-parent beside a stale status line -> status-name ->
+///   name-only -> None.
 ///
 /// Stateless: a pure function of the machine, re-run each turn.
 pub fn detect_location(machine: &Machine) -> Option<Location> {
@@ -296,8 +332,16 @@ pub fn detect_location(machine: &Machine) -> Option<Location> {
                 return Some(Location::PlayerParent(room));
             }
         }
-        if let Some(obj) = resolve_room_object(machine, &name) {
-            return Some(Location::StatusName(obj));
+        // Nothing validated: the status line does not describe where the player is. That is the
+        // signal the text has gone stale, not a reason to trust it — prefer the object tree, which
+        // is the game's own state (SQ-0358).
+        if let Some(shown) = resolve_room_object(machine, &name) {
+            if let Some(room) = player_room_beside(machine, &shown) {
+                return Some(Location::PlayerParent(room));
+            }
+            // No avatar reaches a room at all: the tree has nothing better to offer, so the status
+            // line stands — this is what keeps games with no identifiable player object working.
+            return Some(Location::StatusName(shown));
         }
         return Some(Location::NameOnly(name));
     }

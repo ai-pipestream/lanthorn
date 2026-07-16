@@ -221,3 +221,69 @@ fn beyondzork_vt220_mode_bordered_title_resolves() {
     let name = loc.object().map(|o| o.name.clone()).unwrap_or_default();
     assert!(name.starts_with("Hilltop"), "expected Hilltop, got {name:?}");
 }
+
+// ── SQ-0358: a stale status line must not outrank the object tree ───────────
+
+/// Restore `save_name` through the game's OWN restore path, so it redraws its status line exactly
+/// as in a real session. Returns the machine at the next prompt, or None if the fixture is absent.
+fn restore_fixture(story: &str, save_name: &str) -> Option<Machine> {
+    let save = std::fs::read(stories_dir().join(save_name)).ok()?;
+    let mut m = boot_to_first_read(load_story(story)?)?;
+    let mut restored = false;
+    m.supply_line("restore", 13);
+    for _ in 0..2_000_000u64 {
+        match m.step() {
+            StepResult::RestoreRequest => {
+                m.complete_restore_success(&save).ok()?;
+                restored = true;
+            }
+            StepResult::NeedLine { .. } if restored => return Some(m),
+            StepResult::NeedLine { .. } => m.supply_line("x", 13), // "Restore from file:" prompt
+            StepResult::NeedChar => m.supply_char(b'\n'),
+            StepResult::SaveRequest => m.complete_save(false),
+            StepResult::Quit | StepResult::Restart | StepResult::Fault => return None,
+            StepResult::Continue => {}
+        }
+    }
+    None
+}
+
+/// Zork's Loud Room: the room that proves the status line is a rendering, not a fact.
+///
+/// Its echo routine intercepts input, so Zork never refreshes the status line while you stand
+/// there — it keeps naming the room you came FROM. Detection used to take that text as ground
+/// truth (via `StatusName`) and reported the previous room, so the mapper saw Round Room -E->
+/// Damp Cave and the Loud Room never existed on the map at all. `cretin`'s parent pointed at the
+/// Loud Room the whole time (SQ-0358).
+///
+/// Needs `stories/zork1-loud-room.qzl` (a save standing in the Round Room); skips without it.
+#[test]
+fn a_stale_status_line_does_not_hide_the_room_the_player_is_in() {
+    let Some(mut m) = restore_fixture("zork1-invclues-r52-s871125.z5", "zork1-loud-room.qzl") else {
+        return; // fixture absent — best-effort local verification, as with every test here.
+    };
+    let room = |m: &Machine| {
+        detect_location(m).and_then(|l| l.object().map(|o| o.name.clone())).unwrap_or_default()
+    };
+    let shown = |m: &Machine| {
+        zvm::location::status_line_room_name(&m.screen.upper, m.screen.upper_window_rows)
+            .unwrap_or_default()
+    };
+
+    assert_eq!(room(&m), "Round Room", "the save stands in the Round Room");
+
+    run_one_turn(&mut m, "east");
+    assert_eq!(shown(&m), "Round Room", "Zork does not refresh its status line in the Loud Room");
+    assert_eq!(room(&m), "Loud Room", "but the player IS there, and the object tree says so");
+
+    run_one_turn(&mut m, "east");
+    assert_eq!(room(&m), "Damp Cave", "a refreshed status line still resolves normally");
+
+    // Westward too: the Loud Room is not skipped in either direction.
+    run_one_turn(&mut m, "west");
+    assert_eq!(shown(&m), "Damp Cave", "stale again, now naming the room we just left");
+    assert_eq!(room(&m), "Loud Room");
+
+    run_one_turn(&mut m, "west");
+    assert_eq!(room(&m), "Round Room");
+}
