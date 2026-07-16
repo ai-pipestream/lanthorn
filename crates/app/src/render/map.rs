@@ -1797,6 +1797,45 @@ fn portal_slot(dir: Direction) -> Option<usize> {
     }
 }
 
+/// Where a portal-view badge sits for a passage leaving on `bearing`: the border cell it leads
+/// through, and where its floating name goes (SQ-0363).
+///
+/// Returns `(glyph_cell, label_cell, right_align)`. `right_align` means the name ends AT
+/// `label_cell` rather than starting there — a westward passage's name has to run back toward the
+/// box, not away from it.
+///
+/// One rule for all eight directions. It reproduces the three fixed slots exactly — Up lands on
+/// `(bx + BOX_W/2, by)`, Down on `(bx + BOX_W/2, by + BOX_H - 1)`, an eastward In/Out on
+/// `(bx + BOX_W - 1, by + BOX_H/2)` — which is what says it is the same rule they always were,
+/// just written for every direction instead of the four that could cross a layer before SQ-0360.
+fn portal_border_placement(
+    (bx, by): (i32, i32),
+    bearing: (i32, i32),
+) -> ((i32, i32), (i32, i32), bool) {
+    let (dx, dy) = bearing;
+    let col = match dx.signum() {
+        -1 => bx,
+        1 => bx + BOX_W - 1,
+        _ => bx + BOX_W / 2,
+    };
+    let row = match dy.signum() {
+        -1 => by,
+        1 => by + BOX_H - 1,
+        _ => by + BOX_H / 2,
+    };
+    // A name floats clear of the box on whichever side the passage leaves by. With any vertical
+    // component it goes above or below, aligned to the box's left edge (as Up/Down always have);
+    // a purely horizontal one goes out to the side, on the glyph's own row.
+    let label = if dy != 0 {
+        (bx, if dy < 0 { by - 1 } else { by + BOX_H })
+    } else if dx > 0 {
+        (bx + BOX_W, row)
+    } else {
+        (bx - 1, row)
+    };
+    ((col, row), label, dy == 0 && dx < 0)
+}
+
 /// Mid-slot precedence when a room has several of In/Out/Unknown (lower wins): In ▸ Out ▸ Unknown.
 fn mid_precedence(dir: Direction) -> u8 {
     match dir {
@@ -1923,6 +1962,8 @@ fn draw_portal_icons(
     let mut mid_edge: HashMap<RoomId, (Direction, RoomId)> = HashMap::new();
     // Cross-layer portals: the direction of travel to the other layer, per room (SQ-0223).
     let mut layer_badges: HashMap<RoomId, Vec<Direction>> = HashMap::new();
+    // Portal view only: cross-layer COMPASS passages, which have no portal slot (SQ-0363).
+    let mut layer_borders: HashMap<RoomId, Vec<(Direction, Option<&str>)>> = HashMap::new();
     for edge in &rm.edges {
         if !edge.is_stub {
             continue;
@@ -1940,6 +1981,17 @@ fn draw_portal_icons(
         // that label, so in that view the edge keeps its old path through the slots.
         if edge.is_interlayer && !show_labels {
             layer_badges.entry(edge.origin).or_default().push(edge.dir);
+            continue;
+        }
+        // A cross-layer COMPASS passage has no portal slot — the slots only ever had to hold the
+        // four directions that could leave a layer before `peel-layer <direction>` cut seams at
+        // compass ones (SQ-0360). Falling through to `portal_slot` therefore dropped it silently,
+        // icon and label both. Place it by bearing instead (SQ-0363).
+        if edge.is_interlayer && portal_slot(edge.dir).is_none() {
+            layer_borders
+                .entry(edge.origin)
+                .or_default()
+                .push((edge.dir, edge.dest_label.as_deref()));
             continue;
         }
         let Some(slot) = portal_slot(edge.dir) else { continue };
@@ -1965,7 +2017,8 @@ fn draw_portal_icons(
         let empty: PortalSlots<'_> = [None, None, None];
         let slots = chosen.get(&room.id).unwrap_or(&empty);
         let layers: &[Direction] = layer_badges.get(&room.id).map_or(&[], |v| v.as_slice());
-        if slots.iter().all(Option::is_none) && layers.is_empty() {
+        let borders = layer_borders.get(&room.id).map_or(&[][..], |v| v.as_slice());
+        if slots.iter().all(Option::is_none) && layers.is_empty() && borders.is_empty() {
             continue;
         }
         let style = room_style(room, state);
@@ -1989,6 +2042,18 @@ fn draw_portal_icons(
         }
 
         if show_labels {
+            // A cross-layer compass passage sits on the border it points through, with its
+            // "Room · Layer" name floating outside on that side — the same shape the slotted
+            // portals have always had, for the directions they never covered (SQ-0363).
+            for &(dir, label) in borders {
+                let Some(bearing) = badge_bearing(dir, room.cell, None) else { continue };
+                let ((gc, gr), (lc, lr), right_align) = portal_border_placement((bx, by), bearing);
+                put_str(buf, gc + off_x, gr + off_y, &dir_glyph(dir).to_string(), style, area);
+                if let Some(name) = label {
+                    let col = if right_align { lc - name.chars().count() as i32 + 1 } else { lc };
+                    put_str(buf, col + off_x, lr + off_y, name, style, area);
+                }
+            }
             // Portal view: icons move onto the border; destination names float OUTSIDE the box.
             if let Some((glyph_ch, label)) = slots[0] {
                 let gs = glyph_ch.to_string();
@@ -5716,6 +5781,63 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+
+    /// SQ-0363: with portal labels on, a cross-layer COMPASS passage rendered NOTHING — no icon,
+    /// no name. `portal_slot` only ever had to hold Up/Down/In/Out, the four directions that could
+    /// leave a layer before `peel-layer <direction>` cut seams at compass ones, so a compass edge
+    /// fell through it and was dropped. Each direction must land on the border it leads through,
+    /// with its "Room · Layer" name floating clear on that side.
+    #[test]
+    fn portal_view_shows_a_cross_layer_compass_passage_on_the_border_it_leads_through() {
+        use mapper::graph::MapGraph;
+        use mapper::render::render_layer;
+
+        // (direction, the Vault's cell, the row/col the badge must land on relative to the box)
+        for (dir, cell) in [
+            (Direction::E, (1, 0)),
+            (Direction::W, (-1, 0)),
+            (Direction::N, (0, -1)),
+            (Direction::S, (0, 1)),
+            (Direction::NE, (1, -1)),
+        ] {
+            let mut g = MapGraph::new();
+            g.upsert_room(1, "Here".into());
+            g.upsert_room(2, "Vault".into());
+            g.set_pos(1, (0, 0));
+            g.set_pos(2, cell);
+            g.add_edge(1, dir, 2);
+            g.add_edge(2, mapper::direction::opposite(dir), 1);
+            mapper::layer::peel_at_edge(&mut g, 1, dir).expect("cut at the seam");
+
+            let rm = render_layer(&g, mapper::layer::MAIN_LAYER);
+            let mut st = AppState::default();
+            st.scroll = (rm.bounds.0 .0 - 1, rm.bounds.0 .1 - 1);
+            st.show_portal_labels = true;
+            let area = Rect::new(0, 0, 46, 26);
+            let mut buf = Buffer::empty(area);
+            render_map(&rm, &st, area, &mut buf);
+
+            let text: String = (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" ").to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let arrow = arrow_for_direction(dir, &st.symbols.arrows);
+            assert!(
+                text.contains(arrow),
+                "{dir:?}: the badge shows the direction travelled ({arrow:?})\n{text}"
+            );
+            assert!(
+                text.contains("Vault · Vault"),
+                "{dir:?}: and names the room and layer it leads to\n{text}"
+            );
+        }
     }
 
     #[test]
