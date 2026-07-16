@@ -786,12 +786,13 @@ pub struct RowBadges {
     pub hint: bool,
 }
 
-/// True if a same-stem `.blb`/`.blorb`/`.zblorb` sibling of `path` exists.
+/// True if `path` has an associated resource blorb — an exact same-stem
+/// `.blb`/`.blorb`/`.zblorb` sibling, or (like the info panel's resource
+/// resolution) an unambiguous stem-prefix match in the same directory, e.g.
+/// `Lurking.blb` for `lurkinghorror-r219-s870912.z3`. Filename-only, so the
+/// per-row `(blorb)` tag stays cheap (no blorb parsing).
 fn sibling_blorb_exists(path: &Path) -> bool {
-    ["blb", "blorb", "zblorb"].iter().any(|ext| {
-        let cand = path.with_extension(ext);
-        cand != *path && cand.exists()
-    })
+    blorb::sibling_blorb_by_name(path).is_some()
 }
 
 /// Compute a row's artifact badges. `data_base` is the storage base; the save
