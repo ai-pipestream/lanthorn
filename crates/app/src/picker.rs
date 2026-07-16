@@ -1,8 +1,10 @@
 //! Pre-game story picker: when a directory is passed at launch instead of a
 //! story file, scan it for Z-machine stories and let the user choose one.
 //!
-//! Titles are resolved cheaply (no game is run): the known-title table keyed by
-//! the IFID, falling back to the filename stem.
+//! Metadata (title, author, …) is resolved cheaply (no game is run) by
+//! precedence, per field: a blorb's own `IFmd` chunk, then a fetched IFDB
+//! sidecar, then (title only) the known-title table keyed by the IFID, then
+//! the filename stem. See `resolve`.
 
 use std::path::{Path, PathBuf};
 
@@ -50,6 +52,13 @@ pub struct StoryMeta {
     pub ifid: String,
     pub features: Features,
     pub self_blorb: Option<Vec<ChunkInfo>>, // Some when the story file itself is a blorb
+    /// Resolved per `resolve`'s precedence: IFmd > fetched sidecar. No TSV/stem
+    /// source for these (title-only), so absent means genuinely unknown.
+    pub author: Option<String>,
+    pub year: Option<String>, // from iFiction's `first_published`
+    pub genre: Option<String>,
+    pub language: Option<String>,
+    pub description: Option<String>,
 }
 
 /// One selectable story in the picker.
@@ -445,11 +454,62 @@ fn glulx_features(self_blorb: Option<&[ChunkInfo]>) -> Features {
     f
 }
 
+/// Per-field metadata resolution, produced once by [`resolve`] and read
+/// verbatim by everything downstream (list, sort, info panel).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Resolved {
+    title: String,
+    author: Option<String>,
+    year: Option<String>,
+    genre: Option<String>,
+    language: Option<String>,
+    description: Option<String>,
+}
+
+/// SPEC "Precedence": per field, independently, first non-empty wins —
+/// `ifmd` (the file's own `IFmd` chunk) > `fetched` (an IFDB sidecar) >
+/// `tsv` (the bundled known-title table) > `stem` (the filename). `tsv` and
+/// `stem` apply to `title` only: the other fields have no such source.
+///
+/// Pure so the whole table is testable without touching a filesystem.
+fn resolve(
+    ifmd: Option<&crate::ifiction::IFiction>,
+    fetched: Option<&crate::story_info::FetchedMeta>,
+    tsv: Option<&str>,
+    stem: &str,
+) -> Resolved {
+    let title = ifmd
+        .and_then(|i| i.title.clone())
+        .or_else(|| fetched.and_then(|f| f.title.clone()))
+        .or_else(|| tsv.map(str::to_string))
+        .unwrap_or_else(|| stem.to_string());
+    let author = ifmd
+        .and_then(|i| i.author.clone())
+        .or_else(|| fetched.and_then(|f| f.author.clone()));
+    let year = ifmd
+        .and_then(|i| i.first_published.clone())
+        .or_else(|| fetched.and_then(|f| f.first_published.clone()));
+    let genre = ifmd
+        .and_then(|i| i.genre.clone())
+        .or_else(|| fetched.and_then(|f| f.genre.clone()));
+    let language = ifmd
+        .and_then(|i| i.language.clone())
+        .or_else(|| fetched.and_then(|f| f.language.clone()));
+    let description = ifmd
+        .and_then(|i| i.description.clone())
+        .or_else(|| fetched.and_then(|f| f.description.clone()));
+    Resolved { title, author, year, genre, language, description }
+}
+
 /// Scan `dir` (top level, non-recursive) for **launchable** Z-machine stories,
 /// resolving a display title for each. Files that don't load or don't parse as
 /// a supported story (incl. v6) are silently skipped. Sorted by title
 /// (case-insensitive), then filename.
-pub fn scan_stories(dir: &Path) -> Vec<StoryEntry> {
+///
+/// `data_base` is the storage base (as passed to `ensure_aux`/`compute_row_badges`),
+/// used to locate each story's per-game `info.json` sidecar (SQ-0348's fetched
+/// metadata) for precedence resolution.
+pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
     let mut out: Vec<StoryEntry> = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return out;
@@ -479,14 +539,6 @@ pub fn scan_stories(dir: &Path) -> Vec<StoryEntry> {
             .unwrap_or_default()
             .to_string();
         let ifid = crate::ifid::compute_ifid(&bytes);
-        let title = crate::session::known_title(&ifid)
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| {
-                path.file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(&filename)
-                    .to_string()
-            });
 
         // fs metadata: size + mtime → "YYYY-MM-DD".
         let fs_meta = std::fs::metadata(&path).ok();
@@ -498,11 +550,18 @@ pub fn scan_stories(dir: &Path) -> Vec<StoryEntry> {
 
         // Self-blorb chunks: only blorb-container files carry a resource index,
         // and extraction (`load_story`) discards it — re-read the raw file for
-        // those extensions only, so plain .z* files stay single-read.
+        // those extensions only, so plain .z* files stay single-read. The same
+        // parse yields the `IFmd` chunk (if any) for precedence resolution below.
+        let mut ifmd: Option<crate::ifiction::IFiction> = None;
         let self_blorb = if is_blorb_ext(&path) {
             std::fs::read(&path).ok().and_then(|raw| {
                 if blorb::Blorb::is_blorb(&raw) {
-                    blorb::Blorb::parse(raw).ok().map(|b| chunks_of(&b))
+                    blorb::Blorb::parse(raw).ok().map(|b| {
+                        if let Some(xml) = b.metadata() {
+                            ifmd = crate::ifiction::parse(xml).ok();
+                        }
+                        chunks_of(&b)
+                    })
                 } else {
                     None
                 }
@@ -510,6 +569,18 @@ pub fn scan_stories(dir: &Path) -> Vec<StoryEntry> {
         } else {
             None
         };
+
+        // Fetched IFDB sidecar: absent (never fetched, unreadable, malformed,
+        // wrong IFID) is simply no metadata, never a scan error.
+        let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(&path));
+        let fetched = crate::story_info::load(&game_dir, &ifid).and_then(|info| info.fetched);
+        let tsv_title = crate::session::known_title(&ifid);
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&filename);
+        let resolved = resolve(ifmd.as_ref(), fetched.as_ref(), tsv_title, stem);
+        let title = resolved.title;
 
         let engine = match &loaded {
             crate::hints::LoadedStory::ZCode(_) => Engine::ZCode,
@@ -544,6 +615,11 @@ pub fn scan_stories(dir: &Path) -> Vec<StoryEntry> {
             ifid,
             features,
             self_blorb,
+            author: resolved.author,
+            year: resolved.year,
+            genre: resolved.genre,
+            language: resolved.language,
+            description: resolved.description,
         };
         out.push(StoryEntry { path, title, filename, meta });
     }
@@ -658,7 +734,7 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), b"not a story").unwrap();   // wrong ext
         std::fs::write(dir.join("broken.z5"), b"garbage").unwrap();       // bad header
 
-        let stories = scan_stories(&dir);
+        let stories = scan_stories(&dir, &dir);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(stories.len(), 1, "only the valid .z5 is listed");
@@ -678,7 +754,7 @@ mod tests {
         v6b[0x00] = 6;
         std::fs::write(dir.join("graphic.z5"), &v6b).unwrap(); // v6 bytes, .z5 ext
 
-        let stories = scan_stories(&dir);
+        let stories = scan_stories(&dir, &dir);
         let _ = std::fs::remove_dir_all(&dir);
         assert!(stories.is_empty(), "v6 stories are not listed (can't launch)");
     }
@@ -688,7 +764,7 @@ mod tests {
         let dir = temp_dir("sort");
         std::fs::write(dir.join("zebra.z5"), minimal_v3_story()).unwrap();
         std::fs::write(dir.join("apple.z5"), minimal_v3_story()).unwrap();
-        let stories = scan_stories(&dir);
+        let stories = scan_stories(&dir, &dir);
         let _ = std::fs::remove_dir_all(&dir);
         let titles: Vec<&str> = stories.iter().map(|s| s.title.as_str()).collect();
         assert_eq!(titles, vec!["apple", "zebra"]);
@@ -730,7 +806,7 @@ mod tests {
         b[0x10] = 0x00; b[0x11] = 0x40;                 // colour bit set
         std::fs::write(dir.join("game.z3"), &b).unwrap();
 
-        let stories = scan_stories(&dir);
+        let stories = scan_stories(&dir, &dir);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(stories.len(), 1);
@@ -745,6 +821,103 @@ mod tests {
         assert!(m.self_blorb.is_none());
     }
 
+    // ── `resolve` precedence (pure, no filesystem) ─────────────────────────
+
+    use crate::ifiction::IFiction;
+    use crate::story_info::FetchedMeta;
+
+    /// A fetch that ran to completion but found nothing worth reporting: every
+    /// field absent, `not_found: false` (callers override per-test).
+    fn fetched_stub() -> FetchedMeta {
+        FetchedMeta {
+            scanned_at: "2026-07-16T00:00:00Z".into(),
+            fetch_version: crate::story_info::FETCH_VERSION,
+            source: "ifdb".into(),
+            title: None,
+            author: None,
+            language: None,
+            first_published: None,
+            genre: None,
+            description: None,
+            ifdb_tuid: None,
+            ifdb_link: None,
+            cover: None,
+            not_found: false,
+        }
+    }
+
+    /// SPEC "Precedence". Resolution happens ONCE, here — everything downstream
+    /// reads plain fields and never asks where a value came from.
+    #[test]
+    fn ifmd_outranks_a_fetched_sidecar_field_by_field() {
+        let ifmd = IFiction { title: Some("From IFmd".into()), author: None, ..Default::default() };
+        let fetched = FetchedMeta { title: Some("From IFDB".into()), author: Some("From IFDB".into()), ..fetched_stub() };
+        let r = resolve(Some(&ifmd), Some(&fetched), None, "stem");
+        assert_eq!(r.title, "From IFmd", "the file's own metadata wins");
+        assert_eq!(r.author.as_deref(), Some("From IFDB"), "but IFDB fills the gap IFmd left");
+    }
+
+    #[test]
+    fn tsv_then_stem_when_nothing_else_has_a_title() {
+        assert_eq!(resolve(None, None, Some("From TSV"), "stem").title, "From TSV");
+        assert_eq!(resolve(None, None, None, "stem").title, "stem");
+    }
+
+    #[test]
+    fn a_not_found_block_contributes_nothing_but_is_not_an_error() {
+        let nf = FetchedMeta { not_found: true, title: None, ..fetched_stub() };
+        assert_eq!(resolve(None, Some(&nf), Some("From TSV"), "stem").title, "From TSV");
+    }
+
+    // ── `scan_stories` integration: sidecar resolution end-to-end ──────────
+
+    #[test]
+    fn scan_resolves_title_from_a_fetched_sidecar() {
+        let dir = temp_dir("sidecar-fetched");
+        let bytes = minimal_v3_story();
+        std::fs::write(dir.join("game.z5"), &bytes).unwrap();
+        let ifid = crate::ifid::compute_ifid(&bytes);
+
+        let data_base = dir.join("data");
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&dir.join("game.z5")));
+        let info = crate::story_info::StoryInfo {
+            format_version: crate::story_info::FORMAT_VERSION,
+            ifid: ifid.clone(),
+            fetched: Some(FetchedMeta { title: Some("Fetched Title".into()), ..fetched_stub() }),
+            probe: None,
+        };
+        crate::story_info::save(&game_dir, &info).unwrap();
+
+        let stories = scan_stories(&dir, &data_base);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(stories.len(), 1);
+        assert_eq!(stories[0].title, "Fetched Title");
+    }
+
+    #[test]
+    fn scan_falls_back_past_a_wrong_ifid_sidecar() {
+        let dir = temp_dir("sidecar-wrong-ifid");
+        let bytes = minimal_v3_story();
+        std::fs::write(dir.join("game.z5"), &bytes).unwrap();
+
+        let data_base = dir.join("data");
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&dir.join("game.z5")));
+        let info = crate::story_info::StoryInfo {
+            format_version: crate::story_info::FORMAT_VERSION,
+            ifid: "WRONG-IFID".into(), // doesn't match the story's real IFID
+            fetched: Some(FetchedMeta { title: Some("Should Not Appear".into()), ..fetched_stub() }),
+            probe: None,
+        };
+        crate::story_info::save(&game_dir, &info).unwrap();
+
+        let stories = scan_stories(&dir, &data_base);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(stories.len(), 1);
+        assert_eq!(stories[0].title, "game", "wrong-IFID sidecar ignored entirely; falls to the stem");
+    }
+
     // Build a StoryEntry with a controllable ifid + self_blorb, on a synthetic path.
     fn entry_with(ifid: &str, path: PathBuf, self_blorb: Option<Vec<ChunkInfo>>) -> StoryEntry {
         StoryEntry {
@@ -756,6 +929,7 @@ mod tests {
                 format: "Z-code".into(), version: Some("5".into()),
                 serial: None, release: None, ifid: ifid.into(),
                 features: Features::default(), self_blorb,
+                author: None, year: None, genre: None, language: None, description: None,
             },
         }
     }

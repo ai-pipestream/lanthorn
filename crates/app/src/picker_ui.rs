@@ -90,7 +90,7 @@ pub(crate) fn run_story_picker(
     cfg: &app::config::Config,
     data_base: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let stories = app::picker::scan_stories(dir);
+    let stories = app::picker::scan_stories(dir, data_base);
     if stories.is_empty() {
         eprintln!("babelmap: no Z-machine story files found in '{}'", dir.display());
         std::process::exit(1);
@@ -766,6 +766,7 @@ mod tests {
                 size_bytes: 1, modified: None, engine, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None,
+                author: None, year: None, genre: None, language: None, description: None,
             },
         };
         vec![mk("Zork", Engine::ZCode), mk("Anchorhead", Engine::Glulx)]
@@ -867,6 +868,7 @@ mod tests {
                     detail: Some("15.4 kHz · 8-bit · mono · 2.2s".into()),
                 },
             ]),
+            author: None, year: None, genre: None, language: None, description: None,
         };
         let game_dir = std::path::PathBuf::from("/tmp/babelmap-info-panel-saves/zork1.z3");
         let aux = app::picker::StoryAux {
@@ -957,6 +959,7 @@ mod tests {
             ifid: "ZCODE-88-840726".into(),
             features: app::picker::Features::default(),
             self_blorb: Some(chunks),
+            author: None, year: None, genre: None, language: None, description: None,
         };
         let area = Rect::new(0, 0, 34, 10);
         let mut buf = Buffer::empty(area);
@@ -993,6 +996,7 @@ mod tests {
             format: "Blorb (Glulx)".into(), version: Some("3.1.2".into()),
             serial: None, release: None, ifid: "IFID-X".into(),
             features: app::picker::Features::default(), self_blorb: None,
+            author: None, year: None, genre: None, language: None, description: None,
         }
     }
 
