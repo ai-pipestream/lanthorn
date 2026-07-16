@@ -1197,6 +1197,15 @@ fn draw_info_panel(
     }
     // ifid.
     lines.push((format!("IFID {}", meta.ifid), cs.story_info_value));
+    // Associated resource blorb (SQ-0372): a resource .blorb stored beside the
+    // story (e.g. Lurking.blb, beyondzork.blb). Named here, up-front, so it is
+    // visible without scrolling to the Resources section below. Only the sidecar
+    // case — a self-contained blorb's resources live in the story file itself.
+    if let Some((src, _)) = aux.and_then(|a| a.assoc_blorb.as_ref()) {
+        if let Some(name) = src.file_name().and_then(|n| n.to_str()) {
+            lines.push((format!("Resource blorb: {name}"), cs.story_info_value));
+        }
+    }
     // author · year · genre (SQ-0348): one line, present parts only — a story
     // with none of the three renders no line at all, so a no-metadata panel
     // is unchanged from before this field existed.
@@ -1281,9 +1290,10 @@ fn draw_info_panel(
     let (res_header, chunks): (Option<String>, &[app::picker::ChunkInfo]) =
         if let Some(c) = &meta.self_blorb {
             (Some(format!("Resources ({filename})")), c.as_slice())
-        } else if let Some((src, c)) = aux.and_then(|a| a.assoc_blorb.as_ref()) {
-            let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("blorb");
-            (Some(format!("Resources ({name})")), c.as_slice())
+        } else if let Some((_, c)) = aux.and_then(|a| a.assoc_blorb.as_ref()) {
+            // The sidecar filename is named up-front in the metadata block, so
+            // this header stays generic rather than repeating it.
+            (Some("Resources".to_string()), c.as_slice())
         } else {
             (None, &[])
         };
@@ -2053,6 +2063,43 @@ mod tests {
         assert!(ifid_pos < author_pos, "author line must come after IFID");
         assert!(author_pos < blurb_pos, "blurb must come after the author/year/genre line");
         assert!(blurb_pos < features_pos, "blurb must come before Features");
+    }
+
+    /// SQ-0372: a story stored beside a separate resource `.blorb` names that
+    /// sidecar file up-front in the metadata block (not only in the Resources
+    /// header), so it is visible without scrolling.
+    #[test]
+    fn info_panel_names_the_sidecar_resource_blorb() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let meta = minimal_story_meta(); // self_blorb: None → the sidecar path
+        let aux = app::picker::StoryAux {
+            assoc_blorb: Some((
+                std::path::PathBuf::from("/games/beyondzork.blb"),
+                vec![app::picker::ChunkInfo {
+                    usage: "Pict".into(), number: 1, chunk_type: "PNG ".into(), len: 4096, detail: None,
+                }],
+            )),
+            saves: vec![],
+            hints_available: false,
+            game_dir: std::path::PathBuf::from("/tmp/bz"),
+            qzl_saves: vec![],
+            auto_saves: vec![],
+            sidecars: vec![],
+        };
+        let area = Rect::new(0, 0, 60, 16);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        super::draw_info_panel(
+            "Beyond Zork", "beyondzork-r57-s871221.z5", &meta, Some(&aux), 0, area, None,
+            &mut cover, std::path::Path::new("beyondzork-r57-s871221.z5"), false, &cs, &mut buf, &mut Vec::new(),
+        );
+        let text = buffer_to_string(&buf, area);
+        assert!(text.contains("Resource blorb: beyondzork.blb"), "sidecar named up-front: {text:?}");
+        assert!(text.contains("Image"), "the sidecar's Pict resource still lists: {text:?}");
+        let blorb_pos = text.find("Resource blorb:").expect("sidecar line present");
+        let res_pos = text.find("Resources").expect("resources header present");
+        assert!(blorb_pos < res_pos, "sidecar name is up-front, before the Resources section");
     }
 
     #[test]
