@@ -1894,13 +1894,21 @@ fn draw_portal_icons(
     let (off_x, off_y) = offset;
     let sym_portal = &state.symbols.portal;
 
-    // Helper: map a direction to the configured portal glyph char.
+    let sym_arrows = &state.symbols.arrows;
+
+    // Helper: the glyph for the move that crosses to the other layer.
+    //
+    // A COMPASS edge can cross layers since `peel-layer <direction>` cuts a seam at one
+    // (SQ-0360). Only portals could before, so every compass direction fell through to the
+    // `unknown` marker — a badge that said "?" about a passage whose direction we know
+    // perfectly well. Show the arrow you travel (SQ-0362).
     let dir_glyph = |dir: Direction| -> char {
         match dir {
             Direction::Up => sym_portal.up,
             Direction::Down => sym_portal.down,
             Direction::In => sym_portal.in_,
             Direction::Out => sym_portal.out,
+            d if mapper::direction::grid_offset(d).is_some() => arrow_for_direction(d, sym_arrows),
             _ => sym_portal.unknown,
         }
     };
@@ -5708,6 +5716,45 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn a_cross_layer_compass_badge_shows_its_direction_not_the_unknown_marker() {
+        // SQ-0362. Until `peel-layer <direction>` (SQ-0360) cut seams at compass passages, only
+        // portals could ever cross layers — so the badge mapped Up/Down/In/Out and let every
+        // compass direction fall through to `unknown`. A room whose east passage leads to another
+        // layer then wore a "?", about a direction we know perfectly well.
+        use mapper::graph::MapGraph;
+        use mapper::render::render_layer;
+
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Here".into());
+        g.upsert_room(2, "There".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        let peeled = mapper::layer::peel_at_edge(&mut g, 1, Direction::E).expect("cut at the seam");
+        assert_eq!(g.layer_of(2), peeled, "There is now a layer away, across a COMPASS edge");
+
+        let rm = render_layer(&g, mapper::layer::MAIN_LAYER);
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+
+        let here: Vec<String> = interior_rows(&buf, 0, 0);
+        let joined = here.join("");
+        let east_arrow = st.symbols.arrows.east; // '▶' by default
+        assert!(
+            joined.contains(east_arrow),
+            "the badge shows the direction travelled ({east_arrow:?}): {here:?}"
+        );
+        assert!(
+            !joined.contains(st.symbols.portal.unknown),
+            "and never the unknown marker for a passage whose direction is known: {here:?}"
+        );
     }
 
     #[test]
