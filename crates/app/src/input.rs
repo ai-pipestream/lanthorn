@@ -1693,9 +1693,14 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
         Action::MergeLayer => {
             let active = state.active_layer(&mapper.graph);
-            mapper::layer::merge_layer(&mut mapper.graph, active); // merges into parent (Task 10)
+            let target = mapper::layer::merge_layer(&mut mapper.graph, active); // into its parent
             state.bump_graph_gen(); // layer merged into parent → invalidate memo (SQ-0305)
-            state.set_viewed_layer(None);
+            // Follow the rooms to where they landed. Clearing the view instead sent it to whatever
+            // layer the PLAYER happens to stand in — usually the top one — so a merge looked like
+            // it had dumped the rooms there, when they had gone to the parent all along and were
+            // simply off-screen. Mirrors peel, which pins the view to the layer it creates
+            // (SQ-0361).
+            state.set_viewed_layer(Some(target));
         }
 
         // Re-tidy: re-derive the clean Auto layout (constrained stress majorization,
@@ -6683,6 +6688,37 @@ mod tests {
         m.graph.set_pos(2, (7, 7));
         m.graph.set_current(1);
         (AppState::default(), m)
+    }
+
+    /// SQ-0361: merging showed the layer the PLAYER was standing in, not the one the rooms went
+    /// to — so a merge from a nested layer looked like it had dumped everything on the top layer,
+    /// when the rooms had gone to the parent and were merely off-screen.
+    #[test]
+    fn merging_a_layer_shows_where_the_rooms_went_not_where_the_player_is() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cellar", Some(Direction::Down));
+        let mut s = AppState::default();
+        apply_action(Action::PeelLayer(None), &mut s, &mut m); // Cellar -> L1
+        m.observe(3, "Vault", Some(Direction::E)); // joins L1
+        s.select_room(Some(2));
+        apply_action(Action::PeelLayer(Some(Direction::E)), &mut s, &mut m); // Vault -> L2
+        let vault_layer = m.graph.layer_of(3);
+        assert_eq!(m.graph.layers()[&vault_layer].parent, Some(1), "L2 was peeled out of L1");
+
+        // The player walks back up: they are on the TOP layer, nowhere near the Vault.
+        m.observe(1, "Hall", Some(Direction::Up));
+        assert_eq!(m.graph.layer_of(1), mapper::layer::MAIN_LAYER);
+
+        s.set_viewed_layer(Some(vault_layer));
+        apply_action(Action::MergeLayer, &mut s, &mut m);
+
+        assert_eq!(m.graph.layer_of(3), 1, "the Vault merges into its parent, the Cellar");
+        assert_eq!(
+            s.active_layer(&m.graph),
+            1,
+            "and the map shows the Cellar, where the rooms went — not the player's own top layer"
+        );
     }
 
     // ── SQ-0360: peel at a named seam, and say why a peel refused ────────────
