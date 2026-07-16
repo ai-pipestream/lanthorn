@@ -680,6 +680,23 @@ impl Default for Sort {
     }
 }
 
+/// A lowercased title sort key with a leading English article dropped, so
+/// "The Lurking Horror" files under L and "A Mind Forever Voyaging" under M —
+/// standard bibliographic ordering (SQ-0373). Only strips an article that is
+/// followed by more text (a story literally titled "The" keeps it).
+fn bibliographic_key(title: &str) -> String {
+    let lower = title.trim().to_lowercase();
+    for article in ["the ", "a ", "an "] {
+        if let Some(rest) = lower.strip_prefix(article) {
+            let rest = rest.trim_start();
+            if !rest.is_empty() {
+                return rest.to_string();
+            }
+        }
+    }
+    lower
+}
+
 /// Order `stories` in place by `sort`. Blanks (no author / no year, or a
 /// non-numeric year) always sort last, in both ascending and descending
 /// order — only the non-blank comparison reverses with `desc`. Filename is
@@ -708,7 +725,7 @@ pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
     }
 
     fn title_key(e: &StoryEntry) -> (bool, String) {
-        let t = e.title.to_lowercase();
+        let t = bibliographic_key(&e.title);
         (t.is_empty(), t)
     }
 
@@ -939,6 +956,34 @@ mod tests {
         ];
         sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
         assert_eq!(titles_of(&stories), vec!["apple", "Mango", "Zebra"]);
+    }
+
+    #[test]
+    fn sort_stories_title_ignores_leading_articles() {
+        // SQ-0373: bibliographic ordering. "The Lurking Horror" files under L,
+        // "A Mind Forever Voyaging" under M — but the full title still displays.
+        let mut stories = vec![
+            story("The Lurking Horror", "lh.z3", None, None),
+            story("A Mind Forever Voyaging", "amfv.z4", None, None),
+            story("Bureaucracy", "bur.z3", None, None),
+            story("An Act of Murder", "aom.z5", None, None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
+        assert_eq!(
+            titles_of(&stories),
+            vec!["An Act of Murder", "Bureaucracy", "The Lurking Horror", "A Mind Forever Voyaging"],
+        );
+    }
+
+    #[test]
+    fn bibliographic_key_strips_only_a_real_leading_article() {
+        assert_eq!(super::bibliographic_key("The Lurking Horror"), "lurking horror");
+        assert_eq!(super::bibliographic_key("A Mind Forever Voyaging"), "mind forever voyaging");
+        assert_eq!(super::bibliographic_key("An Act of Murder"), "act of murder");
+        // "Theatre" starts with "the" but isn't the article "the ".
+        assert_eq!(super::bibliographic_key("Theatre"), "theatre");
+        // A story literally titled "The" keeps it (nothing follows the article).
+        assert_eq!(super::bibliographic_key("The"), "the");
     }
 
     #[test]
