@@ -1,0 +1,171 @@
+//! IFDB metadata lookup. Network only — never called except from an explicit
+//! `f`/`r` keypress (see the fetch worker).
+//!
+//! Endpoint verified live 2026-07-16:
+//!   GET https://ifdb.org/viewgame?ifiction&ifid=<IFID>   → iFiction XML
+//! The cover is a SECOND request to the <coverart><url> in that response
+//! (`https://ifdb.org/coverart?id=<tuid>&version=<n>`). There is no
+//! `viewgame?coverart` endpoint — do not construct cover URLs.
+//!
+//! Not-found shape, confirmed live 2026-07-16 with a junk IFID
+//! (`curl 'https://ifdb.org/viewgame?ifiction&ifid=ZCODE-1-000000-0000'`):
+//! a genuine **HTTP 404**, body
+//! `<viewgame xmlns="http://ifdb.org/api/xmlns"><errorCode>notFound</errorCode>
+//! <errorMessage>No game was found matching the requested IFID.</errorMessage>
+//! </viewgame>` — not the `<ifindex>`-with-no-`<story>` shape one might guess
+//! at (same result for a UUID-shaped unknown IFID and a garbage IFID string;
+//! an absent `ifid` param instead gets HTTP 400/`badRequest`). ureq surfaces
+//! that 404 as `Err(ureq::Error::StatusCode(404))`, which is mapped to
+//! `Ok(FetchOutcome::NotFound)` below.
+//!
+//! The parser also treats a well-formed `<ifindex>` with no `<story>` as
+//! `IFictionError::NotIFiction` (see `ifiction.rs`); that specific parse
+//! error is *also* mapped to `Ok(FetchOutcome::NotFound)` here, in case IFDB
+//! ever answers that way for some other query shape. Both are "no record",
+//! never a transport error.
+
+use std::time::Duration;
+
+use crate::ifiction::{self, IFiction, IFictionError};
+
+const TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_XML: u64 = 1024 * 1024; // 1 MiB
+const MAX_COVER: u64 = 8 * 1024 * 1024; // 8 MiB
+
+pub enum FetchOutcome {
+    Found(IFiction),
+    NotFound,
+}
+
+#[derive(Debug)]
+pub enum FetchError {
+    Transport(String),
+}
+
+pub trait MetadataSource: Send + Sync {
+    fn fetch(&self, ifid: &str) -> Result<FetchOutcome, FetchError>;
+    fn fetch_cover(&self, url: &str) -> Result<Vec<u8>, FetchError>;
+}
+
+pub struct IfdbClient {
+    agent: ureq::Agent,
+}
+
+impl IfdbClient {
+    pub fn new() -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(TIMEOUT))
+            .user_agent(user_agent())
+            .build();
+        Self { agent: ureq::Agent::new_with_config(config) }
+    }
+}
+
+impl Default for IfdbClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MetadataSource for IfdbClient {
+    fn fetch(&self, ifid: &str) -> Result<FetchOutcome, FetchError> {
+        match self.agent.get(ifiction_url(ifid)).call() {
+            Ok(mut resp) => {
+                let bytes = resp
+                    .body_mut()
+                    .with_config()
+                    .limit(MAX_XML)
+                    .read_to_vec()
+                    .map_err(|e| FetchError::Transport(e.to_string()))?;
+                match ifiction::parse(&bytes) {
+                    Ok(f) => Ok(FetchOutcome::Found(f)),
+                    // A well-formed response with no <story> is IFDB's "no
+                    // record" answer, not a failure to read the response.
+                    Err(IFictionError::NotIFiction) => Ok(FetchOutcome::NotFound),
+                    Err(e) => Err(FetchError::Transport(format!("{e:?}"))),
+                }
+            }
+            // The naive Ok/Err split would treat "no record" as a transport
+            // failure, which would leave no `not_found` block written and
+            // make the library sweep re-request this story forever.
+            Err(ureq::Error::StatusCode(404)) => Ok(FetchOutcome::NotFound),
+            Err(e) => Err(FetchError::Transport(e.to_string())),
+        }
+    }
+
+    fn fetch_cover(&self, url: &str) -> Result<Vec<u8>, FetchError> {
+        let mut resp =
+            self.agent.get(url).call().map_err(|e| FetchError::Transport(e.to_string()))?;
+        resp.body_mut()
+            .with_config()
+            .limit(MAX_COVER)
+            .read_to_vec()
+            .map_err(|e| FetchError::Transport(e.to_string()))
+    }
+}
+
+fn user_agent() -> String {
+    format!("babelmap/{} (+https://github.com/sharkusk/babelmap)", env!("CARGO_PKG_VERSION"))
+}
+
+fn ifiction_url(ifid: &str) -> String {
+    format!("https://ifdb.org/viewgame?ifiction&ifid={}", percent_encode(ifid))
+}
+
+/// Hand-rolled: the one call site (an IFID reaching us from story bytes,
+/// not guaranteed URL-safe) doesn't justify a `percent-encoding` dependency.
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'~' | b'-' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ifiction_url_is_the_verified_endpoint() {
+        assert_eq!(
+            ifiction_url("ZCODE-52-871125"),
+            "https://ifdb.org/viewgame?ifiction&ifid=ZCODE-52-871125"
+        );
+    }
+
+    /// An IFID reaches us from story bytes and is not guaranteed URL-safe.
+    #[test]
+    fn ifid_is_percent_encoded_into_the_query() {
+        assert!(
+            ifiction_url("A B&c=d").ends_with("ifid=A%20B%26c%3Dd"),
+            "got {}",
+            ifiction_url("A B&c=d")
+        );
+    }
+
+    #[test]
+    fn user_agent_identifies_babelmap_and_its_repo() {
+        let ua = user_agent();
+        assert!(ua.starts_with("babelmap/"));
+        assert!(ua.contains("github.com/sharkusk/babelmap"));
+        assert!(ua.contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    /// The cover URL is IFDB's, taken from the response — never constructed by
+    /// us. `viewgame?coverart` does not exist; the real form is
+    /// `ifdb.org/coverart?id=<tuid>&version=<n>` and only the response knows it.
+    #[test]
+    fn cover_url_comes_from_the_response_not_from_us() {
+        let f = crate::ifiction::parse(include_bytes!("../tests/fixtures/ifdb-zork1.xml")).unwrap();
+        assert_eq!(
+            f.ifdb.unwrap().cover_url.as_deref(),
+            Some("https://ifdb.org/coverart?id=0dbnusxunq7fw5ro&version=45")
+        );
+    }
+}
