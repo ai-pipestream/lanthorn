@@ -165,6 +165,51 @@ fn ensure_aux(
     }
 }
 
+/// Reorder `stories` by `sort`, keeping the selection on the same story (by
+/// path — see `resort_preserving_selection`), and keep the per-index caches
+/// (`row_badges`, `aux_cache`) aligned with the new order. Every reorder in
+/// the picker loop — `s`, `d`, a header click, and a fetch sweep landing new
+/// titles — routes through this one function so no caller can forget to
+/// invalidate the caches.
+#[allow(clippy::too_many_arguments)]
+fn resort_list(
+    stories: &mut [app::picker::StoryEntry],
+    selected: usize,
+    sort: app::picker::Sort,
+    row_badges: &mut Vec<app::picker::RowBadges>,
+    aux_cache: &mut Vec<Option<app::picker::StoryAux>>,
+    data_base: &std::path::Path,
+    hint_index: &app::hints::HintIndex,
+) -> usize {
+    let new_idx = app::picker::resort_preserving_selection(stories, selected, sort);
+    *row_badges = stories
+        .iter()
+        .map(|e| app::picker::compute_row_badges(e, data_base, hint_index))
+        .collect();
+    *aux_cache = (0..stories.len()).map(|_| None).collect();
+    new_idx
+}
+
+/// Overlay a transient status line (fetch progress) onto the list's footer
+/// row, replacing the normal footer hint text while a message is active.
+fn draw_progress_line(
+    buf: &mut ratatui::buffer::Buffer,
+    area: Rect,
+    text: &str,
+    style: ratatui::style::Style,
+) {
+    if area.height < 4 {
+        return; // matches draw_story_picker's own too-small-for-a-footer guard
+    }
+    let y = area.bottom().saturating_sub(1);
+    for x in area.left()..area.right() {
+        if let Some(c) = buf.cell_mut((x, y)) {
+            c.set_symbol(" ").set_style(style);
+        }
+    }
+    draw_str_clipped(buf, area.x, y, text, style, area);
+}
+
 /// Build the ratatui-image picker for cover art per the CLI mode. `Auto`
 /// queries the terminal (falling back to half-blocks); forced modes query for
 /// font size then pin the protocol. Returns `None` only if construction fails.
@@ -195,7 +240,7 @@ pub(crate) fn run_story_picker(
     cfg: &app::config::Config,
     data_base: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
-    let stories = app::picker::scan_stories(dir, data_base);
+    let mut stories = app::picker::scan_stories(dir, data_base);
     if stories.is_empty() {
         eprintln!("babelmap: no Z-machine story files found in '{}'", dir.display());
         std::process::exit(1);
@@ -206,9 +251,10 @@ pub(crate) fn run_story_picker(
     let (cs, _set, _w2) = app::style::resolve(&base, &cfg.user_dir);
 
     // Row badges: each story's per-game dir under `data_base` + one shared hint
-    // index, computed once (SQ-0284).
+    // index, computed once (SQ-0284). Recomputed by `resort_list` whenever the
+    // list reorders, so it stays index-aligned with `stories`.
     let hint_index = app::hints::load_hint_index(&cfg.user_dir);
-    let row_badges: Vec<app::picker::RowBadges> = stories
+    let mut row_badges: Vec<app::picker::RowBadges> = stories
         .iter()
         .map(|e| app::picker::compute_row_badges(e, data_base, &hint_index))
         .collect();
@@ -247,6 +293,24 @@ pub(crate) fn run_story_picker(
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
     let mut header_rects: Vec<(app::picker::SortKey, Rect)> = Vec::new();
     let mut viewport: usize = 0;
+    let mut sort = app::picker::Sort::default();
+
+    // IFDB fetch worker (SQ-0348): `f` (this story, forced) and `r` (whole
+    // library, skip current-version) share one background worker. Live only
+    // while this loop runs — dropping `fetcher` at the end drops its request
+    // sender, which ends the worker thread's `recv()` loop.
+    let fetcher = app::fetch_worker::Fetcher::new(
+        Box::new(app::ifdb::IfdbClient::new()),
+        data_base.to_path_buf(),
+        Duration::from_millis(500),
+    );
+    // The footer-row status line while a fetch is in flight (or just finished);
+    // `None` shows the normal footer hints instead.
+    let mut progress_line: Option<String> = None;
+    // True for an `f` order (single story, forced) — controls the completion
+    // message's shape (`f`: found/not-found/failed; `r`: a tallied summary).
+    let mut fetch_is_single = false;
+    let (mut sweep_fetched, mut sweep_skipped, mut sweep_not_found, mut sweep_failed) = (0u32, 0u32, 0u32, 0u32);
 
     // Info panel: always starts closed each launch (session-only state).
     let mut slide = PanelSlide::closed();
@@ -295,15 +359,18 @@ pub(crate) fn run_story_picker(
             last_area = area;
             let buf = f.buffer_mut();
             let (list_area, panel_area) = split_picker_area(area, slide.fraction());
-            // Task 9 wires an actual sort state through the keys/clicks; for
-            // now this is always the Task 7 default (Title, ascending).
             let (rects, vp, hrects) = draw_story_picker(
                 &stories, &list, &row_badges, &badge_glyphs, dir, &cs,
-                app::picker::Sort::default(), list_area, buf,
+                sort, list_area, buf,
             );
             row_rects = rects;
             viewport = vp;
             header_rects = hrects;
+            // A fetch in flight (or its just-landed result) replaces the
+            // normal footer hints with a live status line.
+            if let Some(msg) = &progress_line {
+                draw_progress_line(buf, list_area, msg, cs.story_header_active);
+            }
             if panel_area.width > 0 {
                 if let Some(entry) = stories.get(list.selected) {
                     last_panel_area = panel_area;
@@ -354,23 +421,79 @@ pub(crate) fn run_story_picker(
             }
         }
 
+        // Drain fetch progress (SQ-0348): each completed story's sidecar may
+        // have just been (re)written, so re-resolve its entry in place — same
+        // path both `f` and `r` take, since a single-story order is just an
+        // order of length one — then re-sort through the one shared helper so
+        // the cursor stays on whatever story the user is actually looking at,
+        // not wherever its index happened to land.
+        let mut fetch_arrived = false;
+        for p in fetcher.drain() {
+            fetch_arrived = true;
+            match &p.outcome {
+                app::fetch_worker::Outcome::Fetched => sweep_fetched += 1,
+                app::fetch_worker::Outcome::Skipped => sweep_skipped += 1,
+                app::fetch_worker::Outcome::NotFound => sweep_not_found += 1,
+                app::fetch_worker::Outcome::Failed(_) => sweep_failed += 1,
+            }
+            // Only Fetched/NotFound actually (re)write the sidecar (a Skipped
+            // story's cache was already current; a Failed story's write is
+            // withheld so a later `r` retries it) — no point re-reading disk
+            // for the other two.
+            let rewrote_sidecar =
+                matches!(p.outcome, app::fetch_worker::Outcome::Fetched | app::fetch_worker::Outcome::NotFound);
+            if rewrote_sidecar {
+                if let Some(fresh) = app::picker::resolve_entry(&p.path, data_base) {
+                    if let Some(slot) = stories.iter_mut().find(|e| e.path == p.path) {
+                        *slot = fresh;
+                    }
+                }
+            }
+            progress_line = Some(if fetch_is_single {
+                match &p.outcome {
+                    app::fetch_worker::Outcome::Fetched => format!("Fetched {}", p.title),
+                    app::fetch_worker::Outcome::Skipped => format!("Fetched {}", p.title),
+                    app::fetch_worker::Outcome::NotFound => format!("No IFDB record for {}", p.title),
+                    app::fetch_worker::Outcome::Failed(reason) => format!("Fetch failed: {reason}"),
+                }
+            } else if p.done < p.total {
+                format!("Fetching {}/{} — {}", p.done, p.total, p.title)
+            } else {
+                let mut msg = format!(
+                    "Fetched {}, skipped {}, not found {}",
+                    sweep_fetched, sweep_skipped, sweep_not_found
+                );
+                if sweep_failed > 0 {
+                    msg.push_str(&format!(", failed {sweep_failed}"));
+                }
+                msg
+            });
+        }
+        if fetch_arrived {
+            list.select(
+                resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                viewport,
+                anim,
+            );
+        }
+
         // A decode just landed: loop back to redraw so the cover paints now. The
         // draw is at the top of the loop, and once the result is cached
         // `cover_busy` goes false — without this the loop would block on `read()`
         // and the new cover wouldn't appear until the next input event.
-        if cover_arrived {
+        if cover_arrived || fetch_arrived {
             list.finalize_if_done();
             continue;
         }
 
         // Tick while a scroll or panel-slide animation eases so the motion is
-        // visible, or while a cover decode is in flight / still needed so results
-        // drain and the debounced request fires without a keypress; otherwise
-        // block until the next event.
+        // visible, or while a cover decode is in flight / still needed, or a
+        // fetch sweep is running, so results drain and redraw without a
+        // keypress; otherwise block until the next event.
         let sel_now = stories.get(list.selected).map(|e| &e.path);
         let cover_busy = slide.open
             && sel_now.is_some_and(|p| !requested.is_empty() || !cover.has(p));
-        if (list.has_active_animation() || slide.active() || cover_busy)
+        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy())
             && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
         {
             list.finalize_if_done();
@@ -413,7 +536,16 @@ pub(crate) fn run_story_picker(
                         Home => { panel_scroll = 0; list.home(viewport, anim) }
                         End => { panel_scroll = 0; list.end(stories.len(), viewport, anim) }
                         Enter => break Some(stories[list.selected].path.clone()),
-                        Esc | Char('q') => break None,
+                        Char('q') => break None,
+                        // Esc cancels a running sweep first; only quits when
+                        // nothing is in flight.
+                        Esc => {
+                            if fetcher.busy() {
+                                fetcher.cancel();
+                            } else {
+                                break None;
+                            }
+                        }
                         Char('i') | Tab => {
                             let target = !slide.open;
                             if !target || can_open_panel(last_area.width) {
@@ -426,6 +558,58 @@ pub(crate) fn run_story_picker(
                                 }
                             }
                         }
+                        // `f`: refetch only the selected story, ignoring its cache.
+                        Char('f') => {
+                            if let Some(entry) = stories.get(list.selected) {
+                                fetch_is_single = true;
+                                sweep_fetched = 0;
+                                sweep_skipped = 0;
+                                sweep_not_found = 0;
+                                sweep_failed = 0;
+                                progress_line = Some(format!("Fetching {}…", entry.title));
+                                fetcher.request(app::fetch_worker::FetchOrder {
+                                    stories: vec![(entry.path.clone(), entry.meta.ifid.clone())],
+                                    forced: true,
+                                });
+                            }
+                        }
+                        // `r`: sweep the whole library; the worker itself skips
+                        // any story already at the current FETCH_VERSION.
+                        Char('r') => {
+                            let total = stories.len();
+                            let order: Vec<(PathBuf, String)> =
+                                stories.iter().map(|e| (e.path.clone(), e.meta.ifid.clone())).collect();
+                            fetch_is_single = false;
+                            sweep_fetched = 0;
+                            sweep_skipped = 0;
+                            sweep_not_found = 0;
+                            sweep_failed = 0;
+                            progress_line = Some(format!("Fetching 0/{total}"));
+                            fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false });
+                        }
+                        // `s`: cycle the sort column, keeping direction. `d`:
+                        // toggle direction, keeping the column. Both preserve
+                        // the selection by path, never by index.
+                        Char('s') => {
+                            sort.key = match sort.key {
+                                app::picker::SortKey::Title => app::picker::SortKey::Author,
+                                app::picker::SortKey::Author => app::picker::SortKey::Year,
+                                app::picker::SortKey::Year => app::picker::SortKey::Title,
+                            };
+                            list.select(
+                                resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                                viewport,
+                                anim,
+                            );
+                        }
+                        Char('d') => {
+                            sort.desc = !sort.desc;
+                            list.select(
+                                resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                                viewport,
+                                anim,
+                            );
+                        }
                         _ => {}
                     }
                 }
@@ -436,6 +620,20 @@ pub(crate) fn run_story_picker(
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
                     if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
                         break Some(stories[*idx].path.clone());
+                    } else if let Some((key, _)) = header_rects.iter().find(|(_, r)| r.contains(pt)) {
+                        // Click the active header → reverse; click another → sort
+                        // by it, ascending.
+                        if sort.key == *key {
+                            sort.desc = !sort.desc;
+                        } else {
+                            sort.key = *key;
+                            sort.desc = false;
+                        }
+                        list.select(
+                            resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
+                            viewport,
+                            anim,
+                        );
                     }
                 } else if let Some(d) = app::input::wheel_delta(m.kind, cfg.mouse_wheel_invert) {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
@@ -1568,5 +1766,194 @@ mod tests {
         assert!(list_area.width < area.width);
         assert!(panel_area.width >= super::PANEL_MIN_W);
         let _ = (&stories, &badges, &glyphs, &cs, &mut buf, &mut list);
+    }
+
+    // ── SQ-0348: fetch-progress wiring ──────────────────────────────────────────
+    //
+    // `run_story_picker` itself can't be unit-tested (it owns a real terminal),
+    // so these exercise the pieces the loop wires together: `resort_list`
+    // (the caches stay index-aligned with `stories`), the progress-line
+    // overlay, and — the important one — a simulated `Fetcher` sweep driving
+    // `resolve_entry` + `resort_preserving_selection` exactly as the loop's
+    // drain handler does, proving the selection survives titles landing mid-sweep.
+
+    /// Minimal valid v3 story bytes (mirrors `picker.rs`'s private test fixture
+    /// of the same name — not reusable across modules, so duplicated here).
+    fn minimal_v3_story() -> Vec<u8> {
+        let mut buf = vec![0u8; 0x0800];
+        buf[0x00] = 3;
+        buf[0x04] = 0x00; buf[0x05] = 0x40;
+        buf[0x06] = 0x00; buf[0x07] = 0x40;
+        buf[0x0A] = 0x00; buf[0x0B] = 0x80;
+        buf[0x0C] = 0x01; buf[0x0D] = 0x00;
+        buf[0x0E] = 0x03; buf[0x0F] = 0x00;
+        buf[0x08] = 0x04; buf[0x09] = 0x00;
+        buf[0x18] = 0x00; buf[0x19] = 0x60;
+        buf[0x0080] = 0; buf[0x0081] = 4; buf[0x0082] = 0; buf[0x0083] = 0;
+        buf
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let mut d = std::env::temp_dir();
+        d.push(format!("babelmap-picker-ui-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn resort_list_keeps_row_badges_and_aux_cache_aligned_with_the_new_order() {
+        let stories_dir = temp_dir("resort-align");
+        std::fs::write(stories_dir.join("a.z5"), minimal_v3_story()).unwrap();
+        let mut b_bytes = minimal_v3_story();
+        b_bytes[0x12] = b'9'; // distinct serial → distinct IFID from a.z5
+        std::fs::write(stories_dir.join("b.z5"), b_bytes).unwrap();
+        let data_base = temp_dir("resort-align-data");
+        let hint_index = app::hints::load_hint_index(&data_base);
+
+        let mut stories = app::picker::scan_stories(&stories_dir, &data_base);
+        assert_eq!(stories.len(), 2);
+        let mut row_badges: Vec<app::picker::RowBadges> = stories
+            .iter()
+            .map(|e| app::picker::compute_row_badges(e, &data_base, &hint_index))
+            .collect();
+        let mut aux_cache: Vec<Option<app::picker::StoryAux>> = vec![Some(app::picker::resolve_aux(
+            &stories[0],
+            &data_base,
+            &hint_index,
+        ))];
+        aux_cache.push(None);
+        let selected_path = stories[0].path.clone();
+
+        let new_idx = super::resort_list(
+            &mut stories,
+            0,
+            app::picker::Sort { key: app::picker::SortKey::Title, desc: true },
+            &mut row_badges,
+            &mut aux_cache,
+            &data_base,
+            &hint_index,
+        );
+
+        assert_eq!(stories[new_idx].path, selected_path, "selection follows its story");
+        assert_eq!(row_badges.len(), stories.len(), "row_badges stays index-aligned");
+        assert_eq!(aux_cache.len(), stories.len(), "aux_cache stays index-aligned");
+        assert!(aux_cache.iter().all(Option::is_none), "a reorder invalidates every cached aux slot");
+
+        let _ = std::fs::remove_dir_all(&stories_dir);
+        let _ = std::fs::remove_dir_all(&data_base);
+    }
+
+    #[test]
+    fn progress_line_overlays_the_footer_row() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        // Pre-fill the footer row with something the overlay must fully replace,
+        // proving it clears trailing characters rather than just prefixing.
+        for x in area.left()..area.right() {
+            if let Some(c) = buf.cell_mut((x, area.bottom() - 1)) {
+                c.set_symbol("#");
+            }
+        }
+        super::draw_progress_line(&mut buf, area, "Fetching 7/23 — Zork I", cs.story_header_active);
+        let row = row_text(&buf, area.bottom() - 1, area);
+        assert!(row.contains("Fetching 7/23 — Zork I"), "{row:?}");
+        assert!(!row.contains('#'), "the overlay must clear the whole row, not just prefix it: {row:?}");
+        let cell = buf.cell((area.left(), area.bottom() - 1)).unwrap();
+        assert_eq!(
+            Some(cell.fg), cs.story_header_active.fg,
+            "progress line must use a themed style, not a hard-coded color"
+        );
+    }
+
+    /// A `MetadataSource` fake local to this module (the one in
+    /// `fetch_worker`'s tests is private to that module) — canned responses
+    /// keyed by IFID, never touching the network.
+    struct FakeSource {
+        title_by_ifid: std::collections::HashMap<String, String>,
+    }
+
+    impl app::ifdb::MetadataSource for FakeSource {
+        fn fetch(&self, ifid: &str) -> Result<app::ifdb::FetchOutcome, app::ifdb::FetchError> {
+            match self.title_by_ifid.get(ifid) {
+                Some(title) => Ok(app::ifdb::FetchOutcome::Found(app::ifiction::IFiction {
+                    title: Some(title.clone()),
+                    ..Default::default()
+                })),
+                None => Ok(app::ifdb::FetchOutcome::NotFound),
+            }
+        }
+        fn fetch_cover(&self, _url: &str) -> Result<Vec<u8>, app::ifdb::FetchError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// THE highest-value integration test in this task: drives a real
+    /// `Fetcher` (with a fake source, zero delay) over two stories, then runs
+    /// the exact same drain-handling pipeline the picker loop uses —
+    /// `resolve_entry` to pick up the freshly-written sidecar, then
+    /// `resort_preserving_selection` — and checks the selection followed its
+    /// story through a title-driven reorder, not its index.
+    #[test]
+    fn a_simulated_sweep_lands_new_titles_and_the_selection_follows_its_story() {
+        let stories_dir = temp_dir("sweep");
+        // "zork2.z5" starts as a bare stem title that sorts LAST (after the
+        // untouched "other.z5" control story); the sweep gives it a fetched
+        // title that sorts FIRST, so a naive index-based cursor would end up
+        // pointing at the wrong (unrelated) story once the sweep lands.
+        std::fs::write(stories_dir.join("other.z5"), minimal_v3_story()).unwrap();
+        let mut b_bytes = minimal_v3_story();
+        b_bytes[0x12] = b'9';
+        std::fs::write(stories_dir.join("zork2.z5"), b_bytes.clone()).unwrap();
+        let data_base = temp_dir("sweep-data");
+
+        let mut stories = app::picker::scan_stories(&stories_dir, &data_base);
+        assert_eq!(stories.len(), 2);
+        let selected = stories.iter().position(|e| e.path.ends_with("zork2.z5")).unwrap();
+        let ifid_b = stories[selected].meta.ifid.clone();
+
+        let mut title_by_ifid = std::collections::HashMap::new();
+        title_by_ifid.insert(ifid_b, "AAA Brand New Title".to_string());
+        let fetcher = app::fetch_worker::Fetcher::new(
+            Box::new(FakeSource { title_by_ifid }),
+            data_base.clone(),
+            std::time::Duration::ZERO,
+        );
+        let order: Vec<(std::path::PathBuf, String)> =
+            stories.iter().map(|e| (e.path.clone(), e.meta.ifid.clone())).collect();
+        fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: true });
+
+        // Bounded drain (mirrors fetch_worker's own test pattern): collect
+        // progress until both stories report in, or give up after ~2s.
+        let mut progress = Vec::new();
+        for _ in 0..2000 {
+            progress.extend(fetcher.drain());
+            if progress.len() >= 2 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(progress.len(), 2, "both stories must report a completed fetch");
+
+        // Exactly what the picker loop's drain handler does per progress item.
+        for p in &progress {
+            if let Some(fresh) = app::picker::resolve_entry(&p.path, &data_base) {
+                if let Some(slot) = stories.iter_mut().find(|e| e.path == p.path) {
+                    *slot = fresh;
+                }
+            }
+        }
+        assert_eq!(stories[selected].title, "AAA Brand New Title", "the sidecar write landed");
+
+        let new_idx =
+            app::picker::resort_preserving_selection(&mut stories, selected, app::picker::Sort::default());
+        assert_eq!(new_idx, 0, "the new title now sorts first");
+        assert!(stories[new_idx].path.ends_with("zork2.z5"), "selection followed its story, not its old index");
+        assert_eq!(stories[new_idx].title, "AAA Brand New Title");
+
+        let _ = std::fs::remove_dir_all(&stories_dir);
+        let _ = std::fs::remove_dir_all(&data_base);
     }
 }
