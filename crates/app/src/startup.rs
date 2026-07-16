@@ -366,9 +366,20 @@ pub(crate) fn boot() -> BootResult {
 
     // Resolve the sound container + construct the audio backend (silent if the
     // feature is off, there is no device, or sound is disabled in config).
+    // The load line prints here, before the alternate screen is entered, so it
+    // stays in the normal terminal scrollback for verification after exit.
     state.sound_blorb = match blorb::resolve_resource_blorb(&story_path) {
         Some((b, path)) => {
-            eprintln!("babelmap: loaded resources from {}", path.display());
+            let count = |usage: &[u8; 4]| b.resources().iter().filter(|r| &r.usage == usage).count();
+            let (sounds, images) = (count(b"Snd "), count(b"Pict"));
+            let own = path == story_path;
+            eprintln!(
+                "babelmap: loaded resources from {}{} ({} sound{}, {} image{})",
+                path.display(),
+                if own { " (self)" } else { " (sidecar)" },
+                sounds, if sounds == 1 { "" } else { "s" },
+                images, if images == 1 { "" } else { "s" },
+            );
             Some(b)
         }
         None => None,

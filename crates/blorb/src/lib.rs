@@ -276,6 +276,19 @@ fn best_unambiguous_prefix<T>(candidates: Vec<(usize, T)>) -> Option<T> {
     }
 }
 
+/// If `cand_stem` names a plausible resource sidecar for `story_stem`, the
+/// length of their shared prefix; else `None`. Requires the SHORTER stem to be a
+/// full prefix of the longer (and at least 3 chars): `lurking`↔`lurkinghorror…`
+/// and `zork1`↔`zork1-sounds` qualify, but `zork0`↔`zork1` does not — they only
+/// share the `zork` series prefix and diverge at the game number, so neither
+/// stem fully prefixes the other. This stops one game's sidecar (e.g.
+/// `zork0.blb`) from being grabbed by every sibling in a numbered series.
+fn stem_prefix_match(story_stem: &str, cand_stem: &str) -> Option<usize> {
+    let plen = common_prefix_len(story_stem, cand_stem);
+    let shorter = story_stem.len().min(cand_stem.len());
+    (plen >= 3 && plen == shorter).then_some(plen)
+}
+
 /// Resolve the Blorb holding a story's media resources (sounds and/or
 /// pictures), plus the path it was read from, or `None`.
 ///
@@ -335,26 +348,24 @@ pub fn resolve_resource_blorb(
             .file_stem()
             .map(|s| s.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        let plen = common_prefix_len(&story_stem, &cand_stem);
-        candidates.push((plen, (b, path)));
+        if let Some(plen) = stem_prefix_match(&story_stem, &cand_stem) {
+            candidates.push((plen, (b, path)));
+        }
     }
-    // A sole resource blorb in the directory is it, even with an unrelated name
-    // (having resources already vouched for it); otherwise require an
-    // unambiguous stem-prefix match so we never grab the wrong game's resources.
-    if candidates.len() == 1 {
-        return Some(candidates.pop().unwrap().1);
-    }
+    // Require an unambiguous full-prefix match — no sole-candidate fallback,
+    // which would grab the wrong game's sidecar (e.g. zork0.blb) whenever it is
+    // the only resource blorb beside a story it doesn't actually belong to.
     best_unambiguous_prefix(candidates)
 }
 
 /// The associated resource-blorb sibling of `story_path`, matched by FILENAME
 /// ONLY (no file read), for the cheap per-row "(blorb)" tag which can't afford
-/// to parse every blorb. Same match order as [`resolve_resource_blorb`]: an exact
-/// same-stem `.blb`/`.blorb`/`.zblorb` sibling first, else the best
-/// unambiguous stem-prefix (>=3 chars) match among the directory's resource
-/// blorbs — `None` if there is none or the longest prefix is a tie. Unlike
-/// `resolve_resource_blorb` it does not verify the file has sounds, so it lights
-/// for any associated resource blorb (e.g. a graphics-only one).
+/// to parse every blorb. Same match order and rule as [`resolve_resource_blorb`]:
+/// an exact same-stem `.blb`/`.blorb`/`.zblorb` sibling first, else the best
+/// unambiguous [`stem_prefix_match`] among the directory's resource blorbs —
+/// `None` if there is none or the longest prefix is a tie. Unlike
+/// `resolve_resource_blorb` it does not read the file, so it can't require the
+/// blorb to actually carry resources — filename agreement is the whole signal.
 pub fn sibling_blorb_by_name(
     story_path: &std::path::Path,
 ) -> Option<std::path::PathBuf> {
@@ -390,10 +401,10 @@ pub fn sibling_blorb_by_name(
             .file_stem()
             .map(|s| s.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        candidates.push((common_prefix_len(&story_stem, &cand_stem), path));
+        if let Some(plen) = stem_prefix_match(&story_stem, &cand_stem) {
+            candidates.push((plen, path));
+        }
     }
-    // Unlike resolve_resource_blorb there is no sole-candidate fallback: without a
-    // has_sounds check, a lone unrelated blorb must not light every story's tag.
     best_unambiguous_prefix(candidates)
 }
 
@@ -850,17 +861,32 @@ mod tests {
 
     #[test]
     fn resolve_returns_none_on_prefix_tie() {
-        // Two candidates share the same >=3 leading run with the story stem;
-        // neither is the story itself nor an exact same-stem sibling. Ambiguous → None.
+        // Two sidecars whose stems each fully prefix the story stem, tied for the
+        // longest prefix → ambiguous → None (don't guess by directory order).
         let dir = TempDir::new("prefix-tie");
-        let story = dir.join("lurkinghorror.z3");
+        let story = dir.join("zork1.z3");
         std::fs::write(&story, b"not a blorb").unwrap();
-        // Both share the "lurking" prefix run with "lurkinghorror":
-        std::fs::write(dir.join("lurking-sounds.blorb"), sound_blorb_tagged(b"a")).unwrap();
-        std::fs::write(dir.join("lurking-audio.blorb"), sound_blorb_tagged(b"b")).unwrap();
+        std::fs::write(dir.join("zork1-sounds.blorb"), sound_blorb_tagged(b"a")).unwrap();
+        std::fs::write(dir.join("zork1-music.blorb"), sound_blorb_tagged(b"b")).unwrap();
         assert!(
             resolve_resource_blorb(&story).is_none(),
             "tie for longest prefix must be ambiguous"
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_a_shared_series_prefix() {
+        // SQ-0372: zork0.blb (Zork Zero's resources) must not be paired with
+        // Zork I — they share only the "zork" series prefix and diverge at the
+        // game number, and zork0's stem does not fully prefix zork1's. This holds
+        // even though zork0.blb is the sole resource blorb in the folder.
+        let dir = TempDir::new("series-resolve");
+        let story = dir.join("zork1-r88-s840726.z3");
+        std::fs::write(&story, b"not a blorb").unwrap();
+        std::fs::write(dir.join("zork0.blb"), pict_blorb()).unwrap();
+        assert!(
+            resolve_resource_blorb(&story).is_none(),
+            "zork0.blb belongs to Zork Zero, not Zork I"
         );
     }
 
@@ -892,11 +918,33 @@ mod tests {
     #[test]
     fn sibling_by_name_none_on_prefix_tie() {
         let dir = TempDir::new("byname-tie");
-        let story = dir.join("lurkinghorror.z3");
+        let story = dir.join("zork1.z3");
         std::fs::write(&story, b"x").unwrap();
-        std::fs::write(dir.join("lurking-a.blorb"), b"x").unwrap();
-        std::fs::write(dir.join("lurking-b.blorb"), b"x").unwrap();
+        std::fs::write(dir.join("zork1-a.blorb"), b"x").unwrap();
+        std::fs::write(dir.join("zork1-b.blorb"), b"x").unwrap();
         assert_eq!(sibling_blorb_by_name(&story), None, "ambiguous tie → None");
+    }
+
+    #[test]
+    fn sibling_by_name_rejects_a_shared_series_prefix() {
+        // SQ-0372: the (blorb) tag must agree with the resolver — zork0.blb must
+        // not light for zork1/zork2/zork3, only for Zork Zero's own story.
+        let dir = TempDir::new("byname-series");
+        for n in ["1", "2", "3"] {
+            std::fs::write(dir.join(&format!("zork{n}-r88-s840726.z3")), b"x").unwrap();
+        }
+        std::fs::write(dir.join("zork0.blb"), b"x").unwrap();
+        for n in ["1", "2", "3"] {
+            let story = dir.join(&format!("zork{n}-r88-s840726.z3"));
+            assert_eq!(sibling_blorb_by_name(&story), None, "zork{n} must not match zork0.blb");
+        }
+        let z0 = dir.join("zork0-r393-s890714.z3");
+        std::fs::write(&z0, b"x").unwrap();
+        assert_eq!(
+            sibling_blorb_by_name(&z0),
+            Some(dir.join("zork0.blb")),
+            "Zork Zero's own story pairs with zork0.blb"
+        );
     }
 
     #[test]
