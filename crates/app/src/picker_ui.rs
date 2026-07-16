@@ -33,6 +33,38 @@ enum PickerView {
     Gallery,
 }
 
+/// A previewable bundled resource the info panel links to (SQ-0347): an image
+/// (`Pict`) or a sound (`Snd `). Carries where to re-read the bytes from (the
+/// story's own blorb, or its sidecar) since the panel's `ChunkInfo` list holds
+/// only display strings, not the resource data.
+#[derive(Clone)]
+struct ResourceRef {
+    blorb_path: std::path::PathBuf,
+    kind: PreviewKind,
+    number: u32,
+    label: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PreviewKind {
+    Image,
+    Sound,
+}
+
+/// A bundled resource being shown in the picker's preview modal (SQ-0347): a
+/// decoded image (rebuilt to a fitted protocol as the modal draws) and/or a
+/// one-line status (sound playback result, or why an image can't be shown).
+struct ResourcePreview {
+    /// Dialog title, e.g. `"Image #7"`.
+    title: String,
+    /// The decoded image, when this is a renderable Pict.
+    image: Option<image::DynamicImage>,
+    /// Fitted protocol cached by the content rect `(w, h)` it was built for.
+    proto: Option<(u16, u16, ratatui_image::protocol::Protocol)>,
+    /// A status line shown instead of (or below) an image.
+    status: Option<String>,
+}
+
 /// Story-list row layout: the selection-marker glyph column, the gap between
 /// text columns, and each data column's target width. Year drops first as
 /// the row narrows, then author, leaving title + badges at the narrowest —
@@ -428,6 +460,19 @@ pub(crate) fn run_story_picker(
     // so a click can open it despite mouse capture (SQ-0367). Empty while the
     // panel is closed (refilled only when draw_info_panel runs).
     let mut panel_link_rects: Vec<(Rect, String)> = Vec::new();
+    // Screen rect + resource ref of each previewable Pict/Snd row drawn this
+    // frame (SQ-0347), so a click opens its preview modal.
+    let mut panel_resource_rects: Vec<(Rect, ResourceRef)> = Vec::new();
+
+    // Resource-preview modal (SQ-0347): `Some` while a bundled image/sound is
+    // shown over the picker. `audio` is constructed lazily on the first sound
+    // play and held for the loop's lifetime (its OutputStream must outlive
+    // playback; per-click construct/drop would cut the sound and stutter).
+    let mut preview: Option<ResourcePreview> = None;
+    let mut audio: Option<audio::AudioBackend> = None;
+    let mut preview_close_rect: Option<Rect> = None;
+    let mut preview_button_rects: Vec<(app::render::dialog::ButtonId, Rect)> = Vec::new();
+    let mut preview_area = Rect::new(0, 0, 0, 0);
 
     // Async cover decode: a background worker decodes off the main loop; results
     // are drained into `cover` each iteration. `requested` tracks in-flight paths
@@ -529,12 +574,23 @@ pub(crate) fn run_story_picker(
                         &cs,
                         buf,
                         &mut panel_link_rects,
+                        &mut panel_resource_rects,
                     );
                 } else {
                     panel_link_rects.clear();
+                    panel_resource_rects.clear();
                 }
             } else {
                 panel_link_rects.clear();
+                panel_resource_rects.clear();
+            }
+
+            // Resource-preview modal (SQ-0347): drawn last, over everything.
+            if let Some(pv) = &mut preview {
+                let rects = draw_resource_preview(pv, area, cover_picker.as_ref(), &cs, buf);
+                preview_area = rects.area;
+                preview_close_rect = rects.close;
+                preview_button_rects = rects.buttons;
             }
         });
 
@@ -691,10 +747,16 @@ pub(crate) fn run_story_picker(
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                 use crossterm::event::KeyCode::*;
                 let shift = k.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
-                // Manual IFDB-page entry (SQ-0371) intercepts every key while
-                // active: keystrokes edit the field, Enter submits a fetch-by-id,
-                // Esc cancels.
-                if let Some(field) = manual_ifdb.as_mut() {
+                // The resource-preview modal (SQ-0347) captures all keys while
+                // open: any of Esc/Enter/q/Space dismisses it (and stops a sound).
+                if preview.is_some() {
+                    if matches!(k.code, Esc | Enter | Char('q') | Char(' ')) {
+                        preview = None;
+                        if let Some(a) = audio.as_mut() {
+                            a.stop_all();
+                        }
+                    }
+                } else if let Some(field) = manual_ifdb.as_mut() {
                     match k.code {
                         Esc => {
                             manual_ifdb = None;
@@ -919,7 +981,24 @@ pub(crate) fn run_story_picker(
                 use crossterm::event::{MouseButton, MouseEventKind};
                 if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                    if let Some((_, url)) = panel_link_rects.iter().find(|(r, _)| r.contains(pt)) {
+                    if preview.is_some() {
+                        // Modal open (SQ-0347): the ✕, the Close button, or a click
+                        // outside the dialog all dismiss it (and stop a sound); a
+                        // click inside is swallowed.
+                        let on_close = preview_close_rect.is_some_and(|r| r.contains(pt));
+                        let on_button = preview_button_rects.iter().any(|(_, r)| r.contains(pt));
+                        let outside = !preview_area.contains(pt);
+                        if on_close || on_button || outside {
+                            preview = None;
+                            if let Some(a) = audio.as_mut() {
+                                a.stop_all();
+                            }
+                        }
+                    } else if let Some((_, rref)) = panel_resource_rects.iter().find(|(r, _)| r.contains(pt)) {
+                        // Click on a previewable Pict/Snd resource row (SQ-0347):
+                        // open its modal (image renders / sound plays).
+                        preview = Some(open_resource_preview(rref, &mut audio, cfg.volume));
+                    } else if let Some((_, url)) = panel_link_rects.iter().find(|(r, _)| r.contains(pt)) {
                         // Click on an info-panel OSC 8 link (SQ-0367): the terminal
                         // can't act on it while we hold mouse capture, so open it.
                         open_url(url);
@@ -955,6 +1034,11 @@ pub(crate) fn run_story_picker(
                         );
                     }
                 } else if let Some(d) = app::input::wheel_delta(m.kind, cfg.mouse_wheel_invert) {
+                    // The preview modal swallows the wheel so the list behind it
+                    // doesn't scroll (SQ-0347).
+                    if preview.is_some() {
+                        // no-op while the modal is open
+                    } else {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
                     if slide.open && last_panel_area.contains(pt) {
                         if d < 0 {
@@ -967,6 +1051,7 @@ pub(crate) fn run_story_picker(
                         // applied at the loop top once this notch's event burst
                         // drains, so one notch moves the selection one story.
                         pending_wheel = Some(d);
+                    }
                     }
                 }
             }
@@ -1335,6 +1420,7 @@ fn open_url(url: &str) {
 /// slide/lazy-resolve). `link_rects` is cleared and refilled with the screen
 /// rect + full URL of every rendered OSC 8 link, so the loop can open one on a
 /// click (mouse capture keeps the terminal from doing it — SQ-0367).
+#[allow(clippy::too_many_arguments)]
 fn draw_info_panel(
     title: &str,
     filename: &str,
@@ -1349,8 +1435,10 @@ fn draw_info_panel(
     cs: &app::colors::ColorScheme,
     buf: &mut ratatui::buffer::Buffer,
     link_rects: &mut Vec<(Rect, String)>,
+    resource_rects: &mut Vec<(Rect, ResourceRef)>,
 ) -> usize {
     link_rects.clear();
+    resource_rects.clear();
     if area.width < 2 || area.height < 2 {
         return 0;
     }
@@ -1426,6 +1514,8 @@ fn draw_info_panel(
     // (SQ-0367): the visible text may truncate, but the whole visible label
     // stays clickable and opens the full URL.
     let mut link_urls: Vec<(usize, String)> = Vec::new();
+    // Line index → previewable resource (SQ-0347), for the Pict/Snd rows below.
+    let mut resource_refs: Vec<(usize, ResourceRef)> = Vec::new();
 
     // Title.
     lines.push((title.to_string(), cs.story_info_title));
@@ -1548,16 +1638,17 @@ fn draw_info_panel(
         }
     }
 
-    // Resources: self_blorb, else aux.assoc_blorb.
-    let (res_header, chunks): (Option<String>, &[app::picker::ChunkInfo]) =
+    // Resources: self_blorb (the story is itself a blorb), else aux.assoc_blorb
+    // (a sidecar). `blorb_path` is where a clicked resource re-reads its bytes.
+    let (res_header, chunks, blorb_path): (Option<String>, &[app::picker::ChunkInfo], Option<std::path::PathBuf>) =
         if let Some(c) = &meta.self_blorb {
-            (Some(format!("Resources ({filename})")), c.as_slice())
-        } else if let Some((_, c)) = aux.and_then(|a| a.assoc_blorb.as_ref()) {
+            (Some(format!("Resources ({filename})")), c.as_slice(), Some(entry_path.to_path_buf()))
+        } else if let Some((p, c)) = aux.and_then(|a| a.assoc_blorb.as_ref()) {
             // The sidecar filename is named up-front in the metadata block, so
             // this header stays generic rather than repeating it.
-            (Some("Resources".to_string()), c.as_slice())
+            (Some("Resources".to_string()), c.as_slice(), Some(p.clone()))
         } else {
-            (None, &[])
+            (None, &[], None)
         };
     if let Some(h) = res_header {
         lines.push((String::new(), cs.story_info_value));
@@ -1573,7 +1664,29 @@ fn draw_info_panel(
                 Some(d) => format!("{base} · {d} ({})", human_size(c.len as u64)),
                 None => format!("{base} ({})", human_size(c.len as u64)),
             };
-            lines.push((line, cs.story_info_value));
+            // Images (Pict) and sounds (Snd) are clickable to preview (SQ-0347):
+            // style them like a link and map their line to the resource so a
+            // click can re-read the bytes and pop the modal.
+            let kind = match c.usage.trim() {
+                "Pict" => Some(PreviewKind::Image),
+                "Snd" => Some(PreviewKind::Sound),
+                _ => None,
+            };
+            match (kind, &blorb_path) {
+                (Some(kind), Some(bp)) => {
+                    resource_refs.push((
+                        lines.len(),
+                        ResourceRef {
+                            blorb_path: bp.clone(),
+                            kind,
+                            number: c.number,
+                            label: format!("{} #{}", resource_usage_label(&c.usage), c.number),
+                        },
+                    ));
+                    lines.push((line, cs.story_info_link));
+                }
+                _ => lines.push((line, cs.story_info_value)),
+            }
         }
     }
 
@@ -1613,6 +1726,13 @@ fn draw_info_panel(
             link_rects.push((rect, url.clone()));
             continue;
         }
+        if let Some((_, rref)) = resource_refs.iter().find(|(idx, _)| *idx == li) {
+            // A previewable Pict/Snd row (SQ-0347): draw it, and record its rect
+            // so a click can open the resource preview modal.
+            draw_str_clipped(buf, text_area.x, y, text, *style, text_area);
+            resource_rects.push((Rect::new(text_area.x, y, text_area.width, 1), rref.clone()));
+            continue;
+        }
         draw_str_clipped(buf, text_area.x, y, text, *style, text_area);
     }
     if overflow {
@@ -1620,6 +1740,130 @@ fn draw_info_panel(
         app::render::scroll::draw_scrollbar(buf, sb_area, lines.len(), inner.height as usize, eff, cs.scrollbar);
     }
     max_scroll
+}
+
+/// Load a clicked resource into a preview (SQ-0347). For an image, decode its
+/// `Pict` bytes; for a sound, play it once through `audio` (constructed lazily
+/// on first use, then held by the caller). Always returns a preview — an
+/// unreadable blorb, an undecodable image, or a silent audio backend surfaces
+/// as a status line rather than nothing.
+fn open_resource_preview(
+    rref: &ResourceRef,
+    audio: &mut Option<audio::AudioBackend>,
+    volume: u8,
+) -> ResourcePreview {
+    let blorb = std::fs::read(&rref.blorb_path)
+        .ok()
+        .and_then(|bytes| blorb::Blorb::parse(bytes).ok());
+    match rref.kind {
+        PreviewKind::Image => {
+            let image = blorb
+                .as_ref()
+                .and_then(|b| b.resource(b"Pict", rref.number))
+                .and_then(|(_, data)| app::cover::decode(data));
+            let status = image
+                .is_none()
+                .then(|| "Can't preview this image (unsupported format).".to_string());
+            ResourcePreview { title: rref.label.clone(), image, proto: None, status }
+        }
+        PreviewKind::Sound => {
+            let status = play_preview_sound(blorb.as_ref(), rref.number, audio, volume);
+            ResourcePreview { title: rref.label.clone(), image: None, proto: None, status: Some(status) }
+        }
+    }
+}
+
+/// Play sound resource `number` from `blorb` once, returning the status line for
+/// the modal. Lazily constructs the audio backend into `audio` on first use.
+fn play_preview_sound(
+    blorb: Option<&blorb::Blorb>,
+    number: u32,
+    audio: &mut Option<audio::AudioBackend>,
+    volume: u8,
+) -> String {
+    let Some(blorb) = blorb else {
+        return "Couldn't read the resource blorb.".to_string();
+    };
+    let Some((bytes, kind)) = blorb.sound(number) else {
+        return "Sound resource not found.".to_string();
+    };
+    let Some(fmt) = app::state::sound_kind_to_format(kind) else {
+        return "Unsupported sound format.".to_string();
+    };
+    let backend = audio.get_or_insert_with(|| audio::AudioBackend::new(volume));
+    match backend.play_sample(bytes, fmt, 8, 1) {
+        Some(_) => "Playing…   (Esc / Enter to close)".to_string(),
+        None => "No audio output available.".to_string(),
+    }
+}
+
+/// Draw the resource-preview modal (SQ-0347) centred over `area`: dialog chrome
+/// (border, title, ✕ close, a Close button) with the fitted image — or a status
+/// line — in its content rect. Returns the dialog's hit rects for dismissal.
+fn draw_resource_preview(
+    pv: &mut ResourcePreview,
+    area: Rect,
+    picker: Option<&ratatui_image::picker::Picker>,
+    cs: &app::colors::ColorScheme,
+    buf: &mut ratatui::buffer::Buffer,
+) -> app::render::dialog::DialogRects {
+    use app::render::dialog::{draw_dialog, ButtonId, DialogButton, DialogSpec, DialogStyle, Placement};
+    // Centre a generous box: 80% of the terminal, floored so it stays usable on
+    // small screens and never exceeds the area.
+    let w = ((area.width as u32 * 4 / 5) as u16).clamp(20, area.width).max(1);
+    let h = ((area.height as u32 * 4 / 5) as u16).clamp(6, area.height).max(1);
+    let st = DialogStyle::from_colors(cs);
+    let buttons = [DialogButton { id: ButtonId::Close, label: "Close" }];
+    let spec = DialogSpec {
+        title: &pv.title,
+        placement: Placement::Centered { w, h },
+        buttons: &buttons,
+        show_close: true,
+        default: Some(ButtonId::Close),
+        focus: None,
+        field: None,
+    };
+    let rects = draw_dialog(buf, area, &spec, &st);
+
+    let content = rects.content;
+    // Render the image fitted + centred, else the status line centred.
+    let mut drew_image = false;
+    if let (Some(picker), Some(img)) = (picker, pv.image.as_ref()) {
+        if content.width >= 1 && content.height >= 1 {
+            let fresh = matches!(&pv.proto, Some((w, h, _)) if *w == content.width && *h == content.height);
+            if !fresh {
+                if let Ok(built) = picker.new_protocol(
+                    img.clone(),
+                    ratatui::layout::Size::new(content.width, content.height),
+                    ratatui_image::Resize::Fit(None),
+                ) {
+                    pv.proto = Some((content.width, content.height, built));
+                }
+            }
+            if let Some((_, _, proto)) = &pv.proto {
+                let sz = proto.size();
+                let uw = sz.width.min(content.width);
+                let uh = sz.height.min(content.height);
+                let dest = Rect::new(
+                    content.x + (content.width - uw) / 2,
+                    content.y + (content.height - uh) / 2,
+                    uw,
+                    uh,
+                );
+                ratatui::widgets::Widget::render(ratatui_image::Image::new(proto), dest, buf);
+                drew_image = true;
+            }
+        }
+    }
+    if !drew_image {
+        if let Some(status) = &pv.status {
+            let text = truncate_to_width(status, content.width as usize);
+            let tx = content.x + (content.width.saturating_sub(UnicodeWidthStr::width(text.as_str()) as u16)) / 2;
+            let ty = content.y + content.height / 2;
+            draw_str_clipped(buf, tx, ty, &text, cs.story_info_value, content);
+        }
+    }
+    rects
 }
 
 /// Translate a raw Blorb resource usage FourCC into a human-readable label.
@@ -2174,7 +2418,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("zork1.z3");
         super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, Some(&aux), 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
+            "Zork I", "zork1.z3", &meta, Some(&aux), 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
 
         let text = buffer_to_string(&buf, area);
@@ -2236,7 +2480,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("zork1.z3");
         let max_scroll = super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
+            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text_top = buffer_to_string(&buf, area);
         assert!(max_scroll > 0, "content should overflow a 10-row panel");
@@ -2245,7 +2489,7 @@ mod tests {
 
         let mut buf2 = Buffer::empty(area);
         let max_scroll2 = super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, max_scroll, area, None, &mut cover, entry_path, false, &cs, &mut buf2, &mut Vec::new(),
+            "Zork I", "zork1.z3", &meta, None, max_scroll, area, None, &mut cover, entry_path, false, &cs, &mut buf2, &mut Vec::new(), &mut Vec::new(),
         );
         let text_scrolled = buffer_to_string(&buf2, area);
         assert_eq!(max_scroll2, max_scroll);
@@ -2254,7 +2498,7 @@ mod tests {
         // Scrolling past max clamps to the same view as scroll == max_scroll.
         let mut buf3 = Buffer::empty(area);
         super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, 999, area, None, &mut cover, entry_path, false, &cs, &mut buf3, &mut Vec::new(),
+            "Zork I", "zork1.z3", &meta, None, 999, area, None, &mut cover, entry_path, false, &cs, &mut buf3, &mut Vec::new(), &mut Vec::new(),
         );
         let text_over = buffer_to_string(&buf3, area);
         assert_eq!(text_over, text_scrolled, "scroll past max should clamp to max_scroll view");
@@ -2288,7 +2532,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("game.gblorb");
         super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         let lines: Vec<&str> = text.lines().collect();
@@ -2322,7 +2566,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("game.gblorb");
         super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         assert!(text.contains("Michael S. Gentry"), "author should render: {text:?}");
@@ -2366,7 +2610,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         super::draw_info_panel(
             "Beyond Zork", "beyondzork-r57-s871221.z5", &meta, Some(&aux), 0, area, None,
-            &mut cover, std::path::Path::new("beyondzork-r57-s871221.z5"), false, &cs, &mut buf, &mut Vec::new(),
+            &mut cover, std::path::Path::new("beyondzork-r57-s871221.z5"), false, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         assert!(text.contains("Resource blorb: beyondzork.blb"), "sidecar named up-front: {text:?}");
@@ -2393,7 +2637,7 @@ mod tests {
         let mut links: Vec<(Rect, String)> = Vec::new();
         super::draw_info_panel(
             "Game", "game.z5", &meta, None, 0, area, None, &mut cover,
-            std::path::Path::new("game.z5"), false, &cs, &mut buf, &mut links,
+            std::path::Path::new("game.z5"), false, &cs, &mut buf, &mut links, &mut Vec::new(),
         );
         let (rect, _) = links.first().expect("a link rect was recorded");
         let first = buf.cell(Position::new(rect.x, rect.y)).expect("link first cell");
@@ -2413,7 +2657,7 @@ mod tests {
             let mut cover = app::cover::CoverState::default();
             super::draw_info_panel(
                 "Game", "game.z5", meta, None, 0, area, None, &mut cover,
-                std::path::Path::new("game.z5"), false, &cs, &mut buf, &mut Vec::new(),
+                std::path::Path::new("game.z5"), false, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
             );
             buffer_to_string(&buf, area)
         };
@@ -2441,7 +2685,7 @@ mod tests {
             let mut cover = app::cover::CoverState::default();
             super::draw_info_panel(
                 title, "game.z5", meta, None, 0, area, None, &mut cover,
-                std::path::Path::new("game.z5"), false, &cs, &mut buf, &mut Vec::new(),
+                std::path::Path::new("game.z5"), false, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
             );
             buffer_to_string(&buf, area)
         };
@@ -2478,7 +2722,7 @@ mod tests {
         let mut rects: Vec<(Rect, String)> = Vec::new();
         super::draw_info_panel(
             "Zork I", "game.z5", &minimal_story_meta(), None, 0, area, None, &mut cover,
-            path, false, &cs, &mut buf, &mut rects,
+            path, false, &cs, &mut buf, &mut rects, &mut Vec::new(),
         );
         assert!(rects.is_empty(), "no link rects before a fetch: {rects:?}");
 
@@ -2490,7 +2734,7 @@ mod tests {
         rects.clear();
         super::draw_info_panel(
             "Zork I", "game.z5", &fetched, None, 0, area, None, &mut cover,
-            path, false, &cs, &mut buf, &mut rects,
+            path, false, &cs, &mut buf, &mut rects, &mut Vec::new(),
         );
         assert_eq!(rects.len(), 1, "one link rect once fetched: {rects:?}");
         let (rect, got) = &rects[0];
@@ -2518,7 +2762,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("game.gblorb");
         let max_scroll = super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         assert!(max_scroll > 0, "a long wrapped blurb should overflow an 8-row panel");
         let text_top = buffer_to_string(&buf, area);
@@ -2526,7 +2770,7 @@ mod tests {
 
         let mut buf2 = Buffer::empty(area);
         let max_scroll2 = super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, max_scroll, area, None, &mut cover, entry_path, false, &cs, &mut buf2, &mut Vec::new(),
+            "Game", "game.gblorb", &meta, None, max_scroll, area, None, &mut cover, entry_path, false, &cs, &mut buf2, &mut Vec::new(), &mut Vec::new(),
         );
         assert_eq!(max_scroll2, max_scroll, "max_scroll must be stable across scroll positions");
         let text_scrolled = buffer_to_string(&buf2, area);
@@ -2554,7 +2798,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("game.gblorb");
         let max_scroll = super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
         assert!(max_scroll > 0, "blurb should overflow so the scrollbar shows");
         let text = buffer_to_string(&buf, area);
@@ -2592,7 +2836,7 @@ mod tests {
 
         super::draw_info_panel(
             "Cover Test", "cover-test.gblorb", &meta, None,
-            0, area, Some(&picker), &mut cover, &path, false, &cs, &mut buf, &mut Vec::new(),
+            0, area, Some(&picker), &mut cover, &path, false, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
         );
 
         // Half-blocks emit the upper-half-block glyph in the reserved top band.
@@ -2921,6 +3165,112 @@ mod tests {
         let unsel_tile = rects.iter().find(|(i, _)| *i == 0).unwrap().1;
         let unsel_cell = buf.cell((unsel_tile.x, unsel_tile.y + app::cover_gallery::TILE_COVER_H)).unwrap();
         assert_ne!(unsel_cell.style().bg, cs.story_tile_selected.bg, "unselected caption is not highlighted");
+    }
+
+    /// A 2×2 red PNG, encoded via the `image` crate (mirrors cover.rs fixtures).
+    fn tiny_png() -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(2, 2, image::Rgb([255, 0, 0]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    /// A minimal blorb carrying one `Pict` resource (number 1) holding `png`.
+    fn blorb_with_pict(png: &[u8]) -> Vec<u8> {
+        fn iff_chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(ty);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                v.push(0);
+            }
+            v
+        }
+        let mut ridx = Vec::new();
+        ridx.extend_from_slice(&1u32.to_be_bytes()); // one entry
+        ridx.extend_from_slice(b"Pict");
+        ridx.extend_from_slice(&1u32.to_be_bytes()); // number
+        let ridx_chunk_len = 8 + (4 + 12); // header + count + one 12-byte entry
+        let pict_off = 12 + ridx_chunk_len; // FORM/IFRS header + RIdx chunk
+        ridx.extend_from_slice(&(pict_off as u32).to_be_bytes());
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"IFRS");
+        inner.extend_from_slice(&iff_chunk(b"RIdx", &ridx));
+        inner.extend_from_slice(&iff_chunk(b"PNG ", png));
+        let mut file = Vec::new();
+        file.extend_from_slice(b"FORM");
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+        file
+    }
+
+    #[test]
+    fn info_panel_records_a_hit_rect_for_a_previewable_pict_row() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        use app::picker::{ChunkInfo, Engine, Features, StoryMeta};
+        let cs = app::colors::ColorScheme::terminal_default();
+        // A self-contained blorb story with one image resource.
+        let meta = StoryMeta {
+            size_bytes: 1, modified: None, engine: Engine::ZCode, format: "Blorb".into(),
+            version: None, serial: None, release: None, ifid: "X".into(),
+            features: Features::default(),
+            self_blorb: Some(vec![ChunkInfo {
+                usage: "Pict".into(), number: 3, chunk_type: "PNG ".into(), len: 100, detail: None,
+            }]),
+            author: None, year: None, genre: None, language: None, description: None,
+            ifdb_link: None, fetch_not_found: false,
+        };
+        let area = Rect::new(0, 0, 40, 30);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("/tmp/game.gblorb");
+        let mut resource_rects: Vec<(Rect, super::ResourceRef)> = Vec::new();
+        super::draw_info_panel(
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path,
+            false, &cs, &mut buf, &mut Vec::new(), &mut resource_rects,
+        );
+        assert_eq!(resource_rects.len(), 1, "the Pict row is clickable");
+        let (_, rref) = &resource_rects[0];
+        assert_eq!(rref.kind, super::PreviewKind::Image);
+        assert_eq!(rref.number, 3);
+        assert_eq!(rref.blorb_path, entry_path, "self-blorb resource reads from the story itself");
+    }
+
+    #[test]
+    fn open_preview_decodes_an_image_resource_from_a_blorb() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("babelmap-preview-{}.blb", std::process::id()));
+        std::fs::write(&path, blorb_with_pict(&tiny_png())).unwrap();
+
+        let rref = super::ResourceRef {
+            blorb_path: path.clone(),
+            kind: super::PreviewKind::Image,
+            number: 1,
+            label: "Image #1".into(),
+        };
+        let mut audio = None;
+        let pv = super::open_resource_preview(&rref, &mut audio, 100);
+        let _ = std::fs::remove_file(&path);
+        assert!(pv.image.is_some(), "the Pict PNG decoded");
+        assert!(pv.status.is_none(), "a decodable image needs no status line");
+        assert!(audio.is_none(), "an image preview never touches the audio backend");
+    }
+
+    #[test]
+    fn open_preview_of_a_missing_blorb_yields_a_status_not_a_panic() {
+        let rref = super::ResourceRef {
+            blorb_path: std::path::PathBuf::from("/no/such/file.blb"),
+            kind: super::PreviewKind::Image,
+            number: 1,
+            label: "Image #1".into(),
+        };
+        let mut audio = None;
+        let pv = super::open_resource_preview(&rref, &mut audio, 100);
+        assert!(pv.image.is_none());
+        assert!(pv.status.is_some(), "an unreadable blorb surfaces a status line");
     }
 
     #[test]

@@ -98,6 +98,11 @@ whenever the highlighted story changes.
   story with no frontispiece of its own shows a fetched cover instead, once
   metadata has been fetched. Force a mode with
   `--image-protocol <auto|halfblocks|kitty|sixel|iterm2>`.
+- **Preview bundled assets.** In the info panel's Resources list, image (`Pict`)
+  and sound (`Snd`) rows render as links — click one to pop a dismissible modal:
+  an image renders fitted and centred; a sound plays once. Close it with `Esc`/
+  `Enter`/`q`, the ✕ in the corner, the Close button, or a click outside.
+  Undecodable images and a missing audio device show a short status line instead.
 - **Cover gallery.** Press `g` to swap the metadata list for a grid of cover
   thumbnails (auto-fitting as many ~16-column tiles as the pane is wide, each
   with the title captioned below and the selected cover highlighted). Arrow
