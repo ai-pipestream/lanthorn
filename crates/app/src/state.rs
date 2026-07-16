@@ -2144,6 +2144,7 @@ impl AppState {
     pub fn cached_map_render(
         &self,
         layer: LayerId,
+        graph: &mapper::graph::MapGraph,
         build: impl FnOnce() -> mapper::render::RenderMap,
     ) -> std::cell::Ref<'_, mapper::render::RenderMap> {
         let gen = self.graph_gen;
@@ -2152,6 +2153,20 @@ impl AppState {
             let fresh = matches!(cache.as_ref(), Some(c) if c.gen == gen && c.layer == layer);
             if !fresh {
                 *cache = Some(MapRenderCache { gen, layer, rm: build() });
+            }
+            // The current-room highlight and a room's label can change on a turn
+            // that did NOT alter the map's routed geometry — a step between two
+            // already-placed rooms, or a room the game renamed in place. Those
+            // must NOT bump `graph_gen`, because re-routing the whole map every
+            // step pauses gameplay on large explored maps (SQ-0378). Refresh just
+            // those fields here from the live graph, reusing the cached routing.
+            let rm = &mut cache.as_mut().expect("cache populated above").rm;
+            let current = graph.current();
+            for r in &mut rm.rooms {
+                r.is_current = Some(r.id) == current;
+                if let Some(room) = graph.room(r.id) {
+                    r.label = room.label().to_string();
+                }
             }
         }
         std::cell::Ref::map(self.map_render.borrow(), |c| {
@@ -4145,7 +4160,7 @@ mod tests {
         // Build closure ignores the layer (keeps the test off layer-subgraph
         // validity); its only job is to count how often the cache actually rebuilds.
         let run = |s: &AppState, layer| {
-            let _ = s.cached_map_render(layer, || {
+            let _ = s.cached_map_render(layer, &g, || {
                 builds.set(builds.get() + 1);
                 mapper::render::render(&g)
             });
@@ -4166,6 +4181,47 @@ mod tests {
         s.graph_gen = s.graph_gen.wrapping_add(1);
         run(&s, 1);
         assert_eq!(builds.get(), 3, "graph_gen bump rebuilds");
+    }
+
+    /// SQ-0378: a step between already-placed rooms changes the current-room
+    /// highlight but not the routed geometry, so `graph_gen` does not bump. The
+    /// cache must follow the player WITHOUT re-routing the whole map (the pause).
+    #[test]
+    fn cached_map_render_refreshes_current_without_rebuilding() {
+        use mapper::graph::MapGraph;
+        use std::cell::Cell;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "A".into());
+        g.set_pos(1, (0, 0));
+        g.upsert_room(2, "B".into());
+        g.set_pos(2, (1, 0));
+        g.set_current(1);
+        let s = AppState::default();
+        let builds = Cell::new(0usize);
+
+        {
+            let rm = s.cached_map_render(0, &g, || {
+                builds.set(builds.get() + 1);
+                mapper::render::render(&g)
+            });
+            assert!(rm.rooms.iter().find(|r| r.id == 1).unwrap().is_current);
+            assert!(!rm.rooms.iter().find(|r| r.id == 2).unwrap().is_current);
+        }
+
+        // Move the player to room 2 WITHOUT bumping graph_gen.
+        g.set_current(2);
+        {
+            let rm = s.cached_map_render(0, &g, || {
+                builds.set(builds.get() + 1);
+                mapper::render::render(&g)
+            });
+            assert_eq!(builds.get(), 1, "a current-room change must NOT re-route the map");
+            assert!(!rm.rooms.iter().find(|r| r.id == 1).unwrap().is_current);
+            assert!(
+                rm.rooms.iter().find(|r| r.id == 2).unwrap().is_current,
+                "the highlight follows the player with no rebuild"
+            );
+        }
     }
 
     #[test]

@@ -310,7 +310,7 @@ fn draw_frame(
             match &state.tidy_anim {
                 Some(anim) => FrameRenderMap::Owned(render_layer(&anim.current().graph, layer)),
                 None => {
-                    FrameRenderMap::Cached(state.cached_map_render(layer, || render_layer(&mapper.graph, layer)))
+                    FrameRenderMap::Cached(state.cached_map_render(layer, &mapper.graph, || render_layer(&mapper.graph, layer)))
                 }
             }
         };
