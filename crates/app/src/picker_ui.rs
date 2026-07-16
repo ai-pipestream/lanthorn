@@ -1126,6 +1126,10 @@ fn draw_info_panel(
     }
 
     let mut lines: Vec<(String, ratatui::style::Style)> = Vec::new();
+    // Line index → full URL for lines that should render as OSC 8 hyperlinks
+    // (SQ-0367): the visible text may truncate, but the whole visible label
+    // stays clickable and opens the full URL.
+    let mut link_urls: Vec<(usize, String)> = Vec::new();
 
     // Title.
     lines.push((title.to_string(), cs.story_info_title));
@@ -1180,15 +1184,17 @@ fn draw_info_panel(
             }
         }
     }
-    // IFDB page link (SQ-0348): rendered as the bare URL so terminals that
-    // detect URLs make it click/⌘-clickable; only present once fetched.
+    // IFDB page link (SQ-0348): a real OSC 8 hyperlink (SQ-0367) so the visible
+    // text is clickable even when the URL truncates; only present once fetched.
     if let Some(link) = meta.ifdb_link.as_deref().filter(|s| !s.is_empty()) {
+        link_urls.push((lines.len(), link.to_string()));
         lines.push((format!("IFDB: {link}"), cs.story_info_link));
     } else if meta.fetch_not_found {
         // A fetch ran but IFDB had no record for this IFID (common for Infocom
         // releases IFDB indexes under a different IFID). Offer a manual search
         // by title so the user isn't at a dead end (SQ-0371).
         let url = app::ifdb::search_url(title);
+        link_urls.push((lines.len(), url.clone()));
         lines.push((format!("IFDB search: {url}"), cs.story_info_link));
     }
     // features line (present badges only).
@@ -1270,8 +1276,18 @@ fn draw_info_panel(
     let max_scroll = lines.len().saturating_sub(content_height);
     let eff = scroll.min(max_scroll);
     let end = (eff + content_height).min(lines.len());
-    for (i, (text, style)) in lines[eff..end].iter().enumerate() {
-        let y = inner.y + i as u16;
+    for (vi, (text, style)) in lines[eff..end].iter().enumerate() {
+        let li = eff + vi;
+        let y = inner.y + vi as u16;
+        if let Some((_, url)) = link_urls.iter().find(|(idx, _)| *idx == li) {
+            // OSC 8 hyperlink (SQ-0367): the whole visible label is clickable and
+            // opens the full URL, so a truncated URL still works. Degrades to
+            // plain styled text on terminals without hyperlink support.
+            let rect = Rect::new(text_area.x, y, text_area.width, 1);
+            let link = hyperrat::Link::new(text.as_str(), url.as_str()).style(*style);
+            ratatui::widgets::Widget::render(link, rect, buf);
+            continue;
+        }
         draw_str_clipped(buf, text_area.x, y, text, *style, text_area);
     }
     if overflow {
