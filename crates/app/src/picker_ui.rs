@@ -188,7 +188,8 @@ fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) 
 /// core hints; the rest are dropped — `PgUp/PgDn` goes first since it's a
 /// standard convention nobody needs told, `f`/`r` survive narrowest since
 /// they name behavior no key convention predicts.
-const FOOTER_OPTIONAL: [&str; 5] = ["f: fetch", "r: refresh", "s: sort", "d: reverse", "PgUp/PgDn"];
+const FOOTER_OPTIONAL: [&str; 6] =
+    ["f: fetch", "r: refresh", "u: IFDB url", "s: sort", "d: reverse", "PgUp/PgDn"];
 
 fn build_footer(width: u16) -> String {
     const CORE_LEFT: &str = " ↑/↓ or j/k: move";
@@ -392,6 +393,10 @@ pub(crate) fn run_story_picker(
     // message's shape (`f`: found/not-found/failed; `r`: a tallied summary).
     let mut fetch_is_single = false;
     let (mut sweep_fetched, mut sweep_skipped, mut sweep_not_found, mut sweep_failed) = (0u32, 0u32, 0u32, 0u32);
+    // Manual IFDB-page entry (SQ-0371): `Some` while the user is typing an IFDB
+    // URL/id for the selected story; keystrokes route to the field, Enter
+    // submits a fetch-by-id, Esc cancels.
+    let mut manual_ifdb: Option<app::text_field::TextField> = None;
 
     // Info panel: always starts closed each launch (session-only state).
     let mut slide = PanelSlide::closed();
@@ -447,9 +452,12 @@ pub(crate) fn run_story_picker(
             row_rects = rects;
             viewport = vp;
             header_rects = hrects;
-            // A fetch in flight (or its just-landed result) replaces the
-            // normal footer hints with a live status line.
-            if let Some(msg) = &progress_line {
+            // The manual IFDB-entry prompt (SQ-0371) takes the footer row while
+            // active; otherwise a fetch's status line, otherwise the hints.
+            if let Some(field) = &manual_ifdb {
+                let prompt = format!("IFDB URL or id (Enter to fetch, Esc to cancel): {}▏", field.as_str());
+                draw_progress_line(buf, list_area, &prompt, cs.story_header_active);
+            } else if let Some(msg) = &progress_line {
                 draw_progress_line(buf, list_area, msg, cs.story_header_active);
             }
             if panel_area.width > 0 {
@@ -607,7 +615,49 @@ pub(crate) fn run_story_picker(
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                 use crossterm::event::KeyCode::*;
                 let shift = k.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
-                if slide.open && shift {
+                // Manual IFDB-page entry (SQ-0371) intercepts every key while
+                // active: keystrokes edit the field, Enter submits a fetch-by-id,
+                // Esc cancels.
+                if let Some(field) = manual_ifdb.as_mut() {
+                    match k.code {
+                        Esc => {
+                            manual_ifdb = None;
+                            progress_line = None;
+                        }
+                        Enter => {
+                            let input = field.take();
+                            manual_ifdb = None;
+                            if let Some(entry) = stories.get(list.selected) {
+                                match app::ifdb::extract_tuid(&input) {
+                                    Some(tuid) => {
+                                        fetch_is_single = true;
+                                        sweep_fetched = 0;
+                                        sweep_skipped = 0;
+                                        sweep_not_found = 0;
+                                        sweep_failed = 0;
+                                        progress_line = Some(format!("Fetching {} from IFDB…", entry.title));
+                                        fetcher.request(app::fetch_worker::FetchOrder {
+                                            stories: vec![(entry.path.clone(), entry.meta.ifid.clone())],
+                                            forced: true,
+                                            id_override: Some(tuid),
+                                        });
+                                    }
+                                    None => {
+                                        progress_line = Some("Not an IFDB URL or id".to_string());
+                                    }
+                                }
+                            }
+                        }
+                        Backspace => field.backspace(),
+                        Delete => field.delete(),
+                        Left => field.left(),
+                        Right => field.right(),
+                        Home => field.home(),
+                        End => field.end(),
+                        Char(c) => field.insert(c),
+                        _ => {}
+                    }
+                } else if slide.open && shift {
                     let page = (last_panel_area.height.saturating_sub(2)).max(1) as usize;
                     match k.code {
                         Up => panel_scroll = panel_scroll.saturating_sub(1),
@@ -668,6 +718,7 @@ pub(crate) fn run_story_picker(
                                 fetcher.request(app::fetch_worker::FetchOrder {
                                     stories: vec![(entry.path.clone(), entry.meta.ifid.clone())],
                                     forced: true,
+                                    id_override: None,
                                 });
                             }
                         }
@@ -684,7 +735,14 @@ pub(crate) fn run_story_picker(
                             sweep_not_found = 0;
                             sweep_failed = 0;
                             progress_line = Some(format!("Fetching 0/{total}"));
-                            fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false });
+                            fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: false, id_override: None });
+                        }
+                        // `u`: point the selected story at an IFDB page by hand
+                        // (for a story whose IFID IFDB doesn't index). Opens the
+                        // manual-entry field; ignored mid-sweep (SQ-0371).
+                        Char('u') if !fetcher.busy() => {
+                            manual_ifdb = Some(app::text_field::TextField::new(""));
+                            progress_line = None;
                         }
                         // `s`: cycle the sort column, keeping direction. `d`:
                         // toggle direction, keeping the column. Both preserve
@@ -1666,23 +1724,23 @@ mod tests {
         assert!(narrow.contains("move") && narrow.contains("open") && narrow.contains("info") && narrow.contains("quit"));
         assert!(!narrow.contains("f: fetch") && !narrow.contains("PgUp/PgDn"), "{narrow:?}");
 
-        // f/r (least guessable) survive down to the narrowest widths that fit
-        // them at all; s/d/PgUp/PgDn need progressively more room.
-        let at_80 = super::build_footer(80);
-        assert!(at_80.contains("f: fetch"), "{at_80:?}");
-        assert!(!at_80.contains("r: refresh"), "{at_80:?}");
-
-        let at_93 = super::build_footer(93);
-        assert!(at_93.contains("r: refresh") && !at_93.contains("s: sort"), "{at_93:?}");
-
-        let at_103 = super::build_footer(103);
-        assert!(at_103.contains("s: sort") && !at_103.contains("d: reverse"), "{at_103:?}");
-
-        let at_116 = super::build_footer(116);
-        assert!(at_116.contains("d: reverse") && !at_116.contains("PgUp/PgDn"), "{at_116:?}");
-
-        let at_128 = super::build_footer(128);
-        assert!(at_128.contains("PgUp/PgDn"), "{at_128:?}");
+        // Segments appear in FOOTER_OPTIONAL order as width grows (least-
+        // guessable first): each one's minimum fitting width is >= the previous
+        // one's, and the core is always present. Robust to segment-set changes.
+        let min_width = |seg: &str| -> u16 {
+            (10u16..=240).find(|&w| super::build_footer(w).contains(seg)).unwrap_or(u16::MAX)
+        };
+        let widths: Vec<u16> = super::FOOTER_OPTIONAL.iter().map(|s| min_width(s)).collect();
+        for pair in widths.windows(2) {
+            assert!(pair[0] <= pair[1], "segments appear in declared order: {widths:?}");
+        }
+        // f: fetch (first, least guessable) appears well before PgUp/PgDn (last).
+        assert!(widths[0] < *widths.last().unwrap(), "{widths:?}");
+        // At a wide-enough terminal, every optional hint (incl. the new u) shows.
+        let wide = super::build_footer(200);
+        for seg in super::FOOTER_OPTIONAL {
+            assert!(wide.contains(seg), "wide footer shows {seg:?}: {wide:?}");
+        }
     }
 
     // ── Story-picker info panel ─────────────────────────────────────────────────
@@ -2260,6 +2318,9 @@ mod tests {
                 None => Ok(app::ifdb::FetchOutcome::NotFound),
             }
         }
+        fn fetch_by_id(&self, _tuid: &str) -> Result<app::ifdb::FetchOutcome, app::ifdb::FetchError> {
+            Ok(app::ifdb::FetchOutcome::NotFound)
+        }
         fn fetch_cover(&self, _url: &str) -> Result<Vec<u8>, app::ifdb::FetchError> {
             Ok(Vec::new())
         }
@@ -2298,7 +2359,7 @@ mod tests {
         );
         let order: Vec<(std::path::PathBuf, String)> =
             stories.iter().map(|e| (e.path.clone(), e.meta.ifid.clone())).collect();
-        fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: true });
+        fetcher.request(app::fetch_worker::FetchOrder { stories: order, forced: true, id_override: None });
 
         // Bounded drain (mirrors fetch_worker's own test pattern): collect
         // progress until both stories report in, or give up after ~2s.
