@@ -406,6 +406,10 @@ pub(crate) fn run_story_picker(
     let mut last_panel_area = Rect::new(0, 0, 0, 0);
     let mut panel_scroll: usize = 0;
     let mut panel_max: usize = 0;
+    // Screen rect + full URL of each OSC 8 link the info panel drew this frame,
+    // so a click can open it despite mouse capture (SQ-0367). Empty while the
+    // panel is closed (refilled only when draw_info_panel runs).
+    let mut panel_link_rects: Vec<(Rect, String)> = Vec::new();
 
     // Async cover decode: a background worker decodes off the main loop; results
     // are drained into `cover` each iteration. `requested` tracks in-flight paths
@@ -480,8 +484,13 @@ pub(crate) fn run_story_picker(
                         slide.active(),
                         &cs,
                         buf,
+                        &mut panel_link_rects,
                     );
+                } else {
+                    panel_link_rects.clear();
                 }
+            } else {
+                panel_link_rects.clear();
             }
         });
 
@@ -779,7 +788,11 @@ pub(crate) fn run_story_picker(
                 use crossterm::event::{MouseButton, MouseEventKind};
                 if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                    if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
+                    if let Some((_, url)) = panel_link_rects.iter().find(|(r, _)| r.contains(pt)) {
+                        // Click on an info-panel OSC 8 link (SQ-0367): the terminal
+                        // can't act on it while we hold mouse capture, so open it.
+                        open_url(url);
+                    } else if let Some((idx, _)) = row_rects.iter().find(|(_, r)| r.contains(pt)) {
                         let idx = *idx;
                         let now = Instant::now();
                         // Second click on the already-selected row within the
@@ -1036,11 +1049,36 @@ fn draw_story_picker(
     (row_rects, rows, header_rects)
 }
 
+/// Open a URL in the user's default browser. The picker holds mouse capture
+/// (for click-to-select), so the terminal never handles a plain click on an
+/// OSC 8 hyperlink (SQ-0367) — we open it ourselves instead. Fire-and-forget:
+/// the URL is passed as a single argument (no shell), so it needs no escaping.
+fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let mut cmd = std::process::Command::new("open");
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = std::process::Command::new("xdg-open");
+
+    let _ = cmd
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// Draw the highlighted story's metadata panel: title, filesystem info,
 /// format/version/release, serial (Z only), IFID, present features, bundled
 /// resources (self-blorb or an associated sibling blorb), and saves. Pure
 /// renderer — no state, no interaction (the picker loop wires toggling/
-/// slide/lazy-resolve).
+/// slide/lazy-resolve). `link_rects` is cleared and refilled with the screen
+/// rect + full URL of every rendered OSC 8 link, so the loop can open one on a
+/// click (mouse capture keeps the terminal from doing it — SQ-0367).
 fn draw_info_panel(
     title: &str,
     filename: &str,
@@ -1054,7 +1092,9 @@ fn draw_info_panel(
     animating: bool,
     cs: &app::colors::ColorScheme,
     buf: &mut ratatui::buffer::Buffer,
+    link_rects: &mut Vec<(Rect, String)>,
 ) -> usize {
+    link_rects.clear();
     if area.width < 2 || area.height < 2 {
         return 0;
     }
@@ -1286,6 +1326,7 @@ fn draw_info_panel(
             let rect = Rect::new(text_area.x, y, text_area.width, 1);
             let link = hyperrat::Link::new(text.as_str(), url.as_str()).style(*style);
             ratatui::widgets::Widget::render(link, rect, buf);
+            link_rects.push((rect, url.clone()));
             continue;
         }
         draw_str_clipped(buf, text_area.x, y, text, *style, text_area);
@@ -1849,7 +1890,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("zork1.z3");
         super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, Some(&aux), 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+            "Zork I", "zork1.z3", &meta, Some(&aux), 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
         );
 
         let text = buffer_to_string(&buf, area);
@@ -1911,7 +1952,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("zork1.z3");
         let max_scroll = super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
         );
         let text_top = buffer_to_string(&buf, area);
         assert!(max_scroll > 0, "content should overflow a 10-row panel");
@@ -1920,7 +1961,7 @@ mod tests {
 
         let mut buf2 = Buffer::empty(area);
         let max_scroll2 = super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, max_scroll, area, None, &mut cover, entry_path, false, &cs, &mut buf2,
+            "Zork I", "zork1.z3", &meta, None, max_scroll, area, None, &mut cover, entry_path, false, &cs, &mut buf2, &mut Vec::new(),
         );
         let text_scrolled = buffer_to_string(&buf2, area);
         assert_eq!(max_scroll2, max_scroll);
@@ -1929,7 +1970,7 @@ mod tests {
         // Scrolling past max clamps to the same view as scroll == max_scroll.
         let mut buf3 = Buffer::empty(area);
         super::draw_info_panel(
-            "Zork I", "zork1.z3", &meta, None, 999, area, None, &mut cover, entry_path, false, &cs, &mut buf3,
+            "Zork I", "zork1.z3", &meta, None, 999, area, None, &mut cover, entry_path, false, &cs, &mut buf3, &mut Vec::new(),
         );
         let text_over = buffer_to_string(&buf3, area);
         assert_eq!(text_over, text_scrolled, "scroll past max should clamp to max_scroll view");
@@ -1963,7 +2004,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("game.gblorb");
         super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         let lines: Vec<&str> = text.lines().collect();
@@ -1997,7 +2038,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("game.gblorb");
         super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
         );
         let text = buffer_to_string(&buf, area);
         assert!(text.contains("Michael S. Gentry"), "author should render: {text:?}");
@@ -2024,7 +2065,7 @@ mod tests {
             let mut cover = app::cover::CoverState::default();
             super::draw_info_panel(
                 "Game", "game.z5", meta, None, 0, area, None, &mut cover,
-                std::path::Path::new("game.z5"), false, &cs, &mut buf,
+                std::path::Path::new("game.z5"), false, &cs, &mut buf, &mut Vec::new(),
             );
             buffer_to_string(&buf, area)
         };
@@ -2052,7 +2093,7 @@ mod tests {
             let mut cover = app::cover::CoverState::default();
             super::draw_info_panel(
                 title, "game.z5", meta, None, 0, area, None, &mut cover,
-                std::path::Path::new("game.z5"), false, &cs, &mut buf,
+                std::path::Path::new("game.z5"), false, &cs, &mut buf, &mut Vec::new(),
             );
             buffer_to_string(&buf, area)
         };
@@ -2071,6 +2112,42 @@ mod tests {
         found.ifdb_link = Some("https://ifdb.org/viewgame?id=abc".into());
         let out = render("Zork I", &found);
         assert!(out.contains("viewgame?id=abc") && !out.contains("IFDB search:"), "link wins: {out:?}");
+    }
+
+    /// SQ-0367: the info panel reports the screen rect + URL of each OSC 8 link
+    /// it draws, so the picker loop can open one on a click (mouse capture keeps
+    /// the terminal from acting on the hyperlink itself). No link → empty.
+    #[test]
+    fn info_panel_surfaces_the_link_rect_for_click_to_open() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 60, 14);
+        let mut cover = app::cover::CoverState::default();
+        let path = std::path::Path::new("game.z5");
+
+        // No fetch → no link → no rects.
+        let mut buf = Buffer::empty(area);
+        let mut rects: Vec<(Rect, String)> = Vec::new();
+        super::draw_info_panel(
+            "Zork I", "game.z5", &minimal_story_meta(), None, 0, area, None, &mut cover,
+            path, false, &cs, &mut buf, &mut rects,
+        );
+        assert!(rects.is_empty(), "no link rects before a fetch: {rects:?}");
+
+        // Fetched → one link rect carrying the full URL, inside the panel.
+        let mut fetched = minimal_story_meta();
+        let url = "https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro".to_string();
+        fetched.ifdb_link = Some(url.clone());
+        let mut buf = Buffer::empty(area);
+        rects.clear();
+        super::draw_info_panel(
+            "Zork I", "game.z5", &fetched, None, 0, area, None, &mut cover,
+            path, false, &cs, &mut buf, &mut rects,
+        );
+        assert_eq!(rects.len(), 1, "one link rect once fetched: {rects:?}");
+        let (rect, got) = &rects[0];
+        assert_eq!(got, &url, "rect carries the full URL for opening");
+        assert!(area.contains(rect.as_position()), "link rect is inside the panel");
     }
 
     /// A long blurb wraps to the panel's content width and, when it overflows
@@ -2093,7 +2170,7 @@ mod tests {
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("game.gblorb");
         let max_scroll = super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf,
+            "Game", "game.gblorb", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(),
         );
         assert!(max_scroll > 0, "a long wrapped blurb should overflow an 8-row panel");
         let text_top = buffer_to_string(&buf, area);
@@ -2101,7 +2178,7 @@ mod tests {
 
         let mut buf2 = Buffer::empty(area);
         let max_scroll2 = super::draw_info_panel(
-            "Game", "game.gblorb", &meta, None, max_scroll, area, None, &mut cover, entry_path, false, &cs, &mut buf2,
+            "Game", "game.gblorb", &meta, None, max_scroll, area, None, &mut cover, entry_path, false, &cs, &mut buf2, &mut Vec::new(),
         );
         assert_eq!(max_scroll2, max_scroll, "max_scroll must be stable across scroll positions");
         let text_scrolled = buffer_to_string(&buf2, area);
@@ -2136,7 +2213,7 @@ mod tests {
 
         super::draw_info_panel(
             "Cover Test", "cover-test.gblorb", &meta, None,
-            0, area, Some(&picker), &mut cover, &path, false, &cs, &mut buf,
+            0, area, Some(&picker), &mut cover, &path, false, &cs, &mut buf, &mut Vec::new(),
         );
 
         // Half-blocks emit the upper-half-block glyph in the reserved top band.
