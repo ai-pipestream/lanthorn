@@ -160,6 +160,31 @@ mod tests {
         assert!(ac.dropped.is_empty());
     }
 
+    /// SQ-0365: doors on two axes into the same room must COMPOSE, not cancel.
+    ///
+    /// `N` constrains only Y and `E` constrains only X, so together they say "above and to the
+    /// right" — northeast — and nothing needs dropping. What broke it was the chain equalities:
+    /// the pair counted as both an E/W chain (equal Y) and an N/S chain (equal X), and each
+    /// equality made the OTHER's direction cycle, so BOTH were dropped and the room was left free
+    /// to drift anywhere. On the real map it drifted north-WEST, satisfying neither door.
+    #[test]
+    fn doors_on_two_axes_into_one_room_compose_into_a_diagonal() {
+        // Zork's Dam Lobby (1) has doors north AND east into the Maintenance Room (2).
+        let mut g = two_rooms();
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::S, 1);
+        g.add_edge(2, Direction::W, 1);
+        let ac = build_axis_constraints(&g, &[1, 2], 1.0);
+        assert!(
+            ac.dropped.is_empty(),
+            "the two doors constrain different axes, so neither has to give: {:?}",
+            ac.dropped
+        );
+        assert!(!ac.x.is_empty(), "east survives: the Maintenance Room is to the right");
+        assert!(!ac.y.is_empty(), "north survives: and above — i.e. north-east");
+    }
+
     #[test]
     fn contradiction_drops_one_constraint() {
         // A→N→B and B→N→A: both want the other north → cycle on the y axis.

@@ -2,7 +2,7 @@
 //! (share a row) or reciprocal N/S (share a column) edges. A pure function of the
 //! graph, used by the layout (alignment + contiguity) and the rules display.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::direction::{grid_offset, opposite};
 use crate::graph::{MapGraph, RoomId};
@@ -37,6 +37,23 @@ pub fn detect_chains(graph: &MapGraph) -> Chains {
             _ => {}
         }
     }
+    // A pair joined BOTH ways — Zork's Dam Lobby has doors north AND east into the one
+    // Maintenance Room, with south and west back — cannot chain on either axis. Equal-Y and
+    // equal-X together say the two rooms occupy one cell, and `build_axis_constraints` adds both
+    // equalities before the directional pass, so each one made the OTHER's direction cycle and
+    // both got dropped. The pair was then left with no constraint at all and drifted wherever the
+    // solver liked — north-WEST on the real map, honouring neither door.
+    //
+    // Drop just the pair, not the chains it sits in: the Lobby is still genuinely north of the
+    // Dam, so that leg of the N/S chain must survive. Without the equalities the two directions
+    // simply compose — north gives "above", east gives "right" — and the room lands northeast.
+    let key = |a: RoomId, b: RoomId| (a.min(b), a.max(b));
+    let ew_keys: BTreeSet<(RoomId, RoomId)> = ew_pairs.iter().map(|&(a, b)| key(a, b)).collect();
+    let ns_keys: BTreeSet<(RoomId, RoomId)> = ns_pairs.iter().map(|&(a, b)| key(a, b)).collect();
+    let both: BTreeSet<(RoomId, RoomId)> = ew_keys.intersection(&ns_keys).copied().collect();
+    ew_pairs.retain(|&(a, b)| !both.contains(&key(a, b)));
+    ns_pairs.retain(|&(a, b)| !both.contains(&key(a, b)));
+
     let (ew, ew_members) = build(&ew_pairs);
     let (ns, ns_members) = build(&ns_pairs);
     Chains { ew, ns, ew_members, ns_members }
@@ -134,6 +151,45 @@ mod tests {
         g.add_edge(3, Direction::S, 7);
         let c = detect_chains(&g);
         assert!(c.ns.is_empty(), "same-origin N+S is not a reciprocal pair");
+    }
+
+    /// SQ-0365: Zork's Dam Lobby has doors NORTH and EAST into the one Maintenance Room (south and
+    /// west back), so the pair was reciprocal on both axes and landed in an E/W chain AND an N/S
+    /// chain — equal-Y and equal-X, i.e. one cell for two rooms. `build_axis_constraints` adds both
+    /// equalities before the directional pass, so each made the other's direction cycle and BOTH
+    /// were dropped; the pair, left unconstrained, drifted north-WEST, honouring neither door.
+    #[test]
+    fn a_pair_joined_on_both_axes_chains_on_neither() {
+        let mut g = MapGraph::new();
+        g.upsert_room(126, "Dam Lobby".into());
+        g.upsert_room(233, "Maintenance Room".into());
+        g.upsert_room(186, "Dam".into());
+        g.add_edge(186, Direction::N, 126);
+        g.add_edge(126, Direction::S, 186);
+        g.add_edge(126, Direction::N, 233);
+        g.add_edge(126, Direction::E, 233);
+        g.add_edge(233, Direction::S, 126);
+        g.add_edge(233, Direction::W, 126);
+
+        let c = detect_chains(&g);
+        assert!(c.ew.is_empty(), "the two-axis pair chains on neither axis: {:?}", c.ew_members);
+        assert_eq!(c.ns.get(&126), c.ns.get(&186), "but the Dam is still genuinely below the Lobby");
+        assert!(!c.ns.contains_key(&233), "and the Maintenance Room is in no column chain");
+    }
+
+    /// The exclusion is for a pair reciprocal on BOTH axes — not for any room that merely belongs
+    /// to one chain of each kind, which is ordinary (see `three_room_ew_chain_and_cross_chain_room`).
+    #[test]
+    fn a_pair_joined_on_one_axis_still_chains() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "a".into());
+        g.upsert_room(2, "b".into());
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        g.add_edge(1, Direction::N, 2); // one-way N, with no S back: not a reciprocal N/S pair
+        let c = detect_chains(&g);
+        assert_eq!(c.ew.get(&1), c.ew.get(&2), "the reciprocal E/W pair still shares a row");
+        assert!(c.ew.contains_key(&1));
     }
 
     #[test]
