@@ -2767,7 +2767,7 @@ fn build_verb_menu_nouns(state: &AppState, _mapper: &Mapper) -> Vec<String> {
 ///   0. the name starts with the token (a plain prefix hit, the old behaviour),
 ///   1. a name-PART starts with it (right after a `-`) — `room` in `toggle-room-numbers`,
 ///   2. it appears mid-word — `map` in `unmappable`.
-/// Alphabetical within a rank, so the list is stable and predictable as you type.
+///      Alphabetical within a rank, so the list is stable and predictable as you type.
 pub(crate) fn slash_suggestions(body_token: &str, names: &[String], limit: usize) -> Vec<String> {
     if body_token.is_empty() || limit == 0 {
         return Vec::new();

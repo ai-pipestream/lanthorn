@@ -939,6 +939,25 @@ struct ConnectorPlot {
     arr_anchor: (i32, i32),
 }
 
+/// The direction bit that seams a `dir` chain to the orthogonal cell it hands off to (SQ-0314).
+///
+/// A chain leaves its last cell through that cell's upper- or lower-centre, and the handoff cell
+/// sits immediately beyond it. For the orthogonal glyph there to actually MEET the chain, it needs
+/// a stroke running from its centre back to the shared edge — i.e. pointing at the chain. A N-ward
+/// chain (NE/NW) hands off upward, so the cell above it needs `DIR_S`; a S-ward chain needs
+/// `DIR_N`. Without this bit the handoff cell draws a bare `─` through its middle and the diagonal
+/// visibly stops one half-cell short.
+fn chain_seam_bit(dir: Direction) -> u8 {
+    match dir {
+        Direction::NE | Direction::NW => DIR_S,
+        _ => DIR_N,
+    }
+}
+
+/// A half-diagonal chain: the `(cell, glyph)` pairs it plots, plus the point where an orthogonal
+/// path resumes. See `diagonal_chain`.
+type DiagonalChain = (Vec<((i32, i32), char)>, (i32, i32));
+
 /// The chain of half-diagonals leaving a room's corner `anchor` toward `target` (SQ-0314), plus
 /// the point where an orthogonal path resumes. `None` when `dir` is not diagonal, or when the gap
 /// is too small to hold even one pair.
@@ -969,32 +988,17 @@ struct ConnectorPlot {
 ///     exactly as `🮣🮠` does, two columns wide instead of one — a shallower step.
 ///   * `│` attaches upper-/lower-centre, so it goes AFTER a step's far glyph: one column across two
 ///     rows — a steeper step.
+///
 /// So the chain absorbs a surplus on EITHER axis and still lands exactly on its target, instead of
 /// leaving a stray run beside the corner (too wide) or refusing to draw at all (too tall). On a
 /// ~1:2 cell a bare step is a 63° climb, one `─` of fill makes it a true 45°, and one `│` makes it
 /// 76°.
-
-/// The direction bit that seams a `dir` chain to the orthogonal cell it hands off to (SQ-0314).
-///
-/// A chain leaves its last cell through that cell's upper- or lower-centre, and the handoff cell
-/// sits immediately beyond it. For the orthogonal glyph there to actually MEET the chain, it needs
-/// a stroke running from its centre back to the shared edge — i.e. pointing at the chain. A N-ward
-/// chain (NE/NW) hands off upward, so the cell above it needs `DIR_S`; a S-ward chain needs
-/// `DIR_N`. Without this bit the handoff cell draws a bare `─` through its middle and the diagonal
-/// visibly stops one half-cell short.
-fn chain_seam_bit(dir: Direction) -> u8 {
-    match dir {
-        Direction::NE | Direction::NW => DIR_S,
-        _ => DIR_N,
-    }
-}
-
 fn diagonal_chain(
     anchor: (i32, i32),
     target: (i32, i32),
     dir: Direction,
     g: &crate::symbols::PathGlyphs,
-) -> Option<(Vec<((i32, i32), char)>, (i32, i32))> {
+) -> Option<DiagonalChain> {
     // `(sx, sy)`: the chain's per-step direction. `(near, far)`: the pair's two glyphs, in the
     // order the line travels through them.
     let (sx, sy, near, far) = match dir {
@@ -1759,10 +1763,12 @@ fn nearest_free_interior(
     (off_x, off_y): (i32, i32),
     area: Rect,
 ) -> Option<(i32, i32)> {
+    // A ranked interior cell: `(ranking key, cell)`.
+    type RankedCell = ((i32, i32, i32), (i32, i32));
     let (dx, dy) = bearing.unwrap_or((0, 0));
     // Interior of an 11x5 box: columns bx+1..=bx+9, rows by+1..=by+3.
     let (cx, cy) = (bx + BOX_W / 2, by + BOX_H / 2);
-    let mut best: Option<((i32, i32, i32), (i32, i32))> = None;
+    let mut best: Option<RankedCell> = None;
     for row in (by + 1)..=(by + BOX_H - 2) {
         for col in (bx + 1)..=(bx + BOX_W - 2) {
             let (sx, sy) = (col + off_x, row + off_y);
@@ -2947,10 +2953,10 @@ mod tests {
         for y in area.y..area.y + area.height {
             for x in area.x..area.x + area.width {
                 let s = buf.cell((x, y)).expect("cell in area").symbol();
-                if s.chars().next() == Some(up) {
+                if s.starts_with(up) {
                     up_row = Some(y);
                 }
-                if s.chars().next() == Some(down) {
+                if s.starts_with(down) {
                     down_row = Some(y);
                 }
             }

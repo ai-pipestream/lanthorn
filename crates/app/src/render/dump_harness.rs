@@ -165,8 +165,10 @@ pub fn model_from_dump(dump: &str, lines_per_win: usize) -> ScreenModel {
 /// multi-byte box glyphs don't break slicing) and `buf` is the raw buffer.
 pub fn render_to_text(dump: &str, area: Rect, lines_per_win: usize) -> (Vec<Vec<char>>, Buffer) {
     let model = model_from_dump(dump, lines_per_win);
-    let mut state = crate::state::AppState::default();
-    state.colors = crate::colors::ColorScheme::terminal_default();
+    let mut state = crate::state::AppState {
+        colors: crate::colors::ColorScheme::terminal_default(),
+        ..Default::default()
+    };
     state.config.honor_game_colours = true;
     for k in 0..lines_per_win {
         state.push_transcript(&format!("MAIN line {k}"));

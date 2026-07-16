@@ -207,7 +207,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
     for raw in text.lines() {
         // Strip inline comments (`#`/`;`) and trim.
         let line = raw
-            .split(|c| c == '#' || c == ';')
+            .split(['#', ';'])
             .next()
             .unwrap_or("")
             .trim();

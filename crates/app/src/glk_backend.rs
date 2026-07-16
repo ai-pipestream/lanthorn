@@ -116,6 +116,9 @@ pub fn theme_style_colours(colors: &crate::colors::ColorScheme) -> (ThemePair, T
 
 // ── Per-window record ──────────────────────────────────────────────────────────
 
+/// One text-grid cell: `(char, style-bits, packed-fg, packed-bg, link, glk_style)`.
+type GridBufCell = (char, u8, u32, u32, u32, u8);
+
 /// A text-grid window's cell buffer (cells keyed by 0-based `(row, col)`).
 #[derive(Default)]
 struct GridBuf {
@@ -124,7 +127,7 @@ struct GridBuf {
     /// `(row, col) -> (char, style-bits, packed-fg, packed-bg, link, glk_style)`.
     /// `link` is the Glk hyperlink value stamped on the cell (0 = not a link)
     /// (SQ-0258); `glk_style` is the Glk style class (0=Normal, SQ-0331).
-    cells: BTreeMap<(u32, u32), (char, u8, u32, u32, u32, u8)>,
+    cells: BTreeMap<(u32, u32), GridBufCell>,
 }
 
 /// One entry in a text-buffer window's ordered output log.
@@ -221,6 +224,10 @@ impl Default for AppGlk {
         AppGlk::new(80, 24)
     }
 }
+
+/// One styled text chunk drained by `take_transcript`: `(char_count, style-bits,
+/// fg, bg, link, paragraph format, glk_style)`.
+type TranscriptChunk = (usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, crate::state::ParaFmt, u8);
 
 impl AppGlk {
     /// A backend reporting a `cols × rows` display. Stylehint colour is always
@@ -393,7 +400,7 @@ impl AppGlk {
     /// Drain the primary window's text printed since the last drain, as
     /// `(text, (char_count, bits, fg, bg) chunks)` for `push_transcript_runs`.
     /// fg/bg carry the resolved stylehint colour (24-bit via `ZColour::True24`).
-    pub fn take_transcript(&mut self) -> (String, Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, crate::state::ParaFmt, u8)>) {
+    pub fn take_transcript(&mut self) -> (String, Vec<TranscriptChunk>) {
         let Some(pid) = self.primary else {
             return (String::new(), Vec::new());
         };
@@ -660,6 +667,10 @@ impl AppGlk {
 
 // ── log → lines helper ─────────────────────────────────────────────────────────
 
+/// The parallel per-line vecs `log_to_lines` produces: `(lines, per-line runs,
+/// per-line paragraph format, per-line inline image)`, all kept the same length.
+type LogLines = (Vec<String>, Vec<Vec<StyleRun>>, Vec<crate::state::ParaFmt>, Vec<Option<crate::inline_image::InlineImage>>);
+
 /// Split a buffer window's styled log into `(lines, per-line runs, per-line
 /// image)`, merging adjacent same-style chars into one [`StyleRun`]. The three
 /// vecs are always kept the same length: an image occupies its own logical
@@ -667,7 +678,7 @@ impl AppGlk {
 /// and a fresh line is always started after it).
 fn log_to_lines(
     log: &[BufElem],
-) -> (Vec<String>, Vec<Vec<StyleRun>>, Vec<crate::state::ParaFmt>, Vec<Option<crate::inline_image::InlineImage>>) {
+) -> LogLines {
     use crate::state::ParaFmt;
     let mut lines: Vec<String> = vec![String::new()];
     let mut runs: Vec<Vec<StyleRun>> = vec![Vec::new()];

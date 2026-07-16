@@ -191,7 +191,7 @@ mod tests {
         let rows = ["HELLOWORLD"];
         // Select columns 2..=5 → "LLOW".
         let sel = Selection { anchor: p(0, 2), head: p(0, 5) };
-        let refs: Vec<&str> = rows.iter().copied().collect();
+        let refs: Vec<&str> = rows.to_vec();
         assert_eq!(extract(&refs, 10, sel), "LLOW");
     }
 
@@ -200,7 +200,7 @@ mod tests {
         let rows = ["aaaaaaaaaa", "bbbbbbbbbb", "cccccccccc"];
         // From (row 0, col 3) to (row 2, col 4).
         let sel = Selection { anchor: p(0, 3), head: p(2, 4) };
-        let refs: Vec<&str> = rows.iter().copied().collect();
+        let refs: Vec<&str> = rows.to_vec();
         let out = extract(&refs, 10, sel);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "aaaaaaa", "first row from col 3 to right edge");
@@ -212,7 +212,7 @@ mod tests {
     fn extract_trims_trailing_whitespace() {
         let rows = ["hi        "];
         let sel = Selection { anchor: p(0, 0), head: p(0, 9) };
-        let refs: Vec<&str> = rows.iter().copied().collect();
+        let refs: Vec<&str> = rows.to_vec();
         assert_eq!(extract(&refs, 10, sel), "hi");
     }
 
@@ -221,7 +221,7 @@ mod tests {
         // Selection spans rows 0..=2 but only one row exists.
         let rows = ["hello"];
         let sel = Selection { anchor: p(0, 0), head: p(2, 4) };
-        let refs: Vec<&str> = rows.iter().copied().collect();
+        let refs: Vec<&str> = rows.to_vec();
         let out = extract(&refs, 10, sel);
         let lines: Vec<&str> = out.split('\n').collect();
         assert_eq!(lines[0], "hello");

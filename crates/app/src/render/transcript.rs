@@ -950,6 +950,11 @@ pub fn inventory_items(
 
 // ── Main render function ───────────────────────────────────────────────────────
 
+/// A rendered transcript pass: `(scrollbar_drawn, max_scroll, links)` — whether a
+/// scrollbar gutter was drawn, the largest meaningful `transcript_scroll`, and a
+/// per-frame map from rendered cell `(col, row)` to Glk hyperlink value.
+type TranscriptRender = (bool, u16, Vec<((u16, u16), u32)>);
+
 /// Render the GAME pane into `buf` within `area`:
 ///
 /// - Top row(s): v3 status line (location left, score/turns or time right), reversed style.
@@ -974,7 +979,7 @@ pub fn render_transcript(
     area: Rect,
     buf: &mut Buffer,
     game_input: Option<Style>,
-) -> (bool, u16, Vec<((u16, u16), u32)>) {
+) -> TranscriptRender {
     if area.height == 0 || area.width == 0 {
         return (false, 0, Vec::new());
     }
@@ -1201,7 +1206,7 @@ fn render_middle(
     area: Rect,
     normal_style: Style,
     game_input: Option<Style>,
-) -> (bool, u16, Vec<((u16, u16), u32)>) {
+) -> TranscriptRender {
     if area.height == 0 || area.width == 0 {
         return (false, 0, Vec::new());
     }
