@@ -31,8 +31,13 @@ const PANEL_MIN_W: u16 = 28;
 const ROW_MARKER_W: u16 = 2;
 const COL_GAP: u16 = 2;
 const AUTHOR_COL_W: u16 = 20;
+const AUTHOR_MAX_W: u16 = 40;
 const YEAR_COL_W: u16 = 6;
 const TITLE_MIN_W: u16 = 8;
+/// Title keeps this much before the author column is allowed to grow past its
+/// base width — title has priority for the shared space, so a long author name
+/// never squeezes the title down to `TITLE_MIN_W`.
+const TITLE_PREFERRED_W: u16 = 24;
 
 /// Resolved column widths for one draw, given `text_w` — the row width left
 /// for marker+title+author+year once the badge cluster's fixed columns (and
@@ -45,18 +50,32 @@ struct ListColumns {
     year_w: u16,
 }
 
-fn compute_columns(text_w: u16) -> ListColumns {
+/// `want_author_w` is the widest author display width to show in full; the
+/// author column grows from `AUTHOR_COL_W` toward it, but never so far that
+/// title would drop below `TITLE_MIN_W`, and never past `AUTHOR_MAX_W` so one
+/// very long name can't swallow the row. Title still absorbs any leftover, so
+/// there is no gap before the badges.
+fn compute_columns(text_w: u16, want_author_w: u16) -> ListColumns {
     let avail = text_w.saturating_sub(ROW_MARKER_W);
     let need_year = TITLE_MIN_W + COL_GAP + AUTHOR_COL_W + COL_GAP + YEAR_COL_W;
     let need_author = TITLE_MIN_W + COL_GAP + AUTHOR_COL_W;
+    let grow = |cols_space: u16| -> u16 {
+        // Space shared by title+author (year already excluded). Author gets at
+        // least AUTHOR_COL_W and grows toward want_author_w, but only into space
+        // left after title keeps TITLE_PREFERRED_W — title has priority, so a
+        // long name can't shrink the title below a comfortable width. Capped at
+        // AUTHOR_MAX_W so one very long name can't swallow the row either.
+        let ceiling = AUTHOR_MAX_W.min(cols_space.saturating_sub(TITLE_PREFERRED_W));
+        want_author_w.clamp(AUTHOR_COL_W, ceiling.max(AUTHOR_COL_W))
+    };
     if avail >= need_year {
-        ListColumns {
-            title_w: avail - COL_GAP - AUTHOR_COL_W - COL_GAP - YEAR_COL_W,
-            author_w: AUTHOR_COL_W,
-            year_w: YEAR_COL_W,
-        }
+        let cols_space = avail - COL_GAP - COL_GAP - YEAR_COL_W;
+        let author_w = grow(cols_space);
+        ListColumns { title_w: cols_space - author_w, author_w, year_w: YEAR_COL_W }
     } else if avail >= need_author {
-        ListColumns { title_w: avail - COL_GAP - AUTHOR_COL_W, author_w: AUTHOR_COL_W, year_w: 0 }
+        let cols_space = avail - COL_GAP;
+        let author_w = grow(cols_space);
+        ListColumns { title_w: cols_space - author_w, author_w, year_w: 0 }
     } else {
         ListColumns { title_w: avail, author_w: 0, year_w: 0 }
     }
@@ -482,6 +501,13 @@ pub(crate) fn run_story_picker(
                         *slot = fresh;
                     }
                 }
+                // A fetch may have just written a cover.png; drop any cached
+                // "coverless" decode so the panel re-reads and shows it now,
+                // rather than only after the picker is reopened.
+                if matches!(p.outcome, app::fetch_worker::Outcome::Fetched) {
+                    cover.forget(&p.path);
+                    requested.remove(&p.path);
+                }
             }
             progress_line = Some(if fetch_is_single {
                 match &p.outcome {
@@ -562,6 +588,13 @@ pub(crate) fn run_story_picker(
                         _ => {}
                     }
                 } else {
+                    // A finished fetch leaves its summary on the footer row; the
+                    // next keypress (once nothing is in flight) clears it so the
+                    // normal hints return — otherwise the summary would sit there
+                    // for the rest of the session, hiding the key legend.
+                    if !fetcher.busy() {
+                        progress_line = None;
+                    }
                     match k.code {
                         Up | Char('k') => { panel_scroll = 0; list.move_by(-1, viewport, anim) }
                         Down | Char('j') => { panel_scroll = 0; list.move_by(1, viewport, anim) }
@@ -592,8 +625,10 @@ pub(crate) fn run_story_picker(
                                 }
                             }
                         }
-                        // `f`: refetch only the selected story, ignoring its cache.
-                        Char('f') => {
+                        // `f`: refetch only the selected story, ignoring its
+                        // cache. Ignored while a sweep is already running, so a
+                        // second press can't garble the in-flight progress line.
+                        Char('f') if !fetcher.busy() => {
                             if let Some(entry) = stories.get(list.selected) {
                                 fetch_is_single = true;
                                 sweep_fetched = 0;
@@ -608,8 +643,9 @@ pub(crate) fn run_story_picker(
                             }
                         }
                         // `r`: sweep the whole library; the worker itself skips
-                        // any story already at the current FETCH_VERSION.
-                        Char('r') => {
+                        // any story already at the current FETCH_VERSION. Ignored
+                        // while a sweep is already running (see `f`).
+                        Char('r') if !fetcher.busy() => {
                             let total = stories.len();
                             let order: Vec<(PathBuf, String)> =
                                 stories.iter().map(|e| (e.path.clone(), e.meta.ifid.clone())).collect();
@@ -762,7 +798,15 @@ fn draw_story_picker(
     let badges_shown = cluster_w + 2 < row_w;
     let badge_reserved = if badges_shown { cluster_w + 1 } else { 0 };
     let text_w = row_w.saturating_sub(badge_reserved);
-    let cols = compute_columns(text_w);
+    // Widest author name across the WHOLE list (not just the visible page), so
+    // the author column doesn't jump width as the user scrolls.
+    let want_author_w = stories
+        .iter()
+        .filter_map(|e| e.meta.author.as_deref())
+        .map(UnicodeWidthStr::width)
+        .max()
+        .unwrap_or(0) as u16;
+    let cols = compute_columns(text_w, want_author_w);
 
     let title_x = area.left() + ROW_MARKER_W;
     let author_x = title_x + cols.title_w + COL_GAP;
@@ -1007,11 +1051,24 @@ fn draw_info_panel(
     }
     // blurb (SQ-0348): word-wrapped to the panel's content width, each
     // wrapped row pushed as its own entry so it rides the same
-    // scroll/overflow accounting as every other panel line below.
+    // scroll/overflow accounting as every other panel line below. Split on the
+    // paragraph breaks html_to_text left in, wrapping each independently so a
+    // `<br/>` in the source stays a visible break rather than collapsing.
     if let Some(desc) = meta.description.as_deref().filter(|s| !s.is_empty()) {
-        for row in wrap_to_width(desc, inner.width as usize) {
-            lines.push((row, cs.story_info_blurb));
+        for para in desc.lines() {
+            if para.trim().is_empty() {
+                lines.push((String::new(), cs.story_info_blurb));
+            } else {
+                for row in wrap_to_width(para, inner.width as usize) {
+                    lines.push((row, cs.story_info_blurb));
+                }
+            }
         }
+    }
+    // IFDB page link (SQ-0348): rendered as the bare URL so terminals that
+    // detect URLs make it click/⌘-clickable; only present once fetched.
+    if let Some(link) = meta.ifdb_link.as_deref().filter(|s| !s.is_empty()) {
+        lines.push((format!("IFDB: {link}"), cs.story_info_link));
     }
     // features line (present badges only).
     let feats = feature_words(&meta.features, aux);
@@ -1197,7 +1254,7 @@ mod tests {
                 size_bytes: 1, modified: None, engine, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None,
-                author: None, year: None, genre: None, language: None, description: None,
+                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
             },
         };
         vec![mk("Zork", Engine::ZCode), mk("Anchorhead", Engine::Glulx)]
@@ -1216,7 +1273,7 @@ mod tests {
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None,
                 author: author.map(String::from), year: year.map(String::from),
-                genre: None, language: None, description: None,
+                genre: None, language: None, description: None, ifdb_link: None,
             },
         }
     }
@@ -1468,6 +1525,31 @@ mod tests {
     }
 
     #[test]
+    fn author_column_grows_to_show_a_longer_name_when_there_is_room() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        // 27 wide — past the old fixed 20-col author column, but under the cap.
+        let author = "Brian Moriarty (Infocom)  X";
+        let stories = vec![story_with_meta("Trinity", Some(author), Some("1986"))];
+        let badges = vec![app::picker::RowBadges::default()];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(1);
+        // A wide terminal: title's minimum is easily met, so the author column
+        // should grow to show the whole name rather than truncate at 20.
+        let area = Rect::new(0, 0, 100, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        let row = row_text(&buf, 2, area);
+        assert!(row.contains(author), "author shown in full when there is room: {row:?}");
+        assert!(!row.contains('…'), "no ellipsis when the column grew to fit: {row:?}");
+    }
+
+    #[test]
     fn header_rects_line_up_with_drawn_header_text() {
         use ratatui::{buffer::Buffer, layout::Rect};
         let cs = app::colors::ColorScheme::terminal_default();
@@ -1562,7 +1644,7 @@ mod tests {
                     detail: Some("15.4 kHz · 8-bit · mono · 2.2s".into()),
                 },
             ]),
-            author: None, year: None, genre: None, language: None, description: None,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
         };
         let game_dir = std::path::PathBuf::from("/tmp/babelmap-info-panel-saves/zork1.z3");
         let aux = app::picker::StoryAux {
@@ -1653,7 +1735,7 @@ mod tests {
             ifid: "ZCODE-88-840726".into(),
             features: app::picker::Features::default(),
             self_blorb: Some(chunks),
-            author: None, year: None, genre: None, language: None, description: None,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
         };
         let area = Rect::new(0, 0, 34, 10);
         let mut buf = Buffer::empty(area);
@@ -1690,7 +1772,7 @@ mod tests {
             format: "Blorb (Glulx)".into(), version: Some("3.1.2".into()),
             serial: None, release: None, ifid: "IFID-X".into(),
             features: app::picker::Features::default(), self_blorb: None,
-            author: None, year: None, genre: None, language: None, description: None,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
         }
     }
 
@@ -1761,6 +1843,32 @@ mod tests {
         assert!(ifid_pos < author_pos, "author line must come after IFID");
         assert!(author_pos < blurb_pos, "blurb must come after the author/year/genre line");
         assert!(blurb_pos < features_pos, "blurb must come before Features");
+    }
+
+    #[test]
+    fn info_panel_shows_the_ifdb_link_only_once_fetched() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 60, 14);
+        let render = |meta: &app::picker::StoryMeta| {
+            let mut buf = Buffer::empty(area);
+            let mut cover = app::cover::CoverState::default();
+            super::draw_info_panel(
+                "Game", "game.z5", meta, None, 0, area, None, &mut cover,
+                std::path::Path::new("game.z5"), false, &cs, &mut buf,
+            );
+            buffer_to_string(&buf, area)
+        };
+        // Not fetched → no IFDB line at all.
+        let bare = minimal_story_meta();
+        assert!(!render(&bare).contains("IFDB:"), "no link before a fetch");
+        // Fetched → the bare URL renders (terminals auto-link it).
+        let mut fetched = minimal_story_meta();
+        fetched.ifdb_link = Some("https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro".into());
+        assert!(
+            render(&fetched).contains("https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro"),
+            "the IFDB URL renders once present"
+        );
     }
 
     /// A long blurb wraps to the panel's content width and, when it overflows

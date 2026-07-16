@@ -96,6 +96,20 @@ impl CoverState {
         }
     }
 
+    /// Drop any cached decode (and built protocol) for `path`, so the next
+    /// request re-reads and re-decodes it. Used after a fetch writes a
+    /// `cover.png` for a story previously cached as coverless (`None`) —
+    /// without this the stale `None` would hide the freshly fetched cover
+    /// until the picker is reopened (SQ-0348).
+    pub fn forget(&mut self, path: &Path) {
+        if self.decoded.remove(path).is_some() {
+            self.order.retain(|p| p != path);
+        }
+        if matches!(&self.proto, Some((p, _, _, _)) if p == path) {
+            self.proto = None;
+        }
+    }
+
     /// Build-or-reuse a protocol for `path`'s cover, fitted (aspect-preserved)
     /// into `area`. `None` when `path` has no decoded cover or the build fails.
     ///

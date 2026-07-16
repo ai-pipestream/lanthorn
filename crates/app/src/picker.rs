@@ -59,6 +59,8 @@ pub struct StoryMeta {
     pub genre: Option<String>,
     pub language: Option<String>,
     pub description: Option<String>,
+    /// The story's IFDB page URL, present only once fetched (no IFmd equivalent).
+    pub ifdb_link: Option<String>,
 }
 
 /// One selectable story in the picker.
@@ -464,6 +466,7 @@ struct Resolved {
     genre: Option<String>,
     language: Option<String>,
     description: Option<String>,
+    ifdb_link: Option<String>,
 }
 
 /// The publication year from a Treaty of Babel `<firstpublished>`, which is
@@ -508,7 +511,9 @@ fn resolve(
     let description = ifmd
         .and_then(|i| i.description.clone())
         .or_else(|| fetched.and_then(|f| f.description.clone()));
-    Resolved { title, author, year, genre, language, description }
+    // IFDB-only: the page link exists solely in a fetched block.
+    let ifdb_link = fetched.and_then(|f| f.ifdb_link.clone());
+    Resolved { title, author, year, genre, language, description, ifdb_link }
 }
 
 /// Scan `dir` (top level, non-recursive) for **launchable** Z-machine stories,
@@ -643,6 +648,7 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
         genre: resolved.genre,
         language: resolved.language,
         description: resolved.description,
+        ifdb_link: resolved.ifdb_link,
     };
     Some(StoryEntry { path: path.to_path_buf(), title, filename, meta })
 }
@@ -909,7 +915,7 @@ mod tests {
                 year: year.map(|s| s.to_string()),
                 genre: None,
                 language: None,
-                description: None,
+                description: None, ifdb_link: None,
             },
         }
     }
@@ -1288,7 +1294,7 @@ mod tests {
                 format: "Z-code".into(), version: Some("5".into()),
                 serial: None, release: None, ifid: ifid.into(),
                 features: Features::default(), self_blorb,
-                author: None, year: None, genre: None, language: None, description: None,
+                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None,
             },
         }
     }

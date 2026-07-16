@@ -274,6 +274,7 @@ pub struct ColorScheme {
     pub story_info_value: Style,
     /// Story-picker info panel blurb text (the fetched IFDB description).
     pub story_info_blurb: Style,
+    pub story_info_link: Style,
     /// Story-picker info panel cover-art letterbox fill (behind/around the
     /// scaled frontispiece image).
     pub story_info_cover: Style,
@@ -452,6 +453,7 @@ impl ColorScheme {
             story_info_label: Style::new().fg(Color::DarkGray),
             story_info_value: Style::new().fg(Color::White),
             story_info_blurb: Style::new().fg(Color::Gray).add_modifier(Modifier::ITALIC),
+            story_info_link: Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
             story_info_cover: Style::new().bg(Color::Black),
             graphics: Style::new().bg(Color::Black),
             inline_image: Style::new().bg(Color::Black),
@@ -652,6 +654,7 @@ impl ColorScheme {
             story_info_label: Style::new().fg(fg).add_modifier(Modifier::DIM),
             story_info_value: Style::new().fg(fg),
             story_info_blurb: Style::new().fg(fg).add_modifier(Modifier::ITALIC),
+            story_info_link: Style::new().fg(fg).add_modifier(Modifier::UNDERLINED),
             story_info_cover: Style::new().bg(bg),
             graphics: Style::new().bg(bg),
             inline_image: Style::new().bg(bg),

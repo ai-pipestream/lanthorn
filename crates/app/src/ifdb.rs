@@ -67,8 +67,9 @@ impl Default for IfdbClient {
     }
 }
 
-impl MetadataSource for IfdbClient {
-    fn fetch(&self, ifid: &str) -> Result<FetchOutcome, FetchError> {
+impl IfdbClient {
+    /// One IFDB lookup for exactly this IFID string.
+    fn fetch_one(&self, ifid: &str) -> Result<FetchOutcome, FetchError> {
         match self.agent.get(ifiction_url(ifid)).call() {
             Ok(mut resp) => {
                 let bytes = resp
@@ -92,6 +93,25 @@ impl MetadataSource for IfdbClient {
             Err(e) => Err(FetchError::Transport(e.to_string())),
         }
     }
+}
+
+impl MetadataSource for IfdbClient {
+    fn fetch(&self, ifid: &str) -> Result<FetchOutcome, FetchError> {
+        let outcome = self.fetch_one(ifid)?;
+        // IFDB does an exact IFID match, and it registers most Infocom games
+        // under the bare `ZCODE-<release>-<serial>` form — without the trailing
+        // header checksum our `compute_ifid` always appends. So a checksummed
+        // lookup 404s even when IFDB has the game under the shorter IFID
+        // (verified 2026-07-16: `ZCODE-52-871125` resolves, `…-FFFF` does not).
+        // On a miss, retry once with the checksum stripped; the bare form's
+        // answer — found or not — is final.
+        if matches!(outcome, FetchOutcome::NotFound) {
+            if let Some(bare) = strip_zcode_checksum(ifid) {
+                return self.fetch_one(&bare);
+            }
+        }
+        Ok(outcome)
+    }
 
     fn fetch_cover(&self, url: &str) -> Result<Vec<u8>, FetchError> {
         let mut resp =
@@ -110,6 +130,22 @@ fn user_agent() -> String {
 
 fn ifiction_url(ifid: &str) -> String {
     format!("https://ifdb.org/viewgame?ifiction&ifid={}", percent_encode(ifid))
+}
+
+/// A `ZCODE-<release>-<serial>-<checksum>` IFID with its trailing 4-hex-digit
+/// header checksum removed, giving the bare `ZCODE-<release>-<serial>` form
+/// IFDB commonly indexes. `None` for anything else — a bare ZCODE IFID (the
+/// serial is 6 chars, never 4 hex), a Glulx/UUID IFID, or any non-ZCODE string
+/// — so only a genuinely-checksummed lookup ever triggers the retry.
+fn strip_zcode_checksum(ifid: &str) -> Option<String> {
+    let rest = ifid.strip_prefix("ZCODE-")?;
+    let (prefix, last) = ifid.rsplit_once('-')?;
+    // Guard against `ZCODE-<checksum>` with nothing between: require the prefix
+    // to still carry the release-serial body after the leading `ZCODE-`.
+    if !rest.contains('-') {
+        return None;
+    }
+    (last.len() == 4 && last.bytes().all(|b| b.is_ascii_hexdigit())).then(|| prefix.to_string())
 }
 
 /// Hand-rolled: the one call site (an IFID reaching us from story bytes,
@@ -167,5 +203,21 @@ mod tests {
             f.ifdb.unwrap().cover_url.as_deref(),
             Some("https://ifdb.org/coverart?id=0dbnusxunq7fw5ro&version=45")
         );
+    }
+
+    #[test]
+    fn strip_zcode_checksum_recovers_the_bare_ifid() {
+        // Our compute_ifid always appends a 4-hex checksum; IFDB commonly
+        // indexes Infocom games under the bare form, so this is the fallback key.
+        assert_eq!(strip_zcode_checksum("ZCODE-52-871125-FFFF").as_deref(), Some("ZCODE-52-871125"));
+        assert_eq!(strip_zcode_checksum("ZCODE-88-840726-A129").as_deref(), Some("ZCODE-88-840726"));
+        // A bare ZCODE IFID has a 6-char serial as its last segment, not a
+        // 4-hex checksum → nothing to strip, no pointless retry.
+        assert_eq!(strip_zcode_checksum("ZCODE-52-871125"), None);
+        // Non-ZCODE IFIDs (Glulx hash, Inform UUID) are never touched.
+        assert_eq!(strip_zcode_checksum("GLULX-0123456789ABCDEF"), None);
+        assert_eq!(strip_zcode_checksum("AC0DAF65-F40F-4A41-A4E4-50414F836E14"), None);
+        // A serial ending in a dash-run must not be mistaken for a checksum.
+        assert_eq!(strip_zcode_checksum("ZCODE-5-------"), None);
     }
 }

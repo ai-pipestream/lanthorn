@@ -36,6 +36,103 @@ pub enum IFictionError {
     NotIFiction,
 }
 
+/// Flatten HTML fragment text (an IFDB description) to plain text: `<br>` and
+/// block tags become newlines, other tags are dropped, and HTML entities are
+/// decoded. Deliberately small — it handles the tags and entities IFDB actually
+/// emits, not a general HTML parser, so it stays dependency-free.
+fn html_to_text(s: &str) -> String {
+    // 1. Tags → newline for line/paragraph breaks, empty for the rest.
+    let mut no_tags = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            let mut tag = String::new();
+            for t in chars.by_ref() {
+                if t == '>' {
+                    break;
+                }
+                tag.push(t);
+            }
+            let name: String = tag
+                .trim_start_matches('/')
+                .chars()
+                .take_while(|c| !c.is_whitespace() && *c != '/')
+                .collect::<String>()
+                .to_ascii_lowercase();
+            if matches!(name.as_str(), "br" | "p" | "div" | "li") {
+                no_tags.push('\n');
+            }
+        } else {
+            no_tags.push(c);
+        }
+    }
+    // 2. Decode the entities IFDB uses. `&amp;` LAST so a literal "&amp;lt;"
+    //    can't be turned into a "<".
+    let decoded = decode_entities(&no_tags);
+    // 3. Collapse the runs of blank lines the tag pass can leave, and trim.
+    let mut out = String::with_capacity(decoded.len());
+    let mut blank_run = 0;
+    for line in decoded.lines() {
+        let line = line.trim_end();
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run > 1 {
+                continue;
+            }
+        } else {
+            blank_run = 0;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.trim().to_string()
+}
+
+/// Decode the small set of HTML entities IFDB descriptions carry, including
+/// numeric `&#NN;` / `&#xNN;`. Unknown entities are left verbatim.
+fn decode_entities(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp..];
+        let Some(semi) = after.find(';').filter(|&i| i <= 10) else {
+            out.push('&');
+            rest = &after[1..];
+            continue;
+        };
+        let ent = &after[1..semi]; // between & and ;
+        let decoded = match ent {
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "amp" => Some('&'),
+            "nbsp" => Some(' '),
+            _ => ent
+                .strip_prefix('#')
+                .and_then(|n| {
+                    n.strip_prefix(['x', 'X'])
+                        .and_then(|h| u32::from_str_radix(h, 16).ok())
+                        .or_else(|| n.parse::<u32>().ok())
+                })
+                .and_then(char::from_u32),
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &after[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &after[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Finds a direct child element named `name` in the Babel namespace (or no
 /// namespace at all), and returns its trimmed text — `None` if absent or blank.
 fn child_text<'a>(parent: roxmltree::Node<'a, 'a>, name: &str) -> Option<String> {
@@ -84,7 +181,11 @@ pub fn parse(xml: &[u8]) -> Result<IFiction, IFictionError> {
         result.language = child_text(bibliographic, "language");
         result.first_published = child_text(bibliographic, "firstpublished");
         result.genre = child_text(bibliographic, "genre");
-        result.description = child_text(bibliographic, "description");
+        // IFDB double-encodes the description: it HTML-encodes the prose (tags
+        // like `<br/>`, entities like `&quot;`/`&#039;`) and then XML-encodes
+        // that, so after roxmltree's one XML decode the text still carries
+        // literal HTML. Flatten it to plain text for a terminal panel.
+        result.description = child_text(bibliographic, "description").map(|d| html_to_text(&d));
     }
 
     if let Some(identification) = story
@@ -169,6 +270,33 @@ mod tests {
     fn a_namespaceless_chunk_still_parses() {
         let xml = br#"<ifindex><story><bibliographic><title>Bare</title></bibliographic></story></ifindex>"#;
         assert_eq!(parse(xml).unwrap().title.as_deref(), Some("Bare"));
+    }
+
+    #[test]
+    fn html_to_text_flattens_ifdb_description_markup() {
+        // The shape IFDB actually emits (post-XML-decode): HTML entities and
+        // literal <br/> tags, as seen in Planetfall's blurb.
+        let raw = "&quot;Join the Patrol!&quot;<br/>You took the poster&#039;s advice.<br /><i>Later:</i> scrubbing decks &amp; sweeping.";
+        let out = html_to_text(raw);
+        assert!(!out.contains('<'), "no tags survive: {out:?}");
+        assert!(!out.contains("&quot;") && !out.contains("&#039;") && !out.contains("&amp;"), "entities decoded: {out:?}");
+        assert!(out.contains('"') && out.contains('\''), "entities became real chars: {out:?}");
+        assert!(out.contains("decks & sweeping"), "&amp; → &: {out:?}");
+        assert!(out.contains("\nYou took"), "<br/> became a newline: {out:?}");
+    }
+
+    #[test]
+    fn html_to_text_leaves_plain_prose_alone() {
+        // Zork's blurb is already plain; flattening must not mangle it.
+        let plain = "Many strange tales have been told of the fabulous treasure.";
+        assert_eq!(html_to_text(plain), plain);
+    }
+
+    #[test]
+    fn html_to_text_and_decode_never_panic_on_odd_input() {
+        for s in ["&", "&;", "&#;", "&#xZZ;", "<unclosed", "&nosuchentity;", "&#99999999999;"] {
+            let _ = html_to_text(s); // must not panic
+        }
     }
 
     #[test]
