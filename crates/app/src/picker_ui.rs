@@ -1342,6 +1342,18 @@ fn draw_info_panel(
             let rect = Rect::new(text_area.x, y, text_area.width, 1);
             let link = hyperrat::Link::new(text.as_str(), url.as_str()).style(*style);
             ratatui::widgets::Widget::render(link, rect, buf);
+            // hyperrat packs the whole OSC 8 escape sequence into the first
+            // cell's symbol but leaves its diff option at None, so ratatui's diff
+            // measures the escape bytes as display width (huge) and then skips
+            // that many following cells when flushing — leaving a stale label
+            // tail and a corrupted scrollbar on this row. Pin the cell to width 1
+            // (ratatui's documented remedy for escape-symbol cells); hyperrat's
+            // own Skip cells already carry the label's real column span.
+            if let Some(first) = buf.cell_mut(ratatui::layout::Position::new(rect.x, rect.y)) {
+                first.set_diff_option(ratatui::buffer::CellDiffOption::ForcedWidth(
+                    std::num::NonZeroU16::new(1).unwrap(),
+                ));
+            }
             link_rects.push((rect, url.clone()));
             continue;
         }
@@ -2106,6 +2118,33 @@ mod tests {
         let blorb_pos = text.find("Resource blorb:").expect("sidecar line present");
         let res_pos = text.find("Resources").expect("resources header present");
         assert!(blorb_pos < res_pos, "sidecar name is up-front, before the Resources section");
+    }
+
+    /// Regression (SQ-0367 link vs scrollbar): hyperrat leaves the OSC 8 first
+    /// cell's diff option at None, so ratatui measures the escape sequence as the
+    /// cell's width and skips the rest of the row — a stale label tail and a
+    /// corrupted scrollbar. We must pin that cell to ForcedWidth(1).
+    #[test]
+    fn info_panel_link_cell_is_pinned_to_width_one() {
+        use ratatui::buffer::{Buffer, CellDiffOption};
+        use ratatui::layout::{Position, Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let mut meta = minimal_story_meta();
+        meta.ifdb_link = Some("https://ifdb.org/viewgame?id=0dbnusxunq7fw5ro".into());
+        let area = Rect::new(0, 0, 60, 14);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let mut links: Vec<(Rect, String)> = Vec::new();
+        super::draw_info_panel(
+            "Game", "game.z5", &meta, None, 0, area, None, &mut cover,
+            std::path::Path::new("game.z5"), false, &cs, &mut buf, &mut links,
+        );
+        let (rect, _) = links.first().expect("a link rect was recorded");
+        let first = buf.cell(Position::new(rect.x, rect.y)).expect("link first cell");
+        assert!(
+            matches!(first.diff_option, CellDiffOption::ForcedWidth(w) if w.get() == 1),
+            "link first cell must be pinned to width 1, was {:?}", first.diff_option
+        );
     }
 
     #[test]
