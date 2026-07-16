@@ -244,6 +244,23 @@ fn common_prefix_len(a: &str, b: &str) -> usize {
     a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
 }
 
+/// From `(prefix_len, value)` candidates, the single value with the longest
+/// prefix — but only if that prefix is >=3 chars and no other candidate ties
+/// it (a tie for the longest is a real collision, so return `None` rather than
+/// pick by directory order). `None` if nothing reaches 3. Shared by
+/// [`resolve_sound_blorb`]'s directory scan and [`sibling_blorb_by_name`] so the
+/// prefix/ambiguity rule lives in one place.
+fn best_unambiguous_prefix<T>(candidates: Vec<(usize, T)>) -> Option<T> {
+    let max_plen = candidates.iter().map(|(plen, _)| *plen).filter(|plen| *plen >= 3).max()?;
+    let mut winners = candidates.into_iter().filter(|(plen, _)| *plen == max_plen);
+    let first = winners.next().map(|(_, value)| value);
+    if winners.next().is_none() {
+        first
+    } else {
+        None // tie → ambiguous
+    }
+}
+
 /// Resolve the Blorb holding a story's sound resources, plus the path it was
 /// read from, or `None`.
 ///
@@ -278,7 +295,7 @@ pub fn resolve_sound_blorb(
         .file_stem()?
         .to_string_lossy()
         .to_ascii_lowercase();
-    let mut candidates: Vec<(usize, Blorb, std::path::PathBuf)> = Vec::new();
+    let mut candidates: Vec<(usize, (Blorb, std::path::PathBuf))> = Vec::new();
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
         if path == story_path {
@@ -303,36 +320,65 @@ pub fn resolve_sound_blorb(
             .map(|s| s.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
         let plen = common_prefix_len(&story_stem, &cand_stem);
-        candidates.push((plen, b, path));
+        candidates.push((plen, (b, path)));
     }
-    // Best non-trivial prefix match wins — but only if it is UNAMBIGUOUS.
-    // Two candidates tied for the longest prefix (>=3) is a real collision:
-    // return None rather than picking one by read_dir order.
-    if let Some(max_plen) = candidates
-        .iter()
-        .map(|(plen, _, _)| *plen)
-        .filter(|plen| *plen >= 3)
-        .max()
-    {
-        let mut winners = candidates
-            .iter()
-            .enumerate()
-            .filter(|(_, (plen, _, _))| *plen == max_plen)
-            .map(|(i, _)| i);
-        let first = winners.next();
-        if winners.next().is_none() {
-            let i = first.unwrap();
-            let (_, b, path) = candidates.swap_remove(i);
-            return Some((b, path));
-        }
-        return None; // tie → ambiguous
-    }
-    // Otherwise, the sole candidate if unambiguous.
+    // A sole sound blorb in the directory is it, even with an unrelated name
+    // (has_sounds already vouched for it); otherwise require an unambiguous
+    // stem-prefix match so we never grab the wrong game's sounds.
     if candidates.len() == 1 {
-        let (_, b, path) = candidates.pop().unwrap();
-        return Some((b, path));
+        return Some(candidates.pop().unwrap().1);
     }
-    None
+    best_unambiguous_prefix(candidates)
+}
+
+/// The associated resource-blorb sibling of `story_path`, matched by FILENAME
+/// ONLY (no file read), for the cheap per-row "(blorb)" tag which can't afford
+/// to parse every blorb. Same match order as [`resolve_sound_blorb`]: an exact
+/// same-stem `.blb`/`.blorb`/`.zblorb` sibling first, else the best
+/// unambiguous stem-prefix (>=3 chars) match among the directory's resource
+/// blorbs — `None` if there is none or the longest prefix is a tie. Unlike
+/// `resolve_sound_blorb` it does not verify the file has sounds, so it lights
+/// for any associated resource blorb (e.g. a graphics-only one).
+pub fn sibling_blorb_by_name(
+    story_path: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    const EXTS: [&str; 3] = ["blb", "blorb", "zblorb"];
+    // 1. Exact same-stem sibling.
+    for ext in EXTS {
+        let cand = story_path.with_extension(ext);
+        if cand != story_path && cand.exists() {
+            return Some(cand);
+        }
+    }
+    // 2. Best unambiguous stem-prefix match in the same directory.
+    let dir = story_path.parent()?;
+    let story_stem = story_path.file_stem()?.to_string_lossy().to_ascii_lowercase();
+    let mut candidates: Vec<(usize, std::path::PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path == story_path {
+            continue;
+        }
+        let ext_ok = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| {
+                let e = e.to_ascii_lowercase();
+                EXTS.iter().any(|x| *x == e)
+            })
+            .unwrap_or(false);
+        if !ext_ok {
+            continue;
+        }
+        let cand_stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        candidates.push((common_prefix_len(&story_stem, &cand_stem), path));
+    }
+    // Unlike resolve_sound_blorb there is no sole-candidate fallback: without a
+    // has_sounds check, a lone unrelated blorb must not light every story's tag.
+    best_unambiguous_prefix(candidates)
 }
 
 #[cfg(test)]
@@ -754,6 +800,53 @@ mod tests {
             resolve_sound_blorb(&story).is_none(),
             "tie for longest prefix must be ambiguous"
         );
+    }
+
+    // ── sibling_blorb_by_name (filename-only, powers the "(blorb)" tag) ──────
+
+    #[test]
+    fn sibling_by_name_finds_exact_stem() {
+        let dir = TempDir::new("byname-exact");
+        let story = dir.join("game.z5");
+        std::fs::write(&story, b"x").unwrap();
+        let sibling = dir.join("game.blb");
+        std::fs::write(&sibling, b"x").unwrap(); // content irrelevant: filename-only
+        assert_eq!(sibling_blorb_by_name(&story), Some(sibling));
+    }
+
+    #[test]
+    fn sibling_by_name_finds_prefix_match_case_insensitively() {
+        // The real bug (SQ-0372): The Lurking Horror ships as
+        // `lurkinghorror-r219-s870912.z3` beside `Lurking.blb` — different stems,
+        // different case. The prefix scan must still pair them.
+        let dir = TempDir::new("byname-prefix");
+        let story = dir.join("lurkinghorror-r219-s870912.z3");
+        std::fs::write(&story, b"x").unwrap();
+        let sibling = dir.join("Lurking.blb");
+        std::fs::write(&sibling, b"x").unwrap();
+        assert_eq!(sibling_blorb_by_name(&story), Some(sibling));
+    }
+
+    #[test]
+    fn sibling_by_name_none_on_prefix_tie() {
+        let dir = TempDir::new("byname-tie");
+        let story = dir.join("lurkinghorror.z3");
+        std::fs::write(&story, b"x").unwrap();
+        std::fs::write(dir.join("lurking-a.blorb"), b"x").unwrap();
+        std::fs::write(dir.join("lurking-b.blorb"), b"x").unwrap();
+        assert_eq!(sibling_blorb_by_name(&story), None, "ambiguous tie → None");
+    }
+
+    #[test]
+    fn sibling_by_name_none_when_prefix_too_short_or_absent() {
+        let dir = TempDir::new("byname-miss");
+        let story = dir.join("zork.z3");
+        std::fs::write(&story, b"x").unwrap();
+        // Only a 2-char shared prefix ("zo"), below the >=3 floor.
+        std::fs::write(dir.join("zone.blorb"), b"x").unwrap();
+        // A blorb with no shared prefix at all.
+        std::fs::write(dir.join("arthur.blb"), b"x").unwrap();
+        assert_eq!(sibling_blorb_by_name(&story), None);
     }
 
     #[test]
