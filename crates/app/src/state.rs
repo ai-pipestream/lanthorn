@@ -648,6 +648,33 @@ impl std::fmt::Debug for TidyJob {
     }
 }
 
+/// An in-flight background map-render job (SQ-0379). The worker builds the routed
+/// `RenderMap` for `(gen, layer)` off the main thread — the routing is the
+/// expensive part — and pushes a short label into `steps` at the start of each
+/// phase so the map pane can show a live progress trace. The run loop polls
+/// `handle.is_finished()` and installs the result when `gen` still matches.
+pub struct RenderJob {
+    /// Worker thread handle. Returns the routed `RenderMap`.
+    pub handle: std::thread::JoinHandle<mapper::render::RenderMap>,
+    /// The layer this model is being routed for.
+    pub layer: mapper::layer::LayerId,
+    /// Graph generation recorded at spawn; a mismatch on completion means the
+    /// map changed again mid-build, so the result is stale and a fresh job runs.
+    pub gen: u64,
+    /// Instant the job was spawned, for the border pulse phase.
+    pub started: std::time::Instant,
+}
+
+impl std::fmt::Debug for RenderJob {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RenderJob")
+            .field("layer", &self.layer)
+            .field("gen", &self.gen)
+            .field("started", &self.started)
+            .finish_non_exhaustive()
+    }
+}
+
 /// An in-flight background job that builds a tidy *animation* off the main thread.
 /// The worker runs `run_tidy_pipeline` on a clone of the graph and returns both the
 /// captured frames and the mutated (tidied) clone. The run loop polls
@@ -1334,6 +1361,15 @@ pub struct AppState {
     /// unchanged map reuses the routed model instead of re-running `render_layer`.
     /// See [`MapRenderCache`] and [`AppState::cached_map_render`]. (SQ-0305)
     pub(crate) map_render: std::cell::RefCell<Option<MapRenderCache>>,
+    /// In-flight background map-render job (SQ-0379): rebuilds `map_render` for a
+    /// new `(graph_gen, layer)` off the main thread so a re-route never blocks the
+    /// interpreter. `RefCell` so it can be spawned from within the draw closure
+    /// (which holds only `&self`); polled/installed from the loop body.
+    pub(crate) render_job: std::cell::RefCell<Option<RenderJob>>,
+    /// Live progress trace for the in-flight `render_job`, shared with the worker
+    /// thread. The worker pushes a phase label as each starts; the map pane shows
+    /// them top-right and they are cleared when the job completes (SQ-0379).
+    pub(crate) render_steps: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Screen origin `(col, row)` of the input line's TEXT (just past the `"> "` prompt), captured
     /// by the renderer each frame so a click can be mapped back to a caret position (SQ-0354).
     ///
@@ -1721,6 +1757,8 @@ impl Default for AppState {
             transcript_gen: 0,
             transcript_wrap: std::cell::RefCell::new(None),
             map_render: std::cell::RefCell::new(None),
+            render_job: std::cell::RefCell::new(None),
+            render_steps: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             input_text_origin: std::cell::Cell::new(None),
             map_pane_size: std::cell::Cell::new(None),
             modal_list_viewport: 0,
@@ -1814,6 +1852,7 @@ impl AppState {
     /// tidy border pulse, the sound-beep flash, and smooth transcript scroll.
     pub fn has_active_animation(&self) -> bool {
         self.tidy_job.is_some()
+            || self.render_job.borrow().is_some()
             || self.anim_build_job.is_some()
             || self.sound_pulse.is_some()
             || self.scroll_anim.is_some()
@@ -2132,12 +2171,13 @@ impl AppState {
         graph.current().map(|id| graph.layer_of(id)).unwrap_or(MAIN_LAYER)
     }
 
-    /// Borrow the live map's routed render model for `layer`, re-routing it (via
-    /// `build`) only when the graph generation or viewed layer changed since the
-    /// last frame. The routing in `render_layer` is the dominant per-frame map
-    /// cost, so a redraw that leaves the live graph untouched (animation frame,
-    /// transcript update, mouse move) reuses the cached model. Callers pass
-    /// `build` as `|| render_layer(&graph, layer)`; it runs only on a cache miss.
+    /// Borrow the live map's routed render model for `layer`. The routing in
+    /// `render_layer` is the dominant map cost, so it is kept OFF the main thread
+    /// (SQ-0379): the very first model is built synchronously (small, at game
+    /// start), but every later rebuild — triggered by a `graph_gen` change —
+    /// happens on a background worker while this keeps returning the last-ready
+    /// model. Only the current-room highlight and labels are refreshed here, live
+    /// and cheaply, so the highlight follows the player with no re-route (SQ-0378).
     ///
     /// Only the live map uses this — replay and tidy-animation graphs are not
     /// tracked by `graph_gen`, so their models are built fresh each frame. (SQ-0305)
@@ -2145,24 +2185,28 @@ impl AppState {
         &self,
         layer: LayerId,
         graph: &mapper::graph::MapGraph,
-        build: impl FnOnce() -> mapper::render::RenderMap,
     ) -> std::cell::Ref<'_, mapper::render::RenderMap> {
         let gen = self.graph_gen;
-        {
-            let mut cache = self.map_render.borrow_mut();
-            let fresh = matches!(cache.as_ref(), Some(c) if c.gen == gen && c.layer == layer);
-            if !fresh {
-                *cache = Some(MapRenderCache { gen, layer, rm: build() });
+        let fresh = matches!(self.map_render.borrow().as_ref(), Some(c) if c.gen == gen && c.layer == layer);
+        if !fresh {
+            // No routing ever runs on the main thread (SQ-0379). If there is no
+            // model yet, seed an empty one so the pane can draw (blank) this frame;
+            // otherwise keep drawing the stale model. Either way the real re-route
+            // runs on the background worker, with the pulse + step overlay showing.
+            if self.map_render.borrow().is_none() {
+                *self.map_render.borrow_mut() = Some(MapRenderCache {
+                    gen,
+                    layer,
+                    rm: mapper::render::render(&mapper::graph::MapGraph::new()),
+                });
             }
-            // The current-room highlight and a room's label can change on a turn
-            // that did NOT alter the map's routed geometry — a step between two
-            // already-placed rooms, or a room the game renamed in place. Those
-            // must NOT bump `graph_gen`, because re-routing the whole map every
-            // step pauses gameplay on large explored maps (SQ-0378). Refresh just
-            // those fields here from the live graph, reusing the cached routing.
-            let rm = &mut cache.as_mut().expect("cache populated above").rm;
+            self.spawn_render_job(layer, graph, gen);
+        }
+        // Live, cheap refresh of the per-move-changeable fields on whatever model
+        // is currently shown — no re-route (SQ-0378).
+        if let Some(c) = self.map_render.borrow_mut().as_mut() {
             let current = graph.current();
-            for r in &mut rm.rooms {
+            for r in &mut c.rm.rooms {
                 r.is_current = Some(r.id) == current;
                 if let Some(room) = graph.room(r.id) {
                     r.label = room.label().to_string();
@@ -2170,8 +2214,90 @@ impl AppState {
             }
         }
         std::cell::Ref::map(self.map_render.borrow(), |c| {
-            &c.as_ref().expect("cache populated above").rm
+            &c.as_ref().expect("populated above").rm
         })
+    }
+
+    /// Spawn the background map-render worker for `(gen, layer)` unless one is
+    /// already in flight (coalesced — like the tidy worker). The worker routes a
+    /// clone of the graph and reports each phase into `render_steps`. (SQ-0379)
+    fn spawn_render_job(&self, layer: LayerId, graph: &mapper::graph::MapGraph, gen: u64) {
+        let mut job = self.render_job.borrow_mut();
+        if job.is_some() {
+            // A job is already running; let it finish. `poll_render_job` discards
+            // it if it turns out stale, and the next frame respawns for `gen`.
+            return;
+        }
+        let g = graph.clone();
+        let steps = self.render_steps.clone();
+        if let Ok(mut s) = steps.lock() {
+            s.clear();
+        }
+        let handle = std::thread::spawn(move || {
+            let mut push = |name: &str| {
+                if let Ok(mut s) = steps.lock() {
+                    s.push(name.to_string());
+                }
+            };
+            mapper::render::render_layer_traced(&g, layer, &mut push)
+        });
+        *job = Some(RenderJob { handle, layer, gen, started: std::time::Instant::now() });
+    }
+
+    /// Poll the background map-render worker: if it has finished, install its
+    /// model as the new last-ready render (when its generation still matches) or
+    /// discard it as stale (a fresh job then spawns on the next draw). Returns
+    /// true when a completed job was handled (the caller should redraw). (SQ-0379)
+    pub fn poll_render_job(&mut self) -> bool {
+        let done = self
+            .render_job
+            .borrow()
+            .as_ref()
+            .is_some_and(|j| j.handle.is_finished());
+        if !done {
+            return false;
+        }
+        let job = self.render_job.borrow_mut().take().expect("checked above");
+        match job.handle.join() {
+            Ok(rm) => {
+                if job.gen == self.graph_gen {
+                    *self.map_render.borrow_mut() =
+                        Some(MapRenderCache { gen: job.gen, layer: job.layer, rm });
+                    if let Ok(mut s) = self.render_steps.lock() {
+                        s.clear();
+                    }
+                }
+                // else: stale — a newer geometry arrived mid-build; drop it and
+                // let the next draw respawn for the current generation.
+            }
+            Err(_) => {
+                // Worker panicked: keep the last-ready model, drop the trace.
+                if let Ok(mut s) = self.render_steps.lock() {
+                    s.clear();
+                }
+            }
+        }
+        true
+    }
+
+    /// True while the background map-render worker (SQ-0379) is in flight.
+    pub fn map_render_in_flight(&self) -> bool {
+        self.render_job.borrow().is_some()
+    }
+
+    /// How long the in-flight background map job (tidy relayout or render worker)
+    /// has been running, for the border-pulse phase — `None` when neither runs.
+    pub fn map_job_pulse_elapsed(&self) -> Option<std::time::Duration> {
+        self.tidy_job
+            .as_ref()
+            .map(|j| j.started.elapsed())
+            .or_else(|| self.render_job.borrow().as_ref().map(|j| j.started.elapsed()))
+    }
+
+    /// Snapshot the in-flight render worker's phase trace, for the map's top-right
+    /// progress overlay (SQ-0379).
+    pub fn render_steps_snapshot(&self) -> Vec<String> {
+        self.render_steps.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
     /// Toggle focus between the game and map panes. The map pane is focusable
@@ -4148,62 +4274,82 @@ mod tests {
         assert_eq!(st.symbols, crate::symbols::SymbolSet::default());
     }
 
+    /// Wait for the in-flight render worker to finish, then install it.
+    fn drain_render_job(s: &mut AppState) {
+        while s
+            .render_job
+            .borrow()
+            .as_ref()
+            .is_some_and(|j| !j.handle.is_finished())
+        {
+            std::thread::yield_now();
+        }
+        s.poll_render_job();
+    }
+
+    /// SQ-0379: no routing runs on the main thread — even the first build. The
+    /// first draw serves an empty placeholder while the real model routes on a
+    /// worker; a later geometry change re-routes off-thread while the last-ready
+    /// model keeps being served, so the interpreter never blocks.
     #[test]
-    fn cached_map_render_reuses_until_gen_or_layer_change() {
+    fn cached_map_render_routes_off_thread_including_first_build() {
         use mapper::graph::MapGraph;
-        use std::cell::Cell;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.set_pos(1, (0, 0));
         let mut s = AppState::default();
-        let builds = Cell::new(0usize);
-        // Build closure ignores the layer (keeps the test off layer-subgraph
-        // validity); its only job is to count how often the cache actually rebuilds.
-        let run = |s: &AppState, layer| {
-            let _ = s.cached_map_render(layer, &g, || {
-                builds.set(builds.get() + 1);
-                mapper::render::render(&g)
-            });
-        };
 
-        // Same (gen, layer): routed once, then reused.
-        run(&s, 0);
-        run(&s, 0);
-        assert_eq!(builds.get(), 1, "unchanged gen+layer reuses the cached model");
+        // First call: empty placeholder served, real model routes off-thread.
+        {
+            let rm = s.cached_map_render(0, &g);
+            assert_eq!(rm.rooms.len(), 0, "empty placeholder while the first route runs");
+        }
+        assert!(s.render_job.borrow().is_some(), "even the first build is off-thread");
+        drain_render_job(&mut s);
+        {
+            let rm = s.cached_map_render(0, &g);
+            assert_eq!(rm.rooms.len(), 1, "routed model served once it lands");
+        }
+        // Same (gen, layer): reused, no new worker.
+        let _ = s.cached_map_render(0, &g);
+        assert!(s.render_job.borrow().is_none());
 
-        // A layer switch invalidates, then holds.
-        run(&s, 1);
-        assert_eq!(builds.get(), 2, "layer switch rebuilds");
-        run(&s, 1);
-        assert_eq!(builds.get(), 2, "same layer again reuses");
-
-        // A graph-generation bump invalidates.
+        // A geometry change (new room + gen bump): re-route OFF-thread, the STALE
+        // model (still 1 room) served meanwhile.
+        g.upsert_room(2, "B".into());
+        g.set_pos(2, (1, 0));
         s.graph_gen = s.graph_gen.wrapping_add(1);
-        run(&s, 1);
-        assert_eq!(builds.get(), 3, "graph_gen bump rebuilds");
+        {
+            let rm = s.cached_map_render(0, &g);
+            assert_eq!(rm.rooms.len(), 1, "last-ready model served while routing");
+        }
+        assert!(s.render_job.borrow().is_some(), "a stale model re-routes off-thread");
+        drain_render_job(&mut s);
+        {
+            let rm = s.cached_map_render(0, &g);
+            assert_eq!(rm.rooms.len(), 2, "the freshly routed model is now served");
+        }
     }
 
     /// SQ-0378: a step between already-placed rooms changes the current-room
     /// highlight but not the routed geometry, so `graph_gen` does not bump. The
-    /// cache must follow the player WITHOUT re-routing the whole map (the pause).
+    /// cache must follow the player WITHOUT re-routing (no worker spawns).
     #[test]
-    fn cached_map_render_refreshes_current_without_rebuilding() {
+    fn cached_map_render_refreshes_current_without_rerouting() {
         use mapper::graph::MapGraph;
-        use std::cell::Cell;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.set_pos(1, (0, 0));
         g.upsert_room(2, "B".into());
         g.set_pos(2, (1, 0));
         g.set_current(1);
-        let s = AppState::default();
-        let builds = Cell::new(0usize);
+        let mut s = AppState::default();
 
+        // Build + install the initial model.
+        let _ = s.cached_map_render(0, &g);
+        drain_render_job(&mut s);
         {
-            let rm = s.cached_map_render(0, &g, || {
-                builds.set(builds.get() + 1);
-                mapper::render::render(&g)
-            });
+            let rm = s.cached_map_render(0, &g);
             assert!(rm.rooms.iter().find(|r| r.id == 1).unwrap().is_current);
             assert!(!rm.rooms.iter().find(|r| r.id == 2).unwrap().is_current);
         }
@@ -4211,17 +4357,17 @@ mod tests {
         // Move the player to room 2 WITHOUT bumping graph_gen.
         g.set_current(2);
         {
-            let rm = s.cached_map_render(0, &g, || {
-                builds.set(builds.get() + 1);
-                mapper::render::render(&g)
-            });
-            assert_eq!(builds.get(), 1, "a current-room change must NOT re-route the map");
+            let rm = s.cached_map_render(0, &g);
             assert!(!rm.rooms.iter().find(|r| r.id == 1).unwrap().is_current);
             assert!(
                 rm.rooms.iter().find(|r| r.id == 2).unwrap().is_current,
-                "the highlight follows the player with no rebuild"
+                "the highlight follows the player"
             );
         }
+        assert!(
+            s.render_job.borrow().is_none(),
+            "a current-room change must NOT spawn a re-route worker"
+        );
     }
 
     #[test]
