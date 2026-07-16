@@ -93,8 +93,19 @@ pub(crate) fn finish_command_turn(
 
     apply_turn(mapper, cmd, &result);
 
-    // Bump the graph generation so any in-flight tidy result is detected as stale.
-    state.graph_gen = state.graph_gen.wrapping_add(1);
+    // Bump the graph generation ONLY when the turn actually changed the map's
+    // routed geometry (a room or connection added/removed). This invalidates the
+    // map render memo (forcing a re-route) and marks any in-flight tidy result
+    // stale. A step between already-placed rooms changes neither, so it must NOT
+    // bump — otherwise every step re-routes the whole map and pauses gameplay on
+    // large explored maps (SQ-0378). The current-room highlight and any in-place
+    // relabel are refreshed cheaply at draw time (see `cached_map_render`), with
+    // no re-route.
+    if mapper.graph.rooms().count() != rooms_before
+        || mapper.graph.connections().len() != conns_before
+    {
+        state.graph_gen = state.graph_gen.wrapping_add(1);
+    }
 
     // Game-initiated (v4+) save/restore: open the saves dialog in
     // in-game mode and defer auto-save/history capture until the
