@@ -71,9 +71,9 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   shareable `style.toml` files, per-game looks, a templated status bar, and a
   fully configurable keymap. → [customization](docs/features/customization.md)
 - **Story picker** — launch a directory to browse your games with type/artifact
-  badges, a sortable author/year list, an info side-panel with full metadata
-  (author, year, genre, blurb) and cover art, and on-demand metadata fetch from
-  IFDB, cached per-game. → [interface](docs/features/interface.md)
+  badges, a sortable author/year list or a `g` cover-gallery grid, an info
+  side-panel with full metadata (author, year, genre, blurb) and cover art, and
+  on-demand metadata fetch from IFDB, cached per-game. → [interface](docs/features/interface.md)
 - **Robust** — a faulting story halts with a call-frame stack trace (written to
   `~/.babelmap/crash.log`) while the app stays interactive, instead of taking the
   interpreter down. → [interpreter](docs/features/interpreter.md)
