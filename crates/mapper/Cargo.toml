@@ -3,6 +3,11 @@ name = "mapper"
 version = "0.1.0"
 edition = "2021"
 
+
+[lib]
+# No doctests here; skip the rustdoc doctest pass (seconds of harness
+# compilation for zero tests). Remove if real doctests are added.
+doctest = false
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

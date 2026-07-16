@@ -3043,6 +3043,7 @@ mod tests {
         use crate::session::SchannelOp;
         let mut state = AppState::default();
         state.config.enable_sound = true;
+        audio::disable_output_for_tests(); // silent backend: no real device to open/tear down
         state.audio = Some(audio::AudioBackend::new(50));
         // Seed the channel's current gain (as a prior play/set_volume would).
         state.glulx_gain.insert(1, 1.0);
@@ -3082,6 +3083,7 @@ mod tests {
         use crate::session::SchannelOp;
         let mut state = AppState::default();
         state.config.enable_sound = true;
+        audio::disable_output_for_tests(); // silent backend: no real device to open/tear down
         state.audio = Some(audio::AudioBackend::new(50));
         // A ramped set_volume_ext with a nonzero notify schedules a pending
         // volume-notify keyed by channel (no live sound needed).

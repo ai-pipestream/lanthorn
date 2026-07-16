@@ -245,14 +245,34 @@ impl std::fmt::Debug for AudioBackend {
     }
 }
 
+/// When set, `AudioBackend::new` skips opening a real output device and returns
+/// a silent backend. Purely for test suites: opening (and, on macOS, tearing
+/// down) a real CoreAudio stream costs many seconds per backend, and a test that
+/// constructs one blocks the whole test binary at drop. Never touched in
+/// production — `main` never calls `disable_output_for_tests`.
+#[cfg(feature = "playback")]
+static TEST_SILENCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Make every subsequently-constructed `AudioBackend` silent (no real device).
+/// Call this at the top of any test that constructs a backend — directly or via
+/// a production path — so it neither opens nor tears down an audio device.
+#[cfg(feature = "playback")]
+pub fn disable_output_for_tests() {
+    TEST_SILENCE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[cfg(feature = "playback")]
 impl AudioBackend {
     pub fn new(volume: u8) -> AudioBackend {
-        let stream = match rodio::OutputStream::try_default() {
-            Ok((s, h)) => Some((s, h)),
-            Err(e) => {
-                eprintln!("audio: no output device ({e}); sound disabled");
-                None
+        let stream = if TEST_SILENCE.load(std::sync::atomic::Ordering::Relaxed) {
+            None
+        } else {
+            match rodio::OutputStream::try_default() {
+                Ok((s, h)) => Some((s, h)),
+                Err(e) => {
+                    eprintln!("audio: no output device ({e}); sound disabled");
+                    None
+                }
             }
         };
         AudioBackend {
@@ -498,6 +518,9 @@ mod tests {
 
     #[test]
     fn backend_no_device_paths_never_panic() {
+        // The whole point is the no-device path — so force it, rather than open
+        // (and slowly tear down) a real device on a machine that has one.
+        disable_output_for_tests();
         // Constructing a backend must succeed even with no output device (CI).
         let mut b = AudioBackend::new(100);
         b.play_tone(800.0, 50, 8);

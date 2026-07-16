@@ -3947,6 +3947,7 @@ mod tests {
         // Regression: launching with enable_sound = false never constructs an
         // AudioBackend (see main.rs), so flipping the config flag alone leaves
         // state.audio == None forever. ToggleSound must build the backend too.
+        audio::disable_output_for_tests(); // ToggleSound builds a real backend; keep it silent
         let mut s = AppState::default();
         s.config.enable_sound = false;
         s.audio = None;

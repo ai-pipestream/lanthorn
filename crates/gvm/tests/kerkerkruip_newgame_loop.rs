@@ -66,6 +66,7 @@ fn run_delivering_timers(m: &mut Machine, budget: u64) -> String {
 }
 
 #[test]
+#[ignore = "slow (~13s): boots Kerkerkruip through many timer turns; run with --include-ignored"]
 fn new_game_timer_wait_reaches_entrance_hall() {
     let Some(mut m) = boot() else {
         eprintln!("SKIP: stories/Kerkerkruip.gblorb missing");

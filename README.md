@@ -126,10 +126,16 @@ model](docs/persistence.md)
 
 ```bash
 cargo build --workspace          # build everything
-cargo test --workspace           # run the full test suite
+cargo test --workspace           # fast suite (a few slow tests are skipped)
+cargo test --workspace -- --include-ignored  # everything, incl. slow tests
 cargo run -p zvm-cli -- story.z5 # DOS-style CLI player (no map)
 cargo run -p gvm-cli -- story.ulx # DOS-style Glulx CLI player (no map)
 ```
+
+A few slow full-game Glulx walkthroughs (Kerkerkruip, Counterfeit Monkey) are
+marked `#[ignore]` so the default `cargo test` stays quick; pass
+`--include-ignored` to run them (CI should). Doctests are disabled workspace-wide
+(`doctest = false`) — there are none, and the rustdoc pass cost seconds.
 
 `zvm-cli` / `gvm-cli` render a basic DOS-style screen (pinned status line / upper
 window via ANSI when interactive, clearing the screen on start) and degrade to a
