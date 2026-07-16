@@ -43,11 +43,22 @@ pub struct RenderMap {
     pub plan: RoutePlan,
 }
 
-/// Build a `RenderMap` from `graph`.
+/// Build a `RenderMap` from `graph`. Convenience wrapper over
+/// [`render_traced`] with a no-op step callback.
 pub fn render(graph: &MapGraph) -> RenderMap {
+    render_traced(graph, &mut |_| {})
+}
+
+/// Build a `RenderMap` from `graph`, calling `on_step` with a short label at the
+/// start of each phase. Used by the app's background map-render worker to report
+/// progress (the routing phases are the expensive ones). `render` is the same
+/// pipeline with an empty callback.
+pub fn render_traced(graph: &MapGraph, on_step: &mut dyn FnMut(&str)) -> RenderMap {
+    on_step("detect chains");
     let current = graph.current();
     let chains = crate::layout::detect_chains(graph);
 
+    on_step("place rooms");
     let rooms: Vec<RenderRoom> = graph
         .rooms()
         .filter_map(|room| {
@@ -82,7 +93,9 @@ pub fn render(graph: &MapGraph) -> RenderMap {
         ((min_col, min_row), (max_col, max_row))
     };
 
+    on_step("route edges");
     let edges = route_all(graph);
+    on_step("route lanes");
     let plan = route_lanes(graph);
 
     RenderMap { rooms, edges, bounds, plan }
@@ -92,8 +105,19 @@ pub fn render(graph: &MapGraph) -> RenderMap {
 /// layer's sub-graph (so the existing routers are reused unchanged). Inter-layer edges
 /// (Phase 2) are appended by `interlayer_badges`, which is empty while there is one layer.
 pub fn render_layer(graph: &MapGraph, layer: LayerId) -> RenderMap {
+    render_layer_traced(graph, layer, &mut |_| {})
+}
+
+/// [`render_layer`] with per-phase step reporting (see [`render_traced`]).
+pub fn render_layer_traced(
+    graph: &MapGraph,
+    layer: LayerId,
+    on_step: &mut dyn FnMut(&str),
+) -> RenderMap {
+    on_step("layer subgraph");
     let sub = graph.layer_subgraph(layer);
-    let mut rm = render(&sub);
+    let mut rm = render_traced(&sub, on_step);
+    on_step("layer badges");
     let badges = crate::layer::interlayer_badges(graph, layer);
     // Flag rooms that own an outgoing cross-layer portal so the renderer can mark them
     // with a distinct box outline.
@@ -129,6 +153,24 @@ mod tests {
         // The all-layers render never flags (no per-layer context).
         let plain = render(&g);
         assert!(plain.rooms.iter().all(|r| !r.has_layer_portal));
+    }
+
+    #[test]
+    fn render_traced_reports_phase_steps_and_matches_render() {
+        let mut m = Mapper::default();
+        m.observe(1, "A", None);
+        m.observe(2, "B", Some(Direction::E));
+        let mut steps: Vec<String> = Vec::new();
+        let traced = render_traced(&m.graph, &mut |s| steps.push(s.to_string()));
+        // The routing phases (the expensive ones) must be reported so the app's
+        // step overlay can pinpoint delays.
+        assert!(steps.iter().any(|s| s == "route edges"), "steps: {steps:?}");
+        assert!(steps.iter().any(|s| s == "route lanes"), "steps: {steps:?}");
+        // The traced pipeline is the same as `render`.
+        let plain = render(&m.graph);
+        assert_eq!(traced.rooms.len(), plain.rooms.len());
+        assert_eq!(traced.edges.len(), plain.edges.len());
+        assert_eq!(traced.bounds, plain.bounds);
     }
 
     #[test]
