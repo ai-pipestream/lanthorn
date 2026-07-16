@@ -3457,12 +3457,26 @@ impl Machine {
                 0
             }
             0x0004 => self.glk_gestalt(a(0), a(1)), // glk_gestalt(sel, val)
-            0x0005 => self.glk_gestalt(a(0), a(1)), // glk_gestalt_ext(sel, val, arr, len)
+            0x0005 => {
+                // glk_gestalt_ext(sel, val, arr, arrlen). Only gestalt_CharOutput (3)
+                // writes the output array — arr[0] = glyphs printed for the char. We
+                // report ExactPrint for every char, so that is exactly one glyph. A
+                // null or zero-length array is skipped, per spec.
+                let (sel, val, arr, arrlen) = (a(0), a(1), a(2), a(3));
+                if sel == 3 && arr != 0 && arrlen >= 1 {
+                    self.store_mem(arr, 1)?;
+                }
+                self.glk_gestalt(sel, val)
+            }
             0x0001 => {
                 // glk_exit — end the program
                 self.halted = true;
                 0
             }
+            // glk_set_interrupt_handler — unusable from Glulx (a C function pointer
+            // can't cross the dispatch layer), so it is a no-op here. Explicit arm so
+            // the call doesn't spam the diagnostics log.
+            0x0002 => 0,
             // glk_tick — a periodic housekeeping hook with nothing to do on a modern
             // host. Explicit no-op so the constant calls don't spam the diagnostics log.
             0x0003 => 0,
@@ -4537,7 +4551,9 @@ impl Machine {
             17 => 1,                // gestalt_LineInputEcho → set_echo_line_event supported
             18 => 1,                // gestalt_LineTerminators → set_terminators_line_event supported
             19 => glk::keycode::is_terminator(val) as u32, // gestalt_LineTerminatorKey(keycode)
-            4 => 1,                 // gestalt_MouseInput → supported (grid + graphics)
+            // gestalt_MouseInput(wintype): grid + graphics support mouse; a generic
+            // val==0 (AllTypes) probe answers "supported". TextBuffer/Pair/Blank do not.
+            4 => matches!(val, 0 | 4 | 5) as u32,
             5 => 1,                 // gestalt_Timer → supported
             6 => self.graphics_enabled as u32,                // gestalt_Graphics
             7 => (self.graphics_enabled && (val == 5 || val == 3)) as u32, // gestalt_DrawImage(wintype): Graphics + TextBuffer (inline images)
@@ -4547,7 +4563,9 @@ impl Machine {
             10 => self.sound_enabled as u32, // gestalt_SoundNotify
             21 => self.sound_enabled as u32, // gestalt_Sound2 (0.7.3 extended sound suite)
             11 => 1,                 // gestalt_Hyperlinks → supported
-            12 => 1,                 // gestalt_HyperlinkInput(wintype) → supported
+            // gestalt_HyperlinkInput(wintype): the text windows (buffer + grid) carry
+            // hyperlinks; a generic val==0 probe answers "supported". Graphics/Pair/Blank do not.
+            12 => matches!(val, 0 | 3 | 4) as u32,
             0x1100 => 1,             // gestalt_GarglkText → garglk_set_zcolors/reversevideo supported
             20 => 1,                 // gestalt_DateTime → clock + date/time conversions supported
             22 => 1,                 // gestalt_ResourceStream → glk_stream_open_resource[_uni] supported
@@ -8134,6 +8152,44 @@ mod tests {
         // unlike the unknown-selector default which would log on every call.
         assert_eq!(m.glk_dispatch(0x0003, &[]).unwrap(), 0);
         assert!(m.diagnostics.is_empty(), "glk_tick must not touch the diagnostics log");
+    }
+
+    #[test]
+    fn glk_set_interrupt_handler_is_a_silent_no_op() {
+        let mut m = machine_with_body(&[], vec![]);
+        // Unusable from Glulx, so a no-op — but an explicit arm, not the warning default.
+        assert_eq!(m.glk_dispatch(0x0002, &[0x1234]).unwrap(), 0);
+        assert!(m.diagnostics.is_empty(), "set_interrupt_handler must not warn");
+    }
+
+    #[test]
+    fn gestalt_mouse_and_hyperlink_report_per_window_type() {
+        let m = machine_with_body(&[], vec![]);
+        // gestalt_MouseInput (4): grid (4) + graphics (5), plus the generic (0) probe.
+        assert_eq!(m.glk_gestalt(4, 4), 1, "grid supports mouse");
+        assert_eq!(m.glk_gestalt(4, 5), 1, "graphics supports mouse");
+        assert_eq!(m.glk_gestalt(4, 0), 1, "generic mouse probe supported");
+        assert_eq!(m.glk_gestalt(4, 3), 0, "text buffer does not support mouse");
+        assert_eq!(m.glk_gestalt(4, 1), 0, "pair windows do not support mouse");
+        // gestalt_HyperlinkInput (12): text windows (buffer 3 + grid 4), plus generic (0).
+        assert_eq!(m.glk_gestalt(12, 3), 1, "buffer supports hyperlinks");
+        assert_eq!(m.glk_gestalt(12, 4), 1, "grid supports hyperlinks");
+        assert_eq!(m.glk_gestalt(12, 0), 1, "generic hyperlink probe supported");
+        assert_eq!(m.glk_gestalt(12, 5), 0, "graphics does not support hyperlinks");
+    }
+
+    #[test]
+    fn glk_gestalt_ext_fills_charoutput_glyph_count() {
+        let mut m = machine_with_body(&[], vec![]);
+        // gestalt_CharOutput (3) for 'A' with a 1-element output array: returns
+        // ExactPrint (2) and writes arr[0] = 1 (one glyph).
+        let r = m.glk_dispatch(0x0005, &[3, b'A' as u32, 0x0110, 1]).unwrap();
+        assert_eq!(r, 2, "ExactPrint");
+        assert_eq!(m.mem.read32(0x0110).unwrap(), 1, "one glyph written to arr[0]");
+        // A non-CharOutput selector still returns its scalar but leaves the array alone.
+        m.mem.write32(0x0110, 0x0000_DEAD).unwrap();
+        assert_eq!(m.glk_dispatch(0x0005, &[0, 0, 0x0110, 1]).unwrap(), 0x0000_0706); // Version
+        assert_eq!(m.mem.read32(0x0110).unwrap(), 0x0000_DEAD, "version query leaves the array untouched");
     }
 
     #[test]
