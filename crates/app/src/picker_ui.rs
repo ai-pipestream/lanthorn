@@ -1374,9 +1374,9 @@ fn draw_story_gallery(
                 }
             }
             if !drew_cover {
-                // No cover art: centre the wrapped title in the band. Selected tiles
-                // keep the selection background (filled above) so the title sits on
-                // the highlight.
+                // No cover art: draw a simple placeholder — a border around the tile
+                // with the wrapped title centred inside it. Selected tiles keep the
+                // selection background (filled above) so it sits on the highlight.
                 let title_style = if sel { cs.story_tile_selected } else { cs.story_tile };
                 if !sel {
                     for y in cover_rect.top()..cover_rect.bottom() {
@@ -1387,12 +1387,31 @@ fn draw_story_gallery(
                         }
                     }
                 }
-                let lines = wrap_to_width(&entry.title, g::TILE_W as usize);
-                let shown = (lines.len() as u16).min(g::TILE_COVER_H);
-                let start_y = cover_rect.y + (g::TILE_COVER_H - shown) / 2;
+                // Border ring around the placeholder.
+                let (x0, x1) = (cover_rect.left(), cover_rect.right().saturating_sub(1));
+                let (y0, y1) = (cover_rect.top(), cover_rect.bottom().saturating_sub(1));
+                for x in x0..=x1 {
+                    if let Some(c) = buf.cell_mut((x, y0)) { c.set_symbol("─").set_style(title_style); }
+                    if let Some(c) = buf.cell_mut((x, y1)) { c.set_symbol("─").set_style(title_style); }
+                }
+                for y in y0..=y1 {
+                    if let Some(c) = buf.cell_mut((x0, y)) { c.set_symbol("│").set_style(title_style); }
+                    if let Some(c) = buf.cell_mut((x1, y)) { c.set_symbol("│").set_style(title_style); }
+                }
+                for (px, py, ch) in [(x0, y0, "┌"), (x1, y0, "┐"), (x0, y1, "└"), (x1, y1, "┘")] {
+                    if let Some(c) = buf.cell_mut((px, py)) {
+                        c.set_symbol(ch).set_style(title_style);
+                    }
+                }
+                // Title centred inside the border.
+                let inner_w = g::TILE_W.saturating_sub(2);
+                let inner_h = g::TILE_COVER_H.saturating_sub(2);
+                let lines = wrap_to_width(&entry.title, inner_w as usize);
+                let shown = (lines.len() as u16).min(inner_h);
+                let start_y = cover_rect.y + 1 + (inner_h - shown) / 2;
                 for (i, line) in lines.iter().take(shown as usize).enumerate() {
                     let lw = UnicodeWidthStr::width(line.as_str()) as u16;
-                    let x = cover_rect.x + g::TILE_W.saturating_sub(lw) / 2;
+                    let x = cover_rect.x + 1 + inner_w.saturating_sub(lw) / 2;
                     draw_str_clipped(buf, x, start_y + i as u16, line, title_style, cover_rect);
                 }
             }
@@ -3218,6 +3237,7 @@ mod tests {
         let sel_tile = rects.iter().find(|(i, _)| *i == 1).unwrap().1;
         let interior = buf.cell((sel_tile.x, sel_tile.y)).unwrap();
         assert_eq!(interior.style().bg, cs.story_tile_selected.bg, "selected tile background is highlighted");
+        assert_eq!(interior.symbol(), "┌", "missing-cover placeholder has a border");
         let frame_above = buf.cell((sel_tile.x, sel_tile.y - 1)).unwrap();
         assert_eq!(frame_above.style().bg, cs.story_tile_selected.bg, "selection frame sits in the gutter");
         // An unselected tile (index 0): neither its background nor its gutter is tinted.
