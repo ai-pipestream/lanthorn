@@ -590,11 +590,18 @@ impl Vm {
 
     /// Index of the item whose `auto_noun` matches the last typed noun, if any.
     fn find_auto_noun_item(&self) -> Option<usize> {
+        // Scott matching is significant only to `word_length` characters, so the
+        // typed noun and the item's auto-noun must be compared truncated — a full
+        // typed word (e.g. "LAMP") still matches a shorter auto-noun ("LAM") when
+        // word_length is 3. `last_noun` and `auto_noun` are already uppercase.
+        let wl = self.db.word_length;
+        let trunc = |s: &str| s.chars().take(wl).collect::<String>();
+        let key = trunc(&self.last_noun);
+        if key.is_empty() {
+            return None;
+        }
         self.db.items.iter().position(|it| {
-            it.auto_noun
-                .as_deref()
-                .map(|n| n.eq_ignore_ascii_case(&self.last_noun))
-                .unwrap_or(false)
+            it.auto_noun.as_deref().map(|n| trunc(n) == key).unwrap_or(false)
         })
     }
 
@@ -1254,6 +1261,26 @@ mod tests {
         vm.flag_set(DARK_FLAG, true);
         assert!(vm.is_dark());
         assert_eq!(vm.room_block(), "It is too dark to see.");
+    }
+
+    #[test]
+    fn get_specific_item_matches_at_word_length() {
+        let mut db = tiny_world(); // word_length 3
+        // A real game stores auto-nouns at word-length significance: the lamp
+        // (item 9, starting in room 1) carries the 3-char auto-noun "LAM".
+        db.items[9].auto_noun = Some("LAM".into());
+        let mut vm = Vm::new(db);
+        // Typing the full word "lamp" must still match "LAM" (both truncate to 3).
+        vm.supply_line("get lamp");
+        vm.step();
+        let out = vm.take_output();
+        assert!(out.contains("OK."), "get lamp succeeds: {out:?}");
+        assert!(vm.item_carried(9), "the lamp is now carried");
+
+        // And dropping it by the full word works too.
+        vm.supply_line("drop lamp");
+        vm.step();
+        assert!(!vm.item_carried(9), "the lamp was dropped");
     }
 
     #[test]
