@@ -1345,10 +1345,14 @@ fn draw_story_gallery(
             // gutter ring around the tile, so it never shrinks the cover.
             let sel = idx == selected;
             let cover_rect = Rect::new(tile.x, tile.y, g::TILE_W, g::TILE_COVER_H);
+            // Letterbox fill. When selected, fill the whole tile background with the
+            // selection style so the bands around a centred (letterboxed) cover are
+            // highlighted too — not only the gutter frame.
+            let bg_style = if sel { cs.story_tile_selected } else { cs.story_info_cover };
             for y in cover_rect.top()..cover_rect.bottom() {
                 for x in cover_rect.left()..cover_rect.right() {
                     if let Some(c) = buf.cell_mut((x, y)) {
-                        c.set_symbol(" ").set_style(cs.story_info_cover);
+                        c.set_symbol(" ").set_style(bg_style);
                     }
                 }
             }
@@ -1375,11 +1379,16 @@ fn draw_story_gallery(
                 }
             }
             if !drew_cover {
-                // No cover art: centre the wrapped title in the band.
-                for y in cover_rect.top()..cover_rect.bottom() {
-                    for x in cover_rect.left()..cover_rect.right() {
-                        if let Some(c) = buf.cell_mut((x, y)) {
-                            c.set_symbol(" ").set_style(cs.story_tile);
+                // No cover art: centre the wrapped title in the band. Selected tiles
+                // keep the selection background (filled above) so the title sits on
+                // the highlight.
+                let title_style = if sel { cs.story_tile_selected } else { cs.story_tile };
+                if !sel {
+                    for y in cover_rect.top()..cover_rect.bottom() {
+                        for x in cover_rect.left()..cover_rect.right() {
+                            if let Some(c) = buf.cell_mut((x, y)) {
+                                c.set_symbol(" ").set_style(title_style);
+                            }
                         }
                     }
                 }
@@ -1389,7 +1398,7 @@ fn draw_story_gallery(
                 for (i, line) in lines.iter().take(shown as usize).enumerate() {
                     let lw = UnicodeWidthStr::width(line.as_str()) as u16;
                     let x = cover_rect.x + g::TILE_W.saturating_sub(lw) / 2;
-                    draw_str_clipped(buf, x, start_y + i as u16, line, cs.story_tile, cover_rect);
+                    draw_str_clipped(buf, x, start_y + i as u16, line, title_style, cover_rect);
                 }
             }
 
@@ -3209,16 +3218,17 @@ mod tests {
         assert!(whole.contains("Anchorhead"));
         assert!(whole.contains("Curses"));
 
-        // Selection is a frame in the gutter around the selected tile (index 1),
-        // not a tint inside it: the interior keeps the neutral fill, while the
-        // gutter row just above it carries the selection style.
+        // The selected tile (index 1) is highlighted across its whole background
+        // AND framed in the surrounding gutter; an unselected tile is neither.
         let sel_tile = rects.iter().find(|(i, _)| *i == 1).unwrap().1;
         let interior = buf.cell((sel_tile.x, sel_tile.y)).unwrap();
-        assert_ne!(interior.style().bg, cs.story_tile_selected.bg, "cover interior is not tinted");
+        assert_eq!(interior.style().bg, cs.story_tile_selected.bg, "selected tile background is highlighted");
         let frame_above = buf.cell((sel_tile.x, sel_tile.y - 1)).unwrap();
         assert_eq!(frame_above.style().bg, cs.story_tile_selected.bg, "selection frame sits in the gutter");
-        // An unselected tile (index 0) has no selection frame above it.
+        // An unselected tile (index 0): neither its background nor its gutter is tinted.
         let unsel_tile = rects.iter().find(|(i, _)| *i == 0).unwrap().1;
+        let unsel_interior = buf.cell((unsel_tile.x, unsel_tile.y)).unwrap();
+        assert_ne!(unsel_interior.style().bg, cs.story_tile_selected.bg, "unselected tile is not highlighted");
         let unsel_above = buf.cell((unsel_tile.x, unsel_tile.y - 1)).unwrap();
         assert_ne!(unsel_above.style().bg, cs.story_tile_selected.bg, "unselected tile has no frame");
     }
