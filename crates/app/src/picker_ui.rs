@@ -535,18 +535,24 @@ pub(crate) fn run_story_picker(
                     header_rects = hrects;
                 }
                 PickerView::Gallery => {
-                    let (rects, cols, vis) = draw_story_gallery(
-                        &stories, list.selected, &mut gallery_first_row, dir, &cs,
-                        cover_picker.as_ref(), &mut cover, list_area, buf,
-                    );
-                    gallery_cols = cols.max(1);
-                    gallery_vis = vis.max(1);
-                    gallery_visible = rects.iter().map(|(i, _)| *i).collect();
-                    // A viewport analogue for ListScroll's easing while it holds
-                    // the shared selection; the grid does its own scrolling.
-                    viewport = (cols * vis).max(1);
-                    row_rects = rects;
-                    header_rects = Vec::new();
+                    // Skip the gallery while the resource-preview modal is open: its
+                    // selected-cover background fill and cover images would otherwise
+                    // render behind the dialog, bleeding the selection colour into it
+                    // and corrupting its border where covers meet the edges (SQ-0389).
+                    if preview.is_none() {
+                        let (rects, cols, vis) = draw_story_gallery(
+                            &stories, list.selected, &mut gallery_first_row, dir, &cs,
+                            cover_picker.as_ref(), &mut cover, list_area, buf,
+                        );
+                        gallery_cols = cols.max(1);
+                        gallery_vis = vis.max(1);
+                        gallery_visible = rects.iter().map(|(i, _)| *i).collect();
+                        // A viewport analogue for ListScroll's easing while it holds
+                        // the shared selection; the grid does its own scrolling.
+                        viewport = (cols * vis).max(1);
+                        row_rects = rects;
+                        header_rects = Vec::new();
+                    }
                 }
             }
             // The manual IFDB-entry prompt (SQ-0371) takes the footer row while
@@ -557,7 +563,7 @@ pub(crate) fn run_story_picker(
             } else if let Some(msg) = &progress_line {
                 draw_progress_line(buf, list_area, msg, cs.story_header_active);
             }
-            if panel_area.width > 0 {
+            if preview.is_none() && panel_area.width > 0 {
                 if let Some(entry) = stories.get(list.selected) {
                     last_panel_area = panel_area;
                     panel_max = draw_info_panel(
@@ -581,6 +587,10 @@ pub(crate) fn run_story_picker(
                     panel_resource_rects.clear();
                 }
             } else {
+                // No selectable story, or the resource-preview modal is open: skip
+                // redrawing the info panel. While the modal is up this stops the
+                // panel's IFDB OSC-8 hyperlink from bleeding across the dialog
+                // (SQ-0389), and drops its now-hidden click rects.
                 panel_link_rects.clear();
                 panel_resource_rects.clear();
             }
@@ -1316,7 +1326,9 @@ fn draw_story_gallery(
     if grid_bottom <= grid_top || area.width < g::TILE_W {
         return (tile_rects, 1, 1);
     }
-    let grid = Rect::new(area.x, grid_top, area.width, grid_bottom - grid_top);
+    // Inset the grid one column so column-0 tiles still have a left gutter for
+    // the selection frame (the other gutters come from the tile spacing).
+    let grid = Rect::new(area.x + 1, grid_top, area.width.saturating_sub(1), grid_bottom - grid_top);
     let cols = g::columns(grid.width);
     let vis = g::visible_rows(grid.height);
     *first_row = g::scroll_to(selected, cols, vis, *first_row);
@@ -1333,48 +1345,113 @@ fn draw_story_gallery(
             let tile = g::tile_rect(grid, col, vr);
             tile_rects.push((idx, tile));
 
-            // Cover band: letterbox fill, then the fitted image centred in it.
+            // Cover band = the whole tile, filled edge-to-edge with the fitted
+            // image at maximum size (or, for a missing cover, the wrapped title
+            // centred in it). The selection highlight is drawn afterwards in the
+            // gutter ring around the tile, so it never shrinks the cover.
+            let sel = idx == selected;
             let cover_rect = Rect::new(tile.x, tile.y, g::TILE_W, g::TILE_COVER_H);
+            // Letterbox fill. When selected, fill the whole tile background with the
+            // selection style so the bands around a centred (letterboxed) cover are
+            // highlighted too — not only the gutter frame.
+            let bg_style = if sel { cs.story_tile_selected } else { cs.story_info_cover };
             for y in cover_rect.top()..cover_rect.bottom() {
                 for x in cover_rect.left()..cover_rect.right() {
                     if let Some(c) = buf.cell_mut((x, y)) {
-                        c.set_symbol(" ").set_style(cs.story_info_cover);
+                        c.set_symbol(" ").set_style(bg_style);
                     }
                 }
             }
+            let mut drew_cover = false;
             if let Some(picker) = picker {
                 if cover.has(&entry.path) {
-                    if let Some(proto) = cover.tile_protocol(picker, &entry.path, cover_rect) {
-                        let sz = proto.size();
-                        let used_w = sz.width.min(cover_rect.width);
-                        let used_h = sz.height.min(cover_rect.height);
-                        let dest = Rect::new(
-                            cover_rect.x + (cover_rect.width - used_w) / 2,
-                            cover_rect.y + (cover_rect.height - used_h) / 2,
-                            used_w,
-                            used_h,
-                        );
+                    // Centre the cover in the tile via a self-computed fitted rect
+                    // (image aspect + cell size), so it centres on both axes no
+                    // matter how the render protocol reports its own size.
+                    let fit = cover.fitted_tile_rect(picker, &entry.path, cover_rect);
+                    if let Some(proto) = cover.tile_protocol(picker, &entry.path, fit) {
                         ratatui::widgets::Widget::render(
                             ratatui_image::Image::new(proto),
-                            dest,
+                            fit,
                             buf,
                         );
+                        drew_cover = true;
                     }
+                }
+            }
+            if !drew_cover {
+                // No cover art: draw a simple placeholder — a border around the tile
+                // with the wrapped title centred inside it. Selected tiles keep the
+                // selection background (filled above) so it sits on the highlight.
+                let title_style = if sel { cs.story_tile_selected } else { cs.story_tile };
+                if !sel {
+                    for y in cover_rect.top()..cover_rect.bottom() {
+                        for x in cover_rect.left()..cover_rect.right() {
+                            if let Some(c) = buf.cell_mut((x, y)) {
+                                c.set_symbol(" ").set_style(title_style);
+                            }
+                        }
+                    }
+                }
+                // Border ring around the placeholder.
+                let (x0, x1) = (cover_rect.left(), cover_rect.right().saturating_sub(1));
+                let (y0, y1) = (cover_rect.top(), cover_rect.bottom().saturating_sub(1));
+                for x in x0..=x1 {
+                    if let Some(c) = buf.cell_mut((x, y0)) { c.set_symbol("─").set_style(title_style); }
+                    if let Some(c) = buf.cell_mut((x, y1)) { c.set_symbol("─").set_style(title_style); }
+                }
+                for y in y0..=y1 {
+                    if let Some(c) = buf.cell_mut((x0, y)) { c.set_symbol("│").set_style(title_style); }
+                    if let Some(c) = buf.cell_mut((x1, y)) { c.set_symbol("│").set_style(title_style); }
+                }
+                for (px, py, ch) in [(x0, y0, "┌"), (x1, y0, "┐"), (x0, y1, "└"), (x1, y1, "┘")] {
+                    if let Some(c) = buf.cell_mut((px, py)) {
+                        c.set_symbol(ch).set_style(title_style);
+                    }
+                }
+                // Title centred inside the border.
+                let inner_w = g::TILE_W.saturating_sub(2);
+                let inner_h = g::TILE_COVER_H.saturating_sub(2);
+                let lines = wrap_to_width(&entry.title, inner_w as usize);
+                let shown = (lines.len() as u16).min(inner_h);
+                let start_y = cover_rect.y + 1 + (inner_h - shown) / 2;
+                for (i, line) in lines.iter().take(shown as usize).enumerate() {
+                    let lw = UnicodeWidthStr::width(line.as_str()) as u16;
+                    let x = cover_rect.x + 1 + inner_w.saturating_sub(lw) / 2;
+                    draw_str_clipped(buf, x, start_y + i as u16, line, title_style, cover_rect);
                 }
             }
 
-            // Caption row: the title, highlighted when this is the selection.
-            let cap_y = tile.y + g::TILE_COVER_H;
-            let sel = idx == selected;
-            let cap_style = if sel { cs.story_tile_selected } else { cs.story_tile };
-            for x in tile.x..tile.x + g::TILE_W {
-                if let Some(c) = buf.cell_mut((x, cap_y)) {
-                    c.set_symbol(" ").set_style(cap_style);
+            // Selection highlight: fill the one-cell gutter ring around the tile
+            // with the selection style, framing the cover without shrinking it.
+            // Clipped to the grid, so a tile against an edge frames only on the
+            // sides that have a gutter.
+            if sel {
+                let sfx = cs.story_tile_selected;
+                let left = tile.x as i32 - 1;
+                let right = tile.x as i32 + g::TILE_W as i32;
+                let top = tile.y as i32 - 1;
+                let bottom = tile.y as i32 + g::TILE_COVER_H as i32;
+                let mut frame = |x: i32, y: i32| {
+                    if x >= area.x as i32
+                        && x < area.right() as i32
+                        && y > area.y as i32
+                        && y < grid_bottom as i32
+                    {
+                        if let Some(c) = buf.cell_mut((x as u16, y as u16)) {
+                            c.set_symbol(" ").set_style(sfx);
+                        }
+                    }
+                };
+                for x in left..=right {
+                    frame(x, top);
+                    frame(x, bottom);
+                }
+                for y in top..=bottom {
+                    frame(left, y);
+                    frame(right, y);
                 }
             }
-            let title = truncate_to_width(&entry.title, g::TILE_W as usize);
-            let cap_rect = Rect::new(tile.x, cap_y, g::TILE_W, 1);
-            draw_str_clipped(buf, tile.x, cap_y, &title, cap_style, cap_rect);
         }
     }
 
@@ -3133,7 +3210,7 @@ mod tests {
     }
 
     #[test]
-    fn gallery_renders_captions_and_highlights_the_selection() {
+    fn gallery_centers_titles_for_missing_covers_and_frames_selection() {
         use ratatui::{buffer::Buffer, layout::Rect};
         let cs = app::colors::ColorScheme::terminal_default();
         let stories = vec![
@@ -3145,31 +3222,36 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let mut cover = app::cover::CoverState::default();
         let mut first_row = 0usize;
-        // No picker → placeholder letterboxes; captions still render.
+        // No picker → no cover art → each tile shows its title centred in the band.
         let (rects, cols, vis) = super::draw_story_gallery(
             &stories, 1, &mut first_row, std::path::Path::new("/tmp"), &cs, None, &mut cover, area, &mut buf,
         );
 
         assert!(cols >= 1 && vis >= 1);
         assert_eq!(rects.len(), 3, "one hit-rect per story tile");
-        // Titles appear as captions on the caption row (cover band is TILE_COVER_H tall).
+        // Missing covers render the title centred in the cover band itself.
         let whole: String = (area.top()..area.bottom())
             .map(|y| row_text(&buf, y, area))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(whole.contains("Zork"), "first cover's caption: {whole:?}");
+        assert!(whole.contains("Zork"), "missing-cover title: {whole:?}");
         assert!(whole.contains("Anchorhead"));
         assert!(whole.contains("Curses"));
 
-        // The selected tile (index 1) caption is drawn with the selected style,
-        // which — unlike the unselected caption — carries a background colour.
+        // The selected tile (index 1) is highlighted across its whole background
+        // AND framed in the surrounding gutter; an unselected tile is neither.
         let sel_tile = rects.iter().find(|(i, _)| *i == 1).unwrap().1;
-        let cap_y = sel_tile.y + app::cover_gallery::TILE_COVER_H;
-        let sel_cell = buf.cell((sel_tile.x, cap_y)).unwrap();
-        assert_eq!(sel_cell.style().bg, cs.story_tile_selected.bg, "selected caption uses the highlight style");
+        let interior = buf.cell((sel_tile.x, sel_tile.y)).unwrap();
+        assert_eq!(interior.style().bg, cs.story_tile_selected.bg, "selected tile background is highlighted");
+        assert_eq!(interior.symbol(), "┌", "missing-cover placeholder has a border");
+        let frame_above = buf.cell((sel_tile.x, sel_tile.y - 1)).unwrap();
+        assert_eq!(frame_above.style().bg, cs.story_tile_selected.bg, "selection frame sits in the gutter");
+        // An unselected tile (index 0): neither its background nor its gutter is tinted.
         let unsel_tile = rects.iter().find(|(i, _)| *i == 0).unwrap().1;
-        let unsel_cell = buf.cell((unsel_tile.x, unsel_tile.y + app::cover_gallery::TILE_COVER_H)).unwrap();
-        assert_ne!(unsel_cell.style().bg, cs.story_tile_selected.bg, "unselected caption is not highlighted");
+        let unsel_interior = buf.cell((unsel_tile.x, unsel_tile.y)).unwrap();
+        assert_ne!(unsel_interior.style().bg, cs.story_tile_selected.bg, "unselected tile is not highlighted");
+        let unsel_above = buf.cell((unsel_tile.x, unsel_tile.y - 1)).unwrap();
+        assert_ne!(unsel_above.style().bg, cs.story_tile_selected.bg, "unselected tile has no frame");
     }
 
     /// A 2×2 red PNG, encoded via the `image` crate (mirrors cover.rs fixtures).
