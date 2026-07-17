@@ -1333,15 +1333,21 @@ fn draw_story_gallery(
             let tile = g::tile_rect(grid, col, vr);
             tile_rects.push((idx, tile));
 
-            // Cover band: letterbox fill, then the fitted image centred in it.
+            // Cover band = the whole tile. A selected tile's letterbox is tinted
+            // with the selection style (the "glow" around the fitted image); an
+            // unselected one uses the neutral cover fill. There is no title
+            // caption — when a cover is missing, the title is centred in the band.
+            let sel = idx == selected;
             let cover_rect = Rect::new(tile.x, tile.y, g::TILE_W, g::TILE_COVER_H);
+            let fill_style = if sel { cs.story_tile_selected } else { cs.story_info_cover };
             for y in cover_rect.top()..cover_rect.bottom() {
                 for x in cover_rect.left()..cover_rect.right() {
                     if let Some(c) = buf.cell_mut((x, y)) {
-                        c.set_symbol(" ").set_style(cs.story_info_cover);
+                        c.set_symbol(" ").set_style(fill_style);
                     }
                 }
             }
+            let mut drew_cover = false;
             if let Some(picker) = picker {
                 if cover.has(&entry.path) {
                     if let Some(proto) = cover.tile_protocol(picker, &entry.path, cover_rect) {
@@ -1359,22 +1365,30 @@ fn draw_story_gallery(
                             dest,
                             buf,
                         );
+                        drew_cover = true;
                     }
                 }
             }
-
-            // Caption row: the title, highlighted when this is the selection.
-            let cap_y = tile.y + g::TILE_COVER_H;
-            let sel = idx == selected;
-            let cap_style = if sel { cs.story_tile_selected } else { cs.story_tile };
-            for x in tile.x..tile.x + g::TILE_W {
-                if let Some(c) = buf.cell_mut((x, cap_y)) {
-                    c.set_symbol(" ").set_style(cap_style);
+            if !drew_cover {
+                // No cover art: centre the wrapped title in the band, using the
+                // selection style when selected so the tile still glows.
+                let title_style = if sel { cs.story_tile_selected } else { cs.story_tile };
+                for y in cover_rect.top()..cover_rect.bottom() {
+                    for x in cover_rect.left()..cover_rect.right() {
+                        if let Some(c) = buf.cell_mut((x, y)) {
+                            c.set_symbol(" ").set_style(title_style);
+                        }
+                    }
+                }
+                let lines = wrap_to_width(&entry.title, g::TILE_W as usize);
+                let shown = (lines.len() as u16).min(g::TILE_COVER_H);
+                let start_y = cover_rect.y + (g::TILE_COVER_H - shown) / 2;
+                for (i, line) in lines.iter().take(shown as usize).enumerate() {
+                    let lw = UnicodeWidthStr::width(line.as_str()) as u16;
+                    let x = cover_rect.x + g::TILE_W.saturating_sub(lw) / 2;
+                    draw_str_clipped(buf, x, start_y + i as u16, line, title_style, cover_rect);
                 }
             }
-            let title = truncate_to_width(&entry.title, g::TILE_W as usize);
-            let cap_rect = Rect::new(tile.x, cap_y, g::TILE_W, 1);
-            draw_str_clipped(buf, tile.x, cap_y, &title, cap_style, cap_rect);
         }
     }
 
@@ -3133,7 +3147,7 @@ mod tests {
     }
 
     #[test]
-    fn gallery_renders_captions_and_highlights_the_selection() {
+    fn gallery_centers_titles_for_missing_covers_and_glows_selection() {
         use ratatui::{buffer::Buffer, layout::Rect};
         let cs = app::colors::ColorScheme::terminal_default();
         let stories = vec![
@@ -3145,31 +3159,31 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let mut cover = app::cover::CoverState::default();
         let mut first_row = 0usize;
-        // No picker → placeholder letterboxes; captions still render.
+        // No picker → no cover art → each tile shows its title centred in the band.
         let (rects, cols, vis) = super::draw_story_gallery(
             &stories, 1, &mut first_row, std::path::Path::new("/tmp"), &cs, None, &mut cover, area, &mut buf,
         );
 
         assert!(cols >= 1 && vis >= 1);
         assert_eq!(rects.len(), 3, "one hit-rect per story tile");
-        // Titles appear as captions on the caption row (cover band is TILE_COVER_H tall).
+        // Missing covers render the title centred in the cover band itself.
         let whole: String = (area.top()..area.bottom())
             .map(|y| row_text(&buf, y, area))
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(whole.contains("Zork"), "first cover's caption: {whole:?}");
+        assert!(whole.contains("Zork"), "missing-cover title: {whole:?}");
         assert!(whole.contains("Anchorhead"));
         assert!(whole.contains("Curses"));
 
-        // The selected tile (index 1) caption is drawn with the selected style,
-        // which — unlike the unselected caption — carries a background colour.
+        // The selected tile (index 1) is tinted with the selection style (the
+        // glow); an unselected tile is not. The tile is the cover band alone now,
+        // so any cell in it carries the tile's fill style.
         let sel_tile = rects.iter().find(|(i, _)| *i == 1).unwrap().1;
-        let cap_y = sel_tile.y + app::cover_gallery::TILE_COVER_H;
-        let sel_cell = buf.cell((sel_tile.x, cap_y)).unwrap();
-        assert_eq!(sel_cell.style().bg, cs.story_tile_selected.bg, "selected caption uses the highlight style");
+        let sel_cell = buf.cell((sel_tile.x, sel_tile.y)).unwrap();
+        assert_eq!(sel_cell.style().bg, cs.story_tile_selected.bg, "selected tile glows");
         let unsel_tile = rects.iter().find(|(i, _)| *i == 0).unwrap().1;
-        let unsel_cell = buf.cell((unsel_tile.x, unsel_tile.y + app::cover_gallery::TILE_COVER_H)).unwrap();
-        assert_ne!(unsel_cell.style().bg, cs.story_tile_selected.bg, "unselected caption is not highlighted");
+        let unsel_cell = buf.cell((unsel_tile.x, unsel_tile.y)).unwrap();
+        assert_ne!(unsel_cell.style().bg, cs.story_tile_selected.bg, "unselected tile is not tinted");
     }
 
     /// A 2×2 red PNG, encoded via the `image` crate (mirrors cover.rs fixtures).

@@ -1,7 +1,7 @@
 //! Pure geometry + navigation for the story-picker cover gallery (SQ-0374).
 //!
 //! The gallery is an alternate story-picker view: a grid of cover thumbnails
-//! (each a fitted frontispiece over a one-row title caption) instead of the
+//! (each a fitted frontispiece, or the story title centred when a cover is
 //! metadata list. Only the layout math and 2D cursor movement live here — the
 //! rendering and input wiring stay in `picker_ui`, so this module is a set of
 //! small, deterministic, unit-testable functions with no terminal/state deps.
@@ -9,14 +9,13 @@
 use ratatui::layout::Rect;
 
 /// Target cover width, in cells, for one tile. Columns auto-fit the pane.
-pub const TILE_W: u16 = 16;
+pub const TILE_W: u16 = 20;
 /// Cover-image band height, in rows, per tile (the frontispiece is fitted into
-/// this, then a caption row sits below it).
-pub const TILE_COVER_H: u16 = 8;
-/// Title-caption height, in rows, per tile.
-pub const TILE_CAPTION_H: u16 = 1;
-/// Full tile height: cover band + caption.
-pub const TILE_H: u16 = TILE_COVER_H + TILE_CAPTION_H;
+/// this; a missing cover shows the story title centred here instead).
+pub const TILE_COVER_H: u16 = 11;
+/// Full tile height. The tile is the cover band alone — there is no separate
+/// title caption (titles appear only in place of a missing cover).
+pub const TILE_H: u16 = TILE_COVER_H;
 /// Blank columns between adjacent tiles.
 pub const GUTTER_X: u16 = 1;
 /// Blank rows between adjacent tile rows.
@@ -79,11 +78,11 @@ mod tests {
 
     #[test]
     fn columns_auto_fit_and_floor_at_one() {
-        // 16-wide tiles + 1 gutter → 17 per column.
-        assert_eq!(columns(80), 4); // (80+1)/17 = 4
-        assert_eq!(columns(17), 1);
-        assert_eq!(columns(34), 2);
-        assert_eq!(columns(120), 7); // (120+1)/17 = 7
+        // 20-wide tiles + 1 gutter → 21 per column.
+        assert_eq!(columns(80), 3); // (80+1)/21 = 3
+        assert_eq!(columns(21), 1);
+        assert_eq!(columns(42), 2);
+        assert_eq!(columns(120), 5); // (120+1)/21 = 5
         // Too narrow for a whole tile still yields one (clipped) column.
         assert_eq!(columns(10), 1);
         assert_eq!(columns(0), 1);
@@ -91,10 +90,10 @@ mod tests {
 
     #[test]
     fn visible_rows_auto_fit_and_floor_at_one() {
-        // 9-tall tiles + 1 gutter → 10 per row.
-        assert_eq!(visible_rows(40), 4); // (40+1)/10 = 4
-        assert_eq!(visible_rows(10), 1);
-        assert_eq!(visible_rows(20), 2);
+        // 11-tall tiles + 1 gutter → 12 per row.
+        assert_eq!(visible_rows(40), 3); // (40+1)/12 = 3
+        assert_eq!(visible_rows(12), 1);
+        assert_eq!(visible_rows(24), 2);
         assert_eq!(visible_rows(5), 1);
         assert_eq!(visible_rows(0), 1);
     }
@@ -141,8 +140,8 @@ mod tests {
         // Top-left tile sits at the grid origin.
         assert_eq!(tile_rect(grid, 0, 0), Rect::new(2, 3, TILE_W, TILE_H));
         // Column step is TILE_W + GUTTER_X; row step is TILE_H + GUTTER_Y.
-        assert_eq!(tile_rect(grid, 1, 0), Rect::new(2 + 17, 3, TILE_W, TILE_H));
-        assert_eq!(tile_rect(grid, 0, 1), Rect::new(2, 3 + 10, TILE_W, TILE_H));
-        assert_eq!(tile_rect(grid, 2, 1), Rect::new(2 + 34, 3 + 10, TILE_W, TILE_H));
+        assert_eq!(tile_rect(grid, 1, 0), Rect::new(2 + 21, 3, TILE_W, TILE_H));
+        assert_eq!(tile_rect(grid, 0, 1), Rect::new(2, 3 + 12, TILE_W, TILE_H));
+        assert_eq!(tile_rect(grid, 2, 1), Rect::new(2 + 42, 3 + 12, TILE_W, TILE_H));
     }
 }
