@@ -93,6 +93,11 @@ impl Database {
         let num_messages = lex.next_int()?;
         let treasure_room = lex.next_int()?;
 
+        if num_items < 0 || num_actions < 0 || num_words < 0 || num_rooms < 0 || num_messages < 0
+        {
+            return Err(LoadError::Truncated);
+        }
+
         let mut actions = Vec::with_capacity(num_actions as usize + 1);
         for _ in 0..=num_actions {
             let w0 = lex.next_int()?;
@@ -257,5 +262,11 @@ mod tests {
         assert!(looks_like_scott(MINI));
         assert!(!looks_like_scott("This is a plain english sentence."));
         assert!(!looks_like_scott("\x01\x02\x03 not text"));
+    }
+    #[test]
+    fn negative_count_errors_not_panics() {
+        // NumActions = -1 (field index 2) must yield a LoadError, not a panic
+        let bad = "32767 1 -1 1 2 6 1 0 3 125 0 1\n";
+        assert!(Database::parse(bad).is_err());
     }
 }
