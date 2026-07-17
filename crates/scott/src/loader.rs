@@ -128,14 +128,8 @@ impl Database {
         let mut verbs: Vec<String> = Vec::with_capacity(num_words as usize + 1);
         let mut nouns: Vec<String> = Vec::with_capacity(num_words as usize + 1);
         for _ in 0..=num_words {
-            let mut verb = lex.next_str()?;
-            let mut noun = lex.next_str()?;
-            if verb.starts_with('*') {
-                verb = verbs.last().cloned().unwrap_or_default();
-            }
-            if noun.starts_with('*') {
-                noun = nouns.last().cloned().unwrap_or_default();
-            }
+            let verb = lex.next_str()?;
+            let noun = lex.next_str()?;
             verbs.push(verb);
             nouns.push(noun);
         }
