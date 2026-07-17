@@ -535,18 +535,24 @@ pub(crate) fn run_story_picker(
                     header_rects = hrects;
                 }
                 PickerView::Gallery => {
-                    let (rects, cols, vis) = draw_story_gallery(
-                        &stories, list.selected, &mut gallery_first_row, dir, &cs,
-                        cover_picker.as_ref(), &mut cover, list_area, buf,
-                    );
-                    gallery_cols = cols.max(1);
-                    gallery_vis = vis.max(1);
-                    gallery_visible = rects.iter().map(|(i, _)| *i).collect();
-                    // A viewport analogue for ListScroll's easing while it holds
-                    // the shared selection; the grid does its own scrolling.
-                    viewport = (cols * vis).max(1);
-                    row_rects = rects;
-                    header_rects = Vec::new();
+                    // Skip the gallery while the resource-preview modal is open: its
+                    // selected-cover background fill and cover images would otherwise
+                    // render behind the dialog, bleeding the selection colour into it
+                    // and corrupting its border where covers meet the edges (SQ-0389).
+                    if preview.is_none() {
+                        let (rects, cols, vis) = draw_story_gallery(
+                            &stories, list.selected, &mut gallery_first_row, dir, &cs,
+                            cover_picker.as_ref(), &mut cover, list_area, buf,
+                        );
+                        gallery_cols = cols.max(1);
+                        gallery_vis = vis.max(1);
+                        gallery_visible = rects.iter().map(|(i, _)| *i).collect();
+                        // A viewport analogue for ListScroll's easing while it holds
+                        // the shared selection; the grid does its own scrolling.
+                        viewport = (cols * vis).max(1);
+                        row_rects = rects;
+                        header_rects = Vec::new();
+                    }
                 }
             }
             // The manual IFDB-entry prompt (SQ-0371) takes the footer row while
