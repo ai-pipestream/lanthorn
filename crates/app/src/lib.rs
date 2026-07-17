@@ -39,6 +39,7 @@ pub mod picker;
 pub mod reload;
 pub mod render;
 pub mod roomid;
+pub mod scott_session;
 pub mod session;
 pub mod state;
 pub mod storage;
