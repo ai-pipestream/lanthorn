@@ -23,6 +23,13 @@ use scott::{Database, Vm};
 /// so the host layer owns it. Scott used this phrase, never the Infocom-style `>`.
 const PROMPT: &str = "\nTell me what to do ? ";
 
+/// The authentic Scott divider drawn between the room "window" and the command
+/// area: `<` and `>` bracketing a run of em-dashes, sized to the room block.
+fn separator(block: &str) -> String {
+    let width = block.lines().map(|l| l.chars().count()).max().unwrap_or(0).max(20);
+    format!("<{}>", "\u{2014}".repeat(width.saturating_sub(2)))
+}
+
 struct Args {
     path: String,
     seed: Option<u32>,
@@ -112,6 +119,7 @@ fn main() {
         let block = vm.room_block();
         if block != last_block {
             let _ = writeln!(out, "\n{block}");
+            let _ = writeln!(out, "{}", separator(&block));
             last_block = block;
         }
         let _ = write!(out, "{PROMPT}");
