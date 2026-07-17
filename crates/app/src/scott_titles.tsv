@@ -1,0 +1,30 @@
+# Canonical titles for the classic Scott Adams "Adventure International"
+# numbered series, keyed by the adventure number stored in a Scott Adams
+# `.dat` database's trailer (`scott::Database::adventure_number`; 0 when the
+# trailer is absent/unparsed, so 0 is never a valid key here).
+#
+# Format: <adventure-number><TAB><Title>. Blank lines and lines starting with
+# '#' are ignored.
+#
+# Provenance: the standard Adventure International numbering for Scott
+# Adams's own 1978-1982 "Adventure" series (titles 1-13) plus the licensed
+# "Buckaroo Banzai" tie-in (14), as published by Adventure International and
+# widely documented (e.g. the IF Archive / Wikipedia's "List of Scott Adams
+# adventure games").
+#
+# A WRONG entry mislabels a game; a MISSING one just falls back to the filename.
+#
+1	Adventureland
+2	Pirate Adventure
+3	Secret Mission
+4	Voodoo Castle
+5	The Count
+6	Strange Odyssey
+7	Mystery Fun House
+8	Pyramid of Doom
+9	Ghost Town
+10	Savage Island, Part I
+11	Savage Island, Part II
+12	The Golden Voyage
+13	The Sorcerer of Claymorgue Castle
+14	Buckaroo Banzai

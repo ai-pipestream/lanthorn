@@ -15,6 +15,7 @@ use crate::hints;
 pub enum Engine {
     ZCode,
     Glulx,
+    Scott,
 }
 
 /// One blorb resource-index entry, string-rendered for display.
@@ -482,6 +483,59 @@ fn leading_year(s: &str) -> Option<String> {
     (y.len() == 4).then_some(y)
 }
 
+/// Canonical titles for the classic Scott Adams numbered series, keyed by the
+/// adventure number from a `.dat` database's trailer, bundled in
+/// `scott_titles.tsv` (`include_str!`d at build time). Mirrors
+/// `session::known_titles`.
+fn scott_titles() -> &'static std::collections::HashMap<i32, &'static str> {
+    use std::sync::OnceLock;
+    static TABLE: OnceLock<std::collections::HashMap<i32, &'static str>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        include_str!("scott_titles.tsv")
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_end();
+                if line.is_empty() || line.starts_with('#') {
+                    return None;
+                }
+                let (k, v) = line.split_once('\t')?;
+                Some((k.trim().parse().ok()?, v.trim()))
+            })
+            .collect()
+    })
+}
+
+/// The canonical title for a known Scott Adams adventure number.
+pub fn scott_title(adventure_number: i32) -> Option<&'static str> {
+    scott_titles().get(&adventure_number).copied()
+}
+
+/// Parse a trailing run of ASCII digits off a filename stem into an adventure
+/// number, e.g. `"adv01"` -> `Some(1)`, `"ADV14"` -> `Some(14)`, `"mystery"` ->
+/// `None` (no trailing digits).
+fn parse_adv_number(stem: &str) -> Option<i32> {
+    let digits_start = stem.rfind(|c: char| !c.is_ascii_digit()).map_or(0, |i| i + 1);
+    let digits = &stem[digits_start..];
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+/// Resolve a display title for a Scott Adams `.dat` story: prefer the
+/// adventure number parsed from the database trailer, falling back to an
+/// `advNN`-style filename. `None` when neither source maps to a known title
+/// (caller falls back to the filename stem).
+pub fn scott_story_title(dat: &[u8], path: &Path) -> Option<String> {
+    if let Ok(s) = std::str::from_utf8(dat) {
+        if let Ok(db) = scott::Database::parse(s) {
+            if let Some(t) = scott_title(db.adventure_number) {
+                return Some(t.to_string());
+            }
+        }
+    }
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    let n = parse_adv_number(stem)?;
+    scott_title(n).map(str::to_string)
+}
+
 /// SPEC "Precedence": per field, independently, first non-empty wins —
 /// `ifmd` (the file's own `IFmd` chunk) > `fetched` (an IFDB sidecar) >
 /// `tsv` (the bundled known-title table) > `stem` (the filename). `tsv` and
@@ -557,13 +611,14 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
     let loaded = crate::hints::load_story(path).ok()?;
     // Only list stories babelmap can actually launch: Z-code via the
     // Z-machine loader (accepts v3/4/5/7/8, rejects v6/v1/v2), Glulx via the
-    // Glulx loader.
+    // Glulx loader, Scott Adams via the Scott database parser.
     let bytes = loaded.bytes().to_vec();
     let launchable = match &loaded {
         crate::hints::LoadedStory::ZCode(b) => zvm::memory::Memory::new(b.clone()).is_ok(),
         crate::hints::LoadedStory::Glulx(b) => gvm::Memory::new(b.clone()).is_ok(),
-        // Scott engine wired in Task 8/9 — not listed by the picker yet.
-        crate::hints::LoadedStory::Scott(_) => false,
+        crate::hints::LoadedStory::Scott(b) => {
+            std::str::from_utf8(b).ok().map(|s| scott::Database::parse(s).is_ok()).unwrap_or(false)
+        }
     };
     if !launchable {
         return None;
@@ -609,7 +664,13 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
     // wrong IFID) is simply no metadata, never a scan error.
     let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(path));
     let fetched = crate::story_info::load(&game_dir, &ifid).and_then(|info| info.fetched);
-    let tsv_title = crate::session::known_title(&ifid);
+    // Scott stories have no IFID-keyed table; resolve their title from the
+    // database's adventure number (or an `advNN` filename) instead.
+    let scott_tsv_title = matches!(loaded, crate::hints::LoadedStory::Scott(_))
+        .then(|| scott_story_title(&bytes, path))
+        .flatten();
+    let tsv_title =
+        scott_tsv_title.as_deref().or_else(|| crate::session::known_title(&ifid));
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -620,8 +681,7 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
     let engine = match &loaded {
         crate::hints::LoadedStory::ZCode(_) => Engine::ZCode,
         crate::hints::LoadedStory::Glulx(_) => Engine::Glulx,
-        // Unreachable: Scott stories are filtered out as not launchable above.
-        crate::hints::LoadedStory::Scott(_) => unreachable!("Scott is never launchable yet"),
+        crate::hints::LoadedStory::Scott(_) => Engine::Scott,
     };
     let is_container = self_blorb.is_some();
     let (version, serial, release, features, format) = match engine {
@@ -639,6 +699,9 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
             let format = if is_container { "Blorb (Glulx)" } else { "Glulx" };
             (version, None, None, features, format.to_string())
         }
+        // Scott Adams databases carry no version/serial/release; blorb
+        // wrapping isn't applicable either.
+        Engine::Scott => (None, None, None, Features::default(), "Scott Adams".to_string()),
     };
 
     let meta = StoryMeta {
@@ -1605,6 +1668,33 @@ mod tests {
         assert!(resource_detail(b"Pict", b"PNG ", &png).is_some());
         assert_eq!(resource_detail(b"Data", b"PNG ", &png), None);
         assert_eq!(resource_detail(b"Exec", b"ZCOD", b"whatever"), None);
+    }
+
+    #[test]
+    fn scott_title_lookup_and_filename_fallback() {
+        assert_eq!(scott_title(1), Some("Adventureland"));
+        assert_eq!(scott_title(13), Some("The Sorcerer of Claymorgue Castle"));
+        assert_eq!(scott_title(999), None);
+        // filename fallback via the tiny_cave fixture (its adventure_number is
+        // 99 -> not in the table), so title resolution should fall back; with
+        // a path "adv01.dat" it should yield Adventureland.
+        let dat = include_bytes!("../../scott/tests/tiny_cave.dat");
+        assert_eq!(
+            scott_story_title(dat, Path::new("adv01.dat")).as_deref(),
+            Some("Adventureland")
+        );
+        // unknown filename + unknown adventure number -> None (caller uses filename)
+        assert_eq!(scott_story_title(dat, Path::new("mygame.dat")), None);
+    }
+
+    #[test]
+    fn scott_titles_file_parses_without_dupes() {
+        let table = scott_titles();
+        let lines = include_str!("scott_titles.tsv")
+            .lines()
+            .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+            .count();
+        assert_eq!(lines, table.len(), "no duplicate adventure numbers in scott_titles.tsv");
     }
 }
 

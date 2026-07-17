@@ -148,6 +148,7 @@ fn interp_label(meta: &app::picker::StoryMeta, blorb: bool) -> String {
             Some(v) if !v.is_empty() => format!("G{v}"),
             _ => "Glulx".to_string(),
         },
+        app::picker::Engine::Scott => "Scott".to_string(),
     }
 }
 
@@ -1612,7 +1613,9 @@ fn draw_info_panel(
     if let Some(v) = &meta.version {
         fmt_line = match meta.engine {
             app::picker::Engine::ZCode => format!("{} v{}", meta.format, v),
-            app::picker::Engine::Glulx => format!("{} {}", meta.format, v),
+            app::picker::Engine::Glulx | app::picker::Engine::Scott => {
+                format!("{} {}", meta.format, v)
+            }
         };
     }
     if let Some(r) = meta.release {
