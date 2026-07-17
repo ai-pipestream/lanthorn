@@ -187,7 +187,27 @@ pub(crate) fn finish_command_turn(
         }
     }
 
-    should_exit_on_turn(&result, state)
+    // Scott Adams games auto-terminate via the VM's quit (opcode 63) on win or
+    // loss. Rather than let a clean Scott quit exit the whole app, keep it alive
+    // and raise the game-over dialog (the final message stays in the transcript
+    // behind it). Every other engine keeps exiting on a clean quit.
+    let should_exit = should_exit_on_turn(&result, state);
+    let is_scott = crate::engine_helpers::engine_tag(session) == "scott";
+    intercept_scott_game_over(should_exit, is_scott, state)
+}
+
+/// Fold a Scott clean quit into the game-over overlay. When the turn would exit
+/// the app (`should_exit`) AND the engine is Scott, open the game-over dialog and
+/// keep the app alive (return `false`). For every other case return `should_exit`
+/// unchanged, so Z-machine/Glulx keep exiting on a clean `@quit`/`glk_exit`.
+fn intercept_scott_game_over(should_exit: bool, is_scott: bool, state: &mut AppState) -> bool {
+    if should_exit && is_scott {
+        state.overlays.game_over = true;
+        state.overlays.dialog_focus = 0;
+        false
+    } else {
+        should_exit
+    }
 }
 
 /// Post-turn bookkeeping shared by the normal `submit` path and the resumed
@@ -653,7 +673,7 @@ mod tests {
         let panes = crate::PaneRects {
             map: ratatui::layout::Rect::default(), story: ratatui::layout::Rect::default(),
             room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None,
-            reset_dialog: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
+            reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
             style_editor: None, verb_menu: Default::default(), glyph_picker: None,
             transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0,
             modal_list_viewport: 0,
@@ -712,6 +732,30 @@ mod tests {
         state.vm_halted = false;
         let not_quit = fault_test_result(false, None);
         assert!(!super::should_exit_on_turn(&not_quit, &state));
+    }
+
+    // ── Scott-only game-over interception ────────────────────────────────────
+    #[test]
+    fn scott_clean_quit_raises_game_over_and_stays_alive() {
+        let mut state = app::state::AppState::default();
+
+        // A Scott engine on a quitting turn: raise the overlay, keep the app alive.
+        let stay = super::intercept_scott_game_over(true, true, &mut state);
+        assert!(!stay, "a Scott clean quit must NOT exit the app");
+        assert!(state.overlays.game_over, "a Scott clean quit opens the game-over dialog");
+        assert_eq!(state.overlays.dialog_focus, 0, "focus starts on the first button");
+
+        // A non-Scott engine on a quitting turn: exit as before, no overlay.
+        let mut state2 = app::state::AppState::default();
+        let exit = super::intercept_scott_game_over(true, false, &mut state2);
+        assert!(exit, "a non-Scott clean quit still exits the app");
+        assert!(!state2.overlays.game_over, "non-Scott never opens the game-over dialog");
+
+        // A Scott engine on a non-quitting turn: no exit, no overlay.
+        let mut state3 = app::state::AppState::default();
+        let exit3 = super::intercept_scott_game_over(false, true, &mut state3);
+        assert!(!exit3, "a non-quitting turn never exits");
+        assert!(!state3.overlays.game_over, "a non-quitting turn never opens the dialog");
     }
 
     #[test]

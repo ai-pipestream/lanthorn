@@ -3,6 +3,7 @@ pub mod config_screen;
 pub mod upper_window;
 pub mod dialog;
 pub mod dump_harness;
+pub mod game_over_dialog;
 pub mod paneframe;
 pub mod filebrowser;
 pub mod gallery;
