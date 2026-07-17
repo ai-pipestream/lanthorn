@@ -72,6 +72,107 @@ impl Vm {
     pub fn has_quit(&self) -> bool {
         self.quit
     }
+    /// Current location of item `idx` (-1/255 = carried, 0 = nowhere, else room index).
+    pub fn item_loc(&self, idx: usize) -> i32 {
+        self.item_loc.get(idx).copied().unwrap_or(0)
+    }
+    /// Whether flag `idx` is set.
+    pub fn flag(&self, idx: usize) -> bool {
+        self.flags.get(idx).copied().unwrap_or(false)
+    }
+    /// Value of the currently-selected counter.
+    pub fn counter(&self) -> i32 {
+        self.counters[self.cur_counter]
+    }
+
+    /// Serialize mutable game state: item locations, player room, flags,
+    /// counters, current counter, saved-room registers, and lamp fuel.
+    /// Manual little-endian byte encoding, zero-dep.
+    pub fn snapshot(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(self.item_loc.len() as u32).to_le_bytes());
+        for v in &self.item_loc {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        buf.extend_from_slice(&(self.player as u32).to_le_bytes());
+        for &f in &self.flags {
+            buf.push(f as u8);
+        }
+        for c in &self.counters {
+            buf.extend_from_slice(&c.to_le_bytes());
+        }
+        buf.extend_from_slice(&(self.cur_counter as u32).to_le_bytes());
+        for &r in &self.saved_rooms {
+            buf.extend_from_slice(&(r as u32).to_le_bytes());
+        }
+        buf.extend_from_slice(&self.lamp.to_le_bytes());
+        buf
+    }
+
+    /// Restore state from `snapshot` bytes. Rejects short/malformed input, a
+    /// mismatched item count, or an out-of-range room/counter index.
+    #[allow(clippy::result_unit_err)]
+    pub fn restore(&mut self, bytes: &[u8]) -> Result<(), ()> {
+        fn read_u32(bytes: &[u8], pos: &mut usize) -> Result<u32, ()> {
+            let end = pos.checked_add(4).ok_or(())?;
+            let slice = bytes.get(*pos..end).ok_or(())?;
+            *pos = end;
+            Ok(u32::from_le_bytes(slice.try_into().unwrap()))
+        }
+        fn read_i32(bytes: &[u8], pos: &mut usize) -> Result<i32, ()> {
+            read_u32(bytes, pos).map(|v| v as i32)
+        }
+
+        let mut pos = 0usize;
+        let item_count = read_u32(bytes, &mut pos)? as usize;
+        if item_count != self.item_loc.len() {
+            return Err(());
+        }
+        let mut item_loc = Vec::with_capacity(item_count);
+        for _ in 0..item_count {
+            item_loc.push(read_i32(bytes, &mut pos)?);
+        }
+        let player = read_u32(bytes, &mut pos)? as usize;
+        if player >= self.db.rooms.len() {
+            return Err(());
+        }
+        let flags_slice = bytes.get(pos..pos + 32).ok_or(())?;
+        let mut flags = [false; 32];
+        for (i, &b) in flags_slice.iter().enumerate() {
+            flags[i] = b != 0;
+        }
+        pos += 32;
+        let mut counters = [0i32; 16];
+        for c in counters.iter_mut() {
+            *c = read_i32(bytes, &mut pos)?;
+        }
+        let cur_counter = read_u32(bytes, &mut pos)? as usize;
+        if cur_counter >= counters.len() {
+            return Err(());
+        }
+        let mut saved_rooms = [0usize; 16];
+        for r in saved_rooms.iter_mut() {
+            let v = read_u32(bytes, &mut pos)? as usize;
+            if v >= self.db.rooms.len() {
+                return Err(());
+            }
+            *r = v;
+        }
+        let lamp = read_i32(bytes, &mut pos)?;
+
+        if pos != bytes.len() {
+            return Err(());
+        }
+
+        self.item_loc = item_loc;
+        self.player = player;
+        self.flags = flags;
+        self.counters = counters;
+        self.cur_counter = cur_counter;
+        self.saved_rooms = saved_rooms;
+        self.lamp = lamp;
+        Ok(())
+    }
 
     /// Run one turn if a line is buffered, then request the next.
     pub fn step(&mut self) -> StepResult {
@@ -93,8 +194,8 @@ impl Vm {
         self.needs_line = false;
     }
 
-    #[cfg(test)]
-    pub(crate) fn seed_rng(&mut self, s: u32) {
+    /// Seed the deterministic PRNG (used by occurrence percentage rolls).
+    pub fn seed_rng(&mut self, s: u32) {
         self.rng_state = s.max(1);
     }
 
