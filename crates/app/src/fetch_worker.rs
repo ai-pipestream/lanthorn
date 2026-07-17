@@ -133,6 +133,23 @@ impl Fetcher {
     }
 }
 
+/// The IFDB game id for a Scott Adams `.dat` at `path`, or `None` if it isn't a
+/// recognised Scott adventure. A Scott database has no embedded IFID and its
+/// computed IFID never resolves on IFDB, so the fetch looks the game up by this
+/// id instead. Scott databases are small ASCII text, so the read is capped — a
+/// large binary story (Glulx/Z-code) fails the sniff without being slurped whole.
+fn scott_ifdb_id(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path).ok()?.take(512 * 1024).read_to_end(&mut buf).ok()?;
+    let text = std::str::from_utf8(&buf).ok()?;
+    if !scott::looks_like_scott(text) {
+        return None;
+    }
+    let db = scott::Database::parse(text).ok()?;
+    crate::picker::scott_tuid(db.adventure_number).map(str::to_string)
+}
+
 /// Handle one story: skip-check, fetch-or-skip, sidecar write, cover write.
 /// Sleeps `delay` only when an actual fetch was attempted — a skip costs no
 /// request, so it must not sleep.
@@ -157,8 +174,12 @@ fn fetch_one(
     let (title, outcome) = if !story_info::needs_fetch(existing.as_ref(), forced) {
         (stem_title(&path), Outcome::Skipped)
     } else {
-        let fetched = match id_override {
-            Some(tuid) => source.fetch_by_id(tuid),
+        // A known Scott Adams adventure is fetched by its mapped IFDB id (its own
+        // computed IFID never resolves on IFDB). A manual id_override (SQ-0371)
+        // still wins.
+        let scott_id = if id_override.is_none() { scott_ifdb_id(&path) } else { None };
+        let fetched = match id_override.or(scott_id.as_deref()) {
+            Some(id) => source.fetch_by_id(id),
             None => source.fetch(&ifid),
         };
         let result = match fetched {
@@ -280,6 +301,23 @@ mod tests {
         let d = std::env::temp_dir().join(format!("bm_fetch_worker_{}_{}", std::process::id(), n));
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn scott_ifdb_id_maps_a_known_adventure_and_ignores_non_scott() {
+        // A minimal Scott `.dat` whose trailer adventure number is 1 (Adventureland).
+        const MINI: &str = "\n32767 1 0 1 2 6 1 0 3 125 0 1\n150 1 0 0 0 0 0 0\n\
+             \"\" \"\"\n\"GO\" \"NORTH\"\n0 0 0 0 0 0 \"*limbo\"\n2 0 0 0 0 0 \"*forest clearing\"\n\
+             0 0 0 0 0 0 \"*swamp\"\n\"\"\n\"\" 0\n\"*a brass lamp/LAMP/\" 1\n\"action comment\"\n0\n1\n1\n";
+        let dir = tmp();
+        let dat = dir.join("adv.dat");
+        std::fs::write(&dat, MINI).unwrap();
+        assert_eq!(super::scott_ifdb_id(&dat).as_deref(), Some("dy4ok8sdlut6ddj7"));
+
+        // A binary (non-Scott) story yields no Scott id.
+        let z = dir.join("story.z5");
+        std::fs::write(&z, [3u8, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(super::scott_ifdb_id(&z), None);
     }
 
     #[derive(Clone)]

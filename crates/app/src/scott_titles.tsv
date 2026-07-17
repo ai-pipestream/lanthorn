@@ -14,17 +14,27 @@
 #
 # A WRONG entry mislabels a game; a MISSING one just falls back to the filename.
 #
-1	Adventureland
-2	Pirate Adventure
-3	Secret Mission
-4	Voodoo Castle
-5	The Count
-6	Strange Odyssey
-7	Mystery Fun House
-8	Pyramid of Doom
-9	Ghost Town
-10	Savage Island, Part I
-11	Savage Island, Part II
-12	The Golden Voyage
-13	The Sorcerer of Claymorgue Castle
-14	Buckaroo Banzai
+# Format: <adventure-number><TAB><Title>[<TAB><IFDB-TUID>]. The optional third
+# column is the IFDB game id (https://ifdb.org/viewgame?id=<TUID>) used to fetch
+# metadata/cover, because a Scott `.dat` has no embedded IFID and its computed
+# IFID never resolves on IFDB. TUIDs looked up on IFDB 2026-07-17 (Adventureland,
+# The Count, Sorcerer, Buckaroo Banzai page-verified; the rest search-matched to
+# the canonical Scott Adams / Adventure International entry).
+# NOTE: keyed by adventure number only — a non-Adventure-International Scott-format
+# game (Brian Howarth's Mysterious Adventures, Questprobe, …) that reuses a number
+# in 1-14 would map here wrongly; disambiguating those needs a content fingerprint.
+#
+1	Adventureland	dy4ok8sdlut6ddj7
+2	Pirate Adventure	zya3mo3njj58hewi
+3	Secret Mission	89kxtet3vb9lzj87
+4	Voodoo Castle	ay2jy3sc3e6s9j4k
+5	The Count	89qmjvv4cb0z93t5
+6	Strange Odyssey	025dj4on6jr2c867
+7	Mystery Fun House	cj05ocxhay4dbrfs
+8	Pyramid of Doom	hew4c6rciycb6vog
+9	Ghost Town	rlxb5i0vjrnfr6x9
+10	Savage Island, Part I	wkaibkem4nxzo53y
+11	Savage Island, Part II	aqy6km542aq20jh4
+12	The Golden Voyage	4yo4je8dh53ug9qs
+13	The Sorcerer of Claymorgue Castle	11tnb08k1jov4hyl
+14	Buckaroo Banzai	m85x5yr0zbopyuyb
