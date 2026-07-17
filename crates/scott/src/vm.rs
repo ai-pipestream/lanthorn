@@ -441,10 +441,11 @@ impl Vm {
         did_continue
     }
 
-    /// Run one full turn: occurrences, parse, command match, built-in fallback, lamp.
+    /// Run one full turn: parse, command match, built-in fallback, lamp, then the
+    /// occurrence pass for the *next* prompt. ScottFree runs occurrences at the top
+    /// of its loop, so they fire after the command that precedes them (seeing its
+    /// effects); the opening pass runs in `Vm::new`.
     fn run_turn(&mut self, cmd: &str) {
-        self.run_occurrences();
-
         let mut w = cmd.split_whitespace();
         let w1 = w.next();
         let w2 = w.next();
@@ -536,6 +537,12 @@ impl Vm {
                 self.flag_set(LAMP_EMPTY_FLAG, true);
                 self.out.push_str("Your light has run out.\n");
             }
+        }
+
+        // Occurrences for the next prompt (ScottFree's top-of-loop pass), unless the
+        // command ended the game.
+        if !self.quit {
+            self.run_occurrences();
         }
 
         self.needs_line = true;

@@ -69,12 +69,12 @@ fn golden_transcript() {
         "stash",       // op81: swap back  (current restored to 7, not 3)
         "tally",       // op78: prints 7   <-- distinguishes op81 SWAP from index-select
         "take lamp",   // verb synonym TAKE -> GET(10); auto-noun picks up the lamp
-        "down",        // scripted GO-down (room1 -> room2)
-        "rub lamp",    // room2 occurrence (water) fires first; then RUB reveals the idol
-        "get idol",    // room2 occurrence; auto-noun GET picks up the revealed idol
-        "up",          // room2 occurrence; lamp carried -> no darkness warning
-        "down",        // scripted GO-down (room1 -> room2)
-        "down",        // unmatched scripted action -> built-in GO (room2 -> room3)
+        "down",        // scripted GO-down (room1 -> room2); water occurrence fires AFTER the move
+        "rub lamp",    // RUB reveals the idol; then the room-2 water occurrence fires
+        "get idol",    // auto-noun GET picks up the idol; then the water occurrence
+        "up",          // GO up back to room1; the water occurrence does NOT fire (we left room2)
+        "down",        // scripted GO-down (room1 -> room2); water fires after
+        "down",        // built-in GO (room2 -> room3); no water in room3
         "score",       // idol still carried -> fallback score action
         "drop idol",   // auto-noun DROP deposits the idol in the treasure room
         "score",       // idol now in treasure room -> win action fires, quits
@@ -105,18 +105,18 @@ Dust settles in the chamber.\n\
 OK.\n\
 > down\n\
 You descend into darkness, feeling your way along the damp rock wall.\n\
+You hear water dripping somewhere in the darkness.\n\
 > rub lamp\n\
-You hear water dripping somewhere in the darkness.\n\
 The lamp's glow reveals a niche in the rock - and within it, a gleaming gold idol!\n\
+You hear water dripping somewhere in the darkness.\n\
 > get idol\n\
-You hear water dripping somewhere in the darkness.\n\
 OK.\n\
-> up\n\
 You hear water dripping somewhere in the darkness.\n\
+> up\n\
 > down\n\
 You descend into darkness, feeling your way along the damp rock wall.\n\
-> down\n\
 You hear water dripping somewhere in the darkness.\n\
+> down\n\
 > score\n\
 You have 0 out of 1 treasures.\n\
 > drop idol\n\
