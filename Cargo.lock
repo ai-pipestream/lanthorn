@@ -2501,6 +2501,7 @@ version = "0.1.0"
 name = "scott-cli"
 version = "0.1.0"
 dependencies = [
+ "crossterm",
  "scott",
 ]
 

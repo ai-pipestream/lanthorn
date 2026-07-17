@@ -16,6 +16,9 @@ use std::fs;
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::process;
 
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::terminal;
+
 use scott::{Database, Vm};
 
 /// The canonical Scott Adams input prompt (mirrors `ScottSession::PROMPT` in the
@@ -28,6 +31,69 @@ const PROMPT: &str = "\nTell me what to do ? ";
 fn separator(block: &str) -> String {
     let width = block.lines().map(|l| l.chars().count()).max().unwrap_or(0).max(20);
     format!("<{}>", "\u{2014}".repeat(width.saturating_sub(2)))
+}
+
+/// Read one command line. Returns `None` at end of input (EOF, or Ctrl-C/Ctrl-D
+/// when interactive).
+///
+/// Piped input (non-TTY): a plain line read, echoed so a captured transcript
+/// reads naturally. Interactive (TTY): a minimal raw-mode line editor that echoes
+/// typed characters, handles Backspace, and — crucially — swallows arrow keys and
+/// other escape sequences instead of letting the terminal spew `^[[A` garbage into
+/// the line. It deliberately does not implement history or cursor movement; this
+/// is a play/smoke harness, not a full readline.
+fn read_command(interactive: bool, out: &mut impl Write) -> Option<String> {
+    if !interactive {
+        let mut line = String::new();
+        if io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
+            return None;
+        }
+        let line = line.trim_end_matches(['\n', '\r']).to_string();
+        let _ = writeln!(out, "{line}"); // echo for a readable piped transcript
+        return Some(line);
+    }
+    // Raw mode disables canonical line editing and echo; on failure, fall back to a
+    // cooked read (arrow keys may still echo, but input still works).
+    if terminal::enable_raw_mode().is_err() {
+        let mut line = String::new();
+        if io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
+            return None;
+        }
+        return Some(line.trim_end_matches(['\n', '\r']).to_string());
+    }
+    let mut buf = String::new();
+    let result = loop {
+        match event::read() {
+            Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => match k.code {
+                // Ctrl-C / Ctrl-D quit (raw mode routes them as keys, not signals).
+                KeyCode::Char('c' | 'd') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                    break None;
+                }
+                KeyCode::Char(c) => {
+                    buf.push(c);
+                    let _ = write!(out, "{c}");
+                    let _ = out.flush();
+                }
+                KeyCode::Backspace => {
+                    if buf.pop().is_some() {
+                        let _ = write!(out, "\u{8} \u{8}"); // erase the last glyph
+                        let _ = out.flush();
+                    }
+                }
+                KeyCode::Enter => {
+                    let _ = write!(out, "\r\n");
+                    let _ = out.flush();
+                    break Some(buf.clone());
+                }
+                // Arrows, Home/End, function keys, etc.: ignored (no garbage).
+                _ => {}
+            },
+            Ok(_) => {}
+            Err(_) => break None,
+        }
+    };
+    let _ = terminal::disable_raw_mode();
+    result
 }
 
 struct Args {
@@ -94,8 +160,7 @@ fn main() {
         vm.seed_rng(seed);
     }
 
-    let stdin = io::stdin();
-    let interactive = stdin.is_terminal();
+    let interactive = io::stdin().is_terminal();
     let mut out = io::stdout();
 
     // Any pending output before the first prompt (empty today — the room is shown
@@ -125,24 +190,32 @@ fn main() {
         let _ = write!(out, "{PROMPT}");
         let _ = out.flush();
 
-        let mut line = String::new();
-        if stdin.lock().read_line(&mut line).unwrap_or(0) == 0 {
-            let _ = writeln!(out); // tidy trailing newline on EOF
-            break;
-        }
-        let line = line.trim_end_matches(['\n', '\r']);
-        // A TTY echoes the typed line itself; when input is piped, echo it so the
-        // captured transcript reads naturally next to the prompt.
-        if !interactive {
-            let _ = writeln!(out, "{line}");
-        }
+        let line = match read_command(interactive, &mut out) {
+            Some(l) => l,
+            None => {
+                let _ = writeln!(out); // tidy trailing newline on EOF / quit
+                break;
+            }
+        };
 
-        vm.supply_line(line);
+        vm.supply_line(&line);
         let _ = vm.step();
         turns += 1;
         // Prints this turn's output; a quitting turn (win/death) is drained here
         // and the loop's top-of-iteration `has_quit` check ends the session.
         let _ = write!(out, "{}", vm.take_output());
+
+        // On game end, print the final room block: the panel (upper "window")
+        // reflects the closing state, but the loop's top-of-iteration block print
+        // won't run because `has_quit` breaks first. Mirrors the app, which keeps
+        // the final panel on screen at game over.
+        if vm.has_quit() {
+            let block = vm.room_block();
+            if block != last_block {
+                let _ = writeln!(out, "\n{block}");
+                let _ = writeln!(out, "{}", separator(&block));
+            }
+        }
     }
     let _ = out.flush();
 }
