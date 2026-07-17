@@ -1359,19 +1359,14 @@ fn draw_story_gallery(
             let mut drew_cover = false;
             if let Some(picker) = picker {
                 if cover.has(&entry.path) {
-                    if let Some(proto) = cover.tile_protocol(picker, &entry.path, cover_rect) {
-                        let sz = proto.size();
-                        let used_w = sz.width.min(cover_rect.width);
-                        let used_h = sz.height.min(cover_rect.height);
-                        let dest = Rect::new(
-                            cover_rect.x + (cover_rect.width - used_w) / 2,
-                            cover_rect.y + (cover_rect.height - used_h) / 2,
-                            used_w,
-                            used_h,
-                        );
+                    // Centre the cover in the tile via a self-computed fitted rect
+                    // (image aspect + cell size), so it centres on both axes no
+                    // matter how the render protocol reports its own size.
+                    let fit = cover.fitted_tile_rect(picker, &entry.path, cover_rect);
+                    if let Some(proto) = cover.tile_protocol(picker, &entry.path, fit) {
                         ratatui::widgets::Widget::render(
                             ratatui_image::Image::new(proto),
-                            dest,
+                            fit,
                             buf,
                         );
                         drew_cover = true;

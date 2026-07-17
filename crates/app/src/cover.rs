@@ -188,6 +188,29 @@ impl CoverState {
         }
         self.tiles.back().map(|(_, _, _, p)| p)
     }
+
+    /// The aspect-fitted, centred sub-rect of `area` for `path`'s cover, computed
+    /// from the image's pixel dimensions and the picker's cell size. Building the
+    /// protocol at — and rendering into — this rect centres the cover on BOTH axes
+    /// regardless of how a given render protocol reports its own size. Returns
+    /// `area` unchanged when the cover isn't decoded.
+    pub fn fitted_tile_rect(&self, picker: &Picker, path: &Path, area: Rect) -> Rect {
+        let Some(img) = self.decoded.get(path).and_then(|o| o.as_ref()) else {
+            return area;
+        };
+        let fs = picker.font_size();
+        let (fw, fh) = (fs.width.max(1) as f32, fs.height.max(1) as f32);
+        let (iw, ih) = (img.width().max(1) as f32, img.height().max(1) as f32);
+        let scale = (area.width as f32 * fw / iw).min(area.height as f32 * fh / ih);
+        let cols = ((iw * scale / fw).round() as u16).clamp(1, area.width);
+        let rows = ((ih * scale / fh).round() as u16).clamp(1, area.height);
+        Rect::new(
+            area.x + (area.width - cols) / 2,
+            area.y + (area.height - rows) / 2,
+            cols,
+            rows,
+        )
+    }
 }
 
 /// Background cover decoder: owns one long-lived worker thread that runs
@@ -491,6 +514,39 @@ mod tests {
             .unwrap()
             .size();
         assert_ne!(size_settled, size_a, "settled frame should rebuild at the new area");
+    }
+
+    #[test]
+    fn fitted_tile_rect_centers_portrait_and_landscape() {
+        let mut st = CoverState::default();
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let area = Rect::new(0, 0, 20, 11);
+
+        // Portrait (tall/narrow): fills the height, centred horizontally.
+        let pp = Path::new("portrait.png");
+        let p_img = image::RgbImage::from_pixel(100, 300, image::Rgb([0, 0, 255]));
+        let mut pb = Vec::new();
+        image::DynamicImage::ImageRgb8(p_img)
+            .write_to(&mut std::io::Cursor::new(&mut pb), image::ImageFormat::Png)
+            .unwrap();
+        st.insert(pp.to_path_buf(), decode(&pb));
+        let fp = st.fitted_tile_rect(&picker, pp, area);
+        assert!(fp.width < area.width, "portrait fits narrower than the tile: {fp:?}");
+        let (lm, rm) = (fp.x - area.x, area.right() - fp.right());
+        assert!(lm >= 1 && rm >= 1 && lm.abs_diff(rm) <= 1, "portrait centred horizontally: lm={lm} rm={rm}");
+
+        // Landscape (short/wide): fills the width, centred vertically.
+        let lp = Path::new("landscape.png");
+        let l_img = image::RgbImage::from_pixel(300, 100, image::Rgb([0, 255, 0]));
+        let mut lb = Vec::new();
+        image::DynamicImage::ImageRgb8(l_img)
+            .write_to(&mut std::io::Cursor::new(&mut lb), image::ImageFormat::Png)
+            .unwrap();
+        st.insert(lp.to_path_buf(), decode(&lb));
+        let fl = st.fitted_tile_rect(&picker, lp, area);
+        assert!(fl.height < area.height, "landscape fits shorter than the tile: {fl:?}");
+        let (tm, bm) = (fl.y - area.y, area.bottom() - fl.bottom());
+        assert!(tm >= 1 && bm >= 1 && tm.abs_diff(bm) <= 1, "landscape centred vertically: tm={tm} bm={bm}");
     }
 
     /// Set up a temp story file + its `<key>.save/` game dir, cleaned up by the
