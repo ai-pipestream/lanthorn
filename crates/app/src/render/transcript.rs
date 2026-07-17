@@ -1188,7 +1188,7 @@ fn render_input_content(
                 if state.input.cursor < drawn {
                     cell.set_style(style);
                 } else {
-                    cell.set_symbol("_").set_style(style);
+                    cell.set_symbol(" ").set_style(style);
                 }
             }
         }
@@ -1565,10 +1565,24 @@ fn render_middle(
             let avail = body_area.right().saturating_sub(start_col) as usize;
             let input_trunc = truncate_line(state.input.as_str(), avail);
             draw_str_clipped(buf, start_col, row_y, input_trunc, text_style, body_area);
-            let cursor_x = start_col + input_trunc.chars().count() as u16;
+            // Where the input text landed, so a click maps back to a caret index
+            // (SQ-0354). The command-bar path sets this too; in inline mode this is
+            // the only place it's set, so a click can find the line at all.
+            state.input_text_origin.set(Some((start_col, row_y)));
+            // Draw the caret where it actually IS, not always after the last char
+            // (SQ-0354). Clamped to the drawn (truncated) text.
+            let drawn = input_trunc.chars().count();
+            let cursor_x = start_col + state.input.cursor.min(drawn) as u16;
             if cursor_x < body_area.right() {
                 if let Some(cell) = buf.cell_mut((cursor_x, row_y)) {
-                    cell.set_symbol("_").set_style(cursor_style(text_style, game_input));
+                    let style = cursor_style(text_style, game_input);
+                    // Mid-line: reverse-video the char the caret sits on (keep the
+                    // text readable); at the end: draw the "_" block.
+                    if state.input.cursor < drawn {
+                        cell.set_style(style);
+                    } else {
+                        cell.set_symbol(" ").set_style(style);
+                    }
                 }
             }
         }
@@ -2796,7 +2810,7 @@ mod tests {
 
         // Cursor at position 4 ("> hi" = 4 chars → cursor at x=4).
         let cursor_cell = buf.cell((4, 4)).expect("cursor cell should exist");
-        assert_eq!(cursor_cell.symbol(), "_", "cursor should be '_' at end of input");
+        assert_eq!(cursor_cell.symbol(), " ", "block cursor is a reverse-video space at end of input");
         assert!(
             cursor_cell.modifier.contains(Modifier::REVERSED),
             "cursor cell should have REVERSED modifier"
@@ -2815,9 +2829,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
-        // Position x=4 should not have '_'.
+        // Position x=4 should carry no cursor (no reverse-video block) in Map focus.
         let cell = buf.cell((4, 4)).expect("cell should exist");
-        assert_ne!(cell.symbol(), "_", "no cursor when focus is Map");
+        assert!(!cell.modifier.contains(Modifier::REVERSED), "no cursor when focus is Map");
     }
 
     #[test]
@@ -2930,9 +2944,9 @@ mod tests {
             }
         }
         let (y, row) = hit.expect("inline prompt row with '>look' must render");
-        // Flush: '>' at col 0, "look" at cols 1..5, block cursor '_' at col 5.
+        // Flush: '>' at col 0, "look" at cols 1..5, reverse-video block cursor at col 5.
         assert!(row.starts_with(">look"), "prompt+input must be flush: {:?}", row);
-        assert_eq!(buf.cell((5, y)).unwrap().symbol(), "_", "cursor sits right after '>look'");
+        assert_eq!(buf.cell((5, y)).unwrap().symbol(), " ", "block cursor sits right after '>look'");
         assert!(buf.cell((5, y)).unwrap().modifier.contains(Modifier::REVERSED));
         // The old dedicated bottom bar is dropped: the bottom row is blank.
         let bottom: String = (0..area.width)

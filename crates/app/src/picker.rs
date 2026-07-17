@@ -487,9 +487,10 @@ fn leading_year(s: &str) -> Option<String> {
 /// adventure number from a `.dat` database's trailer, bundled in
 /// `scott_titles.tsv` (`include_str!`d at build time). Mirrors
 /// `session::known_titles`.
-fn scott_titles() -> &'static std::collections::HashMap<i32, &'static str> {
+fn scott_titles() -> &'static std::collections::HashMap<i32, (&'static str, Option<&'static str>)> {
     use std::sync::OnceLock;
-    static TABLE: OnceLock<std::collections::HashMap<i32, &'static str>> = OnceLock::new();
+    static TABLE: OnceLock<std::collections::HashMap<i32, (&'static str, Option<&'static str>)>> =
+        OnceLock::new();
     TABLE.get_or_init(|| {
         include_str!("scott_titles.tsv")
             .lines()
@@ -498,8 +499,12 @@ fn scott_titles() -> &'static std::collections::HashMap<i32, &'static str> {
                 if line.is_empty() || line.starts_with('#') {
                     return None;
                 }
-                let (k, v) = line.split_once('\t')?;
-                Some((k.trim().parse().ok()?, v.trim()))
+                // <number>\t<title>[\t<ifdb-tuid>]
+                let mut cols = line.splitn(3, '\t');
+                let n = cols.next()?.trim().parse().ok()?;
+                let title = cols.next()?.trim();
+                let tuid = cols.next().map(str::trim).filter(|t| !t.is_empty());
+                Some((n, (title, tuid)))
             })
             .collect()
     })
@@ -507,7 +512,14 @@ fn scott_titles() -> &'static std::collections::HashMap<i32, &'static str> {
 
 /// The canonical title for a known Scott Adams adventure number.
 pub fn scott_title(adventure_number: i32) -> Option<&'static str> {
-    scott_titles().get(&adventure_number).copied()
+    scott_titles().get(&adventure_number).map(|(title, _)| *title)
+}
+
+/// The IFDB game id (TUID) for a known Scott Adams adventure number, if we have
+/// one. A Scott `.dat`'s computed IFID never resolves on IFDB, so the metadata
+/// fetch looks the game up by this id instead.
+pub fn scott_tuid(adventure_number: i32) -> Option<&'static str> {
+    scott_titles().get(&adventure_number).and_then(|(_, tuid)| *tuid)
 }
 
 /// Parse a trailing run of ASCII digits off a filename stem into an adventure
@@ -1685,6 +1697,19 @@ mod tests {
         );
         // unknown filename + unknown adventure number -> None (caller uses filename)
         assert_eq!(scott_story_title(dat, Path::new("mygame.dat")), None);
+    }
+
+    #[test]
+    fn scott_tuid_lookup_and_full_coverage() {
+        assert_eq!(scott_tuid(1), Some("dy4ok8sdlut6ddj7")); // Adventureland
+        assert_eq!(scott_tuid(13), Some("11tnb08k1jov4hyl")); // Sorcerer of Claymorgue
+        assert_eq!(scott_tuid(99), None); // unknown adventure number
+        // Every canonical Adventure International adventure (1..=14) has both a
+        // title and an IFDB id.
+        for n in 1..=14 {
+            assert!(scott_title(n).is_some(), "title for adventure {n}");
+            assert!(scott_tuid(n).is_some(), "IFDB id for adventure {n}");
+        }
     }
 
     #[test]
