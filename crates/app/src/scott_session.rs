@@ -40,6 +40,7 @@ fn room_panel(block: &str) -> BufferWindow {
         para: vec![crate::state::ParaFmt::default(); n],
         images: vec![None; n],
         primary: false,
+        panel: true,
         ..Default::default()
     }
 }

@@ -509,9 +509,13 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
     // This window's own Normal-style background (Glulx window colour, SQ-0328)
     // replaces the theme transcript bg when the game set one; `None` keeps the
     // theme background (today's behaviour).
-    let base = match b.bg {
-        Some(rgb) => state.colors.transcript.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), &state.colors)),
-        None => state.colors.transcript,
+    let base = match (b.panel, b.bg) {
+        // A game-set window colour always wins.
+        (_, Some(rgb)) => state.colors.transcript.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), &state.colors)),
+        // A chrome panel (Scott room panel) uses the themed `room_panel` colour so
+        // the split's top and bottom read as distinct regions.
+        (true, None) => state.colors.room_panel,
+        (false, None) => state.colors.transcript,
     };
     fill_style(area, buf, base);
     if b.lines.is_empty() {
@@ -664,6 +668,7 @@ mod tests {
             primary: false,
             bg: None,
             fg: None,
+            panel: false,
         }
     }
 
@@ -687,7 +692,7 @@ mod tests {
             WinNode::Graphics(crate::engine::GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1 })
         }
         fn buf(bg: u32, primary: bool) -> WinNode {
-            WinNode::Buffer(BufferWindow { lines: vec![], runs: vec![], para: vec![], images: vec![], scroll: 0, primary, bg: Some(bg), fg: None })
+            WinNode::Buffer(BufferWindow { lines: vec![], runs: vec![], para: vec![], images: vec![], scroll: 0, primary, bg: Some(bg), fg: None, panel: false })
         }
         fn grid(bg: u32) -> WinNode {
             let mut g = GridWindow::default();
@@ -767,6 +772,41 @@ mod tests {
         assert_eq!(c.style().fg, Some(Color::Rgb(0xFF, 0, 0)), "rule fg is the key window fg");
         assert_eq!(c.style().bg, Some(Color::Rgb(0, 0, 0xFF)), "rule bg is the key window bg");
         assert_eq!(c.symbol(), "\u{2500}", "vertical pair draws a horizontal rule glyph");
+    }
+
+    /// The Scott split: a `panel: true` buffer over the primary transcript draws
+    /// with the themed `room_panel` colour, distinct from the transcript colour, so
+    /// the top and bottom regions read apart.
+    #[test]
+    fn room_panel_draws_with_room_panel_theme() {
+        use ratatui::style::Color;
+        let mut panel = inline_buffer("I'm in a forest");
+        panel.panel = true;
+        let root = WinNode::Pair {
+            vertical: true,
+            split: Split { fixed: 1 },
+            border: false,
+            key_bg: None,
+            key_fg: None,
+            first: Box::new(WinNode::Buffer(panel)),
+            second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+        };
+        let model = ScreenModel { root, status: StatusModel::HostManaged, bg: 0, fg: 0, content_size: (0, 0) };
+
+        let mut colors = crate::colors::ColorScheme::terminal_default();
+        colors.transcript = ratatui::style::Style::new().bg(Color::Rgb(9, 9, 9));
+        colors.room_panel = ratatui::style::Style::new().bg(Color::Rgb(0, 0, 128));
+        let mut state = AppState::default();
+        state.colors = colors;
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // Top row (panel) uses room_panel bg, distinct from the transcript region
+        // below it.
+        let bgc = |x: u16, y: u16| buf.cell((x, y)).unwrap().style().bg;
+        assert_eq!(bgc(0, 0), Some(Color::Rgb(0, 0, 128)), "panel uses room_panel bg");
+        assert_ne!(bgc(0, 0), bgc(0, 3), "panel and transcript regions read apart");
     }
 
     #[test]
@@ -1214,6 +1254,7 @@ mod tests {
             primary: false,
             bg: None,
             fg: None,
+            panel: false,
         };
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
