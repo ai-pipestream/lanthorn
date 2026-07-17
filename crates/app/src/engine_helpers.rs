@@ -7,6 +7,7 @@
 use app::archive::load_archive;
 use app::engine::Engine;
 use app::glulx_session::GlulxSession;
+use app::scott_session::ScottSession;
 use app::session::GameSession;
 
 /// Escape hatch: borrow the concrete Z-machine `GameSession` behind a
@@ -53,12 +54,28 @@ pub(crate) fn glulx_session_opt_mut(engine: &mut dyn Engine) -> Option<&mut Glul
     engine.as_any_mut().downcast_mut::<GlulxSession>()
 }
 
-/// The engine tag (`"zmachine"` / `"glulx"`) of the running engine, for wrapping
-/// raw same-engine save bytes (e.g. a rewind/replay snapshot) into an
-/// [`app::engine::EngineSave`] before `restore_state`.
+/// Non-panicking downcast to the Scott Adams session: `Some` for a Scott
+/// Adams game, `None` otherwise.
+#[allow(dead_code)] // not yet called by any gameplay path (later Scott task)
+pub(crate) fn scott_session_opt(engine: &dyn Engine) -> Option<&ScottSession> {
+    engine.as_any().downcast_ref::<ScottSession>()
+}
+
+/// Mutable non-panicking downcast to the Scott Adams session: `Some` for a
+/// Scott Adams game, `None` otherwise.
+#[allow(dead_code)] // not yet called by any gameplay path (later Scott task)
+pub(crate) fn scott_session_opt_mut(engine: &mut dyn Engine) -> Option<&mut ScottSession> {
+    engine.as_any_mut().downcast_mut::<ScottSession>()
+}
+
+/// The engine tag (`"zmachine"` / `"glulx"` / `"scott"`) of the running engine,
+/// for wrapping raw same-engine save bytes (e.g. a rewind/replay snapshot) into
+/// an [`app::engine::EngineSave`] before `restore_state`.
 pub(crate) fn engine_tag(engine: &dyn Engine) -> &'static str {
     if engine.as_any().is::<GlulxSession>() {
         app::glulx_session::GLULX_ENGINE
+    } else if engine.as_any().is::<ScottSession>() {
+        app::scott_session::SCOTT_ENGINE
     } else {
         app::session::ZMACHINE_ENGINE
     }
@@ -224,5 +241,15 @@ mod tests {
             !super::engine_supports_save(&*engine),
             "a non-Z-machine engine must report no save support so guards short-circuit"
         );
+    }
+
+    #[test]
+    fn tags_scott_engine() {
+        let s = app::scott_session::ScottSession::new(
+            include_bytes!("../../scott/tests/tiny_cave.dat").to_vec(),
+        )
+        .unwrap();
+        let boxed: Box<dyn app::engine::Engine> = Box::new(s);
+        assert_eq!(super::engine_tag(&*boxed), "scott");
     }
 }
