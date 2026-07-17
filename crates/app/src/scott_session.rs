@@ -20,6 +20,12 @@ pub const SCOTT_ENGINE: &str = "scott";
 /// The save-format version within the `scott` engine.
 pub const SCOTT_SAVE_FORMAT: u32 = 1;
 
+/// The canonical Scott Adams input prompt, shown before each command. ScottFree
+/// prints it from its input routine (`scott.c`: `Output("\nTell me what to do ? ")`),
+/// so it belongs to the host/input layer here (not the VM, which stays input-agnostic).
+/// Scott used this phrase, never the Infocom-style `>`.
+const PROMPT: &str = "\nTell me what to do ? ";
+
 /// A running Scott Adams (ScottFree `.dat`) game session.
 pub struct ScottSession {
     vm: scott::Vm,
@@ -38,7 +44,10 @@ impl ScottSession {
             .map_err(|_| "Scott .dat is not valid text".to_string())?;
         let db = scott::Database::parse(src).map_err(|e| format!("invalid Scott .dat: {e:?}"))?;
         let mut vm = scott::Vm::new(db);
-        let intro = vm.take_output();
+        let mut intro = vm.take_output();
+        if !vm.has_quit() {
+            intro.push_str(PROMPT);
+        }
         Ok(ScottSession { vm, intro, aux: BTreeMap::new(), aux_dirty: false })
     }
 
@@ -73,8 +82,11 @@ impl Engine for ScottSession {
     fn submit(&mut self, command: &str) -> TurnResult {
         self.vm.supply_line(command);
         let _ = self.vm.step();
-        let transcript = self.vm.take_output();
+        let mut transcript = self.vm.take_output();
         let quit = self.vm.has_quit();
+        if !quit {
+            transcript.push_str(PROMPT);
+        }
         self.turn(transcript, quit)
     }
 
@@ -185,6 +197,8 @@ mod tests {
         assert_eq!(loc.number, 1); // tiny_cave's player_room header field is 1
         let intro = s.take_transcript();
         assert!(!intro.is_empty(), "opening room described");
+        assert!(intro.contains("Tell me what to do ?"), "intro ends with the Scott prompt");
+        assert!(!intro.contains('>'), "Scott never uses the '>' prompt");
         assert!(s.take_transcript().is_empty(), "intro drains only once");
 
         // tiny_cave room 1 has a scripted "down" exit (room1 -> room2).
@@ -192,6 +206,7 @@ mod tests {
         assert!(r.location.is_some());
         assert_eq!(r.location.unwrap().number, 2);
         assert!(!r.quit);
+        assert!(r.transcript.contains("Tell me what to do ?"), "each turn ends with the prompt");
 
         let _ = s.screen();
     }
