@@ -1351,16 +1351,27 @@ fn draw_story_gallery(
                     }
                 }
             }
+            // Fit the image inside a small inset so the tile's fill shows as a
+            // margin on ALL four sides: for a selected tile that margin is the
+            // selection glow framing the whole cover, instead of only leaking out
+            // the bottom when the fitted image is a hair shorter than the tile.
+            // Wider inset on x than y so the frame reads evenly (cells are ~2:1).
+            let inner = Rect::new(
+                cover_rect.x + 2,
+                cover_rect.y + 1,
+                cover_rect.width.saturating_sub(4),
+                cover_rect.height.saturating_sub(2),
+            );
             let mut drew_cover = false;
             if let Some(picker) = picker {
                 if cover.has(&entry.path) {
-                    if let Some(proto) = cover.tile_protocol(picker, &entry.path, cover_rect) {
+                    if let Some(proto) = cover.tile_protocol(picker, &entry.path, inner) {
                         let sz = proto.size();
-                        let used_w = sz.width.min(cover_rect.width);
-                        let used_h = sz.height.min(cover_rect.height);
+                        let used_w = sz.width.min(inner.width);
+                        let used_h = sz.height.min(inner.height);
                         let dest = Rect::new(
-                            cover_rect.x + (cover_rect.width - used_w) / 2,
-                            cover_rect.y + (cover_rect.height - used_h) / 2,
+                            inner.x + (inner.width - used_w) / 2,
+                            inner.y + (inner.height - used_h) / 2,
                             used_w,
                             used_h,
                         );
