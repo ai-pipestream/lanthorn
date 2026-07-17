@@ -88,6 +88,7 @@ fn filled_buffer(id: u32, n: usize, bg: Option<u32>, fg: Option<u32>, primary: b
         primary,
         bg,
         fg,
+        panel: false,
     }
 }
 

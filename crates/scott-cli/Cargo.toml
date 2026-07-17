@@ -1,0 +1,8 @@
+[package]
+name = "scott-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+scott = { path = "../scott" }
+crossterm = "0.29"

@@ -10,6 +10,7 @@ fn wizard_sniffer_reaches_input() {
     let bytes = match app::hints::extract_story(raw).expect("extract") {
         app::hints::LoadedStory::Glulx(b) => b,
         app::hints::LoadedStory::ZCode(_) => panic!("expected Glulx"),
+        app::hints::LoadedStory::Scott(_) => panic!("expected Glulx"),
     };
     let mut sess = GlulxSession::new(bytes, 80, 24, true, true, false, (8, 16), None, &[]).expect("ws session");
     let _ = sess.take_transcript();

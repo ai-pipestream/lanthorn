@@ -21,6 +21,9 @@ use app::render::confirm_delete_dialog::{
 };
 use app::render::dialog::DialogRects;
 use app::render::filebrowser::draw_file_browser;
+use app::render::game_over_dialog::{
+    draw_game_over_dialog, game_over_dialog_key_focused, GameOverAction, GameOverDialogRects,
+};
 use app::render::file_picker::draw_file_picker;
 use app::render::gallery::draw_gallery;
 use app::render::glyph_picker::GlyphPickerRects;
@@ -52,6 +55,7 @@ pub(crate) struct OverlayRects {
     pub dialog: Option<DialogRects>,
     pub aux_dialog: Option<AuxDialogRects>,
     pub reset_dialog: Option<ResetDialogRects>,
+    pub game_over: Option<GameOverDialogRects>,
     pub save_name_dialog: Option<SaveNameDialogRects>,
     pub text_entry: Option<TextEntryDialogRects>,
     pub confirm_delete: Option<ConfirmDeleteDialogRects>,
@@ -82,6 +86,7 @@ pub(crate) fn draw_all(
         dialog: dialog_seed,
         aux_dialog: None,
         reset_dialog: None,
+        game_over: None,
         save_name_dialog: None,
         text_entry: None,
         confirm_delete: None,
@@ -196,6 +201,9 @@ pub(crate) enum OverlayAct {
     AuxGlobal,
     ResetConfirm,
     ResetCancel,
+    GameOverPlayAgain,
+    GameOverRestore,
+    GameOverQuit,
     SaveNameSubmit,
     SaveNameCancel,
     TextEntrySubmit,
@@ -223,6 +231,7 @@ pub(crate) enum OverlayOutcome {
 pub(crate) enum OverlayKind {
     Aux,
     Reset,
+    GameOver,
     SaveName,
     TextEntry,
     ConfirmDelete,
@@ -250,6 +259,7 @@ pub(crate) trait Overlay {
 pub(crate) const COMMON_DIALOGS: &[&dyn Overlay] = &[
     &AuxOverlay,
     &ResetOverlay,
+    &GameOverOverlay,
     &SaveNameOverlay,
     &TextEntryOverlay,
     &ConfirmDeleteOverlay,
@@ -373,6 +383,51 @@ impl Overlay for ResetOverlay {
             OverlayOutcome::Consumed
         } else {
             // Click outside the dialog (or its interior): swallow, keep it open.
+            OverlayOutcome::Consumed
+        }
+    }
+}
+
+// ── Game-over dialog (Scott-only win/loss) ─────────────────────────────────
+struct GameOverOverlay;
+impl Overlay for GameOverOverlay {
+    fn kind(&self) -> OverlayKind { OverlayKind::GameOver }
+    fn is_open(&self, ov: &OverlayState) -> bool { ov.game_over }
+    fn draw(&self, state: &AppState, area: Rect, buf: &mut Buffer, out: &mut OverlayRects) {
+        out.game_over = draw_game_over_dialog(state, area, buf);
+    }
+    fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
+        match key.code {
+            KeyCode::Tab | KeyCode::Right => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 3, 1);
+                OverlayOutcome::Consumed
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 3, -1);
+                OverlayOutcome::Consumed
+            }
+            code => match game_over_dialog_key_focused(code, state.overlays.dialog_focus) {
+                GameOverAction::PlayAgain => OverlayOutcome::Act(OverlayAct::GameOverPlayAgain),
+                GameOverAction::Restore => OverlayOutcome::Act(OverlayAct::GameOverRestore),
+                GameOverAction::Quit => OverlayOutcome::Act(OverlayAct::GameOverQuit),
+                GameOverAction::None => OverlayOutcome::Consumed,
+            },
+        }
+    }
+    fn mouse(&self, _state: &mut AppState, m: &MouseEvent, panes: &PaneRects) -> OverlayOutcome {
+        let Some(pt) = left_down(m) else { return OverlayOutcome::Consumed };
+        let Some(gd) = &panes.game_over else { return OverlayOutcome::Consumed };
+        let in_play_again = gd.play_again.is_some_and(|r| r.contains(pt));
+        let in_restore = gd.restore.is_some_and(|r| r.contains(pt));
+        let in_quit = gd.quit.is_some_and(|r| r.contains(pt));
+        if in_play_again {
+            OverlayOutcome::Act(OverlayAct::GameOverPlayAgain)
+        } else if in_restore {
+            OverlayOutcome::Act(OverlayAct::GameOverRestore)
+        } else if in_quit {
+            OverlayOutcome::Act(OverlayAct::GameOverQuit)
+        } else {
+            // Click outside the dialog: swallow, keep it open (the game is over).
             OverlayOutcome::Consumed
         }
     }
@@ -622,6 +677,7 @@ mod tests {
         let cases: &[(fn(&mut OverlayState), OverlayKind)] = &[
             (|o| o.aux_prompt = true, OverlayKind::Aux),
             (|o| o.reset_dialog = true, OverlayKind::Reset),
+            (|o| o.game_over = true, OverlayKind::GameOver),
             (|o| o.save_name_dialog = Some(app::state::SaveNameDialog::new(String::new(), false)), OverlayKind::SaveName),
             (|o| o.text_entry = Some(app::state::TextEntryDialog::new(app::state::TextEntryKind::CreateFile, "")), OverlayKind::TextEntry),
             (|o| o.confirm_delete_save = Some(std::path::PathBuf::from("s.sav")), OverlayKind::ConfirmDelete),

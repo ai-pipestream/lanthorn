@@ -200,6 +200,10 @@ pub struct BufferWindow {
     pub bg: Option<u32>,
     /// This window's own Normal-style foreground colour (packed RGB), or `None`.
     pub fg: Option<u32>,
+    /// True for a chrome panel (e.g. the Scott room panel) drawn with the themed
+    /// `room_panel` colour instead of the transcript colour, so the top and bottom
+    /// of a split read as distinct regions. A game-set `bg` still wins.
+    pub panel: bool,
 }
 
 /// How a [`WinNode::Pair`] divides its space.

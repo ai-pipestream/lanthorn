@@ -1273,6 +1273,9 @@ pub struct OverlayState {
     pub replay: Option<ReplayState>,
     /// When true, the reset-confirmation dialog is open.
     pub reset_dialog: bool,
+    /// When true, the Scott-only "game is now over" dialog is open. Set when a
+    /// Scott engine's turn quits cleanly (win/loss) instead of exiting the app.
+    pub game_over: bool,
     /// When true, the "Also clear the map" checkbox is checked in the reset dialog.
     pub reset_clear_map: bool,
     /// When true, the "Delete saved progress" checkbox is checked in the reset
@@ -2126,6 +2129,7 @@ impl AppState {
             || self.overlays.text_entry.is_some()
             || self.overlays.confirm_delete_save.is_some()
             || self.overlays.reset_dialog
+            || self.overlays.game_over
             || self.overlays.save_name_dialog.is_some()
             || self.overlays.aux_prompt
             || self.overlays.quit_dialog
@@ -4616,6 +4620,16 @@ mod tests {
         assert!(!s.any_overlay_open());
         s.overlays.reset_dialog = true;
         assert!(s.any_overlay_open(), "reset_dialog open => any_overlay_open true");
+    }
+
+    #[test]
+    fn game_over_counts_as_overlay() {
+        let mut s = AppState::default();
+        assert!(!s.any_overlay_open());
+        s.overlays.game_over = true;
+        assert!(s.any_overlay_open(), "game_over open => any_overlay_open true");
+        s.overlays.game_over = false;
+        assert!(!s.any_overlay_open(), "game_over false => any_overlay_open false");
     }
 
     #[test]

@@ -202,6 +202,8 @@ struct PaneRects {
     pub aux_dialog: Option<app::render::aux_dialog::AuxDialogRects>,
     /// Hit-rects for the reset dialog (when open).
     pub reset_dialog: Option<app::render::reset_dialog::ResetDialogRects>,
+    /// Hit-rects for the Scott-only game-over dialog (when open).
+    pub game_over: Option<app::render::game_over_dialog::GameOverDialogRects>,
     /// Hit-rects for the save-name dialog (when open).
     pub save_name_dialog: Option<app::render::save_name_dialog::SaveNameDialogRects>,
     /// Hit-rects for the generic text-entry dialog (when open).
@@ -601,7 +603,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, style_editor: overlay_rects.style_editor, verb_menu: verb_hits, glyph_picker: overlay_rects.glyph_picker, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, style_editor: overlay_rects.style_editor, verb_menu: verb_hits, glyph_picker: overlay_rects.glyph_picker, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -729,7 +731,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1132,6 +1134,22 @@ fn main() {
                     }
                     OverlayAct::ResetCancel => {
                         state.overlays.reset_dialog = false;
+                    }
+                    OverlayAct::GameOverPlayAgain => {
+                        // Plain restart: keep the accumulated map and saved data.
+                        state.overlays.game_over = false;
+                        reset_game(&mut *session, &mut mapper, &mut state, &story_bytes, &story_path, &game_dir, false, false);
+                    }
+                    OverlayAct::GameOverRestore => {
+                        // Close the game-over overlay and open the saves manager (the
+                        // Save State restore flow — same entry point as Action::OpenSaves).
+                        state.overlays.game_over = false;
+                        let entries = combined_saves(&game_dir);
+                        state.overlays.saves = Some(SavesState { entries, scroll: Default::default() });
+                        state.overlays.dialog_focus = 0;
+                    }
+                    OverlayAct::GameOverQuit => {
+                        break 'event_loop;
                     }
                     OverlayAct::SaveNameSubmit => {
                         // Empty names are rejected (dialog stays open); valid names

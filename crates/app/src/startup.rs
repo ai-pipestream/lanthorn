@@ -238,6 +238,13 @@ pub(crate) fn boot() -> BootResult {
                 }
             }
         }
+        app::hints::LoadedStory::Scott(bytes) => match app::scott_session::ScottSession::new(bytes) {
+            Ok(s) => Box::new(s),
+            Err(e) => {
+                eprintln!("babelmap: cannot load Scott Adams story: {e}");
+                std::process::exit(1);
+            }
+        },
     };
     // Strip the game's own inline read prompt only when the dedicated command
     // bar is on (SQ-0264); otherwise inline-prompt mode keeps the game's ">".

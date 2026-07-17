@@ -224,6 +224,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "dialog:button",
     "dialog:button:active",
     "dialog:shadow",
+    "room_panel",
     "upper_window",
     "upper_window_border",
     "sound_beep_high",
@@ -266,7 +267,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ("Dialogs", &[
         "dialog", "dialog:title", "hotkey:key", "dialog:button", "dialog:button:active", "dialog:shadow",
     ]),
-    ("Upper window", &["upper_window", "upper_window_border"]),
+    ("Upper window", &["room_panel", "upper_window", "upper_window_border"]),
     ("Sound", &["sound_beep_high", "sound_beep_low"]),
     ("Graphics", &["graphics", "inline_image"]),
 ];
@@ -318,6 +319,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "dialog:button"        => cs.dialog_button,
         "dialog:button:active" => cs.dialog_button_active,
         "dialog:shadow"        => cs.dialog_shadow,
+        "room_panel"           => cs.room_panel,
         "upper_window"         => cs.upper_window,
         "sound_beep_high"      => cs.sound_beep_high,
         "sound_beep_low"       => cs.sound_beep_low,
@@ -543,6 +545,7 @@ pub fn apply_color_decls(
             "dialog:button"        => cs.dialog_button = cs.dialog_button.patch(style),
             "dialog:button:active" => cs.dialog_button_active = cs.dialog_button_active.patch(style),
             "dialog:shadow"        => cs.dialog_shadow = cs.dialog_shadow.patch(style),
+            "room_panel"           => cs.room_panel = cs.room_panel.patch(style),
             "upper_window"         => cs.upper_window = cs.upper_window.patch(style),
             "upper_window_border" => {
                 cs.upper_window_border = cs.upper_window_border.patch(style);
@@ -1451,6 +1454,7 @@ pub fn write_style_full(
     doc.colors.selectors.insert("dialog:button".to_string(),        style_to_decl(&cs.dialog_button));
     doc.colors.selectors.insert("dialog:button:active".to_string(), style_to_decl(&cs.dialog_button_active));
     doc.colors.selectors.insert("dialog:shadow".to_string(),        style_to_decl(&cs.dialog_shadow));
+    doc.colors.selectors.insert("room_panel".to_string(),           style_to_decl(&cs.room_panel));
     doc.colors.selectors.insert("upper_window".to_string(),         style_to_decl(&cs.upper_window));
     {
         let mut d = style_to_decl(&cs.upper_window_border);

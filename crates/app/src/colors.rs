@@ -341,6 +341,10 @@ pub struct ColorScheme {
     /// Cells of gap from the anchored edge(s); ignored for `Center` (default `0`).
     pub dialog_margin: u16,
     /// Upper (virtual) window content style.
+    /// Background/foreground for a split-screen room panel (the Scott top window),
+    /// distinct from `transcript` so the two regions read apart. Selector:
+    /// `room_panel`.
+    pub room_panel: Style,
     pub upper_window: Style,
     /// Upper (virtual) window border style.
     pub upper_window_border: Style,
@@ -493,6 +497,7 @@ impl ColorScheme {
             dialog_shadow_on: false,
             dialog_placement: DialogPlacement::Center,
             dialog_margin: 0,
+            room_panel: Style::new().fg(Color::White).bg(Color::Blue),
             upper_window: Style::new(),
             upper_window_border: Style::new().fg(Color::Cyan),
             virtual_window_border: BorderStyle::Single,
@@ -697,6 +702,7 @@ impl ColorScheme {
             dialog_shadow_on: false,
             dialog_placement: DialogPlacement::Center,
             dialog_margin: 0,
+            room_panel: Style::new().fg(fg).bg(scheme.palette[4]),
             upper_window: Style::new().fg(fg),
             upper_window_border: Style::new().fg(scheme.palette[6]),
             virtual_window_border: BorderStyle::Single,
