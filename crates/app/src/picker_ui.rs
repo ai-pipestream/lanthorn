@@ -557,7 +557,7 @@ pub(crate) fn run_story_picker(
             } else if let Some(msg) = &progress_line {
                 draw_progress_line(buf, list_area, msg, cs.story_header_active);
             }
-            if panel_area.width > 0 {
+            if preview.is_none() && panel_area.width > 0 {
                 if let Some(entry) = stories.get(list.selected) {
                     last_panel_area = panel_area;
                     panel_max = draw_info_panel(
@@ -581,6 +581,10 @@ pub(crate) fn run_story_picker(
                     panel_resource_rects.clear();
                 }
             } else {
+                // No selectable story, or the resource-preview modal is open: skip
+                // redrawing the info panel. While the modal is up this stops the
+                // panel's IFDB OSC-8 hyperlink from bleeding across the dialog
+                // (SQ-0389), and drops its now-hidden click rects.
                 panel_link_rects.clear();
                 panel_resource_rects.clear();
             }
