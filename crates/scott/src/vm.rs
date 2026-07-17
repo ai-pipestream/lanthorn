@@ -56,6 +56,11 @@ impl Vm {
             rng_state: 0x1234_5678,
             pending_line: None,
         };
+        // Run the opening occurrence pass before the first prompt, so auto-events
+        // that fire at game start (e.g. "A Voice BOOOMS out:") are shown on load —
+        // matching ScottFree/Gargoyle, where occurrences run at the top of the turn
+        // loop rather than only when a command is entered.
+        vm.run_occurrences();
         vm.needs_line = true;
         vm
     }
@@ -786,7 +791,7 @@ impl Vm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Condition, Database, Item, Room};
+    use crate::{Action, Condition, Database, Item, Room};
     fn vm_with(items: Vec<Item>, rooms: Vec<Room>, player: usize) -> Vm {
         let db = Database {
             max_carry: 6,
@@ -1242,6 +1247,26 @@ mod tests {
         vm.flag_set(DARK_FLAG, true);
         assert!(vm.is_dark());
         assert_eq!(vm.room_block(), "It is too dark to see.");
+    }
+
+    #[test]
+    fn opening_occurrence_fires_before_first_prompt() {
+        let mut db = tiny_world();
+        db.messages = vec![String::new(), "A Voice BOOOMS out: Beware!".into()];
+        // An always-occurrence (verb 0, noun 100) printing message 1, no guard.
+        db.actions.push(Action {
+            verb: 0,
+            noun: 100,
+            conditions: [Condition { code: 0, value: 0 }; 5],
+            commands: [1, 0, 0, 0],
+        });
+        // The opening message is available immediately, before any command.
+        let mut vm = Vm::new(db);
+        let intro = vm.take_output();
+        assert!(
+            intro.contains("A Voice BOOOMS out"),
+            "opening occurrence shows on load: {intro:?}"
+        );
     }
 
     #[test]
