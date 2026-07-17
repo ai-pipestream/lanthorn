@@ -1,6 +1,26 @@
 //! End-to-end oracle test for the `scott` crate: loads the "Tiny Cave" fixture,
 //! drives a fixed command script through the turn loop, and freezes the exact
-//! transcript. A second test exercises `Vm::snapshot`/`Vm::restore`.
+//! transcript. The script is authored to exercise the corrected occurrence,
+//! continuation, and counter semantics — every line below is explainable by the
+//! ScottFree behavioral rules, not merely frozen from whatever the code prints.
+//!
+//! Distinguishing cases baked into the fixture (would FAIL under the old bugs):
+//!   * The room-2 ambient occurrence uses noun=100 ("always"), NOT noun=0. Under
+//!     the corrected "roll against 0 never passes" rule a noun-0 occurrence would
+//!     never fire, so an always-occurrence must be encoded as 100.
+//!   * A verb-0/noun-0 line (action 1) with a passing guard sits where nothing
+//!     continues into it; it must NEVER fire standalone (the "SECRET" message and
+//!     flag 10 stay untouched). Under the old "noun 0 always fires" bug it would.
+//!   * PUSH BUTTON runs opcode 73 then chains two consecutive 0/0 continuation
+//!     lines, each re-checking its own conditions. When the lever is unpulled the
+//!     first (flag-5-gated) line is SKIPPED; after PULL LEVER it RUNS. The second
+//!     line (unconditional) prints even though the first carries no 73 — proving
+//!     the walk continues across consecutive 0/0 lines.
+//!   * STASH uses opcode 81 to SWAP the live current counter with a backup, so a
+//!     set/stash/change/stash-back round trip restores the original value (7),
+//!     which the old select-an-index counter model would report as 3.
+//!
+//! A second test exercises `Vm::snapshot`/`Vm::restore`.
 
 use scott::{Database, Vm};
 
@@ -22,34 +42,54 @@ fn run_script(vm: &mut Vm, cmds: &[&str]) -> String {
 fn golden_transcript() {
     let db = Database::parse(TINY_CAVE).expect("tiny_cave.dat parses");
     let mut vm = Vm::new(db);
-    vm.seed_rng(1); // deterministic, though this fixture uses no percentage occurrences
+    vm.seed_rng(1); // deterministic; the only occurrence is noun=100 (always fires)
 
     let script = [
-        "down",       // scripted GO-down (room1->room2), no lamp yet
-        "up",         // occurrence sets DARK_FLAG; unlit -> "dangerous to move" warning
-        "take lamp",  // verb synonym TAKE -> GET(10); auto-noun picks up the lamp
-        "down",       // scripted GO-down again, now carrying the lamp
-        "rub lamp",   // scripted action: code-0 params feed opcode 62 (item->room) + 58 (flag)
-        "get idol",   // auto-noun GET picks up the now-revealed idol
-        "up",         // lamp carried now -> no darkness warning this time
-        "down",       // scripted GO-down (room1->room2)
-        "down",       // unmatched by any scripted action -> built-in GO (room2->room3)
-        "score",      // idol still carried, not deposited -> fallback score action (0/1)
-        "drop idol",  // auto-noun DROP deposits the idol in the treasure room
-        "score",      // idol now in treasure room -> win action fires, quits
+        "push button", // continue-chain: click, first 0/0 line SKIPPED (lever unpulled), dust settles
+        "pull lever",  // sets flag 5, arming the gated continuation line
+        "push button", // continue-chain: click, hidden door (flag 5 set) THEN dust settles
+        "count",       // op79: current counter <- 7
+        "tally",       // op78: prints 7
+        "stash",       // op81: swap current<->backup2  (current becomes 0)
+        "tally",       // op78: prints 0
+        "mark",        // op79: current counter <- 3
+        "stash",       // op81: swap back  (current restored to 7, not 3)
+        "tally",       // op78: prints 7   <-- distinguishes op81 SWAP from index-select
+        "take lamp",   // verb synonym TAKE -> GET(10); auto-noun picks up the lamp
+        "down",        // scripted GO-down (room1 -> room2)
+        "rub lamp",    // room2 occurrence (water) fires first; then RUB reveals the idol
+        "get idol",    // room2 occurrence; auto-noun GET picks up the revealed idol
+        "up",          // room2 occurrence; lamp carried -> no darkness warning
+        "down",        // scripted GO-down (room1 -> room2)
+        "down",        // unmatched scripted action -> built-in GO (room2 -> room3)
+        "score",       // idol still carried -> fallback score action
+        "drop idol",   // auto-noun DROP deposits the idol in the treasure room
+        "score",       // idol now in treasure room -> win action fires, quits
     ];
 
     let transcript = run_script(&mut vm, &script);
     let expected = "\
 You are in a sunlit forest clearing. A narrow path leads down into darkness.\n\
 You can see: a brass lamp\n\
-> down\n\
-You descend into darkness, feeling your way along the damp rock wall.\n\
-> up\n\
-You hear water dripping somewhere in the darkness.\n\
-It is dangerous to move in the dark!\n\
-You are in a sunlit forest clearing. A narrow path leads down into darkness.\n\
-You can see: a brass lamp\n\
+> push button\n\
+You press the button. A click echoes.\n\
+Dust settles in the chamber.\n\
+> pull lever\n\
+The lever clicks into place.\n\
+> push button\n\
+You press the button. A click echoes.\n\
+A hidden door grinds open.\n\
+Dust settles in the chamber.\n\
+> count\n\
+> tally\n\
+7\n\
+> stash\n\
+> tally\n\
+0\n\
+> mark\n\
+> stash\n\
+> tally\n\
+7\n\
 > take lamp\n\
 OK.\n\
 > down\n\
@@ -76,6 +116,15 @@ OK.\n\
 You set the idol down. *** You have won! ***\n";
     assert_eq!(transcript, expected);
     assert!(vm.has_quit(), "win action should have executed opcode 63 (quit)");
+
+    // The standalone verb-0/noun-0 line (action 1) never fired: its guard
+    // (player in room 1) passed on every room-1 turn, but a noun-0 occurrence
+    // must never fire on its own.
+    assert!(
+        !transcript.contains("SECRET"),
+        "noun-0 line must not fire standalone"
+    );
+    assert!(!vm.flag(10), "noun-0 line's flag must never be set");
 }
 
 #[test]
@@ -85,8 +134,8 @@ fn snapshot_restore_round_trip() {
     vm.take_output();
 
     // Reach room2 carrying the lamp, with flag3 set (RUB LAMP guard) and the
-    // counter at 7 (via the fixture's COUNT verb), then snapshot. The lamp
-    // lives in room1, so fetch it before descending again.
+    // live current counter at 7 (via the fixture's COUNT verb), then snapshot.
+    // The lamp lives in room1, so fetch it before descending again.
     for cmd in ["down", "up", "take lamp", "down", "rub lamp", "count"] {
         vm.supply_line(cmd);
         vm.step();
@@ -95,7 +144,7 @@ fn snapshot_restore_round_trip() {
     assert_eq!(vm.current_room(), 2);
     assert_eq!(vm.item_loc(9), scott::CARRIED); // lamp carried
     assert!(vm.flag(3)); // RUB LAMP guard flag set
-    assert_eq!(vm.counter(), 7);
+    assert_eq!(vm.counter(), 7); // current_counter
 
     let snap = vm.snapshot();
 

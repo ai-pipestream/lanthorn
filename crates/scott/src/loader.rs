@@ -187,6 +187,12 @@ impl Database {
         })()
         .ok();
 
+        // Guard against a malformed start-room field that would index past the
+        // rooms table at runtime.
+        if player_room < 0 || player_room as usize >= rooms.len() {
+            return Err(LoadError::Truncated);
+        }
+
         Ok(Database {
             max_carry,
             start_room: player_room as usize,
@@ -223,6 +229,8 @@ pub fn looks_like_scott(src: &str) -> bool {
         && in_range(ints[10], 0, 10000)
         && in_range(ints[5], 0, 1000)
         && in_range(ints[8], 1, 10)
+        // Start room (field 6) must be a valid room index: 0..=num_rooms (field 4).
+        && in_range(ints[6], 0, ints[4] + 1)
 }
 
 #[cfg(test)]
@@ -307,5 +315,26 @@ mod tests {
         // NumActions = -1 (field index 2) must yield a LoadError, not a panic
         let bad = "32767 1 -1 1 2 6 1 0 3 125 0 1\n";
         assert!(Database::parse(bad).is_err());
+    }
+
+    #[test]
+    fn out_of_range_start_room_errors_not_panics() {
+        // MINI has NumRooms=2 (3 slots: 0..2). A start room of 9 (field index 6)
+        // is out of range and must yield a LoadError rather than panic at runtime.
+        const BAD_START: &str = r#"
+32767 1 0 1 2 6 9 0 3 125 0 1
+150 1 0 0 0 0 0 0
+"" ""
+"GO" "NORTH"
+0 0 0 0 0 0 "*limbo"
+2 0 0 0 0 0 "*forest clearing"
+0 0 0 0 0 0 "*swamp"
+""
+"" 0
+"*a brass lamp/LAMP/" 1
+"#;
+        assert!(Database::parse(BAD_START).is_err());
+        // The sniff should also reject it (start room outside 0..=num_rooms).
+        assert!(!looks_like_scott(BAD_START));
     }
 }

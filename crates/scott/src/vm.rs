@@ -17,9 +17,10 @@ pub struct Vm {
     pub(crate) item_loc: Vec<i32>, // per item: current location (room index; -1/255 = carried; 0 = nowhere)
     pub(crate) player: usize,      // current room
     pub(crate) flags: [bool; 32],
-    pub(crate) counters: [i32; 16],
-    pub(crate) cur_counter: usize,
-    pub(crate) saved_rooms: [usize; 16],
+    pub(crate) current_counter: i32, // the live counter all counter ops/conditions act on
+    pub(crate) counters: [i32; 16],  // backup registers, swapped via op 81
+    pub(crate) saved_room: usize,    // op-80 register (swapped with `player`)
+    pub(crate) saved_rooms: [usize; 16], // op-87 registers
     pub(crate) lamp: i32, // remaining light; -1 = infinite
     pub(crate) out: String, // pending transcript
     pub(crate) quit: bool,
@@ -31,7 +32,7 @@ pub struct Vm {
 
 impl Vm {
     /// Initialize: item_loc from each item's start_loc, player=start_room, lamp=light_time,
-    /// flags/counters cleared, cur_counter=0, saved_rooms=[start_room? or 0], needs_line=true.
+    /// flags/counters cleared, current_counter=0, saved_room/saved_rooms=0, needs_line=true.
     /// Describes the starting room into `out` so the host can read the intro via
     /// `take_output()` before driving input.
     pub fn new(db: Database) -> Vm {
@@ -43,8 +44,9 @@ impl Vm {
             item_loc,
             player,
             flags: [false; 32],
+            current_counter: 0,
             counters: [0; 16],
-            cur_counter: 0,
+            saved_room: 0,
             saved_rooms: [0; 16],
             lamp,
             out: String::new(),
@@ -67,7 +69,7 @@ impl Vm {
         self.player
     }
     pub fn room_name(&self, r: usize) -> &str {
-        &self.db.rooms[r].desc
+        self.db.rooms.get(r).map(|room| room.desc.as_str()).unwrap_or("")
     }
     pub fn has_quit(&self) -> bool {
         self.quit
@@ -80,14 +82,15 @@ impl Vm {
     pub fn flag(&self, idx: usize) -> bool {
         self.flags.get(idx).copied().unwrap_or(false)
     }
-    /// Value of the currently-selected counter.
+    /// Value of the live current counter.
     pub fn counter(&self) -> i32 {
-        self.counters[self.cur_counter]
+        self.current_counter
     }
 
     /// Serialize mutable game state: item locations, player room, flags,
-    /// counters, current counter, saved-room registers, and lamp fuel.
-    /// Manual little-endian byte encoding, zero-dep.
+    /// the live current counter, backup counters, the op-80 saved room, the
+    /// op-87 saved-room registers, and lamp fuel. Manual little-endian byte
+    /// encoding, zero-dep.
     pub fn snapshot(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         buf.extend_from_slice(&(self.item_loc.len() as u32).to_le_bytes());
@@ -98,10 +101,11 @@ impl Vm {
         for &f in &self.flags {
             buf.push(f as u8);
         }
+        buf.extend_from_slice(&self.current_counter.to_le_bytes());
         for c in &self.counters {
             buf.extend_from_slice(&c.to_le_bytes());
         }
-        buf.extend_from_slice(&(self.cur_counter as u32).to_le_bytes());
+        buf.extend_from_slice(&(self.saved_room as u32).to_le_bytes());
         for &r in &self.saved_rooms {
             buf.extend_from_slice(&(r as u32).to_le_bytes());
         }
@@ -142,12 +146,13 @@ impl Vm {
             flags[i] = b != 0;
         }
         pos += 32;
+        let current_counter = read_i32(bytes, &mut pos)?;
         let mut counters = [0i32; 16];
         for c in counters.iter_mut() {
             *c = read_i32(bytes, &mut pos)?;
         }
-        let cur_counter = read_u32(bytes, &mut pos)? as usize;
-        if cur_counter >= counters.len() {
+        let saved_room = read_u32(bytes, &mut pos)? as usize;
+        if saved_room >= self.db.rooms.len() {
             return Err(());
         }
         let mut saved_rooms = [0usize; 16];
@@ -167,8 +172,9 @@ impl Vm {
         self.item_loc = item_loc;
         self.player = player;
         self.flags = flags;
+        self.current_counter = current_counter;
         self.counters = counters;
-        self.cur_counter = cur_counter;
+        self.saved_room = saved_room;
         self.saved_rooms = saved_rooms;
         self.lamp = lamp;
         Ok(())
@@ -231,9 +237,9 @@ impl Vm {
             12 => !self.item_present(value),
             13 => self.item_in_play(value),
             14 => !self.item_in_play(value),
-            15 => self.counters[self.cur_counter] <= c.value as i32,
-            16 => self.counters[self.cur_counter] > c.value as i32,
-            19 => self.counters[self.cur_counter] == c.value as i32,
+            15 => self.current_counter <= c.value as i32,
+            16 => self.current_counter > c.value as i32,
+            19 => self.current_counter == c.value as i32,
             17 => self.item_at_start(value),
             18 => !self.item_at_start(value),
             _ => false,
@@ -383,32 +389,31 @@ impl Vm {
                 }
                 76 => self.describe_room(),
                 77 => {
-                    let c = &mut self.counters[self.cur_counter];
-                    *c = (*c - 1).max(0);
+                    self.current_counter = (self.current_counter - 1).max(-1);
                 }
                 78 => {
-                    let v = self.counters[self.cur_counter];
+                    let v = self.current_counter;
                     self.out.push_str(&v.to_string());
                     self.out.push('\n');
                 }
                 79 => {
-                    let v = p.next().unwrap_or(0) as i32;
-                    self.counters[self.cur_counter] = v;
+                    self.current_counter = p.next().unwrap_or(0) as i32;
                 }
                 80 => {
-                    std::mem::swap(&mut self.player, &mut self.saved_rooms[0]);
+                    std::mem::swap(&mut self.player, &mut self.saved_room);
                 }
                 81 => {
-                    let idx = p.next().unwrap_or(0) as usize;
-                    self.cur_counter = idx.min(self.counters.len() - 1);
+                    // Swap the live current counter with backup register `param`.
+                    let idx = (p.next().unwrap_or(0) as usize).min(self.counters.len() - 1);
+                    std::mem::swap(&mut self.current_counter, &mut self.counters[idx]);
                 }
                 82 => {
                     let v = p.next().unwrap_or(0) as i32;
-                    self.counters[self.cur_counter] += v;
+                    self.current_counter += v;
                 }
                 83 => {
                     let v = p.next().unwrap_or(0) as i32;
-                    self.counters[self.cur_counter] -= v;
+                    self.current_counter = (self.current_counter - v).max(-1);
                 }
                 84 => {
                     let noun = self.last_noun.clone();
@@ -475,7 +480,12 @@ impl Vm {
                     if dark_blind {
                         self.out.push_str("It is dangerous to move in the dark!\n");
                     }
-                    let dest = self.db.rooms[self.player].exits[dir];
+                    let dest = self
+                        .db
+                        .rooms
+                        .get(self.player)
+                        .map(|room| room.exits[dir])
+                        .unwrap_or(0);
                     if dest != 0 {
                         self.player = dest;
                         self.describe_room();
@@ -486,25 +496,33 @@ impl Vm {
                     self.out.push_str("I need a direction.\n");
                 }
             } else if vb == 10 {
-                match self.find_auto_noun_item() {
-                    Some(idx) if self.item_loc_of(idx) == Some(self.player as i32) => {
-                        if self.carried_count() < self.db.max_carry {
-                            self.set_item_loc(idx, CARRIED);
-                            self.out.push_str("OK.\n");
-                        } else {
-                            self.out.push_str("You are carrying too much.\n");
+                if self.last_noun == "ALL" {
+                    self.get_all();
+                } else {
+                    match self.find_auto_noun_item() {
+                        Some(idx) if self.item_loc_of(idx) == Some(self.player as i32) => {
+                            if self.carried_count() < self.db.max_carry {
+                                self.set_item_loc(idx, CARRIED);
+                                self.out.push_str("OK.\n");
+                            } else {
+                                self.out.push_str("You are carrying too much.\n");
+                            }
                         }
+                        Some(_) => self.out.push_str("It's beyond my power to do that.\n"),
+                        None => self.out.push_str("I don't understand your command.\n"),
                     }
-                    Some(_) => self.out.push_str("It's beyond my power to do that.\n"),
-                    None => self.out.push_str("I don't understand your command.\n"),
                 }
             } else if vb == 18 {
-                match self.find_auto_noun_item() {
-                    Some(idx) if self.item_carried(idx) => {
-                        self.set_item_loc(idx, self.player as i32);
-                        self.out.push_str("OK.\n");
+                if self.last_noun == "ALL" {
+                    self.drop_all();
+                } else {
+                    match self.find_auto_noun_item() {
+                        Some(idx) if self.item_carried(idx) => {
+                            self.set_item_loc(idx, self.player as i32);
+                            self.out.push_str("OK.\n");
+                        }
+                        _ => self.out.push_str("I don't understand your command.\n"),
                     }
-                    _ => self.out.push_str("I don't understand your command.\n"),
                 }
             } else {
                 self.out.push_str("I don't understand your command.\n");
@@ -522,6 +540,46 @@ impl Vm {
         self.needs_line = true;
     }
 
+    /// GET ALL: take every item in the current room that has an auto-get noun,
+    /// respecting MaxCarry. Reports each taken item; a full pack stops the sweep.
+    fn get_all(&mut self) {
+        let mut took_any = false;
+        for i in 0..self.item_loc.len() {
+            if self.item_in_room(i) && self.db.items[i].auto_noun.is_some() {
+                if self.carried_count() < self.db.max_carry {
+                    self.set_item_loc(i, CARRIED);
+                    let text = self.db.items[i].text.clone();
+                    self.out.push_str(&text);
+                    self.out.push_str(": OK.\n");
+                    took_any = true;
+                } else {
+                    self.out.push_str("You are carrying too much.\n");
+                    return;
+                }
+            }
+        }
+        if !took_any {
+            self.out.push_str("I don't understand your command.\n");
+        }
+    }
+
+    /// DROP ALL: drop every carried item that has an auto-get noun.
+    fn drop_all(&mut self) {
+        let mut dropped_any = false;
+        for i in 0..self.item_loc.len() {
+            if self.item_carried(i) && self.db.items[i].auto_noun.is_some() {
+                self.set_item_loc(i, self.player as i32);
+                let text = self.db.items[i].text.clone();
+                self.out.push_str(&text);
+                self.out.push_str(": OK.\n");
+                dropped_any = true;
+            }
+        }
+        if !dropped_any {
+            self.out.push_str("I don't understand your command.\n");
+        }
+    }
+
     /// Index of the item whose `auto_noun` matches the last typed noun, if any.
     fn find_auto_noun_item(&self) -> Option<usize> {
         self.db.items.iter().position(|it| {
@@ -532,44 +590,66 @@ impl Vm {
         })
     }
 
-    /// Occurrence pass: every verb==0 action whose conditions all pass gets a
-    /// noun-as-percent-chance roll (noun==0 always fires).
+    /// Occurrence pass: walk actions in order; for each verb==0 action, evaluate
+    /// its conditions AT THAT POINT (so an earlier fired occurrence's state change
+    /// is visible to a later guard), then fire it iff a d100 roll passes the
+    /// noun-as-percent chance. A roll against 0 never passes, so noun==0 never
+    /// fires standalone (those are continuation targets reached only via opcode 73).
     fn run_occurrences(&mut self) {
-        let candidates: Vec<usize> = self
-            .db
-            .actions
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| a.verb == 0 && a.conditions.iter().all(|c| self.eval_condition(c)))
-            .map(|(i, _)| i)
-            .collect();
-        for idx in candidates {
-            let noun = self.db.actions[idx].noun;
-            if noun == 0 || self.roll_100() < noun as u32 {
+        for idx in 0..self.db.actions.len() {
+            let (is_occ, noun, pass) = {
+                let a = &self.db.actions[idx];
+                let is_occ = a.verb == 0;
+                let pass = is_occ && a.conditions.iter().all(|c| self.eval_condition(c));
+                (is_occ, a.noun, pass)
+            };
+            if is_occ && pass && self.roll_100() < noun as u32 {
                 self.run_action_chain(idx);
             }
         }
     }
 
-    /// Run `start`'s commands, then chain into the next action(s) while
-    /// `continue` (opcode 73) keeps firing.
+    /// Run action `start`'s commands. If they executed `continue` (opcode 73),
+    /// walk forward over CONSECUTIVE continuation lines (verb==0 && noun==0),
+    /// running each one's commands only if its own conditions re-evaluate true.
+    /// The walk stops at the first action whose vocab is not 0/0 (regardless of
+    /// whether the intermediate lines themselves carry a 73).
     fn run_action_chain(&mut self, start: usize) {
-        let mut idx = start;
-        loop {
-            let (cmds, params) = {
+        if !self.run_action_line(start) {
+            return;
+        }
+        let mut idx = start + 1;
+        while idx < self.db.actions.len() {
+            let (is_cont, pass) = {
                 let a = &self.db.actions[idx];
-                let params: Vec<u16> = a.conditions.iter().filter(|c| c.code == 0).map(|c| c.value).collect();
-                (a.commands, params)
+                let is_cont = a.verb == 0 && a.noun == 0;
+                let pass = is_cont && a.conditions.iter().all(|c| self.eval_condition(c));
+                (is_cont, pass)
             };
-            let cont = self.run_commands(&cmds, &params);
-            if !cont {
+            if !is_cont {
                 break;
+            }
+            if pass {
+                self.run_action_line(idx);
             }
             idx += 1;
-            if idx >= self.db.actions.len() {
-                break;
-            }
         }
+    }
+
+    /// Run one action line's commands, rebuilding its param list (the values of
+    /// its code-0 conditions) fresh. Returns true if it executed `continue`.
+    fn run_action_line(&mut self, idx: usize) -> bool {
+        let (cmds, params) = {
+            let a = &self.db.actions[idx];
+            let params: Vec<u16> = a
+                .conditions
+                .iter()
+                .filter(|c| c.code == 0)
+                .map(|c| c.value)
+                .collect();
+            (a.commands, params)
+        };
+        self.run_commands(&cmds, &params)
     }
 
     fn print_message(&mut self, n: usize) {
@@ -645,7 +725,7 @@ impl Vm {
     }
     #[cfg(test)]
     pub(crate) fn set_counter(&mut self, v: i32) {
-        self.counters[self.cur_counter] = v;
+        self.current_counter = v;
     }
     #[cfg(test)]
     pub(crate) fn item_loc_at(&self, idx: usize) -> i32 {
@@ -657,7 +737,19 @@ impl Vm {
     }
     #[cfg(test)]
     pub(crate) fn counter_at(&self) -> i32 {
-        self.counters[self.cur_counter]
+        self.current_counter
+    }
+    #[cfg(test)]
+    pub(crate) fn saved_room_at(&self) -> usize {
+        self.saved_room
+    }
+    #[cfg(test)]
+    pub(crate) fn backup_counter_at(&self, i: usize) -> i32 {
+        self.counters[i]
+    }
+    #[cfg(test)]
+    pub(crate) fn saved_rooms_at(&self, i: usize) -> usize {
+        self.saved_rooms[i]
     }
 }
 
@@ -812,13 +904,158 @@ mod tests {
         vm.run_commands(&[60, 0, 0, 0], &[4]);
         assert!(!vm.flag_at(4));
 
-        // counter set/add/sub
+        // counter set/add/sub (all act on the single live current counter)
         vm.run_commands(&[79, 0, 0, 0], &[7]);
         assert_eq!(vm.counter_at(), 7);
         vm.run_commands(&[82, 0, 0, 0], &[2]);
         assert_eq!(vm.counter_at(), 9);
         vm.run_commands(&[83, 0, 0, 0], &[3]);
         assert_eq!(vm.counter_at(), 6);
+    }
+
+    fn one_item() -> Vec<Item> {
+        vec![Item {
+            text: "x".into(),
+            treasure: false,
+            auto_noun: None,
+            start_loc: 0,
+        }]
+    }
+
+    // CRIT-2: op 81 SWAPs the live current counter with a backup register; a
+    // stash-change-restore round trip must recover the original value. Under the
+    // old "select an index" model the final value would be 3, not 7.
+    #[test]
+    fn cmd_counter_swap_op81() {
+        let mut vm = vm_with(one_item(), rooms4(), 0);
+        vm.run_commands(&[79, 0, 0, 0], &[7]); // current = 7
+        assert_eq!(vm.counter_at(), 7);
+        vm.run_commands(&[81, 0, 0, 0], &[2]); // swap into backup 2: current<-0, backup2<-7
+        assert_eq!(vm.counter_at(), 0);
+        assert_eq!(vm.backup_counter_at(2), 7);
+        vm.run_commands(&[79, 0, 0, 0], &[3]); // change current
+        assert_eq!(vm.counter_at(), 3);
+        vm.run_commands(&[81, 0, 0, 0], &[2]); // swap back: current<-7 (restored)
+        assert_eq!(vm.counter_at(), 7);
+        assert_eq!(vm.backup_counter_at(2), 3);
+    }
+
+    // CRIT-2 / MIN-7: ops 77 and 83 floor the current counter at -1.
+    #[test]
+    fn cmd_counter_floors_at_minus_one() {
+        let mut vm = vm_with(one_item(), rooms4(), 0);
+        vm.run_commands(&[79, 0, 0, 0], &[0]); // current = 0
+        vm.run_commands(&[77, 0, 0, 0], &[]); // dec -> -1
+        assert_eq!(vm.counter_at(), -1);
+        vm.run_commands(&[77, 0, 0, 0], &[]); // dec again -> stays -1
+        assert_eq!(vm.counter_at(), -1);
+        vm.run_commands(&[79, 0, 0, 0], &[2]); // current = 2
+        vm.run_commands(&[83, 0, 0, 0], &[10]); // sub 10 -> floor at -1
+        assert_eq!(vm.counter_at(), -1);
+    }
+
+    // MIN-6: op 80 (saved_room scalar) and op 87 (saved_rooms array) are distinct
+    // registers. Previously op 80 aliased saved_rooms[0]; here changing the array
+    // must not disturb the op-80 register and vice-versa.
+    #[test]
+    fn cmd_room_registers_distinct_op80_op87() {
+        let mut vm = vm_with(one_item(), rooms4(), 1);
+        // Seed saved_rooms[0] = 2 via op 87, then reset player to 1.
+        vm.set_player(2);
+        vm.run_commands(&[87, 0, 0, 0], &[0]); // swap player(2) <-> saved_rooms[0](0)
+        assert_eq!(vm.current_room(), 0);
+        assert_eq!(vm.saved_rooms_at(0), 2);
+        vm.set_player(1);
+        // op 80 swaps player <-> the SEPARATE saved_room scalar (still 0), NOT array[0].
+        vm.run_commands(&[80, 0, 0, 0], &[]);
+        assert_eq!(vm.current_room(), 0); // would be 2 if op80 wrongly used saved_rooms[0]
+        assert_eq!(vm.saved_room_at(), 1);
+        assert_eq!(vm.saved_rooms_at(0), 2); // op80 left the op87 array untouched
+    }
+
+    // MIN-8: GET ALL / DROP ALL sweep every auto-noun item in the room / pack.
+    #[test]
+    fn get_all_and_drop_all() {
+        let items = vec![
+            Item {
+                text: "limbo".into(),
+                treasure: false,
+                auto_noun: None,
+                start_loc: 0,
+            },
+            Item {
+                text: "a coin".into(),
+                treasure: false,
+                auto_noun: Some("COIN".into()),
+                start_loc: 1,
+            },
+            Item {
+                text: "a key".into(),
+                treasure: false,
+                auto_noun: Some("KEY".into()),
+                start_loc: 1,
+            },
+        ];
+        let mut verbs = vec![String::new(); 19];
+        verbs[1] = "GO".into();
+        verbs[10] = "GET".into();
+        verbs[18] = "DROP".into();
+        let db = Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 3,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![],
+            verbs,
+            nouns: vec![String::new(); 7], // no "ALL" in vocab -> matched via last_noun
+            rooms: rooms4(),
+            messages: vec![String::new()],
+            items,
+            adventure_number: 0,
+        };
+        let mut vm = Vm::new(db);
+        vm.take_output();
+
+        vm.supply_line("get all");
+        vm.step();
+        let out = vm.take_output();
+        assert!(out.contains("a coin"), "get all names each item: {out:?}");
+        assert!(out.contains("a key"), "get all names each item: {out:?}");
+        assert_eq!(vm.item_loc_at(1), CARRIED);
+        assert_eq!(vm.item_loc_at(2), CARRIED);
+
+        vm.supply_line("drop all");
+        vm.step();
+        vm.take_output();
+        assert_eq!(vm.item_loc_at(1), 1); // dropped back into room 1
+        assert_eq!(vm.item_loc_at(2), 1);
+    }
+
+    // Snapshot/restore must round-trip the new current_counter scalar, the backup
+    // registers, and the op-80 saved_room register.
+    #[test]
+    fn snapshot_restore_counter_and_room() {
+        let mut vm = vm_with(one_item(), rooms4(), 1);
+        vm.run_commands(&[79, 0, 0, 0], &[9]); // current = 9
+        vm.run_commands(&[81, 0, 0, 0], &[2]); // swap -> current=0, backup2=9
+        vm.run_commands(&[79, 0, 0, 0], &[5]); // current = 5
+        vm.run_commands(&[80, 0, 0, 0], &[]); // player(1) <-> saved_room(0): player=0, saved_room=1
+        assert_eq!(vm.current_room(), 0);
+        assert_eq!(vm.saved_room_at(), 1);
+
+        let snap = vm.snapshot();
+
+        vm.run_commands(&[79, 0, 0, 0], &[99]); // current = 99
+        vm.run_commands(&[80, 0, 0, 0], &[]); // player=1, saved_room=0
+        assert_ne!(vm.counter_at(), 5);
+
+        vm.restore(&snap).expect("restore");
+        assert_eq!(vm.counter_at(), 5);
+        assert_eq!(vm.backup_counter_at(2), 9);
+        assert_eq!(vm.saved_room_at(), 1);
+        assert_eq!(vm.current_room(), 0);
     }
 
     #[test]
