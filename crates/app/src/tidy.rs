@@ -307,13 +307,40 @@ pub fn tidy_layer_silent(
     layer: mapper::layer::LayerId,
 ) {
     use crate::render::map::{cleanup_overlaps, compact_empty_lines, repair_directional_hints};
+    run_layer_ops_silent(graph, layer, |sub| {
+        mapper::layout::relayout_auto(sub);
+        cleanup_overlaps(sub, 3, 40);
+        repair_directional_hints(sub, 3, 40);
+        cleanup_overlaps(sub, 3, 40);
+        compact_empty_lines(sub);
+    });
+}
 
+/// Background overlap cleanup for one layer: nudges rooms only enough to remove
+/// rendered overlaps, WITHOUT the full relayout/repair/compact that
+/// [`tidy_layer_silent`] does — so it preserves the existing (possibly hand-tuned)
+/// layout and only un-overlaps it. Runs on the background worker on every geometry
+/// change so no overlap work touches the interpreter thread (SQ-0379).
+pub fn cleanup_overlaps_layer_silent(
+    graph: &mut mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+) {
+    use crate::render::map::cleanup_overlaps;
+    run_layer_ops_silent(graph, layer, |sub| {
+        cleanup_overlaps(sub, 2, 20);
+    });
+}
+
+/// Run `ops` on a clone of `layer`'s subgraph, then write the resulting room
+/// positions and connection-distortion flags back into `graph`. Shared write-back
+/// for the full tidy and the overlap-only cleanup so both merge results identically.
+fn run_layer_ops_silent(
+    graph: &mut mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+    ops: impl FnOnce(&mut mapper::graph::MapGraph),
+) {
     let mut sub = graph.layer_subgraph(layer);
-    mapper::layout::relayout_auto(&mut sub);
-    cleanup_overlaps(&mut sub, 3, 40);
-    repair_directional_hints(&mut sub, 3, 40);
-    cleanup_overlaps(&mut sub, 3, 40);
-    compact_empty_lines(&mut sub);
+    ops(&mut sub);
 
     // Write final positions back into the live graph.
     for id in graph.rooms_in_layer(layer) {

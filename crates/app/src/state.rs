@@ -624,6 +624,20 @@ impl ScrollAnim {
 
 // ── Background tidy job ───────────────────────────────────────────────────────
 
+/// What a background [`TidyJob`] does. Both run off the main thread and pulse the
+/// map border; they differ only in how much they move rooms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TidyKind {
+    /// Full relayout + overlap cleanup + hint repair + compaction. Config-driven
+    /// (the `background_tidy` setting) — rearranges the whole layer for aesthetics.
+    Full,
+    /// Overlap cleanup only — nudges rooms just enough to remove rendered overlaps,
+    /// preserving the existing layout. Runs on EVERY geometry change regardless of
+    /// the `background_tidy` setting, so the map is never left showing an overlap
+    /// (the guarantee the old synchronous `apply_turn` cleanup used to provide).
+    Cleanup,
+}
+
 /// An in-flight background tidy job. The worker thread runs the relayout on a
 /// clone of the graph and returns the tidied clone. The run loop polls
 /// `handle.is_finished()` each iteration and joins when done.
@@ -636,6 +650,8 @@ pub struct TidyJob {
     pub gen: u64,
     /// Instant the job was spawned. Used to compute the pulse phase for the border color.
     pub started: std::time::Instant,
+    /// Full relayout vs. overlap-cleanup-only — governs the stale re-trigger.
+    pub kind: TidyKind,
 }
 
 impl std::fmt::Debug for TidyJob {
@@ -644,6 +660,7 @@ impl std::fmt::Debug for TidyJob {
             .field("layer", &self.layer)
             .field("gen", &self.gen)
             .field("started", &self.started)
+            .field("kind", &self.kind)
             .finish_non_exhaustive()
     }
 }
