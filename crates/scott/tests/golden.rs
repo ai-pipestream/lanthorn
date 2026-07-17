@@ -54,7 +54,8 @@ fn golden_transcript() {
          \n\
          Obvious exits: Down.\n\
          \n\
-         I can also see: a brass lamp."
+         I can also see:\n\
+         \x20 a brass lamp"
     );
 
     let script = [

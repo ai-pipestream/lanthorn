@@ -724,8 +724,11 @@ impl Vm {
             .map(|(_, it)| it.text.as_str())
             .collect();
         if !visible.is_empty() {
-            s.push_str("\n\nI can also see: ");
-            s.push_str(&format!("{}.", visible.join(". ")));
+            s.push_str("\n\nI can also see:");
+            for item in &visible {
+                s.push_str("\n  ");
+                s.push_str(item);
+            }
         }
         s
     }
@@ -1252,7 +1255,7 @@ mod tests {
         // period-separated (C64 style).
         assert_eq!(
             vm.room_block(),
-            "I'm in a forest\n\nObvious exits: North. Down.\n\nI can also see: lamp."
+            "I'm in a forest\n\nObvious exits: North. Down.\n\nI can also see:\n  lamp"
         );
 
         // With the darkness flag set and no light source in play, only the dark
