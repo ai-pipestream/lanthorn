@@ -130,6 +130,7 @@ dependencies = [
  "ratatui-image",
  "regex",
  "roxmltree",
+ "scott",
  "serde",
  "serde_json",
  "signal-hook",

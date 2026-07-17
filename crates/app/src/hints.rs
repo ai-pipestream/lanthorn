@@ -200,19 +200,21 @@ pub enum LoadedStory {
     ZCode(Vec<u8>),
     /// A Glulx story image (`.ulx` / `GLUL` Blorb / `.gblorb`).
     Glulx(Vec<u8>),
+    /// A Scott Adams story database (`.dat`).
+    Scott(Vec<u8>),
 }
 
 impl LoadedStory {
     /// The raw executable bytes, regardless of engine.
     pub fn bytes(&self) -> &[u8] {
         match self {
-            LoadedStory::ZCode(b) | LoadedStory::Glulx(b) => b,
+            LoadedStory::ZCode(b) | LoadedStory::Glulx(b) | LoadedStory::Scott(b) => b,
         }
     }
     /// Consume into the raw executable bytes, regardless of engine.
     pub fn into_bytes(self) -> Vec<u8> {
         match self {
-            LoadedStory::ZCode(b) | LoadedStory::Glulx(b) => b,
+            LoadedStory::ZCode(b) | LoadedStory::Glulx(b) | LoadedStory::Scott(b) => b,
         }
     }
 }
@@ -261,6 +263,10 @@ pub fn load_story_bytes(path: &Path) -> io::Result<Vec<u8>> {
             io::ErrorKind::Unsupported,
             "Glulx story files are not supported on this path".to_string(),
         )),
+        LoadedStory::Scott(_) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Scott Adams story files are not supported on this path".to_string(),
+        )),
     }
 }
 
@@ -271,9 +277,15 @@ pub fn load_story_bytes(path: &Path) -> io::Result<Vec<u8>> {
 /// historical pass-through). Never errors for a non-Blorb input.
 pub fn extract_story(bytes: Vec<u8>) -> io::Result<LoadedStory> {
     if !blorb::Blorb::is_blorb(&bytes) {
-        // Raw image: distinguish Glulx by its `Glul` magic; default to Z-code.
+        // Raw image: distinguish Glulx by its `Glul` magic; a Scott Adams `.dat`
+        // is content-sniffed (it has no fixed magic); default to Z-code.
         if bytes.starts_with(b"Glul") {
             return Ok(LoadedStory::Glulx(bytes));
+        }
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            if scott::looks_like_scott(s) {
+                return Ok(LoadedStory::Scott(bytes));
+            }
         }
         return Ok(LoadedStory::ZCode(bytes));
     }
@@ -483,6 +495,23 @@ mod tests {
         assert!(err.to_string().to_lowercase().contains("glulx"));
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn detects_scott_dat() {
+        let dat = include_bytes!("../../scott/tests/tiny_cave.dat").to_vec();
+        match extract_story(dat).unwrap() {
+            LoadedStory::Scott(_) => {}
+            o => panic!("{o:?}"),
+        }
+    }
+
+    #[test]
+    fn zcode_still_defaults() {
+        assert!(matches!(
+            extract_story(vec![3, 0, 0, 0, 0, 0, 0, 0]).unwrap(),
+            LoadedStory::ZCode(_)
+        ));
     }
 
     #[test]

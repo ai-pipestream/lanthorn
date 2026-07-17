@@ -238,6 +238,11 @@ pub(crate) fn boot() -> BootResult {
                 }
             }
         }
+        // Scott engine wired in Task 8/9 — for now, refuse rather than misrun.
+        app::hints::LoadedStory::Scott(_) => {
+            eprintln!("babelmap: Scott Adams stories are not yet supported");
+            std::process::exit(1);
+        }
     };
     // Strip the game's own inline read prompt only when the dedicated command
     // bar is on (SQ-0264); otherwise inline-prompt mode keeps the game's ">".

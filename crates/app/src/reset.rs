@@ -90,6 +90,10 @@ pub(crate) fn reset_game(
                     .expect("restart re-runs the same Glulx story") = new_session;
             })
         }
+        // Scott engine wired in Task 8/9 — restart can't rebuild a Scott session yet.
+        Ok(app::hints::LoadedStory::Scott(_)) => {
+            Err("Scott Adams stories are not yet supported".to_string())
+        }
         Err(e) => Err(format!("{e}")),
     };
     match rebuilt {

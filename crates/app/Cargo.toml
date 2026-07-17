@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 zvm = { path = "../zvm" }
 gvm = { path = "../gvm" }
+scott = { path = "../scott" }
 mapper = { path = "../mapper" }
 blorb = { path = "../blorb" }
 audio = { path = "../audio" }

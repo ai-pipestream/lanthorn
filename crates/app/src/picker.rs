@@ -562,6 +562,8 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
     let launchable = match &loaded {
         crate::hints::LoadedStory::ZCode(b) => zvm::memory::Memory::new(b.clone()).is_ok(),
         crate::hints::LoadedStory::Glulx(b) => gvm::Memory::new(b.clone()).is_ok(),
+        // Scott engine wired in Task 8/9 — not listed by the picker yet.
+        crate::hints::LoadedStory::Scott(_) => false,
     };
     if !launchable {
         return None;
@@ -618,6 +620,8 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
     let engine = match &loaded {
         crate::hints::LoadedStory::ZCode(_) => Engine::ZCode,
         crate::hints::LoadedStory::Glulx(_) => Engine::Glulx,
+        // Unreachable: Scott stories are filtered out as not launchable above.
+        crate::hints::LoadedStory::Scott(_) => unreachable!("Scott is never launchable yet"),
     };
     let is_container = self_blorb.is_some();
     let (version, serial, release, features, format) = match engine {
