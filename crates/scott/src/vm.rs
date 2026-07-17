@@ -19,30 +19,26 @@ pub struct Vm {
     pub(crate) flags: [bool; 32],
     pub(crate) counters: [i32; 16],
     pub(crate) cur_counter: usize,
-    #[allow(dead_code)] // used in later task
     pub(crate) saved_rooms: [usize; 16],
-    #[allow(dead_code)] // used in later task
     pub(crate) lamp: i32, // remaining light; -1 = infinite
     pub(crate) out: String, // pending transcript
     pub(crate) quit: bool,
     pub(crate) needs_line: bool,
-    #[allow(dead_code)] // used in later task
-    pub(crate) last_noun: String, // for print-noun opcodes (later task)
-    #[allow(dead_code)] // used in later task
-    pub(crate) rng_state: u32, // xorshift PRNG state (used by later task; init to a fixed nonzero)
-    #[allow(dead_code)] // used in later task
-    pub(crate) pending_line: Option<String>, // buffered command (later task consumes)
+    pub(crate) last_noun: String, // for print-noun opcodes
+    pub(crate) rng_state: u32, // xorshift PRNG state
+    pub(crate) pending_line: Option<String>, // buffered command
 }
 
 impl Vm {
     /// Initialize: item_loc from each item's start_loc, player=start_room, lamp=light_time,
     /// flags/counters cleared, cur_counter=0, saved_rooms=[start_room? or 0], needs_line=true.
-    /// Do NOT describe the room yet (room description is a later task); leave `out` empty.
+    /// Describes the starting room into `out` so the host can read the intro via
+    /// `take_output()` before driving input.
     pub fn new(db: Database) -> Vm {
         let item_loc = db.items.iter().map(|i| i.start_loc).collect();
         let player = db.start_room;
         let lamp = db.light_time;
-        Vm {
+        let mut vm = Vm {
             db,
             item_loc,
             player,
@@ -57,7 +53,10 @@ impl Vm {
             last_noun: String::new(),
             rng_state: 0x1234_5678,
             pending_line: None,
-        }
+        };
+        vm.describe_room();
+        vm.needs_line = true;
+        vm
     }
 
     // --- accessors used by later tasks + the host adapter ---
@@ -74,18 +73,18 @@ impl Vm {
         self.quit
     }
 
-    // --- minimal step/supply stubs (FULL turn logic is a later task) ---
-    /// For now: if a line is pending, clear it and return Continue; else if not quit, return NeedLine.
+    /// Run one turn if a line is buffered, then request the next.
     pub fn step(&mut self) -> StepResult {
         if self.quit {
             return StepResult::Quit;
         }
-        if self.pending_line.take().is_some() {
-            StepResult::Continue
-        } else {
-            self.needs_line = true;
-            StepResult::NeedLine
+        if let Some(cmd) = self.pending_line.take() {
+            self.run_turn(&cmd);
+            if self.quit {
+                return StepResult::Quit;
+            }
         }
+        StepResult::NeedLine
     }
 
     /// Buffer the command; clear needs_line.
@@ -94,11 +93,25 @@ impl Vm {
         self.needs_line = false;
     }
 
-    // --- THIS TASK'S FOCUS ---
-    // eval_condition (and the field/helper reads it drives) is only exercised by
-    // tests until the turn loop (later task) calls it; allow(dead_code) keeps
-    // `cargo clippy` (without --tests) clean in the meantime.
-    #[allow(dead_code)]
+    #[cfg(test)]
+    pub(crate) fn seed_rng(&mut self, s: u32) {
+        self.rng_state = s.max(1);
+    }
+
+    /// xorshift32 PRNG, deterministic given `rng_state`.
+    fn next_rand(&mut self) -> u32 {
+        let mut x = self.rng_state.max(1);
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng_state = x;
+        x
+    }
+
+    fn roll_100(&mut self) -> u32 {
+        self.next_rand() % 100
+    }
+
     pub(crate) fn eval_condition(&self, c: &Condition) -> bool {
         let value = c.value as usize;
         match c.code {
@@ -177,8 +190,6 @@ impl Vm {
 
     /// Execute the 4 command opcodes of one action, pulling operands in order from
     /// `params`. Returns true if a `continue` (73) was executed.
-    // Only exercised by tests until the turn loop (later task) calls it.
-    #[allow(dead_code)]
     fn run_commands(&mut self, cmds: &[u16; 4], params: &[u16]) -> bool {
         let mut p = params.iter().copied();
         let mut did_continue = false;
@@ -318,6 +329,146 @@ impl Vm {
             }
         }
         did_continue
+    }
+
+    /// Run one full turn: occurrences, parse, command match, built-in fallback, lamp.
+    fn run_turn(&mut self, cmd: &str) {
+        self.run_occurrences();
+
+        let mut w = cmd.split_whitespace();
+        let w1 = w.next();
+        let w2 = w.next();
+        let mut vb = w1.and_then(|s| self.db.match_verb(s)).unwrap_or(0);
+        let no = match w2 {
+            Some(s) => self.db.match_noun(s).unwrap_or(0),
+            None => w1.and_then(|s| self.db.match_noun(s)).unwrap_or(0),
+        };
+        if vb == 0 && (1..=6).contains(&no) {
+            vb = 1;
+        }
+        self.last_noun = w2.or(w1).unwrap_or("").to_uppercase();
+
+        let matched = self
+            .db
+            .actions
+            .iter()
+            .enumerate()
+            .find(|(_, a)| {
+                a.verb == vb
+                    && (a.noun == no || a.noun == 0)
+                    && a.conditions.iter().all(|c| self.eval_condition(c))
+            })
+            .map(|(i, _)| i);
+        let mut handled = false;
+        if let Some(idx) = matched {
+            self.run_action_chain(idx);
+            handled = true;
+        }
+
+        if !handled {
+            if vb == 1 {
+                if (1..=6).contains(&no) {
+                    let dir = no as usize - 1;
+                    let dark_blind = self.flags[DARK_FLAG]
+                        && !(self.item_carried(LIGHT_SOURCE) || self.item_in_room(LIGHT_SOURCE));
+                    if dark_blind {
+                        self.out.push_str("It is dangerous to move in the dark!\n");
+                    }
+                    let dest = self.db.rooms[self.player].exits[dir];
+                    if dest != 0 {
+                        self.player = dest;
+                        self.describe_room();
+                    } else {
+                        self.out.push_str("I can't go in that direction.\n");
+                    }
+                } else {
+                    self.out.push_str("I need a direction.\n");
+                }
+            } else if vb == 10 {
+                match self.find_auto_noun_item() {
+                    Some(idx) if self.item_loc_of(idx) == Some(self.player as i32) => {
+                        if self.carried_count() < self.db.max_carry {
+                            self.set_item_loc(idx, CARRIED);
+                            self.out.push_str("OK.\n");
+                        } else {
+                            self.out.push_str("You are carrying too much.\n");
+                        }
+                    }
+                    Some(_) => self.out.push_str("It's beyond my power to do that.\n"),
+                    None => self.out.push_str("I don't understand your command.\n"),
+                }
+            } else if vb == 18 {
+                match self.find_auto_noun_item() {
+                    Some(idx) if self.item_carried(idx) => {
+                        self.set_item_loc(idx, self.player as i32);
+                        self.out.push_str("OK.\n");
+                    }
+                    _ => self.out.push_str("I don't understand your command.\n"),
+                }
+            } else {
+                self.out.push_str("I don't understand your command.\n");
+            }
+        }
+
+        if self.db.light_time != -1 && self.item_in_play(LIGHT_SOURCE) && self.lamp > 0 {
+            self.lamp -= 1;
+            if self.lamp == 0 {
+                self.flag_set(LAMP_EMPTY_FLAG, true);
+                self.out.push_str("Your light has run out.\n");
+            }
+        }
+
+        self.needs_line = true;
+    }
+
+    /// Index of the item whose `auto_noun` matches the last typed noun, if any.
+    fn find_auto_noun_item(&self) -> Option<usize> {
+        self.db.items.iter().position(|it| {
+            it.auto_noun
+                .as_deref()
+                .map(|n| n.eq_ignore_ascii_case(&self.last_noun))
+                .unwrap_or(false)
+        })
+    }
+
+    /// Occurrence pass: every verb==0 action whose conditions all pass gets a
+    /// noun-as-percent-chance roll (noun==0 always fires).
+    fn run_occurrences(&mut self) {
+        let candidates: Vec<usize> = self
+            .db
+            .actions
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.verb == 0 && a.conditions.iter().all(|c| self.eval_condition(c)))
+            .map(|(i, _)| i)
+            .collect();
+        for idx in candidates {
+            let noun = self.db.actions[idx].noun;
+            if noun == 0 || self.roll_100() < noun as u32 {
+                self.run_action_chain(idx);
+            }
+        }
+    }
+
+    /// Run `start`'s commands, then chain into the next action(s) while
+    /// `continue` (opcode 73) keeps firing.
+    fn run_action_chain(&mut self, start: usize) {
+        let mut idx = start;
+        loop {
+            let (cmds, params) = {
+                let a = &self.db.actions[idx];
+                let params: Vec<u16> = a.conditions.iter().filter(|c| c.code == 0).map(|c| c.value).collect();
+                (a.commands, params)
+            };
+            let cont = self.run_commands(&cmds, &params);
+            if !cont {
+                break;
+            }
+            idx += 1;
+            if idx >= self.db.actions.len() {
+                break;
+            }
+        }
     }
 
     fn print_message(&mut self, n: usize) {
@@ -619,5 +770,114 @@ mod tests {
         let mut vm2 = vm_with(items, rooms4(), 0);
         vm2.run_commands(&[63, 0, 0, 0], &[]);
         assert!(vm2.has_quit());
+    }
+
+    fn tiny_world() -> Database {
+        let mut items = Vec::new();
+        for i in 0..10 {
+            if i == 9 {
+                items.push(Item {
+                    text: "lamp".into(),
+                    treasure: false,
+                    auto_noun: Some("LAMP".into()),
+                    start_loc: 1,
+                });
+            } else {
+                items.push(Item {
+                    text: format!("filler{i}"),
+                    treasure: false,
+                    auto_noun: None,
+                    start_loc: 0,
+                });
+            }
+        }
+        let mut verbs = vec![String::new(); 19];
+        verbs[1] = "GO".into();
+        verbs[10] = "GET".into();
+        verbs[18] = "DROP".into();
+        let mut nouns = vec![String::new(); 7];
+        nouns[1] = "NORTH".into();
+        nouns[2] = "SOUTH".into();
+        nouns[3] = "EAST".into();
+        nouns[4] = "WEST".into();
+        nouns[5] = "UP".into();
+        nouns[6] = "DOWN".into();
+        let rooms = vec![
+            Room {
+                exits: [0; 6],
+                desc: "limbo".into(),
+                literal: true,
+            },
+            Room {
+                exits: [2, 0, 0, 0, 0, 0],
+                desc: "forest clearing".into(),
+                literal: true,
+            },
+            Room {
+                exits: [0, 1, 0, 0, 0, 0],
+                desc: "damp cave".into(),
+                literal: true,
+            },
+        ];
+        Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 3,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![],
+            verbs,
+            nouns,
+            rooms,
+            messages: vec![String::new()],
+            items,
+        }
+    }
+
+    #[test]
+    fn walk_north_moves_and_describes() {
+        let mut vm = Vm::new(tiny_world());
+        vm.seed_rng(1);
+        let _ = vm.take_output(); // discard the opening room description
+        vm.supply_line("go north");
+        assert_eq!(vm.step(), StepResult::NeedLine);
+        let out = vm.take_output();
+        assert!(out.to_lowercase().contains("cave"), "moved into the cave: {out:?}");
+        assert_eq!(vm.current_room(), 2);
+    }
+
+    #[test]
+    fn bare_direction_moves() {
+        let mut vm = Vm::new(tiny_world());
+        let _ = vm.take_output();
+        vm.supply_line("north");
+        vm.step();
+        assert_eq!(vm.current_room(), 2);
+        vm.supply_line("south");
+        vm.step();
+        assert_eq!(vm.current_room(), 1);
+    }
+
+    #[test]
+    fn get_lamp_then_inventory() {
+        let mut vm = Vm::new(tiny_world());
+        let _ = vm.take_output();
+        vm.supply_line("get lamp");
+        vm.step();
+        vm.supply_line("inventory");
+        vm.step(); // no INVENTORY verb in tiny_world -> "don't understand"; instead assert the item moved
+        // Better: assert the lamp is now carried.
+        assert_eq!(vm.item_loc_at(LIGHT_SOURCE), CARRIED);
+    }
+
+    #[test]
+    fn blocked_direction_reports() {
+        let mut vm = Vm::new(tiny_world());
+        let _ = vm.take_output();
+        vm.supply_line("east"); // room1 has no east exit
+        vm.step();
+        assert!(vm.take_output().to_lowercase().contains("can't go"));
+        assert_eq!(vm.current_room(), 1);
     }
 }
