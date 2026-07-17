@@ -12,9 +12,9 @@ use ratatui::layout::Rect;
 
 use app::archive::load_archive;
 use app::engine::Engine;
-use app::tidy::tidy_layer_silent;
+use app::tidy::{cleanup_overlaps_layer_silent, tidy_layer_silent};
 use app::session::{apply_turn, TurnResult};
-use app::state::{AppState, SoundPulse, TidyJob, TranscriptKind};
+use app::state::{AppState, SoundPulse, TidyJob, TidyKind, TranscriptKind};
 use app::storage::default_state_path;
 
 use crate::engine_helpers::{restore_error_msg, zvm_session_opt, zvm_session_opt_mut};
@@ -130,45 +130,60 @@ pub(crate) fn finish_command_turn(
     persist_aux_after_turn(session, state, game_dir);
     persist_vfs_after_turn(session, game_dir);
 
-    // Background tidy: silently re-tidy the active layer when the
-    // configured mode calls for it. Only runs in Auto layout mode.
-    // Overlap signal is computed for ALL modes (not only OnOverlap).
+    // Background map maintenance: a geometry change (new room/connection) is the
+    // ONLY thing that can require re-layout, so all of it runs on a worker thread —
+    // NO routing or overlap cleanup ever touches the interpreter thread (SQ-0379).
+    // A bare "look"/"inventory" changes no geometry, so it schedules nothing and
+    // pays nothing here. The `background_tidy` setting decides whether the job is a
+    // FULL relayout (aesthetics) or overlap-cleanup-only; cleanup runs either way,
+    // so the map is never left overlapping regardless of the setting. Only runs in
+    // Auto layout mode.
+    //
+    // Abort-and-replace on rapid movement: if a job is already in flight when the
+    // next room arrives, we DROP its handle (the thread detaches and finishes into
+    // the void — its result is discarded by the gen check) and spawn a fresh job for
+    // the new state, so the latest geometry always wins immediately instead of
+    // queueing behind a stale computation. Threads can't be force-killed, but only
+    // the newest job is tracked/joined; concurrent stragglers are bounded by the
+    // input rate. (This job is spawned once per command; the per-frame render worker
+    // still coalesces — see `spawn_render_job` — to avoid a per-frame thread storm.)
     if mapper.mode == mapper::layout::LayoutMode::Auto {
         let new_room = mapper.graph.rooms().count() > rooms_before;
-        let active_layer = state.active_layer(&mapper.graph);
-        // Always compute overlap so all modes can react to it.
-        let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
-        let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
-        let has_overlap = cells.len() < total_rooms;
-        let has_distorted = mapper.graph.connections().iter().any(|c| {
-            c.distorted
-                && mapper.graph.layer_of(c.origin) == active_layer
-                && mapper.graph.layer_of(c.dest) == active_layer
-        });
-        let overlap = has_overlap || has_distorted;
-        // Only auto-tidy on turns that actually changed the graph, so a
-        // bare "look" (overlap persists, graph unchanged) doesn't pulse.
         let new_conn = mapper.graph.connections().len() > conns_before;
         let changed = new_room || new_conn;
-        if should_bg_tidy(state.config.background_tidy, new_room, overlap, changed, bg_tidy_counter) {
-            // Spawn a worker thread only if no job is currently in flight (coalesce).
-            if state.tidy_job.is_none() {
-                let graph_clone = mapper.graph.clone();
-                let gen = state.graph_gen;
-                let handle = std::thread::spawn(move || {
-                    let mut g = graph_clone;
-                    tidy_layer_silent(&mut g, active_layer);
-                    g
-                });
-                state.tidy_job = Some(TidyJob {
-                    handle,
-                    layer: active_layer,
-                    gen,
-                    started: std::time::Instant::now(),
-                });
-            }
-            // If a job is already in flight we skip spawning; the gen check after
-            // join will detect the stale result and re-trigger as needed.
+        if changed {
+            let active_layer = state.active_layer(&mapper.graph);
+            // Overlap/distortion signal → decides FULL relayout vs. cleanup-only.
+            let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
+            let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
+            let has_overlap = cells.len() < total_rooms;
+            let has_distorted = mapper.graph.connections().iter().any(|c| {
+                c.distorted
+                    && mapper.graph.layer_of(c.origin) == active_layer
+                    && mapper.graph.layer_of(c.dest) == active_layer
+            });
+            let overlap = has_overlap || has_distorted;
+            let full = should_bg_tidy(
+                state.config.background_tidy, new_room, overlap, changed, bg_tidy_counter,
+            );
+            let kind = if full { TidyKind::Full } else { TidyKind::Cleanup };
+            let graph_clone = mapper.graph.clone();
+            let gen = state.graph_gen;
+            let handle = std::thread::spawn(move || {
+                let mut g = graph_clone;
+                match kind {
+                    TidyKind::Full => tidy_layer_silent(&mut g, active_layer),
+                    TidyKind::Cleanup => cleanup_overlaps_layer_silent(&mut g, active_layer),
+                }
+                g
+            });
+            state.tidy_job = Some(TidyJob {
+                handle,
+                layer: active_layer,
+                gen,
+                started: std::time::Instant::now(),
+                kind,
+            });
         }
     }
 

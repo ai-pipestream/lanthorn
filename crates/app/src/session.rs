@@ -527,9 +527,10 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
         } else {
             mapper.observe(snap.number, &snap.name, parse_direction(command));
         }
-        if mapper.mode == mapper::layout::LayoutMode::Auto {
-            crate::render::map::cleanup_overlaps(&mut mapper.graph, 2, 20);
-        }
+        // Overlap cleanup is NOT done here: it is map-layout work and must never run
+        // on the interpreter thread. On a geometry change the run loop schedules a
+        // background cleanup (or full tidy) job — see `finish_command_turn` and
+        // `cleanup_overlaps_layer_silent`. (SQ-0379)
     }
 }
 
@@ -1345,10 +1346,11 @@ mod tests {
     }
 
     #[test]
-    fn auto_mode_cleanup_keeps_map_free_of_illegal_overlaps() {
+    fn auto_mode_background_cleanup_keeps_map_free_of_illegal_overlaps() {
         // Drive a small loop (E, N, W, S toward start) that — under incremental
-        // placement — can produce a routing overlap.  After the sequence,
-        // render_overlap_stats must report zero illegal overlaps.
+        // placement — can produce a routing overlap.  `apply_turn` no longer cleans
+        // overlaps inline (that is background map work now); running the background
+        // cleanup the run loop schedules must leave zero illegal overlaps.
         let mut m = Mapper::default(); // Auto mode by default
 
         apply_turn(&mut m, "look",  &turn(1, "Start"));
@@ -1357,8 +1359,10 @@ mod tests {
         apply_turn(&mut m, "west",  &turn(4, "North Room"));
         apply_turn(&mut m, "south", &turn(1, "Start")); // back to start — closes the loop
 
+        crate::tidy::cleanup_overlaps_layer_silent(&mut m.graph, mapper::layer::MAIN_LAYER);
+
         let (illegal, _) = crate::render::map::render_overlap_stats(&m.graph);
-        assert_eq!(illegal, 0, "Auto mode cleanup must leave zero illegal overlaps");
+        assert_eq!(illegal, 0, "background cleanup must leave zero illegal overlaps");
     }
 
     #[test]

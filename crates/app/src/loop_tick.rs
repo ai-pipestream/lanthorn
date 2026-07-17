@@ -13,9 +13,9 @@ use mapper::mapper::Mapper;
 
 use app::engine::Engine;
 use app::glulx_session::GlulxSession;
-use app::tidy::{apply_tidy_result, tidy_layer_silent, ApplyTidyOutcome};
+use app::tidy::{apply_tidy_result, cleanup_overlaps_layer_silent, tidy_layer_silent, ApplyTidyOutcome};
 use app::render::map::SOUND_PULSE_MS;
-use app::state::{AppState, TidyJob, TidyAnim, TranscriptKind};
+use app::state::{AppState, TidyJob, TidyKind, TidyAnim, TranscriptKind};
 
 /// Style watch: drain events, debounce, then reload. Returns `true` if a reload
 /// happened (colours/status changed → repaint).
@@ -135,13 +135,18 @@ pub(crate) fn poll_tidy_jobs(
                         }
                     }
                     ApplyTidyOutcome::Stale => {
-                        // Graph changed mid-tidy: re-trigger a fresh tidy immediately.
+                        // Graph changed mid-tidy: re-trigger the SAME kind of job
+                        // (full relayout vs. cleanup-only) for the current state.
                         let active_layer2 = state.active_layer(&mapper.graph);
+                        let kind = job.kind;
                         let graph_clone = mapper.graph.clone();
                         let gen2 = state.graph_gen;
                         let handle2 = std::thread::spawn(move || {
                             let mut g = graph_clone;
-                            tidy_layer_silent(&mut g, active_layer2);
+                            match kind {
+                                TidyKind::Full => tidy_layer_silent(&mut g, active_layer2),
+                                TidyKind::Cleanup => cleanup_overlaps_layer_silent(&mut g, active_layer2),
+                            }
                             g
                         });
                         state.tidy_job = Some(TidyJob {
@@ -149,6 +154,7 @@ pub(crate) fn poll_tidy_jobs(
                             layer: active_layer2,
                             gen: gen2,
                             started: std::time::Instant::now(),
+                            kind,
                         });
                     }
                 }
