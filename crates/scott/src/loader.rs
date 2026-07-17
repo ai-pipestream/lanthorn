@@ -173,6 +173,20 @@ impl Database {
             });
         }
 
+        // Trailer (optional metadata, best-effort): NumActions+1 comment strings,
+        // then a version int, then the adventure number. Any failure here just
+        // leaves adventure_number at 0 — the trailer is not required to parse.
+        let mut adventure_number = 0;
+        (|| -> Result<(), LoadError> {
+            for _ in 0..=num_actions {
+                lex.next_str()?;
+            }
+            let _version = lex.next_int()?;
+            adventure_number = lex.next_int()?;
+            Ok(())
+        })()
+        .ok();
+
         Ok(Database {
             max_carry,
             start_room: player_room as usize,
@@ -186,6 +200,7 @@ impl Database {
             rooms,
             messages,
             items,
+            adventure_number,
         })
     }
 }
@@ -250,6 +265,36 @@ mod tests {
         assert_eq!(db.actions.len(), 1); // NumActions=0 -> 1 slot
         assert_eq!(db.actions[0].verb, 1);
         assert_eq!(db.actions[0].noun, 0);
+    }
+    #[test]
+    fn parses_trailer_adventure_number() {
+        // MINI's trailer: 1 comment string ("action comment"), version=0,
+        // adventure_number=1, checksum=1.
+        let db = Database::parse(MINI).unwrap();
+        assert_eq!(db.adventure_number, 1);
+    }
+    #[test]
+    fn missing_trailer_leaves_adventure_number_zero() {
+        // Same header/body as MINI, but with the trailer entirely removed.
+        const NO_TRAILER: &str = r#"
+32767 1 0 1 2 6 1 0 3 125 0 1
+150 1 0 0 0 0 0 0
+"" ""
+"GO" "NORTH"
+0 0 0 0 0 0 "*limbo"
+2 0 0 0 0 0 "*forest clearing"
+0 0 0 0 0 0 "*swamp"
+""
+"" 0
+"*a brass lamp/LAMP/" 1
+"#;
+        let db = Database::parse(NO_TRAILER).expect("parse without trailer");
+        assert_eq!(db.adventure_number, 0);
+    }
+    #[test]
+    fn tiny_cave_fixture_reports_adventure_number() {
+        let db = Database::parse(include_str!("../tests/tiny_cave.dat")).expect("parse fixture");
+        assert_eq!(db.adventure_number, 99);
     }
     #[test]
     fn sniff_accepts_scott_rejects_garbage() {

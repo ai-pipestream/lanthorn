@@ -679,6 +679,7 @@ mod tests {
             rooms,
             messages: vec!["".into()],
             items,
+            adventure_number: 0,
         };
         let mut vm = Vm::new(db);
         vm.set_player(player);
@@ -848,6 +849,7 @@ mod tests {
             }],
             messages,
             items,
+            adventure_number: 0,
         };
         let mut vm = Vm::new(db);
 
@@ -933,6 +935,7 @@ mod tests {
             rooms,
             messages: vec![String::new()],
             items,
+            adventure_number: 0,
         }
     }
 

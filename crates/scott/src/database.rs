@@ -12,6 +12,8 @@ pub struct Database {
     pub rooms: Vec<Room>,
     pub messages: Vec<String>,
     pub items: Vec<Item>,
+    /// Adventure number from the trailer, best-effort. 0 = unknown/absent.
+    pub adventure_number: i32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +129,7 @@ mod tests {
                 auto_noun: None,
                 start_loc: 1,
             }],
+            adventure_number: 0,
         };
         assert_eq!(db.rooms.len(), 2);
         assert_eq!(db.start_room, 1);
@@ -159,6 +162,7 @@ mod tests {
             rooms: vec![],
             messages: vec![],
             items: vec![],
+            adventure_number: 0,
         };
         assert_eq!(db.match_verb("go"), Some(1));
         assert_eq!(db.match_verb("GET"), Some(10));
