@@ -157,6 +157,231 @@ impl Vm {
         self.flags.get(idx).copied().unwrap_or(false)
     }
 
+    fn flag_set(&mut self, idx: usize, v: bool) {
+        if let Some(f) = self.flags.get_mut(idx) {
+            *f = v;
+        }
+    }
+
+    fn set_item_loc(&mut self, idx: usize, loc: i32) {
+        if let Some(l) = self.item_loc.get_mut(idx) {
+            *l = loc;
+        }
+    }
+
+    fn carried_count(&self) -> i32 {
+        (0..self.item_loc.len())
+            .filter(|&i| self.item_carried(i))
+            .count() as i32
+    }
+
+    /// Execute the 4 command opcodes of one action, pulling operands in order from
+    /// `params`. Returns true if a `continue` (73) was executed.
+    // Only exercised by tests until the turn loop (later task) calls it.
+    #[allow(dead_code)]
+    fn run_commands(&mut self, cmds: &[u16; 4], params: &[u16]) -> bool {
+        let mut p = params.iter().copied();
+        let mut did_continue = false;
+        for &n in cmds {
+            match n {
+                0 => {}
+                1..=51 => self.print_message(n as usize),
+                102..=149 => self.print_message(n as usize - 50),
+                52 => {
+                    let item = p.next().unwrap_or(0) as usize;
+                    if self.carried_count() < self.db.max_carry {
+                        self.set_item_loc(item, CARRIED);
+                    } else {
+                        self.out.push_str("You are carrying too much.\n");
+                    }
+                }
+                53 => {
+                    let item = p.next().unwrap_or(0) as usize;
+                    self.set_item_loc(item, self.player as i32);
+                }
+                54 => {
+                    let room = p.next().unwrap_or(0) as usize;
+                    if room < self.db.rooms.len() {
+                        self.player = room;
+                    }
+                }
+                55 => {
+                    let item = p.next().unwrap_or(0) as usize;
+                    self.set_item_loc(item, 0);
+                }
+                56 => self.flag_set(DARK_FLAG, true),
+                57 => self.flag_set(DARK_FLAG, false),
+                58 => {
+                    let flag = p.next().unwrap_or(0) as usize;
+                    self.flag_set(flag, true);
+                }
+                59 => {
+                    let item = p.next().unwrap_or(0) as usize;
+                    self.set_item_loc(item, 0);
+                }
+                60 => {
+                    let flag = p.next().unwrap_or(0) as usize;
+                    self.flag_set(flag, false);
+                }
+                61 => {
+                    self.out.push_str("You have died.\n");
+                    self.flag_set(DARK_FLAG, false);
+                    if let Some(last) = self.db.rooms.len().checked_sub(1) {
+                        self.player = last;
+                    }
+                }
+                62 => {
+                    let item = p.next().unwrap_or(0) as usize;
+                    let room = p.next().unwrap_or(0) as usize;
+                    if room < self.db.rooms.len() {
+                        self.set_item_loc(item, room as i32);
+                    }
+                }
+                63 => self.quit = true,
+                64 => self.describe_room(),
+                65 => self.print_score(),
+                66 => self.print_inventory(),
+                67 => self.flag_set(0, true),
+                68 => self.flag_set(0, false),
+                69 => {
+                    self.lamp = self.db.light_time;
+                    self.flag_set(LAMP_EMPTY_FLAG, false);
+                }
+                70 => self.out.clear(),
+                71 => { /* save game: host wires this later (v1 no-op) */ }
+                72 => {
+                    let a = p.next().unwrap_or(0) as usize;
+                    let b = p.next().unwrap_or(0) as usize;
+                    if let (Some(&la), Some(&lb)) = (self.item_loc.get(a), self.item_loc.get(b)) {
+                        self.set_item_loc(a, lb);
+                        self.set_item_loc(b, la);
+                    }
+                }
+                73 => did_continue = true,
+                74 => {
+                    let item = p.next().unwrap_or(0) as usize;
+                    self.set_item_loc(item, CARRIED);
+                }
+                75 => {
+                    let a = p.next().unwrap_or(0) as usize;
+                    let b = p.next().unwrap_or(0) as usize;
+                    if let Some(&lb) = self.item_loc.get(b) {
+                        self.set_item_loc(a, lb);
+                    }
+                }
+                76 => self.describe_room(),
+                77 => {
+                    let c = &mut self.counters[self.cur_counter];
+                    *c = (*c - 1).max(0);
+                }
+                78 => {
+                    let v = self.counters[self.cur_counter];
+                    self.out.push_str(&v.to_string());
+                    self.out.push('\n');
+                }
+                79 => {
+                    let v = p.next().unwrap_or(0) as i32;
+                    self.counters[self.cur_counter] = v;
+                }
+                80 => {
+                    std::mem::swap(&mut self.player, &mut self.saved_rooms[0]);
+                }
+                81 => {
+                    let idx = p.next().unwrap_or(0) as usize;
+                    self.cur_counter = idx.min(self.counters.len() - 1);
+                }
+                82 => {
+                    let v = p.next().unwrap_or(0) as i32;
+                    self.counters[self.cur_counter] += v;
+                }
+                83 => {
+                    let v = p.next().unwrap_or(0) as i32;
+                    self.counters[self.cur_counter] -= v;
+                }
+                84 => {
+                    let noun = self.last_noun.clone();
+                    self.out.push_str(&noun);
+                }
+                85 => {
+                    let noun = self.last_noun.clone();
+                    self.out.push_str(&noun);
+                    self.out.push('\n');
+                }
+                86 => self.out.push('\n'),
+                87 => {
+                    let idx = (p.next().unwrap_or(0) as usize).min(self.saved_rooms.len() - 1);
+                    std::mem::swap(&mut self.player, &mut self.saved_rooms[idx]);
+                }
+                88 => { /* pause: host handles timing */ }
+                89 => { /* draw picture: no-op for text interpreter */ }
+                _ => {} // 90..=101 unused
+            }
+        }
+        did_continue
+    }
+
+    fn print_message(&mut self, n: usize) {
+        if let Some(msg) = self.db.messages.get(n) {
+            self.out.push_str(msg);
+            self.out.push('\n');
+        }
+    }
+
+    /// BASIC room description: room text + visible items. Light/darkness handling
+    /// and detailed exit listing are a later task.
+    fn describe_room(&mut self) {
+        if let Some(room) = self.db.rooms.get(self.player) {
+            self.out.push_str(&room.desc);
+            self.out.push('\n');
+        }
+        let visible: Vec<&str> = self
+            .db
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.item_in_room(*i))
+            .map(|(_, it)| it.text.as_str())
+            .collect();
+        if !visible.is_empty() {
+            self.out.push_str("You can see: ");
+            self.out.push_str(&visible.join(", "));
+            self.out.push('\n');
+        }
+    }
+
+    fn print_inventory(&mut self) {
+        let carried: Vec<&str> = self
+            .db
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.item_carried(*i))
+            .map(|(_, it)| it.text.as_str())
+            .collect();
+        if carried.is_empty() {
+            self.out.push_str("You are carrying nothing.\n");
+        } else {
+            self.out.push_str("You are carrying: ");
+            self.out.push_str(&carried.join(", "));
+            self.out.push('\n');
+        }
+    }
+
+    fn print_score(&mut self) {
+        let total = self.db.num_treasures;
+        let in_treasure_room = self
+            .db
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(_, it)| it.treasure)
+            .filter(|(i, _)| self.item_loc_of(*i) == Some(self.db.treasure_room as i32))
+            .count() as i32;
+        self.out.push_str(&format!(
+            "You have {in_treasure_room} out of {total} treasures.\n"
+        ));
+    }
+
     // --- test-only helpers (or make fields pub(crate) and set directly) ---
     #[cfg(test)]
     pub(crate) fn set_player(&mut self, r: usize) {
@@ -169,6 +394,18 @@ impl Vm {
     #[cfg(test)]
     pub(crate) fn set_counter(&mut self, v: i32) {
         self.counters[self.cur_counter] = v;
+    }
+    #[cfg(test)]
+    pub(crate) fn item_loc_at(&self, idx: usize) -> i32 {
+        self.item_loc[idx]
+    }
+    #[cfg(test)]
+    pub(crate) fn flag_at(&self, i: usize) -> bool {
+        self.flags[i]
+    }
+    #[cfg(test)]
+    pub(crate) fn counter_at(&self) -> i32 {
+        self.counters[self.cur_counter]
     }
 }
 
@@ -268,5 +505,119 @@ mod tests {
         assert!(vm.eval_condition(&Condition { code: 15, value: 5 })); // counter <= 5
         assert!(vm.eval_condition(&Condition { code: 19, value: 5 })); // counter == 5
         assert!(vm.eval_condition(&Condition { code: 16, value: 4 })); // counter > 4
+    }
+
+    fn rooms4() -> Vec<Room> {
+        (0..4)
+            .map(|i| Room {
+                exits: [0; 6],
+                desc: format!("room{i}"),
+                literal: true,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cmd_get_drop_goto_flags_counters() {
+        let items = vec![
+            Item {
+                text: "limbo".into(),
+                treasure: false,
+                auto_noun: None,
+                start_loc: 0,
+            },
+            Item {
+                text: "item1".into(),
+                treasure: false,
+                auto_noun: None,
+                start_loc: 1,
+            },
+            Item {
+                text: "item2".into(),
+                treasure: false,
+                auto_noun: None,
+                start_loc: 2,
+            },
+        ];
+        let mut vm = vm_with(items, rooms4(), 1);
+
+        // GET item1
+        assert!(!vm.run_commands(&[52, 0, 0, 0], &[1]));
+        assert_eq!(vm.item_loc_at(1), CARRIED);
+
+        // DROP item1
+        vm.run_commands(&[53, 0, 0, 0], &[1]);
+        assert_eq!(vm.item_loc_at(1), vm.current_room() as i32);
+
+        // GOTO room 3
+        vm.run_commands(&[54, 0, 0, 0], &[3]);
+        assert_eq!(vm.current_room(), 3);
+
+        // set/clear flag 4
+        vm.run_commands(&[58, 0, 0, 0], &[4]);
+        assert!(vm.flag_at(4));
+        vm.run_commands(&[60, 0, 0, 0], &[4]);
+        assert!(!vm.flag_at(4));
+
+        // counter set/add/sub
+        vm.run_commands(&[79, 0, 0, 0], &[7]);
+        assert_eq!(vm.counter_at(), 7);
+        vm.run_commands(&[82, 0, 0, 0], &[2]);
+        assert_eq!(vm.counter_at(), 9);
+        vm.run_commands(&[83, 0, 0, 0], &[3]);
+        assert_eq!(vm.counter_at(), 6);
+    }
+
+    #[test]
+    fn cmd_message_ranges() {
+        let mut messages = vec!["".to_string(); 53];
+        messages[1] = "hello".into();
+        messages[52] = "deep".into();
+        let items = vec![Item {
+            text: "x".into(),
+            treasure: false,
+            auto_noun: None,
+            start_loc: 0,
+        }];
+        let db = Database {
+            max_carry: 6,
+            start_room: 0,
+            num_treasures: 0,
+            word_length: 3,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![],
+            verbs: vec!["".into()],
+            nouns: vec!["".into()],
+            rooms: vec![Room {
+                exits: [0; 6],
+                desc: "r".into(),
+                literal: true,
+            }],
+            messages,
+            items,
+        };
+        let mut vm = Vm::new(db);
+
+        vm.run_commands(&[1, 0, 0, 0], &[]);
+        assert!(vm.take_output().contains("hello"));
+        vm.run_commands(&[102, 0, 0, 0], &[]); // 102 -> message 52
+        assert!(vm.take_output().contains("deep"));
+    }
+
+    #[test]
+    fn cmd_continue_flag_and_quit() {
+        let items = vec![Item {
+            text: "x".into(),
+            treasure: false,
+            auto_noun: None,
+            start_loc: 0,
+        }];
+        let mut vm = vm_with(items.clone(), rooms4(), 0);
+        assert!(vm.run_commands(&[73, 0, 0, 0], &[]));
+
+        let mut vm2 = vm_with(items, rooms4(), 0);
+        vm2.run_commands(&[63, 0, 0, 0], &[]);
+        assert!(vm2.has_quit());
     }
 }
