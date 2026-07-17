@@ -47,6 +47,8 @@ fn plays_fixture_and_echoes_prompt() {
     // The authentic Scott prompt, never the Infocom `>`.
     assert!(transcript.contains("Tell me what to do ?"), "prompt shown");
     assert!(!transcript.contains('>'), "no Infocom-style prompt");
+    // The room block (top "window") is printed inline, with its exits line.
+    assert!(transcript.contains("Obvious exits:"), "room block shown:\n{transcript}");
     // The piped command is echoed after the prompt so the transcript reads
     // naturally (e.g. "Tell me what to do ? down").
     assert!(transcript.contains("Tell me what to do ? down\n"), "command echoed when piped");

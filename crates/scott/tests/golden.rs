@@ -44,6 +44,19 @@ fn golden_transcript() {
     let mut vm = Vm::new(db);
     vm.seed_rng(1); // deterministic; the only occurrence is noun=100 (always fires)
 
+    // The room is shown by the panel (room_block), never the transcript. Room 1 is
+    // a `*`-literal sentence (printed verbatim), has only a Down exit, and holds
+    // the lamp — exits/items are period-separated (the C64 presentation style).
+    let start_block = vm.room_block();
+    assert_eq!(
+        start_block,
+        "You are in a sunlit forest clearing. A narrow path leads down into darkness.\n\
+         \n\
+         Obvious exits: Down.\n\
+         \n\
+         I can also see: a brass lamp."
+    );
+
     let script = [
         "push button", // continue-chain: click, first 0/0 line SKIPPED (lever unpulled), dust settles
         "pull lever",  // sets flag 5, arming the gated continuation line
@@ -69,8 +82,6 @@ fn golden_transcript() {
 
     let transcript = run_script(&mut vm, &script);
     let expected = "\
-You are in a sunlit forest clearing. A narrow path leads down into darkness.\n\
-You can see: a brass lamp\n\
 > push button\n\
 You press the button. A click echoes.\n\
 Dust settles in the chamber.\n\
@@ -102,12 +113,10 @@ You hear water dripping somewhere in the darkness.\n\
 OK.\n\
 > up\n\
 You hear water dripping somewhere in the darkness.\n\
-You are in a sunlit forest clearing. A narrow path leads down into darkness.\n\
 > down\n\
 You descend into darkness, feeling your way along the damp rock wall.\n\
 > down\n\
 You hear water dripping somewhere in the darkness.\n\
-You are in a crystal grotto glittering with reflected light.\n\
 > score\n\
 You have 0 out of 1 treasures.\n\
 > drop idol\n\

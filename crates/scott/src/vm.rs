@@ -56,7 +56,6 @@ impl Vm {
             rng_state: 0x1234_5678,
             pending_line: None,
         };
-        vm.describe_room();
         vm.needs_line = true;
         vm
     }
@@ -356,7 +355,7 @@ impl Vm {
                     }
                 }
                 63 => self.quit = true,
-                64 => self.describe_room(),
+                64 => { /* LOOK: the host redraws the room panel every frame */ }
                 65 => self.print_score(),
                 66 => self.print_inventory(),
                 67 => self.flag_set(0, true),
@@ -387,7 +386,7 @@ impl Vm {
                         self.set_item_loc(a, lb);
                     }
                 }
-                76 => self.describe_room(),
+                76 => { /* LOOK (redraw): the host room panel is always current */ }
                 77 => {
                     self.current_counter = (self.current_counter - 1).max(-1);
                 }
@@ -475,9 +474,7 @@ impl Vm {
             if vb == 1 {
                 if (1..=6).contains(&no) {
                     let dir = no as usize - 1;
-                    let dark_blind = self.flags[DARK_FLAG]
-                        && !(self.item_carried(LIGHT_SOURCE) || self.item_in_room(LIGHT_SOURCE));
-                    if dark_blind {
+                    if self.is_dark() {
                         self.out.push_str("It is dangerous to move in the dark!\n");
                     }
                     let dest = self
@@ -488,7 +485,6 @@ impl Vm {
                         .unwrap_or(0);
                     if dest != 0 {
                         self.player = dest;
-                        self.describe_room();
                     } else {
                         self.out.push_str("I can't go in that direction.\n");
                     }
@@ -659,12 +655,46 @@ impl Vm {
         }
     }
 
-    /// BASIC room description: room text + visible items. Light/darkness handling
-    /// and detailed exit listing are a later task.
-    fn describe_room(&mut self) {
+    /// True when the current room is unlit: the darkness flag is set and no light
+    /// source (item 9) is either carried or present in the room.
+    pub fn is_dark(&self) -> bool {
+        self.flags[DARK_FLAG]
+            && !(self.item_carried(LIGHT_SOURCE) || self.item_in_room(LIGHT_SOURCE))
+    }
+
+    /// The current room's display block, in the classic Scott Adams "top window"
+    /// form: the room line, then "Obvious exits:", then "I can also see:". The host
+    /// shows this as a persistent panel above the scrolling transcript (the CLI
+    /// prints it inline), so it is a pure query and never touches `out`.
+    ///
+    /// A `*`-literal room prints verbatim; a non-literal room gets the "I'm in a "
+    /// prefix. When the room is dark, only the darkness line is returned.
+    pub fn room_block(&self) -> String {
+        if self.is_dark() {
+            return "It is too dark to see.".to_string();
+        }
+        let mut s = String::new();
         if let Some(room) = self.db.rooms.get(self.player) {
-            self.out.push_str(&room.desc);
-            self.out.push('\n');
+            if room.literal {
+                s.push_str(&room.desc);
+            } else {
+                s.push_str("I'm in a ");
+                s.push_str(&room.desc);
+            }
+            let names = ["North", "South", "East", "West", "Up", "Down"];
+            let exits: Vec<&str> = room
+                .exits
+                .iter()
+                .enumerate()
+                .filter(|(_, &dest)| dest != 0)
+                .map(|(i, _)| names[i])
+                .collect();
+            s.push_str("\n\nObvious exits: ");
+            s.push_str(&if exits.is_empty() {
+                "none".to_string()
+            } else {
+                format!("{}.", exits.join(". "))
+            });
         }
         let visible: Vec<&str> = self
             .db
@@ -675,10 +705,10 @@ impl Vm {
             .map(|(_, it)| it.text.as_str())
             .collect();
         if !visible.is_empty() {
-            self.out.push_str("You can see: ");
-            self.out.push_str(&visible.join(", "));
-            self.out.push('\n');
+            s.push_str("\n\nI can also see: ");
+            s.push_str(&format!("{}.", visible.join(". ")));
         }
+        s
     }
 
     fn print_inventory(&mut self) {
@@ -1180,12 +1210,38 @@ mod tests {
     fn walk_north_moves_and_describes() {
         let mut vm = Vm::new(tiny_world());
         vm.seed_rng(1);
-        let _ = vm.take_output(); // discard the opening room description
         vm.supply_line("go north");
         assert_eq!(vm.step(), StepResult::NeedLine);
-        let out = vm.take_output();
-        assert!(out.to_lowercase().contains("cave"), "moved into the cave: {out:?}");
         assert_eq!(vm.current_room(), 2);
+        // The destination is described by the room panel (room_block), not the
+        // scrolling transcript.
+        let block = vm.room_block();
+        assert!(block.to_lowercase().contains("cave"), "moved into the cave: {block:?}");
+        assert!(block.contains("Obvious exits: South."), "exits listed: {block:?}");
+    }
+
+    #[test]
+    fn room_block_prefix_exits_items_and_darkness() {
+        let mut db = tiny_world();
+        // A non-literal noun room with North + Down exits; the lamp (item 9) is here.
+        db.rooms[1].literal = false;
+        db.rooms[1].desc = "forest".into();
+        db.rooms[1].exits = [2, 0, 0, 0, 0, 3];
+        let mut vm = Vm::new(db);
+
+        // Non-literal rooms get the "I'm in a " prefix; exits and items are
+        // period-separated (C64 style).
+        assert_eq!(
+            vm.room_block(),
+            "I'm in a forest\n\nObvious exits: North. Down.\n\nI can also see: lamp."
+        );
+
+        // With the darkness flag set and no light source in play, only the dark
+        // line shows — no room text, exits, or items.
+        vm.set_item_loc(LIGHT_SOURCE, 0); // banish the lamp to nowhere
+        vm.flag_set(DARK_FLAG, true);
+        assert!(vm.is_dark());
+        assert_eq!(vm.room_block(), "It is too dark to see.");
     }
 
     #[test]

@@ -91,10 +91,12 @@ fn main() {
     let interactive = stdin.is_terminal();
     let mut out = io::stdout();
 
-    // Opening room description, drained before any input is read.
+    // Any pending output before the first prompt (empty today — the room is shown
+    // via the room block below).
     let _ = write!(out, "{}", vm.take_output());
 
     let mut turns = 0u64;
+    let mut last_block = String::new();
     loop {
         if vm.has_quit() {
             break;
@@ -104,6 +106,13 @@ fn main() {
                 eprintln!("\nscott-cli: reached --max-turns {max}, stopping");
                 break;
             }
+        }
+        // The room block is the top "window" in the real game; on a dumb terminal
+        // we print it inline whenever the room (or its contents) changes.
+        let block = vm.room_block();
+        if block != last_block {
+            let _ = writeln!(out, "\n{block}");
+            last_block = block;
         }
         let _ = write!(out, "{PROMPT}");
         let _ = out.flush();

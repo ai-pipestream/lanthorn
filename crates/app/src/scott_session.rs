@@ -11,7 +11,8 @@ use std::any::Any;
 use std::collections::BTreeMap;
 
 use crate::engine::{
-    BufferWindow, Engine, EngineError, EngineSave, LocationInfo, ScreenModel, StatusModel, WinNode,
+    BufferWindow, Engine, EngineError, EngineSave, LocationInfo, ScreenModel, Split, StatusModel,
+    WinNode,
 };
 use crate::session::{InputKind, TurnResult};
 
@@ -25,6 +26,23 @@ pub const SCOTT_SAVE_FORMAT: u32 = 1;
 /// so it belongs to the host/input layer here (not the VM, which stays input-agnostic).
 /// Scott used this phrase, never the Infocom-style `>`.
 const PROMPT: &str = "\nTell me what to do ? ";
+
+/// Build the top room-panel buffer from a `Vm::room_block()` string: one logical
+/// line per `\n`, with the per-line style/paragraph/image tracks filled parallel
+/// (the inline-buffer renderer indexes them by line). `primary: false` so the app
+/// draws it inline rather than mirroring it into the transcript.
+fn room_panel(block: &str) -> BufferWindow {
+    let lines: Vec<String> = block.split('\n').map(str::to_string).collect();
+    let n = lines.len();
+    BufferWindow {
+        lines,
+        runs: vec![Vec::new(); n],
+        para: vec![crate::state::ParaFmt::default(); n],
+        images: vec![None; n],
+        primary: false,
+        ..Default::default()
+    }
+}
 
 /// A running Scott Adams (ScottFree `.dat`) game session.
 pub struct ScottSession {
@@ -118,13 +136,22 @@ impl Engine for ScottSession {
     }
 
     fn screen(&self) -> ScreenModel {
-        ScreenModel {
-            root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
-            status: StatusModel::HostManaged,
-            bg: 0,
-            fg: 0,
-            content_size: (0, 0),
-        }
+        // The classic Scott split: a persistent top panel showing the current
+        // room block (redrawn every frame from live VM state), above the scrolling
+        // command transcript. The panel is a non-primary buffer carrying its own
+        // lines; the primary buffer below is the transcript the app mirrors.
+        let panel = room_panel(&self.vm.room_block());
+        let rows = panel.lines.len() as u16;
+        let root = WinNode::Pair {
+            vertical: true,
+            split: Split { fixed: rows },
+            border: true,
+            key_bg: None,
+            key_fg: None,
+            first: Box::new(WinNode::Buffer(panel)),
+            second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+        };
+        ScreenModel { root, status: StatusModel::HostManaged, bg: 0, fg: 0, content_size: (0, 0) }
     }
 
     fn save_state(&self) -> EngineSave {
@@ -190,25 +217,42 @@ mod tests {
         include_bytes!("../../scott/tests/tiny_cave.dat").to_vec()
     }
 
+    /// The top room-panel text (first buffer of the split), joined for matching.
+    fn panel_text(model: &ScreenModel) -> String {
+        match &model.root {
+            WinNode::Pair { first, .. } => match &**first {
+                WinNode::Buffer(b) => b.lines.join("\n"),
+                _ => String::new(),
+            },
+            _ => String::new(),
+        }
+    }
+
     #[test]
-    fn boots_and_reports_location() {
+    fn boots_and_shows_room_panel() {
         let mut s = ScottSession::new(dat()).unwrap();
-        let loc = s.current_location().expect("loc");
-        assert_eq!(loc.number, 1); // tiny_cave's player_room header field is 1
+        assert_eq!(s.current_location().expect("loc").number, 1);
+
+        // The transcript opens with only the prompt — the room lives in the panel.
         let intro = s.take_transcript();
-        assert!(!intro.is_empty(), "opening room described");
-        assert!(intro.contains("Tell me what to do ?"), "intro ends with the Scott prompt");
+        assert!(intro.contains("Tell me what to do ?"), "intro carries the Scott prompt");
         assert!(!intro.contains('>'), "Scott never uses the '>' prompt");
         assert!(s.take_transcript().is_empty(), "intro drains only once");
 
-        // tiny_cave room 1 has a scripted "down" exit (room1 -> room2).
+        // The top panel shows the room block: description, exits, and items.
+        let panel = panel_text(&s.screen());
+        assert!(panel.contains("sunlit forest clearing"), "room in panel: {panel:?}");
+        assert!(panel.contains("Obvious exits:"), "exits in panel: {panel:?}");
+        assert!(panel.contains("brass lamp"), "items in panel: {panel:?}");
+
+        // Take the lamp (so room 2 is lit), then descend: the panel follows the
+        // player, and each turn's transcript ends with the prompt.
+        s.submit("take lamp");
         let r = s.submit("down");
-        assert!(r.location.is_some());
-        assert_eq!(r.location.unwrap().number, 2);
+        assert_eq!(r.location.expect("loc").number, 2);
         assert!(!r.quit);
         assert!(r.transcript.contains("Tell me what to do ?"), "each turn ends with the prompt");
-
-        let _ = s.screen();
+        assert!(panel_text(&s.screen()).contains("damp, dark cave"), "panel follows the player");
     }
 
     #[test]
