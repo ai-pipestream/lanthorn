@@ -916,6 +916,14 @@ impl Engine for GlulxSession {
         self.last_room.clone()
     }
 
+    fn set_trace_screen(&mut self, on: bool) {
+        self.machine.trace_screen = on;
+    }
+
+    fn take_screen_trace(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.machine.screen_trace)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }

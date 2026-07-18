@@ -264,6 +264,14 @@ pub struct Machine {
     pub(crate) backend: Box<dyn GlkBackend>,
     /// Recorded runtime faults / deferred-feature notices.
     pub diagnostics: Vec<String>,
+    /// When true, every structural Glk call (windows, styles, streams, colours,
+    /// garglk extensions — but not the high-volume put/get text I/O) is recorded
+    /// to `screen_trace`. A debug aid for seeing exactly what a story instructs
+    /// the interpreter to do.
+    pub trace_screen: bool,
+    /// Structural Glk/garglk call lines recorded while `trace_screen` is set,
+    /// drained by the host each turn. Separate from `diagnostics`.
+    pub screen_trace: Vec<String>,
     /// Set once execution has ended (outer return or quit/fault).
     pub(crate) halted: bool,
     /// Protected RAM range `(addr, len)` preserved across restore/restoreundo;
@@ -340,6 +348,212 @@ fn glk_char_to_upper(c: u32) -> u32 {
         0x61..=0x7A => c - 0x20,
         0xE0..=0xF6 | 0xF8..=0xFE => c - 0x20,
         _ => c,
+    }
+}
+
+/// True for high-volume per-character Glk selectors — text I/O (put/get
+/// char/string/buffer, Latin-1 and Unicode) plus the per-character case/normalize
+/// helpers. The debug trace skips these so a story's structural window/style/
+/// colour instructions aren't buried under per-character output.
+fn is_glk_text_io(sel: u32) -> bool {
+    matches!(sel,
+        0x0080..=0x0085 // put_char / _stream / put_string / _stream / put_buffer / _stream
+        | 0x0090..=0x0092 // get_char_stream / get_line_stream / get_buffer_stream
+        | 0x00A0..=0x00A1 // char_to_lower / char_to_upper
+        | 0x0120..=0x0124 // buffer_to_lower/upper/title_case_uni, canon_decompose/normalize_uni
+        | 0x0128..=0x012D // put_char_uni / put_string_uni / put_buffer_uni / _stream
+        | 0x0130..=0x0132 // get_char_stream_uni / get_buffer / get_line (uni)
+    )
+}
+
+/// A human-readable name for a Glk / garglk selector, for the debug trace. The
+/// mapping is taken from this interpreter's own `glk_dispatch` arms (the
+/// authoritative source — not the Glk spec constants, which differ), so it stays
+/// correct as the dispatch evolves. Unknown selectors fall back to hex.
+fn glk_selector_name(sel: u32) -> String {
+    let name = match sel {
+        0x0001 => "glk_exit",
+        0x0002 => "glk_tick",
+        0x0004 => "glk_gestalt",
+        0x0005 => "glk_gestalt_ext",
+        0x0020 => "glk_window_iterate",
+        0x0021 => "glk_window_get_rock",
+        0x0022 => "glk_window_get_root",
+        0x0023 => "glk_window_open",
+        0x0024 => "glk_window_close",
+        0x0025 => "glk_window_get_size",
+        0x0026 => "glk_window_set_arrangement",
+        0x0027 => "glk_window_get_arrangement",
+        0x0028 => "glk_window_get_type",
+        0x0029 => "glk_window_get_parent",
+        0x002A => "glk_window_clear",
+        0x002B => "glk_window_move_cursor",
+        0x002C => "glk_window_get_stream",
+        0x002D => "glk_window_set_echo_stream",
+        0x002E => "glk_window_get_echo_stream",
+        0x002F => "glk_set_window",
+        0x0030 => "glk_window_get_sibling",
+        0x0040 => "glk_stream_iterate",
+        0x0041 => "glk_stream_get_rock",
+        0x0042 => "glk_stream_open_file",
+        0x0043 => "glk_stream_open_memory",
+        0x0044 => "glk_stream_close",
+        0x0045 => "glk_stream_set_position",
+        0x0046 => "glk_stream_get_position",
+        0x0047 => "glk_stream_set_current",
+        0x0048 => "glk_stream_get_current",
+        0x0049 => "glk_stream_open_resource",
+        0x0060 => "glk_fileref_create_temp",
+        0x0061 => "glk_fileref_create_by_name",
+        0x0062 => "glk_fileref_create_by_prompt",
+        0x0063 => "glk_fileref_destroy",
+        0x0064 => "glk_fileref_iterate",
+        0x0065 => "glk_fileref_get_rock",
+        0x0066 => "glk_fileref_delete_file",
+        0x0067 => "glk_fileref_does_file_exist",
+        0x0068 => "glk_fileref_create_from_fileref",
+        0x0080 => "glk_put_char",
+        0x0081 => "glk_put_char_stream",
+        0x0082 => "glk_put_string",
+        0x0083 => "glk_put_string_stream",
+        0x0084 => "glk_put_buffer",
+        0x0085 => "glk_put_buffer_stream",
+        0x0086 => "glk_set_style",
+        0x0087 => "glk_set_style_stream",
+        0x0090 => "glk_get_char_stream",
+        0x0091 => "glk_get_line_stream",
+        0x0092 => "glk_get_buffer_stream",
+        0x00A0 => "glk_char_to_lower",
+        0x00A1 => "glk_char_to_upper",
+        0x00B0 => "glk_stylehint_set",
+        0x00B1 => "glk_stylehint_clear",
+        0x00B2 => "glk_style_distinguish",
+        0x00B3 => "glk_style_measure",
+        0x00C0 => "glk_select",
+        0x00C1 => "glk_select_poll",
+        0x00D0 => "glk_request_line_event",
+        0x00D1 => "glk_cancel_line_event",
+        0x00D2 => "glk_request_char_event",
+        0x00D3 => "glk_cancel_char_event",
+        0x00D4 => "glk_request_mouse_event",
+        0x00D5 => "glk_cancel_mouse_event",
+        0x00D6 => "glk_request_timer_events",
+        0x00E0 => "glk_image_get_info",
+        0x00E1 => "glk_image_draw",
+        0x00E2 => "glk_image_draw_scaled",
+        0x00E8 => "glk_window_flow_break",
+        0x00E9 => "glk_window_erase_rect",
+        0x00EA => "glk_window_fill_rect",
+        0x00EB => "glk_window_set_background_color",
+        0x00F0 => "glk_schannel_iterate",
+        0x00F1 => "glk_schannel_get_rock",
+        0x00F2 => "glk_schannel_create",
+        0x00F3 => "glk_schannel_destroy",
+        0x00F4 => "glk_schannel_create_ext",
+        0x00F7 => "glk_schannel_play_multi",
+        0x00F8 => "glk_schannel_play",
+        0x00F9 => "glk_schannel_play_ext",
+        0x00FA => "glk_schannel_stop",
+        0x00FB => "glk_schannel_set_volume",
+        0x00FC => "glk_sound_load_hint",
+        0x00FD => "glk_schannel_set_volume_ext",
+        0x00FE => "glk_schannel_pause",
+        0x00FF => "glk_schannel_unpause",
+        0x0100 => "glk_set_hyperlink",
+        0x0101 => "glk_set_hyperlink_stream",
+        0x0102 => "glk_request_hyperlink_event",
+        0x0103 => "glk_cancel_hyperlink_event",
+        0x0120 => "glk_buffer_to_lower_case_uni",
+        0x0121 => "glk_buffer_to_upper_case_uni",
+        0x0122 => "glk_buffer_to_title_case_uni",
+        0x0123 => "glk_buffer_canon_decompose_uni",
+        0x0124 => "glk_buffer_canon_normalize_uni",
+        0x0128 => "glk_put_char_uni",
+        0x0129 => "glk_put_string_uni",
+        0x012A => "glk_put_buffer_uni",
+        0x012B => "glk_put_char_stream_uni",
+        0x012C => "glk_put_string_stream_uni",
+        0x012D => "glk_put_buffer_stream_uni",
+        0x0130 => "glk_get_char_stream_uni",
+        0x0131 => "glk_get_buffer_stream_uni",
+        0x0132 => "glk_get_line_stream_uni",
+        0x0138 => "glk_stream_open_file_uni",
+        0x0139 => "glk_stream_open_memory_uni",
+        0x013A => "glk_stream_open_resource_uni",
+        0x0140 => "glk_request_char_event_uni",
+        0x0141 => "glk_request_line_event_uni",
+        0x0150 => "glk_set_echo_line_event",
+        0x0151 => "glk_set_terminators_line_event",
+        0x0160 => "glk_current_time",
+        0x0161 => "glk_current_simple_time",
+        0x0168 => "glk_time_to_date_local",
+        0x0169 => "glk_simple_time_to_date_utc",
+        0x016A => "glk_simple_time_to_date_local",
+        0x016B => "glk_date_to_time_utc",
+        0x016C => "glk_date_to_time_local",
+        0x016D => "glk_date_to_simple_time_utc",
+        0x016E => "glk_date_to_simple_time_local",
+        0x1100 => "garglk_set_zcolors",
+        0x1101 => "garglk_set_zcolors_stream",
+        0x1102 => "garglk_set_reversevideo",
+        0x1103 => "garglk_set_reversevideo_stream",
+        _ => return format!("glk[{sel:#06x}]"),
+    };
+    name.to_string()
+}
+
+/// Glk `wintype_*` name, for the trace.
+fn glk_wintype_name(v: u32) -> &'static str {
+    match v { 0 => "AllTypes", 1 => "Pair", 2 => "Blank", 3 => "TextBuffer", 4 => "TextGrid", 5 => "Graphics", _ => "?" }
+}
+
+/// Glk `style_*` name (0..=10), for the trace.
+fn glk_style_name(v: u32) -> &'static str {
+    match v {
+        0 => "Normal", 1 => "Emphasized", 2 => "Preformatted", 3 => "Header", 4 => "Subheader",
+        5 => "Alert", 6 => "Note", 7 => "BlockQuote", 8 => "Input", 9 => "User1", 10 => "User2", _ => "?",
+    }
+}
+
+/// Glk `stylehint_*` name, for the trace.
+fn glk_hint_name(v: u32) -> &'static str {
+    match v {
+        0 => "Indentation", 1 => "ParaIndentation", 2 => "Justification", 3 => "Size", 4 => "Weight",
+        5 => "Oblique", 6 => "Proportional", 7 => "TextColor", 8 => "BackColor", 9 => "ReverseColor", _ => "?",
+    }
+}
+
+/// Format a Glk/garglk colour value: the garglk sentinels by name, else `#RRGGBB`.
+fn glk_color_hex(v: u32) -> String {
+    match v {
+        0xffff_ffff => "default".to_string(),
+        0xffff_fffe => "current".to_string(),
+        0xffff_fffd => "cursor".to_string(),
+        0xffff_fffc => "transparent".to_string(),
+        rgb => format!("#{:06X}", rgb & 0x00FF_FFFF),
+    }
+}
+
+/// Format a Glk call's arguments for the trace, decoding the colour/style calls
+/// (stylehints, window/graphics background, garglk zcolors, set_style) into
+/// readable names + `#RRGGBB`; everything else prints its raw args. (SQ-0403)
+fn glk_trace_args(sel: u32, args: &[u32]) -> String {
+    let a = |i: usize| args.get(i).copied().unwrap_or(0);
+    match sel {
+        0x00B0 => {
+            // glk_stylehint_set(wintype, style, hint, value)
+            let hint = a(2);
+            let val = if hint == 7 || hint == 8 { glk_color_hex(a(3)) } else { a(3).to_string() };
+            format!("{}, {}, {}, {val}", glk_wintype_name(a(0)), glk_style_name(a(1)), glk_hint_name(hint))
+        }
+        0x00B1 => format!("{}, {}, {}", glk_wintype_name(a(0)), glk_style_name(a(1)), glk_hint_name(a(2))),
+        0x0086 => glk_style_name(a(0)).to_string(),                         // glk_set_style(style)
+        0x0087 => format!("str={}, {}", a(0), glk_style_name(a(1))),        // glk_set_style_stream
+        0x00EB => format!("win={}, {}", a(0), glk_color_hex(a(1))),         // window_set_background_color(win, color)
+        0x00EA => format!("win={}, {}, l={}, t={}, w={}, h={}", a(0), glk_color_hex(a(1)), a(2), a(3), a(4), a(5)), // fill_rect
+        0x1100 => format!("fg={}, bg={}", glk_color_hex(a(0)), glk_color_hex(a(1))),           // garglk_set_zcolors(fg, bg)
+        0x1101 => format!("str={}, fg={}, bg={}", a(0), glk_color_hex(a(1)), glk_color_hex(a(2))), // _stream
+        _ => args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "),
     }
 }
 
@@ -428,6 +642,8 @@ impl Machine {
             pending_fileref: None,
             backend,
             diagnostics: Vec::new(),
+            trace_screen: false,
+            screen_trace: Vec::new(),
             halted: false,
             protect: (0, 0),
             undo_stack: Vec::new(),
@@ -2997,6 +3213,12 @@ impl Machine {
     /// diagnostic and return 0; nothing here panics on bad ids.
     fn glk_dispatch(&mut self, selector: u32, args: &[u32]) -> R<u32> {
         let a = |i: usize| args.get(i).copied().unwrap_or(0);
+        // Debug trace: record structural Glk/garglk calls so a story's
+        // window/style/colour instructions are visible. The high-volume text I/O
+        // (put/get char/string/buffer) is skipped so the trace stays readable.
+        if self.trace_screen && !is_glk_text_io(selector) {
+            self.screen_trace.push(format!("{}({})", glk_selector_name(selector), glk_trace_args(selector, args)));
+        }
         let ret = match selector {
             // ── output (put) ──────────────────────────────────────────────────
             0x0080 => {
@@ -4953,6 +5175,43 @@ mod tests {
     use super::*;
     use crate::asm;
     use crate::glk::TestBackend;
+
+    #[test]
+    fn glk_trace_names_structural_selectors_and_skips_text_io() {
+        // Structural calls get readable names; unknowns fall back to hex.
+        assert_eq!(glk_selector_name(0x002A), "glk_window_clear");
+        assert_eq!(glk_selector_name(0x1100), "garglk_set_zcolors");
+        assert_eq!(glk_selector_name(0x0023), "glk_window_open");
+        assert_eq!(glk_selector_name(0xDEAD), "glk[0xdead]");
+        // The high-volume text I/O family is skipped so the trace stays readable;
+        // structural calls are traced.
+        assert!(is_glk_text_io(0x0080), "put_char is text I/O");
+        assert!(is_glk_text_io(0x0082), "put_string is text I/O");
+        assert!(is_glk_text_io(0x012A), "put_string_uni is text I/O");
+        assert!(!is_glk_text_io(0x002A), "window_clear is structural");
+        assert!(!is_glk_text_io(0x1100), "garglk_set_zcolors is structural");
+        // Names come from the dispatch, not Glk-spec constants: tick is 0x0002 here.
+        assert_eq!(glk_selector_name(0x0002), "glk_tick");
+        assert_eq!(glk_selector_name(0x0042), "glk_stream_open_file");
+        assert_eq!(glk_selector_name(0x0043), "glk_stream_open_memory");
+        // Per-char case helpers are named but skipped from the trace (noise).
+        assert_eq!(glk_selector_name(0x00A0), "glk_char_to_lower");
+        assert!(is_glk_text_io(0x00A0));
+    }
+
+    #[test]
+    fn glk_trace_args_decodes_colour_and_style_calls() {
+        // stylehint_set(TextGrid, Normal, ReverseColor, 1)
+        assert_eq!(glk_trace_args(0x00B0, &[4, 0, 9, 1]), "TextGrid, Normal, ReverseColor, 1");
+        // stylehint_set(TextBuffer, Normal, BackColor, #FFFFFF)
+        assert_eq!(glk_trace_args(0x00B0, &[3, 0, 8, 0xFFFFFF]), "TextBuffer, Normal, BackColor, #FFFFFF");
+        // window_set_background_color(6, #000000)
+        assert_eq!(glk_trace_args(0x00EB, &[6, 0]), "win=6, #000000");
+        // garglk_set_zcolors: sentinels named, rgb as hex
+        assert_eq!(glk_trace_args(0x1100, &[0x00FF0000, 0xFFFF_FFFF]), "fg=#FF0000, bg=default");
+        // set_style(Header)
+        assert_eq!(glk_trace_args(0x0086, &[3]), "Header");
+    }
 
     /// Build a test machine over `built` with a [`TestBackend`], then run the
     /// Glk prelude: open a TextBuffer window and make its stream current, so the
@@ -10180,6 +10439,21 @@ mod tests {
             "graphics clear must erase the whole canvas to the set background colour"
         );
         assert_eq!(tb.background(win), Some(0));
+    }
+
+    #[test]
+    fn screen_trace_records_glk_calls_when_enabled_and_skips_text_io() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        m.trace_screen = true;
+        m.glk_dispatch(0x0023, &[0, 0, 3]).ok();   // glk_window_open (structural → traced)
+        m.glk_dispatch(0x0080, &[b'x' as u32]).ok(); // glk_put_char (text I/O → skipped)
+        assert!(m.screen_trace.iter().any(|l| l.starts_with("glk_window_open(")), "{:?}", m.screen_trace);
+        assert!(!m.screen_trace.iter().any(|l| l.starts_with("glk_put_char")), "text I/O skipped");
+
+        let mut off = super::tests::machine_with_glk(&[]);
+        off.trace_screen = false;
+        off.glk_dispatch(0x0023, &[0, 0, 3]).ok();
+        assert!(off.screen_trace.is_empty());
     }
 
     #[test]
