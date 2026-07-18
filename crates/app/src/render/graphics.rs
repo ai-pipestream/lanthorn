@@ -143,7 +143,11 @@ impl GraphicsRender {
             Some((v, w, h, _)) if *v == gw.version && *w == area.width && *h == area.height);
         if !fresh {
             let img = image::DynamicImage::ImageRgba8((*gw.canvas).clone());
-            match picker.new_protocol(img, Size::new(area.width, area.height), Resize::Fit(None)) {
+            // `Scale` upscales a small canvas to fill the window (aspect
+            // preserved, Nearest filter → crisp pixel art); `Fit` leaves it at
+            // native size, centered. Scott room pictures want the former.
+            let resize = if gw.upscale { Resize::Scale(None) } else { Resize::Fit(None) };
+            match picker.new_protocol(img, Size::new(area.width, area.height), resize) {
                 Ok(p) => { self.cache.insert(gw.win, (gw.version, area.width, area.height, p)); }
                 Err(_) => return,
             }
@@ -172,6 +176,7 @@ mod tests {
             win,
             canvas: std::sync::Arc::new(image::RgbaImage::new(1, 1)),
             version: 1,
+            upscale: false,
         }
     }
 
@@ -201,6 +206,7 @@ mod tests {
             win,
             canvas: std::sync::Arc::new(image::RgbaImage::from_pixel(wpx, hpx, image::Rgba(rgba))),
             version: 1,
+            upscale: false,
         }
     }
 
@@ -229,7 +235,7 @@ mod tests {
         for x in 0..90 {
             img.put_pixel(x, 0, image::Rgba([200, 40, 60, 255])); // top row only
         }
-        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1 };
+        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
         assert!(render_graphics_as_cells(&gw, area, &mut buf), "thin strip → cells");
@@ -246,7 +252,7 @@ mod tests {
             img.put_pixel(3, y, image::Rgba([255, 255, 255, 255]));
             img.put_pixel(4, y, image::Rgba([255, 255, 255, 255]));
         }
-        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1 };
+        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
         let area = Rect::new(0, 0, 1, 3);
         let mut buf = Buffer::empty(area);
         assert!(render_graphics_as_cells(&gw, area, &mut buf));
@@ -257,7 +263,7 @@ mod tests {
     fn thin_fully_transparent_paints_nothing() {
         // A thin window the game hasn't drawn (all transparent) leaves cells alone.
         let img = image::RgbaImage::new(90, 19);
-        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1 };
+        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
         buf.cell_mut((5, 0)).unwrap().set_style(Style::default().bg(Color::Rgb(1, 2, 3)));
@@ -283,7 +289,7 @@ mod tests {
             let on = ((x / 9) + (y / 19)) % 2 == 0;
             *p = if on { image::Rgba([255, 255, 255, 255]) } else { image::Rgba([0, 0, 0, 255]) };
         }
-        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1 };
+        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
         let area = Rect::new(0, 0, 10, 10);
         let mut buf = Buffer::empty(area);
         assert!(!render_graphics_as_cells(&gw, area, &mut buf), "detailed image → protocol, not cells");
@@ -297,7 +303,7 @@ mod tests {
         // garbled into artifacts (stray chars/lines) over the neighbouring
         // windows in a real terminal. (SQ-0338)
         let img = image::RgbaImage::new(90, 190); // 10×10 cells, all transparent
-        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1 };
+        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
         let area = Rect::new(0, 0, 10, 10);
         let mut buf = Buffer::empty(area);
         buf.cell_mut((5, 5)).unwrap().set_style(Style::default().bg(Color::Rgb(1, 2, 3)));

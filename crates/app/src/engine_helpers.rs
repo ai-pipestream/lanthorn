@@ -247,6 +247,7 @@ mod tests {
     fn tags_scott_engine() {
         let s = app::scott_session::ScottSession::new(
             include_bytes!("../../scott/tests/tiny_cave.dat").to_vec(),
+            None,
         )
         .unwrap();
         let boxed: Box<dyn app::engine::Engine> = Box::new(s);

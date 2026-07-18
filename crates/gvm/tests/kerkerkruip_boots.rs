@@ -43,7 +43,9 @@ fn extract_glulx(bytes: Vec<u8>) -> Vec<u8> {
     let b = blorb::Blorb::parse(bytes).expect("valid Blorb");
     match b.executable() {
         Ok((blorb::ExecKind::Glulx, data)) => data.to_vec(),
-        Ok((blorb::ExecKind::ZCode, _)) => panic!("expected a Glulx Blorb, found Z-code"),
+        Ok((blorb::ExecKind::ZCode | blorb::ExecKind::Scott, _)) => {
+            panic!("expected a Glulx Blorb")
+        }
         Err(e) => panic!("Blorb has no executable: {e:?}"),
     }
 }

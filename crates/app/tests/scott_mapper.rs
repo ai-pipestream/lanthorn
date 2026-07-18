@@ -17,7 +17,7 @@ fn tiny_cave() -> Vec<u8> {
 
 #[test]
 fn scott_walk_drives_the_automapper() {
-    let mut session = ScottSession::new(tiny_cave()).expect("tiny_cave.dat loads");
+    let mut session = ScottSession::new(tiny_cave(), None).expect("tiny_cave.dat loads");
     let mut mapper = Mapper::default();
 
     // Startup seed: observe the starting room with no direction, mirroring

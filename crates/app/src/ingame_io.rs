@@ -75,7 +75,13 @@ pub(crate) fn handle_save_as(
         match zvm_session_opt(&*session) {
             Some(z) => save_game_named(dir, &buf, &z.machine).map(|_| ()),
             None => {
-                let bytes = glulx_session_opt(&*session).map(|g| g.save_quetzal()).unwrap_or_default();
+                // Glulx writes its own Quetzal; other host-snapshot engines
+                // (Scott, which has no game-native save format) write their VM
+                // snapshot, exactly what `restore_game_save` feeds back on load.
+                let bytes = match glulx_session_opt(&*session) {
+                    Some(g) => g.save_quetzal(),
+                    None => session.save_state().bytes,
+                };
                 app::persist_files::save_game_named_bytes(dir, &buf, &bytes).map(|_| ())
             }
         }

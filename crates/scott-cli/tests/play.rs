@@ -55,10 +55,13 @@ fn plays_fixture_and_echoes_prompt() {
     // The piped command is echoed after the prompt so the transcript reads
     // naturally (e.g. "Tell me what to do ? down").
     assert!(transcript.contains("Tell me what to do ? down\n"), "command echoed when piped");
-    // "down" moves room 1 -> room 2.
+    // "down" moves room 1 -> room 2 (the dark chamber), where the always-on
+    // water-dripping occurrence fires. The move is via the room's exit table:
+    // ScottFree resolves GO + a direction before the action list, so a GO-action
+    // never intercepts it (and its flavor never prints).
     assert!(
-        transcript.contains("You descend into darkness"),
-        "the move happened:\n{transcript}"
+        transcript.contains("water dripping"),
+        "the move to the dark chamber happened:\n{transcript}"
     );
 }
 

@@ -369,7 +369,7 @@ const DEFAULT_GROUPS: &[(&str, &[(char, &str)])] = &[
     ("Layers", &[('p', "peel-layer"), ('m', "merge-layer"), ('c', "cycle-layer next"), ('n', "rename-layer")]),
     ("Edit", &[('r', "rename-room"), ('o', "edit-notes"), ('d', "delete-connection"), ('e', "relabel-edge")]),
     ("Files", &[
-        ('s', "open-saves"), ('h', "open-history"), ('x', "reset-game"),
+        ('s', "restore-state"), ('h', "open-history"), ('x', "reset-game"),
         ('v', "export-svg"), ('g', "export-dot"), ('u', "export-dump"),
     ]),
     ("View", &[

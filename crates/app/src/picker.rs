@@ -82,7 +82,7 @@ pub struct StoryEntry {
 /// `.blorb` / zips are handled by `load_story_bytes`; `.dat` covers some
 /// Infocom releases.
 const STORY_EXTS: &[&str] = &[
-    "z3", "z4", "z5", "z7", "z8", "zblorb", "blorb", "zlb", "dat", "ulx", "gblorb",
+    "z3", "z4", "z5", "z7", "z8", "zblorb", "blorb", "zlb", "dat", "ulx", "gblorb", "blb",
 ];
 
 fn has_story_ext(path: &Path) -> bool {
@@ -739,9 +739,13 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
             let format = if is_container { "Blorb (Glulx)" } else { "Glulx" };
             (version, None, None, features, format.to_string())
         }
-        // Scott Adams databases carry no version/serial/release; blorb
-        // wrapping isn't applicable either.
-        Engine::Scott => (None, None, None, Features::default(), "Scott Adams".to_string()),
+        // Scott Adams databases carry no version/serial/release. The graphic
+        // (SAGA/Mysterious Adventures) versions ship in a blorb (`.blb`); a plain
+        // `.dat` does not.
+        Engine::Scott => {
+            let format = if is_container { "Blorb (Scott Adams)" } else { "Scott Adams" };
+            (None, None, None, Features::default(), format.to_string())
+        }
     };
 
     let meta = StoryMeta {

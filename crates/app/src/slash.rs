@@ -155,8 +155,11 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "save-state [name]", description: "save an emulator Save State, optionally to a named slot",
         dispatch: |a| SlashOutcome::Save(a.first().map(|s| s.to_string())) },
     CommandSpec { name: "restore-state", category: Category::Game, context: Context::Global,
-        usage: "restore-state [name]", description: "restore an emulator Save State, optionally a named slot",
-        dispatch: |a| SlashOutcome::Load(a.first().map(|s| s.to_string())) },
+        usage: "restore-state [name]", description: "restore an emulator Save State — bare opens the saves dialog to pick one; a name restores that slot directly",
+        dispatch: |a| match a.first() {
+            Some(name) => SlashOutcome::Load(Some(name.to_string())),
+            None => SlashOutcome::Action(crate::input::Action::OpenSaves),
+        } },
     CommandSpec { name: "reset-game", category: Category::Game, context: Context::Global,
         usage: "reset-game [map] [data]", description: "restart the game — bare opens the options dialog; 'map' also clears the map, 'data' deletes the game's saved progress/cache so it starts fresh",
         dispatch: |a| SlashOutcome::Reset { map: a.contains(&"map"), data: a.contains(&"data") } },
@@ -172,9 +175,6 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "open-verb-menu", category: Category::Game, context: Context::Global,
         usage: "open-verb-menu", description: "open the verb/item palette",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenVerbMenu) },
-    CommandSpec { name: "open-saves", category: Category::Game, context: Context::Global,
-        usage: "open-saves", description: "open the saves manager",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenSaves) },
     CommandSpec { name: "toggle-timed-input", category: Category::Game, context: Context::Global,
         usage: "toggle-timed-input", description: "toggle honoring the game's timed-input timers",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleTimedInput) },
@@ -572,6 +572,9 @@ mod tests {
         assert!(matches!(parse("cycle-layer next", '/'), SlashOutcome::Action(Action::CycleLayer(1))));
         assert!(matches!(parse("save-state foo", '/'), SlashOutcome::Save(Some(_))));
         assert!(matches!(parse("save-state", '/'), SlashOutcome::Save(None)));
+        // restore-state: a name restores that slot directly; bare opens the saves dialog.
+        assert!(matches!(parse("restore-state foo", '/'), SlashOutcome::Load(Some(_))));
+        assert!(matches!(parse("restore-state", '/'), SlashOutcome::Action(Action::OpenSaves)));
         assert!(matches!(parse("reset-game map", '/'), SlashOutcome::Reset { map: true, data: false }));
         assert!(matches!(parse("reset-game", '/'), SlashOutcome::Reset { map: false, data: false }));
         assert!(matches!(parse("reset-game data", '/'), SlashOutcome::Reset { map: false, data: true }));
@@ -720,9 +723,10 @@ mod tests {
         assert_eq!(by("save-state").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (Game 12, Map 21, View 6,
-        // Transcript 3, Style 7, Export 3, Animation 4, Help 2).
-        assert_eq!(COMMANDS.len(), 58, "registry must match the spec's Full command table");
+        // Total count matches the spec table (Game 11, Map 21, View 6,
+        // Transcript 3, Style 7, Export 3, Animation 4, Help 2). `open-saves`
+        // was removed — `restore-state` (bare) opens the saves dialog instead.
+        assert_eq!(COMMANDS.len(), 57, "registry must match the spec's Full command table");
     }
 
     #[test]

@@ -606,6 +606,7 @@ impl AppGlk {
                         win: *id,
                         canvas: c.map(|c| c.arc()).unwrap_or_else(|| std::sync::Arc::new(image::RgbaImage::new(1, 1))),
                         version: c.map(|c| c.version).unwrap_or(0),
+                        upscale: false,
                     })
                 }
                 WinType::Pair => unreachable!("pair windows are never tree leaves"),

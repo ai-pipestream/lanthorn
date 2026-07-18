@@ -105,7 +105,6 @@ Dust settles in the chamber.\n\
 > take lamp\n\
 OK.\n\
 > down\n\
-You descend into darkness, feeling your way along the damp rock wall.\n\
 You hear water dripping somewhere in the darkness.\n\
 > rub lamp\n\
 The lamp's glow reveals a niche in the rock - and within it, a gleaming gold idol!\n\
@@ -115,7 +114,6 @@ OK.\n\
 You hear water dripping somewhere in the darkness.\n\
 > up\n\
 > down\n\
-You descend into darkness, feeling your way along the damp rock wall.\n\
 You hear water dripping somewhere in the darkness.\n\
 > down\n\
 > score\n\

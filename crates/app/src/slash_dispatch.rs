@@ -10,7 +10,7 @@ use app::export::export_transcript;
 use app::input::{apply_action, Action};
 use app::persist_files::{load_map, save_named};
 use app::slash::{self, SlashOutcome, TranscriptFilterArg};
-use app::state::{AppState, TranscriptFilter, TranscriptKind};
+use app::state::{AppState, SavesState, TranscriptFilter, TranscriptKind};
 use mapper::mapper::Mapper;
 use ratatui::layout::Rect;
 
@@ -45,7 +45,15 @@ pub(crate) fn dispatch_slash_outcome(
 ) -> bool {
     match outcome {
         SlashOutcome::Action(a) => {
-            if handle_map_export(&a, game_dir, mapper, state) {
+            if matches!(a, Action::OpenSaves) {
+                // OpenSaves needs `game_dir` to populate the saves list, which
+                // `apply_action` (state + mapper only) can't do — it just resets
+                // the modal's focus. Build the populated dialog here so the
+                // command/slash path (e.g. `restore-state`) actually opens it.
+                let entries = combined_saves(game_dir);
+                apply_action(Action::OpenSaves, state, mapper);
+                state.overlays.saves = Some(SavesState { entries, scroll: Default::default() });
+            } else if handle_map_export(&a, game_dir, mapper, state) {
                 // handled
             } else if matches!(a, Action::ToggleWatch) {
                 toggle_style_watch(state, style_watcher);

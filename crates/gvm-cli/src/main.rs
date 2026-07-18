@@ -64,6 +64,9 @@ fn extract_executable(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
         Ok((blorb::ExecKind::ZCode, _)) => {
             Err("Error: this is a Z-code Blorb; run it with zvm-cli.".to_string())
         }
+        Ok((blorb::ExecKind::Scott, _)) => {
+            Err("Error: this is a Scott Adams Blorb; run it with babelmap.".to_string())
+        }
         Err(e) => Err(format!("Error: Blorb has no executable: {e:?}")),
     }
 }
@@ -80,6 +83,9 @@ fn split_story(bytes: Vec<u8>) -> Result<(Vec<u8>, Option<blorb::Blorb>), String
         Ok((blorb::ExecKind::Glulx, data)) => data.to_vec(),
         Ok((blorb::ExecKind::ZCode, _)) => {
             return Err("Error: this is a Z-code Blorb; run it with zvm-cli.".to_string())
+        }
+        Ok((blorb::ExecKind::Scott, _)) => {
+            return Err("Error: this is a Scott Adams Blorb; run it with babelmap.".to_string())
         }
         Err(e) => return Err(format!("Error: Blorb has no executable: {e:?}")),
     };

@@ -32,6 +32,10 @@ pub struct Vm {
     // GAME) this turn. The host drains it after `step()` to trigger a save. Not
     // part of game state, so it is excluded from snapshot/restore.
     pub(crate) save_requested: bool,
+    // The picture opcode 89 (draw picture) requested this turn, if any; overrides
+    // the default room picture until the next command. Cosmetic, host-read via
+    // `current_picture`; excluded from snapshot/restore.
+    pub(crate) pending_picture: Option<u16>,
 }
 
 impl Vm {
@@ -60,6 +64,7 @@ impl Vm {
             rng_state: 0x1234_5678,
             pending_line: None,
             save_requested: false,
+            pending_picture: None,
         };
         // Run the opening occurrence pass before the first prompt, so auto-events
         // that fire at game start (e.g. "A Voice BOOOMS out:") are shown on load —
@@ -88,6 +93,13 @@ impl Vm {
     /// save. Transient — never persisted in a snapshot.
     pub fn take_save_request(&mut self) -> bool {
         std::mem::take(&mut self.save_requested)
+    }
+    /// The picture the host should display: an opcode-89 override if one was set
+    /// this turn, else the current room's own picture (by convention, picture
+    /// number == room number). The host maps this to a blorb `Pict` resource and
+    /// shows nothing when none exists.
+    pub fn current_picture(&self) -> Option<u16> {
+        self.pending_picture.or(Some(self.player as u16))
     }
     /// Current location of item `idx` (-1/255 = carried, 0 = nowhere, else room index).
     pub fn item_loc(&self, idx: usize) -> i32 {
@@ -201,6 +213,9 @@ impl Vm {
             return StepResult::Quit;
         }
         if let Some(cmd) = self.pending_line.take() {
+            // A new command starts a fresh turn: drop any opcode-89 override from
+            // the previous turn so the picture reverts to the room's own.
+            self.pending_picture = None;
             self.run_turn(&cmd);
             if self.quit {
                 return StepResult::Quit;
@@ -449,7 +464,7 @@ impl Vm {
                     std::mem::swap(&mut self.player, &mut self.saved_rooms[idx]);
                 }
                 88 => { /* pause: host handles timing */ }
-                89 => { /* draw picture: no-op for text interpreter */ }
+                89 => self.pending_picture = Some(p.next().unwrap_or(0)), // draw picture N
                 _ => {} // 90..=101 unused
             }
         }
@@ -474,44 +489,53 @@ impl Vm {
         }
         self.last_noun = w2.or(w1).unwrap_or("").to_uppercase();
 
-        let matched = self
-            .db
-            .actions
-            .iter()
-            .enumerate()
-            .find(|(_, a)| {
-                a.verb == vb
-                    && (a.noun == no || a.noun == 0)
-                    && a.conditions.iter().all(|c| self.eval_condition(c))
-            })
-            .map(|(i, _)| i);
+        // ScottFree resolves GO + a compass direction from the room's exit table
+        // BEFORE consulting the action table, so a catch-all "GO <anything>"
+        // action (verb 1, noun 0) can't intercept ordinary movement. A GO with a
+        // non-direction noun (e.g. GO TENT) still falls through to the actions.
         let mut handled = false;
-        if let Some(idx) = matched {
-            self.run_action_chain(idx);
+        if vb == 1 && (1..=6).contains(&no) {
+            let dir = no as usize - 1;
+            if self.is_dark() {
+                self.out.push_str("It is dangerous to move in the dark!\n");
+            }
+            let dest = self
+                .db
+                .rooms
+                .get(self.player)
+                .map(|room| room.exits[dir])
+                .unwrap_or(0);
+            if dest != 0 {
+                self.player = dest;
+            } else {
+                self.out.push_str("I can't go in that direction.\n");
+            }
             handled = true;
+        } else if vb != 0 {
+            // Only a recognized verb consults the command actions. Verb 0 is
+            // reserved for occurrences (the top-of-turn auto-event pass), so an
+            // unrecognized command must NOT match them here — otherwise an
+            // occurrence (e.g. a conditional death) fires as if it were the reply.
+            let matched = self
+                .db
+                .actions
+                .iter()
+                .enumerate()
+                .find(|(_, a)| {
+                    a.verb == vb
+                        && (a.noun == no || a.noun == 0)
+                        && a.conditions.iter().all(|c| self.eval_condition(c))
+                })
+                .map(|(i, _)| i);
+            if let Some(idx) = matched {
+                self.run_action_chain(idx);
+                handled = true;
+            }
         }
 
         if !handled {
             if vb == 1 {
-                if (1..=6).contains(&no) {
-                    let dir = no as usize - 1;
-                    if self.is_dark() {
-                        self.out.push_str("It is dangerous to move in the dark!\n");
-                    }
-                    let dest = self
-                        .db
-                        .rooms
-                        .get(self.player)
-                        .map(|room| room.exits[dir])
-                        .unwrap_or(0);
-                    if dest != 0 {
-                        self.player = dest;
-                    } else {
-                        self.out.push_str("I can't go in that direction.\n");
-                    }
-                } else {
-                    self.out.push_str("I need a direction.\n");
-                }
+                self.out.push_str("I need a direction.\n");
             } else if vb == 10 {
                 if self.last_noun == "ALL" {
                     self.get_all();
@@ -1038,6 +1062,100 @@ mod tests {
         assert_eq!(vm.current_room(), 0); // would be 2 if op80 wrongly used saved_rooms[0]
         assert_eq!(vm.saved_room_at(), 1);
         assert_eq!(vm.saved_rooms_at(0), 2); // op80 left the op87 array untouched
+    }
+
+    // A catch-all "GO <anything>" action (verb 1, noun 0) must not intercept
+    // compass movement: ScottFree consults the exit table first (Mysterious
+    // Adventures regression — circus "go south" printed "Sorry" and never moved).
+    #[test]
+    fn go_direction_beats_catch_all_go_action() {
+        let mut verbs = vec![String::new(); 2];
+        verbs[1] = "GO".into();
+        let nouns: Vec<String> = ["ANY", "NORTH", "SOUTH", "EAST", "WEST", "UP", "DOWN"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let mut rooms = rooms4();
+        rooms[1].exits[1] = 2; // south -> room 2
+        let db = Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 4,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![Action {
+                verb: 1,
+                noun: 0,
+                conditions: [Condition { code: 0, value: 0 }; 5], // always matches
+                commands: [1, 0, 0, 0],                           // print message 1 ("Sorry")
+            }],
+            verbs,
+            nouns,
+            rooms,
+            messages: vec![String::new(), "Sorry".into()],
+            items: one_item(),
+            adventure_number: 0,
+        };
+        let mut vm = Vm::new(db);
+        vm.take_output();
+        vm.supply_line("go south");
+        vm.step();
+        let out = vm.take_output();
+        assert_eq!(vm.current_room(), 2, "GO SOUTH moves via the exit table");
+        assert!(!out.contains("Sorry"), "catch-all GO action must not fire: {out:?}");
+    }
+
+    // An unrecognized command (verb 0) must not match verb-0 occurrence actions
+    // as if they were the reply — otherwise a conditional occurrence fires on a
+    // typo (Mysterious Adventures regression: "knock" in circus killed the player).
+    #[test]
+    fn unknown_command_does_not_fire_a_verb0_occurrence() {
+        let verbs = vec!["AUTO".to_string(), "GO".to_string()];
+        let nouns = vec!["ANY".to_string(), "NORTH".to_string()];
+        let db = Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 4,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![Action {
+                verb: 0,
+                noun: 0, // 0% occurrence: never fires on its own, but the old
+                // command loop wrongly matched it on an unknown command.
+                conditions: [Condition { code: 0, value: 0 }; 5],
+                commands: [63, 0, 0, 0], // quit
+            }],
+            verbs,
+            nouns,
+            rooms: rooms4(),
+            messages: vec![String::new()],
+            items: one_item(),
+            adventure_number: 0,
+        };
+        let mut vm = Vm::new(db);
+        vm.take_output();
+        vm.supply_line("xyzzy"); // unrecognized verb
+        vm.step();
+        assert!(!vm.has_quit(), "an unknown command must not fire a verb-0 occurrence");
+        assert!(
+            vm.take_output().contains("don't understand"),
+            "an unknown command is reported as not understood"
+        );
+    }
+
+    // current_picture defaults to the room number and is overridden by opcode 89
+    // (draw picture) until the next command resets it.
+    #[test]
+    fn current_picture_room_default_and_op89_override() {
+        let mut vm = vm_with(one_item(), rooms4(), 1);
+        assert_eq!(vm.current_picture(), Some(1), "defaults to the current room");
+        vm.run_commands(&[89, 0, 0, 0], &[7]); // draw picture 7
+        assert_eq!(vm.current_picture(), Some(7), "opcode 89 overrides");
+        vm.supply_line("look");
+        vm.step(); // a fresh turn drops the override
+        assert_eq!(vm.current_picture(), Some(1), "reverts to the room picture");
     }
 
     // Action codes >= 102 print message (code - 50) with no upper cap: a game

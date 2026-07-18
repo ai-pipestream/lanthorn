@@ -38,6 +38,8 @@ pub enum ExecKind {
     ZCode,
     /// Glulx story (`GLUL` chunk).
     Glulx,
+    /// Scott Adams / ScottFree adventure (`SAAI` chunk).
+    Scott,
 }
 
 /// The kind of a Blorb `Snd ` sound resource, detected from its chunk type.
@@ -173,9 +175,10 @@ impl Blorb {
 
     /// The embedded executable: its [`ExecKind`] plus a slice of its chunk data.
     ///
-    /// Finds the `Exec` resource, mapping a `ZCOD` chunk to [`ExecKind::ZCode`]
-    /// and `GLUL` to [`ExecKind::Glulx`]. Returns [`BlorbError::NoExecutable`]
-    /// when there is no `Exec` entry or its chunk type is neither.
+    /// Finds the `Exec` resource, mapping a `ZCOD` chunk to [`ExecKind::ZCode`],
+    /// `GLUL` to [`ExecKind::Glulx`], and `SAAI` to [`ExecKind::Scott`]. Returns
+    /// [`BlorbError::NoExecutable`] when there is no `Exec` entry or its chunk
+    /// type is none of those.
     pub fn executable(&self) -> Result<(ExecKind, &[u8]), BlorbError> {
         let e = self
             .index
@@ -185,6 +188,7 @@ impl Blorb {
         let kind = match &e.chunk_type {
             b"ZCOD" => ExecKind::ZCode,
             b"GLUL" => ExecKind::Glulx,
+            b"SAAI" => ExecKind::Scott,
             _ => return Err(BlorbError::NoExecutable),
         };
         Ok((kind, self.chunk_data(e)))
@@ -525,6 +529,16 @@ mod tests {
     fn executable_detects_glulx() {
         let b = build_blorb(&[(b"Exec", 0, b"GLUL", b"glul")]);
         assert_eq!(Blorb::parse(b).unwrap().executable().unwrap().0, ExecKind::Glulx);
+    }
+
+    #[test]
+    fn executable_detects_scott() {
+        // Scott Adams / ScottFree games ship in a blorb `SAAI` Exec chunk.
+        let b = build_blorb(&[(b"Exec", 0, b"SAAI", b"scott-dat")]);
+        let blorb = Blorb::parse(b).unwrap();
+        let (kind, data) = blorb.executable().unwrap();
+        assert_eq!(kind, ExecKind::Scott);
+        assert_eq!(data, b"scott-dat");
     }
 
     #[test]

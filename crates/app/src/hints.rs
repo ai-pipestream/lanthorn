@@ -294,6 +294,7 @@ pub fn extract_story(bytes: Vec<u8>) -> io::Result<LoadedStory> {
     match b.executable() {
         Ok((blorb::ExecKind::ZCode, data)) => Ok(LoadedStory::ZCode(data.to_vec())),
         Ok((blorb::ExecKind::Glulx, data)) => Ok(LoadedStory::Glulx(data.to_vec())),
+        Ok((blorb::ExecKind::Scott, data)) => Ok(LoadedStory::Scott(data.to_vec())),
         Err(e) => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Blorb has no executable: {e:?}"),

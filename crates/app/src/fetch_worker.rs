@@ -139,11 +139,11 @@ impl Fetcher {
 /// id instead. Scott databases are small ASCII text, so the read is capped — a
 /// large binary story (Glulx/Z-code) fails the sniff without being slurped whole.
 fn scott_ifdb_id(path: &Path) -> Option<String> {
-    use std::io::Read;
-    let mut buf = Vec::new();
-    std::fs::File::open(path).ok()?.take(512 * 1024).read_to_end(&mut buf).ok()?;
-    let text = std::str::from_utf8(&buf).ok()?;
-    if !scott::looks_like_scott(text) {
+    // Recognise a Scott story the same way the picker does, so a `.blb` blorb
+    // (whose SAAI exec chunk holds the `.dat`) is detected as well as a raw
+    // `.dat` — sniffing the raw file text alone misses the binary blorb. The
+    // TUID is keyed by filename stem, since a Scott database has no embedded IFID.
+    if !matches!(crate::hints::load_story(path), Ok(crate::hints::LoadedStory::Scott(_))) {
         return None;
     }
     let stem = path.file_stem().and_then(|s| s.to_str())?;
@@ -293,6 +293,36 @@ mod tests {
     use std::sync::atomic::AtomicU32;
     use std::sync::Mutex;
 
+    /// Wrap Scott `.dat` bytes in a minimal Blorb with a single `Exec`/`SAAI`
+    /// resource — the shape a graphics `.blb` uses.
+    fn blb_wrapping_saai(dat: &[u8]) -> Vec<u8> {
+        fn chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = ty.to_vec();
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                v.push(0);
+            }
+            v
+        }
+        let ridx_data_len = 4 + 12; // count + one 12-byte entry
+        let first_res_off = 12 + 8 + ridx_data_len + (ridx_data_len % 2);
+        let mut ridx = Vec::new();
+        ridx.extend_from_slice(&1u32.to_be_bytes()); // resource count
+        ridx.extend_from_slice(b"Exec");
+        ridx.extend_from_slice(&0u32.to_be_bytes()); // resource number
+        ridx.extend_from_slice(&(first_res_off as u32).to_be_bytes());
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"IFRS");
+        inner.extend_from_slice(&chunk(b"RIdx", &ridx));
+        inner.extend_from_slice(&chunk(b"SAAI", dat));
+        let mut file = Vec::new();
+        file.extend_from_slice(b"FORM");
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+        file
+    }
+
     /// A unique temp dir per call, safe under parallel test execution (mirrors
     /// `story_info`'s own `tmp()` helper).
     fn tmp() -> PathBuf {
@@ -314,6 +344,12 @@ mod tests {
         let dat = dir.join("adv01.dat");
         std::fs::write(&dat, MINI).unwrap();
         assert_eq!(super::scott_ifdb_id(&dat).as_deref(), Some("dy4ok8sdlut6ddj7"));
+
+        // The same Scott `.dat` wrapped in a `.blb` blorb (SAAI exec chunk) is
+        // detected too, keyed by its filename stem (`circus`).
+        let blb = dir.join("circus.blb");
+        std::fs::write(&blb, blb_wrapping_saai(MINI.as_bytes())).unwrap();
+        assert_eq!(super::scott_ifdb_id(&blb).as_deref(), Some("bdnprzz9zomlge4b"));
 
         // A binary (non-Scott) story yields no Scott id.
         let z = dir.join("story.z5");

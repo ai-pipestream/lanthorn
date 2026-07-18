@@ -238,7 +238,10 @@ pub(crate) fn boot() -> BootResult {
                 }
             }
         }
-        app::hints::LoadedStory::Scott(bytes) => match app::scott_session::ScottSession::new(bytes) {
+        app::hints::LoadedStory::Scott(bytes) => match app::scott_session::ScottSession::new(
+            bytes,
+            resolve_pict_blorb(&story_path, cfg.images),
+        ) {
             Ok(s) => Box::new(s),
             Err(e) => {
                 eprintln!("babelmap: cannot load Scott Adams story: {e}");

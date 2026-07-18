@@ -76,7 +76,7 @@ const AUTHOR_MAX_W: u16 = 40;
 const YEAR_COL_W: u16 = 6;
 /// Interpreter/format column ("Z5", "Z5 (blorb)", "G3.1.2"): fixed width, sits
 /// just left of the badge cluster. `Z8 (blorb)` (10) is the widest (SQ-0369).
-const INTERP_COL_W: u16 = 10;
+const INTERP_COL_W: u16 = 13;
 const TITLE_MIN_W: u16 = 8;
 /// Title keeps this much before the author column is allowed to grow past its
 /// base width — title has priority for the shared space, so a long author name
@@ -130,7 +130,9 @@ fn compute_columns(text_w: u16, want_author_w: u16) -> ListColumns {
 /// Glulx ("G3.1.2", from the Glulx header version). A blorb-wrapped Z-machine
 /// story gets a " (blorb)" suffix ("Z5 (blorb)"), which subsumes the old B
 /// badge; Glulx is omitted since Glulx games are effectively always blorbed
-/// (SQ-0369). Bare "Z"/"Glulx" when the version is unknown.
+/// (SQ-0369). A Scott game shows "Scott", with " (blorb)" for the graphic
+/// `.blb` versions (`.dat` is not blorbed, so the suffix distinguishes them).
+/// Bare "Z"/"Glulx" when the version is unknown.
 fn interp_label(meta: &app::picker::StoryMeta, blorb: bool) -> String {
     match meta.engine {
         app::picker::Engine::ZCode => {
@@ -148,7 +150,13 @@ fn interp_label(meta: &app::picker::StoryMeta, blorb: bool) -> String {
             Some(v) if !v.is_empty() => format!("G{v}"),
             _ => "Glulx".to_string(),
         },
-        app::picker::Engine::Scott => "Scott".to_string(),
+        app::picker::Engine::Scott => {
+            if blorb {
+                "Scott (blorb)".to_string()
+            } else {
+                "Scott".to_string()
+            }
+        }
     }
 }
 
@@ -2042,7 +2050,11 @@ mod tests {
         // Glulx: "G<v>", never a blorb suffix (Glulx is effectively always blorbed).
         assert_eq!(super::interp_label(&meta(Engine::Glulx, Some("3.1.2")), true), "G3.1.2");
         assert_eq!(super::interp_label(&meta(Engine::Glulx, None), false), "Glulx");
-        // Widest label fits the column.
+        // Scott: "Scott", plus " (blorb)" for the graphic .blb versions.
+        assert_eq!(super::interp_label(&meta(Engine::Scott, None), false), "Scott");
+        assert_eq!(super::interp_label(&meta(Engine::Scott, None), true), "Scott (blorb)");
+        // Widest label ("Scott (blorb)") fits the column.
+        assert!(super::interp_label(&meta(Engine::Scott, None), true).len() <= super::INTERP_COL_W as usize);
         assert!(super::interp_label(&meta(Engine::ZCode, Some("8")), true).len() <= super::INTERP_COL_W as usize);
     }
 
@@ -2291,16 +2303,16 @@ mod tests {
         let mut list = app::list_scroll::ListScroll::new();
         list.len(1);
 
-        // (width, author shown, year shown). Right zone = INTERP_COL_W(10) +
-        // COL_GAP(2) + cluster_w(save+hint=2) = 14, reserved 15; so avail =
-        // width - 17. year needs avail >= 38 (width >= 55); author needs avail
-        // >= 30 (width >= 47). Below that: title + right-zone only.
+        // (width, author shown, year shown). Right zone = INTERP_COL_W(13) +
+        // COL_GAP(2) + cluster_w(save+hint=2) = 17, reserved 18; so avail =
+        // width - 20. year needs avail >= 38 (width >= 58); author needs avail
+        // >= 30 (width >= 50). Below that: title + right-zone only.
         for &(width, want_author, want_year) in &[
             (70u16, true, true),
-            (55, true, true),
-            (54, true, false),
-            (47, true, false),
-            (46, false, false),
+            (58, true, true),
+            (57, true, false),
+            (50, true, false),
+            (49, false, false),
             (30, false, false),
         ] {
             let area = Rect::new(0, 0, width, 10);

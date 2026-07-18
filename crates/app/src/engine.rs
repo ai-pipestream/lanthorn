@@ -219,6 +219,10 @@ pub struct GraphicsWindow {
     pub win: u32,
     pub canvas: std::sync::Arc<image::RgbaImage>,
     pub version: u64,
+    /// Scale the canvas up to fill the window (preserving aspect), rather than
+    /// centering it at native size. Set for small pixel-art canvases like Scott
+    /// Adams room pictures (256×96); Glulx keeps native-size centering.
+    pub upscale: bool,
 }
 
 /// A node in the engine-neutral window tree.

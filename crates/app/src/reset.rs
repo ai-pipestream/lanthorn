@@ -90,8 +90,11 @@ pub(crate) fn reset_game(
                     .expect("restart re-runs the same Glulx story") = new_session;
             })
         }
-        Ok(app::hints::LoadedStory::Scott(bytes)) => app::scott_session::ScottSession::new(bytes)
-            .map(|new_session| {
+        Ok(app::hints::LoadedStory::Scott(bytes)) => app::scott_session::ScottSession::new(
+            bytes,
+            resolve_pict_blorb(story_path, state.config.images),
+        )
+        .map(|new_session| {
                 *session
                     .as_any_mut()
                     .downcast_mut::<app::scott_session::ScottSession>()

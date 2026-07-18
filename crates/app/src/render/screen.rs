@@ -689,7 +689,7 @@ mod tests {
         use ratatui::style::Color;
         fn gfx() -> WinNode {
             let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 255]));
-            WinNode::Graphics(crate::engine::GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1 })
+            WinNode::Graphics(crate::engine::GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false })
         }
         fn buf(bg: u32, primary: bool) -> WinNode {
             WinNode::Buffer(BufferWindow { lines: vec![], runs: vec![], para: vec![], images: vec![], scroll: 0, primary, bg: Some(bg), fg: None, panel: false })
@@ -1342,6 +1342,7 @@ mod tests {
             win: 1,
             canvas: std::sync::Arc::new(img),
             version: 1,
+            upscale: false,
         })
     }
 
@@ -1414,7 +1415,7 @@ mod tests {
         use ratatui::layout::Rect;
         use ratatui::buffer::Buffer;
         let img = image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 50, 50, 255]));
-        let gw = crate::engine::GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1 };
+        let gw = crate::engine::GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
         let picker = ratatui_image::picker::Picker::halfblocks();
         let mut gr = crate::render::graphics::GraphicsRender::default();
         let area = Rect::new(0, 0, 12, 6);
@@ -1596,7 +1597,7 @@ mod tests {
         // those still suppress our rule (no doubling). (SQ-0340, refines SQ-0332)
         let empty_graphics = || {
             let img = image::RgbaImage::new(9, 57); // opened but never drawn → transparent
-            WinNode::Graphics(crate::engine::GraphicsWindow { win: 4, canvas: std::sync::Arc::new(img), version: 1 })
+            WinNode::Graphics(crate::engine::GraphicsWindow { win: 4, canvas: std::sync::Arc::new(img), version: 1, upscale: false })
         };
         let make = |second: WinNode| ScreenModel {
             root: WinNode::Pair {
@@ -1631,6 +1632,7 @@ mod tests {
             win: 7,
             canvas: std::sync::Arc::new(img),
             version: 1,
+            upscale: false,
         });
         let tree = WinNode::Pair {
             vertical: false,

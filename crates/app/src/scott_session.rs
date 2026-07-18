@@ -9,11 +9,13 @@
 
 use std::any::Any;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::engine::{
-    BufferWindow, Engine, EngineError, EngineSave, LocationInfo, ScreenModel, Split, StatusModel,
-    WinNode,
+    BufferWindow, Engine, EngineError, EngineSave, GraphicsWindow, LocationInfo, ScreenModel, Split,
+    StatusModel, WinNode,
 };
+use crate::graphics::PictSource;
 use crate::session::{InputKind, PendingIo, TurnResult};
 
 /// The engine tag recorded in an `EngineSave` produced by the Scott adapter.
@@ -26,6 +28,10 @@ pub const SCOTT_SAVE_FORMAT: u32 = 1;
 /// so it belongs to the host/input layer here (not the VM, which stays input-agnostic).
 /// Scott used this phrase, never the Infocom-style `>`.
 const PROMPT: &str = "\nTell me what to do ? ";
+
+/// Terminal rows reserved for the room-picture band in a graphics (`.blb`) game.
+/// The renderer scales the picture (typically 256×96) to fit this band.
+const PICTURE_ROWS: u16 = 16;
 
 /// Build the top room-panel buffer from a `Vm::room_block()` string: one logical
 /// line per `\n`, with the per-line style/paragraph/image tracks filled parallel
@@ -54,11 +60,23 @@ pub struct ScottSession {
     intro: String,
     aux: BTreeMap<String, Vec<u8>>,
     aux_dirty: bool,
+    /// Blorb `Pict` resources for a graphics (`.blb`) game; empty for a plain
+    /// `.dat`. The SAGA/Mysterious Adventures graphic versions ship the room
+    /// pictures here (SQ-0402).
+    picts: PictSource,
+    /// The decoded picture to show for the current room, and the picture number
+    /// it was resolved from — recomputed only when the number changes so the same
+    /// image isn't re-uploaded to the terminal every frame.
+    current_canvas: Option<Arc<image::RgbaImage>>,
+    current_pic_num: Option<u16>,
+    pic_version: u64,
 }
 
 impl ScottSession {
-    /// Parse a ScottFree `.dat` (UTF-8 text) and start a session.
-    pub fn new(bytes: Vec<u8>) -> Result<ScottSession, String> {
+    /// Parse a ScottFree `.dat` (UTF-8 text) and start a session. `pict_blorb` is
+    /// the game's own Blorb when it is a `.blb` graphics container (carrying the
+    /// room `Pict` images); `None` for a plain text `.dat`.
+    pub fn new(bytes: Vec<u8>, pict_blorb: Option<blorb::Blorb>) -> Result<ScottSession, String> {
         let src = std::str::from_utf8(&bytes)
             .map_err(|_| "Scott .dat is not valid text".to_string())?;
         let db = scott::Database::parse(src).map_err(|e| format!("invalid Scott .dat: {e:?}"))?;
@@ -67,7 +85,33 @@ impl ScottSession {
         if !vm.has_quit() {
             intro.push_str(PROMPT);
         }
-        Ok(ScottSession { vm, intro, aux: BTreeMap::new(), aux_dirty: false })
+        let mut s = ScottSession {
+            vm,
+            intro,
+            aux: BTreeMap::new(),
+            aux_dirty: false,
+            picts: PictSource::new(pict_blorb),
+            current_canvas: None,
+            current_pic_num: None,
+            pic_version: 0,
+        };
+        s.refresh_picture();
+        Ok(s)
+    }
+
+    /// Recompute the current room's decoded picture. Cheap when the picture
+    /// number is unchanged (early-out). A dark room shows no picture; a room
+    /// whose number has no `Pict` resource also shows none.
+    fn refresh_picture(&mut self) {
+        let want = if self.vm.is_dark() { None } else { self.vm.current_picture() };
+        if want == self.current_pic_num {
+            return;
+        }
+        self.current_pic_num = want;
+        self.current_canvas = want
+            .and_then(|n| self.picts.image(n as u32))
+            .map(|dynimg| Arc::new(dynimg.to_rgba8()));
+        self.pic_version += 1;
     }
 
     /// Build a `TurnResult` with the non-Scott fields at their empty default,
@@ -103,6 +147,7 @@ impl Engine for ScottSession {
         let _ = self.vm.step();
         let transcript = self.vm.take_output();
         let quit = self.vm.has_quit();
+        self.refresh_picture();
         // The game ran the SAVE GAME action (opcode 71): bubble the same Save
         // request the Z-machine/Glulx engines raise for `@save`, so the app's
         // Save State file I/O runs. The prompt is withheld and returns via
@@ -157,7 +202,7 @@ impl Engine for ScottSession {
         // lines; the primary buffer below is the transcript the app mirrors.
         let panel = room_panel(&self.vm.room_block());
         let rows = panel.lines.len() as u16;
-        let root = WinNode::Pair {
+        let text = WinNode::Pair {
             vertical: true,
             split: Split { fixed: rows },
             border: true,
@@ -165,6 +210,25 @@ impl Engine for ScottSession {
             key_fg: None,
             first: Box::new(WinNode::Buffer(panel)),
             second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+        };
+        // A graphics (`.blb`) game shows the current room's picture in a band
+        // above the room panel; the renderer scales the canvas into the band.
+        let root = match &self.current_canvas {
+            Some(canvas) => WinNode::Pair {
+                vertical: true,
+                split: Split { fixed: PICTURE_ROWS },
+                border: true,
+                key_bg: None,
+                key_fg: None,
+                first: Box::new(WinNode::Graphics(GraphicsWindow {
+                    win: 1,
+                    canvas: Arc::clone(canvas),
+                    version: self.pic_version,
+                    upscale: true,
+                })),
+                second: Box::new(text),
+            },
+            None => text,
         };
         ScreenModel { root, status: StatusModel::HostManaged, bg: 0, fg: 0, content_size: (0, 0) }
     }
@@ -180,15 +244,21 @@ impl Engine for ScottSession {
                 found: save.engine.clone(),
             });
         }
-        self.vm
+        let r = self
+            .vm
             .restore(&save.bytes)
-            .map_err(|_| EngineError::BadSave("bad Scott snapshot".to_string()))
+            .map_err(|_| EngineError::BadSave("bad Scott snapshot".to_string()));
+        self.refresh_picture();
+        r
     }
 
     fn restore_game_save(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
-        self.vm
+        let r = self
+            .vm
             .restore(bytes)
-            .map_err(|_| EngineError::BadSave("bad Scott snapshot".to_string()))
+            .map_err(|_| EngineError::BadSave("bad Scott snapshot".to_string()));
+        self.refresh_picture();
+        r
     }
 
     fn aux_data(&self) -> &BTreeMap<String, Vec<u8>> {
@@ -245,7 +315,7 @@ mod tests {
 
     #[test]
     fn boots_and_shows_room_panel() {
-        let mut s = ScottSession::new(dat()).unwrap();
+        let mut s = ScottSession::new(dat(), None).unwrap();
         assert_eq!(s.current_location().expect("loc").number, 1);
 
         // The transcript opens with only the prompt — the room lives in the panel.
@@ -272,7 +342,7 @@ mod tests {
 
     #[test]
     fn save_restore_roundtrip() {
-        let mut s = ScottSession::new(dat()).unwrap();
+        let mut s = ScottSession::new(dat(), None).unwrap();
         let start = s.current_location().unwrap().number;
         let save = s.save_state();
 
@@ -289,7 +359,7 @@ mod tests {
         // Only the SAVE GAME action (opcode 71) bubbles a Save request; an
         // ordinary command must not. resume_save (called by the host after it
         // writes the snapshot) returns cleanly to the command prompt.
-        let mut s = ScottSession::new(dat()).unwrap();
+        let mut s = ScottSession::new(dat(), None).unwrap();
         let r = s.submit("down");
         assert_eq!(r.pending_io, None, "a plain move does not request a save");
 
@@ -302,9 +372,65 @@ mod tests {
         assert_eq!(resumed.pending_io, None);
     }
 
+    /// A minimal 2×2 PNG for a blorb `Pict` resource.
+    fn tiny_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut buf, image::ImageFormat::Png)
+            .unwrap();
+        buf.into_inner()
+    }
+
+    #[test]
+    fn blb_game_shows_a_room_picture_band() {
+        // A graphics (.blb) game: the start room's Pict renders as a Graphics
+        // window above the room panel. tiny_cave.dat starts in (lit) room 1, and
+        // picture number == room number, so Pict resource 1 is the start picture.
+        let blorb = crate::graphics::test_blorb_with_pict(1, &tiny_png());
+        let s = ScottSession::new(dat(), Some(blorb)).unwrap();
+        match s.screen().root {
+            WinNode::Pair { first, .. } => {
+                assert!(matches!(*first, WinNode::Graphics(_)), "picture band on top");
+            }
+            other => panic!("expected a graphics band on top, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plain_dat_has_no_picture_band() {
+        // Without a picture blorb the layout is unchanged: room panel over
+        // transcript, no graphics window.
+        let s = ScottSession::new(dat(), None).unwrap();
+        match s.screen().root {
+            WinNode::Pair { first, .. } => {
+                assert!(matches!(*first, WinNode::Buffer(_)), "no graphics band");
+            }
+            other => panic!("expected the plain room/transcript pair, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn in_game_save_bytes_round_trip_via_restore_game_save() {
+        // The in-game SAVE opcode writes `save_state().bytes` as the game-save
+        // payload; the in-game restore feeds them back through
+        // `restore_game_save`. They must round-trip (regression: the payload was
+        // empty for Scott, so restore hit "bad Scott snapshot").
+        let mut s = ScottSession::new(dat(), None).unwrap();
+        let start = s.current_location().unwrap().number;
+        let bytes = s.save_state().bytes;
+        assert!(!bytes.is_empty(), "the in-game save payload is the VM snapshot");
+
+        s.submit("down");
+        assert_ne!(s.current_location().unwrap().number, start, "moved before restore");
+
+        s.restore_game_save(&bytes).expect("restore accepts the snapshot");
+        assert_eq!(s.current_location().unwrap().number, start, "restored to the saved room");
+    }
+
     #[test]
     fn restore_state_rejects_foreign_engine() {
-        let mut s = ScottSession::new(dat()).unwrap();
+        let mut s = ScottSession::new(dat(), None).unwrap();
         let foreign = EngineSave::new("zmachine", 1, vec![1, 2, 3]);
         let err = s.restore_state(&foreign).unwrap_err();
         assert!(matches!(err, EngineError::EngineMismatch { .. }));

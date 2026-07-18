@@ -256,6 +256,9 @@ fn extract_story(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
         Ok((blorb::ExecKind::Glulx, _)) => {
             Err("Error: Glulx story files are not yet supported.".to_string())
         }
+        Ok((blorb::ExecKind::Scott, _)) => {
+            Err("Error: this is a Scott Adams Blorb; run it with babelmap.".to_string())
+        }
         Err(e) => Err(format!("Error: Blorb has no executable: {e:?}")),
     }
 }
