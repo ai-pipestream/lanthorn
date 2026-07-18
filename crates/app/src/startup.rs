@@ -374,6 +374,13 @@ pub(crate) fn boot() -> BootResult {
     state.honor_game_colours_base = honor_game_colours_base;
     state.config = cfg;
 
+    // Debug trace (trace feature): start a fresh log for this run and arm the
+    // engine's screen-trace buffer per config; no-op when no section is active.
+    if state.config.trace.any() {
+        app::trace::truncate(&state.config.user_dir);
+    }
+    session.set_trace_screen(state.config.trace.screen);
+
     // Resolve the sound container + construct the audio backend (silent if the
     // feature is off, there is no device, or sound is disabled in config).
     // The load line prints here, before the alternate screen is entered, so it
@@ -468,6 +475,15 @@ pub(crate) fn boot() -> BootResult {
             transcript_elems: Vec::new(),
         };
         apply_turn(&mut mapper, "", &seed_result);
+        crate::turn::flush_screen_trace(&state.config.user_dir, &mut *session, state.config.trace.screen);
+        if state.config.trace.any() {
+            let ptr = format!(
+                "[trace → {}: {}]",
+                state.config.user_dir.join("trace.log").display(),
+                state.config.trace.active_list(),
+            );
+            state.push_transcript_internal(&ptr, app::state::TranscriptKind::Meta);
+        }
         let rid = snap_number as mapper::graph::RoomId;
         state.select_room(Some(rid));
         // Recenter using a default pane size; will be corrected after first draw.

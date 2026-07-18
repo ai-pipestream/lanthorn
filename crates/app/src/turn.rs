@@ -81,6 +81,7 @@ pub(crate) fn finish_command_turn(
         }
     }
     apply_turn_events(state, &result);
+    flush_screen_trace(&state.config.user_dir, session, state.config.trace.screen);
     if let Some(note) = &result.info {
         state.push_transcript(note);
     }
@@ -322,6 +323,16 @@ fn post_turn_bookkeeping(
         if let Err(e) = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history) {
             state.push_notice(&format!("[Auto-save failed: {}]", e));
         }
+    }
+}
+
+/// Drain the engine's `screen` trace and, when `on`, append it to trace.log.
+/// Always drains (so the buffer never grows while the section is off between a
+/// runtime toggle). (trace feature)
+pub(crate) fn flush_screen_trace(user_dir: &std::path::Path, session: &mut dyn Engine, on: bool) {
+    let lines = session.take_screen_trace();
+    if on {
+        app::trace::write(user_dir, app::trace::Section::Screen, &lines);
     }
 }
 
@@ -606,6 +617,94 @@ pub(crate) fn next_input_deadline(
 
 #[cfg(test)]
 mod tests {
+    // ── screen-trace flush (drain-always, write-when-on) ────────────────────────
+
+    /// A minimal `Engine` double whose `take_screen_trace` returns one line on
+    /// its first call and is empty thereafter, so a test can observe both the
+    /// write-when-on path and the always-drain (no regrowth) behavior.
+    struct TraceOnlyEngine {
+        line: Option<String>,
+    }
+
+    impl app::engine::Engine for TraceOnlyEngine {
+        fn submit(&mut self, _command: &str) -> app::session::TurnResult {
+            unreachable!("not exercised by this test")
+        }
+        fn submit_key(&mut self, _key: app::engine::KeyInput) -> Option<app::session::TurnResult> {
+            unreachable!("not exercised by this test")
+        }
+        fn take_transcript(&mut self) -> String {
+            String::new()
+        }
+        fn pending_input(&self) -> app::session::InputKind {
+            unreachable!("not exercised by this test")
+        }
+        fn resume_save(&mut self, _wrote_ok: bool) -> app::session::TurnResult {
+            unreachable!("not exercised by this test")
+        }
+        fn resume_restore(&mut self, _data: Option<&[u8]>) -> app::session::TurnResult {
+            unreachable!("not exercised by this test")
+        }
+        fn has_quit(&self) -> bool {
+            false
+        }
+        fn screen(&self) -> app::engine::ScreenModel {
+            unreachable!("not exercised by this test")
+        }
+        fn save_state(&self) -> app::engine::EngineSave {
+            unreachable!("not exercised by this test")
+        }
+        fn restore_state(&mut self, _save: &app::engine::EngineSave) -> Result<(), app::engine::EngineError> {
+            unreachable!("not exercised by this test")
+        }
+        fn restore_game_save(&mut self, _bytes: &[u8]) -> Result<(), app::engine::EngineError> {
+            unreachable!("not exercised by this test")
+        }
+        fn take_screen_trace(&mut self) -> Vec<String> {
+            self.line.take().into_iter().collect()
+        }
+        fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> {
+            unreachable!("not exercised by this test")
+        }
+        fn set_aux_data(&mut self, _data: std::collections::BTreeMap<String, Vec<u8>>) {
+            unreachable!("not exercised by this test")
+        }
+        fn aux_dirty(&self) -> bool {
+            false
+        }
+        fn clear_aux_dirty(&mut self) {}
+        fn current_location(&self) -> Option<app::engine::LocationInfo> {
+            None
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn flush_screen_trace_writes_when_on_and_drains() {
+        let dir = std::env::temp_dir().join(format!("bm-flush-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut eng = TraceOnlyEngine { line: Some("@split_window(1)".to_string()) };
+
+        super::flush_screen_trace(&dir, &mut eng, true);
+        let body = std::fs::read_to_string(dir.join("trace.log")).unwrap_or_default();
+        assert!(body.contains("[screen] "), "{body:?}");
+
+        // Off → no further write, but the buffer must still be drained (no growth
+        // while the section is toggled off between calls). Since take_screen_trace
+        // is already empty after the first drain, a second flush is a no-op either
+        // way; assert the log is unchanged.
+        super::flush_screen_trace(&dir, &mut eng, false);
+        let body2 = std::fs::read_to_string(dir.join("trace.log")).unwrap_or_default();
+        assert_eq!(body, body2, "off flush must not append");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     // ── Timed-input deadline arming (F1 regression) ─────────────────────────────
 
     #[test]
