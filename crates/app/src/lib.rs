@@ -52,5 +52,6 @@ pub mod styles;
 pub mod symbols;
 pub mod text_field;
 pub mod tidy;
+pub mod trace;
 pub mod vfs_store;
 pub mod watch;
