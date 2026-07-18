@@ -1,40 +1,94 @@
-# Canonical titles for the classic Scott Adams "Adventure International"
-# numbered series, keyed by the adventure number stored in a Scott Adams
-# `.dat` database's trailer (`scott::Database::adventure_number`; 0 when the
-# trailer is absent/unparsed, so 0 is never a valid key here).
+# Canonical titles for Scott-format ("ScottFree") `.dat`/`.blb` adventures,
+# keyed by the file's lowercase filename stem (`scott::looks_like_scott` + the
+# picker's `scott_title`). The internal adventure number in a `.dat` trailer is
+# NOT a reliable key: Brian Howarth's "Mysterious Adventures" reuse numbers 1-11
+# and would collide with Scott Adams's own 1-14, and licensed/Questprobe titles
+# have no distinguishing number at all. The filename is the disambiguator, and
+# the same game shipped under several filenames (e.g. the graphics `.blb` blorb
+# repackaging of the Mysterious Adventures) gets one row per filename.
 #
-# Format: <adventure-number><TAB><Title>. Blank lines and lines starting with
-# '#' are ignored.
-#
-# Provenance: the standard Adventure International numbering for Scott
-# Adams's own 1978-1982 "Adventure" series (titles 1-13) plus the licensed
-# "Buckaroo Banzai" tie-in (14), as published by Adventure International and
-# widely documented (e.g. the IF Archive / Wikipedia's "List of Scott Adams
-# adventure games").
+# Format: <filename-stem><TAB><Title>[<TAB><IFDB-TUID>[<TAB><Author>[<TAB><Description>]]].
+# Trailing columns are optional; leave an inner column empty (two tabs) to skip
+# it while still supplying a later one (e.g. author with no TUID). Author and
+# description are only used for games with no IFDB record to fetch them from; a
+# real IFDB fetch always outranks these. Blank lines and lines starting with '#'
+# are ignored. Keys are matched case-insensitively (the lookup lowercases the
+# stem), so store them lowercase here.
 #
 # A WRONG entry mislabels a game; a MISSING one just falls back to the filename.
 #
-# Format: <adventure-number><TAB><Title>[<TAB><IFDB-TUID>]. The optional third
-# column is the IFDB game id (https://ifdb.org/viewgame?id=<TUID>) used to fetch
-# metadata/cover, because a Scott `.dat` has no embedded IFID and its computed
-# IFID never resolves on IFDB. TUIDs looked up on IFDB 2026-07-17 (Adventureland,
-# The Count, Sorcerer, Buckaroo Banzai page-verified; the rest search-matched to
-# the canonical Scott Adams / Adventure International entry).
-# NOTE: keyed by adventure number only — a non-Adventure-International Scott-format
-# game (Brian Howarth's Mysterious Adventures, Questprobe, …) that reuses a number
-# in 1-14 would map here wrongly; disambiguating those needs a content fingerprint.
+# The optional third column is the IFDB game id (https://ifdb.org/viewgame?id=<TUID>)
+# used to fetch metadata/cover, because a Scott `.dat` has no embedded IFID and
+# its computed IFID never resolves on IFDB. TUIDs were page-verified on IFDB
+# (title + author confirmed) on 2026-07-17. Rows with no TUID have no IFDB entry:
+# the Adventureland Sampler, and the eight miscellaneous homebrew games at the
+# bottom (title/author taken from their readme and each game's own title screen).
 #
-1	Adventureland	dy4ok8sdlut6ddj7
-2	Pirate Adventure	zya3mo3njj58hewi
-3	Secret Mission	89kxtet3vb9lzj87
-4	Voodoo Castle	ay2jy3sc3e6s9j4k
-5	The Count	89qmjvv4cb0z93t5
-6	Strange Odyssey	025dj4on6jr2c867
-7	Mystery Fun House	cj05ocxhay4dbrfs
-8	Pyramid of Doom	hew4c6rciycb6vog
-9	Ghost Town	rlxb5i0vjrnfr6x9
-10	Savage Island, Part I	wkaibkem4nxzo53y
-11	Savage Island, Part II	aqy6km542aq20jh4
-12	The Golden Voyage	4yo4je8dh53ug9qs
-13	The Sorcerer of Claymorgue Castle	11tnb08k1jov4hyl
-14	Buckaroo Banzai	m85x5yr0zbopyuyb
+# Provenance: filename->title mappings from the ScottFree collection readmes ---
+# the "Scott Adams Collection 2.2" 0readme.txt (adv01-adv14b, sampler1, quest1,
+# quest2), Brian Howarth's "Mysterious Adventures" ReadMe.txt (1_baton ..
+# b_waxworks), the blorb repackaging ReadBlorb.txt (golden_baton .. waxworks),
+# and the miscellaneous "Scott Adams Format" otheradv readme.txt (bond .. secret,
+# identities verified against each `.dat`'s embedded title/room text).
+
+# Scott Adams Classic Adventures (Adventure International, 1978-1982)
+adv01	Adventureland	dy4ok8sdlut6ddj7
+adv02	Pirate Adventure	zya3mo3njj58hewi
+adv03	Secret Mission	89kxtet3vb9lzj87
+adv04	Voodoo Castle	ay2jy3sc3e6s9j4k
+adv05	The Count	89qmjvv4cb0z93t5
+adv06	Strange Odyssey	025dj4on6jr2c867
+adv07	Mystery Fun House	cj05ocxhay4dbrfs
+adv08	Pyramid of Doom	hew4c6rciycb6vog
+adv09	Ghost Town	rlxb5i0vjrnfr6x9
+adv10	Savage Island, Part I	wkaibkem4nxzo53y
+adv11	Savage Island, Part II	aqy6km542aq20jh4
+adv12	The Golden Voyage	4yo4je8dh53ug9qs
+adv13	The Sorcerer of Claymorgue Castle	11tnb08k1jov4hyl
+
+# Later Adventures and a sampler
+adv14a	Return to Pirate's Isle	rp9eibu02f9vp2sv
+adv14b	Buckaroo Banzai	m85x5yr0zbopyuyb
+sampler1	Adventureland (Sampler)
+
+# Questprobe (Marvel) series
+quest1	The Hulk	4blbm63qfki4kf2p
+quest2	Spiderman	ngi8ox3s9gfcand2
+
+# Brian Howarth's Mysterious Adventures (1981-1983) --- text-only `.dat` version
+1_baton	The Golden Baton	v148gq1vx7leo8al
+2_timemachine	The Time Machine	g7h92i8ucy0sfll2
+3_arrow1	Arrow of Death Part 1	g25uklrs45gj7e02
+4_arrow2	Arrow of Death Part 2	fy9klru0b5swgnsz
+5_pulsar7	Escape from Pulsar 7	tbrvwzmvgmmnavhl
+6_circus	Circus	bdnprzz9zomlge4b
+7_feasibility	Feasibility Experiment	up2ak731a6h2quna
+8_akyrz	The Wizard of Akyrz	u1kmutsdwp8uys1h
+9_perseus	Perseus and Andromeda	gti5j0nqvvqqvnzo
+a_tenlittleindians	Ten Little Indians	z7ettlqezn4mcnng
+b_waxworks	Waxworks	lkt6sm3mgarb02bo
+
+# Mysterious Adventures --- graphics `.blb` blorb repackaging (same games)
+golden_baton	The Golden Baton	v148gq1vx7leo8al
+time_machine	The Time Machine	g7h92i8ucy0sfll2
+arrow1	Arrow of Death Part 1	g25uklrs45gj7e02
+arrow2	Arrow of Death Part 2	fy9klru0b5swgnsz
+pulsar7	Escape from Pulsar 7	tbrvwzmvgmmnavhl
+circus	Circus	bdnprzz9zomlge4b
+feasibility	Feasibility Experiment	up2ak731a6h2quna
+wizard_akyrz	The Wizard of Akyrz	u1kmutsdwp8uys1h
+perseus_andromeda	Perseus and Andromeda	gti5j0nqvvqqvnzo
+ten_indians	Ten Little Indians	z7ettlqezn4mcnng
+waxworks	Waxworks	lkt6sm3mgarb02bo
+
+# Miscellaneous homebrew "Scott Adams Format" games (no IFDB entry): title, an
+# empty TUID column, author, and a one-line description from the otheradv
+# readme. Identities verified against each `.dat`'s embedded title/room text.
+miner	Miner's Adventure		Bruce Hansen	Collect four lost treasures in a mine.
+bond	James Bond Adventure			A Scott-format spy adventure featuring the villain Dr. Yes; the author is unknown, though Bruce Hansen has been suggested.
+burglar	Burglar's Adventure		Bruce Hansen	As an ambitious burglar, steal five valuable treasures from a poorly-secured museum without tripping an alarm or waking the sleeping guard.
+romulan	Romulan Adventure		Jim Veneskey	A Star Trek-inspired adventure: as a Romulan spy testing a new cloaking device, infiltrate and destroy a Federation base, with cameos by Captain Kirk and Harlan Ellison.
+secret	Top Secret Adventure		Jim Veneskey	Stop the villainous Dr. Yes from using his weather machine to take over the world, at any cost.
+gamma	Gamma World		Jim Veneskey	Little is known about this adventure; it may be based on the science-fantasy RPG published by TSR.
+marooned	Marooned		Kim Watt	The title screen marks this as number ten in a series, though which series is meant is unknown.
+conquest	Undersea Conquest, Part I		Marc Mandel	Part I of a series; whether any further parts exist is unknown.

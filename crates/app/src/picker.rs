@@ -483,14 +483,25 @@ fn leading_year(s: &str) -> Option<String> {
     (y.len() == 4).then_some(y)
 }
 
-/// Canonical titles for the classic Scott Adams numbered series, keyed by the
-/// adventure number from a `.dat` database's trailer, bundled in
-/// `scott_titles.tsv` (`include_str!`d at build time). Mirrors
-/// `session::known_titles`.
-fn scott_titles() -> &'static std::collections::HashMap<i32, (&'static str, Option<&'static str>)> {
+/// A bundled Scott-format entry: canonical title plus, where known, its IFDB id
+/// and — for the homebrew games with no IFDB record — author and one-line
+/// description, so the browser can show those without a fetch.
+struct ScottEntry {
+    title: &'static str,
+    tuid: Option<&'static str>,
+    author: Option<&'static str>,
+    description: Option<&'static str>,
+}
+
+/// Canonical metadata for Scott-format ("ScottFree") `.dat`/`.blb` adventures,
+/// keyed by the lowercase filename stem, bundled in `scott_titles.tsv`
+/// (`include_str!`d at build time). Keyed by filename rather than the `.dat`
+/// trailer's adventure number because that number is not unique across the
+/// ScottFree corpus (Brian Howarth's Mysterious Adventures reuse 1-11;
+/// Questprobe titles have none).
+fn scott_titles() -> &'static std::collections::HashMap<&'static str, ScottEntry> {
     use std::sync::OnceLock;
-    static TABLE: OnceLock<std::collections::HashMap<i32, (&'static str, Option<&'static str>)>> =
-        OnceLock::new();
+    static TABLE: OnceLock<std::collections::HashMap<&'static str, ScottEntry>> = OnceLock::new();
     TABLE.get_or_init(|| {
         include_str!("scott_titles.tsv")
             .lines()
@@ -499,75 +510,83 @@ fn scott_titles() -> &'static std::collections::HashMap<i32, (&'static str, Opti
                 if line.is_empty() || line.starts_with('#') {
                     return None;
                 }
-                // <number>\t<title>[\t<ifdb-tuid>]
-                let mut cols = line.splitn(3, '\t');
-                let n = cols.next()?.trim().parse().ok()?;
+                // <filename-stem>\t<title>[\t<ifdb-tuid>[\t<author>[\t<description>]]]
+                let mut cols = line.splitn(5, '\t');
+                let stem = cols.next()?.trim();
                 let title = cols.next()?.trim();
-                let tuid = cols.next().map(str::trim).filter(|t| !t.is_empty());
-                Some((n, (title, tuid)))
+                let tuid = cols.next().map(str::trim).filter(|c| !c.is_empty());
+                let author = cols.next().map(str::trim).filter(|c| !c.is_empty());
+                let description = cols.next().map(str::trim).filter(|c| !c.is_empty());
+                (!stem.is_empty() && !title.is_empty())
+                    .then_some((stem, ScottEntry { title, tuid, author, description }))
             })
             .collect()
     })
 }
 
-/// The canonical title for a known Scott Adams adventure number.
-pub fn scott_title(adventure_number: i32) -> Option<&'static str> {
-    scott_titles().get(&adventure_number).map(|(title, _)| *title)
+/// Look up a bundled Scott entry by filename stem (matched case-insensitively).
+fn scott_entry(stem: &str) -> Option<&'static ScottEntry> {
+    scott_titles().get(stem.to_ascii_lowercase().as_str())
 }
 
-/// The IFDB game id (TUID) for a known Scott Adams adventure number, if we have
-/// one. A Scott `.dat`'s computed IFID never resolves on IFDB, so the metadata
-/// fetch looks the game up by this id instead.
-pub fn scott_tuid(adventure_number: i32) -> Option<&'static str> {
-    scott_titles().get(&adventure_number).and_then(|(_, tuid)| *tuid)
+/// The canonical title for a known Scott-format game, keyed by filename stem
+/// (matched case-insensitively).
+pub fn scott_title(stem: &str) -> Option<&'static str> {
+    scott_entry(stem).map(|e| e.title)
 }
 
-/// Parse a trailing run of ASCII digits off a filename stem into an adventure
-/// number, e.g. `"adv01"` -> `Some(1)`, `"ADV14"` -> `Some(14)`, `"mystery"` ->
-/// `None` (no trailing digits).
-fn parse_adv_number(stem: &str) -> Option<i32> {
-    let digits_start = stem.rfind(|c: char| !c.is_ascii_digit()).map_or(0, |i| i + 1);
-    let digits = &stem[digits_start..];
-    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+/// The IFDB game id (TUID) for a known Scott-format game, keyed by filename stem
+/// (matched case-insensitively), if we have one. A Scott `.dat`'s computed IFID
+/// never resolves on IFDB, so the metadata fetch looks the game up by this id.
+pub fn scott_tuid(stem: &str) -> Option<&'static str> {
+    scott_entry(stem).and_then(|e| e.tuid)
 }
 
-/// Resolve a display title for a Scott Adams `.dat` story: prefer the
-/// adventure number parsed from the database trailer, falling back to an
-/// `advNN`-style filename. `None` when neither source maps to a known title
-/// (caller falls back to the filename stem).
-pub fn scott_story_title(dat: &[u8], path: &Path) -> Option<String> {
-    if let Ok(s) = std::str::from_utf8(dat) {
-        if let Ok(db) = scott::Database::parse(s) {
-            if let Some(t) = scott_title(db.adventure_number) {
-                return Some(t.to_string());
-            }
-        }
-    }
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    let n = parse_adv_number(stem)?;
-    scott_title(n).map(str::to_string)
+/// The bundled author for a Scott-format game (filename stem, case-insensitive),
+/// present only for the homebrew games that have no IFDB record to fetch it from.
+pub fn scott_author(stem: &str) -> Option<&'static str> {
+    scott_entry(stem).and_then(|e| e.author)
+}
+
+/// The bundled one-line description for a Scott-format game (filename stem,
+/// case-insensitive), present only for the homebrew games with no IFDB record.
+pub fn scott_description(stem: &str) -> Option<&'static str> {
+    scott_entry(stem).and_then(|e| e.description)
+}
+
+/// Resolve a display title for a Scott-format `.dat` story from its filename
+/// stem. `None` when the filename isn't a known Scott game (caller falls back to
+/// the filename stem).
+pub fn scott_story_title(path: &Path) -> Option<String> {
+    let stem = path.file_stem().and_then(|s| s.to_str())?;
+    scott_title(stem).map(str::to_string)
 }
 
 /// SPEC "Precedence": per field, independently, first non-empty wins —
-/// `ifmd` (the file's own `IFmd` chunk) > `fetched` (an IFDB sidecar) >
-/// `tsv` (the bundled known-title table) > `stem` (the filename). `tsv` and
-/// `stem` apply to `title` only: the other fields have no such source.
+/// `ifmd` (the file's own `IFmd` chunk) > `fetched` (an IFDB sidecar) > the
+/// bundled `scott_titles.tsv` (`tsv_title`/`tsv_author`/`tsv_description`, only
+/// populated for Scott-format games) > `stem` (the filename, title only). The
+/// TSV author/description feed the homebrew Scott games that have no IFDB record
+/// to fetch from; a real fetch still outranks them.
 ///
 /// Pure so the whole table is testable without touching a filesystem.
 fn resolve(
     ifmd: Option<&crate::ifiction::IFiction>,
     fetched: Option<&crate::story_info::FetchedMeta>,
-    tsv: Option<&str>,
+    tsv_title: Option<&str>,
+    tsv_author: Option<&str>,
+    tsv_description: Option<&str>,
     stem: &str,
 ) -> Resolved {
     let title = ifmd
         .and_then(|i| i.title.clone())
         .or_else(|| fetched.and_then(|f| f.title.clone()))
-        .or_else(|| tsv.map(str::to_string))
+        .or_else(|| tsv_title.map(str::to_string))
         .unwrap_or_else(|| stem.to_string());
     let author = ifmd
         .and_then(|i| i.author.clone())
-        .or_else(|| fetched.and_then(|f| f.author.clone()));
+        .or_else(|| fetched.and_then(|f| f.author.clone()))
+        .or_else(|| tsv_author.map(str::to_string));
     let year = ifmd
         .and_then(|i| i.first_published.clone())
         .or_else(|| fetched.and_then(|f| f.first_published.clone()))
@@ -580,7 +599,8 @@ fn resolve(
         .or_else(|| fetched.and_then(|f| f.language.clone()));
     let description = ifmd
         .and_then(|i| i.description.clone())
-        .or_else(|| fetched.and_then(|f| f.description.clone()));
+        .or_else(|| fetched.and_then(|f| f.description.clone()))
+        .or_else(|| tsv_description.map(str::to_string));
     // IFDB-only: the page link exists solely in a fetched block.
     let ifdb_link = fetched.and_then(|f| f.ifdb_link.clone());
     let fetch_not_found = fetched.map(|f| f.not_found).unwrap_or(false);
@@ -676,18 +696,26 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
     // wrong IFID) is simply no metadata, never a scan error.
     let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(path));
     let fetched = crate::story_info::load(&game_dir, &ifid).and_then(|info| info.fetched);
-    // Scott stories have no IFID-keyed table; resolve their title from the
-    // database's adventure number (or an `advNN` filename) instead.
-    let scott_tsv_title = matches!(loaded, crate::hints::LoadedStory::Scott(_))
-        .then(|| scott_story_title(&bytes, path))
-        .flatten();
-    let tsv_title =
-        scott_tsv_title.as_deref().or_else(|| crate::session::known_title(&ifid));
+    // Scott stories have no IFID-keyed table; resolve their title (and, for the
+    // homebrew games with no IFDB record, author/description) from the filename
+    // stem via the bundled filename->metadata table instead.
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(&filename);
-    let resolved = resolve(ifmd.as_ref(), fetched.as_ref(), tsv_title, stem);
+    let is_scott = matches!(loaded, crate::hints::LoadedStory::Scott(_));
+    let scott_tsv_title = is_scott.then(|| scott_title(stem)).flatten();
+    let tsv_title = scott_tsv_title.or_else(|| crate::session::known_title(&ifid));
+    let tsv_author = is_scott.then(|| scott_author(stem)).flatten();
+    let tsv_description = is_scott.then(|| scott_description(stem)).flatten();
+    let resolved = resolve(
+        ifmd.as_ref(),
+        fetched.as_ref(),
+        tsv_title,
+        tsv_author,
+        tsv_description,
+        stem,
+    );
     let title = resolved.title;
 
     let engine = match &loaded {
@@ -744,6 +772,7 @@ pub enum SortKey {
     Title,
     Author,
     Year,
+    Type,
 }
 
 /// A sort column plus direction.
@@ -823,6 +852,29 @@ pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
         }
     }
 
+    /// Groups rows by engine (Z-code, then Glulx, then Scott), and within an
+    /// engine by version. Each dotted version component is zero-padded to a
+    /// fixed width so a plain string compare orders numerically (Z3 < Z5 < Z8,
+    /// Glulx 3.1.2 < 3.1.11). Every story has an engine, so the key is never
+    /// blank.
+    fn type_key(e: &StoryEntry) -> String {
+        let rank = match e.meta.engine {
+            Engine::ZCode => 0,
+            Engine::Glulx => 1,
+            Engine::Scott => 2,
+        };
+        let version: String = e
+            .meta
+            .version
+            .as_deref()
+            .unwrap_or("")
+            .split('.')
+            .map(|part| format!("{part:0>4}"))
+            .collect::<Vec<_>>()
+            .join(".");
+        format!("{rank} {version}")
+    }
+
     stories.sort_by(|a, b| {
         let ord = match sort.key {
             SortKey::Title => {
@@ -839,6 +891,9 @@ pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
                 let (a_blank, a_val) = year_key(a);
                 let (b_blank, b_val) = year_key(b);
                 cmp_blank_last(a_blank, &a_val, b_blank, &b_val, sort.desc)
+            }
+            SortKey::Type => {
+                cmp_blank_last(false, &type_key(a), false, &type_key(b), sort.desc)
             }
         };
         ord.then_with(|| a.filename.cmp(&b.filename))
@@ -1036,6 +1091,29 @@ mod tests {
         ];
         sort_stories(&mut stories, Sort { key: SortKey::Title, desc: false });
         assert_eq!(titles_of(&stories), vec!["apple", "Mango", "Zebra"]);
+    }
+
+    #[test]
+    fn sort_stories_by_type_groups_by_engine_then_version() {
+        // Type sort groups Z-code (ordered by version) < Glulx < Scott,
+        // independent of title order.
+        let typed = |title: &str, engine: Engine, version: Option<&str>| {
+            let mut e = story(title, &format!("{title}.dat"), None, None);
+            e.meta.engine = engine;
+            e.meta.version = version.map(str::to_string);
+            e
+        };
+        let mut stories = vec![
+            typed("scott", Engine::Scott, None),
+            typed("z8", Engine::ZCode, Some("8")),
+            typed("glulx", Engine::Glulx, Some("3.1.2")),
+            typed("z3", Engine::ZCode, Some("3")),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Type, desc: false });
+        assert_eq!(titles_of(&stories), vec!["z3", "z8", "glulx", "scott"]);
+
+        sort_stories(&mut stories, Sort { key: SortKey::Type, desc: true });
+        assert_eq!(titles_of(&stories), vec!["scott", "glulx", "z8", "z3"]);
     }
 
     #[test]
@@ -1336,21 +1414,41 @@ mod tests {
     fn ifmd_outranks_a_fetched_sidecar_field_by_field() {
         let ifmd = IFiction { title: Some("From IFmd".into()), author: None, ..Default::default() };
         let fetched = FetchedMeta { title: Some("From IFDB".into()), author: Some("From IFDB".into()), ..fetched_stub() };
-        let r = resolve(Some(&ifmd), Some(&fetched), None, "stem");
+        let r = resolve(Some(&ifmd), Some(&fetched), None, None, None, "stem");
         assert_eq!(r.title, "From IFmd", "the file's own metadata wins");
         assert_eq!(r.author.as_deref(), Some("From IFDB"), "but IFDB fills the gap IFmd left");
     }
 
     #[test]
     fn tsv_then_stem_when_nothing_else_has_a_title() {
-        assert_eq!(resolve(None, None, Some("From TSV"), "stem").title, "From TSV");
-        assert_eq!(resolve(None, None, None, "stem").title, "stem");
+        assert_eq!(resolve(None, None, Some("From TSV"), None, None, "stem").title, "From TSV");
+        assert_eq!(resolve(None, None, None, None, None, "stem").title, "stem");
     }
 
     #[test]
     fn a_not_found_block_contributes_nothing_but_is_not_an_error() {
         let nf = FetchedMeta { not_found: true, title: None, ..fetched_stub() };
-        assert_eq!(resolve(None, Some(&nf), Some("From TSV"), "stem").title, "From TSV");
+        assert_eq!(
+            resolve(None, Some(&nf), Some("From TSV"), None, None, "stem").title,
+            "From TSV"
+        );
+    }
+
+    #[test]
+    fn tsv_author_and_description_fill_gaps_but_a_fetch_still_wins() {
+        // Homebrew Scott games have only the bundled TSV author/description.
+        let r = resolve(None, None, Some("Marooned"), Some("Kim Watt"), Some("A desc."), "stem");
+        assert_eq!(r.author.as_deref(), Some("Kim Watt"));
+        assert_eq!(r.description.as_deref(), Some("A desc."));
+        // A real IFDB fetch outranks the TSV fallback, field by field.
+        let fetched = FetchedMeta {
+            author: Some("From IFDB".into()),
+            description: Some("From IFDB".into()),
+            ..fetched_stub()
+        };
+        let r = resolve(None, Some(&fetched), None, Some("Kim Watt"), Some("A desc."), "stem");
+        assert_eq!(r.author.as_deref(), Some("From IFDB"));
+        assert_eq!(r.description.as_deref(), Some("From IFDB"));
     }
 
     #[test]
@@ -1683,32 +1781,61 @@ mod tests {
     }
 
     #[test]
-    fn scott_title_lookup_and_filename_fallback() {
-        assert_eq!(scott_title(1), Some("Adventureland"));
-        assert_eq!(scott_title(13), Some("The Sorcerer of Claymorgue Castle"));
-        assert_eq!(scott_title(999), None);
-        // filename fallback via the tiny_cave fixture (its adventure_number is
-        // 99 -> not in the table), so title resolution should fall back; with
-        // a path "adv01.dat" it should yield Adventureland.
-        let dat = include_bytes!("../../scott/tests/tiny_cave.dat");
-        assert_eq!(
-            scott_story_title(dat, Path::new("adv01.dat")).as_deref(),
-            Some("Adventureland")
-        );
-        // unknown filename + unknown adventure number -> None (caller uses filename)
-        assert_eq!(scott_story_title(dat, Path::new("mygame.dat")), None);
+    fn scott_title_lookup_by_filename() {
+        assert_eq!(scott_title("adv01"), Some("Adventureland"));
+        assert_eq!(scott_title("adv13"), Some("The Sorcerer of Claymorgue Castle"));
+        // Distinct games that share the "14" number resolve by filename.
+        assert_eq!(scott_title("adv14a"), Some("Return to Pirate's Isle"));
+        assert_eq!(scott_title("adv14b"), Some("Buckaroo Banzai"));
+        // Howarth's Mysterious Adventures reuse numbers 1-11 but key by name.
+        assert_eq!(scott_title("1_baton"), Some("The Golden Baton"));
+        assert_eq!(scott_title("b_waxworks"), Some("Waxworks"));
+        // Lookup is case-insensitive (the readme uses uppercase stems).
+        assert_eq!(scott_title("ADV01"), Some("Adventureland"));
+        assert_eq!(scott_title("nope"), None);
+
+        // scott_story_title keys off the path's filename stem.
+        assert_eq!(scott_story_title(Path::new("adv01.dat")).as_deref(), Some("Adventureland"));
+        assert_eq!(scott_story_title(Path::new("quest1.dat")).as_deref(), Some("The Hulk"));
+        // Unknown filename -> None (caller falls back to the filename stem).
+        assert_eq!(scott_story_title(Path::new("mygame.dat")), None);
+
+        // Homebrew games carry a bundled author + description; IFDB games and
+        // unknown stems have neither.
+        assert_eq!(scott_author("marooned"), Some("Kim Watt"));
+        assert_eq!(scott_description("miner"), Some("Collect four lost treasures in a mine."));
+        assert_eq!(scott_author("bond"), None); // author genuinely unknown
+        assert!(scott_description("bond").is_some());
+        assert_eq!(scott_author("adv01"), None);
+        assert_eq!(scott_description("adv01"), None);
+        assert_eq!(scott_author("nope"), None);
     }
 
     #[test]
-    fn scott_tuid_lookup_and_full_coverage() {
-        assert_eq!(scott_tuid(1), Some("dy4ok8sdlut6ddj7")); // Adventureland
-        assert_eq!(scott_tuid(13), Some("11tnb08k1jov4hyl")); // Sorcerer of Claymorgue
-        assert_eq!(scott_tuid(99), None); // unknown adventure number
-        // Every canonical Adventure International adventure (1..=14) has both a
-        // title and an IFDB id.
-        for n in 1..=14 {
-            assert!(scott_title(n).is_some(), "title for adventure {n}");
-            assert!(scott_tuid(n).is_some(), "IFDB id for adventure {n}");
+    fn scott_tuid_lookup_where_known() {
+        assert_eq!(scott_tuid("adv01"), Some("dy4ok8sdlut6ddj7")); // Adventureland
+        assert_eq!(scott_tuid("adv13"), Some("11tnb08k1jov4hyl")); // Sorcerer of Claymorgue
+        assert_eq!(scott_tuid("quest1"), Some("4blbm63qfki4kf2p")); // The Hulk (Questprobe)
+        // The `.dat` and graphics `.blb` repackaging of a Mysterious Adventure
+        // are the same game, so they share one IFDB id.
+        assert_eq!(scott_tuid("1_baton"), Some("v148gq1vx7leo8al"));
+        assert_eq!(scott_tuid("golden_baton"), Some("v148gq1vx7leo8al"));
+        // The sampler and the homebrew games have a title but no IFDB entry.
+        assert_eq!(scott_title("sampler1"), Some("Adventureland (Sampler)"));
+        assert_eq!(scott_tuid("sampler1"), None);
+        assert_eq!(scott_title("bond"), Some("James Bond Adventure"));
+        assert_eq!(scott_tuid("bond"), None);
+        assert_eq!(scott_tuid("nope"), None);
+        // Rows not known to lack an IFDB entry carry both a title and a TUID.
+        const NO_TUID: &[&str] = &[
+            "sampler1", "miner", "bond", "burglar", "romulan", "secret", "gamma", "marooned",
+            "conquest",
+        ];
+        for (stem, entry) in scott_titles() {
+            assert!(!entry.title.is_empty(), "title for {stem}");
+            if !NO_TUID.contains(stem) {
+                assert!(entry.tuid.is_some(), "IFDB id for {stem}");
+            }
         }
     }
 
@@ -1719,7 +1846,7 @@ mod tests {
             .lines()
             .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
             .count();
-        assert_eq!(lines, table.len(), "no duplicate adventure numbers in scott_titles.tsv");
+        assert_eq!(lines, table.len(), "no duplicate filename stems in scott_titles.tsv");
     }
 }
 

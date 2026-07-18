@@ -146,8 +146,8 @@ fn scott_ifdb_id(path: &Path) -> Option<String> {
     if !scott::looks_like_scott(text) {
         return None;
     }
-    let db = scott::Database::parse(text).ok()?;
-    crate::picker::scott_tuid(db.adventure_number).map(str::to_string)
+    let stem = path.file_stem().and_then(|s| s.to_str())?;
+    crate::picker::scott_tuid(stem).map(str::to_string)
 }
 
 /// Handle one story: skip-check, fetch-or-skip, sidecar write, cover write.
@@ -305,12 +305,13 @@ mod tests {
 
     #[test]
     fn scott_ifdb_id_maps_a_known_adventure_and_ignores_non_scott() {
-        // A minimal Scott `.dat` whose trailer adventure number is 1 (Adventureland).
+        // A minimal Scott `.dat`; identity comes from the filename stem
+        // (`adv01` -> Adventureland), not the trailer number.
         const MINI: &str = "\n32767 1 0 1 2 6 1 0 3 125 0 1\n150 1 0 0 0 0 0 0\n\
              \"\" \"\"\n\"GO\" \"NORTH\"\n0 0 0 0 0 0 \"*limbo\"\n2 0 0 0 0 0 \"*forest clearing\"\n\
              0 0 0 0 0 0 \"*swamp\"\n\"\"\n\"\" 0\n\"*a brass lamp/LAMP/\" 1\n\"action comment\"\n0\n1\n1\n";
         let dir = tmp();
-        let dat = dir.join("adv.dat");
+        let dat = dir.join("adv01.dat");
         std::fs::write(&dat, MINI).unwrap();
         assert_eq!(super::scott_ifdb_id(&dat).as_deref(), Some("dy4ok8sdlut6ddj7"));
 

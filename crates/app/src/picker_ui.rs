@@ -968,7 +968,8 @@ pub(crate) fn run_story_picker(
                             sort.key = match sort.key {
                                 app::picker::SortKey::Title => app::picker::SortKey::Author,
                                 app::picker::SortKey::Author => app::picker::SortKey::Year,
-                                app::picker::SortKey::Year => app::picker::SortKey::Title,
+                                app::picker::SortKey::Year => app::picker::SortKey::Type,
+                                app::picker::SortKey::Type => app::picker::SortKey::Title,
                             };
                             list.select(
                                 resort_list(&mut stories, list.selected, sort, &mut row_badges, &mut aux_cache, data_base, &hint_index),
@@ -1185,10 +1186,14 @@ fn draw_story_picker(
         header_rects.push((SortKey::Year, Rect::new(year_x, header_y, cols.year_w, 1)));
     }
     // TYPE column header, above the interpreter labels in the right-hand zone.
-    // Not sortable, so no header rect — just a dimmed label (SQ-0369).
+    // Sortable like the other columns: active-styled with a direction arrow and
+    // a header rect for click-to-sort.
     if badges_shown {
         let interp_hx = area.left() + row_w - 1 - cluster_w - COL_GAP - INTERP_COL_W;
-        draw_str_clipped(buf, interp_hx, header_y, "TYPE", cs.story_header, area);
+        let (type_label, type_active) = header_label("TYPE", SortKey::Type, sort);
+        let type_hstyle = if type_active { cs.story_header_active } else { cs.story_header };
+        draw_str_clipped(buf, interp_hx, header_y, &type_label, type_hstyle, area);
+        header_rects.push((SortKey::Type, Rect::new(interp_hx, header_y, INTERP_COL_W, 1)));
     }
 
     for (i, entry) in stories.iter().enumerate().skip(first).take(rows) {
@@ -2388,12 +2393,13 @@ mod tests {
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
             &cs, app::picker::Sort::default(), area, &mut buf,
         );
-        assert_eq!(header_rects.len(), 3, "all three columns are shown at this width: {header_rects:?}");
+        assert_eq!(header_rects.len(), 4, "all four columns are shown at this width: {header_rects:?}");
         for (key, rect) in &header_rects {
             let expected_char = match key {
                 app::picker::SortKey::Title => "T",
                 app::picker::SortKey::Author => "A",
                 app::picker::SortKey::Year => "Y",
+                app::picker::SortKey::Type => "T", // "TYPE"
             };
             let cell = buf.cell((rect.x, rect.y)).unwrap();
             assert_eq!(
