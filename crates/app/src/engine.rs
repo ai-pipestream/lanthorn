@@ -472,6 +472,16 @@ pub trait Engine {
         vec![format!("Window layout: Grid {}x{} over Buffer (Z-machine simple path)", gc, gr)]
     }
 
+    /// Enable/disable the `screen` trace on this engine's VM (default: no-op for
+    /// engines without a Glk/screen model, e.g. Scott). (trace feature)
+    fn set_trace_screen(&mut self, _on: bool) {}
+
+    /// Drain any accumulated `screen`-trace lines (display instructions the story
+    /// issued this turn). Default empty; zvm/gvm sessions override. (trace feature)
+    fn take_screen_trace(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     // ── persistence (engine-tagged) ──
     /// Capture the game state as an engine-tagged save.
     fn save_state(&self) -> EngineSave;

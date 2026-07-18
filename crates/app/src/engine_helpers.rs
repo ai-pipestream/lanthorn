@@ -244,6 +244,14 @@ mod tests {
     }
 
     #[test]
+    fn engine_default_screen_trace_is_empty_and_toggle_is_noop() {
+        use app::engine::Engine as _;
+        let mut engine = NotZmachineEngine;
+        engine.set_trace_screen(true); // default no-op must not panic
+        assert!(engine.take_screen_trace().is_empty());
+    }
+
+    #[test]
     fn tags_scott_engine() {
         let s = app::scott_session::ScottSession::new(
             include_bytes!("../../scott/tests/tiny_cave.dat").to_vec(),
