@@ -2290,6 +2290,10 @@ impl AppState {
         match job.handle.join() {
             Ok(rm) => {
                 if job.gen == self.graph_gen {
+                    if self.config.trace.map {
+                        let steps = self.render_steps_snapshot();
+                        write_map_trace(&self.config.user_dir, &steps, true);
+                    }
                     *self.map_render.borrow_mut() =
                         Some(MapRenderCache { gen: job.gen, layer: job.layer, rm });
                     if let Ok(mut s) = self.render_steps.lock() {
@@ -3139,6 +3143,13 @@ impl AppState {
         self.search_query = None;
         self.search_matches.clear();
         self.search_idx = 0;
+    }
+}
+
+/// Append this render pass's pipeline stage labels to trace.log when `on`. (trace feature)
+pub(crate) fn write_map_trace(user_dir: &std::path::Path, steps: &[String], on: bool) {
+    if on {
+        crate::trace::write(user_dir, crate::trace::Section::Map, steps);
     }
 }
 
@@ -4751,6 +4762,23 @@ mod tests {
         assert_eq!(s.search_idx, 0);
         s.clear_search();
         assert!(s.search_query.is_none() && s.search_matches.is_empty());
+    }
+
+    #[test]
+    fn map_trace_routes_render_steps_to_log_only_when_on() {
+        let dir = std::env::temp_dir().join(format!("bm-maptrace-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let steps = vec!["detect chains".to_string(), "route lanes".to_string()];
+        // helper under test:
+        write_map_trace(&dir, &steps, /* on = */ true);
+        let body = std::fs::read_to_string(dir.join("trace.log")).unwrap_or_default();
+        assert!(body.contains("[map]    detect chains"), "{body:?}");
+
+        let dir2 = std::env::temp_dir().join(format!("bm-maptrace-off-{}", std::process::id()));
+        std::fs::create_dir_all(&dir2).unwrap();
+        write_map_trace(&dir2, &steps, false);
+        assert!(!dir2.join("trace.log").exists() || std::fs::read_to_string(dir2.join("trace.log")).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok(); std::fs::remove_dir_all(&dir2).ok();
     }
 }
 
