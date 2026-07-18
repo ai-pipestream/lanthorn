@@ -100,6 +100,13 @@ pub fn write(user_dir: &Path, section: Section, lines: &[String]) {
     }
 }
 
+/// Emit a single `hostio` line when the section is on (best-effort, no-op otherwise).
+pub fn hostio(user_dir: &Path, on: bool, line: String) {
+    if on {
+        write(user_dir, Section::HostIo, &[line]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +149,17 @@ mod tests {
 
         truncate(&dir);
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "", "truncate starts fresh");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hostio_writes_only_when_on() {
+        let dir = std::env::temp_dir().join(format!("bm-hostio-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        hostio(&dir, false, "save_state(auto, 1024 bytes)".to_string());
+        assert!(!dir.join("trace.log").exists() || std::fs::read_to_string(dir.join("trace.log")).unwrap().is_empty());
+        hostio(&dir, true, "save_state(auto, 1024 bytes)".to_string());
+        assert!(std::fs::read_to_string(dir.join("trace.log")).unwrap().contains("[hostio] save_state(auto, 1024 bytes)"));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

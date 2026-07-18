@@ -1174,7 +1174,7 @@ fn main() {
                             let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
                                 || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
                             turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-                            turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                            turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
                             if quit { break; }
                         }
                     }
@@ -1183,7 +1183,7 @@ fn main() {
                         let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
                             || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
                         turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-                        turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                        turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
                         if quit { break; }
                     }
                     OverlayAct::TextEntrySubmit => {
@@ -1195,7 +1195,7 @@ fn main() {
                         let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
                             || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
                         turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-                        turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                        turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
                         if quit { break; }
                     }
                     OverlayAct::TextEntryCancel => {
@@ -1205,7 +1205,7 @@ fn main() {
                         let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
                             || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
                         turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-                        turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                        turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
                         if quit { break; }
                     }
                     OverlayAct::ConfirmDelete(confirmed) => {
@@ -1541,7 +1541,10 @@ fn main() {
                         // converts it (ZSCII for the Z-machine) and returns None
                         // for keys with no input meaning, which are ignored.
                         if let Some(result) = app::engine::key_event_to_input(*k)
-                            .and_then(|ki| session.submit_key(ki))
+                            .and_then(|ki| {
+                                app::trace::hostio(&state.config.user_dir, state.config.trace.hostio, format!("input_key({ki:?})"));
+                                session.submit_key(ki)
+                            })
                         {
                             if turn::apply_game_driven_result(
                                 &mut state, &mut mapper, &result, &game_dir, last_panes.map,
@@ -1989,6 +1992,7 @@ fn main() {
                 state.turns += 1;
                 state.unsaved_progress = true;
 
+                app::trace::hostio(&state.config.user_dir, state.config.trace.hostio, format!("input_line({cmd:?})"));
                 let result = session.submit(&cmd);
                 if turn::finish_command_turn(
                     &cmd, result, &mut state, &mut mapper, &mut *session,
@@ -2174,7 +2178,7 @@ fn main() {
                     };
                     let quit = turn::finish_resumed_turn(result, &mut mapper, &mut state, &*session, &game_dir, &ifid, last_panes.map);
                     turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-                    turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                    turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
                     if let Some(io) = state.ingame_io {
                         open_ingame_saves(io, &game_dir, &mut state);
                     }
@@ -2231,7 +2235,7 @@ fn main() {
                                 let result = session.resume_restore(None);
                                 let quit = turn::finish_resumed_turn(result, &mut mapper, &mut state, &*session, &game_dir, &ifid, last_panes.map);
                                 turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-                                turn::persist_vfs_after_turn(&mut *session, &game_dir);
+                                turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
                                 if let Some(io) = state.ingame_io {
                                     open_ingame_saves(io, &game_dir, &mut state);
                                 }
@@ -2346,7 +2350,7 @@ fn main() {
         let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
             || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
         turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
-        turn::persist_vfs_after_turn(&mut *session, &game_dir);
+        turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
         if quit {
             break;
         }

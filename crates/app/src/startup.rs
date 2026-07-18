@@ -141,6 +141,8 @@ pub(crate) fn boot() -> BootResult {
     let game_dir = story_game_dir(&data_base, &story_key(&story_path));
     let _ = std::fs::create_dir_all(&game_dir);
     let vfs_sidecar = app::vfs_store::read_vfs(&game_dir);
+    app::trace::hostio(&cfg.user_dir, cfg.trace.hostio,
+        format!("vfs_read({} bytes)", vfs_sidecar.len()));
 
     // Resolve the look from style.toml (the single styling source) BEFORE the
     // engine builds: a Glulx game may probe glk_style_measure for the host's

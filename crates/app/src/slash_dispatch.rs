@@ -151,6 +151,9 @@ pub(crate) fn dispatch_slash_outcome(
                 Ok(msg) => {
                     // Progress is now captured in a Save State — quitting is safe.
                     state.unsaved_progress = false;
+                    if state.config.trace.hostio {
+                        app::trace::hostio(&state.config.user_dir, true, format!("save_state({} bytes)", session.save_state().bytes.len()));
+                    }
                     state.set_status(msg);
                 }
                 Err(e) => state.set_status(e),
@@ -174,7 +177,9 @@ pub(crate) fn dispatch_slash_outcome(
                     state.set_status("load failed: no save found with that name");
                 }
                 Some(ref path) => {
-                    match restore_from_file(path, &mut *session) {
+                    let restore_outcome = restore_from_file(path, &mut *session);
+                    app::trace::hostio(&state.config.user_dir, state.config.trace.hostio, format!("restore_state({})", path.display()));
+                    match restore_outcome {
                         Ok(RestoreOutcome::DescriptorCompleted) => {
                             reobserve_location(state, mapper, &*session, map_rect);
                             state.set_status("restored");

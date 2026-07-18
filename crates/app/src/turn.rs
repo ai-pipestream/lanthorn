@@ -129,7 +129,7 @@ pub(crate) fn finish_command_turn(
         rooms_before, conns_before, ifid, arc_file,
     );
     persist_aux_after_turn(session, state, game_dir);
-    persist_vfs_after_turn(session, game_dir);
+    persist_vfs_after_turn(session, state, game_dir);
 
     // Background map maintenance: a geometry change (new room/connection) is the
     // ONLY thing that can require re-layout, so all of it runs on a worker thread —
@@ -368,13 +368,17 @@ pub(crate) fn persist_aux_after_turn(
 /// always false). Mirrors `persist_aux_after_turn`.
 pub(crate) fn persist_vfs_after_turn(
     session: &mut dyn Engine,
+    state: &AppState,
     game_dir: &std::path::Path,
 ) {
     if !session.vfs_dirty() {
         return;
     }
-    let _ = app::vfs_store::write_vfs(game_dir, &session.vfs_bytes());
+    let bytes = session.vfs_bytes();
+    let _ = app::vfs_store::write_vfs(game_dir, &bytes);
     session.clear_vfs_dirty();
+    app::trace::hostio(&state.config.user_dir, state.config.trace.hostio,
+        format!("vfs_write({} bytes)", bytes.len()));
 }
 
 /// Post-process a TurnResult produced by `session.resume_*`: render output,
