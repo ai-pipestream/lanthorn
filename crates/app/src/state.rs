@@ -1360,6 +1360,13 @@ pub struct AppState {
     /// Which categories of transcript entries are currently visible.
     pub transcript_filter: TranscriptFilter,
     pub transcript_scroll: u16,
+    /// The `[more]` pager (SQ-0404): runtime state for paging a single command's
+    /// overflowing output one screen at a time instead of jumping to the bottom.
+    pub pager: crate::pager::Pager,
+    /// The transcript's total wrapped-row count from the last rendered frame,
+    /// cached so a command turn can measure how many rows it added (the pager arm
+    /// needs the pre-turn total, which is only known at render time). (SQ-0404)
+    pub last_transcript_total_rows: u16,
     /// Transcript length at the most recent game screen-clear (`erase_window`),
     /// or `None`. When set and the view is at the bottom, the renderer pins the
     /// post-clear lines to the top of the pane so a screen clear looks fresh
@@ -1780,6 +1787,8 @@ impl Default for AppState {
             garglk_overlay: None,
             honor_game_colours_base: true,
             transcript_scroll: 0,
+            pager: crate::pager::Pager::default(),
+            last_transcript_total_rows: 0,
             clear_anchor: None,
             transcript_gen: 0,
             transcript_wrap: std::cell::RefCell::new(None),
