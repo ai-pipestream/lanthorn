@@ -28,6 +28,10 @@ pub struct Vm {
     pub(crate) last_noun: String, // for print-noun opcodes
     pub(crate) rng_state: u32, // xorshift PRNG state
     pub(crate) pending_line: Option<String>, // buffered command
+    // Transient per-turn signal: the action interpreter ran opcode 71 (SAVE
+    // GAME) this turn. The host drains it after `step()` to trigger a save. Not
+    // part of game state, so it is excluded from snapshot/restore.
+    pub(crate) save_requested: bool,
 }
 
 impl Vm {
@@ -55,6 +59,7 @@ impl Vm {
             last_noun: String::new(),
             rng_state: 0x1234_5678,
             pending_line: None,
+            save_requested: false,
         };
         // Run the opening occurrence pass before the first prompt, so auto-events
         // that fire at game start (e.g. "A Voice BOOOMS out:") are shown on load —
@@ -77,6 +82,12 @@ impl Vm {
     }
     pub fn has_quit(&self) -> bool {
         self.quit
+    }
+    /// Take (read and clear) the "the game ran SAVE GAME (opcode 71) this turn"
+    /// signal. The host calls this after `step()`; when true it should perform a
+    /// save. Transient — never persisted in a snapshot.
+    pub fn take_save_request(&mut self) -> bool {
+        std::mem::take(&mut self.save_requested)
     }
     /// Current location of item `idx` (-1/255 = carried, 0 = nowhere, else room index).
     pub fn item_loc(&self, idx: usize) -> i32 {
@@ -308,7 +319,11 @@ impl Vm {
             match n {
                 0 => {}
                 1..=51 => self.print_message(n as usize),
-                102..=149 => self.print_message(n as usize - 50),
+                // Action codes >= 102 print message (code - 50), with no upper
+                // bound — a game with 100+ messages emits them via codes >= 152.
+                // `print_message` bounds-checks, so an out-of-range index is a
+                // safe no-op.
+                102..=u16::MAX => self.print_message(n as usize - 50),
                 52 => {
                     let item = p.next().unwrap_or(0) as usize;
                     if self.carried_count() < self.db.max_carry {
@@ -370,7 +385,7 @@ impl Vm {
                     self.flag_set(LAMP_EMPTY_FLAG, false);
                 }
                 70 => self.out.clear(),
-                71 => { /* save game: host wires this later (v1 no-op) */ }
+                71 => self.save_requested = true, // SAVE GAME: host performs the save after the turn
                 72 => {
                     let a = p.next().unwrap_or(0) as usize;
                     let b = p.next().unwrap_or(0) as usize;
@@ -1023,6 +1038,48 @@ mod tests {
         assert_eq!(vm.current_room(), 0); // would be 2 if op80 wrongly used saved_rooms[0]
         assert_eq!(vm.saved_room_at(), 1);
         assert_eq!(vm.saved_rooms_at(0), 2); // op80 left the op87 array untouched
+    }
+
+    // Action codes >= 102 print message (code - 50) with no upper cap: a game
+    // with 100+ messages emits them via codes >= 152, which must not be dropped.
+    #[test]
+    fn cmd_message_code_above_149_prints_high_message() {
+        let mut messages = vec![String::new(); 103];
+        messages[102] = "you found the hidden vault".into();
+        let db = Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 3,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![],
+            verbs: vec![String::new(); 2],
+            nouns: vec![String::new(); 2],
+            rooms: rooms4(),
+            messages,
+            items: one_item(),
+            adventure_number: 0,
+        };
+        let mut vm = Vm::new(db);
+        vm.take_output();
+        vm.run_commands(&[152, 0, 0, 0], &[]); // 152 - 50 -> message 102
+        assert!(
+            vm.take_output().contains("you found the hidden vault"),
+            "message code 152 prints message 102"
+        );
+    }
+
+    // Opcode 71 (SAVE GAME) raises a transient, host-drained save request; it is
+    // not the quit flag and does not persist across a take.
+    #[test]
+    fn cmd_save_request_flag_op71() {
+        let mut vm = vm_with(one_item(), rooms4(), 1);
+        assert!(!vm.take_save_request(), "no save requested before op 71");
+        vm.run_commands(&[71, 0, 0, 0], &[]);
+        assert!(!vm.has_quit(), "SAVE GAME does not quit");
+        assert!(vm.take_save_request(), "op 71 raises the save request");
+        assert!(!vm.take_save_request(), "the request clears once taken");
     }
 
     // MIN-8: GET ALL / DROP ALL sweep every auto-noun item in the room / pack.

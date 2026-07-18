@@ -14,7 +14,7 @@ use crate::engine::{
     BufferWindow, Engine, EngineError, EngineSave, LocationInfo, ScreenModel, Split, StatusModel,
     WinNode,
 };
-use crate::session::{InputKind, TurnResult};
+use crate::session::{InputKind, PendingIo, TurnResult};
 
 /// The engine tag recorded in an `EngineSave` produced by the Scott adapter.
 pub const SCOTT_ENGINE: &str = "scott";
@@ -101,8 +101,18 @@ impl Engine for ScottSession {
     fn submit(&mut self, command: &str) -> TurnResult {
         self.vm.supply_line(command);
         let _ = self.vm.step();
-        let mut transcript = self.vm.take_output();
+        let transcript = self.vm.take_output();
         let quit = self.vm.has_quit();
+        // The game ran the SAVE GAME action (opcode 71): bubble the same Save
+        // request the Z-machine/Glulx engines raise for `@save`, so the app's
+        // Save State file I/O runs. The prompt is withheld and returns via
+        // `resume_save` once the host has written the snapshot.
+        if !quit && self.vm.take_save_request() {
+            let mut result = self.turn(transcript, quit);
+            result.pending_io = Some(PendingIo::Save);
+            return result;
+        }
+        let mut transcript = transcript;
         if !quit {
             transcript.push_str(PROMPT);
         }
@@ -123,8 +133,12 @@ impl Engine for ScottSession {
     }
 
     fn resume_save(&mut self, _wrote_ok: bool) -> TurnResult {
-        // Scott has no in-game @save suspension; nothing to resume.
-        self.turn(String::new(), self.vm.has_quit())
+        // The SAVE GAME action ran the whole turn synchronously; the host has now
+        // performed the Save State write. Nothing in the VM to resume — just
+        // return to the command prompt (withheld by `submit` for this turn).
+        let quit = self.vm.has_quit();
+        let transcript = if quit { String::new() } else { PROMPT.to_string() };
+        self.turn(transcript, quit)
     }
 
     fn resume_restore(&mut self, _data: Option<&[u8]>) -> TurnResult {
@@ -268,6 +282,24 @@ mod tests {
 
         s.restore_state(&save).unwrap();
         assert_eq!(s.current_location().unwrap().number, start);
+    }
+
+    #[test]
+    fn a_normal_turn_raises_no_save_request_and_resume_returns_to_prompt() {
+        // Only the SAVE GAME action (opcode 71) bubbles a Save request; an
+        // ordinary command must not. resume_save (called by the host after it
+        // writes the snapshot) returns cleanly to the command prompt.
+        let mut s = ScottSession::new(dat()).unwrap();
+        let r = s.submit("down");
+        assert_eq!(r.pending_io, None, "a plain move does not request a save");
+
+        let resumed = s.resume_save(true);
+        assert!(
+            resumed.transcript.contains("Tell me what to do ?"),
+            "resume_save returns to the Scott prompt: {:?}",
+            resumed.transcript
+        );
+        assert_eq!(resumed.pending_io, None);
     }
 
     #[test]
