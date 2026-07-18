@@ -2355,6 +2355,25 @@ fn main() {
                 );
                 state.scroll_transcript_to(target);
             }
+            // [more] pager (SQ-0404): page one screen toward the bottom; reaching
+            // the bottom (offset 0) catches up and exits the pager.
+            Action::PagerAdvance => {
+                let target = app::input::page_scroll(
+                    state.transcript_scroll,
+                    -1,
+                    last_panes.transcript_viewport_rows,
+                    last_panes.transcript_max_scroll,
+                );
+                state.scroll_transcript_to(target);
+                if target == 0 {
+                    state.pager.active = false;
+                }
+            }
+            // [more] pager: jump straight to the newest output and exit.
+            Action::PagerDismiss => {
+                state.scroll_transcript_to(0);
+                state.pager.active = false;
+            }
 
             // ── apply_action handles everything else ───────────────────────────
             other => {

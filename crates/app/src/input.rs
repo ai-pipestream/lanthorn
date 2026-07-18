@@ -421,6 +421,11 @@ pub enum Action {
     /// older lines, `-1` toward newer. Resolved by the run loop, which knows the
     /// last-rendered transcript viewport height and max scroll (see `page_scroll`).
     TranscriptScrollPage(i8),
+    /// Advance the `[more]` pager one screen toward the bottom; catching up exits
+    /// the pager (SQ-0404).
+    PagerAdvance,
+    /// Dismiss the `[more]` pager, jumping straight to the newest output (SQ-0404).
+    PagerDismiss,
     /// Open the Hints panel. Real behavior wired in Task D; stub here keeps match exhaustive.
     OpenHints,
     /// Open the rewind/replay history modal (seeds `replay` at the last turn).
@@ -544,6 +549,18 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
         && matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
             return KeyResolve::Action(Action::CloseRoomPanel);
         }
+
+    // [more] pager (SQ-0404): while it's showing, keypresses page the transcript
+    // instead of reaching the game. Space/PgDn/↓/Enter advance one screen; any
+    // other key jumps to the bottom and dismisses.
+    if state.pager.active {
+        return match key.code {
+            KeyCode::Char(' ') | KeyCode::PageDown | KeyCode::Down | KeyCode::Enter => {
+                KeyResolve::Action(Action::PagerAdvance)
+            }
+            _ => KeyResolve::Action(Action::PagerDismiss),
+        };
+    }
 
     // 7. Prefix key → open the hotkey dialog.
     let spec = KeySpec::from_key_event(key);
@@ -2616,6 +2633,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::FbEnter
         | Action::GalleryExportStyle
         | Action::TranscriptScrollPage(_)
+        | Action::PagerAdvance
+        | Action::PagerDismiss
         | Action::Quit => {}
 
         // Caller-handled (needs session scope): opens the hints panel in main.rs.
@@ -3306,6 +3325,30 @@ mod tests {
         // Typing still reaches the command line (plain and shifted/capital letters).
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::InputChar('n')));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::InputChar('N')));
+    }
+
+    #[test]
+    fn active_more_pager_intercepts_keys() {
+        // SQ-0404: while the [more] pager is showing, Space/PgDn/Down/Enter page
+        // one screen; anything else dismisses to the bottom. Keys never reach the
+        // game.
+        let mut s = AppState::default();
+        s.pager.active = true;
+        for code in [KeyCode::Char(' '), KeyCode::PageDown, KeyCode::Down, KeyCode::Enter] {
+            assert!(
+                matches!(key_to_command(&s, key(code)), KeyResolve::Action(Action::PagerAdvance)),
+                "{code:?} should advance the pager"
+            );
+        }
+        for code in [KeyCode::Char('x'), KeyCode::Esc, KeyCode::Char('q')] {
+            assert!(
+                matches!(key_to_command(&s, key(code)), KeyResolve::Action(Action::PagerDismiss)),
+                "{code:?} should dismiss the pager"
+            );
+        }
+        // Inactive: the pager does not intercept — a plain letter reaches input.
+        s.pager.active = false;
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('x'))), Action::InputChar('x')));
     }
 
     #[test]

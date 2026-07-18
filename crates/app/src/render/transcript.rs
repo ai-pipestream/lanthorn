@@ -1327,6 +1327,11 @@ fn render_middle(
     } else {
         middle_bottom
     };
+    // [more] pager (SQ-0404): reserve the bottom row for the prompt when active,
+    // as long as at least one transcript row remains above it.
+    let more_row = (state.pager.active && transcript_bottom > transcript_top + 1)
+        .then_some(transcript_bottom - 1);
+    let transcript_bottom = transcript_bottom - more_row.is_some() as u16;
 
     if transcript_top >= transcript_bottom {
         return (false, 0, 0, Vec::new());
@@ -1691,6 +1696,21 @@ fn render_middle(
             start,
             state.colors.scrollbar,
         );
+    }
+    // [more] pager prompt (SQ-0404): a reverse-video bar on the reserved row.
+    if let Some(row) = more_row {
+        let mp = state.colors.more_prompt;
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, row)) {
+                cell.set_symbol(" ").set_style(mp);
+            }
+        }
+        let label = "[more]  Space/PgDn continue  Esc skip";
+        for (x, ch) in (area.x + 1..area.right()).zip(label.chars()) {
+            if let Some(cell) = buf.cell_mut((x, row)) {
+                cell.set_symbol(&ch.to_string()).set_style(mp);
+            }
+        }
     }
     let max_scroll = total_rows.saturating_sub(transcript_rows).min(u16::MAX as usize) as u16;
     let total = total_rows.min(u16::MAX as usize) as u16;
@@ -3084,6 +3104,31 @@ mod tests {
                 .collect();
             assert!(!row.contains("SECRETCMD"), "scrolled-up must not draw the live input: {:?}", row);
         }
+    }
+
+    #[test]
+    fn more_pager_prompt_drawn_only_when_active() {
+        // SQ-0404: an active pager reserves a bottom row for the `[more]` prompt.
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.transcript = (0..50).map(|i| format!("L{i}")).collect();
+        let area = Rect::new(0, 0, 40, 12);
+
+        let has_more = |state: &AppState| {
+            let mut buf = Buffer::empty(area);
+            render_transcript(&crate::session::status_model_from_machine(&machine), None, state, area, &mut buf, None);
+            (0..area.height).any(|y| {
+                let row: String = (0..area.width)
+                    .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+                    .collect();
+                row.contains("[more]")
+            })
+        };
+
+        state.pager.active = false;
+        assert!(!has_more(&state), "no prompt when the pager is inactive");
+        state.pager.active = true;
+        assert!(has_more(&state), "the [more] prompt shows on the reserved row when active");
     }
 
     #[test]
