@@ -27,6 +27,9 @@ pub struct StoryPaneMetrics {
     pub max_scroll: u16,
     /// The transcript viewport height (rows).
     pub viewport_rows: u16,
+    /// Total wrapped rows of the transcript this frame (for the [more] pager,
+    /// which needs the true total even when it fits — SQ-0404).
+    pub total_rows: u16,
     /// Per-frame map from rendered cell `(col, row)` → Glk hyperlink value, for
     /// hit-testing a mouse click to its link. Empty when nothing is linked.
     pub links: Vec<((u16, u16), u32)>,
@@ -173,9 +176,9 @@ pub fn render_story_pane(
             None => 0,
         };
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
-        let (scrollbar, max_scroll, mut tlinks) = render_transcript(&model.status, introspect, state, tarea, buf, gi);
+        let (scrollbar, max_scroll, total_rows, mut tlinks) = render_transcript(&model.status, introspect, state, tarea, buf, gi);
         links.append(&mut tlinks);
-        return StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: tarea.height, links };
+        return StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: tarea.height, total_rows, links };
     }
 
     // Generic multi-window path. Grid windows push their hyperlink cells into
@@ -200,7 +203,7 @@ pub fn render_story_pane(
     collect_graphics_ids(&model.root, &mut live);
     state.graphics_render.borrow_mut().retain_live(&live);
 
-    let mut m = metrics.unwrap_or(StoryPaneMetrics { scrollbar: false, max_scroll: 0, viewport_rows: area.height, links: Vec::new() });
+    let mut m = metrics.unwrap_or(StoryPaneMetrics { scrollbar: false, max_scroll: 0, viewport_rows: area.height, total_rows: 0, links: Vec::new() });
     m.links.extend(grid_links);
     m
 }
@@ -308,9 +311,9 @@ fn render_node(
         }
         WinNode::Buffer(b) => {
             if b.primary {
-                let (scrollbar, max_scroll, links) =
+                let (scrollbar, max_scroll, total_rows, links) =
                     render_transcript(status, introspect, state, area, buf, game_input);
-                Some(StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: area.height, links })
+                Some(StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: area.height, total_rows, links })
             } else {
                 render_inline_buffer(b, state, area, buf);
                 None
@@ -1330,7 +1333,7 @@ mod tests {
         let mut buf_b = Buffer::empty(area);
         let used = draw_upper_window(model.grid().unwrap(), false, &state.colors, area, &mut buf_b, state.config.honor_game_colours, &mut Vec::new());
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
-        let (sb, ms, _) = render_transcript(&model.status, None, &state, tarea, &mut buf_b, None);
+        let (sb, ms, _, _) = render_transcript(&model.status, None, &state, tarea, &mut buf_b, None);
 
         assert_eq!(buf_a, buf_b, "the simple path must be byte-identical to the legacy path");
         assert_eq!((ma.scrollbar, ma.max_scroll, ma.viewport_rows), (sb, ms, tarea.height));

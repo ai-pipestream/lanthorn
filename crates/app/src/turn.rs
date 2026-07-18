@@ -82,6 +82,16 @@ pub(crate) fn finish_command_turn(
     }
     apply_turn_events(state, &result);
     flush_screen_trace(&state.config.user_dir, session, state.config.trace.screen);
+    // [more] pager (SQ-0404): arm the pager for this command's output only when
+    // the game is now awaiting a normal LINE command — never on a screen clear
+    // (menu takeover) or when it switched to char/event input (a keypress menu or
+    // "press any key"), where a keypress must reach the game, not page the pane.
+    // The next render measures the rows added and engages if it overflowed.
+    if !result.erase_lower && session.pending_input() == app::session::InputKind::Line {
+        state.pager.arm(state.last_transcript_total_rows);
+    } else {
+        state.pager.disarm();
+    }
     if let Some(note) = &result.info {
         state.push_transcript(note);
     }
@@ -794,6 +804,7 @@ mod tests {
             reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
             style_editor: None, verb_menu: Default::default(), glyph_picker: None,
             transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0,
+            transcript_total_rows: 0,
             modal_list_viewport: 0,
         };
         assert_eq!(state.turns, 0, "a fresh AppState starts at turn 0");

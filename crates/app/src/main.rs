@@ -235,6 +235,9 @@ struct PaneRects {
     /// Visible transcript rows this frame (the transcript viewport height). Used
     /// to size a PageUp/PageDown step.
     pub transcript_viewport_rows: u16,
+    /// Total wrapped transcript rows this frame. Cached so a command turn can
+    /// measure how many rows its output added (the [more] pager, SQ-0404).
+    pub transcript_total_rows: u16,
     /// List-row viewport of the open selection-list modal this frame, synced to
     /// `AppState.modal_list_viewport` so nav actions can window/animate. 0 when
     /// no list modal is open.
@@ -278,6 +281,7 @@ fn draw_frame(
     let mut modal_list_viewport: usize = 0;
     let mut transcript_max_scroll: u16 = 0;
     let mut transcript_viewport_rows: u16 = 0;
+    let mut transcript_total_rows: u16 = 0;
     let mut transcript_links_out: Vec<((u16, u16), u32)> = Vec::new();
 
     terminal.draw(|f| {
@@ -367,6 +371,7 @@ fn draw_frame(
                 let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                 transcript_max_scroll = m.max_scroll;
                 transcript_viewport_rows = m.viewport_rows;
+                transcript_total_rows = m.total_rows;
                 transcript_links_out = m.links;
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
@@ -391,6 +396,7 @@ fn draw_frame(
                 let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                 transcript_max_scroll = m.max_scroll;
                 transcript_viewport_rows = m.viewport_rows;
+                transcript_total_rows = m.total_rows;
                 transcript_links_out = m.links;
                 if let Some(hrect) = story_fp.header {
                     let segs = [InsetSegment { text: &state.title, active: false }];
@@ -607,7 +613,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, style_editor: overlay_rects.style_editor, verb_menu: verb_hits, glyph_picker: overlay_rects.glyph_picker, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, style_editor: overlay_rects.style_editor, verb_menu: verb_hits, glyph_picker: overlay_rects.glyph_picker, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -735,7 +741,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_total_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -829,6 +835,26 @@ fn main() {
                 // over-scroll past the top doesn't accumulate (and lag on the
                 // way back down).
                 state.transcript_scroll = state.transcript_scroll.min(panes.transcript_max_scroll);
+                // [more] pager (SQ-0404): a command turn armed with the pre-turn
+                // wrapped-row total; now this frame knows the after-total + the
+                // viewport, so decide whether the output overflowed and, if so,
+                // park the view at the FIRST new screenful instead of the bottom.
+                if let Some(before) = state.pager.pending_before_rows.take() {
+                    match app::pager::activation_target(
+                        before,
+                        panes.transcript_total_rows,
+                        panes.transcript_viewport_rows,
+                    ) {
+                        Some(target) => {
+                            state.scroll_transcript_to(target.min(panes.transcript_max_scroll));
+                            state.pager.active = true;
+                        }
+                        None => state.pager.active = false,
+                    }
+                }
+                // Cache this frame's total so the next command turn can measure how
+                // many wrapped rows its own output added (the pager arm). (SQ-0404)
+                state.last_transcript_total_rows = panes.transcript_total_rows;
                 // Carry this frame's modal list viewport so the next nav action
                 // can window/animate the open selection-list modal.
                 state.modal_list_viewport = panes.modal_list_viewport;

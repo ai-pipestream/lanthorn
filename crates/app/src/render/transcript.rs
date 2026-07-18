@@ -953,7 +953,7 @@ pub fn inventory_items(
 /// A rendered transcript pass: `(scrollbar_drawn, max_scroll, links)` — whether a
 /// scrollbar gutter was drawn, the largest meaningful `transcript_scroll`, and a
 /// per-frame map from rendered cell `(col, row)` to Glk hyperlink value.
-type TranscriptRender = (bool, u16, Vec<((u16, u16), u32)>);
+type TranscriptRender = (bool, u16, u16, Vec<((u16, u16), u32)>);
 
 /// Render the GAME pane into `buf` within `area`:
 ///
@@ -981,7 +981,7 @@ pub fn render_transcript(
     game_input: Option<Style>,
 ) -> TranscriptRender {
     if area.height == 0 || area.width == 0 {
-        return (false, 0, Vec::new());
+        return (false, 0, 0, Vec::new());
     }
 
     let normal_style = state.colors.transcript;
@@ -1022,7 +1022,7 @@ pub fn render_transcript(
     }
 
     if area.height < status_rows + 1 {
-        return (false, 0, Vec::new());
+        return (false, 0, 0, Vec::new());
     }
 
     // ── Bottom row(s): input line ─────────────────────────────────────────────
@@ -1047,7 +1047,7 @@ pub fn render_transcript(
     let middle_top = area.y + status_rows;
     let middle_bottom = input_region_top;
     if middle_top >= middle_bottom {
-        return (false, 0, Vec::new());
+        return (false, 0, 0, Vec::new());
     }
     let middle_area = Rect::new(area.x, middle_top, area.width, middle_bottom - middle_top);
     render_middle(state, buf, middle_area, normal_style, game_input)
@@ -1258,7 +1258,7 @@ fn render_middle(
     game_input: Option<Style>,
 ) -> TranscriptRender {
     if area.height == 0 || area.width == 0 {
-        return (false, 0, Vec::new());
+        return (false, 0, 0, Vec::new());
     }
     let w = area.width as usize;
 
@@ -1316,7 +1316,7 @@ fn render_middle(
     // ── Transcript body ───────────────────────────────────────────────────────
     if area.height < 2 {
         // Not enough room for transcript when there's a suggestion row.
-        return (false, 0, Vec::new());
+        return (false, 0, 0, Vec::new());
     }
 
     let transcript_top = area.y;
@@ -1329,7 +1329,7 @@ fn render_middle(
     };
 
     if transcript_top >= transcript_bottom {
-        return (false, 0, Vec::new());
+        return (false, 0, 0, Vec::new());
     }
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
@@ -1693,7 +1693,8 @@ fn render_middle(
         );
     }
     let max_scroll = total_rows.saturating_sub(transcript_rows).min(u16::MAX as usize) as u16;
-    (drew_scrollbar, max_scroll, links)
+    let total = total_rows.min(u16::MAX as usize) as u16;
+    (drew_scrollbar, max_scroll, total, links)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -2110,7 +2111,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 40, 10);
         let mut buf = Buffer::empty(area);
-        let (_sb, _ms, links) = render_transcript(
+        let (_sb, _ms, _total, links) = render_transcript(
             &crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None,
         );
 
