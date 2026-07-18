@@ -553,8 +553,93 @@ fn glk_trace_args(sel: u32, args: &[u32]) -> String {
         0x00EA => format!("win={}, {}, l={}, t={}, w={}, h={}", a(0), glk_color_hex(a(1)), a(2), a(3), a(4), a(5)), // fill_rect
         0x1100 => format!("fg={}, bg={}", glk_color_hex(a(0)), glk_color_hex(a(1))),           // garglk_set_zcolors(fg, bg)
         0x1101 => format!("str={}, fg={}, bg={}", a(0), glk_color_hex(a(1)), glk_color_hex(a(2))), // _stream
+        0x0004 => format!("{}, {}", glk_gestalt_name(a(0)), a(1)),          // glk_gestalt(sel, val)
+        0x0005 => format!("{}, {}", glk_gestalt_name(a(0)), a(1)),          // glk_gestalt_ext(sel, val, ...)
         _ => args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "),
     }
+}
+
+/// A human-readable result suffix for the value-returning Glk selectors, so the
+/// trace can show `call(...) -> <result>` on one line. `None` for void returns.
+/// (SQ-0405)
+fn glk_trace_ret(sel: u32, ret: u32) -> Option<String> {
+    let s = match sel {
+        0x0020 | 0x0022 | 0x0023 | 0x0029 | 0x0030 => format!("win {ret}"), // window open/root/parent/sibling/iterate
+        0x0028 => glk_wintype_name(ret).to_string(),                        // window_get_type
+        0x002C | 0x002E | 0x0040 | 0x0042 | 0x0043 | 0x0048 | 0x0049 | 0x0138 | 0x0139 | 0x013A => format!("stream {ret}"),
+        0x0060 | 0x0061 | 0x0062 | 0x0064 | 0x0068 => format!("fileref {ret}"),
+        0x0067 => (if ret != 0 { "exists" } else { "absent" }).to_string(), // fileref_does_file_exist
+        0x0004 | 0x0005 => ret.to_string(),                                 // gestalt value
+        0x00F2 | 0x00F4 => format!("channel {ret}"),                        // schannel_create[_ext]
+        0x00E1 | 0x00E2 => (if ret != 0 { "drawn" } else { "no" }).to_string(), // image_draw[_scaled]
+        _ => return None,
+    };
+    Some(s)
+}
+
+/// Glk `evtype_*` name, for the event trace. (SQ-0405)
+fn glk_evtype_name(t: u32) -> &'static str {
+    match t {
+        0 => "None", 1 => "Timer", 2 => "CharInput", 3 => "LineInput", 4 => "MouseInput",
+        5 => "Arrange", 6 => "Redraw", 7 => "SoundNotify", 8 => "Hyperlink", 9 => "VolumeNotify",
+        _ => "Event?",
+    }
+}
+
+/// Decode a Glk character-event `val1` — a special `keycode_*` name, a printable
+/// char, or a hex code point. (SQ-0405)
+fn glk_keycode_name(k: u32) -> String {
+    use glk::keycode::*;
+    match k {
+        UNKNOWN => "Unknown".into(),
+        LEFT => "Left".into(),
+        RIGHT => "Right".into(),
+        UP => "Up".into(),
+        DOWN => "Down".into(),
+        RETURN => "Return".into(),
+        DELETE => "Delete".into(),
+        ESCAPE => "Escape".into(),
+        TAB => "Tab".into(),
+        PAGE_UP => "PageUp".into(),
+        PAGE_DOWN => "PageDown".into(),
+        HOME => "Home".into(),
+        END => "End".into(),
+        // Function keys occupy FUNC12..=FUNC1 (keycode_FuncN = FUNC1 - (N-1)).
+        f if (FUNC12..=FUNC1).contains(&f) => format!("Func{}", FUNC1 - f + 1),
+        c if c <= 0x0010_FFFF => {
+            char::from_u32(c).map(|ch| format!("'{ch}'")).unwrap_or_else(|| format!("{c:#x}"))
+        }
+        _ => format!("{k:#010x}"),
+    }
+}
+
+/// One-line description of a delivered Glk event, decoding the type + payload
+/// (keycode for char input, length for line input). (SQ-0405)
+fn glk_event_desc(ev: &GlkEvent) -> String {
+    let name = glk_evtype_name(ev.etype);
+    match ev.etype {
+        glk::evtype::NONE => name.to_string(),
+        glk::evtype::LINE_INPUT => format!("{name} win={} len={}", ev.win, ev.val1),
+        glk::evtype::CHAR_INPUT => format!("{name} win={} key={}", ev.win, glk_keycode_name(ev.val1)),
+        glk::evtype::MOUSE_INPUT => format!("{name} win={} x={} y={}", ev.win, ev.val1, ev.val2),
+        glk::evtype::HYPERLINK => format!("{name} win={} link={}", ev.win, ev.val1),
+        _ => format!("{name} win={} val1={} val2={}", ev.win, ev.val1, ev.val2),
+    }
+}
+
+/// A human-readable name for a Glk `gestalt_*` selector. (SQ-0405)
+fn glk_gestalt_name(sel: u32) -> String {
+    let name = match sel {
+        0 => "Version", 1 => "CharInput", 2 => "LineInput", 3 => "CharOutput",
+        4 => "MouseInput", 5 => "Timer", 6 => "Graphics", 7 => "DrawImage", 8 => "Sound",
+        9 => "SoundVolume", 10 => "SoundNotify", 11 => "Hyperlinks", 12 => "HyperlinkInput",
+        13 => "SoundMusic", 14 => "GraphicsTransparency", 15 => "Unicode", 16 => "UnicodeNorm",
+        17 => "LineInputEcho", 18 => "LineTerminators", 19 => "LineTerminatorKey", 20 => "DateTime",
+        21 => "Sound2", 22 => "ResourceStream", 23 => "GraphicsCharInput",
+        0x1100 => "GarglkText",
+        _ => return format!("gestalt[{sel:#x}]"),
+    };
+    name.to_string()
 }
 
 /// Clamp a code point for a byte-oriented stream read: values above 0xFF are
@@ -3216,9 +3301,10 @@ impl Machine {
         // Debug trace: record structural Glk/garglk calls so a story's
         // window/style/colour instructions are visible. The high-volume text I/O
         // (put/get char/string/buffer) is skipped so the trace stays readable.
-        if self.trace_screen && !is_glk_text_io(selector) {
-            self.screen_trace.push(format!("{}({})", glk_selector_name(selector), glk_trace_args(selector, args)));
-        }
+        // Captured now (args), pushed after the result is known so the return
+        // value can ride on the same line as `-> …`. (SQ-0405)
+        let trace_call = (self.trace_screen && !is_glk_text_io(selector))
+            .then(|| format!("{}({})", glk_selector_name(selector), glk_trace_args(selector, args)));
         let ret = match selector {
             // ── output (put) ──────────────────────────────────────────────────
             0x0080 => {
@@ -4136,6 +4222,12 @@ impl Machine {
                 0
             }
         };
+        if let Some(call) = trace_call {
+            match glk_trace_ret(selector, ret) {
+                Some(r) => self.screen_trace.push(format!("{call} -> {r}")),
+                None => self.screen_trace.push(call),
+            }
+        }
         Ok(ret)
     }
 
@@ -4477,6 +4569,13 @@ impl Machine {
     /// pointer `addr` — to memory, NULL-discarded, or pushed to the stack for the
     /// -1 convention (see [`Machine::glk_out_ref`]).
     fn write_event(&mut self, addr: u32, ev: GlkEvent) -> R<()> {
+        // Trace the delivered event, decoded (SQ-0405). This is the single choke
+        // point for every event — the async `glk_select` result (written on
+        // resume) and the synchronous arrange/redraw/cancel events — so its
+        // "meaning" surfaces here even though `glk_select` itself only suspends.
+        if self.trace_screen {
+            self.screen_trace.push(format!("event -> {}", glk_event_desc(&ev)));
+        }
         self.glk_out_ref(addr, &[ev.etype, ev.win, ev.val1, ev.val2])
     }
 
@@ -5211,6 +5310,36 @@ mod tests {
         assert_eq!(glk_trace_args(0x1100, &[0x00FF0000, 0xFFFF_FFFF]), "fg=#FF0000, bg=default");
         // set_style(Header)
         assert_eq!(glk_trace_args(0x0086, &[3]), "Header");
+        // gestalt selector decoded to its name
+        assert_eq!(glk_trace_args(0x0004, &[15, 0]), "Unicode, 0");
+    }
+
+    #[test]
+    fn glk_trace_ret_labels_return_values() {
+        // SQ-0405: value-returning selectors get a labelled `-> …` suffix.
+        assert_eq!(glk_trace_ret(0x0023, 5), Some("win 5".to_string()));      // window_open
+        assert_eq!(glk_trace_ret(0x0043, 3), Some("stream 3".to_string()));   // stream_open_memory
+        assert_eq!(glk_trace_ret(0x0061, 2), Some("fileref 2".to_string()));  // fileref_create_by_name
+        assert_eq!(glk_trace_ret(0x0028, 3), Some("TextBuffer".to_string())); // window_get_type
+        assert_eq!(glk_trace_ret(0x0067, 1), Some("exists".to_string()));     // does_file_exist
+        assert_eq!(glk_trace_ret(0x0067, 0), Some("absent".to_string()));
+        assert_eq!(glk_trace_ret(0x0004, 1), Some("1".to_string()));          // gestalt value
+        // A void-returning selector (window_clear) gets no suffix.
+        assert_eq!(glk_trace_ret(0x002A, 0), None);
+    }
+
+    #[test]
+    fn glk_event_desc_decodes_event_types_and_keycodes() {
+        use crate::glk::{evtype, keycode, GlkEvent};
+        let ev = |etype, win, val1, val2| GlkEvent { etype, win, val1, val2 };
+        assert_eq!(glk_event_desc(&ev(evtype::LINE_INPUT, 5, 8, 0)), "LineInput win=5 len=8");
+        assert_eq!(glk_event_desc(&ev(evtype::CHAR_INPUT, 5, keycode::RETURN, 0)), "CharInput win=5 key=Return");
+        assert_eq!(glk_event_desc(&ev(evtype::CHAR_INPUT, 5, 'x' as u32, 0)), "CharInput win=5 key='x'");
+        assert_eq!(glk_event_desc(&ev(evtype::ARRANGE, 0, 0, 0)), "Arrange win=0 val1=0 val2=0");
+        // Function keys decode by number.
+        assert_eq!(glk_keycode_name(keycode::FUNC1), "Func1");
+        assert_eq!(glk_gestalt_name(0), "Version");
+        assert_eq!(glk_gestalt_name(0x9999), "gestalt[0x9999]");
     }
 
     /// Build a test machine over `built` with a [`TestBackend`], then run the
@@ -10445,9 +10574,13 @@ mod tests {
     fn screen_trace_records_glk_calls_when_enabled_and_skips_text_io() {
         let mut m = super::tests::machine_with_glk(&[]);
         m.trace_screen = true;
-        m.glk_dispatch(0x0023, &[0, 0, 3]).ok();   // glk_window_open (structural → traced)
+        let win = m.glk_dispatch(0x0023, &[0, 0, 3]).unwrap(); // glk_window_open (traced, returns win id)
         m.glk_dispatch(0x0080, &[b'x' as u32]).ok(); // glk_put_char (text I/O → skipped)
-        assert!(m.screen_trace.iter().any(|l| l.starts_with("glk_window_open(")), "{:?}", m.screen_trace);
+        // SQ-0405: the return value rides on the same line as `-> win N`.
+        assert!(
+            m.screen_trace.iter().any(|l| l.starts_with("glk_window_open(") && l.ends_with(&format!("-> win {win}"))),
+            "{:?}", m.screen_trace
+        );
         assert!(!m.screen_trace.iter().any(|l| l.starts_with("glk_put_char")), "text I/O skipped");
 
         let mut off = super::tests::machine_with_glk(&[]);
