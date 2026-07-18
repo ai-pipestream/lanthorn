@@ -523,7 +523,10 @@ impl GlulxSession {
             transcript_runs,
             location,
             quit: self.quit,
-            erase_lower: false,
+            // A `glk_window_clear` on the primary buffer (e.g. an Inform 7 menu
+            // redraw) pins the reprint to a fresh screen instead of stacking a
+            // fresh copy of the menu on every keypress. (SQ-0403)
+            erase_lower: self.appglk().take_primary_cleared(),
             info: None,
             sounds: Vec::new(),
             glulx_sound_ops,

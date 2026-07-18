@@ -181,6 +181,11 @@ pub struct AppGlk {
     buffers: BTreeMap<u32, BufBuf>,
     /// The primary buffer window id (the first text-buffer opened), if any.
     primary: Option<u32>,
+    /// Set when the primary buffer window is cleared (`glk_window_clear`) this
+    /// turn — an Inform 7 menu redraw clears + reprints on every keypress. Taken
+    /// by `finish_turn` into `TurnResult.erase_lower` so the app pins the reprint
+    /// to a fresh screen instead of appending a fresh copy each time. (SQ-0403)
+    primary_cleared: bool,
     /// Accumulator for the current run of `Subheader` text in the primary
     /// window (the Inform 7 room heading, captured char-by-char).
     heading_acc: String,
@@ -252,6 +257,7 @@ impl AppGlk {
             grids: BTreeMap::new(),
             buffers: BTreeMap::new(),
             primary: None,
+            primary_cleared: false,
             heading_acc: String::new(),
             last_heading: None,
             at_line_start: true,
@@ -354,7 +360,7 @@ impl AppGlk {
         fn walk(node: &WinTree, depth: usize, primary: Option<u32>, gfx: &std::collections::BTreeMap<u32, String>, out: &mut Vec<String>) {
             let indent = "  ".repeat(depth);
             match node {
-                WinTree::Leaf { id, wintype, rect, bg, fg } => {
+                WinTree::Leaf { id, wintype, rect, bg, fg, .. } => {
                     let ty = match wintype {
                         WinType::TextGrid => "Grid",
                         WinType::TextBuffer => "Buffer",
@@ -467,6 +473,14 @@ impl AppGlk {
     /// Drain the sound operations buffered this turn (see [`crate::session::SchannelOp`]).
     pub fn take_sound_ops(&mut self) -> Vec<crate::session::SchannelOp> {
         std::mem::take(&mut self.sound_ops)
+    }
+
+    /// Take (and reset) the "primary buffer cleared this turn" flag — a
+    /// `glk_window_clear` on the primary window, e.g. an Inform 7 menu redraw.
+    /// Fed into `TurnResult.erase_lower` so the reprint replaces the screen
+    /// instead of stacking a fresh copy. (SQ-0403)
+    pub fn take_primary_cleared(&mut self) -> bool {
+        std::mem::take(&mut self.primary_cleared)
     }
 
     /// Test seam: append an inline image to the primary buffer's undrained log,
@@ -585,13 +599,14 @@ impl AppGlk {
     /// zero-area areas in T4.
     fn convert_tree(&self, tree: &WinTree) -> WinNode {
         match tree {
-            WinTree::Leaf { id, wintype, rect, bg, fg } => match wintype {
+            WinTree::Leaf { id, wintype, rect, bg, fg, reverse } => match wintype {
                 // Glulx grids are frameless on the generic path; the pair
                 // separator carries the border (T4), so pass `None` here.
                 WinType::TextGrid => {
                     let mut g = self.grid_node(*id, *rect, None);
                     g.bg = *bg;
                     g.fg = *fg;
+                    g.reverse = *reverse;
                     WinNode::Grid(g)
                 }
                 WinType::TextBuffer => {
@@ -650,6 +665,7 @@ impl AppGlk {
             },
             bg: None,
             fg: None,
+            reverse: false,
         }
     }
 
@@ -854,6 +870,9 @@ impl GlkBackend for AppGlk {
             self.at_line_start = true;
             self.in_heading = false;
             self.heading_acc.clear();
+            // Signal the app to pin the upcoming reprint to a fresh screen
+            // instead of appending a fresh copy (menu redraws). (SQ-0403)
+            self.primary_cleared = true;
         }
     }
 
@@ -1028,12 +1047,12 @@ mod tests {
 
     /// Test helper: a `WinTree` leaf (no per-window colour).
     fn leaf(id: u32, wintype: WinType, r: GlkRect) -> WinTree {
-        WinTree::Leaf { id, wintype, rect: r, bg: None, fg: None }
+        WinTree::Leaf { id, wintype, rect: r, bg: None, fg: None, reverse: false }
     }
 
     /// Test helper: a `WinTree` leaf carrying a packed bg/fg colour.
     fn leaf_col(id: u32, wintype: WinType, r: GlkRect, bg: Option<u32>, fg: Option<u32>) -> WinTree {
-        WinTree::Leaf { id, wintype, rect: r, bg, fg }
+        WinTree::Leaf { id, wintype, rect: r, bg, fg, reverse: false }
     }
 
     /// Bounding rect of two child rects (a pair node's own rect).
@@ -1146,6 +1165,35 @@ mod tests {
         let img_idx = bw.images.iter().position(|o| o.is_some()).expect("image line present");
         assert_eq!(bw.lines[img_idx], "", "image occupies its own logical line");
         assert!(img_idx > 0 && img_idx < bw.lines.len() - 1, "image line sits between a and b");
+    }
+
+    #[test]
+    fn primary_window_clear_signals_erase_and_resets_the_drain() {
+        // SQ-0403: an Inform 7 menu clears the primary buffer and reprints on
+        // every keypress. The clear must (a) flag a screen clear so the app pins
+        // the reprint to a fresh screen, and (b) reset the drain so the reprint
+        // is drained ONCE, not stacked on the previous copy.
+        let mut glk = AppGlk::new(80, 24);
+        glk.window_open(1, WinType::TextBuffer); // first buffer -> primary
+        assert!(!glk.take_primary_cleared(), "no clear yet");
+
+        glk.put_text(1, GlkStyle::Normal, "MENU v1\n");
+        let (first, _) = glk.take_transcript();
+        assert!(first.contains("MENU v1"));
+
+        // Menu redraw: clear the primary window, then reprint.
+        glk.window_clear(1);
+        assert!(glk.take_primary_cleared(), "clearing the primary buffer flags a screen clear");
+        assert!(!glk.take_primary_cleared(), "the flag resets when taken");
+        glk.put_text(1, GlkStyle::Normal, "MENU v2\n");
+        let (second, _) = glk.take_transcript();
+        assert!(second.contains("MENU v2"), "reprint present: {second:?}");
+        assert!(!second.contains("MENU v1"), "cleared content is not re-drained: {second:?}");
+
+        // A grid (upper-window) clear must NOT flag it — the grid redraws in place.
+        glk.window_open(2, WinType::TextGrid);
+        glk.window_clear(2);
+        assert!(!glk.take_primary_cleared(), "grid clears don't trigger the anchor");
     }
 
     #[test]

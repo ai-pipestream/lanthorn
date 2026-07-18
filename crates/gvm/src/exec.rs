@@ -3142,6 +3142,13 @@ impl Machine {
                 match self.glk.window_clear(a(0)) {
                     Some(WinType::TextGrid) => self.backend.grid_clear(a(0)),
                     Some(WinType::TextBuffer) => self.backend.window_clear(a(0)),
+                    // A graphics window clears to its background colour
+                    // (glk_window_set_background_color): erase the whole canvas to
+                    // that colour. Without this the clear was a no-op, so a game
+                    // that set a black background (Counterfeit Monkey's help)
+                    // rendered as the transparent default → the white page showed
+                    // through. (SQ-0403)
+                    Some(WinType::Graphics) => self.backend.graphics_erase_rect(a(0), 0, 0, u32::MAX, u32::MAX),
                     _ => {}
                 }
                 0
@@ -10148,6 +10155,31 @@ mod tests {
         assert_eq!(tb.fills(win), vec![(0x00FF_0000, 1, 2, 3, 4)]);
         assert_eq!(tb.background(win), Some(0x0000_00FF));
         assert_eq!(tb.draws(win), vec![(7, 5, 6, None)]);
+    }
+
+    #[test]
+    fn graphics_window_clear_erases_canvas_to_background() {
+        // SQ-0403: glk_window_clear on a GRAPHICS window must erase the canvas to
+        // its background colour (glk_window_set_background_color). It used to fall
+        // through the clear dispatch's `_ => {}` (only text windows were handled),
+        // so a game that set a black background — Counterfeit Monkey's help window
+        // — left the canvas transparent and the white page showed through.
+        let mut m = super::tests::machine_with_glk(&[]);
+        m.set_graphics(true);
+        let win = m.glk_open_window(0, 0, 0, 5, 0); // graphics root
+        assert_ne!(win, 0);
+
+        m.glk_dispatch(0x00EB, &[win, 0]).unwrap(); // set_background_color(win, 0 = black)
+        m.glk_dispatch(0x002A, &[win]).unwrap();    // window_clear(win)
+
+        let tb = m.backend.as_any().downcast_ref::<glk::TestBackend>().unwrap();
+        // The clear reached the backend as a full-canvas erase to the background.
+        assert_eq!(
+            tb.fills(win),
+            vec![(0, 0, 0, u32::MAX, u32::MAX)],
+            "graphics clear must erase the whole canvas to the set background colour"
+        );
+        assert_eq!(tb.background(win), Some(0));
     }
 
     #[test]

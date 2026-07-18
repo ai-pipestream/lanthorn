@@ -140,6 +140,10 @@ pub struct GridWindow {
     pub bg: Option<u32>,
     /// This window's own Normal-style foreground colour (packed RGB), or `None`.
     pub fg: Option<u32>,
+    /// The grid's Normal-style ReverseColor flag: when the game reversed the grid
+    /// styles with no explicit colours (Counterfeit Monkey's menu), the empty-cell
+    /// fill is drawn reversed too, so the whole window matches. (SQ-0403)
+    pub reverse: bool,
 }
 
 impl GridWindow {

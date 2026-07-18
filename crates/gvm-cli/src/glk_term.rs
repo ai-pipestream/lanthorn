@@ -1215,7 +1215,7 @@ mod tests {
 
     // Helpers to build leaf/pair nodes tersely.
     fn leaf(id: u32, ty: WinType, left: u32, top: u32, width: u32, height: u32) -> WinTree {
-        WinTree::Leaf { id, wintype: ty, rect: Rect { left, top, width, height }, bg: None, fg: None }
+        WinTree::Leaf { id, wintype: ty, rect: Rect { left, top, width, height }, bg: None, fg: None, reverse: false }
     }
 
     #[test]

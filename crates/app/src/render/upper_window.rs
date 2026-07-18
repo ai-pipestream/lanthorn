@@ -124,10 +124,17 @@ pub fn draw_grid(
     // carries its own `bg`, the content fill and each cell's default background use
     // it instead of the theme's `upper_window` bg. `None` (Z-machine simple path,
     // default) leaves the behaviour byte-identical.
-    let content_style = match upper.bg {
+    let mut content_style = match upper.bg {
         Some(rgb) => colors.upper_window.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), colors)),
         None => colors.upper_window,
     };
+    // If the game reversed the grid's Normal style with no explicit colours
+    // (Counterfeit Monkey's menu sets ReverseColor on every grid style), the empty
+    // fill must invert the theme base too — otherwise the unwritten cells show the
+    // non-reversed base (white) while the reverse-video text is dark. (SQ-0403)
+    if upper.reverse {
+        content_style = content_style.add_modifier(ratatui::style::Modifier::REVERSED);
+    }
     let border_color = colors.upper_window_border;
 
     // Resolve which sides to frame. The game controls border PRESENCE (SQ-0286);
@@ -560,6 +567,32 @@ mod tests {
         assert_eq!(buf.cell((19, 0)).unwrap().symbol(), "Z", "right edge at x=19 (10..19)");
         // Nothing drawn outside the centered 10-col region.
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), " ", "no content stretched to the pane left edge");
+    }
+
+    /// SQ-0403: a grid whose Normal style is reverse-video with no explicit
+    /// colours (Counterfeit Monkey's menu sets ReverseColor on every grid style)
+    /// must fill its EMPTY cells reversed too, so the whole window reads dark to
+    /// match the reverse-video text — not a white fill with dark text islands.
+    #[test]
+    fn reverse_grid_fills_empty_cells_reversed() {
+        let mut upper = GridWindow::default();
+        upper.resize(2, 5);
+        upper.reverse = true; // game reversed the grid's Normal style
+        upper.put(1, 1, 'X', 0); // one written non-reverse cell; the rest are empty fill
+
+        let mut colors = make_colors();
+        colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
+
+        let area = Rect::new(0, 0, 10, 3);
+        let mut buf = Buffer::empty(area);
+        draw_grid(&upper, 2, (1, 1), false, &colors, area, &mut buf, true, &mut Vec::new());
+
+        // An empty fill cell (row 1, col 5 → cols=5 centered in 10: x_off=2, so x=6) is REVERSED.
+        assert!(
+            buf.cell((6, 0)).unwrap().modifier.contains(Modifier::REVERSED),
+            "a reverse-Normal grid must fill empty cells reversed so the window reads dark"
+        );
     }
 
     #[test]

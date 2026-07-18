@@ -492,6 +492,11 @@ pub enum WinTree {
         /// The window's Normal-style foreground colour from its own snapshot
         /// (packed RGB `0x00RRGGBB`), or `None` if unset.
         fg: Option<u32>,
+        /// The window's Normal-style ReverseColor flag. A game may set a grid's
+        /// styles to reverse-video with no explicit colours (Counterfeit Monkey's
+        /// status/menu grid); the host inverts the window's default fill so the
+        /// empty cells match the reversed text instead of showing the base. (SQ-0403)
+        reverse: bool,
     },
     Pair {
         /// true for an Above/Below split (children stacked), false for Left/Right.
@@ -2123,8 +2128,14 @@ impl Model {
     fn build_win_tree(&self, id: u32) -> WinTree {
         let w = self.win(id).expect("window_tree walks the live window tree");
         if w.wintype != WinType::Pair {
-            let sc = self.window_style_colour(id, GlkStyle::Normal);
-            return WinTree::Leaf { id, wintype: w.wintype, rect: w.rect, bg: sc.bg, fg: sc.fg };
+            // A window's effective default colour is its Normal-style hint WITH any
+            // garglk per-stream override (garglk_set_zcolors on the window's own
+            // stream) layered on top — so we honour a game that colours a window
+            // via the garglk extension, not only via a stylehint. Games that colour
+            // text transiently reset the stream, leaving the persistent override
+            // unset, so this is a no-op at rest. (SQ-0403 follow-up)
+            let sc = self.window_stream_style_colour(id, w.stream, GlkStyle::Normal);
+            return WinTree::Leaf { id, wintype: w.wintype, rect: w.rect, bg: sc.bg, fg: sc.fg, reverse: sc.reverse };
         }
         let dir = w.method & WINMETHOD_DIRMASK;
         let vertical = dir == WINMETHOD_ABOVE || dir == WINMETHOD_BELOW;

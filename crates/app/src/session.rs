@@ -222,10 +222,11 @@ pub struct TurnResult {
     pub transcript_runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)>,
     pub location: Option<ObjectSnapshot>,
     pub quit: bool,
-    /// The game issued `erase_window` (lower / all) this turn (ZMSD §8.7.3) — a
-    /// screen clear, e.g. a help-menu takeover. The host clears the transcript
-    /// before appending this turn's output so stale text does not bleed through
-    /// (matching a retained-mode interpreter like Lectrote).
+    /// The game cleared the screen this turn — a Z-machine `erase_window`
+    /// (lower / all, ZMSD §8.7.3) or a Glulx `glk_window_clear` on the primary
+    /// buffer (e.g. a help-menu takeover / Inform 7 menu redraw). The host pins
+    /// this turn's output to a fresh screen (scrollback preserved) so stale text
+    /// does not bleed through — matching a retained-mode interpreter like Lectrote.
     pub erase_lower: bool,
     /// Optional one-line note to surface to the player (general-purpose; currently unused — no producer sets it).
     pub info: Option<String>,
@@ -817,6 +818,9 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
         // byte-identical (bg=None → theme). (SQ-0328)
         bg: None,
         fg: None,
+        // Z-machine grid reverse is per-cell (style bits), not a window-level Glk
+        // ReverseColor, so no window-level reverse fill here. (SQ-0403)
+        reverse: false,
     };
     ScreenModel {
         root: WinNode::Pair {
