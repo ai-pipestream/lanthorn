@@ -977,6 +977,14 @@ impl Engine for GameSession {
         detect_location(&self.machine).as_ref().map(location_to_snapshot)
     }
 
+    fn set_trace_screen(&mut self, on: bool) {
+        self.machine.trace_screen = on;
+    }
+
+    fn take_screen_trace(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.machine.screen_trace)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -1534,6 +1542,21 @@ mod tests {
         let session = GameSession::new(story, true, false, None).expect("GameSession::new failed");
         assert_eq!(session.pending_input(), InputKind::Char,
             "GameSession::new on a read_char story should leave pending == Char");
+    }
+
+    #[test]
+    fn game_session_take_screen_trace_drains_when_enabled() {
+        // No handy fixture issues screen opcodes on turn one, so this asserts
+        // the drain plumbing directly: set_trace_screen wires to the machine's
+        // flag, and take_screen_trace drains screen_trace exactly once.
+        let mut s = GameSession::new(read_char_story_v5(), true, false, None)
+            .expect("GameSession::new failed");
+        s.set_trace_screen(true);
+        assert!(s.machine.trace_screen, "set_trace_screen(true) reaches the machine");
+        s.machine.screen_trace.push("@set_colour(fg=std5, bg=std2)".to_string());
+        let lines = s.take_screen_trace();
+        assert!(lines.iter().any(|l| l.starts_with("@")), "{lines:?}");
+        assert!(s.take_screen_trace().is_empty(), "second drain is empty");
     }
 
     #[test]

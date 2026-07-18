@@ -179,6 +179,11 @@ pub struct Machine {
     /// Captured into `PendingInput.instr_pc` when a `read`/`read_char` suspends,
     /// so `save_pc` can rewind a save-at-input-prompt to the read instruction.
     cur_instr_pc: u32,
+    /// When true, screen-control opcodes push a decoded line into `screen_trace`
+    /// (the `screen` debug section). Separate from `diagnostics`. (trace feature)
+    pub trace_screen: bool,
+    /// Accumulated `screen`-trace lines since the host last drained them.
+    pub screen_trace: Vec<String>,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -233,6 +238,8 @@ impl Machine {
             interpreter_number: None,
             fault_trace: None,
             cur_instr_pc: 0,
+            trace_screen: false,
+            screen_trace: Vec::new(),
         }
     }
 
@@ -566,6 +573,11 @@ impl Machine {
             // 2OP:0x1B set_colour (v5+). Per-channel replace with sentinels
             // (ZMSD §8.3): 0 = keep, 1 = default, 2..=12 = palette + v6 greys.
             0x1B => {
+                if self.trace_screen {
+                    let fg = decode_set_colour(a).map(zscreen_colour_name).unwrap_or_else(|| a.to_string());
+                    let bg = decode_set_colour(b).map(zscreen_colour_name).unwrap_or_else(|| b.to_string());
+                    self.screen_trace.push(format!("@set_colour(fg={fg}, bg={bg})"));
+                }
                 if let Some(c) = decode_set_colour(a) {
                     self.screen.current_fg = c;
                 }
@@ -1042,6 +1054,7 @@ impl Machine {
             // 0x0A split_window — set upper window to N rows (v3+)
             0x0A => {
                 let rows = ops.first().copied().unwrap_or(0);
+                if self.trace_screen { self.screen_trace.push(format!("@split_window({rows})")); }
                 self.screen.upper_window_rows = rows;
                 let cols = self.mem.read_byte(0x21) as u16;
                 self.screen.upper.resize(rows, cols.max(1));
@@ -1052,6 +1065,7 @@ impl Machine {
             // 0x0B set_window — select window 0 (lower) or 1 (upper) (v3+)
             0x0B => {
                 let win = ops.first().copied().unwrap_or(0) as u8;
+                if self.trace_screen { self.screen_trace.push(format!("@set_window({})", zscreen_window_name(win as u16))); }
                 self.screen.current_window = win;
                 StepResult::Continue
             }
@@ -1062,6 +1076,7 @@ impl Machine {
             // to drain (erase_lower_requested), mirroring show_status_requested.
             0x0D => {
                 let win = ops.first().copied().unwrap_or(0) as i16;
+                if self.trace_screen { self.screen_trace.push(format!("@erase_window({})", zscreen_window_name(win as u16))); }
                 match win {
                     -1 => {
                         self.screen.upper_window_rows = 0;
@@ -1086,6 +1101,7 @@ impl Machine {
             0x0F => {
                 let row = ops.first().copied().unwrap_or(1);
                 let col = ops.get(1).copied().unwrap_or(1);
+                if self.trace_screen { self.screen_trace.push(format!("@set_cursor(row={row}, col={col})")); }
                 self.screen.cursor_row = row;
                 self.screen.cursor_col = col;
                 StepResult::Continue
@@ -1097,6 +1113,7 @@ impl Machine {
             // the reverse bit persisting; replacing would wipe it.
             0x11 => {
                 let style = ops.first().copied().unwrap_or(0) as u8;
+                if self.trace_screen { self.screen_trace.push(format!("@set_text_style({})", zscreen_style_name(style as u16))); }
                 if style == 0 {
                     self.screen.text_style = 0;
                 } else {
@@ -1108,6 +1125,7 @@ impl Machine {
             0x12 => {
                 let mode = ops.first().copied().unwrap_or(0);
                 let on = mode != 0;
+                if self.trace_screen { self.screen_trace.push(format!("@buffer_mode({})", if on { "on" } else { "off" })); }
                 self.screen.buffer_mode = on;
                 self.out.set_buffer_mode(on);
                 StepResult::Continue
@@ -1270,6 +1288,7 @@ impl Machine {
             // 0x0E erase_line — erase from cursor to end of line in the upper window.
             0x0E => {
                 let value = ops.first().copied().unwrap_or(0);
+                if self.trace_screen { self.screen_trace.push(format!("@erase_line({value})")); }
                 if value == 1 {
                     let (row, start) = (self.screen.cursor_row, self.screen.cursor_col);
                     let cols = self.screen.upper.cols;
@@ -1415,6 +1434,7 @@ impl Machine {
             // previously-active font, or 0 if the requested font is unavailable.
             0x04 => {
                 let requested = ops.first().copied().unwrap_or(0);
+                if self.trace_screen { self.screen_trace.push(format!("@set_font({})", zscreen_font_name(requested))); }
                 let prev = self.screen.current_font as u16;
                 let result = match requested {
                     0 => prev,       // query: return current, no change
@@ -1460,10 +1480,17 @@ impl Machine {
             // EXT:0x0D set_true_colour (v5+). Same channel model as set_colour
             // but signed sentinels: -2 = keep, -1 = default, else 15-bit RGB.
             0x0D => {
-                if let Some(c) = decode_true_colour(ops.first().copied().unwrap_or(0)) {
+                let fg_op = ops.first().copied().unwrap_or(0);
+                let bg_op = ops.get(1).copied().unwrap_or(0);
+                if self.trace_screen {
+                    let fg = decode_true_colour(fg_op).map(zscreen_colour_name).unwrap_or_else(|| fg_op.to_string());
+                    let bg = decode_true_colour(bg_op).map(zscreen_colour_name).unwrap_or_else(|| bg_op.to_string());
+                    self.screen_trace.push(format!("@set_true_colour(fg={fg}, bg={bg})"));
+                }
+                if let Some(c) = decode_true_colour(fg_op) {
                     self.screen.current_fg = c;
                 }
-                if let Some(c) = decode_true_colour(ops.get(1).copied().unwrap_or(0)) {
+                if let Some(c) = decode_true_colour(bg_op) {
                     self.screen.current_bg = c;
                 }
                 StepResult::Continue
@@ -2252,6 +2279,39 @@ fn decode_true_colour(v: u16) -> Option<crate::screen::ZColour> {
         -1 => Some(ZColour::Default),      // default
         n if n >= 0 => Some(ZColour::True((n as u16) & 0x7FFF)),
         _ => None,                         // -3 transparent / other → keep
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Screen-trace decoders (trace feature, `screen` section)
+// ---------------------------------------------------------------------------
+
+fn zscreen_window_name(v: u16) -> String {
+    match v as i16 {
+        0 => "lower".into(), 1 => "upper".into(),
+        -1 => "all(unsplit)".into(), -2 => "all".into(),
+        other => format!("win{other}"),
+    }
+}
+fn zscreen_style_name(bits: u16) -> String {
+    if bits == 0 { return "roman".into(); }
+    let mut p = Vec::new();
+    if bits & 1 != 0 { p.push("reverse"); }
+    if bits & 2 != 0 { p.push("bold"); }
+    if bits & 4 != 0 { p.push("italic"); }
+    if bits & 8 != 0 { p.push("fixed"); }
+    if p.is_empty() { format!("0x{bits:x}") } else { p.join("|") }
+}
+fn zscreen_font_name(v: u16) -> String {
+    match v { 0 => "query".into(), 1 => "normal".into(), 3 => "graphics".into(), 4 => "fixed".into(), n => format!("font{n}") }
+}
+fn zscreen_colour_name(c: crate::screen::ZColour) -> String {
+    use crate::screen::ZColour::*;
+    match c {
+        Default => "default".into(),
+        Standard(n) => format!("std{n}"),
+        True(v) => format!("true(0x{v:04x})"),
+        True24(rgb) => format!("#{:06X}", rgb & 0x00FF_FFFF),
     }
 }
 
@@ -5560,6 +5620,46 @@ pub(crate) mod tests {
         assert_eq!(cell.ch, 'H');
         assert_eq!(cell.fg, ZColour::Standard(3));
         assert_eq!(cell.bg, ZColour::Standard(6));
+    }
+
+    // -----------------------------------------------------------------------
+    // Sectioned debug trace (Task 3): screen-control opcodes decode into
+    // `screen_trace` when `trace_screen` is enabled.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn screen_trace_records_decoded_display_opcodes_when_enabled() {
+        // set_colour(fg=std5, bg=std2); set_text_style(reverse|bold); split_window(1); quit.
+        fn build() -> Machine {
+            let mut buf = sample_story(5);
+            let mut pos = 0x10usize;
+            // set_colour 5,2 (2OP:0x1B long form, both small consts)
+            buf[pos] = 0x1B; buf[pos + 1] = 5; buf[pos + 2] = 2; pos += 3;
+            let mut v = vec![];
+            emit_var_instr(&mut v, 0x11, &[3]); // set_text_style reverse|bold
+            buf[pos..pos + v.len()].copy_from_slice(&v); pos += v.len();
+            v.clear();
+            emit_var_instr(&mut v, 0x0A, &[1]); // split_window 1
+            buf[pos..pos + v.len()].copy_from_slice(&v); pos += v.len();
+            buf[pos] = 0xBA; // quit
+            let mem = Memory::new(buf).unwrap();
+            let mut m = Machine::new(mem);
+            m.state.pc = 0x10;
+            m
+        }
+
+        let mut m = build();
+        m.trace_screen = true;
+        run_until_quit(&mut m);
+        assert!(m.screen_trace.iter().any(|l| l.starts_with("@set_colour(")), "{:?}", m.screen_trace);
+        assert!(m.screen_trace.iter().any(|l| l.contains("@set_text_style(") && l.contains("reverse")), "{:?}", m.screen_trace);
+        assert!(m.screen_trace.iter().any(|l| l == "@split_window(1)"), "{:?}", m.screen_trace);
+
+        // Disabled → nothing accumulates.
+        let mut m2 = build();
+        m2.trace_screen = false;
+        run_until_quit(&mut m2);
+        assert!(m2.screen_trace.is_empty());
     }
 
     // -----------------------------------------------------------------------
