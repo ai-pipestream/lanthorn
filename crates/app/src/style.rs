@@ -176,6 +176,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "border",
     "border:focused",
     "statusbar",
+    "notification",
     "transcript",
     "transcript:input",
     "transcript:meta",
@@ -254,7 +255,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
         "warning_marker", "meta_marker", "scrollbar", "hyperlink",
     ]),
     ("Chrome", &[
-        "statusbar", "helpbar", "story_border", "story_title",
+        "statusbar", "notification", "helpbar", "story_border", "story_title",
         "status_header", "input_line", "border:focused", "border",
         "inventory:dock",
     ]),
@@ -292,6 +293,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "shared_path"          => cs.shared_path,
         "border:focused"       => cs.focused_border,
         "statusbar"            => cs.status_bar,
+        "notification"         => cs.notification,
         "transcript"           => cs.transcript,
         "transcript:input"     => cs.transcript_input,
         "transcript:meta"      => cs.transcript_meta,
@@ -442,6 +444,13 @@ pub fn apply_color_decls(
             "border"             => {} // reserved, accepted silently
             "border:focused"     => cs.focused_border = cs.focused_border.patch(style),
             "statusbar"          => cs.status_bar = cs.status_bar.patch(style),
+            "notification" => {
+                cs.notification = cs.notification.patch(style);
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.notification_style);
+                cs.notification_style = base;
+                cs.notification_sides = resolve_sides(base, decl);
+                cs.notification_glyphs = decl_glyphs(decl);
+            }
             "transcript"         => cs.transcript = cs.transcript.patch(style),
             "transcript:input"    => cs.transcript_input = cs.transcript_input.patch(style),
             "transcript:meta"     => cs.transcript_meta = cs.transcript_meta.patch(style),
@@ -1331,6 +1340,15 @@ pub fn write_style_full(
     doc.colors.selectors.insert("shared_path".to_string(),       style_to_decl(&cs.shared_path));
     doc.colors.selectors.insert("border:focused".to_string(),    style_to_decl(&cs.focused_border));
     doc.colors.selectors.insert("statusbar".to_string(),         style_to_decl(&cs.status_bar));
+    {
+        let mut d = style_to_decl(&cs.notification);
+        if cs.notification_style != paneframe::BorderStyle::None {
+            d.style = Some(paneframe::border_style_name(cs.notification_style).to_string());
+        }
+        decorate_sides(&mut d, cs.notification_style, cs.notification_sides);
+        decorate_glyphs(&mut d, &cs.notification_glyphs);
+        doc.colors.selectors.insert("notification".to_string(), d);
+    }
     doc.colors.selectors.insert("transcript".to_string(),        style_to_decl(&cs.transcript));
     doc.colors.selectors.insert("transcript:input".to_string(),    style_to_decl(&cs.transcript_input));
     doc.colors.selectors.insert("transcript:meta".to_string(),     style_to_decl(&cs.transcript_meta));

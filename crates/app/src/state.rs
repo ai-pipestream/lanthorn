@@ -1419,8 +1419,15 @@ pub struct AppState {
     /// keypress the run loop's char-mode gate forwards the key straight to the VM, before app
     /// routing sees it.
     pub input: crate::text_field::TextField,
-    /// Transient status message shown on the status line (cleared on next keypress/turn).
-    pub status_msg: Option<String>,
+    /// Transient top-right notification popups (save/restore/export banners,
+    /// slash results, VM faults, map-command refusals). Fed by [`set_status`] and
+    /// [`push_notice`]; they slide in, hold a few seconds, and slide out without
+    /// ever touching the score bar or the transcript. `/dump-notifications`
+    /// replays the retained history into the story. (SQ-0176)
+    ///
+    /// [`set_status`]: AppState::set_status
+    /// [`push_notice`]: AppState::push_notice
+    pub notifications: crate::notify::Notifications,
     /// Modal / overlay UI cluster: every field whose presence means a
     /// modal, dialog, or full-screen overlay is open, plus the shared
     /// modal button-focus index. Grouped off `AppState` in SQ-0307.
@@ -1783,7 +1790,7 @@ impl Default for AppState {
             map_pane_size: std::cell::Cell::new(None),
             modal_list_viewport: 0,
             input: crate::text_field::TextField::default(),
-            status_msg: None,
+            notifications: crate::notify::Notifications::default(),
             overlays: OverlayState::default(),
             show_alignment: false,
             show_portal_labels: false,
@@ -1888,6 +1895,7 @@ impl AppState {
             || self.overlays.hints.as_ref().is_some_and(|h| h.has_active_animation())
             || self.inv_dock.active()
             || self.verb_dock.active()
+            || self.notifications.needs_tick()
     }
 
     /// Clear `verb_menu` once its slide-out has fully settled. The verb dock
@@ -2613,10 +2621,11 @@ impl AppState {
         }
     }
 
-    /// A convenience for a plain app-internal `Story`-kind notice (the `[…]`
-    /// bracketed messages), routed through [`push_transcript_internal`].
+    /// Surface an app-internal `[…]` bracketed notice as a top-right toast
+    /// (SQ-0176). It slides in, holds a few seconds, and slides out — it is NOT
+    /// written to the transcript; `/dump-notifications` replays the history.
     pub fn push_notice(&mut self, text: &str) {
-        self.push_transcript_internal(text, TranscriptKind::Story);
+        self.notifications.push(text);
     }
 
     /// Append `text` to the last transcript line in place (used in inline-prompt
@@ -2955,9 +2964,11 @@ impl AppState {
         self.transcript_images = vec![None; self.transcript.len()];
     }
 
-    /// Set the transient status message (displayed on the status line until cleared).
+    /// Surface a transient message as a top-right notification toast (SQ-0176).
+    /// No longer reuses the score bar — the message slides in, holds a few
+    /// seconds, and slides out; `/dump-notifications` replays the history.
     pub fn set_status(&mut self, msg: impl Into<String>) {
-        self.status_msg = Some(msg.into());
+        self.notifications.push(msg);
     }
 
     /// Set the selected room.

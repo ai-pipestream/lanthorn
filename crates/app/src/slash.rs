@@ -63,6 +63,9 @@ pub enum SlashOutcome {
     /// Diagnostic: dump the live Glk window layout (sizes, borders, per-window
     /// colours) to the transcript as Meta lines. Handled in `slash_dispatch`.
     DumpWindows,
+    /// Replay the notification history into the transcript as Meta lines, in case
+    /// a toast was missed. Handled in `slash_dispatch`. (SQ-0176)
+    DumpNotifications,
     /// Diagnostic: list Blorb `Snd` resources (`None`) or play resource `n`
     /// (`Some(n)`). Handled in `main.rs::dispatch_slash_outcome` because it
     /// needs `AppState` (audio backend + sound blorb).
@@ -429,6 +432,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "dump-windows", category: Category::Help, context: Context::Global,
         usage: "dump-windows", description: "dump the live Glk window layout (sizes, borders, colours)",
         dispatch: |_| SlashOutcome::DumpWindows },
+    CommandSpec { name: "dump-notifications", category: Category::Help, context: Context::Global,
+        usage: "dump-notifications", description: "print the notification history to the transcript, in case a toast was missed",
+        dispatch: |_| SlashOutcome::DumpNotifications },
     CommandSpec { name: "help", category: Category::Help, context: Context::Global,
         usage: "help [command]", description: "list all commands by category; with a name, show one command's detail",
         dispatch: |_| SlashOutcome::Help },
@@ -726,7 +732,7 @@ mod tests {
         // Total count matches the spec table (Game 11, Map 21, View 6,
         // Transcript 3, Style 7, Export 3, Animation 4, Help 2). `open-saves`
         // was removed — `restore-state` (bare) opens the saves dialog instead.
-        assert_eq!(COMMANDS.len(), 57, "registry must match the spec's Full command table");
+        assert_eq!(COMMANDS.len(), 58, "registry must match the spec's Full command table");
     }
 
     #[test]

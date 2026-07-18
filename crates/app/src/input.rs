@@ -1561,8 +1561,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
     // ── Normal action dispatch ────────────────────────────────────────────
     match action {
         Action::InputChar(c) => {
-            // Clear any transient status message on the first keypress.
-            state.status_msg = None;
             state.push_input_char(c);
             // Recompute suggestions after every character typed in game focus.
             if state.focus == Focus::Game {
@@ -1672,7 +1670,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::PeelLayer(dir) => {
             let Some(room) = state.selected_room.or_else(|| mapper.graph.current()) else {
-                state.status_msg = Some("peel-layer: no room selected".into());
+                state.notifications.push("peel-layer: no room selected");
                 return;
             };
             // With a direction, the player names the seam; without one, peel looks for a portal
@@ -1688,7 +1686,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 }
                 // A refusal used to be silent, which reads as a broken command — say which of the
                 // several quite different reasons it was (SQ-0360).
-                Err(why) => state.status_msg = Some(peel_refusal_message(&mapper.graph, room, dir, why)),
+                Err(why) => state.notifications.push(peel_refusal_message(&mapper.graph, room, dir, why)),
             }
         }
         Action::MergeLayer => {
@@ -6741,14 +6739,14 @@ mod tests {
         // Plain peel: one connected region, so it refuses — and now explains itself.
         apply_action(Action::PeelLayer(None), &mut s, &mut m);
         assert_eq!(m.graph.layers().len(), 1, "nothing peeled");
-        let msg = s.status_msg.clone().expect("a refusal must not be silent");
+        let msg = s.notifications.latest_text().expect("a refusal must not be silent").to_string();
         assert!(msg.contains("one connected region"), "says why: {msg:?}");
         assert!(msg.contains("peel-layer <direction>"), "and points at the way forward: {msg:?}");
 
-        // Naming the seam cuts there.
-        s.status_msg = None;
+        // Naming the seam cuts there — and posts no complaint.
+        let before = s.notifications.history().len();
         apply_action(Action::PeelLayer(Some(Direction::E)), &mut s, &mut m);
-        assert_eq!(s.status_msg, None, "no complaint when it works");
+        assert_eq!(s.notifications.history().len(), before, "no complaint when it works");
         let new = s.viewed_layer.expect("the peeled layer is now in view");
         // #1 is selected, so #1's own side leaves — the same side plain `peel-layer` would take
         // (SQ-0364). The far side is what stays.
@@ -6769,14 +6767,13 @@ mod tests {
         s.select_room(Some(1));
 
         apply_action(Action::PeelLayer(Some(Direction::E)), &mut s, &mut m);
-        let msg = s.status_msg.clone().expect("refusal must speak");
+        let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
         assert!(msg.contains("not a boundary"), "{msg:?}");
         assert_eq!(m.graph.layers().len(), 1, "nothing peeled");
 
         // And a direction with no passage at all is a different complaint.
-        s.status_msg = None;
         apply_action(Action::PeelLayer(Some(Direction::W)), &mut s, &mut m);
-        let msg = s.status_msg.clone().expect("refusal must speak");
+        let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
         assert!(msg.contains("no W passage"), "{msg:?}");
     }
 

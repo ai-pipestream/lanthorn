@@ -992,11 +992,10 @@ pub fn render_transcript(
     let input_style_kind  = state.colors.input_line_style;
 
     // The status bar always shows for v3 (its automatic status line is valid).
-    // For v4+/Glulx (HostManaged) the synthesized bar is removed; the bar is
-    // only shown when a transient notification message is present so that
-    // save/load/export feedback still surfaces briefly.
-    let status_visible = matches!(status, StatusModel::Classic { .. })
-        || state.status_msg.is_some();
+    // For v4+/Glulx (HostManaged) the synthesized bar is removed entirely —
+    // transient app feedback no longer reuses the score bar; it surfaces as a
+    // top-right notification toast instead (SQ-0176).
+    let status_visible = matches!(status, StatusModel::Classic { .. });
 
     // When boxed, status/input each take 3 rows; fall back to 1 if too small.
     // Gate on "any side present" (base OR per-side) so a style="none" + per-side
@@ -1054,13 +1053,72 @@ pub fn render_transcript(
     render_middle(state, buf, middle_area, normal_style, game_input)
 }
 
+/// Draw the top-right notification toasts over `area` (the full frame).
+///
+/// Newest is drawn on top; each toast slides in from the right edge, holds for a
+/// few seconds, and slides out (see [`crate::notify`]). Called last in
+/// `draw_frame` so toasts overlay every pane. When animations are disabled the
+/// toast simply appears and disappears on the same clock, without sliding.
+/// (SQ-0176)
+pub fn render_notifications(buf: &mut Buffer, area: Rect, state: &AppState) {
+    let notes = state.notifications.active();
+    if notes.is_empty() || area.width < 6 || area.height == 0 {
+        return;
+    }
+    let style = state.colors.notification;
+    let animate = state.config.animation.enabled;
+    let easing = state.config.animation.easing;
+    // A single-bordered box by default (SQ-0176); collapses to a 1-row strip only
+    // if the border is themed off or there's no vertical room for a frame.
+    let boxed = (state.colors.notification_style != BorderStyle::None
+        || state.colors.notification_sides.any_on())
+        && area.height >= 3;
+    let box_h: u16 = if boxed { 3 } else { 1 };
+    // Cap the inner text width (leave room for a space of padding each side).
+    let max_inner = (area.width as usize).min(48).saturating_sub(if boxed { 2 } else { 0 });
+    let right = area.right();
+
+    // `active()` is oldest-first; draw the newest (last) in the top box.
+    for (i, note) in notes.iter().rev().enumerate() {
+        let top = area.y + i as u16 * box_h;
+        if top + box_h > area.bottom() {
+            break;
+        }
+        let reveal = note.reveal(animate, easing);
+        let text = truncate_line(&note.text, max_inner.saturating_sub(2));
+        let inner = format!(" {text} ");
+        let inner_w = inner.chars().count() as u16;
+        let box_w = inner_w + if boxed { 2 } else { 0 };
+        // Slide in from the right: the box translates leftward from off the right
+        // edge; columns past `right` clip naturally against the buffer bounds.
+        let shown = (reveal * box_w as f64).round().clamp(0.0, box_w as f64) as u16;
+        if shown == 0 {
+            continue;
+        }
+        let box_left = right - shown;
+        let box_region = Rect::new(box_left, top, box_w, box_h);
+        if boxed {
+            let frame = draw_framed(
+                buf,
+                box_region,
+                state.colors.notification_sides,
+                &state.colors.notification_glyphs,
+                style,
+                false,
+            );
+            draw_str_clipped(buf, frame.content.x, frame.content.y, &inner, style, frame.content);
+        } else {
+            draw_str_clipped(buf, box_left, top, &inner, style, box_region);
+        }
+    }
+}
+
 /// Draw the status bar into `region`.
 ///
-/// When `state.status_msg` is `Some`, it overrides all segments and renders the
-/// transient message left-aligned in the base style. Otherwise each segment in
-/// `state.colors.statusbar_layout` is resolved (placeholders substituted, empty
-/// ones hidden), styled (base patched with the segment style), and packed into
-/// left/center/right clusters.
+/// Each segment in `state.colors.statusbar_layout` is resolved (placeholders
+/// substituted, empty ones hidden), styled (base patched with the segment
+/// style), and packed into left/center/right clusters. Transient app feedback
+/// is no longer drawn here — it surfaces as a notification toast (SQ-0176).
 fn render_status_content(
     status: &StatusModel,
     state: &AppState,
@@ -1081,16 +1139,8 @@ fn render_status_content(
         }
     }
 
-    // Transient status message overrides the segments.
-    if let Some(msg) = state.status_msg.as_deref() {
-        let msg_trunc = truncate_line(msg, w);
-        draw_str_clipped(buf, region.x, status_y, msg_trunc, base, region);
-        return;
-    }
-
-    // For HostManaged (v4+/Glulx) the synthesized bar is removed entirely.
-    // The transient status_msg path above already handled any flash message;
-    // if we reach here with HostManaged there is nothing to render.
+    // For HostManaged (v4+/Glulx) the synthesized bar is removed entirely; a
+    // Classic v3 bar renders its automatic status line below.
     let (location, right_field) = match status {
         StatusModel::HostManaged => return,
         StatusModel::Classic { location, right } => (location.clone(), *right),
@@ -1656,6 +1706,66 @@ mod tests {
     use ratatui::layout::Rect;
 
     // ── Pure helper tests (no Machine required) ──────────────────────────────
+
+    /// A helper: read `row` of `buf` as a String across `[x0, x1)`.
+    fn read_row(buf: &Buffer, row: u16, x0: u16, x1: u16) -> String {
+        (x0..x1)
+            .map(|x| buf.cell((x, row)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect()
+    }
+
+    #[test]
+    fn notification_toast_is_a_right_anchored_bordered_box() {
+        let mut state = AppState::default();
+        // Disable animation so reveal snaps to 1 (fully shown) — deterministic.
+        state.config.animation.enabled = false;
+        state.notifications.push("[Saved as: foo]");
+
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_notifications(&mut buf, area, &state);
+
+        // Default is a single-bordered box: top border (row 0), content (row 1),
+        // bottom border (row 2). The bracket pair is stripped for a clean toast:
+        // inner is " Saved as: foo " (15 chars), box 17 wide, right-anchored to
+        // col 40, so it spans cols 23..40.
+        let content = read_row(&buf, 1, 24, 39);
+        assert_eq!(content, " Saved as: foo ", "content row, bracket-stripped + padded: {content:?}");
+        // Borders drawn above and below (non-blank in the box columns).
+        assert!(!read_row(&buf, 0, 23, 40).trim().is_empty(), "top border drawn");
+        assert!(!read_row(&buf, 2, 23, 40).trim().is_empty(), "bottom border drawn");
+        // The notification style (default cyan bg) is applied to the content cells.
+        let cell = buf.cell((30, 1)).expect("content cell exists");
+        assert_eq!(cell.style().bg, state.colors.notification.bg, "toast uses the themed notification style");
+    }
+
+    #[test]
+    fn notification_toasts_stack_newest_on_top() {
+        let mut state = AppState::default();
+        state.config.animation.enabled = false;
+        state.notifications.push("older");
+        state.notifications.push("newer");
+
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        render_notifications(&mut buf, area, &state);
+
+        // Each toast is a 3-row box: newest in rows 0-2, older in rows 3-5.
+        let newest_box = (0..3).map(|r| read_row(&buf, r, 0, 40)).collect::<String>();
+        let older_box = (3..6).map(|r| read_row(&buf, r, 0, 40)).collect::<String>();
+        assert!(newest_box.contains("newer"), "newest is in the top box");
+        assert!(older_box.contains("older"), "older is pushed to the box below");
+    }
+
+    #[test]
+    fn no_toasts_when_notifications_empty() {
+        let state = AppState::default();
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_notifications(&mut buf, area, &state);
+        // Nothing drawn: the top-right stays blank.
+        assert_eq!(read_row(&buf, 0, 0, 40).trim(), "");
+    }
 
     #[test]
     fn input_uses_full_width_warning_wraps_like_meta() {
@@ -2529,14 +2639,14 @@ mod tests {
 
     // ── New: status-bar removal contract for HostManaged (v4+/Glulx) ──────────
 
-    /// (a) HostManaged + no status_msg → bar hidden, no synthesized content.
+    /// (a) HostManaged → bar hidden, no synthesized content (SQ-0176: transient
+    /// feedback never reuses the score bar).
     #[test]
     fn host_managed_no_msg_status_row_hidden() {
         let mut state = AppState::default();
         state.current_room_name = Some("West of House".to_string());
         state.turns = 42;
         state.transcript = vec!["You are standing in front of a house.".to_string()];
-        state.status_msg = None; // explicit
 
         let area = Rect::new(0, 0, 60, 5);
         let mut buf = Buffer::empty(area);
@@ -2562,31 +2672,6 @@ mod tests {
             .collect();
         assert!(top.contains("standing"),
             "transcript must start at y=0 (no status bar row): {:?}", top);
-    }
-
-    /// (b) HostManaged + status_msg set → transient flash still renders.
-    #[test]
-    fn host_managed_with_msg_flash_renders() {
-        let mut state = AppState::default();
-        state.current_room_name = Some("West of House".to_string());
-        state.turns = 42;
-        state.status_msg = Some("Saved.".to_string());
-
-        let area = Rect::new(0, 0, 60, 5);
-        let mut buf = Buffer::empty(area);
-        render_transcript(&StatusModel::HostManaged, None, &state, area, &mut buf, None);
-
-        // The flash message must appear on the top row.
-        let top: String = (0..area.width)
-            .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
-            .collect();
-        assert!(top.contains("Saved."),
-            "HostManaged flash message must render in the status row: {:?}", top);
-        // Synthesized room/turn must NOT appear alongside the flash.
-        assert!(!top.contains("West of House"),
-            "flash must not co-render synthesized room name: {:?}", top);
-        assert!(!top.contains("turn 42"),
-            "flash must not co-render turn counter: {:?}", top);
     }
 
     /// (c) Classic status line is unaffected — still always renders.
@@ -3257,30 +3342,6 @@ mod tests {
         assert_eq!(inventory_items(None, &items, None), items);
         assert_eq!(inventory_items(Some(7), &items, None), items);
         assert!(inventory_items(None, &[], None).is_empty());
-    }
-
-    // ── Task 5: status_msg render ─────────────────────────────────────────────
-
-    #[test]
-    fn status_msg_renders_on_status_line() {
-        let machine = minimal_machine();
-        let mut state = AppState::default();
-        state.status_msg = Some("saved".to_string());
-
-        // 10-row area; status row is y=0.
-        let area = Rect::new(0, 0, 40, 10);
-        let mut buf = Buffer::empty(area);
-        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
-
-        // Row 0 (status line) must contain the word "saved".
-        let status_row: String = (0..40u16)
-            .map(|x| buf.cell((x, 0)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
-            .collect();
-        assert!(
-            status_row.contains("saved"),
-            "status row should contain 'saved' when status_msg is set; got: {:?}",
-            status_row
-        );
     }
 
     // ── Task 8: status-header + input-line boxing + opt-out ───────────────────

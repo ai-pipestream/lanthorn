@@ -784,7 +784,7 @@ mod tests {
         super::apply_turn_events(&mut state, &result);
 
         assert!(state.vm_halted, "a fault must set vm_halted");
-        assert!(state.status_msg.is_some(), "a fault must set a user-visible status");
+        assert!(state.notifications.latest_text().is_some(), "a fault must set a user-visible notification");
 
         let log = std::fs::read_to_string(tmp.join("crash.log")).expect("crash.log written");
         assert!(log.contains("gvm runtime fault"), "crash.log must record the fault header");

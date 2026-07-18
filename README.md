@@ -61,7 +61,8 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
 - **Rewind & replay** — step back through a recorded per-turn history with the map
   reconstructed at each moment, and resume from any earlier turn. → [saves](docs/features/saves.md)
 - **A full TUI** — mouse support, select-and-copy, verb/noun menu, dictionary
-  autocomplete, inventory strip, command history, in-game Invisiclues hints, and
+  autocomplete, inventory strip, command history, in-game Invisiclues hints,
+  animated top-right notification toasts (with a `dump-notifications` recall), and
   transcript search / filter / export. → [interface](docs/features/interface.md)
 - **Saves & persistence** — self-contained `.babelmap` Save States (map + VM
   state + metadata), named slots, Quetzal import/export, auto-save/auto-load, and

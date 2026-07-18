@@ -174,7 +174,6 @@ pub(crate) fn poll_tidy_jobs(
         redraw = true; // anim build installed / graph applied → repaint
         let job = state.anim_build_job.take().unwrap();
         let current_gen = state.graph_gen;
-        state.status_msg = None;
         if let Ok((frames, tidied)) = job.handle.join() {
             match apply_tidy_result(&mut mapper.graph, tidied, job.layer, job.gen, current_gen) {
                 ApplyTidyOutcome::Applied => {
@@ -279,6 +278,11 @@ pub(crate) fn expire_sound_and_settle_dock(state: &mut AppState) -> bool {
             state.sound_pulse = None;
             redraw = true; // border returns to normal → repaint once
         }
+    }
+
+    // Reap expired notification toasts (they slide out, then vanish). (SQ-0176)
+    if state.notifications.expire() {
+        redraw = true;
     }
 
     // Clear the verb-menu content once its slide-out has fully settled

@@ -316,15 +316,15 @@ pub fn draw_dialog(buf: &mut Buffer, bounds: Rect, spec: &DialogSpec, st: &Dialo
     let content = if !spec.buttons.is_empty() && pane.content.height > 0 {
         // Reserve the last row of content for buttons
         let button_row_y = pane.content.bottom().saturating_sub(1);
-        // Each button rendered as "[ Label ]"
-        // Lay out right-to-left
+        // Each button is its label in reverse video with a reversed space of
+        // padding on each side (no brackets), and a single non-reversed space
+        // separating adjacent buttons. Lay out right-to-left.
         let mut col = pane.content.right();
         let n = spec.buttons.len();
         for (rev_i, btn) in spec.buttons.iter().rev().enumerate() {
             let orig_i = n - 1 - rev_i;
-            // "[ Label ]" = 4 + label_len chars
             let label_chars = btn.label.chars().count() as u16;
-            let btn_width = 4 + label_chars; // "[ " + label + " ]"
+            let btn_width = label_chars + 2; // " " + label + " ", all reversed
             if col < btn_width || col.saturating_sub(btn_width) < pane.content.x {
                 break;
             }
@@ -337,7 +337,7 @@ pub fn draw_dialog(buf: &mut Buffer, bounds: Rect, spec: &DialogSpec, st: &Dialo
                 style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
             }
 
-            let btn_str = format!("[ {} ]", btn.label);
+            let btn_str = format!(" {} ", btn.label);
             let mut draw_x = bx;
             for ch in btn_str.chars() {
                 if draw_x < pane.content.right() {
@@ -350,6 +350,8 @@ pub fn draw_dialog(buf: &mut Buffer, bounds: Rect, spec: &DialogSpec, st: &Dialo
             }
 
             button_rects.push((btn.id, Rect::new(bx, button_row_y, btn_width, 1)));
+            // Leave one non-reversed separator column before the next button.
+            col = col.saturating_sub(1);
         }
         button_rects.reverse();
 
@@ -657,7 +659,7 @@ mod tests {
         let rects = draw_dialog(&mut buf, full, &spec, &st);
         // The Save (default) button label cells carry UNDERLINED.
         let (_, save_rect) = rects.buttons.iter().find(|(id, _)| *id == ButtonId::Save).unwrap();
-        let save_cell = buf.cell((save_rect.x + 2, save_rect.y)).unwrap(); // inside "[ "
+        let save_cell = buf.cell((save_rect.x + 2, save_rect.y)).unwrap(); // inside the label
         assert!(save_cell.style().add_modifier.contains(Modifier::UNDERLINED),
             "default button must be underlined");
         // The Cancel (focused idx 1) button cells carry REVERSED (button_active).
@@ -665,5 +667,53 @@ mod tests {
         let cancel_cell = buf.cell((cancel_rect.x + 2, cancel_rect.y)).unwrap();
         assert!(cancel_cell.style().add_modifier.contains(Modifier::REVERSED),
             "focused button must use button_active");
+    }
+
+    #[test]
+    fn dialog_buttons_have_no_brackets_and_a_plain_separator() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::{Style, Modifier}};
+        let full = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(full);
+        let st = DialogStyle {
+            frame: Style::default(),
+            box_style: BorderStyle::Single,
+            glyphs: PaneGlyphs::default(),
+            title: Style::default(),
+            button: Style::default().add_modifier(Modifier::REVERSED),
+            button_active: Style::default().add_modifier(Modifier::REVERSED),
+            shadow: Style::default(),
+            shadow_on: false,
+            placement: DialogPlacement::Center,
+            margin: 0,
+        };
+        let spec = DialogSpec {
+            title: "T",
+            placement: Placement::Centered { w: 30, h: 6 },
+            buttons: &[
+                DialogButton { id: ButtonId::Save, label: "Save" },
+                DialogButton { id: ButtonId::Cancel, label: "Cancel" },
+            ],
+            show_close: false, default: None, focus: None, field: None,
+        };
+        let rects = draw_dialog(&mut buf, full, &spec, &st);
+        let (_, save) = rects.buttons.iter().find(|(id, _)| *id == ButtonId::Save).unwrap();
+        let (_, cancel) = rects.buttons.iter().find(|(id, _)| *id == ButtonId::Cancel).unwrap();
+        // The button rect is the label plus one reversed pad space each side — no "[ ]" chrome.
+        assert_eq!(save.width, 6, "Save chip is ' Save '");
+        assert_eq!(cancel.width, 8, "Cancel chip is ' Cancel '");
+        // The whole button row carries no brackets.
+        let row: String = (0..full.width)
+            .map(|x| buf.cell((x, save.y)).unwrap().symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(!row.contains('['), "no '[' on the button row: {row:?}");
+        assert!(!row.contains(']'), "no ']' on the button row: {row:?}");
+        // Save sits to the left of Cancel with a one-column gap between them, and
+        // that separator cell is NOT reversed (the button chips are).
+        let sep_x = save.x + save.width;
+        assert_eq!(sep_x, cancel.x - 1, "one-column separator between buttons");
+        assert!(buf.cell((save.x, save.y)).unwrap().style().add_modifier.contains(Modifier::REVERSED),
+            "chip (including its pad space) is reversed");
+        assert!(!buf.cell((sep_x, save.y)).unwrap().style().add_modifier.contains(Modifier::REVERSED),
+            "separator space is not reversed");
     }
 }

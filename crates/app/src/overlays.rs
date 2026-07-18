@@ -297,11 +297,11 @@ impl Overlay for AuxOverlay {
     }
     fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
         match key.code {
-            KeyCode::Tab | KeyCode::Right => {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, 1);
                 OverlayOutcome::Consumed
             }
-            KeyCode::BackTab | KeyCode::Left => {
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, -1);
                 OverlayOutcome::Consumed
             }
@@ -339,11 +339,11 @@ impl Overlay for ResetOverlay {
     }
     fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
         match key.code {
-            KeyCode::Tab | KeyCode::Right => {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 4, 1);
                 OverlayOutcome::Consumed
             }
-            KeyCode::BackTab | KeyCode::Left => {
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 4, -1);
                 OverlayOutcome::Consumed
             }
@@ -398,11 +398,11 @@ impl Overlay for GameOverOverlay {
     }
     fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
         match key.code {
-            KeyCode::Tab | KeyCode::Right => {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 3, 1);
                 OverlayOutcome::Consumed
             }
-            KeyCode::BackTab | KeyCode::Left => {
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 3, -1);
                 OverlayOutcome::Consumed
             }
@@ -538,11 +538,11 @@ impl Overlay for ConfirmDeleteOverlay {
     }
     fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
         match key.code {
-            KeyCode::Tab | KeyCode::Right => {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, 1);
                 OverlayOutcome::Consumed
             }
-            KeyCode::BackTab | KeyCode::Left => {
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, -1);
                 OverlayOutcome::Consumed
             }
@@ -579,11 +579,11 @@ impl Overlay for QuitOverlay {
     }
     fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
         match key.code {
-            KeyCode::Tab | KeyCode::Right => {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 3, 1);
                 OverlayOutcome::Consumed
             }
-            KeyCode::BackTab | KeyCode::Left => {
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 3, -1);
                 OverlayOutcome::Consumed
             }
@@ -625,11 +625,11 @@ impl Overlay for LaunchOverlay {
     }
     fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
         match key.code {
-            KeyCode::Tab | KeyCode::Right => {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, 1);
                 OverlayOutcome::Consumed
             }
-            KeyCode::BackTab | KeyCode::Left => {
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
                 state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, -1);
                 OverlayOutcome::Consumed
             }
@@ -661,6 +661,27 @@ impl Overlay for LaunchOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Up/Down arrow keys move focus between a dialog's options, not just its
+    /// buttons — Down advances the 4-slot reset ring, Up reverses. (SQ-0176 follow-up)
+    #[test]
+    fn arrow_keys_cycle_dialog_focus() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut state = AppState::default();
+        state.overlays.reset_dialog = true;
+        state.overlays.dialog_focus = 0;
+        let ov = topmost_common_dialog(&state.overlays).expect("reset dialog is open");
+
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        ov.key(&mut state, &down);
+        assert_eq!(state.overlays.dialog_focus, 1, "Down advances to the next option");
+        ov.key(&mut state, &down);
+        assert_eq!(state.overlays.dialog_focus, 2, "Down keeps advancing through options and buttons");
+
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        ov.key(&mut state, &up);
+        assert_eq!(state.overlays.dialog_focus, 1, "Up reverses");
+    }
 
     /// The common-dialog priority ladder resolves to the exact z-order the old
     /// run-loop if-ladder used: aux ▸ reset ▸ save-name ▸ text-entry ▸

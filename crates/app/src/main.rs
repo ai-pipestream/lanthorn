@@ -599,6 +599,10 @@ fn draw_frame(
         //
         // The former bottom-bar map-edit prompts are now the text-entry modal drawn
         // by the overlay ladder in the graphics-free dialog area (SQ-0307).
+
+        // Notification toasts overlay everything (including modals): drawn last so
+        // they always sit topmost in the top-right corner. (SQ-0176)
+        app::render::transcript::render_notifications(buf, full, state);
     })?;
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
@@ -1575,7 +1579,6 @@ fn main() {
                             if !cmd.is_empty() {
                                 state.record_command(&cmd);
                             }
-                            state.status_msg = None;
                             state.turns += 1;
                             state.unsaved_progress = true;
                             let result = zvm_session_opt_mut(&mut *session)
@@ -1980,9 +1983,6 @@ fn main() {
                         continue;
                     }
                 }
-
-                // Clear any transient status message on a real game turn.
-                state.status_msg = None;
 
                 // Increment the session turn counter. Progress now exists that
                 // isn't captured in a Save State (drives the quit prompt).

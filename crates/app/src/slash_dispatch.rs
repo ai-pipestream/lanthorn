@@ -82,6 +82,17 @@ pub(crate) fn dispatch_slash_outcome(
                 state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
         }
+        SlashOutcome::DumpNotifications => {
+            let history = state.notifications.history().to_vec();
+            state.push_transcript_internal("[notifications]", TranscriptKind::Meta);
+            if history.is_empty() {
+                state.push_transcript_internal("  (none)", TranscriptKind::Meta);
+            } else {
+                for line in history {
+                    state.push_transcript_internal(&format!("  {line}"), TranscriptKind::Meta);
+                }
+            }
+        }
         SlashOutcome::PlaySound(None) => {
             for line in app::state::format_sound_resource_list(state.sound_blorb.as_ref()) {
                 state.push_transcript_internal(&line, TranscriptKind::Meta);

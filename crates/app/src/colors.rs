@@ -236,6 +236,8 @@ pub struct ColorScheme {
     pub shared_path: Style,
     /// Status bar (top of transcript pane).
     pub status_bar: Style,
+    /// Top-right notification toasts (SQ-0176).
+    pub notification: Style,
     /// Transcript text (body of transcript pane).
     pub transcript: Style,
     /// Autocomplete suggestion line.
@@ -320,6 +322,8 @@ pub struct ColorScheme {
     pub input_line_style: BorderStyle,
     /// Resolved border style for the auto-complete suggestion popup.
     pub suggestion_line_style: BorderStyle,
+    /// Border style for notification toasts (default `Single`). (SQ-0176)
+    pub notification_style: BorderStyle,
     /// Dialog frame background/foreground style.
     pub dialog: Style,
     /// Dialog title text style.
@@ -356,6 +360,7 @@ pub struct ColorScheme {
     pub status_header_sides: PaneSides,
     pub input_line_sides: PaneSides,
     pub suggestion_line_sides: PaneSides,
+    pub notification_sides: PaneSides,
     pub upper_window_border_sides: PaneSides,
     /// Per-side/corner glyph overrides for each bordered pane element.
     pub map_border_glyphs: PaneGlyphs,
@@ -363,6 +368,7 @@ pub struct ColorScheme {
     pub status_header_glyphs: PaneGlyphs,
     pub input_line_glyphs: PaneGlyphs,
     pub suggestion_line_glyphs: PaneGlyphs,
+    pub notification_glyphs: PaneGlyphs,
     pub upper_window_border_glyphs: PaneGlyphs,
     pub dialog_glyphs: PaneGlyphs,
     /// Whether the story title / map layer-tab header strip is shown.
@@ -440,6 +446,7 @@ impl ColorScheme {
             portal_connector: Style::new().fg(Color::Cyan),
             shared_path: Style::new().fg(Color::LightCyan),
             status_bar: Style::new().add_modifier(Modifier::REVERSED),
+            notification: Style::new().fg(Color::Black).bg(Color::Cyan),
             transcript: Style::new().fg(Color::White),
             suggestion: Style::new().fg(Color::DarkGray),
             input_text: Style::new(),
@@ -487,10 +494,11 @@ impl ColorScheme {
             status_header_style: BorderStyle::None,
             input_line_style: BorderStyle::None,
             suggestion_line_style: BorderStyle::None,
+            notification_style: BorderStyle::Single,
             dialog: Style::new().fg(Color::White).bg(Color::Black),
             dialog_title: Style::new().fg(Color::Cyan),
             hotkey_key: Style::new().fg(Color::Cyan),
-            dialog_button: Style::new().fg(Color::White),
+            dialog_button: Style::new().add_modifier(Modifier::REVERSED),
             dialog_button_active: Style::new().fg(Color::Black).bg(Color::Cyan),
             dialog_shadow: Style::new().bg(Color::DarkGray),
             dialog_box_style: BorderStyle::None,
@@ -506,12 +514,14 @@ impl ColorScheme {
             status_header_sides: PaneSides::all(BorderStyle::None),
             input_line_sides: PaneSides::all(BorderStyle::None),
             suggestion_line_sides: PaneSides::all(BorderStyle::None),
+            notification_sides: PaneSides::all(BorderStyle::Single),
             upper_window_border_sides: PaneSides::all(BorderStyle::Single),
             map_border_glyphs: PaneGlyphs::default(),
             story_border_glyphs: PaneGlyphs::default(),
             status_header_glyphs: PaneGlyphs::default(),
             input_line_glyphs: PaneGlyphs::default(),
             suggestion_line_glyphs: PaneGlyphs::default(),
+            notification_glyphs: PaneGlyphs::default(),
             upper_window_border_glyphs: PaneGlyphs::default(),
             dialog_glyphs: PaneGlyphs::default(),
             story_header_on: true,
@@ -647,6 +657,7 @@ impl ColorScheme {
             portal_connector: Style::new().fg(portal_connector_fg),
             shared_path: Style::new().fg(shared_path_fg),
             status_bar,
+            notification: Style::new().fg(bg).bg(scheme.palette[6]),
             transcript: Style::new().fg(transcript_fg),
             suggestion: Style::new().fg(suggestion_fg),
             input_text: Style::new(),
@@ -692,10 +703,11 @@ impl ColorScheme {
             status_header_style: BorderStyle::None,
             input_line_style: BorderStyle::None,
             suggestion_line_style: BorderStyle::None,
+            notification_style: BorderStyle::Single,
             dialog: Style::new().fg(fg).bg(bg),
             dialog_title: Style::new().fg(scheme.palette[6]),
             hotkey_key: Style::new().fg(scheme.palette[6]),
-            dialog_button: Style::new().fg(fg),
+            dialog_button: Style::new().fg(fg).add_modifier(Modifier::REVERSED),
             dialog_button_active: Style::new().fg(bg).bg(scheme.palette[6]),
             dialog_shadow: Style::new().bg(scheme.palette[8]),
             dialog_box_style: BorderStyle::None,
@@ -711,12 +723,14 @@ impl ColorScheme {
             status_header_sides: PaneSides::all(BorderStyle::None),
             input_line_sides: PaneSides::all(BorderStyle::None),
             suggestion_line_sides: PaneSides::all(BorderStyle::None),
+            notification_sides: PaneSides::all(BorderStyle::Single),
             upper_window_border_sides: PaneSides::all(BorderStyle::Single),
             map_border_glyphs: PaneGlyphs::default(),
             story_border_glyphs: PaneGlyphs::default(),
             status_header_glyphs: PaneGlyphs::default(),
             input_line_glyphs: PaneGlyphs::default(),
             suggestion_line_glyphs: PaneGlyphs::default(),
+            notification_glyphs: PaneGlyphs::default(),
             upper_window_border_glyphs: PaneGlyphs::default(),
             dialog_glyphs: PaneGlyphs::default(),
             story_header_on: true,
@@ -1014,6 +1028,8 @@ mod tests {
         assert_eq!(cs.status_header_sides, PaneSides::all(cs.status_header_style));
         assert_eq!(cs.input_line_sides, PaneSides::all(cs.input_line_style));
         assert_eq!(cs.suggestion_line_sides, PaneSides::all(cs.suggestion_line_style));
+        assert_eq!(cs.notification_sides, PaneSides::all(cs.notification_style));
+        assert_eq!(cs.notification_style, BorderStyle::Single, "toasts default to a single border");
         assert_eq!(cs.upper_window_border_sides, PaneSides::all(cs.virtual_window_border));
         assert!(cs.story_header_on);
         assert!(cs.map_header_on);
