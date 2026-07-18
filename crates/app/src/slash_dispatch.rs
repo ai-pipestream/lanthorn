@@ -370,6 +370,25 @@ pub(crate) fn dispatch_slash_outcome(
                 Err(e) => state.set_status(format!("set-game-borders failed: {e}")),
             }
         }
+        SlashOutcome::Trace(arg) => {
+            match arg {
+                None => {
+                    state.set_status(format!("[trace: {}]", state.config.trace.active_list()));
+                }
+                Some(list) => {
+                    let (sections, unknown) = app::trace::TraceSections::parse(&list);
+                    state.config.trace = sections;
+                    session.set_trace_screen(sections.screen);
+                    if sections.any() && !unknown.is_empty() {
+                        state.set_status(format!("[trace: {} — ignored: {}]", sections.active_list(), unknown.join(",")));
+                    } else if !unknown.is_empty() {
+                        state.set_status(format!("[trace: unknown section(s): {}]", unknown.join(",")));
+                    } else {
+                        state.set_status(format!("[trace: {}]", sections.active_list()));
+                    }
+                }
+            }
+        }
     }
     false
 }

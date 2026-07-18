@@ -81,6 +81,9 @@ pub enum SlashOutcome {
     /// Glk borders, `None` = clear the override (default: bordered). Persisted
     /// per-game; applied live to a running Glulx session. (SQ-0341)
     SetGameBorderless(Option<bool>),
+    /// Toggle debug-trace sections: `None` shows current state; `Some(list)` sets
+    /// the active set (comma list of screen,map,hostio / all / none). (trace feature)
+    Trace(Option<String>),
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -432,6 +435,12 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "dump-windows", category: Category::Help, context: Context::Global,
         usage: "dump-windows", description: "dump the live Glk window layout (sizes, borders, colours)",
         dispatch: |_| SlashOutcome::DumpWindows },
+    CommandSpec {
+        name: "trace", category: Category::Help, context: Context::Global,
+        usage: "trace [sections|all|none]",
+        description: "toggle debug-trace sections (screen, map, hostio) written to trace.log; no arg shows current state",
+        dispatch: |a| SlashOutcome::Trace(a.first().map(|s| s.to_string())),
+    },
     CommandSpec { name: "dump-notifications", category: Category::Help, context: Context::Global,
         usage: "dump-notifications", description: "print the notification history to the transcript, in case a toast was missed",
         dispatch: |_| SlashOutcome::DumpNotifications },
@@ -721,7 +730,7 @@ mod tests {
         }
         // Verb-noun lint: every name contains '-' except the whitelist.
         for c in COMMANDS {
-            if c.name == "quit" || c.name == "help" || c.name == "volume" { continue; }
+            if c.name == "quit" || c.name == "help" || c.name == "volume" || c.name == "trace" { continue; }
             assert!(c.name.contains('-'), "non-verb-noun command name: {}", c.name);
         }
         // Spot-check representative commands exist with the right category.
@@ -732,7 +741,7 @@ mod tests {
         // Total count matches the spec table (Game 11, Map 21, View 6,
         // Transcript 3, Style 7, Export 3, Animation 4, Help 2). `open-saves`
         // was removed — `restore-state` (bare) opens the saves dialog instead.
-        assert_eq!(COMMANDS.len(), 58, "registry must match the spec's Full command table");
+        assert_eq!(COMMANDS.len(), 59, "registry must match the spec's Full command table");
     }
 
     #[test]
@@ -775,6 +784,15 @@ mod tests {
     fn dump_windows_command_parses() {
         assert!(find_command("dump-windows").is_some());
         assert!(matches!(parse("dump-windows", '/'), SlashOutcome::DumpWindows));
+    }
+
+    #[test]
+    fn trace_command_parses_set_and_show() {
+        assert!(find_command("trace").is_some());
+        let set = parse("trace screen,map", '/');
+        assert!(matches!(set, SlashOutcome::Trace(Some(ref s)) if s == "screen,map"));
+        let show = parse("trace", '/');
+        assert!(matches!(show, SlashOutcome::Trace(None)));
     }
 
     #[test]
