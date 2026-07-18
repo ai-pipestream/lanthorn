@@ -190,6 +190,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "input:text",
     "input:prompt",
     "scrollbar",
+    "more_prompt",
     "tidy_progress",
     "meta_marker",
     "hyperlink",
@@ -252,7 +253,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
         "transcript", "transcript:input", "transcript:meta", "transcript:warning",
         "transcript:crash", "transcript:location", "transcript:system",
         "suggestion", "suggestion_line", "input:text", "input:prompt",
-        "warning_marker", "meta_marker", "scrollbar", "hyperlink",
+        "warning_marker", "meta_marker", "scrollbar", "more_prompt", "hyperlink",
     ]),
     ("Chrome", &[
         "statusbar", "notification", "helpbar", "story_border", "story_title",
@@ -308,6 +309,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "input:text"           => cs.input_text,
         "input:prompt"         => cs.input_prompt,
         "scrollbar"            => cs.scrollbar,
+        "more_prompt"          => cs.more_prompt,
         "tidy_progress"        => cs.tidy_progress,
         "meta_marker"          => cs.meta_marker,
         "hyperlink"            => cs.hyperlink,
@@ -474,6 +476,7 @@ pub fn apply_color_decls(
             "input:text"         => cs.input_text = cs.input_text.patch(style),
             "input:prompt"       => cs.input_prompt = cs.input_prompt.patch(style),
             "scrollbar"          => cs.scrollbar = cs.scrollbar.patch(style),
+            "more_prompt"        => cs.more_prompt = cs.more_prompt.patch(style),
             "tidy_progress"      => cs.tidy_progress = cs.tidy_progress.patch(style),
             "meta_marker"        => cs.meta_marker = cs.meta_marker.patch(style),
             "hyperlink"          => cs.hyperlink = cs.hyperlink.patch(style),
@@ -1373,6 +1376,7 @@ pub fn write_style_full(
     doc.colors.selectors.insert("input:text".to_string(),        style_to_decl(&cs.input_text));
     doc.colors.selectors.insert("input:prompt".to_string(),      style_to_decl(&cs.input_prompt));
     doc.colors.selectors.insert("scrollbar".to_string(),         style_to_decl(&cs.scrollbar));
+    doc.colors.selectors.insert("more_prompt".to_string(),       style_to_decl(&cs.more_prompt));
     doc.colors.selectors.insert("tidy_progress".to_string(),     style_to_decl(&cs.tidy_progress));
     doc.colors.selectors.insert("meta_marker".to_string(),       style_to_decl(&cs.meta_marker));
     doc.colors.selectors.insert("hyperlink".to_string(),         style_to_decl(&cs.hyperlink));

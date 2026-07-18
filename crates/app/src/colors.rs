@@ -248,6 +248,9 @@ pub struct ColorScheme {
     pub input_prompt: Style,
     /// Transcript scrollbar (track + thumb).
     pub scrollbar: Style,
+    /// The `[more]` pager prompt, shown at the story-pane bottom while a single
+    /// command's output is being paged one screen at a time (SQ-0404).
+    pub more_prompt: Style,
     /// Progress bar shown in the map pane while the tidy animation builds off-thread.
     pub tidy_progress: Style,
     /// Gutter marker drawn beside META (app/slash) transcript output.
@@ -452,6 +455,7 @@ impl ColorScheme {
             input_text: Style::new(),
             input_prompt: Style::new(),
             scrollbar: Style::new().fg(Color::DarkGray),
+            more_prompt: Style::new().add_modifier(Modifier::REVERSED),
             tidy_progress: Style::new().fg(Color::Cyan),
             meta_marker: Style::new().fg(Color::DarkGray),
             hyperlink: Style::new().fg(Color::Cyan),
@@ -663,6 +667,7 @@ impl ColorScheme {
             input_text: Style::new(),
             input_prompt: Style::new(),
             scrollbar: Style::new().fg(suggestion_fg),
+            more_prompt: Style::new().add_modifier(Modifier::REVERSED),
             tidy_progress: Style::new().fg(scheme.palette[6]),
             meta_marker: Style::new().fg(suggestion_fg),
             hyperlink: Style::new().fg(scheme.palette[6]),
