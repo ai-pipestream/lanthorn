@@ -197,6 +197,11 @@ pub struct Cli {
     /// Disable all image rendering (in-game graphics + story-picker cover art).
     #[arg(long)]
     pub no_images: bool,
+
+    /// Debug trace sections to enable from boot: comma list of screen,map,hostio
+    /// (or `all`/`none`). Output goes to <user_dir>/trace.log. (trace feature)
+    #[arg(long, value_name = "LIST")]
+    pub trace: Option<String>,
 }
 
 /// Terminal image protocol for cover art. `Auto` detects the best available
@@ -493,6 +498,9 @@ pub struct Config {
     /// Runtime-only (set from --no-images); not persisted.
     #[serde(skip, default = "default_images")]
     pub images: bool,
+    /// Active debug-trace sections. Runtime-only (from --trace / /trace); not persisted.
+    #[serde(skip)]
+    pub trace: crate::trace::TraceSections,
 }
 
 impl Default for Config {
@@ -533,6 +541,7 @@ impl Default for Config {
             acceleration: default_acceleration(),
             image_protocol: default_image_protocol(),
             images: default_images(),
+            trace: crate::trace::TraceSections::default(),
         }
     }
 }
@@ -618,6 +627,14 @@ pub fn resolve(cli: &Cli) -> Config {
     cfg.acceleration = !cli.no_accel;
     cfg.image_protocol = cli.image_protocol;
     cfg.images = !cli.no_images;
+
+    if let Some(list) = &cli.trace {
+        let (sections, unknown) = crate::trace::TraceSections::parse(list);
+        cfg.trace = sections;
+        for u in unknown {
+            eprintln!("warning: unknown --trace section '{u}' (valid: screen, map, hostio, all, none)");
+        }
+    }
 
     cfg
 }
@@ -825,6 +842,7 @@ mod tests {
             no_accel: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            trace: None,
         };
 
         let cfg = resolve(&cli);
@@ -841,6 +859,7 @@ mod tests {
             no_accel: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            trace: None,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir.file_name().unwrap(), ".babelmap");
@@ -858,6 +877,7 @@ mod tests {
             no_accel: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            trace: None,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, PathBuf::from("/tmp/from-file"));
@@ -992,6 +1012,7 @@ use_defaults = false
             acceleration: true,
             image_protocol: ImageProtocol::Auto,
             images: true,
+            trace: crate::trace::TraceSections::default(),
         };
         write_config(&dir, &cfg).unwrap();
 
@@ -1185,9 +1206,27 @@ use_defaults = false
             no_accel: true,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            trace: None,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.acceleration);
+    }
+
+    #[test]
+    fn resolve_parses_trace_flag() {
+        let mut cli = Cli {
+            story: PathBuf::from("foo.z5"),
+            user_dir: None,
+            data_dir: None,
+            config: Some(PathBuf::from("/nonexistent/path/config.toml")),
+            no_accel: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: false,
+            trace: None,
+        };
+        cli.trace = Some("screen,map".to_string());
+        let cfg = resolve(&cli);
+        assert!(cfg.trace.screen && cfg.trace.map && !cfg.trace.hostio);
     }
 
     #[test]
@@ -1202,6 +1241,7 @@ use_defaults = false
             no_accel: false,
             image_protocol: ImageProtocol::Auto,
             no_images: true,
+            trace: None,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.images);
