@@ -1,6 +1,7 @@
 pub mod aux_dialog;
 pub mod config_screen;
 pub mod upper_window;
+pub mod debug_panel;
 pub mod dialog;
 pub mod dump_harness;
 pub mod game_over_dialog;
