@@ -183,6 +183,38 @@ impl DisasmCache {
     pub fn unpack(&self) -> &Unpack {
         &self.unpack
     }
+
+    /// Index of the unit containing `addr`. Clamps to `0` if `addr` is
+    /// before the first unit, and to the last index if `addr` is at or past
+    /// the last unit's start. Assumes `units` is non-empty (true after
+    /// `build`).
+    fn unit_index_at(&self, addr: u32) -> usize {
+        debug_assert!(!self.units.is_empty(), "unit_index_at on an empty cache");
+        let pp = self.units.partition_point(|u| u.addr() <= addr);
+        pp.saturating_sub(1).min(self.units.len() - 1)
+    }
+
+    /// Start address of the unit strictly after the one containing `addr`.
+    /// Clamps to the last unit's start (no movement past the end).
+    pub fn next_addr(&self, addr: u32) -> u32 {
+        let i = self.unit_index_at(addr);
+        if i + 1 < self.units.len() {
+            self.units[i + 1].addr()
+        } else {
+            self.units[i].addr()
+        }
+    }
+
+    /// Start address of the unit strictly before the one containing `addr`.
+    /// Clamps to `region_start` (the first unit's start).
+    pub fn prev_addr(&self, addr: u32) -> u32 {
+        let i = self.unit_index_at(addr);
+        if i > 0 {
+            self.units[i - 1].addr()
+        } else {
+            self.units[0].addr()
+        }
+    }
 }
 
 /// Code-region bounds: `(region_start, region_end)`.
@@ -551,6 +583,93 @@ mod tests {
         assert!(
             found,
             "initial_pc {initial_pc:#x} not inside any Instr unit"
+        );
+    }
+
+    #[test]
+    fn nav_next_addr_from_unit_start_lands_on_next_unit_on_minizork() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let cache = DisasmCache::build(&mem);
+        let u = cache.units();
+        let k = u.len() / 3;
+        let (a, b) = (u[k], u[k + 1]);
+        assert_eq!(cache.next_addr(a.addr()), b.addr());
+    }
+
+    #[test]
+    fn nav_next_addr_from_mid_unit_lands_on_next_unit_on_minizork() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let cache = DisasmCache::build(&mem);
+        let u = cache.units();
+        let k = u.len() / 3;
+        let (a, b) = (u[k], u[k + 1]);
+        let mid = if a.end() > a.addr() + 1 { (a.addr() + a.end()) / 2 } else { a.addr() };
+        assert_eq!(cache.next_addr(mid), b.addr());
+    }
+
+    #[test]
+    fn nav_prev_addr_from_unit_start_lands_on_previous_unit_on_minizork() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let cache = DisasmCache::build(&mem);
+        let u = cache.units();
+        let k = u.len() / 3;
+        let (a, b, c) = (u[k], u[k + 1], u[k + 2]);
+        assert_eq!(cache.prev_addr(c.addr()), b.addr());
+        assert_eq!(cache.prev_addr(b.addr()), a.addr());
+    }
+
+    #[test]
+    fn nav_clamps_at_region_bounds_on_minizork() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let (rstart, _rend) = code_region(&mem);
+        let cache = DisasmCache::build(&mem);
+        let u = cache.units();
+        let last = u.last().unwrap();
+        assert_eq!(cache.next_addr(last.addr()), last.addr());
+        assert_eq!(cache.prev_addr(rstart), rstart);
+        assert_eq!(cache.prev_addr(rstart), u[0].addr());
+    }
+
+    #[test]
+    fn nav_never_invents_a_boundary_crossing_into_header_or_data_on_minizork() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let cache = DisasmCache::build(&mem);
+        let u = cache.units();
+
+        let boundary = u.windows(2).enumerate().find(|(_, w)| {
+            matches!(w[0], Unit::Instr { .. })
+                && matches!(w[1], Unit::RoutineHeader { .. } | Unit::Data { .. })
+        });
+
+        let Some((i, _)) = boundary else {
+            eprintln!("skipping: no Instr -> RoutineHeader/Data boundary found in minizork.z3");
+            return;
+        };
+
+        assert_eq!(cache.next_addr(u[i].addr()), u[i + 1].addr());
+        assert!(
+            !matches!(u[i + 1], Unit::Instr { .. }),
+            "navigation landed on an invented mid-data instruction instead of the real boundary"
         );
     }
 
