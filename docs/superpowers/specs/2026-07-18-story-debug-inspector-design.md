@@ -167,6 +167,38 @@ packed/offset — a follow-up):
   and `state.focus = Focus::Map`. Within-turn (the next per-turn refresh re-anchors to PC,
   same as scrolling).
 
+## Revision 6 (2026-07-19) — memory navigation + object detail
+
+### Memory window
+- **(b) VM-correct char column:** the hex dump's ASCII column uses the VM's own character set
+  (zvm: ZSCII via the text decoder) instead of raw ASCII, so ZSCII-range bytes (incl. the
+  155+ accented/special range) render correctly. `'.'` for non-printable.
+- **(c) Address input:** when the Memory tab is focused, a small input line accepts a hex
+  address; Enter jumps `mem_addr` there, Esc cancels. Panel gains a `mem_input: Option<String>`
+  edit buffer; a key (e.g. `:` or `/`) opens it; digits/backspace edit; Enter parses hex →
+  `mem_addr` (clamped) + closes; Esc closes. Rendered as one line in the Memory window.
+- **(a) Clickable memory pointers:** in the hex dump, each 16-bit word is a clickable pointer —
+  clicking it jumps the Memory window to that word's value (follow-pointer), underlined like the
+  other clickables. (Interpretation to confirm; alternative = making disasm memory-operands jump
+  the Memory window.) Uses the shared clickable-span/hit-test pattern, extended to the Memory
+  section with a per-word span → `mem_addr = word_value` jump.
+
+### Object detail (Objects tab — expand on click)
+Clicking an object in the Objects tree expands it inline to show its **attributes** (which flags
+are set) and its **property table** (each property number → its bytes/value).
+- **zvm/Debugger:** `fn object_detail(&self, obj: u16) -> Vec<String>` — set attributes (via
+  `objects::get_attr` over the version's attribute count) and properties (walk
+  `get_next_prop`/`get_prop_addr`/`get_prop_len`, formatting number → hex bytes). Drain the mem
+  fault (it reads memory).
+- **Panel:** `expanded_objects: std::collections::HashSet<u16>`; snapshot gains
+  `object_details: HashMap<u16, Vec<String>>`. `refresh` rebuilds the tree and refreshes details
+  for still-expanded objects. Clicking an Objects line parses its `[N]` object number and toggles
+  expansion (fetching `object_detail(N)` via the debugger on expand).
+- **Render + click:** like the disassembly, use a shared **`objects_rows`** display model that
+  interleaves each tree line with its expanded detail lines, so scroll offset and click
+  row→object mapping agree between render and hit-test. Objects tree lines are clickable
+  (toggle-expand) and underlined; detail lines are plain.
+
 ## Goal
 
 Give a developer a read-only window into the running Z-machine: disassemble code at any
