@@ -1640,9 +1640,17 @@ fn main() {
                                             ClickTarget::Code(a)   => p.goto(a, dbg),
                                             ClickTarget::Memory(a) => p.goto_memory(a, dbg),
                                             ClickTarget::Object(n) => p.goto_object(n, dbg),
-                                            // Variables are hover-only now (see the
-                                            // `Moved` arm); `clickable_at` no longer
-                                            // returns them, but the match must cover them.
+                                            // `@local5`/`@g0f`/`@sp` — a variable holding
+                                            // a memory address: jump to memory at its
+                                            // current value (read now via the debugger).
+                                            ClickTarget::MemVia(v) => {
+                                                if let Some(addr) = dbg.var_value(v) {
+                                                    p.goto_memory(addr as u32, dbg);
+                                                }
+                                            }
+                                            // Plain variables are hover-only (see the
+                                            // `Moved` arm); `clickable_at` doesn't return
+                                            // them, but the match must cover them.
                                             ClickTarget::Global(_) | ClickTarget::Local(_) | ClickTarget::Stack => {}
                                         }
                                     }

@@ -284,12 +284,19 @@ pub fn format_instr(instr: &Instr, unpack: &Unpack) -> String {
                     return format!("'{}'", c as u8 as char);
                 }
             }
-            // A variable is a runtime value, never a static reference: always
-            // render its variable sigil regardless of the opcode's operand role.
+            // A variable holds a runtime value, not a static reference — render
+            // its sigil (sp/localN/gNN), except that a variable used AS a memory
+            // address gets an `@` prefix (`@local5`) so the debugger can link it
+            // to memory at the address it currently holds.
             let value = match op {
                 Operand::Small(n) => *n as u16,
                 Operand::Large(n) => *n,
-                Operand::Var(_) => return fmt_operand(op),
+                Operand::Var(_) => {
+                    return match operand_role(&instr.operand_count, instr.opcode, version, i) {
+                        OpRole::MemAddr => format!("@{}", fmt_operand(op)),
+                        _ => fmt_operand(op),
+                    };
+                }
             };
             match operand_role(&instr.operand_count, instr.opcode, version, i) {
                 OpRole::Object => format!("obj#{}", value),
@@ -738,15 +745,27 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("arg1 = g00:")),
             "VarRef operand should name the variable: {lines:?}");
 
-        // A variable operand ignores the role and stays a variable sigil.
+        // A variable used AS a memory address (loadw base) renders `@sp` — the
+        // `@` marks it as an address the debugger links to memory[sp]; it is NOT
+        // the `@0x……` constant-address form.
         let loadw_var = Instr {
             opcode: 0x0F, form: Form::Long, operand_count: OperandCount::Two,
             operands: vec![Operand::Var(0), Operand::Small(0x00)],
             store: Some(0), branch: None, text: None, next_pc: 0x1000,
         };
         let s = format_instr(&loadw_var, &Unpack::plain(5));
-        assert!(s.contains("sp"), "got {s:?}");
-        assert!(!s.contains("@0x"), "var base must not render as a memory addr: {s:?}");
+        assert!(s.contains("@sp"), "var memory base should render @sp: {s:?}");
+        assert!(!s.contains("@0x"), "not the constant-address form: {s:?}");
+
+        // A variable in a NON-address role stays a plain sigil (no `@`).
+        // add sp, #01 (2OP:0x14) — operand 0 is a Plain value, not an address.
+        let add_var = Instr {
+            opcode: 0x14, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Var(0), Operand::Small(0x01)],
+            store: Some(1), branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr(&add_var, &Unpack::plain(5));
+        assert!(s.contains("sp") && !s.contains("@sp"), "plain var must not be @-linked: {s:?}");
     }
 
     #[test]
