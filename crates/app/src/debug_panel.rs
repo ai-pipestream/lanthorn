@@ -604,6 +604,19 @@ pub enum ClickTarget {
     MemVia(u8),   // → Memory window at the ADDRESS held by variable `u8`
                   //   (var-value convention: 0 = sp, 1..=15 = locals, 16.. = globals);
                   //   dereferenced at click time.
+    ObjVia(u8),   // → Objects tab, the OBJECT whose number variable `u8` holds
+                  //   (same var-value convention); dereferenced at click time.
+}
+
+/// Var-value number (0 = sp, 1..=15 = locals, 16.. = globals) for a variable
+/// `ClickTarget`, or `None` for a non-variable target.
+fn var_number(t: &ClickTarget) -> Option<u8> {
+    match t {
+        ClickTarget::Stack => Some(0),
+        ClickTarget::Local(i) => Some(i + 1),
+        ClickTarget::Global(i) => Some(i + 16),
+        _ => None,
+    }
 }
 
 /// Clickable operand-reference spans within a rendered line: the char range and
@@ -620,7 +633,7 @@ pub fn clickable_spans(section: Section, line: &str) -> Vec<(core::ops::Range<us
         Section::Disasm => classify_disasm_tokens(line).into_iter()
             .filter(|(_, t)| matches!(t,
                 ClickTarget::Code(_) | ClickTarget::Memory(_) | ClickTarget::Object(_)
-                | ClickTarget::MemVia(_)))
+                | ClickTarget::MemVia(_) | ClickTarget::ObjVia(_)))
             .collect(),
         Section::CallStack => {
             // Both the routine entry (`fn@……`) and the return PC (`ret=……`) are
@@ -685,15 +698,9 @@ fn classify_token(tok: &str) -> Option<(core::ops::Range<usize>, ClickTarget)> {
     // variable currently holds, read at click time (a variable is a runtime
     // value). The variable part is still hover-classified for its value.
     if let Some(varpart) = tok.strip_prefix('@') {
-        return classify_token(varpart).and_then(|(_, t)| {
-            let var = match t {
-                ClickTarget::Stack => 0u8,
-                ClickTarget::Local(i) => i + 1,
-                ClickTarget::Global(i) => i + 16,
-                _ => return None,
-            };
-            Some((0..tok.len(), ClickTarget::MemVia(var)))
-        });
+        return classify_token(varpart)
+            .and_then(|(_, t)| var_number(&t))
+            .map(|var| (0..tok.len(), ClickTarget::MemVia(var)));
     }
     // Code: `0x` + 6 hex, optionally behind a `?` / `?~` branch prefix. Span
     // covers the `0x……` core (skip the prefix).
@@ -707,9 +714,16 @@ fn classify_token(tok: &str) -> Option<(core::ops::Range<usize>, ClickTarget)> {
             }
         }
     }
-    // Object: `obj#` + decimal digits.
+    // Object: `obj#` + decimal digits (constant), or `obj#` + a variable sigil
+    // (`obj#local5`/`obj#g0f`/`obj#sp`) → the object whose number the variable
+    // currently holds, resolved on click.
     if let Some(n) = tok.strip_prefix("obj#") {
-        return (is_dec(n)).then(|| n.parse().ok().map(|n| (0..tok.len(), ClickTarget::Object(n)))).flatten();
+        if is_dec(n) {
+            return n.parse().ok().map(|num| (0..tok.len(), ClickTarget::Object(num)));
+        }
+        return classify_token(n)
+            .and_then(|(_, t)| var_number(&t))
+            .map(|var| (0..tok.len(), ClickTarget::ObjVia(var)));
     }
     // Global: exactly `g` + 2 hex digits.
     if let Some(n) = tok.strip_prefix('g') {
@@ -846,9 +860,10 @@ pub fn hover_var_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -
             ClickTarget::Stack => 0,
             ClickTarget::Local(i) => i + 1,
             ClickTarget::Global(i) => i + 16,
-            // `@local5` etc. — hovering the address-holding variable still shows
-            // its current value; `var` is already the var-value number.
-            ClickTarget::MemVia(v) => v,
+            // `@local5` / `obj#local5` etc. — hovering the address- or object-
+            // holding variable still shows its current value (`v` is already the
+            // var-value number).
+            ClickTarget::MemVia(v) | ClickTarget::ObjVia(v) => v,
             _ => return None,
         };
         return Some((var, content.x + 1 + range.start as u16, row));
@@ -1318,6 +1333,27 @@ mod tests {
         assert_eq!(classify_token("@0x001234"), Some((0..9, ClickTarget::Memory(0x1234))));
         // `@` on a non-variable is not a link.
         assert_eq!(classify_token("@nonsense"), None);
+    }
+
+    #[test]
+    fn classify_token_object_via_variable() {
+        // `obj#<var>` → ObjVia in the var-value convention; `obj#<decimal>` stays Object.
+        assert_eq!(classify_token("obj#sp"), Some((0..6, ClickTarget::ObjVia(0))));
+        assert_eq!(classify_token("obj#local0"), Some((0..10, ClickTarget::ObjVia(1))));
+        assert_eq!(classify_token("obj#g05"), Some((0..7, ClickTarget::ObjVia(21))));
+        assert_eq!(classify_token("obj#5"), Some((0..5, ClickTarget::Object(5))));
+        assert_eq!(classify_token("obj#bogus"), None);
+    }
+
+    #[test]
+    fn object_via_variable_is_clickable_and_still_hoverable() {
+        let line = "001000  get_child obj#local0 -> sp ?0x001010";
+        let spans = clickable_spans(Section::Disasm, line);
+        assert!(spans.iter().any(|(_, t)| matches!(t, ClickTarget::ObjVia(1))),
+            "obj#local0 should be a clickable ObjVia span: {spans:?}");
+        let (p, region, content, row_y) = hover_panel(line);
+        let col = content.x + 1 + line.find("obj#local0").unwrap() as u16 + 4; // over "local0"
+        assert_eq!(hover_var_at(region, &p, col, row_y).map(|(v, ..)| v), Some(1));
     }
 
     #[test]

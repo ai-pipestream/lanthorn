@@ -294,6 +294,7 @@ pub fn format_instr(instr: &Instr, unpack: &Unpack) -> String {
                 Operand::Var(_) => {
                     return match operand_role(&instr.operand_count, instr.opcode, version, i) {
                         OpRole::MemAddr => format!("@{}", fmt_operand(op)),
+                        OpRole::Object => format!("obj#{}", fmt_operand(op)),
                         _ => fmt_operand(op),
                     };
                 }
@@ -766,6 +767,17 @@ mod tests {
         };
         let s = format_instr(&add_var, &Unpack::plain(5));
         assert!(s.contains("sp") && !s.contains("@sp"), "plain var must not be @-linked: {s:?}");
+
+        // A variable used AS an object (get_child operand) renders `obj#local0`
+        // — an object link the debugger resolves to object[local0].
+        let getchild_var = Instr {
+            opcode: 0x02, form: Form::Short, operand_count: OperandCount::One,
+            operands: vec![Operand::Var(1)],
+            store: Some(0), branch: Some(Branch { on_true: true, offset: 4, len: 1 }),
+            text: None, next_pc: 0x1000,
+        };
+        let s = format_instr(&getchild_var, &Unpack::plain(5));
+        assert!(s.contains("obj#local0"), "var object should render obj#local0: {s:?}");
     }
 
     #[test]

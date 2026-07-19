@@ -1648,6 +1648,13 @@ fn main() {
                                                     p.goto_memory(addr as u32, dbg);
                                                 }
                                             }
+                                            // `obj#local5`/`obj#g0f`/`obj#sp` — a variable
+                                            // holding an object number: expand that object.
+                                            ClickTarget::ObjVia(v) => {
+                                                if let Some(obj) = dbg.var_value(v) {
+                                                    p.goto_object(obj, dbg);
+                                                }
+                                            }
                                             // Plain variables are hover-only (see the
                                             // `Moved` arm); `clickable_at` doesn't return
                                             // them, but the match must cover them.
