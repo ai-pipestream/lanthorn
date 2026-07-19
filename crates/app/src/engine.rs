@@ -335,17 +335,35 @@ pub trait Introspect {
     fn player_object(&self) -> Option<u16>;
 }
 
-// ── Debugger capability (reserved) ──────────────────────────────────────────
+// ── Debugger capability ──────────────────────────────────────────────────────
 
-/// Reserved single-step / inspection capability for a future Story Debug +
-/// Disassembly feature.  Declared so the trait surface is future-proof; no
-/// engine implements it in 3b-i and [`Engine::debugger`] returns `None`
-/// everywhere.
+/// Read-only debug inspection of a running engine. All methods return
+/// pre-formatted lines so the app render code stays engine-neutral (mirrors
+/// `Engine::window_dump`). Z-machine implements this; other engines return
+/// `None` from `Engine::debugger` for now. (Inspect-only; a stepper is a
+/// future increment that will add `&mut` control methods.)
 pub trait Debugger {
-    /// Execute a single instruction.
-    fn step(&mut self);
-    /// Disassemble one instruction at `addr`, returning its textual form.
-    fn decode_at(&self, addr: u32) -> String;
+    /// Instruction pointer the VM is parked at (for "jump to PC").
+    fn pc(&self) -> u32;
+    /// Disassemble `lines` instructions starting at `addr`, one string per line.
+    fn disassemble(&self, addr: u32, lines: usize) -> Vec<String>;
+    /// Address of the instruction after the one at `addr` (clamped to memory);
+    /// lets the panel advance the disassembly view by whole instructions.
+    fn next_instr(&self, addr: u32) -> u32;
+    /// Call stack, one or more lines per frame, innermost last.
+    fn stack_lines(&self) -> Vec<String>;
+    /// Locals of the innermost frame.
+    fn locals_lines(&self) -> Vec<String>;
+    /// Global variables, formatted.
+    fn globals_lines(&self) -> Vec<String>;
+    /// The object tree, indented.
+    fn object_tree_lines(&self) -> Vec<String>;
+    /// Dictionary words.
+    fn dictionary_lines(&self) -> Vec<String>;
+    /// Hex+ASCII dump: `rows` rows of 16 bytes from `addr`.
+    fn memory_hex(&self, addr: u32, rows: usize) -> Vec<String>;
+    /// Total addressable memory length (so the panel can clamp scroll).
+    fn memory_len(&self) -> u32;
 }
 
 // ── Engine-tagged save ──────────────────────────────────────────────────────
@@ -533,8 +551,8 @@ pub trait Engine {
     fn introspect(&self) -> Option<&dyn Introspect> {
         None
     }
-    /// Debugger capability (reserved); `None` everywhere in 3b-i.
-    fn debugger(&mut self) -> Option<&mut dyn Debugger> {
+    /// Debug-inspection capability, when the engine has one.
+    fn debugger(&self) -> Option<&dyn Debugger> {
         None
     }
 }
@@ -609,5 +627,33 @@ mod tests {
         };
         assert!(e.to_string().contains("zmachine"));
         assert!(e.to_string().contains("glulx"));
+    }
+}
+
+#[cfg(test)]
+mod debugger_trait_tests {
+    use super::*;
+
+    struct Dummy;
+    impl Debugger for Dummy {
+        fn pc(&self) -> u32 { 0x4a2f }
+        fn disassemble(&self, _a: u32, _n: usize) -> Vec<String> { vec!["4a2f  add".into()] }
+        fn next_instr(&self, a: u32) -> u32 { a + 4 }
+        fn stack_lines(&self) -> Vec<String> { vec!["#0 main".into()] }
+        fn locals_lines(&self) -> Vec<String> { vec!["(none)".into()] }
+        fn globals_lines(&self) -> Vec<String> { vec!["g00=0000".into()] }
+        fn object_tree_lines(&self) -> Vec<String> { vec!["[1] thing".into()] }
+        fn dictionary_lines(&self) -> Vec<String> { vec!["word".into()] }
+        fn memory_hex(&self, _a: u32, _r: usize) -> Vec<String> { vec!["000000  00".into()] }
+        fn memory_len(&self) -> u32 { 0x10000 }
+    }
+
+    #[test]
+    fn debugger_object_is_usable() {
+        let d = Dummy;
+        let dyn_d: &dyn Debugger = &d;
+        assert_eq!(dyn_d.pc(), 0x4a2f);
+        assert_eq!(dyn_d.next_instr(0x4a2f), 0x4a33);
+        assert!(!dyn_d.disassemble(0, 4).is_empty());
     }
 }
