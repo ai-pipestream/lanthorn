@@ -988,6 +988,11 @@ pub fn status_model_from_machine(machine: &Machine) -> StatusModel {
 impl Engine for GameSession {
     fn submit(&mut self, command: &str) -> TurnResult {
         if self.machine.trace_exec { self.machine.exec_pcs.clear(); }
+        // A turn executes new code, so its freshly-recorded boundaries must be
+        // folded afterward EVEN IF it returns to the same parked PC (every
+        // look/examine returns to the same input prompt). Reopen the per-turn
+        // confirmation gate so the next disassemble re-folds. (read-pc follow-up)
+        self.last_confirmed_pc.set(None);
         // Dot syntax resolves to the inherent `GameSession::submit` (inherent
         // methods take precedence over trait methods), so this is not recursive.
         self.submit(command)
@@ -995,6 +1000,7 @@ impl Engine for GameSession {
 
     fn submit_key(&mut self, key: KeyInput) -> Option<TurnResult> {
         if self.machine.trace_exec { self.machine.exec_pcs.clear(); }
+        self.last_confirmed_pc.set(None); // reopen the confirmation gate each turn
         let byte = GameSession::key_input_to_zscii(key)?;
         Some(self.submit_char(byte))
     }
@@ -2837,6 +2843,21 @@ mod debugger_impl_tests {
         let row = &dbg.disassemble(read_addr, 1)[0];
         assert!(row.contains("read"), "parked read renders as a read op, got {row:?}");
         assert_eq!(dbg.next_instr(read_addr), pc, "the read is the instruction immediately before the parked PC");
+    }
+
+    #[test]
+    fn a_turn_reopens_the_confirmation_gate_at_the_same_prompt() {
+        // The per-turn confirmation gate is keyed on the parked PC, but a
+        // look/examine returns to the SAME input prompt — its freshly-executed
+        // boundaries (which correct false routine headers) must still be folded, so
+        // a turn must reopen the gate rather than skip confirmation. (read-pc follow-up)
+        let Some(mut session) = zvm_session() else { return };
+        session.set_debug_trace(true);
+        let pc = session.machine.state.pc;
+        let _ = session.debugger().unwrap().disassemble(pc, 1); // builds + confirms, closes the gate
+        assert_eq!(session.last_confirmed_pc.get(), Some(pc), "confirm closes the gate on the parked PC");
+        let _ = Engine::submit(&mut session, "look");
+        assert_eq!(session.last_confirmed_pc.get(), None, "a turn must reopen the confirmation gate");
     }
 
     // A read-only debug inspection must never leave a latched memory fault in the
