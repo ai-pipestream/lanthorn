@@ -25,7 +25,11 @@ pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
         zchars.push(((word >> 10) & 0x1F) as u8);
         zchars.push(((word >> 5) & 0x1F) as u8);
         zchars.push((word & 0x1F) as u8);
-        if last {
+        // Stop at the end-of-string marker, or at end of memory: an
+        // unterminated string (e.g. garbage decoded as a `print` inline
+        // string) would otherwise read out of bounds forever until `pos`
+        // overflows.
+        if last || pos as usize >= mem.len() {
             break;
         }
     }
