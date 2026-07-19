@@ -14,6 +14,7 @@ pub mod colors;
 pub mod complete;
 pub mod config;
 pub mod cover;
+pub mod debug_panel;
 pub mod engine;
 pub mod garglk_ini;
 pub mod glk_backend;

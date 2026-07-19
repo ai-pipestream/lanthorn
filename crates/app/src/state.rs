@@ -1283,6 +1283,8 @@ pub struct OverlayState {
     pub config_screen: Option<ConfigScreenState>,
     /// Active style-editor full-screen state. `None` means the editor is closed.
     pub style_editor: Option<StyleEditorState>,
+    /// Active debug-inspector panel. `None` = closed.
+    pub debug_panel: Option<crate::debug_panel::DebugPanelState>,
     /// Active glyph-picker modal state. `None` means the picker is closed.
     /// Opened over the style editor; closes on pick/clear/cancel.
     pub glyph_picker: Option<GlyphPickerState>,
