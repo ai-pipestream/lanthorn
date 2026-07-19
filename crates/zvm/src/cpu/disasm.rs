@@ -264,6 +264,74 @@ pub fn disassemble(mem: &Memory, start: u32, version: u8, lines: usize) -> Vec<S
     out
 }
 
+/// Raw class tag for an `OperandCount` — the untranslated instruction class.
+fn class_tag(count: &OperandCount) -> &'static str {
+    match count {
+        OperandCount::Zero => "0OP",
+        OperandCount::One => "1OP",
+        OperandCount::Two => "2OP",
+        OperandCount::Var => "VAR",
+        OperandCount::Ext => "EXT",
+    }
+}
+
+/// Format one decoded instruction in RAW form — the part AFTER the address:
+/// `{bytes}   {CLASS}:0x{opcode}  {operands} -> V{store} ?{T|F}{offset} "text"`.
+/// Deliberately performs NO lookups (a diagnostic to catch bugs in the
+/// translation layer): no mnemonic name, no operand-role sigils, no variable
+/// naming (`sp`/`localN`/`gNN`), no packed-address unpacking, no annotations.
+/// `bytes` is the instruction's raw bytes (already extracted + capped by the
+/// caller); `truncated` appends `…` to the byte column when they were clipped.
+pub fn format_instr_raw(instr: &Instr, bytes: &[u8], truncated: bool) -> String {
+    let mut byte_col = bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+    if truncated {
+        byte_col.push_str(" …");
+    }
+    let mut s = format!("{}   {}:0x{:02x}", byte_col, class_tag(&instr.operand_count), instr.opcode);
+    if !instr.operands.is_empty() {
+        let ops: Vec<String> = instr.operands.iter().map(|op| match op {
+            Operand::Large(n) => format!("L#{:04x}", n),
+            Operand::Small(n) => format!("S#{:02x}", n),
+            Operand::Var(n) => format!("V{:02x}", n),
+        }).collect();
+        s.push_str("  ");
+        s.push_str(&ops.join(", "));
+    }
+    if let Some(v) = instr.store {
+        s.push_str(&format!(" -> V{:02x}", v));
+    }
+    if let Some(b) = &instr.branch {
+        let tf = if b.on_true { "T" } else { "F" };
+        s.push_str(&format!(" ?{}{}", tf, b.offset));
+    }
+    if let Some((text, _)) = &instr.text {
+        s.push_str(&format!(" {:?}", text));
+    }
+    s
+}
+
+/// Disassemble `lines` instructions from `start` in RAW form — mirrors
+/// [`disassemble`] but shows instruction bytes + untranslated structure with no
+/// lookups (see [`format_instr_raw`]). Stops early at the end of memory.
+pub fn disassemble_raw(mem: &Memory, start: u32, version: u8, lines: usize) -> Vec<String> {
+    let mut out = Vec::with_capacity(lines);
+    let mut pc = start.min(mem.len() as u32);
+    for _ in 0..lines {
+        if pc >= mem.len() as u32 {
+            break;
+        }
+        let instr = decode(mem, pc, version);
+        let end = instr.next_pc.min(mem.len() as u32);
+        let n = end.saturating_sub(pc).min(12);
+        let truncated = end.saturating_sub(pc) > 12;
+        let bytes: Vec<u8> = (0..n).map(|i| mem.read_byte(pc + i)).collect();
+        out.push(format!("{:06x}: {}", pc, format_instr_raw(&instr, &bytes, truncated)));
+        // Guard against a decoder that fails to advance (malformed bytes).
+        pc = if instr.next_pc > pc { instr.next_pc } else { pc + 1 };
+    }
+    out
+}
+
 /// Address of the instruction following the one at `addr` (clamped to memory).
 pub fn next_instr(mem: &Memory, addr: u32, version: u8) -> u32 {
     if addr >= mem.len() as u32 {
@@ -585,6 +653,94 @@ mod tests {
         let bytes = crate::header::tests_support::sample_story(5);
         let mem = Memory::new(bytes).unwrap();
         assert_eq!(prev_instr(&mem, 0, mem.version()), 0);
+    }
+
+    #[test]
+    fn class_tag_covers_each_operand_count() {
+        assert_eq!(class_tag(&OperandCount::Zero), "0OP");
+        assert_eq!(class_tag(&OperandCount::One), "1OP");
+        assert_eq!(class_tag(&OperandCount::Two), "2OP");
+        assert_eq!(class_tag(&OperandCount::Var), "VAR");
+        assert_eq!(class_tag(&OperandCount::Ext), "EXT");
+    }
+
+    #[test]
+    fn format_instr_raw_shows_bytes_and_untranslated_decode() {
+        use crate::cpu::decode::Form;
+        // add S#05, S#03 -> V05  (2OP:0x14, store var 5). Raw: NO mnemonic name.
+        let instr = Instr {
+            opcode: 0x14, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Small(5), Operand::Small(3)],
+            store: Some(5), branch: None, text: None, next_pc: 0x1004,
+        };
+        let s = format_instr_raw(&instr, &[0x54, 0x05, 0x03, 0x05], false);
+        assert_eq!(s, "54 05 03 05   2OP:0x14  S#05, S#03 -> V05");
+        assert!(!s.contains("add"), "raw view must not name the mnemonic: {s:?}");
+        // A Large operand renders `L#{:04x}`.
+        let big = Instr {
+            opcode: 0x00, form: Form::Variable, operand_count: OperandCount::Var,
+            operands: vec![Operand::Large(0x0a2f)],
+            store: None, branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr_raw(&big, &[], false);
+        assert!(s.contains("VAR:0x00"), "got {s:?}");
+        assert!(s.contains("L#0a2f"), "raw large is not unpacked: {s:?}");
+        assert!(!s.contains("0x00145e"), "raw must not unpack packed addresses: {s:?}");
+    }
+
+    #[test]
+    fn format_instr_raw_never_names_variables() {
+        use crate::cpu::decode::Form;
+        // Var(0) is the stack, but raw shows V00 — never `sp`; store shows raw V01.
+        let instr = Instr {
+            opcode: 0x0F, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Var(0), Operand::Small(0)],
+            store: Some(1), branch: None, text: None, next_pc: 0x1004,
+        };
+        let s = format_instr_raw(&instr, &[0x6f, 0x00, 0x00, 0x01], false);
+        assert!(s.contains("V00"), "got {s:?}");
+        assert!(s.contains("-> V01"), "raw store is a bare variable number: {s:?}");
+        assert!(!s.contains("sp"), "raw view must not name variables: {s:?}");
+        assert!(!s.contains("local"), "got {s:?}");
+    }
+
+    #[test]
+    fn format_instr_raw_renders_raw_branch_offset() {
+        use crate::cpu::decode::Form;
+        let on_true = Instr {
+            opcode: 0x01, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Small(1), Operand::Small(2)],
+            store: None, branch: Some(Branch { on_true: true, offset: 5, len: 1 }),
+            text: None, next_pc: 0x1000,
+        };
+        assert!(format_instr_raw(&on_true, &[], false).ends_with("?T5"),
+            "raw branch is the signed offset, no target address: {:?}", format_instr_raw(&on_true, &[], false));
+        let on_false = Instr {
+            opcode: 0x01, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Small(1), Operand::Small(2)],
+            store: None, branch: Some(Branch { on_true: false, offset: -3, len: 2 }),
+            text: None, next_pc: 0x1000,
+        };
+        assert!(format_instr_raw(&on_false, &[], false).ends_with("?F-3"),
+            "got {:?}", format_instr_raw(&on_false, &[], false));
+    }
+
+    #[test]
+    fn disassemble_raw_prefixes_address_and_caps_the_byte_column() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let start = mem.initial_pc();
+        let lines = disassemble_raw(&mem, start, mem.version(), 8);
+        assert!(!lines.is_empty());
+        // Raw lines carry a class tag, never a mnemonic.
+        assert!(lines.iter().any(|l| l.contains(":0x")), "no class:opcode: {lines:?}");
+        assert!(lines.iter().all(|l| !l.contains("add") && !l.contains("call")),
+            "raw view leaked a mnemonic: {lines:?}");
+        // Address column uses `{:06x}: ` (colon), distinct from the translated path.
+        assert!(lines[0].as_bytes()[6] == b':', "addr sep: {:?}", lines[0]);
     }
 
     #[test]

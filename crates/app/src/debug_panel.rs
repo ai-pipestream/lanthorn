@@ -117,6 +117,9 @@ pub struct DebugPanelState {
     /// List-content scroll offset per window (reset on tab change).
     pub scroll: [usize; 3],
     pub disasm_addr: u32,
+    /// Disassembly view mode: `true` = RAW (bytes + untranslated decode, no
+    /// lookups), `false` = the translated view. Toggled by `r` in the Disasm tab.
+    pub raw_disasm: bool,
     pub mem_addr: u32,
     /// Memory address-input edit buffer (hex digits typed so far). `None`
     /// when not editing; `Some` while the Memory tab's `:`/`/`-opened input
@@ -148,6 +151,7 @@ impl DebugPanelState {
             tab: [0, 0, 0],
             scroll: [0, 0, 0],
             disasm_addr: pc,
+            raw_disasm: false,
             mem_addr: 0,
             mem_input: None,
             expanded_objects: std::collections::HashSet::new(),
@@ -174,7 +178,7 @@ impl DebugPanelState {
         self.hover = None;
         self.pc = dbg.pc();
         self.disasm_addr = self.pc;
-        self.snapshot.disasm = dbg.disassemble(self.disasm_addr, DISASM_WINDOW);
+        self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
         self.snapshot.globals = dbg.globals_lines();
         self.snapshot.locals = dbg.locals_lines();
         self.snapshot.objects = dbg.object_tree_lines();
@@ -193,6 +197,16 @@ impl DebugPanelState {
     }
 
     fn page(&self) -> usize { self.viewport.max(1) }
+
+    /// Build the disassembly for `addr` honoring the current view mode, so every
+    /// site that (re)builds `snapshot.disasm` picks up the raw/translated toggle.
+    fn load_disasm(&self, dbg: &dyn Debugger, addr: u32) -> Vec<String> {
+        if self.raw_disasm {
+            dbg.disassemble_raw(addr, DISASM_WINDOW)
+        } else {
+            dbg.disassemble(addr, DISASM_WINDOW)
+        }
+    }
 
     /// `window`'s active tab index moves by `dir` (wrapping); its scroll resets.
     fn cycle_tab(&mut self, dir: i32) {
@@ -217,7 +231,12 @@ impl DebugPanelState {
             KeyCode::Right => self.cycle_tab(1),
             KeyCode::Char('g') => {
                 self.disasm_addr = self.pc;
-                self.snapshot.disasm = dbg.disassemble(self.disasm_addr, DISASM_WINDOW);
+                self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
+            }
+            // Only in the Disasm tab, so it doesn't shadow keys in other sections.
+            KeyCode::Char('r') if self.active_section(self.focus) == Section::Disasm => {
+                self.raw_disasm = !self.raw_disasm;
+                self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
             }
             KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp
             | KeyCode::Home | KeyCode::End => {
@@ -298,7 +317,7 @@ impl DebugPanelState {
         } else {
             self.disasm_addr = dbg.prev_instr(self.disasm_addr);
         }
-        self.snapshot.disasm = dbg.disassemble(self.disasm_addr, DISASM_WINDOW);
+        self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
     }
 
     fn step_memory(&mut self, down: bool, dbg: &dyn Debugger) {
@@ -359,7 +378,7 @@ impl DebugPanelState {
         self.disasm_addr = addr;
         self.focus = 0;
         self.tab[0] = 0;
-        self.snapshot.disasm = dbg.disassemble(self.disasm_addr, DISASM_WINDOW);
+        self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
     }
 
     /// Mouse: toggle object `n`'s expansion in the Objects tree (collapse if
@@ -908,6 +927,11 @@ mod tests {
         fn disassemble(&self, addr: u32, n: usize) -> Vec<String> {
             (0..n).map(|i| format!("{:06x}  add", addr + i as u32 * 4)).collect()
         }
+        // Raw form is distinguishable from the translated `add` above (carries a
+        // class tag) so the `r` toggle is testable.
+        fn disassemble_raw(&self, addr: u32, n: usize) -> Vec<String> {
+            (0..n).map(|i| format!("{:06x}: 54  2OP:0x14", addr + i as u32 * 4)).collect()
+        }
         fn next_instr(&self, a: u32) -> u32 { a + 4 }
         fn prev_instr(&self, a: u32) -> u32 { a.saturating_sub(4) }
         fn executed_pcs(&self) -> std::collections::HashSet<u32> { std::collections::HashSet::new() }
@@ -925,6 +949,32 @@ mod tests {
         fn frame_locals(&self, _idx: usize) -> Vec<String> { vec![format!("local0 = 0x0001  (1)")] }
         // Deterministic, distinct-per-var value so deref jumps are testable.
         fn var_value(&self, var: u8) -> Option<u16> { Some(0x1000 + var as u16 * 0x10) }
+    }
+
+    #[test]
+    fn r_toggles_raw_disasm_in_the_disasm_tab() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.refresh(&MockDbg); // focus 0 / tab 0 = Disasm, translated view first.
+        assert!(!p.raw_disasm);
+        assert!(p.snapshot.disasm.iter().all(|l| !l.contains("2OP:0x14")),
+            "translated view: {:?}", p.snapshot.disasm.first());
+        // Toggle on → raw form.
+        assert_eq!(p.handle_key(KeyCode::Char('r'), &MockDbg), DebugKey::Consumed);
+        assert!(p.raw_disasm, "flag flipped on");
+        assert!(p.snapshot.disasm.iter().all(|l| l.contains("2OP:0x14")),
+            "raw view: {:?}", p.snapshot.disasm.first());
+        // Toggle back → translated form restored.
+        assert_eq!(p.handle_key(KeyCode::Char('r'), &MockDbg), DebugKey::Consumed);
+        assert!(!p.raw_disasm);
+        assert!(p.snapshot.disasm.iter().all(|l| !l.contains("2OP:0x14")));
+    }
+
+    #[test]
+    fn r_is_ignored_outside_the_disasm_tab() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.focus = 1; // Locals | Objects | Dictionary — not Disasm.
+        assert_eq!(p.handle_key(KeyCode::Char('r'), &MockDbg), DebugKey::Ignored);
+        assert!(!p.raw_disasm, "no flip outside the Disasm tab");
     }
 
     #[test]

@@ -1056,6 +1056,13 @@ impl Debugger for GameSession {
         out
     }
 
+    fn disassemble_raw(&self, addr: u32, lines: usize) -> Vec<String> {
+        let version = self.machine.mem.version();
+        let out = zvm::cpu::disasm::disassemble_raw(&self.machine.mem, addr, version, lines);
+        self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
+        out
+    }
+
     fn next_instr(&self, addr: u32) -> u32 {
         let version = self.machine.mem.version();
         let out = zvm::cpu::disasm::next_instr(&self.machine.mem, addr, version);

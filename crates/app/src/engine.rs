@@ -347,6 +347,10 @@ pub trait Debugger {
     fn pc(&self) -> u32;
     /// Disassemble `lines` instructions starting at `addr`, one string per line.
     fn disassemble(&self, addr: u32, lines: usize) -> Vec<String>;
+    /// Raw disassembly: instruction bytes + decoded structure with NO lookups
+    /// (no mnemonic name, operand-role sigils, variable naming, or packed-address
+    /// unpacking) — a diagnostic view to catch bugs in the translation layer.
+    fn disassemble_raw(&self, addr: u32, lines: usize) -> Vec<String>;
     /// Address of the instruction after the one at `addr` (clamped to memory);
     /// lets the panel advance the disassembly view by whole instructions.
     fn next_instr(&self, addr: u32) -> u32;
@@ -660,6 +664,7 @@ mod debugger_trait_tests {
     impl Debugger for Dummy {
         fn pc(&self) -> u32 { 0x4a2f }
         fn disassemble(&self, _a: u32, _n: usize) -> Vec<String> { vec!["4a2f  add".into()] }
+        fn disassemble_raw(&self, _a: u32, _n: usize) -> Vec<String> { vec!["4a2f: 54 05 03 05   2OP:0x14".into()] }
         fn next_instr(&self, a: u32) -> u32 { a + 4 }
         fn prev_instr(&self, a: u32) -> u32 { a.saturating_sub(4) }
         fn executed_pcs(&self) -> std::collections::HashSet<u32> { std::collections::HashSet::new() }

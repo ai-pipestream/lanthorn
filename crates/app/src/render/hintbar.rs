@@ -40,6 +40,7 @@ pub const DEBUG_HINTS: &[(&str, &str)] = &[
     ("\u{2190}\u{2192}", "section"),
     ("\u{2191}\u{2193}", "scroll"),
     ("g", "PC"),
+    ("r", "raw"),
     ("Esc", "back"),
 ];
 
@@ -134,7 +135,7 @@ mod tests {
     #[test]
     fn literal_hint_bar_joins_debug_hints() {
         let line = literal_hint_bar(DEBUG_HINTS, 200);
-        assert_eq!(line, "Tab: window | \u{2190}\u{2192}: section | \u{2191}\u{2193}: scroll | g: PC | Esc: back");
+        assert_eq!(line, "Tab: window | \u{2190}\u{2192}: section | \u{2191}\u{2193}: scroll | g: PC | r: raw | Esc: back");
     }
 
     #[test]

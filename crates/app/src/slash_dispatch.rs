@@ -440,6 +440,7 @@ mod debug_dispatch_tests {
     impl Debugger for MockDebugger {
         fn pc(&self) -> u32 { 0x1234 }
         fn disassemble(&self, _addr: u32, _lines: usize) -> Vec<String> { vec!["1234  nop".into()] }
+        fn disassemble_raw(&self, _addr: u32, _lines: usize) -> Vec<String> { vec!["1234: b4  0OP:0x04".into()] }
         fn next_instr(&self, addr: u32) -> u32 { addr + 1 }
         fn prev_instr(&self, addr: u32) -> u32 { addr.saturating_sub(1) }
         fn executed_pcs(&self) -> std::collections::HashSet<u32> { std::collections::HashSet::new() }
