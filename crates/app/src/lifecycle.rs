@@ -35,6 +35,7 @@ pub(crate) fn exit_auto_save(
     if !state.config.auto_save || session.is_saveload_pending() {
         return;
     }
+    let (location, score) = crate::engine_helpers::save_summary(session, state);
     let exit_meta = app::archive::Meta {
         format_version: app::archive::CURRENT_FORMAT_VERSION,
         ifid: Some(ifid.to_string()),
@@ -46,6 +47,8 @@ pub(crate) fn exit_auto_save(
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
         ),
+        location,
+        score,
     };
     match save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history) {
         Ok(()) => {
@@ -75,6 +78,7 @@ pub(crate) fn quit_dialog_save(
     if session.is_saveload_pending() {
         return;
     }
+    let (location, score) = crate::engine_helpers::save_summary(session, state);
     let meta = app::archive::Meta {
         format_version: app::archive::CURRENT_FORMAT_VERSION,
         ifid: Some(ifid.to_string()),
@@ -86,6 +90,8 @@ pub(crate) fn quit_dialog_save(
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
         ),
+        location,
+        score,
     };
     let _ = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history);
 }

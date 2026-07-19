@@ -84,6 +84,14 @@ pub struct Meta {
     /// RFC3339 timestamp of when this save was written, empty string for legacy saves.
     #[serde(default)]
     pub saved_at: String,
+    /// Detected room name at save time, for the picker's save summary (SQ-0411).
+    /// None when unknown (legacy saves, or an engine with no location signal).
+    #[serde(default)]
+    pub location: Option<String>,
+    /// Score at save time, from the Z-machine v1–3 automatic status line (SQ-0411).
+    /// None for v4+ Z-machine and Glulx, which have no engine-provided score.
+    #[serde(default)]
+    pub score: Option<i32>,
 }
 
 /// Transcript payload written to `transcript.json` inside the archive.
@@ -225,6 +233,8 @@ pub fn save_archive(
         name: None,
         turns: 0,
         saved_at: String::new(),
+        location: None,
+        score: None,
     }, transcript, transcript_kinds, transcript_runs, transcript_para, history, command_history)
 }
 
@@ -742,7 +752,7 @@ mod tests {
             &zvm_es(&machine),
             Some(&machine.screen),
             &machine.aux_data,
-            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new() },
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None },
             &transcript,
             &kinds,
             &[],
@@ -938,6 +948,8 @@ mod tests {
                 name: Some("before-troll".to_string()),
                 turns: 42,
                 saved_at: "2026-06-30T12:00:00Z".to_string(),
+            location: None,
+            score: None,
             },
             &[],
             &[],
@@ -985,7 +997,7 @@ mod tests {
             let options = zip::write::SimpleFileOptions::default();
 
             // Write only meta.json; omit map.json and game.sav
-            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new() };
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -1053,7 +1065,7 @@ mod tests {
                 .compression_method(zip::CompressionMethod::Deflated);
 
             // meta.json
-            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new() };
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -1126,7 +1138,7 @@ mod tests {
             let options = zip::write::SimpleFileOptions::default();
 
             // Write an archive with no transcript.json entry.
-            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new() };
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -1163,7 +1175,7 @@ mod tests {
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
 
-            let meta = Meta { format_version: 99, ifid: None, name: None, turns: 0, saved_at: String::new() };
+            let meta = Meta { format_version: 99, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -1278,7 +1290,7 @@ mod tests {
             let file = std::fs::File::create(&path).unwrap();
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
-            let meta = Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new() };
+            let meta = Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None };
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(serde_json::to_string(&meta).unwrap().as_bytes()).unwrap();
             zip.start_file(ENTRY_MAP, options).unwrap();

@@ -87,7 +87,8 @@ pub(crate) fn handle_save_as(
         }
     } else {
         // Host "Save State" named slot -> rich .babelmap archive.
-        save_named(dir, ifid, &buf, mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para)
+        let (location, score) = crate::engine_helpers::save_summary(&*session, state);
+        save_named(dir, ifid, &buf, mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para)
     };
     match result {
         Ok(()) => {

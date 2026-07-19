@@ -188,7 +188,7 @@ mod tests {
             name: name.to_string(),
             turns,
             saved_at: "2026-06-18T10:00:00Z".to_string(),
-            is_default,
+            location: None, score: None, is_default,
         }
     }
 
@@ -198,7 +198,7 @@ mod tests {
             name: name.to_string(),
             turns,
             saved_at: "2026-06-18T10:00:00Z".to_string(),
-            is_default: false,
+            location: None, score: None, is_default: false,
         }
     }
 

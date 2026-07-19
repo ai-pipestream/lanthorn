@@ -126,11 +126,13 @@ pub(crate) fn dispatch_slash_outcome(
             // Named save or default archive save.
             let result = match name_opt {
                 Some(ref name) => {
-                    save_named(game_dir, ifid, name, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para)
+                    let (location, score) = crate::engine_helpers::save_summary(&*session, state);
+                    save_named(game_dir, ifid, name, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para)
                         .map(|()| format!("saved as \"{}\"", name))
                         .map_err(|e| format!("save failed: {}", e))
                 }
                 None => {
+                    let (location, score) = crate::engine_helpers::save_summary(&*session, state);
                     let meta = app::archive::Meta {
                         format_version: app::archive::CURRENT_FORMAT_VERSION,
                         ifid: Some(ifid.to_string()),
@@ -142,6 +144,8 @@ pub(crate) fn dispatch_slash_outcome(
                                 .map(|d| d.as_secs())
                                 .unwrap_or(0),
                         ),
+                        location,
+                        score,
                     };
                     save_archive_meta(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history)
                         .map(|()| "saved".to_string())

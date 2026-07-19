@@ -42,6 +42,25 @@ pub(crate) fn zvm_session_opt_mut(engine: &mut dyn Engine) -> Option<&mut GameSe
     engine.as_any_mut().downcast_mut::<GameSession>()
 }
 
+/// The `(location, score)` save summary captured into a save's `Meta` at save time
+/// (SQ-0411), shared by every Meta-building save site (auto-save, exit/quit-dialog
+/// snapshots, named saves).
+///
+/// Location is the app-detected room name (`state.current_room_name`). Score comes
+/// from the Z-machine v1–3 automatic status line; it is `None` for v4+ Z-machine and
+/// Glulx games, which expose no engine-provided score.
+pub(crate) fn save_summary(engine: &dyn Engine, state: &app::state::AppState) -> (Option<String>, Option<i32>) {
+    use app::engine::{StatusField, StatusModel};
+    let location = state.current_room_name.clone();
+    let score = zvm_session_opt(engine).and_then(|z| {
+        match app::session::status_model_from_machine(&z.machine) {
+            StatusModel::Classic { right: StatusField::ScoreTurns { score, .. }, .. } => Some(score as i32),
+            _ => None,
+        }
+    });
+    (location, score)
+}
+
 /// Non-panicking downcast to the Glulx session: `Some` for a Glulx game, `None`
 /// for Z-code. Used to read the armed Glk timer interval.
 pub(crate) fn glulx_session_opt(engine: &dyn Engine) -> Option<&GlulxSession> {

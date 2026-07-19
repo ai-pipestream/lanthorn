@@ -2249,6 +2249,7 @@ fn main() {
             Action::SaveGame => {
                 // Dead post-unification: keys now route through SlashOutcome::Save. Retained as a no-cost match arm.
                 // Bundle map + game into a single .babelmap archive, with turn metadata.
+                let (location, score) = crate::engine_helpers::save_summary(&*session, &state);
                 let meta = app::archive::Meta {
                     format_version: app::archive::CURRENT_FORMAT_VERSION,
                     ifid: Some(ifid.clone()),
@@ -2264,6 +2265,8 @@ fn main() {
                         // cleaner but it's private; inline the same logic here.
                         format_rfc3339(secs)
                     },
+                    location,
+                    score,
                 };
                 match save_archive_meta(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history) {
                     Ok(()) => {
@@ -3065,7 +3068,7 @@ mod tests {
             name: name.to_string(),
             turns: 0,
             saved_at: ts.to_string(),
-            is_default: false,
+            location: None, score: None, is_default: false,
         };
         let mut v = [mk("old", "2026-06-01T10:00:00Z"),
             mk("legacy", ""),

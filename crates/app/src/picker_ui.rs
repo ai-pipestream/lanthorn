@@ -1516,6 +1516,16 @@ fn open_url(url: &str) {
 /// slide/lazy-resolve). `link_rects` is cleared and refilled with the screen
 /// rect + full URL of every rendered OSC 8 link, so the loop can open one on a
 /// click (mouse capture keeps the terminal from doing it — SQ-0367).
+/// Format an RFC3339 save timestamp (`YYYY-MM-DDTHH:MM:SSZ`) as `YYYY-MM-DD HH:MM`
+/// — date plus time-of-day, so same-day saves are distinguishable (SQ-0411). Falls
+/// back to the leading date, or the raw string, when it isn't the expected shape.
+fn save_when(saved_at: &str) -> String {
+    match saved_at.get(0..16) {
+        Some(s) if s.as_bytes().get(10) == Some(&b'T') => s.replacen('T', " ", 1),
+        _ => saved_at.get(0..10).unwrap_or(saved_at).to_string(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_info_panel(
     title: &str,
@@ -1713,19 +1723,28 @@ fn draw_info_panel(
             let dir = abbreviate_home(&a.game_dir);
             lines.push((format!("Saves · {dir}"), cs.story_info_label));
             for s in &a.saves {
-                let when = s.saved_at.get(0..10).unwrap_or(&s.saved_at);
+                let when = save_when(&s.saved_at);
                 let fname = s.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                lines.push((format!(" {}  turn {} · {}  {}", s.name, s.turns, when, fname), cs.story_info_value));
+                // Save summary (SQ-0411): name · location · score, then turn/date/file.
+                let mut summary = s.name.clone();
+                if let Some(loc) = &s.location {
+                    summary.push_str(" · ");
+                    summary.push_str(loc);
+                }
+                if let Some(score) = s.score {
+                    summary.push_str(&format!(" · score {score}"));
+                }
+                lines.push((format!(" {}  turn {} · {}  {}", summary, s.turns, when, fname), cs.story_info_value));
             }
             for q in &a.qzl_saves {
-                let when = q.saved_at.get(0..10).unwrap_or(&q.saved_at);
+                let when = save_when(&q.saved_at);
                 let fname = q.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 lines.push((format!(" {}  {}  {}", q.name, when, fname), cs.story_info_value));
             }
             if !a.auto_saves.is_empty() {
                 lines.push(("Automatic:".to_string(), cs.story_info_label));
                 for q in &a.auto_saves {
-                    let when = q.saved_at.get(0..10).unwrap_or(&q.saved_at);
+                    let when = save_when(&q.saved_at);
                     let fname = q.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     lines.push((format!(" (auto) {}  {}  {}", q.name, when, fname), cs.story_info_value));
                 }
@@ -2465,6 +2484,14 @@ mod tests {
     }
 
     #[test]
+    fn save_when_formats_date_and_time_of_day() {
+        // SQ-0411: full RFC3339 → "YYYY-MM-DD HH:MM"; short/legacy fall back gracefully.
+        assert_eq!(super::save_when("2026-07-19T13:05:42Z"), "2026-07-19 13:05");
+        assert_eq!(super::save_when("2026-07-19"), "2026-07-19");
+        assert_eq!(super::save_when(""), "");
+    }
+
+    #[test]
     fn info_panel_renders_metadata_features_resources_and_saves() {
         use ratatui::{buffer::Buffer, layout::Rect};
         let cs = app::colors::ColorScheme::terminal_default();
@@ -2494,7 +2521,9 @@ mod tests {
                 path: game_dir.join("before-troll.babelmap"),
                 name: "before-troll".into(),
                 turns: 42,
-                saved_at: "2026-06-30T00:00:00Z".into(),
+                saved_at: "2026-06-30T13:05:00Z".into(),
+                location: Some("The Troll Room".into()),
+                score: Some(10),
                 is_default: false,
             }],
             hints_available: false,
@@ -2504,6 +2533,8 @@ mod tests {
                 name: "quick".into(),
                 turns: 0,
                 saved_at: "2026-06-29T00:00:00Z".into(),
+                location: None,
+                score: None,
                 is_default: false,
             }],
             auto_saves: vec![app::persist_files::SaveInfo {
@@ -2511,12 +2542,14 @@ mod tests {
                 name: "_startup".into(),
                 turns: 0,
                 saved_at: "2026-06-28T00:00:00Z".into(),
+                location: None,
+                score: None,
                 is_default: false,
             }],
             sidecars: vec!["default.aux"],
         };
-        // Wide enough that the resource detail suffix isn't clipped.
-        let area = Rect::new(0, 0, 70, 25);
+        // Wide enough that the resource detail suffix and the save-summary row aren't clipped.
+        let area = Rect::new(0, 0, 100, 25);
         let mut buf = Buffer::empty(area);
         let mut cover = app::cover::CoverState::default();
         let entry_path = std::path::Path::new("zork1.z3");
@@ -2540,6 +2573,10 @@ mod tests {
         assert!(text.contains("15.4 kHz · 8-bit · mono · 2.2s"), "parsed detail: {text:?}");
         assert!(text.contains("Saves ·"), "saves dir header: {text:?}");
         assert!(text.contains("before-troll.babelmap"), "babelmap filename: {text:?}");
+        // SQ-0411: the save summary surfaces location, score, and date + time-of-day.
+        assert!(text.contains("The Troll Room"), "save location: {text:?}");
+        assert!(text.contains("score 10"), "save score: {text:?}");
+        assert!(text.contains("2026-06-30 13:05"), "save date + time-of-day: {text:?}");
         assert!(text.contains("quick.qzl"), "qzl filename: {text:?}");
         assert!(text.contains("Sidecars:"), "sidecars line: {text:?}");
         assert!(text.contains("default.aux"), "sidecar filename: {text:?}");

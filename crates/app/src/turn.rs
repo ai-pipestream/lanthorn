@@ -327,6 +327,7 @@ fn post_turn_bookkeeping(
     // Engine-neutral: the save routes through Engine::save_state (Quetzal for
     // zvm, the gvm snapshot for Glulx); screen.json is written for zvm only.
     if state.config.auto_save {
+        let (location, score) = crate::engine_helpers::save_summary(session, state);
         let meta = app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: Some(ifid.to_string()),
@@ -338,6 +339,8 @@ fn post_turn_bookkeeping(
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
             ),
+            location,
+            score,
         };
         if let Err(e) = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history) {
             state.push_notice(&format!("[Auto-save failed: {}]", e));
@@ -832,6 +835,8 @@ mod tests {
             name: None,
             turns: 42,
             saved_at: String::new(),
+            location: None,
+            score: None,
         };
         app::archive::save_archive_meta(
             &arc, &mapper::mapper::Mapper::default(), &save, None,
