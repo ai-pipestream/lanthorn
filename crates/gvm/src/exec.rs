@@ -272,6 +272,11 @@ pub struct Machine {
     /// Structural Glk/garglk call lines recorded while `trace_screen` is set,
     /// drained by the host each turn. Separate from `diagnostics`.
     pub screen_trace: Vec<String>,
+    /// Pending coalesced story-text run for the `screen` trace: `(window, window
+    /// type, text)`. Flushed as a `win N [buf|grid] <- "…"` line before the next
+    /// structural call, so the trace shows WHERE story text is printed (which
+    /// window and whether it's a buffer that accumulates or a grid). (SQ-0405)
+    text_run: Option<(u32, &'static str, String)>,
     /// Set once execution has ended (outer return or quit/fault).
     pub(crate) halted: bool,
     /// Protected RAM range `(addr, len)` preserved across restore/restoreundo;
@@ -734,6 +739,7 @@ impl Machine {
             diagnostics: Vec::new(),
             trace_screen: false,
             screen_trace: Vec::new(),
+            text_run: None,
             halted: false,
             protect: (0, 0),
             undo_stack: Vec::new(),
@@ -2970,6 +2976,14 @@ impl Machine {
         };
         match kind {
             StreamKind::Window(win) => {
+                if self.trace_screen {
+                    let ty = match self.glk.window_type(win) {
+                        Some(WinType::TextBuffer) => "buf",
+                        Some(WinType::TextGrid) => "grid",
+                        _ => "?",
+                    };
+                    self.trace_text_append(win, ty, s);
+                }
                 match self.glk.window_type(win) {
                     Some(WinType::TextBuffer) => {
                         let colour = self.glk.window_stream_style_colour(win, sid, style);
@@ -3315,6 +3329,29 @@ impl Machine {
         }
     }
 
+    /// Coalesce a run of story text going to `win` (of type `ty`) for the trace,
+    /// so a stream of per-char puts becomes one readable line. (SQ-0405)
+    fn trace_text_append(&mut self, win: u32, ty: &'static str, s: &str) {
+        if self.text_run.as_ref().is_some_and(|(w, _, _)| *w != win) {
+            self.flush_text_run();
+        }
+        let run = self.text_run.get_or_insert_with(|| (win, ty, String::new()));
+        run.2.push_str(s);
+        if run.2.len() > 4096 {
+            self.flush_text_run();
+        }
+    }
+
+    /// Emit any pending coalesced text run as a `win N [ty] <- "…"` trace line.
+    fn flush_text_run(&mut self) {
+        if let Some((win, ty, buf)) = self.text_run.take() {
+            if !buf.is_empty() {
+                let preview: String = buf.chars().take(200).collect();
+                self.screen_trace.push(format!("win {win} [{ty}] <- {preview:?}"));
+            }
+        }
+    }
+
     /// Dispatch one `@glk` selector against the Glk model + backend. Output-side
     /// selectors only (input/events are phase 3a-2). Unknown selectors record a
     /// diagnostic and return 0; nothing here panics on bad ids.
@@ -3323,6 +3360,11 @@ impl Machine {
         // Debug trace: record structural Glk/garglk calls so a story's
         // window/style/colour instructions are visible. The high-volume text I/O
         // (put/get char/string/buffer) is skipped so the trace stays readable.
+        // Flush any pending story-text run before a non-text (structural) call, so
+        // the `win N [ty] <- "…"` line lands in order ahead of this call. (SQ-0405)
+        if self.trace_screen && !matches!(selector, 0x0080..=0x0085 | 0x0128..=0x012D) {
+            self.flush_text_run();
+        }
         // Captured now (args), pushed after the result is known so the return
         // value can ride on the same line as `-> …`. (SQ-0405)
         let trace_call = (self.trace_screen && !is_glk_text_io(selector))
@@ -5341,6 +5383,26 @@ mod tests {
         assert_eq!(glk_trace_args(0x00C0, &[0x36E5DA]), "event=0x36E5DA");
         // request_line_event args are named
         assert_eq!(glk_trace_args(0x00D0, &[1, 0x1000, 256, 0]), "win=1, buf=0x1000, maxlen=256, initlen=0");
+    }
+
+    #[test]
+    fn screen_trace_text_run_coalesces_and_labels_window_type() {
+        // SQ-0405: story text is captured per target window (buffer vs grid) so
+        // the trace shows WHERE output goes — e.g. a menu redraw into the primary
+        // buffer accumulates, a grid does not.
+        let mut m = super::tests::machine_with_glk(&[]);
+        m.trace_screen = true;
+        m.trace_text_append(1, "buf", "Basic ");
+        m.trace_text_append(1, "buf", "Commands");
+        assert!(m.screen_trace.is_empty(), "same-window text coalesces, not yet flushed");
+        m.flush_text_run();
+        assert_eq!(m.screen_trace, vec!["win 1 [buf] <- \"Basic Commands\"".to_string()]);
+
+        // A run to a DIFFERENT window flushes the pending one first.
+        m.screen_trace.clear();
+        m.trace_text_append(2, "grid", "menu");
+        m.trace_text_append(1, "buf", "body");
+        assert_eq!(m.screen_trace, vec!["win 2 [grid] <- \"menu\"".to_string()]);
     }
 
     #[test]
