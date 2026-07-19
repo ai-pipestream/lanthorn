@@ -740,6 +740,66 @@ pub const ZMACHINE_ENGINE: &str = "zmachine";
 const ZMACHINE_SAVE_FORMAT: u32 = 1;
 
 impl GameSession {
+    /// object entry base address -> object number.
+    fn object_addr_map(&self) -> std::collections::HashMap<u32, u16> {
+        let mem = &self.machine.mem;
+        zvm::object_tree_view(&self.machine)
+            .iter()
+            .map(|s| (zvm::objects::object_entry_addr(mem, s.number), s.number))
+            .collect()
+    }
+
+    /// dictionary entry base address -> decoded word.
+    fn dict_addr_map(&self) -> std::collections::HashMap<u32, String> {
+        let mem = &self.machine.mem;
+        let d = zvm::dictionary::load(mem); // pub fields: base, count, entry_length
+        (0..d.count as u32)
+            .filter_map(|i| {
+                let addr = d.base + i * d.entry_length as u32;
+                let (w, _) = zvm::text::decode::decode_string(mem, addr);
+                let w = w.trim().to_string();
+                (!w.is_empty()).then_some((addr, w))
+            })
+            .collect()
+    }
+
+    /// Insert a ` [tag]` annotation right after each resolvable `@0x{6hex}` memory
+    /// operand in a formatted disassembly line (object wins over dictionary). The
+    /// scan is byte-safe (`@0x` + hex digits are all ASCII); insertions are applied
+    /// right-to-left so earlier byte positions stay valid.
+    fn annotate_refs(
+        &self,
+        line: &str,
+        objs: &std::collections::HashMap<u32, u16>,
+        dict: &std::collections::HashMap<u32, String>,
+    ) -> String {
+        let mut inserts: Vec<(usize, String)> = Vec::new();
+        let mut i = 0;
+        while i + 9 <= line.len() {
+            if line.get(i..i + 3) == Some("@0x") {
+                if let Some(hex) = line.get(i + 3..i + 9) {
+                    if hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        if let Ok(a) = u32::from_str_radix(hex, 16) {
+                            if let Some(n) = objs.get(&a) {
+                                inserts.push((i + 9, format!(" [obj#{n}]")));
+                            } else if let Some(w) = dict.get(&a) {
+                                inserts.push((i + 9, format!(" [{w}]")));
+                            }
+                            i += 9;
+                            continue;
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+        let mut s = line.to_string();
+        for (pos, text) in inserts.into_iter().rev() {
+            s.insert_str(pos, &text);
+        }
+        s
+    }
+
     /// Map a neutral [`KeyInput`] to a ZSCII input byte (the logic relocated from
     /// the app's former `key_to_zscii`). Returns `None` for keys with no ZSCII
     /// meaning (non-ASCII printables, unhandled specials), so the caller leaves
@@ -1045,7 +1105,15 @@ impl Debugger for GameSession {
 
     fn disassemble(&self, addr: u32, lines: usize) -> Vec<String> {
         let version = self.machine.mem.version();
-        let out = zvm::cpu::disasm::disassemble(&self.machine.mem, addr, version, lines);
+        let mut out = zvm::cpu::disasm::disassemble(&self.machine.mem, addr, version, lines);
+        // Annotate `@0x……` memory-reference operands with their referent: a
+        // clickable ` [obj#N]` for an object entry base, an informational ` [word]`
+        // for a dictionary entry base. Build both reverse maps once per call.
+        let objs = self.object_addr_map();
+        let dict = self.dict_addr_map();
+        for line in &mut out {
+            *line = self.annotate_refs(line, &objs, &dict);
+        }
         // The disassembler can walk past code into data; an out-of-range read
         // latches a fault into Memory's fault cell that the CPU drains each step.
         // Discard it here so this read-only inspection never leaks a phantom fault
@@ -2711,6 +2779,60 @@ mod debugger_impl_tests {
             s.machine.mem.take_mem_fault().is_none(),
             "object_detail left a phantom fault that would halt the VM on its next step"
         );
+    }
+
+    #[test]
+    fn object_addr_map_maps_object_one_entry_address() {
+        let Some(s) = zvm_session() else { return };
+        let objs = s.object_addr_map();
+        let obj1_addr = zvm::objects::object_entry_addr(&s.machine.mem, 1);
+        assert_eq!(objs.get(&obj1_addr), Some(&1));
+    }
+
+    #[test]
+    fn dict_addr_map_maps_an_entry_to_its_word() {
+        let Some(s) = zvm_session() else { return };
+        let dict = s.dict_addr_map();
+        assert!(!dict.is_empty(), "minizork has a populated dictionary");
+        // Every mapped entry decodes to a non-empty word.
+        assert!(dict.values().all(|w| !w.is_empty()));
+    }
+
+    #[test]
+    fn annotate_refs_appends_obj_tag_for_object_entry_address() {
+        let Some(s) = zvm_session() else { return };
+        let objs = s.object_addr_map();
+        let dict = s.dict_addr_map();
+        let obj1_addr = zvm::objects::object_entry_addr(&s.machine.mem, 1);
+        let line = format!("004a2f  loadw @0x{obj1_addr:06x}, #00");
+        let out = s.annotate_refs(&line, &objs, &dict);
+        assert!(out.contains(&format!("@0x{obj1_addr:06x} [obj#1]")), "got: {out}");
+    }
+
+    #[test]
+    fn annotate_refs_appends_word_tag_for_dictionary_entry_address() {
+        let Some(s) = zvm_session() else { return };
+        let objs = s.object_addr_map();
+        let dict = s.dict_addr_map();
+        // Pick a dictionary entry whose address is not also an object entry base.
+        let (&addr, word) = dict
+            .iter()
+            .find(|(a, _)| !objs.contains_key(a))
+            .expect("some dict entry is not an object entry");
+        let line = format!("004a2f  storeb @0x{addr:06x}, #01");
+        let out = s.annotate_refs(&line, &objs, &dict);
+        assert!(out.contains(&format!("@0x{addr:06x} [{word}]")), "got: {out}");
+    }
+
+    #[test]
+    fn annotate_refs_leaves_non_matching_reference_unchanged() {
+        let Some(s) = zvm_session() else { return };
+        let objs = s.object_addr_map();
+        let dict = s.dict_addr_map();
+        // 0xffffff is neither an object nor a dictionary entry base.
+        let line = "004a2f  loadw @0xffffff, #00".to_string();
+        let out = s.annotate_refs(&line, &objs, &dict);
+        assert_eq!(out, line);
     }
 
     #[test]

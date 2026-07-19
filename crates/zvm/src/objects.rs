@@ -29,6 +29,13 @@ pub(crate) fn entries_base(mem: &Memory) -> u32 {
     mem.object_table() as u32 + prop_defaults_count(mem.version()) * 2
 }
 
+/// Byte address of object `obj`'s entry (1-based). Object 0 is the null object.
+/// Public single source of truth for the object-table layout so callers don't
+/// duplicate the 31/63-defaults + 9/14-entry-size constants.
+pub fn object_entry_addr(mem: &Memory, obj: u16) -> u32 {
+    entry_addr(mem, obj)
+}
+
 /// Byte address of object `obj`'s entry (object numbers are 1-based).
 /// Object 0 is the null object — callers must guard against it.
 fn entry_addr(mem: &Memory, obj: u16) -> u32 {
@@ -535,6 +542,20 @@ mod tests {
     }
 
     // ── v3 tree pointer tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn v3_object_entry_addr_matches_layout_formula() {
+        let buf = build_v3_story();
+        let m = Memory::new(buf).unwrap();
+        // Object 1's entry is at entries_base; object 2 one entry_size later.
+        assert_eq!(object_entry_addr(&m, 1), entries_base(&m));
+        assert_eq!(
+            object_entry_addr(&m, 2),
+            entries_base(&m) + entry_size(m.version())
+        );
+        assert_eq!(object_entry_addr(&m, 1), OBJ1_ENTRY);
+        assert_eq!(object_entry_addr(&m, 2), OBJ2_ENTRY);
+    }
 
     #[test]
     fn v3_tree_pointers() {

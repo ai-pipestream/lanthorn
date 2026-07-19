@@ -631,6 +631,11 @@ fn classify_disasm_tokens(line: &str) -> Vec<(core::ops::Range<usize>, ClickTarg
 /// matters: `@0x` (memory) is checked before `0x` (code) so a memory sigil is
 /// never misread as a code address.
 fn classify_token(tok: &str) -> Option<(core::ops::Range<usize>, ClickTarget)> {
+    // Annotation wrapper: `[obj#5]` (clickable) / `[lamp]` (dictionary, no match →
+    // non-clickable). Classify the inner token and shift the span by +1 for the `[`.
+    if let Some(inner) = tok.strip_prefix('[').and_then(|t| t.strip_suffix(']')) {
+        return classify_token(inner).map(|(r, t)| (r.start + 1..r.end + 1, t));
+    }
     let is_hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
     let is_dec = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
 
@@ -1161,6 +1166,39 @@ mod tests {
         // filtered out of the clickable set — only Object(5) remains.
         assert_eq!(targets, vec![ClickTarget::Object(5)]);
         assert_eq!(&line[spans[0].0.clone()], "obj#5");
+    }
+
+    #[test]
+    fn classify_token_unwraps_object_annotation_bracket() {
+        // `[obj#5]` → Object(5), span covering the inner `obj#5` (shifted +1).
+        let tok = "[obj#5]";
+        let (span, target) = classify_token(tok).expect("[obj#5] classifies");
+        assert_eq!(target, ClickTarget::Object(5));
+        assert_eq!(&tok[span], "obj#5");
+    }
+
+    #[test]
+    fn classify_token_dictionary_bracket_is_not_clickable() {
+        // `[lamp]` → inner `lamp` matches nothing → None (dictionary is informational).
+        assert_eq!(classify_token("[lamp]"), None);
+    }
+
+    #[test]
+    fn clickable_spans_makes_object_annotation_clickable_but_not_dictionary() {
+        let line = "004a2f  loadw @0x00abcd [obj#5], #00";
+        let spans = clickable_spans(Section::Disasm, line);
+        // The `[obj#5]` annotation yields a clickable Object(5) span.
+        let obj = spans
+            .iter()
+            .find(|(_, t)| matches!(t, ClickTarget::Object(_)))
+            .expect("[obj#5] annotation is clickable");
+        assert_eq!(obj.1, ClickTarget::Object(5));
+        assert_eq!(&line[obj.0.clone()], "obj#5");
+
+        // A dictionary annotation yields no clickable span.
+        let dict_line = "004a2f  storeb @0x001a2c [lamp], #01";
+        let dict_spans = clickable_spans(Section::Disasm, dict_line);
+        assert!(dict_spans.iter().all(|(_, t)| !matches!(t, ClickTarget::Object(_))));
     }
 
     #[test]
