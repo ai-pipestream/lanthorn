@@ -227,6 +227,38 @@ numbers and dictionary references are a later follow-up (their "referent view" i
   `format_instr` + `clickable_spans`/`clickable_at` tagged targets + `goto_global`/`goto_local`/
   `goto_stack` + packed-address unpacking, wiring the whole table above.
 
+## Revision 8 (2026-07-19) — call-stack entry address + object/dictionary annotations
+
+### Call stack shows the routine ENTRY address, clickable (Phase 6b)
+`stack_lines` must show each frame's original routine **entry address** (`Frame.func_addr`),
+not only its `return_pc`, and that entry address is a clickable code reference (→ Disassembly at
+the routine start) via the existing `fn@……` span. Verify `func_addr` is populated (from
+`call_routine`) and shown for real routine frames (it is 0 for the outermost/interrupt
+pseudo-frames — those have no entry, render plainly). Format e.g.
+`#i  entry@{func_addr:06x}  ret={return_pc:06x}  args=N  locals=[…]`.
+
+### Object base-address annotation on memory references (Phase 6c)
+Track object base addresses so a disassembly memory reference that lands on an object gets both
+its address AND a linkable object tag: `loadw @0x0abc [obj#5]`. Session-side enrichment (zvm
+stays pure): `GameSession` computes an address→object reverse lookup from the object-table
+layout (defaults table of 31/63 words, then fixed-size entries: 9 bytes v≤3, 14 bytes v≥4), and
+`GameSession::disassemble` post-processes each formatted line — a `@0x……` operand whose address
+is an object entry base gets ` [obj#N]` appended, where `obj#N` is a clickable Object span
+(reuses the Rev 7 object-jump).
+
+### Dictionary annotation (Phase 6c, optional, non-clickable)
+Similarly, a `@0x……` operand whose address is a dictionary entry gets ` [word]` appended for
+readability (the decoded dictionary word). No link — informational only.
+
+Phases 6c annotations build on 6b's operand roles and object/memory jumps; keep them a separate
+reviewable chunk.
+
+### Objects: disclosure triangle instead of underline (amends Rev 6)
+Object tree lines are NOT underlined. Instead prefix each object row with a disclosure
+indicator: **`▶ `** when collapsed, **`▼ `** when expanded. The row stays fully clickable to
+toggle expansion (the triangle just signals expandability). Detail lines are indented under the
+`▼` row with no triangle.
+
 ### Object detail (Objects tab — expand on click)
 Clicking an object in the Objects tree expands it inline to show its **attributes** (which flags
 are set) and its **property table** (each property number → its bytes/value).
