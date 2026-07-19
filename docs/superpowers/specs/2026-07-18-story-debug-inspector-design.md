@@ -177,11 +177,14 @@ packed/offset — a follow-up):
   address; Enter jumps `mem_addr` there, Esc cancels. Panel gains a `mem_input: Option<String>`
   edit buffer; a key (e.g. `:` or `/`) opens it; digits/backspace edit; Enter parses hex →
   `mem_addr` (clamped) + closes; Esc closes. Rendered as one line in the Memory window.
-- **(a) Clickable memory pointers:** in the hex dump, each 16-bit word is a clickable pointer —
-  clicking it jumps the Memory window to that word's value (follow-pointer), underlined like the
-  other clickables. (Interpretation to confirm; alternative = making disasm memory-operands jump
-  the Memory window.) Uses the shared clickable-span/hit-test pattern, extended to the Memory
-  section with a per-word span → `mem_addr = word_value` jump.
+- **(a) Clickable memory references in the disassembly:** disassembly operands that name a
+  memory byte-address — the base operand of `loadw`/`loadb`/`storew`/`storeb` (2OP 0x0F/0x10,
+  VAR 0x01/0x02) and `print_addr`'s operand (1OP 0x07) — are, when CONSTANT, formatted by
+  `format_instr` with a distinct memory sigil `@0x{:04x}` (vs `#` for plain constants). The
+  clickable layer treats a `@0x……` span as a **memory jump**: clicking it focuses the Memory
+  window and sets `mem_addr` to that address (a new `goto_memory(addr)` method: `focus = 2`,
+  `tab[2] = Memory`, `mem_addr = addr`). Branch `?0x……` spans stay disassembly jumps. Packed
+  operands (`print_paddr`, `call` routines) need unpack math and are a follow-up.
 
 ### Object detail (Objects tab — expand on click)
 Clicking an object in the Objects tree expands it inline to show its **attributes** (which flags
