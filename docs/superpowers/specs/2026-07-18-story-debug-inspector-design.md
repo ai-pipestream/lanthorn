@@ -35,6 +35,49 @@ inspecting. This section governs where it disagrees with component 3.
 Where component 3 ("The debug panel", "full-screen takeover") and the modal wiring in the
 plan conflict with this section, **this section wins**.
 
+## Revision 3 (2026-07-18) — three tabbed windows, wheel scroll, PC-follow, hints
+
+After TTY use, the internal model of the debug region changes from a two-view toggle
+(Execution / World-state) to **three independently-tabbed windows**. This supersedes the
+`DebugPane`/`DebugView` model where it conflicts.
+
+**Window model** — three windows in the same geometry as Revision 2 (left full height,
+right split top/bottom); each window is a tabbed panel (default = first tab):
+- **Left (full height):** tabs `Disassembly | Globals`
+- **Right-top:** tabs `Locals | Objects | Dictionary`
+- **Right-bottom:** tabs `Stack | Memory`
+
+State per window: active tab index + content scroll offset. Plus the disasm address/history
+and memory address (as today), and the current `pc` (for PC-follow + highlight).
+
+**Interaction:**
+- `Tab` / `Shift-Tab` → cycle **window focus** across the three windows (wrapping). (Changed
+  from Revision 2, where Tab cycled the seven sections.)
+- `←` / `→` → switch the **focused window's active tab** (e.g. Disassembly↔Globals).
+- `↑`/`↓`, `PgUp`/`PgDn`, `Home`/`End` → scroll the focused window's content.
+- **Mouse wheel** over any window → scroll *that* window (hit-tested by cursor position,
+  focused or not).
+- **Mouse click** on a tab label → activate that tab + focus its window; click in a window
+  body → focus that window.
+- `g` → jump the disassembly to the current PC.
+- `Esc` → focus back to the story (panel stays open); `/debug` closes.
+
+**Disassembly follows execution.** On every per-turn refresh, the disassembly re-anchors to
+the live PC (set disasm address = `pc`, clear the scroll-back history) so the executing
+instruction is shown at the top of the Disassembly tab and **highlighted** (new themeable
+`debug_disasm_pc` selector). `g` re-anchors on demand after scrolling within a turn.
+
+**Hint bar.** While the debug region is focused, the bottom hint bar shows debug keys
+(`Tab: window  ←→: section  ↑↓: scroll  g: PC  Esc: back`) instead of the map hints.
+
+**New themeable selectors:** `debug_disasm_pc` (PC line), `debug_tab` (inactive tab label),
+`debug_tab:active` (active tab label) — registered through the full styling chain like the
+existing `debug_pane*` selectors.
+
+This section supersedes Revision 2's `DebugPane`/`DebugView` and the "Tab cycles panes"
+navigation. The tiled placement, `Focus::Map` reuse, live-refresh, and non-modal nature from
+Revision 2 all still hold.
+
 ## Goal
 
 Give a developer a read-only window into the running Z-machine: disassemble code at any
