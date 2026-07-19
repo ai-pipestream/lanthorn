@@ -14,7 +14,7 @@ use crate::state::AppState;
 /// Redraw the char ranges `clickable_spans` reports within `line` with the
 /// UNDERLINED modifier added to `style` (color unchanged), at `x_base + range.start`.
 fn underline_clickables(buf: &mut Buffer, x_base: u16, y: u16, line: &str, style: Style, section: Section, area: Rect) {
-    for (range, _addr) in debug_panel::clickable_spans(section, line) {
+    for (range, _target) in debug_panel::clickable_spans(section, line) {
         let Some(sub) = line.get(range.clone()) else { continue };
         let x = x_base + range.start as u16;
         draw_str_clipped(buf, x, y, sub, style.add_modifier(Modifier::UNDERLINED), area);
@@ -119,8 +119,8 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
 /// Draw the Objects section: `objects_rows` interleaves each tree line with
 /// its expanded detail lines (if any), so render and the click hit-test
 /// (`objects_click_at`) always agree on which screen row is which object row.
-/// Tree rows that carry an object id are underlined (clickable to toggle);
-/// detail rows are drawn plain and indented.
+/// Tree rows that carry an object id get a ▶/▼ disclosure triangle (clickable
+/// to toggle); detail rows are drawn plain and indented.
 fn draw_objects(buf: &mut Buffer, content: Rect, window: usize, panel: &DebugPanelState, body: Style) {
     let rows = debug_panel::objects_rows(
         &panel.snapshot.objects, &panel.expanded_objects, &panel.snapshot.object_details,
@@ -131,10 +131,16 @@ fn draw_objects(buf: &mut Buffer, content: Rect, window: usize, panel: &DebugPan
         match row_entry {
             debug_panel::ObjRow::Tree { line_idx, obj } => {
                 let Some(line) = panel.snapshot.objects.get(*line_idx) else { continue };
-                draw_str_clipped(buf, content.x, y, line, body, content);
-                if obj.is_some() {
-                    draw_str_clipped(buf, content.x, y, line, body.add_modifier(Modifier::UNDERLINED), content);
-                }
+                // Disclosure triangle marks a toggleable object row: ▼ when
+                // expanded, ▶ when collapsed; a marker-less row (no id) keeps a
+                // two-space pad so columns stay aligned.
+                let marker = match obj {
+                    Some(n) if panel.expanded_objects.contains(n) => "▼ ",
+                    Some(_) => "▶ ",
+                    None => "  ",
+                };
+                let text = format!("{marker}{line}");
+                draw_str_clipped(buf, content.x, y, &text, body, content);
             }
             debug_panel::ObjRow::Detail { obj, di } => {
                 let Some(det) = panel.snapshot.object_details.get(obj) else { continue };
@@ -281,5 +287,32 @@ mod tests {
         let text = buf_text(&buf);
         assert!(text.contains("g00=0012"));
         assert!(!text.contains("should-not-show"));
+    }
+
+    #[test]
+    fn objects_show_disclosure_triangles_and_no_underline() {
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        panel.tab[1] = 1; // Objects tab (window 1)
+        panel.snapshot.objects = vec!["[1] lamp".into(), "[2] rock".into()];
+        panel.expanded_objects = std::collections::HashSet::from([1u16]);
+        state.debug = Some(panel);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        draw_debug_panel(&state, area, &mut buf);
+
+        let text = buf_text(&buf);
+        assert!(text.contains("▼"), "expanded object gets a ▼ marker");
+        assert!(text.contains("▶"), "collapsed object gets a ▶ marker");
+
+        // The tree line is no longer underlined: the first glyph of "[1] lamp"
+        // (drawn just after the "▼ " marker) carries no UNDERLINED modifier.
+        let [_, top, _] = crate::debug_panel::window_rects(area);
+        let content = Rect::new(top.x + 1, top.y + 1, top.width.saturating_sub(2), top.height.saturating_sub(2));
+        let cell = buf.cell((content.x + 2, content.y)).unwrap(); // past "▼ "
+        assert_eq!(cell.symbol(), "[");
+        assert!(!cell.style().add_modifier.contains(Modifier::UNDERLINED), "tree line must not be underlined");
     }
 }

@@ -355,6 +355,13 @@ impl DebugPanelState {
             self.scroll[1] = idx;
         }
     }
+
+    /// Focus the Globals tab (window 0) and scroll to global index `idx`.
+    pub fn goto_global(&mut self, idx: u8) { self.focus = 0; self.tab[0] = 1; self.scroll[0] = idx as usize; }
+    /// Focus the Locals tab (window 1) and scroll to local index `idx`.
+    pub fn goto_local(&mut self, idx: u8) { self.focus = 1; self.tab[1] = 0; self.scroll[1] = idx as usize; }
+    /// Focus the Stack (eval) tab (window 2).
+    pub fn goto_stack(&mut self) { self.focus = 2; self.tab[2] = 1; }
 }
 
 // ── Geometry (pure; shared by render and mouse hit-testing) ───────────────────
@@ -452,19 +459,106 @@ pub fn objects_rows(
     all.into_iter().skip(scroll).take(height).collect()
 }
 
-/// Clickable code-address spans within a rendered line: the char range and the
-/// target address. v1: branch targets in Disasm (`?…0x……`) and the frame entry
-/// address in Call Stack lines (`fn@……`, non-zero). Pure; shared by the
-/// render-underline pass and the mouse hit-test so they never drift.
-pub fn clickable_spans(section: Section, line: &str) -> Vec<(core::ops::Range<usize>, u32)> {
+/// A resolved click destination, tagged by the operand-role sigil it came from.
+/// The disassembler (Phase 6b-1) emits these sigils; the app classifies each
+/// clickable token to one of these and jumps to its referent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ClickTarget {
+    Code(u32),    // → Disassembly at address
+    Memory(u32),  // → Memory window at address
+    Object(u16),  // → Objects tab, expand object
+    Global(u8),   // → Globals tab, scroll to global index (0..=239)
+    Local(u8),    // → Locals tab, scroll to local index (0-based)
+    Stack,        // → Stack (eval) tab
+}
+
+/// Clickable operand-reference spans within a rendered line: the char range and
+/// the tagged target. In Disasm, every role sigil the disassembler emits
+/// (`@0x……` memory, `0x……`/`?0x……` code, `obj#N`, `gNN`, `localN`, `sp`) is
+/// clickable; in Call Stack, the frame entry address (`fn@……`, non-zero). Pure;
+/// shared by the render-underline pass and the mouse hit-test so they never drift.
+pub fn clickable_spans(section: Section, line: &str) -> Vec<(core::ops::Range<usize>, ClickTarget)> {
     match section {
-        Section::Disasm => find_hex_spans(line, "0x", 6),
+        Section::Disasm => classify_disasm_tokens(line),
         Section::CallStack => find_hex_spans(line, "fn@", 6)
             .into_iter()
             .filter(|(_, addr)| *addr != 0)
+            .map(|(range, addr)| (range, ClickTarget::Code(addr)))
             .collect(),
         _ => Vec::new(),
     }
+}
+
+/// Whole-token classifier for a Disassembly line. Splits on ASCII whitespace and
+/// commas (both are single-byte, so token ranges stay on valid `str` boundaries
+/// even when a trailing `print`-family story-text token is multi-byte), then
+/// classifies each complete token to a `ClickTarget`. Whole-token matching (not
+/// substring scanning) is what keeps mnemonics like `get_prop`/`jg` from
+/// false-matching a bare `g`/`0x`.
+fn classify_disasm_tokens(line: &str) -> Vec<(core::ops::Range<usize>, ClickTarget)> {
+    let mut out = Vec::new();
+    let bytes = line.as_bytes();
+    let is_sep = |b: u8| b == b',' || b.is_ascii_whitespace();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && is_sep(bytes[i]) { i += 1; }
+        if i >= bytes.len() { break; }
+        let start = i;
+        while i < bytes.len() && !is_sep(bytes[i]) { i += 1; }
+        let token = &line[start..i];
+        if let Some((sub, target)) = classify_token(token) {
+            out.push((start + sub.start..start + sub.end, target));
+        }
+    }
+    out
+}
+
+/// Classify one whole token to a `ClickTarget`, returning the sub-range within
+/// the token that its underline/hit-test span should cover (the whole token,
+/// except the code case which drops a leading `?`/`~` branch prefix). Order
+/// matters: `@0x` (memory) is checked before `0x` (code) so a memory sigil is
+/// never misread as a code address.
+fn classify_token(tok: &str) -> Option<(core::ops::Range<usize>, ClickTarget)> {
+    let is_hex = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_hexdigit());
+    let is_dec = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+
+    // Memory: `@0x` + exactly 6 hex, nothing more.
+    if let Some(rest) = tok.strip_prefix("@0x") {
+        return (rest.len() == 6 && is_hex(rest))
+            .then(|| u32::from_str_radix(rest, 16).ok().map(|a| (0..tok.len(), ClickTarget::Memory(a))))
+            .flatten();
+    }
+    // Code: `0x` + 6 hex, optionally behind a `?` / `?~` branch prefix. Span
+    // covers the `0x……` core (skip the prefix).
+    {
+        let prefix = tok.len() - tok.trim_start_matches(['?', '~']).len();
+        let core = &tok[prefix..];
+        if let Some(hex) = core.strip_prefix("0x") {
+            if hex.len() == 6 && is_hex(hex) {
+                return u32::from_str_radix(hex, 16).ok()
+                    .map(|a| (prefix..tok.len(), ClickTarget::Code(a)));
+            }
+        }
+    }
+    // Object: `obj#` + decimal digits.
+    if let Some(n) = tok.strip_prefix("obj#") {
+        return (is_dec(n)).then(|| n.parse().ok().map(|n| (0..tok.len(), ClickTarget::Object(n)))).flatten();
+    }
+    // Global: exactly `g` + 2 hex digits.
+    if let Some(n) = tok.strip_prefix('g') {
+        if n.len() == 2 && is_hex(n) {
+            return u8::from_str_radix(n, 16).ok().map(|g| (0..tok.len(), ClickTarget::Global(g)));
+        }
+    }
+    // Local: `local` + decimal digits.
+    if let Some(n) = tok.strip_prefix("local") {
+        return (is_dec(n)).then(|| n.parse().ok().map(|l| (0..tok.len(), ClickTarget::Local(l)))).flatten();
+    }
+    // Stack: exactly `sp`.
+    if tok == "sp" {
+        return Some((0..tok.len(), ClickTarget::Stack));
+    }
+    None
 }
 
 /// Find every occurrence of `marker` followed by exactly `hex_len` hex digits,
@@ -501,7 +595,7 @@ fn find_hex_spans(line: &str, marker: &str, hex_len: usize) -> Vec<(core::ops::R
 /// `window_rects` / `disasm_rows` / scroll math the renderer uses, so it
 /// never drifts. Only Disasm (window 0, tab 0) and Call Stack (window 2, tab
 /// 0) are clickable in v1.
-pub fn clickable_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -> Option<u32> {
+pub fn clickable_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -> Option<ClickTarget> {
     let windows = window_rects(region);
     for (w, window_rect) in windows.iter().enumerate() {
         if col < window_rect.x || col >= window_rect.right()
@@ -528,7 +622,7 @@ pub fn clickable_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -
                 let off = (col.checked_sub(content.x + 1))? as usize;
                 clickable_spans(section, line).into_iter()
                     .find(|(range, _)| range.contains(&off))
-                    .map(|(_, addr)| addr)
+                    .map(|(_, target)| target)
             }
             (2, Section::CallStack) => {
                 let line_idx = (row - content.y) as usize + panel.scroll[2];
@@ -536,7 +630,7 @@ pub fn clickable_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -
                 let off = (col.checked_sub(content.x))? as usize;
                 clickable_spans(section, line).into_iter()
                     .find(|(range, _)| range.contains(&off))
-                    .map(|(_, addr)| addr)
+                    .map(|(_, target)| target)
             }
             _ => None,
         };
@@ -810,10 +904,42 @@ mod tests {
     fn clickable_spans_finds_a_disasm_branch_target() {
         let line = "001000  je local0, #01 ?0x001234";
         let spans = clickable_spans(Section::Disasm, line);
-        assert_eq!(spans.len(), 1);
-        let (range, addr) = &spans[0];
-        assert_eq!(*addr, 0x1234);
+        // The branch target is the Code span (the `local0` operand also
+        // classifies now — a Local — but this test is about the branch target).
+        let (range, target) = spans.iter()
+            .find(|(_, t)| matches!(t, ClickTarget::Code(_)))
+            .expect("a Code target");
+        assert_eq!(*target, ClickTarget::Code(0x1234));
         assert_eq!(&line[range.clone()], "0x001234");
+    }
+
+    #[test]
+    fn clickable_spans_classifies_every_operand_sigil_in_order() {
+        let line = "004a2f  loadw @0x001234, g0f -> local2  ?0x004b00";
+        let spans = clickable_spans(Section::Disasm, line);
+        let targets: Vec<ClickTarget> = spans.iter().map(|(_, t)| *t).collect();
+        assert_eq!(targets, vec![
+            ClickTarget::Memory(0x1234),
+            ClickTarget::Global(0x0f),
+            ClickTarget::Local(2),
+            ClickTarget::Code(0x4b00),
+        ]);
+        assert_eq!(&line[spans[0].0.clone()], "@0x001234");
+        assert_eq!(&line[spans[1].0.clone()], "g0f");
+        assert_eq!(&line[spans[2].0.clone()], "local2");
+        assert_eq!(&line[spans[3].0.clone()], "0x004b00"); // span skips the `?`
+    }
+
+    #[test]
+    fn clickable_spans_classifies_object_and_stack_sigils() {
+        let line = "004a2f  get_prop obj#5 -> sp";
+        let spans = clickable_spans(Section::Disasm, line);
+        let targets: Vec<ClickTarget> = spans.iter().map(|(_, t)| *t).collect();
+        // Whole-token classification: `get_prop` must NOT false-match a `g..`
+        // global or an embedded `0x`; exactly Object(5) then Stack.
+        assert_eq!(targets, vec![ClickTarget::Object(5), ClickTarget::Stack]);
+        assert_eq!(&line[spans[0].0.clone()], "obj#5");
+        assert_eq!(&line[spans[1].0.clone()], "sp");
     }
 
     #[test]
@@ -821,7 +947,7 @@ mod tests {
         let line = "#0  fn@004a00  ret=004a35  args=2  locals=[]";
         let spans = clickable_spans(Section::CallStack, line);
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].1, 0x4a00);
+        assert_eq!(spans[0].1, ClickTarget::Code(0x4a00));
         assert_eq!(&line[spans[0].0.clone()], "fn@004a00");
 
         let zero_line = "#0  fn@000000  ret=004a35  args=2  locals=[]";
@@ -866,7 +992,27 @@ mod tests {
         let off = line.find("0x").unwrap();
         let col = content.x + 1 + off as u16; // +1 for the execution-mark gutter
         let hit = clickable_at(region, &p, col, row_y);
-        assert_eq!(hit, Some(0x1234));
+        assert_eq!(hit, Some(ClickTarget::Code(0x1234)));
+    }
+
+    #[test]
+    fn clickable_at_resolves_memory_and_global_clicks_in_disasm() {
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        p.pc = 0x1000;
+        p.snapshot.disasm = vec![
+            "001000  loadw @0x001234, g0f -> sp".to_string(),
+            "001004  add".to_string(),
+        ];
+        let [left, ..] = window_rects(region);
+        let content = Rect::new(left.x + 1, left.y + 1, left.width.saturating_sub(2), left.height.saturating_sub(2));
+        // Row 0 is the PC divider (line 0 IS the PC line); row 1 is line_idx 0.
+        let row_y = content.y + 1;
+        let line = &p.snapshot.disasm[0];
+        let mem_col = content.x + 1 + line.find("@0x").unwrap() as u16;
+        assert_eq!(clickable_at(region, &p, mem_col, row_y), Some(ClickTarget::Memory(0x1234)));
+        let g_col = content.x + 1 + line.find("g0f").unwrap() as u16;
+        assert_eq!(clickable_at(region, &p, g_col, row_y), Some(ClickTarget::Global(0x0f)));
     }
 
     #[test]
@@ -892,7 +1038,7 @@ mod tests {
         let off = line.find("fn@").unwrap();
         let col = content.x + off as u16;
         let hit = clickable_at(region, &p, col, content.y);
-        assert_eq!(hit, Some(0x4a00));
+        assert_eq!(hit, Some(ClickTarget::Code(0x4a00)));
     }
 
     #[test]
@@ -1116,5 +1262,33 @@ mod tests {
         assert!(p.expanded_objects.contains(&2));
         assert!(p.snapshot.object_details.contains_key(&2));
         assert_eq!(p.scroll[1], 1, "object [2]'s display row is index 1");
+    }
+
+    #[test]
+    fn goto_global_focuses_the_globals_tab_and_scrolls_to_the_index() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.goto_global(0x0f);
+        assert_eq!(p.focus, 0);
+        assert_eq!(p.tab[0], 1, "Globals is WINDOW_TABS[0][1]");
+        assert_eq!(p.scroll[0], 0x0f);
+    }
+
+    #[test]
+    fn goto_local_focuses_the_locals_tab_and_scrolls_to_the_index() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.focus = 2;
+        p.goto_local(3);
+        assert_eq!(p.focus, 1);
+        assert_eq!(p.tab[1], 0, "Locals is WINDOW_TABS[1][0]");
+        assert_eq!(p.scroll[1], 3);
+    }
+
+    #[test]
+    fn goto_stack_focuses_the_eval_stack_tab() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.goto_stack();
+        assert_eq!(p.focus, 2);
+        assert_eq!(p.tab[2], 1, "EvalStack is WINDOW_TABS[2][1]");
+        assert_eq!(p.active_section(2), Section::EvalStack);
     }
 }

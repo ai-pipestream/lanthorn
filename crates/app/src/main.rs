@@ -1628,8 +1628,18 @@ fn main() {
                             let target = state.debug.as_ref()
                                 .and_then(|p| app::debug_panel::clickable_at(region, p, m.column, m.row));
                             if let Some(target) = target {
+                                use app::debug_panel::ClickTarget;
                                 if let Some(dbg) = session.debugger() {
-                                    if let Some(p) = state.debug.as_mut() { p.goto(target, dbg); }
+                                    if let Some(p) = state.debug.as_mut() {
+                                        match target {
+                                            ClickTarget::Code(a)   => p.goto(a, dbg),
+                                            ClickTarget::Memory(a) => p.goto_memory(a, dbg),
+                                            ClickTarget::Object(n) => p.goto_object(n, dbg),
+                                            ClickTarget::Global(i) => p.goto_global(i),
+                                            ClickTarget::Local(i)  => p.goto_local(i),
+                                            ClickTarget::Stack     => p.goto_stack(),
+                                        }
+                                    }
                                     state.focus = Focus::Map;
                                 }
                                 continue;
