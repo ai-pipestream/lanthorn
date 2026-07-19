@@ -1038,12 +1038,22 @@ impl Debugger for GameSession {
 
     fn disassemble(&self, addr: u32, lines: usize) -> Vec<String> {
         let version = self.machine.mem.version();
-        zvm::cpu::disasm::disassemble(&self.machine.mem, addr, version, lines)
+        let out = zvm::cpu::disasm::disassemble(&self.machine.mem, addr, version, lines);
+        // The disassembler can walk past code into data; an out-of-range read
+        // latches a fault into Memory's fault cell that the CPU drains each step.
+        // Discard it here so this read-only inspection never leaks a phantom fault
+        // that would halt the VM on its next instruction. Between turns there is no
+        // legitimately-pending fault (the VM consumes its own at step end), so
+        // discarding is safe.
+        self.machine.mem.take_mem_fault();
+        out
     }
 
     fn next_instr(&self, addr: u32) -> u32 {
         let version = self.machine.mem.version();
-        zvm::cpu::disasm::next_instr(&self.machine.mem, addr, version)
+        let out = zvm::cpu::disasm::next_instr(&self.machine.mem, addr, version);
+        self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
+        out
     }
 
     fn stack_lines(&self) -> Vec<String> {
@@ -1073,14 +1083,17 @@ impl Debugger for GameSession {
     }
 
     fn globals_lines(&self) -> Vec<String> {
-        (0u8..240).map(|n| format!("g{:02x} = {:04x}", n, self.machine.global(n))).collect()
+        let out: Vec<String> =
+            (0u8..240).map(|n| format!("g{:02x} = {:04x}", n, self.machine.global(n))).collect();
+        self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
+        out
     }
 
     fn object_tree_lines(&self) -> Vec<String> {
         // Indent each object by its depth in the parent chain.
         let mem = &self.machine.mem;
         let snaps = zvm::object_tree_view(&self.machine);
-        snaps.iter().map(|s| {
+        let out: Vec<String> = snaps.iter().map(|s| {
             let mut depth = 0usize;
             let mut p = s.parent;
             while p != 0 && depth < 32 {
@@ -1088,11 +1101,15 @@ impl Debugger for GameSession {
                 p = zvm::objects::get_parent(mem, p);
             }
             format!("{}[{}] {}", "  ".repeat(depth), s.number, s.name)
-        }).collect()
+        }).collect();
+        self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
+        out
     }
 
     fn dictionary_lines(&self) -> Vec<String> {
-        zvm::dictionary::load(&self.machine.mem).words(&self.machine.mem)
+        let out = zvm::dictionary::load(&self.machine.mem).words(&self.machine.mem);
+        self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
+        out
     }
 
     fn memory_hex(&self, addr: u32, rows: usize) -> Vec<String> {
@@ -2455,6 +2472,29 @@ mod debugger_impl_tests {
         }
         let story = std::fs::read(&fixture_path).expect("read minizork.z3");
         Some(GameSession::new(story, true, false, None).expect("GameSession::new with minizork.z3"))
+    }
+
+    // A read-only debug inspection must never leave a latched memory fault in the
+    // shared VM `Memory`: the disassembler can walk past code into data, and an
+    // OOB read latches into the fault cell the CPU drains each step — so a phantom
+    // fault would halt the *game* on its next instruction (the "crash only when
+    // /debug is open" bug).
+    #[test]
+    fn debugger_reads_do_not_leak_a_memory_fault_into_the_vm() {
+        let Some(s) = zvm_session() else { return };
+        let end = s.machine.mem.len() as u32;
+        // Latch a fault the way an out-of-range disassembly read would.
+        let _ = s.machine.mem.read_word(end + 100);
+        assert!(s.machine.mem.take_mem_fault().is_some(), "sanity: OOB read latches a fault");
+        let _ = s.machine.mem.read_word(end + 100); // re-latch (the check above drained it)
+        // Any Debugger read must leave the fault cell clean.
+        let pc = s.machine.state.pc;
+        let dbg = s.debugger().expect("zvm has a debugger");
+        let _ = dbg.disassemble(pc, 8);
+        assert!(
+            s.machine.mem.take_mem_fault().is_none(),
+            "a debug read left a phantom fault that would halt the VM on its next step"
+        );
     }
 
     #[test]
