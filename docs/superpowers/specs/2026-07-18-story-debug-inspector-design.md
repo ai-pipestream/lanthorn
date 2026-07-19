@@ -78,6 +78,53 @@ This section supersedes Revision 2's `DebugPane`/`DebugView` and the "Tab cycles
 navigation. The tiled placement, `Focus::Map` reuse, live-refresh, and non-modal nature from
 Revision 2 all still hold.
 
+## Revision 4 (2026-07-18) — execution-coverage marking in the disassembly
+
+**Problem.** Inspect-only shows the VM parked at input between turns, and the parser's
+`@read` is at a fixed address, so `dbg.pc()` is ~constant every turn — "PC-follow" anchors
+the disassembly to the idle input loop, which never usefully changes. A stepper (to watch
+mid-command execution) is still out of scope.
+
+**Solution (works within inspect-only): mark the instructions that ran during the last
+command.** Record the set of instruction start-PCs executed during each turn, and prefix
+each disassembly line whose address is in that set with a `|` marker. This shows the actual
+code path the last command took — the useful signal PC-follow couldn't give.
+
+- **zvm (stays zero-dep; `std` only):** `Machine` gains `pub trace_exec: bool` and
+  `pub exec_pcs: std::collections::HashSet<u32>`. In `step()`, when `trace_exec`, insert the
+  instruction's start PC (`instr_start_pc`) into `exec_pcs`. Bounded by unique addresses hit
+  (coverage), not instruction count. (Mirrors the existing `trace_screen`/`screen_trace`
+  opt-in pattern.)
+- **Session:** enable `trace_exec` while the debug pane is open (via a new `Engine` method
+  the `/debug` toggle calls), disable + clear when it closes. Clear `exec_pcs` at the start
+  of each turn (`submit`/`submit_key`) so it holds only the **last** command's coverage.
+- **Debugger seam:** `fn executed_pcs(&self) -> std::collections::HashSet<u32>` (the app-side
+  neutral view; returns a clone). Panel stores it in the snapshot on refresh.
+- **Render:** for each Disassembly line, extract its leading `{:06x}` address and, if present
+  in the executed set, draw a `|` marker in a leading column (new themeable `debug_exec_mark`
+  selector); otherwise a blank column. Disassembly stays anchored at `pc` (the resume point,
+  which IS executed, so marks flow from there through the command's linear path); `g` and
+  scrolling unchanged.
+
+New themeable selector: `debug_exec_mark`. "Since the last **step**" in the request means
+since the last **command/turn** (no stepper exists).
+
+### Backward disassembly scroll (scroll before the PC)
+
+Z-machine instructions are variable-length and cannot be decoded backwards, so the current
+disassembly can only scroll *up* through addresses previously scrolled *down* from (a history
+stack), which is empty at the anchor — hence "can't scroll before the PC". Fix with the
+standard linear-sweep technique:
+
+- **zvm:** `pub fn prev_instr(mem, addr, version) -> u32` — scan forward from
+  `addr.saturating_sub(WINDOW)` (WINDOW ≈ 16–24 bytes, > max instruction length), decoding
+  instructions and returning the start of the one whose `next_pc == addr`. If none aligns
+  exactly (a data region or the very start of memory), fall back to the nearest start `< addr`
+  found in the sweep, or `addr.saturating_sub(1)`. Never returns `>= addr`.
+- **debug_panel:** the disassembly scroll model becomes symmetric — `disasm_addr` is the top;
+  scroll-down = `next_instr(disasm_addr)`, scroll-up = `prev_instr(disasm_addr)`. Drop the
+  `disasm_history` stack. This lets the view scroll freely before the PC.
+
 ## Goal
 
 Give a developer a read-only window into the running Z-machine: disassemble code at any
