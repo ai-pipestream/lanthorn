@@ -264,6 +264,10 @@ pub struct GameSession {
     /// transcript instead of being stripped. Default true. See
     /// [`Engine::set_strip_prompt`].
     strip_prompt: bool,
+    /// Lazily-built, memoized disassembly cache (routine-discovery boundaries).
+    /// `RefCell` because the Debugger read-path is `&self`; consistent with the
+    /// existing `mem_fault` interior-mutability pattern.
+    disasm_cache: std::cell::RefCell<Option<zvm::cpu::disasm_cache::DisasmCache>>,
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
@@ -295,7 +299,7 @@ impl GameSession {
             }
         };
 
-        Ok(GameSession { machine, quit, pending, strip_prompt: true })
+        Ok(GameSession { machine, quit, pending, strip_prompt: true, disasm_cache: std::cell::RefCell::new(None) })
     }
 
     /// Drain the transcript accumulated since the last drain (intro or last turn).
@@ -740,6 +744,18 @@ pub const ZMACHINE_ENGINE: &str = "zmachine";
 const ZMACHINE_SAVE_FORMAT: u32 = 1;
 
 impl GameSession {
+    /// Build the disasm cache on first use, memoize it, and run `f` against it.
+    fn with_disasm_cache<R>(&self, f: impl FnOnce(&zvm::cpu::disasm_cache::DisasmCache) -> R) -> R {
+        {
+            let mut slot = self.disasm_cache.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(zvm::cpu::disasm_cache::DisasmCache::build(&self.machine.mem));
+            }
+        } // drop borrow_mut before the shared borrow
+        let slot = self.disasm_cache.borrow();
+        f(slot.as_ref().unwrap())
+    }
+
     /// object entry base address -> object number.
     fn object_addr_map(&self) -> std::collections::HashMap<u32, u16> {
         let mem = &self.machine.mem;
@@ -1104,8 +1120,8 @@ impl Debugger for GameSession {
     }
 
     fn disassemble(&self, addr: u32, lines: usize) -> Vec<String> {
-        let version = self.machine.mem.version();
-        let mut out = zvm::cpu::disasm::disassemble(&self.machine.mem, addr, version, lines);
+        use zvm::cpu::disasm_cache::CacheFmt;
+        let mut out = self.with_disasm_cache(|c| c.disassemble(&self.machine.mem, addr, lines, CacheFmt::Full));
         // Annotate `@0x……` memory-reference operands with their referent: a
         // clickable ` [obj#N]` for an object entry base, an informational ` [word]`
         // for a dictionary entry base. Build both reverse maps once per call.
@@ -1125,31 +1141,29 @@ impl Debugger for GameSession {
     }
 
     fn disassemble_raw(&self, addr: u32, lines: usize) -> Vec<String> {
-        let version = self.machine.mem.version();
-        let out = zvm::cpu::disasm::disassemble_raw(&self.machine.mem, addr, version, lines);
+        use zvm::cpu::disasm_cache::CacheFmt;
+        let out = self.with_disasm_cache(|c| c.disassemble(&self.machine.mem, addr, lines, CacheFmt::Raw));
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
     }
 
     fn disassemble_basic(&self, addr: u32, lines: usize) -> Vec<String> {
-        let version = self.machine.mem.version();
+        use zvm::cpu::disasm_cache::CacheFmt;
         // Basic form: plain mnemonic disassembly with NO annotations (the
         // `[obj#N]`/`[word]` reference-following stays exclusive to `disassemble`).
-        let out = zvm::cpu::disasm::disassemble_basic(&self.machine.mem, addr, version, lines);
+        let out = self.with_disasm_cache(|c| c.disassemble(&self.machine.mem, addr, lines, CacheFmt::Basic));
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
     }
 
     fn next_instr(&self, addr: u32) -> u32 {
-        let version = self.machine.mem.version();
-        let out = zvm::cpu::disasm::next_instr(&self.machine.mem, addr, version);
+        let out = self.with_disasm_cache(|c| c.next_addr(addr));
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
     }
 
     fn prev_instr(&self, addr: u32) -> u32 {
-        let version = self.machine.mem.version();
-        let out = zvm::cpu::disasm::prev_instr(&self.machine.mem, addr, version);
+        let out = self.with_disasm_cache(|c| c.prev_addr(addr));
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
     }
@@ -2842,6 +2856,76 @@ mod debugger_impl_tests {
         let line = "004a2f  loadw @0xffffff, #00".to_string();
         let out = s.annotate_refs(&line, &objs, &dict);
         assert_eq!(out, line);
+    }
+
+    // ── DisasmCache integration (SQ-0418, Task 6) ──────────────────────────
+    // The five disassembly Debugger methods now route through GameSession's
+    // lazily-built, memoized DisasmCache. These assert integration stability
+    // and nav consistency through the &dyn Debugger surface; the cache's own
+    // classification/format guarantees are unit-tested in zvm.
+
+    fn is_six_hex(s: &str) -> bool {
+        s.len() >= 6 && s.as_bytes()[..6].iter().all(|b| b.is_ascii_hexdigit())
+    }
+
+    #[test]
+    fn disassemble_routes_through_cache_and_formats_a_real_line() {
+        let Some(s) = zvm_session() else { return };
+        let pc = Debugger::pc(&s);
+        let line = s.disassemble(pc, 1);
+        assert_eq!(line.len(), 1, "one requested line -> one line");
+        assert!(!line[0].is_empty(), "line is non-empty");
+        assert!(is_six_hex(&line[0]), "line begins with a 6-hex address: {:?}", line[0]);
+        assert!(&line[0][6..8] == "  ", "6-hex address followed by two spaces: {:?}", line[0]);
+    }
+
+    #[test]
+    fn nav_boundary_round_trip_and_monotonicity() {
+        let Some(s) = zvm_session() else { return };
+        let b = Debugger::pc(&s);
+        let n = s.next_instr(b);
+        let back = s.prev_instr(n);
+        // `n` is a real unit boundary produced by next_instr, so stepping
+        // forward from prev_instr(n) returns to n.
+        assert_eq!(s.next_instr(back), n, "boundary round-trip holds");
+        assert!(s.next_instr(n) >= n, "next_instr is non-decreasing");
+        assert!(s.prev_instr(n) <= n, "prev_instr is non-increasing");
+    }
+
+    #[test]
+    fn prev_instr_clamps_without_stalling() {
+        let Some(s) = zvm_session() else { return };
+        let mut a = Debugger::pc(&s);
+        for _ in 0..500 {
+            a = s.prev_instr(a);
+        }
+        // Reached the region-start clamp: stable fixpoint, no panic/hang.
+        assert_eq!(s.prev_instr(a), a, "prev_instr is stable at the region-start clamp");
+    }
+
+    #[test]
+    fn disassemble_window_is_bounded_and_has_no_empty_lines() {
+        let Some(s) = zvm_session() else { return };
+        let out = s.disassemble(Debugger::pc(&s), 200);
+        assert!(out.len() <= 200, "never returns more lines than requested");
+        assert!(out.iter().all(|l| !l.is_empty()), "no empty lines");
+    }
+
+    #[test]
+    fn all_three_modes_agree_on_the_address_prefix() {
+        let Some(s) = zvm_session() else { return };
+        let pc = Debugger::pc(&s);
+        let full = s.disassemble(pc, 1);
+        let basic = s.disassemble_basic(pc, 1);
+        let raw = s.disassemble_raw(pc, 1);
+        assert_eq!(full.len(), 1);
+        assert_eq!(basic.len(), 1);
+        assert_eq!(raw.len(), 1);
+        let addr6 = &full[0][..6];
+        assert!(is_six_hex(&full[0]));
+        assert_eq!(&basic[0][..6], addr6, "basic shares the address prefix");
+        assert_eq!(&raw[0][..6], addr6, "raw shares the address prefix");
+        assert_eq!(&raw[0][6..7], ":", "raw's distinct prefix is a colon after the address: {:?}", raw[0]);
     }
 
     #[test]
