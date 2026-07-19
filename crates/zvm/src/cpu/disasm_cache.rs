@@ -255,7 +255,8 @@ impl DisasmCache {
                     out.push(row);
                 }
                 Unit::RoutineHeader { addr, nlocals, .. } => {
-                    out.push(format!("{:06x}  ; routine, {} locals", addr, nlocals));
+                    let plural = if nlocals == 1 { "local" } else { "locals" };
+                    out.push(format!("{:06x}  ; routine, {} {}", addr, nlocals, plural));
                 }
                 Unit::Data { addr, len } => {
                     let end = addr + len;
@@ -1167,7 +1168,8 @@ mod tests {
         };
         let row = &cache.disassemble(&mem, addr, 1, CacheFmt::Full)[0];
         assert!(row.contains("; routine,"), "got {row:?}");
-        assert!(row.contains(&format!("{} locals", nlocals)), "got {row:?}");
+        let noun = if nlocals == 1 { "local" } else { "locals" };
+        assert!(row.contains(&format!("{} {}", nlocals, noun)), "got {row:?}");
     }
 
     #[test]
