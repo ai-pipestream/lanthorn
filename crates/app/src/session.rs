@@ -1121,18 +1121,19 @@ impl Debugger for GameSession {
     }
 
     fn object_tree_lines(&self) -> Vec<String> {
-        // Indent each object by its depth in the parent chain.
+        // A real tree: DFS over the child/sibling links so each object renders
+        // directly under its parent. (Numeric order + per-object indent, which
+        // this replaces, does NOT nest children under their parents.)
         let mem = &self.machine.mem;
-        let snaps = zvm::object_tree_view(&self.machine);
-        let out: Vec<String> = snaps.iter().map(|s| {
-            let mut depth = 0usize;
-            let mut p = s.parent;
-            while p != 0 && depth < 32 {
-                depth += 1;
-                p = zvm::objects::get_parent(mem, p);
-            }
-            format!("{}[{}] {}", "  ".repeat(depth), s.number, s.name)
-        }).collect();
+        let numbers: Vec<u16> = zvm::object_tree_view(&self.machine)
+            .iter().map(|s| s.number).collect();
+        let out = build_object_tree(
+            &numbers,
+            |o| zvm::objects::get_parent(mem, o),
+            |o| zvm::objects::get_child(mem, o),
+            |o| zvm::objects::get_sibling(mem, o),
+            |o| zvm::objects::short_name(mem, o),
+        );
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
     }
@@ -1213,12 +1214,111 @@ impl Debugger for GameSession {
     }
 }
 
+/// Render the object hierarchy as indented `[N] name` lines in **tree order**:
+/// a depth-first walk from each root (parent 0, ascending) down each object's
+/// child chain (child, then that child's siblings), so every object sits
+/// directly beneath its parent. Pure over the link/name lookups so it is
+/// unit-testable without a `Machine`. Guards against malformed data: a `seen`
+/// set breaks parent/child/sibling cycles, and any object never reached from a
+/// root (a broken link) is still appended (at its parent-chain depth) so
+/// nothing silently disappears.
+fn build_object_tree(
+    numbers: &[u16],
+    parent: impl Fn(u16) -> u16,
+    child: impl Fn(u16) -> u16,
+    sibling: impl Fn(u16) -> u16,
+    name: impl Fn(u16) -> String,
+) -> Vec<String> {
+    let mut out = Vec::with_capacity(numbers.len());
+    let mut seen = std::collections::HashSet::new();
+    // Roots pushed in reverse so ascending roots emit first (stack pops LIFO).
+    let mut stack: Vec<(u16, usize)> = numbers.iter().rev()
+        .filter(|&&o| parent(o) == 0)
+        .map(|&o| (o, 0usize))
+        .collect();
+    while let Some((obj, depth)) = stack.pop() {
+        if obj == 0 || depth > 64 || !seen.insert(obj) {
+            continue;
+        }
+        out.push(format!("{}[{}] {}", "  ".repeat(depth), obj, name(obj)));
+        // Collect this object's child chain, then push reversed so the first
+        // child is visited first. `!kids.contains` + `!seen` guard cycles.
+        let mut kids = Vec::new();
+        let mut c = child(obj);
+        while c != 0 && !seen.contains(&c) && !kids.contains(&c) {
+            kids.push(c);
+            c = sibling(c);
+        }
+        for &k in kids.iter().rev() {
+            stack.push((k, depth + 1));
+        }
+    }
+    // Safety net: objects unreachable from any root still appear, at their
+    // parent-chain depth, in ascending number order.
+    for &o in numbers {
+        if seen.insert(o) {
+            let mut depth = 0usize;
+            let mut p = parent(o);
+            while p != 0 && depth < 64 {
+                depth += 1;
+                p = parent(p);
+            }
+            out.push(format!("{}[{}] {}", "  ".repeat(depth), o, name(o)));
+        }
+    }
+    out
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use mapper::direction::Direction;
+
+    // ── Object tree ordering ──────────────────────────────────────────────────
+
+    #[test]
+    fn build_object_tree_walks_children_under_their_parent() {
+        // Two roots (1, 2). 1's children are 3 then 5 (siblings); 3 has child 4;
+        // 2 has child 6. A numeric-order+indent render would emit 1,2,3,4,5,6 —
+        // this DFS must nest each child directly under its parent instead.
+        use std::collections::HashMap;
+        let parent: HashMap<u16, u16> = [(1, 0), (2, 0), (3, 1), (4, 3), (5, 1), (6, 2)].into();
+        let child: HashMap<u16, u16> = [(1, 3), (2, 6), (3, 4), (4, 0), (5, 0), (6, 0)].into();
+        let sibling: HashMap<u16, u16> = [(1, 0), (2, 0), (3, 5), (4, 0), (5, 0), (6, 0)].into();
+        let lines = build_object_tree(
+            &[1, 2, 3, 4, 5, 6],
+            |o| parent[&o], |o| child[&o], |o| sibling[&o], |o| format!("o{o}"),
+        );
+        assert_eq!(lines, vec![
+            "[1] o1".to_string(),
+            "  [3] o3".to_string(),
+            "    [4] o4".to_string(),
+            "  [5] o5".to_string(),
+            "[2] o2".to_string(),
+            "  [6] o6".to_string(),
+        ]);
+    }
+
+    #[test]
+    fn build_object_tree_appends_objects_unreachable_from_a_root() {
+        // Object 3 claims parent 2, but 2 has no child pointing back — a broken
+        // link. It must still appear (at its parent-chain depth), never vanish.
+        use std::collections::HashMap;
+        let parent: HashMap<u16, u16> = [(1, 0), (2, 0), (3, 2)].into();
+        let child: HashMap<u16, u16> = [(1, 0), (2, 0), (3, 0)].into();
+        let sibling: HashMap<u16, u16> = [(1, 0), (2, 0), (3, 0)].into();
+        let lines = build_object_tree(
+            &[1, 2, 3],
+            |o| parent[&o], |o| child[&o], |o| sibling[&o], |o| format!("o{o}"),
+        );
+        assert_eq!(lines, vec![
+            "[1] o1".to_string(),
+            "[2] o2".to_string(),
+            "  [3] o3".to_string(), // appended, depth 1 (parent 2)
+        ]);
+    }
 
     // ── CaptureSink style-run capture ─────────────────────────────────────────
 
