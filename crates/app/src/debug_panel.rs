@@ -1,4 +1,4 @@
-//! Full-screen Z-machine debug inspector — panel state + navigation logic.
+//! Z-machine debug inspector (tiled pane) — panel state + navigation logic.
 //! Pure over the `Debugger` trait (engine-neutral); the render code paints the
 //! snapshot this holds. No `zvm::` calls here.
 

@@ -1,4 +1,4 @@
-//! Full-screen debug-inspector renderer. Paints the DebugPanelState snapshot.
+//! Debug-inspector renderer (tiled pane in the map slot). Paints the DebugPanelState snapshot.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
