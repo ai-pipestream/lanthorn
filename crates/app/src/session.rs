@@ -268,6 +268,9 @@ pub struct GameSession {
     /// `RefCell` because the Debugger read-path is `&self`; consistent with the
     /// existing `mem_fault` interior-mutability pattern.
     disasm_cache: std::cell::RefCell<Option<zvm::cpu::disasm_cache::DisasmCache>>,
+    /// PC at which the disasm cache was last runtime-confirmed; the per-turn
+    /// fold is skipped while the VM is parked at the same PC (nav/scroll calls).
+    last_confirmed_pc: std::cell::Cell<Option<u32>>,
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
@@ -299,7 +302,7 @@ impl GameSession {
             }
         };
 
-        Ok(GameSession { machine, quit, pending, strip_prompt: true, disasm_cache: std::cell::RefCell::new(None) })
+        Ok(GameSession { machine, quit, pending, strip_prompt: true, disasm_cache: std::cell::RefCell::new(None), last_confirmed_pc: std::cell::Cell::new(None) })
     }
 
     /// Drain the transcript accumulated since the last drain (intro or last turn).
@@ -751,9 +754,37 @@ impl GameSession {
             if slot.is_none() {
                 *slot = Some(zvm::cpu::disasm_cache::DisasmCache::build(&self.machine.mem));
             }
-        } // drop borrow_mut before the shared borrow
+        } // drop borrow_mut before confirmation / the shared borrow
+        // Runtime confirmation, once per turn (skip while parked at same PC).
+        if self.last_confirmed_pc.get() != Some(self.machine.state.pc) {
+            self.confirm_disasm();
+        }
         let slot = self.disasm_cache.borrow();
         f(slot.as_ref().unwrap())
+    }
+
+    /// Fold runtime-confirmed boundaries (call-stack func_addrs, parked PC, and
+    /// last turn's executed PCs) into the cache. No-op if the cache isn't built.
+    fn fold_confirmations(&self) {
+        let mut slot = self.disasm_cache.borrow_mut();
+        let Some(cache) = slot.as_mut() else { return }; // don't build just to confirm
+        let mem = &self.machine.mem;
+        for f in &self.machine.state.frames {
+            cache.confirm_routine(mem, f.func_addr);
+        }
+        cache.confirm_pc(mem, self.machine.state.pc);
+        for &pc in &self.machine.exec_pcs {
+            cache.confirm_pc(mem, pc);
+        }
+        // Draining a fault isn't needed here (confirm reads via decode which may
+        // latch a fault) — drain to be safe, matching the other debug read paths.
+        self.machine.mem.take_mem_fault();
+    }
+
+    /// Public entry for the per-turn confirmation fold (also callable in tests).
+    pub fn confirm_disasm(&self) {
+        self.fold_confirmations();
+        self.last_confirmed_pc.set(Some(self.machine.state.pc));
     }
 
     /// object entry base address -> object number.
@@ -2940,5 +2971,53 @@ mod debugger_impl_tests {
         let hex = d.memory_hex(0, 2);
         assert_eq!(hex.len(), 2);
         assert!(hex[0].starts_with("000000"));
+    }
+
+    // ── Runtime-confirmation fold (SQ-0418, Task 9) ────────────────────────
+    // Executed/parked PCs and call-stack func_addrs are folded into the cache
+    // once per turn so regions the VM really runs self-heal to Instr boundaries.
+
+    #[test]
+    fn parked_pc_becomes_an_instr_boundary_after_confirmation() {
+        let Some(s) = zvm_session() else { return };
+        let p = Debugger::pc(&s);
+        // A disassemble read builds the cache then folds the parked PC in.
+        let line = s.disassemble(p, 1);
+        // p is now the start of an Instr unit: stepping to the next unit and back
+        // lands exactly on p (prev/next are unit-boundary ops).
+        assert_eq!(s.prev_instr(s.next_instr(p)), p, "parked pc is a unit boundary after confirmation");
+        // The first disassembled line is addressed exactly at p.
+        assert_eq!(line.len(), 1);
+        assert!(line[0].starts_with(&format!("{p:06x}")), "first line starts at p: {:?}", line[0]);
+    }
+
+    #[test]
+    fn frame_func_addrs_are_promoted_to_routine_headers() {
+        let Some(s) = zvm_session() else { return };
+        let _ = s.disassemble(Debugger::pc(&s), 1); // build cache + fold the call stack in
+        for f in &s.machine.state.frames {
+            // Only func_addrs inside the code region get a header; disassembling
+            // at one now shows a RoutineHeader unit line ("; routine").
+            let hdr = s.disassemble(f.func_addr, 1);
+            if hdr.is_empty() {
+                continue; // outside the tiled code region
+            }
+            assert!(
+                hdr[0].contains("; routine"),
+                "func_addr {:06x} did not become a routine header: {:?}",
+                f.func_addr, hdr[0]
+            );
+        }
+    }
+
+    #[test]
+    fn confirmation_is_idempotent_and_stable() {
+        let Some(s) = zvm_session() else { return };
+        let _ = s.disassemble(Debugger::pc(&s), 1); // build cache + first fold
+        s.confirm_disasm();
+        let first = s.disassemble(Debugger::pc(&s), 50);
+        s.confirm_disasm();
+        let second = s.disassemble(Debugger::pc(&s), 50);
+        assert_eq!(first, second, "confirmation must not oscillate the disasm window");
     }
 }
