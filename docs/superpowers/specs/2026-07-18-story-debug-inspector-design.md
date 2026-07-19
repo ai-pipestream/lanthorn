@@ -177,14 +177,55 @@ packed/offset — a follow-up):
   address; Enter jumps `mem_addr` there, Esc cancels. Panel gains a `mem_input: Option<String>`
   edit buffer; a key (e.g. `:` or `/`) opens it; digits/backspace edit; Enter parses hex →
   `mem_addr` (clamped) + closes; Esc closes. Rendered as one line in the Memory window.
-- **(a) Clickable memory references in the disassembly:** disassembly operands that name a
-  memory byte-address — the base operand of `loadw`/`loadb`/`storew`/`storeb` (2OP 0x0F/0x10,
-  VAR 0x01/0x02) and `print_addr`'s operand (1OP 0x07) — are, when CONSTANT, formatted by
-  `format_instr` with a distinct memory sigil `@0x{:04x}` (vs `#` for plain constants). The
-  clickable layer treats a `@0x……` span as a **memory jump**: clicking it focuses the Memory
-  window and sets `mem_addr` to that address (a new `goto_memory(addr)` method: `focus = 2`,
-  `tab[2] = Memory`, `mem_addr = addr`). Branch `?0x……` spans stay disassembly jumps. Packed
-  operands (`print_paddr`, `call` routines) need unpack math and are a follow-up.
+- **(a) Clickable operands in the disassembly — via operand ROLES.** Add an operand-role
+  classifier in the disassembler: for a given `(operand_count, opcode)`, each operand has a role
+  — `Plain`, `MemAddr` (a memory byte-address), or `Object` (an object number). When such an
+  operand is CONSTANT, `format_instr` renders it with a role sigil so the clickable layer can
+  route it:
+  - **MemAddr → `@0x{:04x}`** — base operand of `loadw`/`loadb` (2OP 0x0F/0x10),
+    `storew`/`storeb` (VAR 0x01/0x02), and `print_addr` (1OP 0x07). Click → **Memory window**:
+    `goto_memory(addr)` (`focus = 2`, `tab[2] = Memory`, `mem_addr = addr`).
+  - **Object → `obj#{n}`** (decimal, matching the tree's `[N]`) — operands of `jin`, `test_attr`,
+    `set_attr`, `clear_attr`, `insert_obj`, `get_prop`, `get_prop_addr`, `get_next_prop` (2OP),
+    and `get_sibling`/`get_child`/`get_parent`/`remove_obj`/`print_obj` (1OP). Click → **Objects
+    tab**: `goto_object(n)` (`focus = 1`, `tab[1] = Objects`, mark object `n` expanded + scroll it
+    into view — the same expansion the Object-detail feature uses).
+  - **Plain constants** keep `#{:02x}`/`#{:04x}`; branch `?0x……` stays a disassembly jump.
+  - `clickable_spans` gains `@0x……` (→ mem) and `obj#N` (→ object) span kinds beside `?0x……`
+    (→ disasm); `clickable_at` returns a tagged target (Disasm addr / Memory addr / Object id) so
+    the mouse handler calls the right `goto_*`. Packed operands (`print_paddr`, `call` routines)
+    need unpack math → follow-up.
+
+## Revision 7 (2026-07-19) — the reference-following principle
+
+**Guiding rule: anything in the disassembly that references something is a clickable link that
+jumps to its referent.** Revision 6's memory/object clicks generalize to every operand ROLE. The
+disassembler's operand-role classifier tags each operand; `format_instr` renders each with a
+role sigil; `clickable_spans` recognizes every sigil; `clickable_at` returns a tagged target; the
+mouse handler dispatches to the matching `goto_*`. Underline every clickable span.
+
+| Reference (operand role) | Rendered as | Click destination |
+|---|---|---|
+| Branch / jump target | `?0x……` / `0x……` | Disassembly at address |
+| Routine (call target, packed) | unpacked → `0x……` | Disassembly at unpacked address |
+| Memory byte-address (loadw/loadb/storew/storeb base, print_addr) | `@0x……` | Memory window at address |
+| String (print_paddr, packed) | unpacked → `@0x……` | Memory window at unpacked address |
+| Object number | `obj#N` | Objects tab → expand object N |
+| Global variable | `gNN` | Globals tab → scroll to global NN |
+| Local variable | `localN` | Locals tab → scroll to local N |
+| Stack (variable 0) | `sp` | Stack (eval) tab |
+
+Variables appear both as operands and as store targets (`-> gNN`) — both are clickable. Property
+numbers and dictionary references are a later follow-up (their "referent view" is less defined).
+
+### Build phasing (reviewable chunks)
+- **Phase 6a (infrastructure):** Memory (b) ZSCII char column, (c) address-input line; Object
+  **detail expand-on-click** (attributes + property table, `objects_rows` display model); and the
+  navigation primitives `goto_memory(addr)`, `goto_object(n)` (+ the multi-byte panic regression
+  test the last review asked for).
+- **Phase 6b (reference-following):** the operand-role classifier in zvm + role sigils in
+  `format_instr` + `clickable_spans`/`clickable_at` tagged targets + `goto_global`/`goto_local`/
+  `goto_stack` + packed-address unpacking, wiring the whole table above.
 
 ### Object detail (Objects tab — expand on click)
 Clicking an object in the Objects tree expands it inline to show its **attributes** (which flags
