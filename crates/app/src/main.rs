@@ -607,6 +607,8 @@ fn draw_frame(
             let w = (pane_layout.help_row.width as usize).saturating_sub(leader_hint.chars().count() + 3);
             let rest = match state.focus {
                 Focus::Game => hint_bar(&state.keymap, &state.hotkeys, Context::Global, GAME_HINTS, w),
+                Focus::Map if state.debug.is_some() =>
+                    app::render::hintbar::literal_hint_bar(app::render::hintbar::DEBUG_HINTS, w),
                 Focus::Map => hint_bar(&state.keymap, &state.hotkeys, Context::Map, MAP_HINTS, w),
             };
             if rest.is_empty() {
@@ -1582,6 +1584,50 @@ fn main() {
                         continue;
                     }
                     // Ignored → fall through (do not `continue`).
+                }
+            }
+        }
+
+        // ── Debug inspector (tiled): mouse ──────────────────────────────────────
+        // Works regardless of focus, whenever the cursor is over the debug region
+        // (the map slot while `state.debug` is `Some`). Runs before the big
+        // `match event` below so it pre-empts the `Event::Mouse` arm's map
+        // wheel/click handling, which would otherwise misfire against the blank
+        // map area the debug region currently occupies.
+        if state.debug.is_some() {
+            if let Event::Mouse(m) = &event {
+                use crossterm::event::{MouseButton, MouseEventKind};
+                let region = last_panes.map;
+                let in_region = region.width > 0 && m.column >= region.x && m.column < region.right()
+                    && m.row >= region.y && m.row < region.bottom();
+                if in_region {
+                    let rects = app::debug_panel::window_rects(region);
+                    let over = rects.iter().position(|r| m.column >= r.x && m.column < r.right()
+                        && m.row >= r.y && m.row < r.bottom());
+                    match m.kind {
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                            if let Some(i) = over {
+                                let down = app::input::wheel_delta(m.kind, state.config.mouse_wheel_invert)
+                                    .map(|d| d > 0).unwrap_or(false);
+                                if let Some(dbg) = session.debugger() {
+                                    if let Some(p) = state.debug.as_mut() { p.scroll_active(i, down, dbg); }
+                                }
+                            }
+                            continue; // pre-empt the map wheel arms
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if let Some((w, t)) = state.debug.as_ref()
+                                .and_then(|p| app::debug_panel::tab_at(region, p, m.column, m.row)) {
+                                if let Some(p) = state.debug.as_mut() { p.activate_tab(w, t); }
+                                state.focus = Focus::Map;
+                            } else if let Some(i) = over {
+                                if let Some(p) = state.debug.as_mut() { p.focus_window(i); }
+                                state.focus = Focus::Map;
+                            }
+                            continue;
+                        }
+                        _ => { continue; } // swallow other mouse over the region
+                    }
                 }
             }
         }

@@ -30,6 +30,41 @@ pub const ANIM_HINTS: &[&str] = &[
     "zoom-map in",
 ];
 
+/// Debug-inspector hint bar: `(key, label)` pairs. Unlike the other hint
+/// lists above, these bindings are internal to the debug panel (handled by
+/// `DebugPanelState::handle_key`), not registered commands in the global
+/// keymap — so they're rendered via [`literal_hint_bar`] instead of
+/// [`hint_bar`]'s keymap-resolution path.
+pub const DEBUG_HINTS: &[(&str, &str)] = &[
+    ("Tab", "window"),
+    ("\u{2190}\u{2192}", "section"),
+    ("\u{2191}\u{2193}", "scroll"),
+    ("g", "PC"),
+    ("Esc", "back"),
+];
+
+/// Build a hint bar string from a fixed literal `(key, label)` list. Mirrors
+/// [`hint_bar`]'s join/truncate behavior, without the keymap-resolution gates
+/// (there is no keymap entry to resolve — the bindings are hard-coded).
+pub fn literal_hint_bar(hints: &[(&str, &str)], width: usize) -> String {
+    let joined = hints.iter().map(|(k, l)| format!("{k}: {l}")).collect::<Vec<_>>().join(" | ");
+    if width == 0 {
+        return String::new();
+    }
+    let char_count = joined.chars().count();
+    if char_count <= width {
+        joined
+    } else {
+        let truncate_at = width.saturating_sub(1);
+        let byte_pos = joined
+            .char_indices()
+            .nth(truncate_at)
+            .map(|(i, _)| i)
+            .unwrap_or(joined.len());
+        format!("{}…", &joined[..byte_pos])
+    }
+}
+
 /// Short hint-bar label for a command-string: "zoom-map in" -> "zoom map in".
 fn hint_label(cmd_str: &str) -> String {
     cmd_str.replace('-', " ")
@@ -93,8 +128,21 @@ pub fn hint_bar(
 
 #[cfg(test)]
 mod tests {
-    use super::{hint_bar, ANIM_HINTS, GAME_HINTS, MAP_HINTS};
+    use super::{hint_bar, literal_hint_bar, ANIM_HINTS, DEBUG_HINTS, GAME_HINTS, MAP_HINTS};
     use crate::keymap::{Context, HotkeyLayout, KeyMap};
+
+    #[test]
+    fn literal_hint_bar_joins_debug_hints() {
+        let line = literal_hint_bar(DEBUG_HINTS, 200);
+        assert_eq!(line, "Tab: window | \u{2190}\u{2192}: section | \u{2191}\u{2193}: scroll | g: PC | Esc: back");
+    }
+
+    #[test]
+    fn literal_hint_bar_truncates_at_width() {
+        let line = literal_hint_bar(DEBUG_HINTS, 10);
+        assert!(line.chars().count() <= 10);
+        assert!(line.ends_with('…'));
+    }
 
     #[test]
     fn hint_line_map_contains_zoom_with_plus_key() {

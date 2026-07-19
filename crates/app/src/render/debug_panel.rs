@@ -1,68 +1,62 @@
-//! Debug-inspector renderer (tiled pane in the map slot). Paints the DebugPanelState snapshot.
+//! Debug-inspector renderer (tiled pane in the map slot). Paints the
+//! DebugPanelState snapshot: three tabbed windows (left full height; right
+//! split top/bottom), each with its tab strip embedded in its top border row.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use crate::debug_panel::{DebugPane, DebugView};
+use crate::debug_panel::{self, DebugPanelState, Section, WINDOW_TABS};
 use crate::render::draw_str_clipped;
-use crate::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment};
+use crate::render::paneframe::draw_pane_frame;
 use crate::state::AppState;
 
-/// One titled pane: border in the focused/unfocused style, snapshot lines inside.
-fn draw_pane(
-    buf: &mut Buffer, area: Rect, title: &str, lines: &[String], scroll: usize,
-    focused: bool, state: &AppState,
-) {
+/// Draw one window: frame, tab strip, and the active section's content.
+fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelState, state: &AppState) {
     if area.width < 2 || area.height < 2 { return; }
+    let focused = panel.focus == window;
     let border = if focused { state.colors.debug_pane_focused } else { state.colors.debug_pane };
-    let pane = draw_pane_frame(buf, area, state.colors.dialog_box_style, &state.colors.dialog_glyphs, border);
-    draw_top_inset(buf, pane.top_inset, &[InsetSegment { text: title, active: focused }],
-        state.colors.debug_title, state.colors.debug_title);
-    let content = pane.content;
+    let frame = draw_pane_frame(buf, area, state.colors.dialog_box_style, &state.colors.dialog_glyphs, border);
+
+    // Tab strip: embedded in the window's top border row. `tab_hit_rects` is
+    // the SAME geometry the mouse click handler uses (crate::debug_panel::tab_at),
+    // so a click always lands on the tab actually drawn here.
+    let sections = WINDOW_TABS[window];
+    let tab_rects = debug_panel::tab_hit_rects(area, sections);
+    for (i, (section, rect)) in sections.iter().zip(tab_rects.iter()).enumerate() {
+        if rect.width == 0 { continue; }
+        let label = format!(" {} ", section.label());
+        let style = if i == panel.tab[window] { state.colors.debug_tab_active } else { state.colors.debug_tab };
+        draw_str_clipped(buf, rect.x, rect.y, &label, style, *rect);
+    }
+
+    // Active section content, clipped to the frame's content rect.
+    let section = panel.active_section(window);
+    let lines = panel.snapshot.section(section);
+    let content = frame.content;
     let body = state.colors.debug_pane;
+    // Disasm/Memory are pre-windowed by their addr (offset 0); list sections
+    // apply their per-window scroll offset.
+    let scroll = match section {
+        Section::Disasm | Section::Memory => 0,
+        _ => panel.scroll[window],
+    };
+    let pc_prefix = format!("{:06x}", panel.pc);
     for (row, line) in lines.iter().skip(scroll).take(content.height as usize).enumerate() {
-        draw_str_clipped(buf, content.x, content.y + row as u16, line, body, content);
+        let y = content.y + row as u16;
+        let style = if section == Section::Disasm && line.starts_with(&pc_prefix) {
+            state.colors.debug_disasm_pc
+        } else {
+            body
+        };
+        draw_str_clipped(buf, content.x, y, line, style, content);
     }
 }
 
 pub fn draw_debug_panel(state: &AppState, area: Rect, buf: &mut Buffer) {
     let Some(panel) = &state.debug else { return };
-    let view = panel.focus.view();
-
-    // Left column full height; right column split into two stacked panes.
-    let left_w = area.width / 2;
-    let right_x = area.x + left_w;
-    let right_w = area.width - left_w;
-    let top_h = area.height / 2;
-    let left = Rect::new(area.x, area.y, left_w, area.height);
-    let r_top = Rect::new(right_x, area.y, right_w, top_h);
-    let r_bot = Rect::new(right_x, area.y + top_h, right_w, area.height - top_h);
-
-    let s = &panel.snapshot;
-    let f = panel.focus;
-    let ls = panel.list_scroll;
-    // Which pane is focused decides where list_scroll applies; address panes
-    // (disasm/memory) scroll via their addr, so pass 0 for their offset.
-    match view {
-        DebugView::Execution => {
-            draw_pane(buf, left, " Disassembly ", &s.disasm, 0, f == DebugPane::Disasm, state);
-            draw_pane(buf, r_top, " Locals ", &s.locals, if f == DebugPane::Locals { ls } else { 0 }, f == DebugPane::Locals, state);
-            draw_pane(buf, r_bot, " Stack ", &s.stack, if f == DebugPane::Stack { ls } else { 0 }, f == DebugPane::Stack, state);
-        }
-        DebugView::WorldState => {
-            draw_pane(buf, left, " Globals ", &s.globals, if f == DebugPane::Globals { ls } else { 0 }, f == DebugPane::Globals, state);
-            // Right-top shows Objects; when Dict/Memory focused it takes the top slot.
-            let (top_title, top_lines, top_pane) = match f {
-                DebugPane::Dict => (" Dictionary ", &s.dict, DebugPane::Dict),
-                DebugPane::Memory => (" Memory ", &s.memory, DebugPane::Memory),
-                _ => (" Objects ", &s.objects, DebugPane::Objects),
-            };
-            let off = if f == top_pane && top_pane != DebugPane::Memory { ls } else { 0 };
-            draw_pane(buf, r_top, top_title, top_lines, off, f == top_pane, state);
-            // Right-bottom shows the other of Objects/Dictionary for context.
-            let bot = if top_pane == DebugPane::Objects { (" Dictionary ", &s.dict) } else { (" Objects ", &s.objects) };
-            draw_pane(buf, r_bot, bot.0, bot.1, 0, false, state);
-        }
+    let windows = debug_panel::window_rects(area);
+    for (i, w) in windows.iter().enumerate() {
+        draw_window(buf, *w, i, panel, state);
     }
 }
 
@@ -77,12 +71,14 @@ mod tests {
     }
 
     #[test]
-    fn draws_execution_view_panes() {
+    fn draws_all_three_windows_default_tabs() {
         let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
         let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
-        panel.snapshot.disasm = vec!["1000  add".into()];
+        panel.snapshot.disasm = vec!["001000  add".into()];
         panel.snapshot.locals = vec!["local0 = 0001".into()];
         panel.snapshot.stack = vec!["#0 main".into()];
+        panel.pc = 0x1000;
         state.debug = Some(panel);
 
         let area = Rect::new(0, 0, 80, 24);
@@ -92,5 +88,49 @@ mod tests {
         let text = buf_text(&buf);
         assert!(text.contains("add"));
         assert!(text.contains("main"));
+        // Tab labels for the default (first) tab of each window.
+        assert!(text.contains("Disassembly"));
+        assert!(text.contains("Locals"));
+        assert!(text.contains("Stack"));
+    }
+
+    #[test]
+    fn highlights_the_pc_line_in_disassembly() {
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        panel.pc = 0x1000;
+        panel.snapshot.disasm = vec!["001000  add".into(), "001004  sub".into()];
+        state.debug = Some(panel);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        draw_debug_panel(&state, area, &mut buf);
+
+        let [left, ..] = crate::debug_panel::window_rects(area);
+        let content_y = left.y + 1; // first content row under the top border
+        let pc_line_modifier = buf.cell((left.x + 1, content_y)).unwrap().style().add_modifier;
+        // Compare modifiers only: `Cell::style()` always reports concrete
+        // Reset colors for unset fg/bg, so it never equals a Style::default()
+        // built with `.add_modifier(...)` alone.
+        assert_eq!(pc_line_modifier, state.colors.debug_disasm_pc.add_modifier);
+    }
+
+    #[test]
+    fn shows_a_non_default_active_tab_and_hides_the_others_content() {
+        let mut state = crate::state::AppState::default();
+        let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        panel.tab[0] = 1; // Globals instead of Disassembly
+        panel.snapshot.disasm = vec!["001000  should-not-show".into()];
+        panel.snapshot.globals = vec!["g00=0012".into()];
+        state.debug = Some(panel);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        draw_debug_panel(&state, area, &mut buf);
+
+        let text = buf_text(&buf);
+        assert!(text.contains("g00=0012"));
+        assert!(!text.contains("should-not-show"));
     }
 }

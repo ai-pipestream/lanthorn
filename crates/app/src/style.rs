@@ -225,6 +225,9 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "debug_pane",
     "debug_pane:focused",
     "debug_title",
+    "debug_disasm_pc",
+    "debug_tab",
+    "debug_tab:active",
     "hotkey:key",
     "dialog:button",
     "dialog:button:active",
@@ -272,7 +275,10 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ("Dialogs", &[
         "dialog", "dialog:title", "hotkey:key", "dialog:button", "dialog:button:active", "dialog:shadow",
     ]),
-    ("Debug", &["debug_pane", "debug_pane:focused", "debug_title"]),
+    ("Debug", &[
+        "debug_pane", "debug_pane:focused", "debug_title",
+        "debug_disasm_pc", "debug_tab", "debug_tab:active",
+    ]),
     ("Upper window", &["room_panel", "upper_window", "upper_window_border"]),
     ("Sound", &["sound_beep_high", "sound_beep_low"]),
     ("Graphics", &["graphics", "inline_image"]),
@@ -326,6 +332,9 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "debug_pane"           => cs.debug_pane,
         "debug_pane:focused"   => cs.debug_pane_focused,
         "debug_title"          => cs.debug_title,
+        "debug_disasm_pc"      => cs.debug_disasm_pc,
+        "debug_tab"            => cs.debug_tab,
+        "debug_tab:active"     => cs.debug_tab_active,
         "hotkey:key"           => cs.hotkey_key,
         "dialog:button"        => cs.dialog_button,
         "dialog:button:active" => cs.dialog_button_active,
@@ -563,6 +572,9 @@ pub fn apply_color_decls(
             "debug_pane"           => cs.debug_pane = cs.debug_pane.patch(style),
             "debug_pane:focused"   => cs.debug_pane_focused = cs.debug_pane_focused.patch(style),
             "debug_title"          => cs.debug_title = cs.debug_title.patch(style),
+            "debug_disasm_pc"      => cs.debug_disasm_pc = cs.debug_disasm_pc.patch(style),
+            "debug_tab"            => cs.debug_tab = cs.debug_tab.patch(style),
+            "debug_tab:active"     => cs.debug_tab_active = cs.debug_tab_active.patch(style),
             "hotkey:key"           => cs.hotkey_key = cs.hotkey_key.patch(style),
             "dialog:button"        => cs.dialog_button = cs.dialog_button.patch(style),
             "dialog:button:active" => cs.dialog_button_active = cs.dialog_button_active.patch(style),
@@ -1485,6 +1497,9 @@ pub fn write_style_full(
     doc.colors.selectors.insert("debug_pane".to_string(),           style_to_decl(&cs.debug_pane));
     doc.colors.selectors.insert("debug_pane:focused".to_string(),   style_to_decl(&cs.debug_pane_focused));
     doc.colors.selectors.insert("debug_title".to_string(),          style_to_decl(&cs.debug_title));
+    doc.colors.selectors.insert("debug_disasm_pc".to_string(),      style_to_decl(&cs.debug_disasm_pc));
+    doc.colors.selectors.insert("debug_tab".to_string(),            style_to_decl(&cs.debug_tab));
+    doc.colors.selectors.insert("debug_tab:active".to_string(),     style_to_decl(&cs.debug_tab_active));
     doc.colors.selectors.insert("hotkey:key".to_string(),           style_to_decl(&cs.hotkey_key));
     doc.colors.selectors.insert("dialog:button".to_string(),        style_to_decl(&cs.dialog_button));
     doc.colors.selectors.insert("dialog:button:active".to_string(), style_to_decl(&cs.dialog_button_active));
@@ -2546,10 +2561,16 @@ box_style = "rounded"
         let _ = style_for_selector(&cs, "debug_pane");
         let _ = style_for_selector(&cs, "debug_pane:focused");
         let _ = style_for_selector(&cs, "debug_title");
+        let _ = style_for_selector(&cs, "debug_disasm_pc");
+        let _ = style_for_selector(&cs, "debug_tab");
+        let _ = style_for_selector(&cs, "debug_tab:active");
         // registry lists them (so the style editor shows them)
         assert!(SELECTOR_FIELDS.contains(&"debug_pane"));
         assert!(SELECTOR_FIELDS.contains(&"debug_pane:focused"));
         assert!(SELECTOR_FIELDS.contains(&"debug_title"));
+        assert!(SELECTOR_FIELDS.contains(&"debug_disasm_pc"));
+        assert!(SELECTOR_FIELDS.contains(&"debug_tab"));
+        assert!(SELECTOR_FIELDS.contains(&"debug_tab:active"));
     }
 
     #[test]

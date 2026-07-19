@@ -337,6 +337,12 @@ pub struct ColorScheme {
     pub debug_pane_focused: Style,
     /// Debug-inspector pane title.
     pub debug_title: Style,
+    /// Debug-inspector disassembly line at the current PC.
+    pub debug_disasm_pc: Style,
+    /// Debug-inspector tab label (inactive).
+    pub debug_tab: Style,
+    /// Debug-inspector tab label (active).
+    pub debug_tab_active: Style,
     /// Leader-panel hotkey letter style.
     pub hotkey_key: Style,
     /// Dialog button (normal) style.
@@ -510,6 +516,9 @@ impl ColorScheme {
             debug_pane: Style::default(),
             debug_pane_focused: Style::default().add_modifier(Modifier::BOLD),
             debug_title: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            debug_disasm_pc: Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            debug_tab: Style::default(),
+            debug_tab_active: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             hotkey_key: Style::new().fg(Color::Cyan),
             dialog_button: Style::new().add_modifier(Modifier::REVERSED),
             dialog_button_active: Style::new().fg(Color::Black).bg(Color::Cyan),
@@ -723,6 +732,9 @@ impl ColorScheme {
             debug_pane: Style::default(),
             debug_pane_focused: Style::default().add_modifier(Modifier::BOLD),
             debug_title: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            debug_disasm_pc: Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
+            debug_tab: Style::default(),
+            debug_tab_active: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             hotkey_key: Style::new().fg(scheme.palette[6]),
             dialog_button: Style::new().fg(fg).add_modifier(Modifier::REVERSED),
             dialog_button_active: Style::new().fg(bg).bg(scheme.palette[6]),
