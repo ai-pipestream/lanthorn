@@ -1656,6 +1656,18 @@ fn main() {
                                 }
                                 continue;
                             }
+                            // Call-stack frame expand/collapse click (Call Stack
+                            // tab). The `fn@` address-click above runs first and
+                            // `continue`s on hit, so it keeps priority over toggle.
+                            let frame_target = state.debug.as_ref()
+                                .and_then(|p| app::debug_panel::stack_click_at(region, p, m.column, m.row));
+                            if let Some(idx) = frame_target {
+                                if let Some(dbg) = session.debugger() {
+                                    if let Some(p) = state.debug.as_mut() { p.toggle_frame(idx, dbg); }
+                                    state.focus = Focus::Map;
+                                }
+                                continue;
+                            }
                             if let Some((w, t)) = state.debug.as_ref()
                                 .and_then(|p| app::debug_panel::tab_at(region, p, m.column, m.row)) {
                                 if let Some(p) = state.debug.as_mut() { p.activate_tab(w, t); }

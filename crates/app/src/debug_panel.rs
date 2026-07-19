@@ -64,6 +64,10 @@ pub struct DebugSnapshot {
     /// object, keyed by object number. Refreshed each turn for whichever
     /// objects are still in `DebugPanelState::expanded_objects`.
     pub object_details: std::collections::HashMap<u16, Vec<String>>,
+    /// Detail lines (locals) for each currently-expanded call-stack frame, keyed
+    /// by frame index. Unlike `object_details`, this is cleared every turn —
+    /// frame indices are ephemeral, so expansion state resets on each `refresh`.
+    pub frame_details: std::collections::HashMap<usize, Vec<String>>,
 }
 
 impl DebugSnapshot {
@@ -120,6 +124,9 @@ pub struct DebugPanelState {
     pub mem_input: Option<String>,
     /// Object numbers currently expanded inline in the Objects tree.
     pub expanded_objects: std::collections::HashSet<u16>,
+    /// Frame indices currently expanded inline in the Call Stack. Reset each
+    /// turn (frame indices are ephemeral) — see `refresh`.
+    pub expanded_frames: std::collections::HashSet<usize>,
     /// Focused-window content height captured by the last draw (for paging).
     pub viewport: usize,
     /// Live PC (for disasm PC-follow + highlight).
@@ -144,6 +151,7 @@ impl DebugPanelState {
             mem_addr: 0,
             mem_input: None,
             expanded_objects: std::collections::HashSet::new(),
+            expanded_frames: std::collections::HashSet::new(),
             viewport: 1,
             pc,
             snapshot: DebugSnapshot::default(),
@@ -172,6 +180,10 @@ impl DebugPanelState {
         self.snapshot.objects = dbg.object_tree_lines();
         self.snapshot.dict = dbg.dictionary_lines();
         self.snapshot.stack = dbg.stack_lines();
+        // Frame indices are ephemeral across turns, so expansion state cannot
+        // carry over the way objects' does — clear it every refresh.
+        self.expanded_frames.clear();
+        self.snapshot.frame_details = std::collections::HashMap::new();
         self.snapshot.eval_stack = dbg.eval_stack_lines();
         self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
         self.snapshot.executed = dbg.executed_pcs();
@@ -361,6 +373,17 @@ impl DebugPanelState {
         }
     }
 
+    /// Mouse: toggle call-stack frame `idx`'s expansion (collapse if already
+    /// expanded, else expand + fetch its locals detail lines).
+    pub fn toggle_frame(&mut self, idx: usize, dbg: &dyn Debugger) {
+        if self.expanded_frames.remove(&idx) {
+            self.snapshot.frame_details.remove(&idx);
+        } else {
+            self.expanded_frames.insert(idx);
+            self.snapshot.frame_details.insert(idx, dbg.frame_locals(idx));
+        }
+    }
+
     /// Focus the Memory window/tab and point it at `addr`.
     pub fn goto_memory(&mut self, addr: u32, dbg: &dyn Debugger) {
         self.focus = 2;
@@ -415,6 +438,12 @@ pub fn disasm_rows(disasm: &[String], pc: u32, height: usize) -> Vec<DisasmRow> 
 /// (`di` indexes into that object's `object_details` entry).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjRow { Tree { line_idx: usize, obj: Option<u16> }, Detail { obj: u16, di: usize } }
+
+/// One screen row of the Call Stack section: either a frame line (`frame` is its
+/// parsed `#N` index, if any) or one of an expanded frame's locals detail lines
+/// (`di` indexes into that frame's `frame_details` entry). Mirrors `ObjRow`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StackRow { Frame { line_idx: usize, frame: Option<usize> }, Detail { frame: usize, di: usize } }
 
 /// Resolve a Memory-jump input to a target address. A variable token (`sp`,
 /// `localN`, `gNN` — matching the disassembly's rendering) dereferences to the
@@ -473,6 +502,42 @@ pub fn objects_rows(
                 if let Some(det) = details.get(&n) {
                     for di in 0..det.len() {
                         all.push(ObjRow::Detail { obj: n, di });
+                    }
+                }
+            }
+        }
+    }
+    all.into_iter().skip(scroll).take(height).collect()
+}
+
+/// Parse the leading `#N` frame index from a stack line (`"#0  fn@…"`). `None`
+/// for a line without one (e.g. the `(no frames)` placeholder).
+fn parse_frame_idx(line: &str) -> Option<usize> {
+    let rest = line.strip_prefix('#')?;
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    rest.get(..end)?.parse().ok()
+}
+
+/// Interleave each frame line with its expanded locals detail lines (if any),
+/// apply `scroll` (display rows, not frame lines) and cap at `height`. Pure;
+/// shared by the renderer and both hit-tests so scroll offset and click-row→line
+/// mapping never drift (same discipline as `objects_rows`).
+pub fn stack_rows(
+    stack: &[String],
+    expanded: &std::collections::HashSet<usize>,
+    details: &std::collections::HashMap<usize, Vec<String>>,
+    scroll: usize,
+    height: usize,
+) -> Vec<StackRow> {
+    let mut all = Vec::new();
+    for (i, line) in stack.iter().enumerate() {
+        let frame = parse_frame_idx(line);
+        all.push(StackRow::Frame { line_idx: i, frame });
+        if let Some(n) = frame {
+            if expanded.contains(&n) {
+                if let Some(det) = details.get(&n) {
+                    for di in 0..det.len() {
+                        all.push(StackRow::Detail { frame: n, di });
                     }
                 }
             }
@@ -653,12 +718,18 @@ pub fn clickable_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -
                     .map(|(_, target)| target)
             }
             (2, Section::CallStack) => {
-                let line_idx = (row - content.y) as usize + panel.scroll[2];
-                let line = panel.snapshot.stack.get(line_idx)?;
-                let off = (col.checked_sub(content.x))? as usize;
-                clickable_spans(section, line).into_iter()
-                    .find(|(range, _)| range.contains(&off))
-                    .map(|(_, target)| target)
+                let r = (row - content.y) as usize;
+                let rows = stack_rows(&panel.snapshot.stack, &panel.expanded_frames,
+                                      &panel.snapshot.frame_details, panel.scroll[2], content.height as usize);
+                match rows.get(r)? {
+                    StackRow::Frame { line_idx, .. } => {
+                        let line = panel.snapshot.stack.get(*line_idx)?;
+                        let off = (col.checked_sub(content.x + 2))? as usize; // +2 for the "▶ " marker
+                        clickable_spans(section, line).into_iter()
+                            .find(|(range, _)| range.contains(&off)).map(|(_, t)| t)
+                    }
+                    StackRow::Detail { .. } => None,
+                }
             }
             _ => None,
         };
@@ -736,6 +807,37 @@ pub fn objects_click_at(region: Rect, panel: &DebugPanelState, col: u16, row: u1
     );
     match rows.get(r)? {
         ObjRow::Tree { obj: Some(n), .. } => Some(*n),
+        _ => None,
+    }
+}
+
+/// Hit-test a click at `(col, row)` against the Call Stack frame rows (window 2,
+/// tab 0). Returns the frame index if the click landed on a `Frame` row that
+/// carries one (a toggle target). Uses the same `window_rects` / content-inset /
+/// `stack_rows` geometry the renderer uses, so it never drifts.
+pub fn stack_click_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -> Option<usize> {
+    let window_rect = window_rects(region)[2];
+    if col < window_rect.x || col >= window_rect.right()
+        || row < window_rect.y || row >= window_rect.bottom() {
+        return None;
+    }
+    if panel.active_section(2) != Section::CallStack {
+        return None;
+    }
+    let content = Rect::new(
+        window_rect.x + 1, window_rect.y + 1,
+        window_rect.width.saturating_sub(2), window_rect.height.saturating_sub(2),
+    );
+    if col < content.x || col >= content.right() || row < content.y || row >= content.bottom() {
+        return None;
+    }
+    let r = (row - content.y) as usize;
+    let rows = stack_rows(
+        &panel.snapshot.stack, &panel.expanded_frames, &panel.snapshot.frame_details,
+        panel.scroll[2], content.height as usize,
+    );
+    match rows.get(r)? {
+        StackRow::Frame { frame: Some(n), .. } => Some(*n),
         _ => None,
     }
 }
@@ -820,6 +922,7 @@ mod tests {
         }
         fn memory_len(&self) -> u32 { 0x10000 }
         fn object_detail(&self, _obj: u16) -> Vec<String> { vec!["attrs: (none)".into()] }
+        fn frame_locals(&self, _idx: usize) -> Vec<String> { vec![format!("local0 = 0x0001  (1)")] }
         // Deterministic, distinct-per-var value so deref jumps are testable.
         fn var_value(&self, var: u8) -> Option<u16> { Some(0x1000 + var as u16 * 0x10) }
     }
@@ -1100,14 +1203,22 @@ mod tests {
     fn clickable_at_resolves_a_call_stack_frame_address_click() {
         let region = Rect::new(0, 0, 61, 40);
         let mut p = DebugPanelState::new(0x1000);
-        p.snapshot.stack = vec!["#0  fn@004a00  ret=004a35  args=2  locals=[]".to_string()];
+        p.snapshot.stack = vec!["#0  fn@004a00  ret=004a35  args=2".to_string()];
         let [_, _, bot] = window_rects(region);
         let content = Rect::new(bot.x + 1, bot.y + 1, bot.width.saturating_sub(2), bot.height.saturating_sub(2));
         let line = &p.snapshot.stack[0];
         let off = line.find("fn@").unwrap();
-        let col = content.x + off as u16;
+        // +2 for the "▶ " disclosure marker prefixing the frame text.
+        let col = content.x + 2 + off as u16;
         let hit = clickable_at(region, &p, col, content.y);
         assert_eq!(hit, Some(ClickTarget::Code(0x4a00)));
+
+        // A click on an expanded frame's detail row resolves to nothing.
+        p.expanded_frames.insert(0);
+        p.snapshot.frame_details.insert(0, vec!["local0 = 0x0001  (1)".to_string()]);
+        let detail_col = content.x + 2 + off as u16;
+        assert_eq!(clickable_at(region, &p, detail_col, content.y + 1), None,
+            "detail row carries no clickable address");
     }
 
     #[test]
@@ -1275,6 +1386,70 @@ mod tests {
         let [_, top, _] = window_rects(region);
         let content = Rect::new(top.x + 1, top.y + 1, top.width.saturating_sub(2), top.height.saturating_sub(2));
         assert_eq!(objects_click_at(region, &p, content.x, content.y), None);
+    }
+
+    // ── stack_rows / toggle_frame / stack_click_at (Call Stack expansion) ───
+
+    #[test]
+    fn stack_rows_interleaves_detail_lines_after_an_expanded_frame() {
+        let stack = vec!["#0  fn@004a00  ret=004a35  args=2".to_string(),
+                         "#1  fn@005000  ret=005035  args=0".to_string()];
+        let expanded = std::collections::HashSet::from([0usize]);
+        let details = std::collections::HashMap::from([
+            (0usize, vec!["local0 = 0x0001  (1)".to_string(), "local1 = 0x0002  (2)".to_string()]),
+        ]);
+        let rows = stack_rows(&stack, &expanded, &details, 0, 10);
+        assert_eq!(rows.len(), 4); // frame#0 + 2 detail lines + frame#1
+        assert!(matches!(rows[0], StackRow::Frame { line_idx: 0, frame: Some(0) }));
+        assert!(matches!(rows[1], StackRow::Detail { frame: 0, di: 0 }));
+        assert!(matches!(rows[2], StackRow::Detail { frame: 0, di: 1 }));
+        assert!(matches!(rows[3], StackRow::Frame { line_idx: 1, frame: Some(1) }));
+    }
+
+    #[test]
+    fn parse_frame_idx_reads_the_leading_hash_number() {
+        assert_eq!(parse_frame_idx("#0  fn@004a00  ret=004a35  args=2"), Some(0));
+        assert_eq!(parse_frame_idx("#12  fn@…"), Some(12));
+        assert_eq!(parse_frame_idx("(no frames)"), None);
+    }
+
+    #[test]
+    fn toggle_frame_expands_then_collapses() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.snapshot.stack = vec!["#0  fn@004a00  ret=004a35  args=2".to_string()];
+        p.toggle_frame(0, &MockDbg);
+        assert!(p.expanded_frames.contains(&0));
+        assert!(p.snapshot.frame_details.contains_key(&0));
+        p.toggle_frame(0, &MockDbg);
+        assert!(!p.expanded_frames.contains(&0));
+        assert!(!p.snapshot.frame_details.contains_key(&0));
+    }
+
+    #[test]
+    fn stack_click_at_resolves_a_frame_row_and_ignores_a_detail_row() {
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        // focus/tab default: window 2 tab 0 = Call Stack.
+        p.snapshot.stack = vec!["#0  fn@004a00  ret=004a35  args=2".to_string()];
+        p.expanded_frames.insert(0);
+        p.snapshot.frame_details.insert(0, vec!["local0 = 0x0001  (1)".to_string()]);
+        let [_, _, bot] = window_rects(region);
+        let content = Rect::new(bot.x + 1, bot.y + 1, bot.width.saturating_sub(2), bot.height.saturating_sub(2));
+        // Row 0 is the frame row → toggle target.
+        assert_eq!(stack_click_at(region, &p, content.x, content.y), Some(0));
+        // Row 1 is the detail row → not a toggle target.
+        assert_eq!(stack_click_at(region, &p, content.x, content.y + 1), None);
+    }
+
+    #[test]
+    fn stack_click_at_ignores_clicks_when_call_stack_is_not_the_active_tab() {
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        p.tab[2] = 1; // Stack (eval), not Call Stack
+        p.snapshot.stack = vec!["#0  fn@004a00  ret=004a35  args=2".to_string()];
+        let [_, _, bot] = window_rects(region);
+        let content = Rect::new(bot.x + 1, bot.y + 1, bot.width.saturating_sub(2), bot.height.saturating_sub(2));
+        assert_eq!(stack_click_at(region, &p, content.x, content.y), None);
     }
 
     // ── Navigation primitives (goto_memory / goto_object) ───────────────────

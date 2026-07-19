@@ -100,6 +100,11 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
         return;
     }
 
+    if section == Section::CallStack {
+        draw_callstack(buf, content, window, panel, body);
+        return;
+    }
+
     if section == Section::Memory {
         draw_memory(buf, content, panel, state, body);
         return;
@@ -110,9 +115,6 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
     for (row, line) in lines.iter().skip(scroll).take(content.height as usize).enumerate() {
         let y = content.y + row as u16;
         draw_str_clipped(buf, content.x, y, line, body, content);
-        if section == Section::CallStack {
-            underline_clickables(buf, content.x, y, line, body, section, content);
-        }
     }
 }
 
@@ -144,6 +146,41 @@ fn draw_objects(buf: &mut Buffer, content: Rect, window: usize, panel: &DebugPan
             }
             debug_panel::ObjRow::Detail { obj, di } => {
                 let Some(det) = panel.snapshot.object_details.get(obj) else { continue };
+                let Some(line) = det.get(*di) else { continue };
+                let indented = format!("    {line}");
+                draw_str_clipped(buf, content.x, y, &indented, body, content);
+            }
+        }
+    }
+}
+
+/// Draw the Call Stack section: `stack_rows` interleaves each frame line with
+/// its expanded locals detail lines (if any), so render and the two hit-tests
+/// (`clickable_at`, `stack_click_at`) always agree on which screen row is which
+/// frame line. Frame rows get a ▶/▼ disclosure triangle (a 2-column marker, so
+/// the frame text — with its clickable `fn@` address — draws at `content.x + 2`);
+/// detail rows are drawn plain and indented.
+fn draw_callstack(buf: &mut Buffer, content: Rect, window: usize, panel: &DebugPanelState, body: Style) {
+    let rows = debug_panel::stack_rows(
+        &panel.snapshot.stack, &panel.expanded_frames, &panel.snapshot.frame_details,
+        panel.scroll[window], content.height as usize,
+    );
+    for (r, row_entry) in rows.iter().enumerate() {
+        let y = content.y + r as u16;
+        match row_entry {
+            debug_panel::StackRow::Frame { line_idx, frame } => {
+                let Some(line) = panel.snapshot.stack.get(*line_idx) else { continue };
+                let marker = match frame {
+                    Some(n) if panel.expanded_frames.contains(n) => "▼ ",
+                    Some(_) => "▶ ",
+                    None => "  ", // e.g. the "(no frames)" line
+                };
+                draw_str_clipped(buf, content.x, y, marker, body, content);
+                draw_str_clipped(buf, content.x + 2, y, line, body, content);
+                underline_clickables(buf, content.x + 2, y, line, body, Section::CallStack, content);
+            }
+            debug_panel::StackRow::Detail { frame, di } => {
+                let Some(det) = panel.snapshot.frame_details.get(frame) else { continue };
                 let Some(line) = det.get(*di) else { continue };
                 let indented = format!("    {line}");
                 draw_str_clipped(buf, content.x, y, &indented, body, content);
@@ -354,6 +391,41 @@ mod tests {
         let cell = buf.cell((content.x + 2, content.y)).unwrap(); // past "▼ "
         assert_eq!(cell.symbol(), "[");
         assert!(!cell.style().add_modifier.contains(Modifier::UNDERLINED), "tree line must not be underlined");
+    }
+
+    #[test]
+    fn callstack_shows_disclosure_triangles_and_indents_expanded_locals() {
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        // Window 2 tab 0 = Call Stack (the default).
+        panel.snapshot.stack = vec![
+            "#0  fn@004a00  ret=004a35  args=2".into(),
+            "#1  fn@005000  ret=005035  args=0".into(),
+        ];
+        panel.expanded_frames = std::collections::HashSet::from([0usize]);
+        panel.snapshot.frame_details = std::collections::HashMap::from([
+            (0usize, vec!["local0 = 0x0001  (1)".to_string()]),
+        ]);
+        state.debug = Some(panel);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        draw_debug_panel(&state, area, &mut buf);
+
+        let text = buf_text(&buf);
+        assert!(text.contains("▼"), "expanded frame gets a ▼ marker");
+        assert!(text.contains("▶"), "collapsed frame gets a ▶ marker");
+        assert!(text.contains("local0 = 0x0001  (1)"), "expanded frame's locals appear");
+
+        // The frame text draws at content.x + 2 (past the "▼ " marker); its first
+        // glyph is '#'. The detail row below (row 1) is indented by four spaces.
+        let [_, _, bot] = crate::debug_panel::window_rects(area);
+        let content = Rect::new(bot.x + 1, bot.y + 1, bot.width.saturating_sub(2), bot.height.saturating_sub(2));
+        assert_eq!(buf.cell((content.x + 2, content.y)).unwrap().symbol(), "#");
+        assert_eq!(buf.cell((content.x, content.y)).unwrap().symbol(), "▼");
+        // Detail row (row 1) indented: first four cells blank, then the local.
+        assert_eq!(buf.cell((content.x + 4, content.y + 1)).unwrap().symbol(), "l");
     }
 
     #[test]

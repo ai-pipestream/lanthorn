@@ -1081,10 +1081,9 @@ impl Debugger for GameSession {
         }
         let mut out = Vec::with_capacity(st.frames.len());
         for (i, f) in st.frames.iter().enumerate() {
-            let locals: Vec<String> = f.locals.iter().map(|w| format!("{:04x}", w)).collect();
             out.push(format!(
-                "#{i}  fn@{:06x}  ret={:06x}  args={}  locals=[{}]",
-                f.func_addr, f.return_pc, f.arg_count, locals.join(",")
+                "#{i}  fn@{:06x}  ret={:06x}  args={}",
+                f.func_addr, f.return_pc, f.arg_count
             ));
         }
         out
@@ -1210,6 +1209,16 @@ impl Debugger for GameSession {
         }
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
+    }
+
+    fn frame_locals(&self, idx: usize) -> Vec<String> {
+        match self.machine.state.frames.get(idx) {
+            None => vec!["(no frame)".to_string()],
+            Some(f) if f.locals.is_empty() => vec!["(no locals)".to_string()],
+            Some(f) => f.locals.iter().enumerate()
+                .map(|(i, w)| format!("local{i} = 0x{:04x}  ({})", w, *w as i16))
+                .collect(),
+        }
     }
 
     fn var_value(&self, var: u8) -> Option<u16> {
