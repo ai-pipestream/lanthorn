@@ -1190,15 +1190,23 @@ impl Debugger for GameSession {
             let list: Vec<String> = attrs.iter().map(|a| a.to_string()).collect();
             out.push(format!("attrs: {}", list.join(", ")));
         }
+        // Walk the property table. Properties are stored strictly descending
+        // and there are at most 63, so a valid walk is short. A corrupt object
+        // (e.g. one the table-bound heuristic mis-identified) could otherwise
+        // make get_next_prop cycle or not descend — guard both ways so the
+        // debugger never hangs expanding a bad object.
         let mut prop = zvm::objects::get_next_prop(mem, obj, 0);
-        while prop != 0 {
+        for _ in 0..64 {
+            if prop == 0 { break; }
             let addr = zvm::objects::get_prop_addr(mem, obj, prop);
             let len = zvm::objects::get_prop_len(mem, addr);
             let bytes: Vec<String> = (0..len as u32)
                 .map(|i| format!("{:02x}", mem.read_byte(addr as u32 + i)))
                 .collect();
             out.push(format!("  prop {}: {}", prop, bytes.join(" ")));
-            prop = zvm::objects::get_next_prop(mem, obj, prop);
+            let next = zvm::objects::get_next_prop(mem, obj, prop);
+            if next >= prop { break; } // must strictly descend; else corrupt
+            prop = next;
         }
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out

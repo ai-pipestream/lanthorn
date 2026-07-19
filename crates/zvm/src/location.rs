@@ -403,27 +403,31 @@ pub fn object_tree_view(machine: &Machine) -> Vec<ObjectSnapshot> {
 
 /// Infer the maximum valid object number from the object table layout.
 ///
-/// Scans entries starting from 1.  Stops when an entry's property-table pointer
-/// points into or before the object-entries region (a sign we've run off the end
-/// of the real table), or when the pointer is zero.  Capped at 2000 to guard
-/// against pathological data.
+/// Object entries are stored contiguously and are immediately followed by the
+/// property tables, so the LOWEST property-table pointer marks the end of the
+/// entries region. We track that minimum as we scan and stop once an entry
+/// would extend into (or past) it — the bytes there are property data that
+/// merely resemble another entry. (The previous "pointer looks plausible"
+/// check had no such bound, so it walked straight into the property tables and
+/// over-counted, surfacing garbage objects with corrupt names.) Capped at 2000
+/// to guard against pathological data.
 fn max_object_number(mem: &crate::memory::Memory) -> u16 {
     let version = mem.version();
     let base = entries_base(mem);
     let esize = entry_size(version);
+    let prop_ptr_offset = prop_table_ptr_offset(version);
 
+    let mut min_ptbl = u32::MAX;
     let mut n: u16 = 0;
     for candidate in 1u16..=2000 {
         // Address of this candidate's entry.
         let entry_addr = base + (candidate as u32 - 1) * esize;
-        // Stop if this entry would extend past the end of the story file: a
-        // malformed or over-counted table can run off the end, and the
-        // property-pointer word we read below must itself be in bounds.
-        if (entry_addr + esize) as usize > mem.len() {
+        // Stop if this entry would run past the end of the story file, or into
+        // the first property table (the end of the real entries region).
+        if (entry_addr + esize) as usize > mem.len() || entry_addr + esize > min_ptbl {
             break;
         }
         // Property-table pointer is the last word of the entry.
-        let prop_ptr_offset = prop_table_ptr_offset(version);
         let ptbl_addr = mem.read_word(entry_addr + prop_ptr_offset) as u32;
 
         // A valid property-table pointer is nonzero, points after this entry,
@@ -433,6 +437,7 @@ fn max_object_number(mem: &crate::memory::Memory) -> u16 {
         if ptbl_addr == 0 || ptbl_addr <= entry_addr || ptbl_addr as usize >= mem.len() {
             break;
         }
+        min_ptbl = min_ptbl.min(ptbl_addr);
         n = candidate;
     }
     n
@@ -889,5 +894,22 @@ mod tests {
         }
         let loc = current_location(&machine);
         assert!(loc.is_some(), "minizork: expected a location from global 0, got None");
+    }
+    #[test]
+    fn minizork_object_table_stops_at_the_real_end_no_garbage() {
+        // Regression: the object-entry scan used to walk past the real table into
+        // the property-table data and over-count, surfacing garbage objects with
+        // corrupt names. Bounded by the lowest property-table pointer, minizork
+        // has exactly 179 objects; the last is "pseudo" (the pseudo-object), not
+        // a garbage-named phantom.
+        let Some(story) = crate::fixtures::load("minizork.z3") else {
+            return; // fixture absent — skip
+        };
+        let mem = Memory::new(story).unwrap();
+        let machine = Machine::new(mem);
+        let tree = object_tree_view(&machine);
+        assert_eq!(tree.len(), 179, "minizork has 179 real objects");
+        assert_eq!(tree.first().map(|s| s.name.as_str()), Some("forest"));
+        assert_eq!(tree.last().map(|s| s.name.as_str()), Some("pseudo"));
     }
 }
