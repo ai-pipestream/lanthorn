@@ -6,9 +6,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use crate::debug_panel::{self, DebugPanelState, Section, WINDOW_TABS};
+use crate::debug_panel::{self, DebugPanelState, HoverTip, Section, WINDOW_TABS};
 use crate::render::draw_str_clipped;
-use crate::render::paneframe::draw_pane_frame;
+use crate::render::paneframe::{draw_pane_frame, BorderStyle};
 use crate::state::AppState;
 
 /// Redraw the char ranges `clickable_spans` reports within `line` with the
@@ -170,12 +170,46 @@ fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
     }
 }
 
+/// Draw the floating variable-value tooltip on top of the windows. Preferred
+/// position is just below the hovered token; the box is clamped inside `area`
+/// (shifted left / flipped above as needed) and simply skipped if `area` is too
+/// small to hold it (never panics).
+fn draw_tooltip(buf: &mut Buffer, area: Rect, tip: &HoverTip, state: &AppState) {
+    let inner = tip.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+    let w = inner + 2; // + borders
+    let h = tip.lines.len() as u16 + 2;
+    if area.width < w || area.height < h { return; }
+
+    // Preferred: just below the token; clamp into `area`.
+    let mut x = tip.col;
+    let mut y = tip.row + 1;
+    if x + w > area.right() { x = area.right().saturating_sub(w); }
+    if y + h > area.bottom() { y = tip.row.saturating_sub(h); } // flip above
+    x = x.max(area.x);
+    y = y.max(area.y);
+
+    let box_rect = Rect::new(x, y, w, h);
+    let style = state.colors.debug_tooltip;
+    // Fill the interior so it reads as a solid box over the disasm, then frame
+    // and text over it.
+    let pad: String = " ".repeat(inner as usize);
+    for i in 0..tip.lines.len() as u16 {
+        draw_str_clipped(buf, x + 1, y + 1 + i, &pad, style, box_rect);
+    }
+    draw_pane_frame(buf, box_rect, BorderStyle::Single, &state.colors.dialog_glyphs, style);
+    for (i, line) in tip.lines.iter().enumerate() {
+        draw_str_clipped(buf, x + 1, y + 1 + i as u16, line, style, box_rect);
+    }
+}
+
 pub fn draw_debug_panel(state: &AppState, area: Rect, buf: &mut Buffer) {
     let Some(panel) = &state.debug else { return };
     let windows = debug_panel::window_rects(area);
     for (i, w) in windows.iter().enumerate() {
         draw_window(buf, *w, i, panel, state);
     }
+    // Tooltip paints on top of the windows.
+    if let Some(tip) = &panel.hover { draw_tooltip(buf, area, tip, state); }
 }
 
 #[cfg(test)]
@@ -314,5 +348,44 @@ mod tests {
         let cell = buf.cell((content.x + 2, content.y)).unwrap(); // past "▼ "
         assert_eq!(cell.symbol(), "[");
         assert!(!cell.style().add_modifier.contains(Modifier::UNDERLINED), "tree line must not be underlined");
+    }
+
+    #[test]
+    fn draws_the_hover_tooltip_value_text() {
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        panel.pc = 0x1000;
+        panel.snapshot.disasm = vec!["001000  loadw g0f -> sp".into()];
+        panel.hover = Some(crate::debug_panel::HoverTip::for_var(0x1f, Some(0x1234), 5, 5));
+        state.debug = Some(panel);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        draw_debug_panel(&state, area, &mut buf);
+
+        let text = buf_text(&buf);
+        assert!(text.contains("g0f = 0x1234"), "tooltip value text is painted");
+    }
+
+    #[test]
+    fn hover_tooltip_clamps_at_the_bottom_right_corner_without_panicking() {
+        let state = crate::state::AppState::default();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        // Anchor at the very bottom-right corner: the box must flip/shift inside
+        // `area` rather than draw out of bounds and panic.
+        let tip = crate::debug_panel::HoverTip::for_var(0x1f, Some(0x1234), area.right() - 1, area.bottom() - 1);
+        draw_tooltip(&mut buf, area, &tip, &state);
+        assert!(buf_text(&buf).contains("g0f = 0x1234"), "clamped tooltip still paints");
+    }
+
+    #[test]
+    fn hover_tooltip_skips_a_too_small_area_without_panicking() {
+        let state = crate::state::AppState::default();
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::empty(area);
+        let tip = crate::debug_panel::HoverTip::for_var(0x1f, Some(0x1234), 0, 0);
+        draw_tooltip(&mut buf, area, &tip, &state); // must not panic
     }
 }

@@ -1635,9 +1635,10 @@ fn main() {
                                             ClickTarget::Code(a)   => p.goto(a, dbg),
                                             ClickTarget::Memory(a) => p.goto_memory(a, dbg),
                                             ClickTarget::Object(n) => p.goto_object(n, dbg),
-                                            ClickTarget::Global(i) => p.goto_global(i),
-                                            ClickTarget::Local(i)  => p.goto_local(i),
-                                            ClickTarget::Stack     => p.goto_stack(),
+                                            // Variables are hover-only now (see the
+                                            // `Moved` arm); `clickable_at` no longer
+                                            // returns them, but the match must cover them.
+                                            ClickTarget::Global(_) | ClickTarget::Local(_) | ClickTarget::Stack => {}
                                         }
                                     }
                                     state.focus = Focus::Map;
@@ -1662,6 +1663,25 @@ fn main() {
                             } else if let Some(i) = over {
                                 if let Some(p) = state.debug.as_mut() { p.focus_window(i); }
                                 state.focus = Focus::Map;
+                            }
+                            continue;
+                        }
+                        MouseEventKind::Moved => {
+                            // Hovering a variable operand (`gNN`/`localN`/`sp`) in
+                            // the Disassembly shows a floating value tooltip at the
+                            // cursor; moving off clears it. Borrows don't overlap:
+                            // `as_ref` for the hit-test, then `session.debugger()`,
+                            // then `as_mut`.
+                            let hv = state.debug.as_ref()
+                                .and_then(|p| app::debug_panel::hover_var_at(region, p, m.column, m.row));
+                            match hv {
+                                Some((var, acol, arow)) => {
+                                    let value = session.debugger().and_then(|dbg| dbg.var_value(var));
+                                    if let Some(p) = state.debug.as_mut() {
+                                        p.hover = Some(app::debug_panel::HoverTip::for_var(var, value, acol, arow));
+                                    }
+                                }
+                                None => { if let Some(p) = state.debug.as_mut() { p.hover = None; } }
                             }
                             continue;
                         }

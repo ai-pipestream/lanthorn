@@ -229,6 +229,7 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "debug_tab",
     "debug_tab:active",
     "debug_exec_mark",
+    "debug_tooltip",
     "hotkey:key",
     "dialog:button",
     "dialog:button:active",
@@ -279,6 +280,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ("Debug", &[
         "debug_pane", "debug_pane:focused", "debug_title",
         "debug_disasm_pc", "debug_tab", "debug_tab:active", "debug_exec_mark",
+        "debug_tooltip",
     ]),
     ("Upper window", &["room_panel", "upper_window", "upper_window_border"]),
     ("Sound", &["sound_beep_high", "sound_beep_low"]),
@@ -337,6 +339,7 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "debug_tab"            => cs.debug_tab,
         "debug_tab:active"     => cs.debug_tab_active,
         "debug_exec_mark"      => cs.debug_exec_mark,
+        "debug_tooltip"        => cs.debug_tooltip,
         "hotkey:key"           => cs.hotkey_key,
         "dialog:button"        => cs.dialog_button,
         "dialog:button:active" => cs.dialog_button_active,
@@ -578,6 +581,7 @@ pub fn apply_color_decls(
             "debug_tab"            => cs.debug_tab = cs.debug_tab.patch(style),
             "debug_tab:active"     => cs.debug_tab_active = cs.debug_tab_active.patch(style),
             "debug_exec_mark"      => cs.debug_exec_mark = cs.debug_exec_mark.patch(style),
+            "debug_tooltip"        => cs.debug_tooltip = cs.debug_tooltip.patch(style),
             "hotkey:key"           => cs.hotkey_key = cs.hotkey_key.patch(style),
             "dialog:button"        => cs.dialog_button = cs.dialog_button.patch(style),
             "dialog:button:active" => cs.dialog_button_active = cs.dialog_button_active.patch(style),
@@ -1504,6 +1508,7 @@ pub fn write_style_full(
     doc.colors.selectors.insert("debug_tab".to_string(),            style_to_decl(&cs.debug_tab));
     doc.colors.selectors.insert("debug_tab:active".to_string(),     style_to_decl(&cs.debug_tab_active));
     doc.colors.selectors.insert("debug_exec_mark".to_string(),      style_to_decl(&cs.debug_exec_mark));
+    doc.colors.selectors.insert("debug_tooltip".to_string(),        style_to_decl(&cs.debug_tooltip));
     doc.colors.selectors.insert("hotkey:key".to_string(),           style_to_decl(&cs.hotkey_key));
     doc.colors.selectors.insert("dialog:button".to_string(),        style_to_decl(&cs.dialog_button));
     doc.colors.selectors.insert("dialog:button:active".to_string(), style_to_decl(&cs.dialog_button_active));
@@ -2569,6 +2574,7 @@ box_style = "rounded"
         let _ = style_for_selector(&cs, "debug_tab");
         let _ = style_for_selector(&cs, "debug_tab:active");
         let _ = style_for_selector(&cs, "debug_exec_mark");
+        let _ = style_for_selector(&cs, "debug_tooltip");
         // registry lists them (so the style editor shows them)
         assert!(SELECTOR_FIELDS.contains(&"debug_pane"));
         assert!(SELECTOR_FIELDS.contains(&"debug_pane:focused"));
@@ -2577,6 +2583,7 @@ box_style = "rounded"
         assert!(SELECTOR_FIELDS.contains(&"debug_tab"));
         assert!(SELECTOR_FIELDS.contains(&"debug_tab:active"));
         assert!(SELECTOR_FIELDS.contains(&"debug_exec_mark"));
+        assert!(SELECTOR_FIELDS.contains(&"debug_tooltip"));
     }
 
     #[test]

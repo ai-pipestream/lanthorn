@@ -82,6 +82,28 @@ impl DebugSnapshot {
     }
 }
 
+/// A floating value tooltip: the screen anchor (the hovered token's start col
+/// and its row) plus the formatted lines to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverTip { pub col: u16, pub row: u16, pub lines: Vec<String> }
+
+impl HoverTip {
+    /// Build the tooltip for variable `var` with current value `value`
+    /// (`None` = unavailable, e.g. a local with no frame). `col`/`row` anchor it.
+    pub fn for_var(var: u8, value: Option<u16>, col: u16, row: u16) -> Self {
+        let label = match var {
+            0 => "sp".to_string(),
+            1..=15 => format!("local{}", var - 1),
+            n => format!("g{:02x}", n - 16),
+        };
+        let lines = match value {
+            Some(v) => vec![format!("{label} = 0x{v:04x}"), format!("{v} / {}", v as i16)],
+            None => vec![format!("{label} = (n/a)")],
+        };
+        HoverTip { col, row, lines }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DebugPanelState {
     /// Focused window: 0 = left, 1 = right-top, 2 = right-bottom.
@@ -103,6 +125,9 @@ pub struct DebugPanelState {
     /// Live PC (for disasm PC-follow + highlight).
     pub pc: u32,
     pub snapshot: DebugSnapshot,
+    /// Floating value tooltip for the variable operand under the mouse (set by
+    /// the `Moved` handler, cleared on move-off and on each per-turn `refresh`).
+    pub hover: Option<HoverTip>,
 }
 
 /// Result of a keypress.
@@ -122,6 +147,7 @@ impl DebugPanelState {
             viewport: 1,
             pc,
             snapshot: DebugSnapshot::default(),
+            hover: None,
         }
     }
 
@@ -135,6 +161,9 @@ impl DebugPanelState {
     /// executing instruction is always at the top of the Disassembly tab
     /// after a turn.
     pub fn refresh(&mut self, dbg: &dyn Debugger) {
+        // A new turn re-anchors the disassembly, so a stale tooltip (anchored to
+        // last turn's rows) must not linger.
+        self.hover = None;
         self.pc = dbg.pc();
         self.disasm_addr = self.pc;
         self.snapshot.disasm = dbg.disassemble(self.disasm_addr, DISASM_WINDOW);
@@ -355,13 +384,6 @@ impl DebugPanelState {
             self.scroll[1] = idx;
         }
     }
-
-    /// Focus the Globals tab (window 0) and scroll to global index `idx`.
-    pub fn goto_global(&mut self, idx: u8) { self.focus = 0; self.tab[0] = 1; self.scroll[0] = idx as usize; }
-    /// Focus the Locals tab (window 1) and scroll to local index `idx`.
-    pub fn goto_local(&mut self, idx: u8) { self.focus = 1; self.tab[1] = 0; self.scroll[1] = idx as usize; }
-    /// Focus the Stack (eval) tab (window 2).
-    pub fn goto_stack(&mut self) { self.focus = 2; self.tab[2] = 1; }
 }
 
 // ── Geometry (pure; shared by render and mouse hit-testing) ───────────────────
@@ -479,7 +501,13 @@ pub enum ClickTarget {
 /// shared by the render-underline pass and the mouse hit-test so they never drift.
 pub fn clickable_spans(section: Section, line: &str) -> Vec<(core::ops::Range<usize>, ClickTarget)> {
     match section {
-        Section::Disasm => classify_disasm_tokens(line),
+        // Variables (`gNN`/`localN`/`sp`) are NOT clickable — they show a hover
+        // tooltip instead (see `hover_var_at`). Only memory/object/code
+        // references keep their click-jump + underline. `classify_disasm_tokens`
+        // itself still emits the variable variants for the hover path.
+        Section::Disasm => classify_disasm_tokens(line).into_iter()
+            .filter(|(_, t)| matches!(t, ClickTarget::Code(_) | ClickTarget::Memory(_) | ClickTarget::Object(_)))
+            .collect(),
         Section::CallStack => find_hex_spans(line, "fn@", 6)
             .into_iter()
             .filter(|(_, addr)| *addr != 0)
@@ -634,6 +662,48 @@ pub fn clickable_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -
             }
             _ => None,
         };
+    }
+    None
+}
+
+/// If `(col,row)` lands on a variable operand (`gNN`/`localN`/`sp`) in the
+/// Disassembly window, return its Z-machine variable number and the screen
+/// anchor (the token's start col, its row) for a tooltip. Uses the same
+/// window_rects / content-inset / disasm_rows math as clickable_at so it
+/// never drifts. Runs `classify_disasm_tokens` (not the filtered
+/// `clickable_spans`, which drops variables) to find the variable spans.
+pub fn hover_var_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -> Option<(u8, u16, u16)> {
+    let windows = window_rects(region);
+    for (w, window_rect) in windows.iter().enumerate() {
+        if col < window_rect.x || col >= window_rect.right()
+            || row < window_rect.y || row >= window_rect.bottom() {
+            continue;
+        }
+        let content = Rect::new(
+            window_rect.x + 1, window_rect.y + 1,
+            window_rect.width.saturating_sub(2), window_rect.height.saturating_sub(2),
+        );
+        if col < content.x || col >= content.right() || row < content.y || row >= content.bottom() {
+            return None;
+        }
+        if w != 0 || panel.active_section(0) != Section::Disasm {
+            return None;
+        }
+        let r = (row - content.y) as usize;
+        let rows = disasm_rows(&panel.snapshot.disasm, panel.pc, content.height as usize);
+        let row_entry = rows.get(r)?;
+        if row_entry.divider { return None; }
+        let line = panel.snapshot.disasm.get(row_entry.line_idx)?;
+        let off = (col.checked_sub(content.x + 1))? as usize;
+        let (range, target) = classify_disasm_tokens(line).into_iter()
+            .find(|(range, _)| range.contains(&off))?;
+        let var = match target {
+            ClickTarget::Stack => 0,
+            ClickTarget::Local(i) => i + 1,
+            ClickTarget::Global(i) => i + 16,
+            _ => return None,
+        };
+        return Some((var, content.x + 1 + range.start as u16, row));
     }
     None
 }
@@ -918,16 +988,14 @@ mod tests {
         let line = "004a2f  loadw @0x001234, g0f -> local2  ?0x004b00";
         let spans = clickable_spans(Section::Disasm, line);
         let targets: Vec<ClickTarget> = spans.iter().map(|(_, t)| *t).collect();
+        // Variables (`g0f`, `local2`) are filtered out of the clickable set —
+        // they're hover-only now; only memory and code references remain, in order.
         assert_eq!(targets, vec![
             ClickTarget::Memory(0x1234),
-            ClickTarget::Global(0x0f),
-            ClickTarget::Local(2),
             ClickTarget::Code(0x4b00),
         ]);
         assert_eq!(&line[spans[0].0.clone()], "@0x001234");
-        assert_eq!(&line[spans[1].0.clone()], "g0f");
-        assert_eq!(&line[spans[2].0.clone()], "local2");
-        assert_eq!(&line[spans[3].0.clone()], "0x004b00"); // span skips the `?`
+        assert_eq!(&line[spans[1].0.clone()], "0x004b00"); // span skips the `?`
     }
 
     #[test]
@@ -936,10 +1004,10 @@ mod tests {
         let spans = clickable_spans(Section::Disasm, line);
         let targets: Vec<ClickTarget> = spans.iter().map(|(_, t)| *t).collect();
         // Whole-token classification: `get_prop` must NOT false-match a `g..`
-        // global or an embedded `0x`; exactly Object(5) then Stack.
-        assert_eq!(targets, vec![ClickTarget::Object(5), ClickTarget::Stack]);
+        // global or an embedded `0x`. The `sp` operand is a variable, so it's
+        // filtered out of the clickable set — only Object(5) remains.
+        assert_eq!(targets, vec![ClickTarget::Object(5)]);
         assert_eq!(&line[spans[0].0.clone()], "obj#5");
-        assert_eq!(&line[spans[1].0.clone()], "sp");
     }
 
     #[test]
@@ -996,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn clickable_at_resolves_memory_and_global_clicks_in_disasm() {
+    fn clickable_at_resolves_memory_but_not_variable_clicks_in_disasm() {
         let region = Rect::new(0, 0, 61, 40);
         let mut p = DebugPanelState::new(0x1000);
         p.pc = 0x1000;
@@ -1011,8 +1079,9 @@ mod tests {
         let line = &p.snapshot.disasm[0];
         let mem_col = content.x + 1 + line.find("@0x").unwrap() as u16;
         assert_eq!(clickable_at(region, &p, mem_col, row_y), Some(ClickTarget::Memory(0x1234)));
+        // A variable operand is no longer clickable — it's hover-only.
         let g_col = content.x + 1 + line.find("g0f").unwrap() as u16;
-        assert_eq!(clickable_at(region, &p, g_col, row_y), Some(ClickTarget::Global(0x0f)));
+        assert_eq!(clickable_at(region, &p, g_col, row_y), None);
     }
 
     #[test]
@@ -1264,31 +1333,82 @@ mod tests {
         assert_eq!(p.scroll[1], 1, "object [2]'s display row is index 1");
     }
 
-    #[test]
-    fn goto_global_focuses_the_globals_tab_and_scrolls_to_the_index() {
+    // ── Variable hover tooltips ─────────────────────────────────────────────
+
+    /// Build a Disasm-focused panel with a single known line at the PC divider's
+    /// row, using the same Rect the `clickable_at` tests use. Returns the panel,
+    /// the content rect, and the row_y of the disasm line (row 1, under the
+    /// divider at row 0).
+    fn hover_panel(line: &str) -> (DebugPanelState, Rect, Rect, u16) {
+        // Wide enough that every operand of the test lines fits the left window.
+        let region = Rect::new(0, 0, 120, 40);
         let mut p = DebugPanelState::new(0x1000);
-        p.goto_global(0x0f);
-        assert_eq!(p.focus, 0);
-        assert_eq!(p.tab[0], 1, "Globals is WINDOW_TABS[0][1]");
-        assert_eq!(p.scroll[0], 0x0f);
+        p.pc = 0x1000;
+        p.snapshot.disasm = vec![line.to_string(), "001004  add".to_string()];
+        let [left, ..] = window_rects(region);
+        let content = Rect::new(left.x + 1, left.y + 1, left.width.saturating_sub(2), left.height.saturating_sub(2));
+        let row_y = content.y + 1; // row 0 is the PC divider; row 1 is line 0
+        (p, region, content, row_y)
     }
 
     #[test]
-    fn goto_local_focuses_the_locals_tab_and_scrolls_to_the_index() {
-        let mut p = DebugPanelState::new(0x1000);
-        p.focus = 2;
-        p.goto_local(3);
-        assert_eq!(p.focus, 1);
-        assert_eq!(p.tab[1], 0, "Locals is WINDOW_TABS[1][0]");
-        assert_eq!(p.scroll[1], 3);
+    fn hover_var_at_resolves_global_local_and_stack_operands() {
+        let line = "001000  loadw g0f, local0 -> sp";
+        let (p, region, content, row_y) = hover_panel(line);
+        // g0f (global index 0x0f) → var 0x0f + 16 = 0x1f (31).
+        let g_col = content.x + 1 + line.find("g0f").unwrap() as u16;
+        assert_eq!(hover_var_at(region, &p, g_col, row_y), Some((0x1f, g_col, row_y)));
+        // local0 → var 1.
+        let l_col = content.x + 1 + line.find("local0").unwrap() as u16;
+        assert_eq!(hover_var_at(region, &p, l_col, row_y), Some((1, l_col, row_y)));
+        // sp → var 0.
+        let sp_col = content.x + 1 + line.rfind("sp").unwrap() as u16;
+        assert_eq!(hover_var_at(region, &p, sp_col, row_y), Some((0, sp_col, row_y)));
     }
 
     #[test]
-    fn goto_stack_focuses_the_eval_stack_tab() {
-        let mut p = DebugPanelState::new(0x1000);
-        p.goto_stack();
-        assert_eq!(p.focus, 2);
-        assert_eq!(p.tab[2], 1, "EvalStack is WINDOW_TABS[2][1]");
-        assert_eq!(p.active_section(2), Section::EvalStack);
+    fn hover_var_at_returns_none_over_non_variable_tokens() {
+        let line = "001000  storew @0x001234, obj#5 -> #01";
+        let (p, region, content, row_y) = hover_panel(line);
+        let mem_col = content.x + 1 + line.find("@0x").unwrap() as u16;
+        assert_eq!(hover_var_at(region, &p, mem_col, row_y), None);
+        let obj_col = content.x + 1 + line.find("obj#").unwrap() as u16;
+        assert_eq!(hover_var_at(region, &p, obj_col, row_y), None);
+        let const_col = content.x + 1 + line.find("#01").unwrap() as u16;
+        assert_eq!(hover_var_at(region, &p, const_col, row_y), None);
+    }
+
+    #[test]
+    fn hover_var_at_returns_none_outside_window_0() {
+        let line = "001000  loadw g0f -> sp";
+        let (p, region, _content, row_y) = hover_panel(line);
+        // Far right (window 1/2 territory) is not the Disasm window.
+        let [_, top, _] = window_rects(region);
+        assert_eq!(hover_var_at(region, &p, top.x + 3, row_y), None);
+    }
+
+    #[test]
+    fn hover_tip_for_var_formats_hex_signed_and_na() {
+        // var 0x1f = global index 0x0f → label "g0f"; value 0x1234 = 4660.
+        let tip = HoverTip::for_var(0x1f, Some(0x1234), 5, 7);
+        assert_eq!(tip.lines, vec!["g0f = 0x1234".to_string(), "4660 / 4660".to_string()]);
+        assert_eq!((tip.col, tip.row), (5, 7));
+        // Signed rendering: 0xffff → -1.
+        let neg = HoverTip::for_var(1, Some(0xffff), 0, 0);
+        assert_eq!(neg.lines, vec!["local0 = 0xffff".to_string(), "65535 / -1".to_string()]);
+        // Unavailable value.
+        let na = HoverTip::for_var(0, None, 0, 0);
+        assert_eq!(na.lines, vec!["sp = (n/a)".to_string()]);
+    }
+
+    #[test]
+    fn clickable_spans_drops_variable_targets_in_disasm() {
+        let line = "004a2f  loadw @0x001234, g0f, local2, sp  ?0x004b00";
+        let spans = clickable_spans(Section::Disasm, line);
+        let targets: Vec<ClickTarget> = spans.iter().map(|(_, t)| *t).collect();
+        // Only memory/object/code survive; g0f/local2/sp are gone.
+        assert_eq!(targets, vec![ClickTarget::Memory(0x1234), ClickTarget::Code(0x4b00)]);
+        assert!(!targets.iter().any(|t| matches!(t,
+            ClickTarget::Global(_) | ClickTarget::Local(_) | ClickTarget::Stack)));
     }
 }
