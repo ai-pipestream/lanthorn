@@ -5,7 +5,7 @@
 //! `units`/`routines`) lands in later tasks.
 
 use crate::cpu::decode::{decode, Operand, OperandCount};
-use crate::cpu::disasm::Unpack;
+use crate::cpu::disasm::{format_instr, format_instr_basic, format_instr_raw, Unpack};
 use crate::memory::Memory;
 use std::collections::{BTreeSet, HashSet};
 
@@ -214,6 +214,64 @@ impl DisasmCache {
         } else {
             self.units[0].addr()
         }
+    }
+
+    /// Format up to `lines` display rows starting at the unit at/after `addr`.
+    ///
+    /// Rendering always begins at the containing unit's own start (the whole
+    /// unit is drawn even if `addr` falls mid-unit), and walks forward emitting
+    /// rows until `lines` rows are produced or the units are exhausted. Instr
+    /// units decode on demand and match the three legacy `disasm` formatters
+    /// byte-for-byte; a `Data` run emits one `.byte` row per 16 bytes, each row
+    /// counting as one line (so a large run can fill the window and stop
+    /// mid-run).
+    pub fn disassemble(&self, mem: &Memory, addr: u32, lines: usize, fmt: CacheFmt) -> Vec<String> {
+        let mut out = Vec::with_capacity(lines);
+        if self.units.is_empty() || lines == 0 {
+            return out;
+        }
+        let mut i = self.unit_index_at(addr);
+        while i < self.units.len() && out.len() < lines {
+            match self.units[i] {
+                Unit::Instr { addr, .. } => {
+                    let instr = decode(mem, addr, self.version);
+                    let row = match fmt {
+                        CacheFmt::Full => {
+                            format!("{:06x}  {}", addr, format_instr(&instr, &self.unpack))
+                        }
+                        CacheFmt::Basic => {
+                            format!("{:06x}  {}", addr, format_instr_basic(&instr, self.version))
+                        }
+                        CacheFmt::Raw => {
+                            let end = instr.next_pc.min(mem.len() as u32);
+                            let n = end.saturating_sub(addr).min(12);
+                            let truncated = end.saturating_sub(addr) > 12;
+                            let bytes: Vec<u8> = (0..n).map(|k| mem.read_byte(addr + k)).collect();
+                            format!("{:06x}: {}", addr, format_instr_raw(&instr, &bytes, truncated))
+                        }
+                    };
+                    out.push(row);
+                }
+                Unit::RoutineHeader { addr, nlocals, .. } => {
+                    out.push(format!("{:06x}  ; routine, {} locals", addr, nlocals));
+                }
+                Unit::Data { addr, len } => {
+                    let end = addr + len;
+                    let mut row_addr = addr;
+                    while row_addr < end && out.len() < lines {
+                        let row_end = (row_addr + 16).min(end);
+                        let hexbytes = (row_addr..row_end)
+                            .map(|a| format!("{:02x}", mem.read_byte(a)))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        out.push(format!("{:06x}  .byte {}", row_addr, hexbytes));
+                        row_addr += 16;
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
     }
 }
 
@@ -689,5 +747,126 @@ mod tests {
         }
         assert_eq!(u[0].addr(), rstart);
         assert_eq!(u.last().unwrap().end(), rend);
+    }
+
+    #[test]
+    fn disassemble_full_matches_legacy_for_a_real_instruction() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let initial_pc = mem.read_word(0x06) as u32;
+        let cache = DisasmCache::build(&mem);
+        assert_eq!(
+            cache.disassemble(&mem, initial_pc, 1, CacheFmt::Full)[0],
+            crate::cpu::disasm::disassemble(&mem, initial_pc, mem.version(), 1)[0]
+        );
+    }
+
+    #[test]
+    fn disassemble_basic_and_raw_match_legacy_for_a_real_instruction() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let initial_pc = mem.read_word(0x06) as u32;
+        let cache = DisasmCache::build(&mem);
+        assert_eq!(
+            cache.disassemble(&mem, initial_pc, 1, CacheFmt::Basic)[0],
+            crate::cpu::disasm::disassemble_basic(&mem, initial_pc, mem.version(), 1)[0]
+        );
+        assert_eq!(
+            cache.disassemble(&mem, initial_pc, 1, CacheFmt::Raw)[0],
+            crate::cpu::disasm::disassemble_raw(&mem, initial_pc, mem.version(), 1)[0]
+        );
+    }
+
+    #[test]
+    fn disassemble_renders_data_as_bytes_never_an_instruction() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let cache = DisasmCache::build(&mem);
+        let Some(data) = cache.units().iter().find(|u| matches!(u, Unit::Data { .. })) else {
+            eprintln!("skipping: no Data unit in minizork.z3");
+            return;
+        };
+        let row = &cache.disassemble(&mem, data.addr(), 1, CacheFmt::Full)[0];
+        let prefix = format!("{:06x}  ", data.addr());
+        assert!(row.starts_with(&prefix), "addr prefix mismatch: {row:?}");
+        assert!(
+            row[prefix.len()..].starts_with(".byte "),
+            "data row must render as .byte, not an instruction: {row:?}"
+        );
+    }
+
+    #[test]
+    fn disassemble_renders_routine_header_as_a_marker() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let cache = DisasmCache::build(&mem);
+        let Some(&Unit::RoutineHeader { addr, nlocals, .. }) =
+            cache.units().iter().find(|u| matches!(u, Unit::RoutineHeader { .. }))
+        else {
+            eprintln!("skipping: no RoutineHeader unit in minizork.z3");
+            return;
+        };
+        let row = &cache.disassemble(&mem, addr, 1, CacheFmt::Full)[0];
+        assert!(row.contains("; routine,"), "got {row:?}");
+        assert!(row.contains(&format!("{} locals", nlocals)), "got {row:?}");
+    }
+
+    #[test]
+    fn disassemble_caps_lines_and_never_over_reads() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let (rstart, _rend) = code_region(&mem);
+        let cache = DisasmCache::build(&mem);
+        assert!(cache.disassemble(&mem, rstart, 5, CacheFmt::Full).len() <= 5);
+        // Requesting far more lines than remain stops cleanly (no panic, bounded).
+        let last = cache.units().last().unwrap().addr();
+        let rows = cache.disassemble(&mem, last, 1000, CacheFmt::Full);
+        assert!(rows.len() <= 1000);
+    }
+
+    #[test]
+    fn disassemble_multi_row_data_steps_by_16_and_stops_mid_run() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let cache = DisasmCache::build(&mem);
+        let Some(&Unit::Data { addr, len }) = cache
+            .units()
+            .iter()
+            .find(|u| matches!(u, Unit::Data { len, .. } if *len > 16))
+        else {
+            eprintln!("skipping: no Data unit with len > 16 in minizork.z3");
+            return;
+        };
+        let want = len.div_ceil(16) as usize;
+        let rows = cache.disassemble(&mem, addr, want, CacheFmt::Full);
+        assert!(rows.len() >= 2, "expected multiple .byte rows: {rows:?}");
+        for (k, row) in rows.iter().enumerate() {
+            assert!(row.contains(".byte "), "row {k} not a .byte row: {row:?}");
+            let expect_addr = addr + 16 * k as u32;
+            assert!(
+                row.starts_with(&format!("{:06x}  ", expect_addr)),
+                "row {k} addr should step by 16: {row:?}"
+            );
+        }
+        // lines=1 stops after a single row, mid-run.
+        assert_eq!(cache.disassemble(&mem, addr, 1, CacheFmt::Full).len(), 1);
     }
 }
