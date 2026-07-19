@@ -444,6 +444,7 @@ mod debug_dispatch_tests {
         fn prev_instr(&self, addr: u32) -> u32 { addr.saturating_sub(1) }
         fn executed_pcs(&self) -> std::collections::HashSet<u32> { std::collections::HashSet::new() }
         fn stack_lines(&self) -> Vec<String> { Vec::new() }
+        fn eval_stack_lines(&self) -> Vec<String> { Vec::new() }
         fn locals_lines(&self) -> Vec<String> { Vec::new() }
         fn globals_lines(&self) -> Vec<String> { Vec::new() }
         fn object_tree_lines(&self) -> Vec<String> { Vec::new() }

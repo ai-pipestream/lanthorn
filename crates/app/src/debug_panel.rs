@@ -20,7 +20,7 @@ pub const MEM_WINDOW: usize = 256;
 
 /// A displayable section (one tab's content).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Section { Disasm, Globals, Locals, Objects, Dict, Stack, Memory }
+pub enum Section { Disasm, Globals, Locals, Objects, Dict, CallStack, EvalStack, Memory }
 
 impl Section {
     /// Short label shown on its tab, and used as the on-screen hit target.
@@ -31,7 +31,8 @@ impl Section {
             Section::Locals => "Locals",
             Section::Objects => "Objects",
             Section::Dict => "Dictionary",
-            Section::Stack => "Stack",
+            Section::CallStack => "Call Stack",
+            Section::EvalStack => "Stack",
             Section::Memory => "Memory",
         }
     }
@@ -42,7 +43,7 @@ impl Section {
 pub const WINDOW_TABS: [&[Section]; 3] = [
     &[Section::Disasm, Section::Globals],
     &[Section::Locals, Section::Objects, Section::Dict],
-    &[Section::Stack, Section::Memory],
+    &[Section::CallStack, Section::EvalStack, Section::Memory],
 ];
 
 /// The formatted lines the render code paints, refreshed from the Debugger.
@@ -54,6 +55,7 @@ pub struct DebugSnapshot {
     pub objects: Vec<String>,
     pub dict: Vec<String>,
     pub stack: Vec<String>,
+    pub eval_stack: Vec<String>,
     pub memory: Vec<String>,
     /// Instruction start-PCs executed during the last command turn (execution-
     /// coverage marking — a `|` gutter is drawn beside these disasm lines).
@@ -69,7 +71,8 @@ impl DebugSnapshot {
             Section::Locals => &self.locals,
             Section::Objects => &self.objects,
             Section::Dict => &self.dict,
-            Section::Stack => &self.stack,
+            Section::CallStack => &self.stack,
+            Section::EvalStack => &self.eval_stack,
             Section::Memory => &self.memory,
         }
     }
@@ -128,6 +131,7 @@ impl DebugPanelState {
         self.snapshot.objects = dbg.object_tree_lines();
         self.snapshot.dict = dbg.dictionary_lines();
         self.snapshot.stack = dbg.stack_lines();
+        self.snapshot.eval_stack = dbg.eval_stack_lines();
         self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
         self.snapshot.executed = dbg.executed_pcs();
     }
@@ -238,9 +242,134 @@ impl DebugPanelState {
         self.scroll[window] = 0;
         self.focus = window;
     }
+
+    /// Navigate the disassembly to `addr` (focus the Left window's Disasm
+    /// tab). Does NOT call `refresh` — that re-anchors to the live PC, which
+    /// would instantly undo the jump. Within-turn nav, like scrolling; the
+    /// next per-turn refresh re-anchors to PC as usual.
+    pub fn goto(&mut self, addr: u32, dbg: &dyn Debugger) {
+        self.disasm_addr = addr;
+        self.focus = 0;
+        self.tab[0] = 0;
+        self.snapshot.disasm = dbg.disassemble(self.disasm_addr, DISASM_WINDOW);
+    }
 }
 
 // ── Geometry (pure; shared by render and mouse hit-testing) ───────────────────
+
+/// One screen row of the Disassembly section: either the `▼── PC ──▼` divider
+/// or a disasm line, identified by its index into the snapshot's `disasm` Vec.
+#[derive(Clone, Copy)]
+pub struct DisasmRow { pub divider: bool, pub line_idx: usize }
+
+/// The screen rows to draw for the disassembly, inserting a PC-divider row
+/// above the line at `pc`. `disasm` is the pre-windowed snapshot (index 0 =
+/// top). Shared by the renderer and the click hit-test so they never disagree
+/// on which screen row is which disasm line.
+pub fn disasm_rows(disasm: &[String], pc: u32, height: usize) -> Vec<DisasmRow> {
+    let pc_prefix = format!("{:06x}", pc);
+    let mut rows = Vec::with_capacity(height);
+    for (i, line) in disasm.iter().enumerate() {
+        if line.starts_with(&pc_prefix) && rows.len() < height {
+            rows.push(DisasmRow { divider: true, line_idx: i });
+        }
+        if rows.len() < height { rows.push(DisasmRow { divider: false, line_idx: i }); }
+        if rows.len() >= height { break; }
+    }
+    rows
+}
+
+/// Clickable code-address spans within a rendered line: the char range and the
+/// target address. v1: branch targets in Disasm (`?…0x……`) and the frame entry
+/// address in Call Stack lines (`fn@……`, non-zero). Pure; shared by the
+/// render-underline pass and the mouse hit-test so they never drift.
+pub fn clickable_spans(section: Section, line: &str) -> Vec<(core::ops::Range<usize>, u32)> {
+    match section {
+        Section::Disasm => find_hex_spans(line, "0x", 6),
+        Section::CallStack => find_hex_spans(line, "fn@", 6)
+            .into_iter()
+            .filter(|(_, addr)| *addr != 0)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Find every occurrence of `marker` followed by exactly `hex_len` hex digits,
+/// returning the char range covering `marker` + the hex digits, and the
+/// parsed address. Byte-indexed but panic-safe: a disasm line can carry
+/// embedded multi-byte story text (from `print`-family instructions) after
+/// the part we actually search, so every slice goes through `str::get`
+/// (returns `None` off a char boundary) rather than direct indexing.
+fn find_hex_spans(line: &str, marker: &str, hex_len: usize) -> Vec<(core::ops::Range<usize>, u32)> {
+    let mut out = Vec::new();
+    let mlen = marker.len();
+    let mut i = 0;
+    while i + mlen + hex_len <= line.len() {
+        if line.get(i..i + mlen) == Some(marker) {
+            let hex_start = i + mlen;
+            let hex_end = hex_start + hex_len;
+            if let Some(candidate) = line.get(hex_start..hex_end) {
+                if candidate.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    if let Ok(addr) = u32::from_str_radix(candidate, 16) {
+                        out.push((i..hex_end, addr));
+                    }
+                    i = hex_end;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Map a click at `(col, row)` inside the debug region to a jump target
+/// address, if it landed on an underlined clickable span. Uses the same
+/// `window_rects` / `disasm_rows` / scroll math the renderer uses, so it
+/// never drifts. Only Disasm (window 0, tab 0) and Call Stack (window 2, tab
+/// 0) are clickable in v1.
+pub fn clickable_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -> Option<u32> {
+    let windows = window_rects(region);
+    for (w, window_rect) in windows.iter().enumerate() {
+        if col < window_rect.x || col >= window_rect.right()
+            || row < window_rect.y || row >= window_rect.bottom() {
+            continue;
+        }
+        // Content rect: border inset by one on every side (matches
+        // `draw_pane_frame`'s frame.content for a Single/Double border).
+        let content = Rect::new(
+            window_rect.x + 1, window_rect.y + 1,
+            window_rect.width.saturating_sub(2), window_rect.height.saturating_sub(2),
+        );
+        if col < content.x || col >= content.right() || row < content.y || row >= content.bottom() {
+            return None;
+        }
+        let section = panel.active_section(w);
+        return match (w, section) {
+            (0, Section::Disasm) => {
+                let r = (row - content.y) as usize;
+                let rows = disasm_rows(&panel.snapshot.disasm, panel.pc, content.height as usize);
+                let row_entry = rows.get(r)?;
+                if row_entry.divider { return None; }
+                let line = panel.snapshot.disasm.get(row_entry.line_idx)?;
+                let off = (col.checked_sub(content.x + 1))? as usize;
+                clickable_spans(section, line).into_iter()
+                    .find(|(range, _)| range.contains(&off))
+                    .map(|(_, addr)| addr)
+            }
+            (2, Section::CallStack) => {
+                let line_idx = (row - content.y) as usize + panel.scroll[2];
+                let line = panel.snapshot.stack.get(line_idx)?;
+                let off = (col.checked_sub(content.x))? as usize;
+                clickable_spans(section, line).into_iter()
+                    .find(|(range, _)| range.contains(&off))
+                    .map(|(_, addr)| addr)
+            }
+            _ => None,
+        };
+    }
+    None
+}
 
 /// Tile `region` into the three window rects: left full-height, right column
 /// split top/bottom. Must match exactly what `render/debug_panel.rs` draws.
@@ -312,6 +441,7 @@ mod tests {
         fn prev_instr(&self, a: u32) -> u32 { a.saturating_sub(4) }
         fn executed_pcs(&self) -> std::collections::HashSet<u32> { std::collections::HashSet::new() }
         fn stack_lines(&self) -> Vec<String> { vec!["#0 main".into()] }
+        fn eval_stack_lines(&self) -> Vec<String> { vec!["[  0] 0000  (0)".into()] }
         fn locals_lines(&self) -> Vec<String> { vec!["(none)".into()] }
         fn globals_lines(&self) -> Vec<String> { (0..240).map(|i| format!("g{i:02x}")).collect() }
         fn object_tree_lines(&self) -> Vec<String> { vec!["[1] thing".into()] }
@@ -398,10 +528,10 @@ mod tests {
         let mut p = DebugPanelState::new(0x1000);
         assert_eq!(p.active_section(0), Section::Disasm);
         assert_eq!(p.active_section(1), Section::Locals);
-        assert_eq!(p.active_section(2), Section::Stack);
+        assert_eq!(p.active_section(2), Section::CallStack);
         p.tab[0] = 1;
         p.tab[1] = 2;
-        p.tab[2] = 1;
+        p.tab[2] = 2;
         assert_eq!(p.active_section(0), Section::Globals);
         assert_eq!(p.active_section(1), Section::Dict);
         assert_eq!(p.active_section(2), Section::Memory);
@@ -432,5 +562,126 @@ mod tests {
         // The first tab label starts at left.x + 1 (just inside the left border).
         let hit = tab_at(region, &p, left.x + 2, left.y);
         assert_eq!(hit, Some((0, 0)));
+    }
+
+    // ── disasm_rows (Feature B: shared row model) ──────────────────────────────
+
+    #[test]
+    fn disasm_rows_inserts_a_pc_divider_above_the_pc_line() {
+        let disasm = vec!["001000  add".to_string(), "001004  sub".to_string(), "001008  mul".to_string()];
+        let rows = disasm_rows(&disasm, 0x1004, 10);
+        assert_eq!(rows.len(), 4);
+        assert!(!rows[0].divider && rows[0].line_idx == 0);
+        assert!(rows[1].divider && rows[1].line_idx == 1);
+        assert!(!rows[2].divider && rows[2].line_idx == 1);
+        assert!(!rows[3].divider && rows[3].line_idx == 2);
+    }
+
+    #[test]
+    fn disasm_rows_caps_at_height_including_the_divider() {
+        let disasm = vec!["001000  add".to_string(), "001004  sub".to_string()];
+        let rows = disasm_rows(&disasm, 0x1000, 2);
+        // The divider consumes one of the 2 available rows, so only the PC
+        // line itself fits — not also the next disasm line.
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].divider);
+        assert!(!rows[1].divider && rows[1].line_idx == 0);
+    }
+
+    #[test]
+    fn disasm_rows_no_divider_when_pc_is_off_screen() {
+        let disasm = vec!["001000  add".to_string(), "001004  sub".to_string()];
+        let rows = disasm_rows(&disasm, 0x9999, 10);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| !r.divider));
+    }
+
+    // ── clickable_spans / clickable_at (Feature C: shared click model) ─────────
+
+    #[test]
+    fn clickable_spans_finds_a_disasm_branch_target() {
+        let line = "001000  je local0, #01 ?0x001234";
+        let spans = clickable_spans(Section::Disasm, line);
+        assert_eq!(spans.len(), 1);
+        let (range, addr) = &spans[0];
+        assert_eq!(*addr, 0x1234);
+        assert_eq!(&line[range.clone()], "0x001234");
+    }
+
+    #[test]
+    fn clickable_spans_finds_a_call_stack_frame_address_and_skips_a_zero_address() {
+        let line = "#0  fn@004a00  ret=004a35  args=2  locals=[]";
+        let spans = clickable_spans(Section::CallStack, line);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].1, 0x4a00);
+        assert_eq!(&line[spans[0].0.clone()], "fn@004a00");
+
+        let zero_line = "#0  fn@000000  ret=004a35  args=2  locals=[]";
+        assert!(clickable_spans(Section::CallStack, zero_line).is_empty());
+    }
+
+    #[test]
+    fn clickable_spans_empty_for_other_sections() {
+        assert!(clickable_spans(Section::Globals, "g00=0012").is_empty());
+    }
+
+    #[test]
+    fn clickable_at_resolves_a_branch_target_click_in_disasm() {
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        p.pc = 0x1000;
+        p.snapshot.disasm = vec![
+            "001000  je local0, #01 ?0x001234".to_string(),
+            "001004  add".to_string(),
+        ];
+        let [left, ..] = window_rects(region);
+        let content = Rect::new(left.x + 1, left.y + 1, left.width.saturating_sub(2), left.height.saturating_sub(2));
+        // Row 0 is the PC divider (line 0 IS the PC line); row 1 is line_idx 0.
+        let row_y = content.y + 1;
+        let line = &p.snapshot.disasm[0];
+        let off = line.find("0x").unwrap();
+        let col = content.x + 1 + off as u16; // +1 for the execution-mark gutter
+        let hit = clickable_at(region, &p, col, row_y);
+        assert_eq!(hit, Some(0x1234));
+    }
+
+    #[test]
+    fn clickable_at_returns_none_on_the_divider_row() {
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        p.pc = 0x1000;
+        p.snapshot.disasm = vec!["001000  add".to_string()];
+        let [left, ..] = window_rects(region);
+        let content_y = left.y + 1;
+        let hit = clickable_at(region, &p, left.x + 3, content_y);
+        assert_eq!(hit, None);
+    }
+
+    #[test]
+    fn clickable_at_resolves_a_call_stack_frame_address_click() {
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        p.snapshot.stack = vec!["#0  fn@004a00  ret=004a35  args=2  locals=[]".to_string()];
+        let [_, _, bot] = window_rects(region);
+        let content = Rect::new(bot.x + 1, bot.y + 1, bot.width.saturating_sub(2), bot.height.saturating_sub(2));
+        let line = &p.snapshot.stack[0];
+        let off = line.find("fn@").unwrap();
+        let col = content.x + off as u16;
+        let hit = clickable_at(region, &p, col, content.y);
+        assert_eq!(hit, Some(0x4a00));
+    }
+
+    #[test]
+    fn goto_navigates_disasm_without_touching_pc_or_calling_refresh() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.pc = 0x1000;
+        p.focus = 2;
+        p.tab[0] = 1;
+        p.goto(0x2000, &MockDbg);
+        assert_eq!(p.disasm_addr, 0x2000);
+        assert_eq!(p.focus, 0);
+        assert_eq!(p.tab[0], 0);
+        assert_eq!(p.pc, 0x1000, "goto must not re-anchor to PC (that's refresh's job)");
+        assert_eq!(p.snapshot.disasm[0], format!("{:06x}  add", 0x2000));
     }
 }

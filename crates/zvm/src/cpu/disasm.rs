@@ -100,7 +100,20 @@ fn fmt_branch(b: &Branch, next_pc: u32) -> String {
 pub fn format_instr(instr: &Instr, version: u8) -> String {
     let mut s = mnemonic(&instr.operand_count, instr.opcode, version).to_string();
     if !instr.operands.is_empty() {
-        let ops: Vec<String> = instr.operands.iter().map(fmt_operand).collect();
+        let is_print_char = matches!(instr.operand_count, OperandCount::Var) && instr.opcode == 0x05;
+        let ops: Vec<String> = instr.operands.iter().map(|op| {
+            if is_print_char {
+                let ch = match op {
+                    Operand::Small(n) => Some(*n as u32),
+                    Operand::Large(n) => Some(*n as u32),
+                    Operand::Var(_) => None,
+                };
+                if let Some(c) = ch.filter(|c| (32..=126).contains(c)) {
+                    return format!("'{}'", c as u8 as char);
+                }
+            }
+            fmt_operand(op)
+        }).collect();
         s.push(' ');
         s.push_str(&ops.join(", "));
     }
@@ -226,6 +239,37 @@ mod tests {
         assert!(s.contains("local0"), "got {s:?}");
         assert!(s.contains("#05"), "got {s:?}");
         assert!(s.contains("-> sp"), "got {s:?}");
+    }
+
+    #[test]
+    fn print_char_renders_a_printable_constant_operand_as_a_character() {
+        use crate::cpu::decode::Form;
+        // print_char #0x41 (VAR:0x05, one small-constant operand)
+        let instr = Instr {
+            opcode: 0x05, form: Form::Variable, operand_count: OperandCount::Var,
+            operands: vec![Operand::Small(0x41)],
+            store: None, branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr(&instr, 5);
+        assert!(s.contains("'A'"), "got {s:?}");
+    }
+
+    #[test]
+    fn print_char_keeps_hex_for_a_variable_or_non_printable_operand() {
+        use crate::cpu::decode::Form;
+        let var_op = Instr {
+            opcode: 0x05, form: Form::Variable, operand_count: OperandCount::Var,
+            operands: vec![Operand::Var(1)],
+            store: None, branch: None, text: None, next_pc: 0x1000,
+        };
+        assert!(format_instr(&var_op, 5).contains("local0"), "got {:?}", format_instr(&var_op, 5));
+        let non_printable = Instr {
+            opcode: 0x05, form: Form::Variable, operand_count: OperandCount::Var,
+            operands: vec![Operand::Small(0x0a)],
+            store: None, branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr(&non_printable, 5);
+        assert!(s.contains("#0a"), "got {s:?}");
     }
 
     #[test]

@@ -4,11 +4,58 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
 
 use crate::debug_panel::{self, DebugPanelState, Section, WINDOW_TABS};
 use crate::render::draw_str_clipped;
 use crate::render::paneframe::draw_pane_frame;
 use crate::state::AppState;
+
+/// Redraw the char ranges `clickable_spans` reports within `line` with the
+/// UNDERLINED modifier added to `style` (color unchanged), at `x_base + range.start`.
+fn underline_clickables(buf: &mut Buffer, x_base: u16, y: u16, line: &str, style: Style, section: Section, area: Rect) {
+    for (range, _addr) in debug_panel::clickable_spans(section, line) {
+        let Some(sub) = line.get(range.clone()) else { continue };
+        let x = x_base + range.start as u16;
+        draw_str_clipped(buf, x, y, sub, style.add_modifier(Modifier::UNDERLINED), area);
+    }
+}
+
+/// Draw the Disassembly section: `disasm_rows` inserts a PC-divider row
+/// directly above the instruction at `pc`, so render and the click hit-test
+/// (`clickable_at`) always agree on which screen row is which disasm line.
+fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: &AppState, body: Style) {
+    let disasm = &panel.snapshot.disasm;
+    let rows = debug_panel::disasm_rows(disasm, panel.pc, content.height as usize);
+    let text_rect = Rect::new(content.x + 1, content.y, content.width.saturating_sub(1), content.height);
+    for (r, row_entry) in rows.iter().enumerate() {
+        let y = content.y + r as u16;
+        if row_entry.divider {
+            let width = content.width.saturating_sub(1) as usize;
+            let core = "▼── PC ──▼";
+            let text: String = if core.chars().count() >= width {
+                core.chars().take(width).collect()
+            } else {
+                let mut s = core.to_string();
+                s.push_str(&"─".repeat(width - core.chars().count()));
+                s
+            };
+            draw_str_clipped(buf, content.x + 1, y, &text, state.colors.debug_disasm_pc, content);
+            continue;
+        }
+        let Some(line) = disasm.get(row_entry.line_idx) else { continue };
+        // 1-column execution-coverage gutter: `|` when this line's leading
+        // address ran during the last command turn, else blank. Text is
+        // drawn one column in so the gutter never overlaps it.
+        let marked = line.get(0..6)
+            .and_then(|a| u32::from_str_radix(a, 16).ok())
+            .is_some_and(|addr| panel.snapshot.executed.contains(&addr));
+        let marker = if marked { "|" } else { " " };
+        draw_str_clipped(buf, content.x, y, marker, state.colors.debug_exec_mark, content);
+        draw_str_clipped(buf, content.x + 1, y, line, body, text_rect);
+        underline_clickables(buf, content.x + 1, y, line, body, Section::Disasm, text_rect);
+    }
+}
 
 /// Draw one window: frame, tab strip, and the active section's content.
 fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelState, state: &AppState) {
@@ -42,33 +89,23 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
     let lines = panel.snapshot.section(section);
     let content = frame.content;
     let body = state.colors.debug_pane;
-    // Disasm/Memory are pre-windowed by their addr (offset 0); list sections
-    // apply their per-window scroll offset.
+
+    if section == Section::Disasm {
+        draw_disasm(buf, content, panel, state, body);
+        return;
+    }
+
+    // Memory is pre-windowed by its addr (offset 0); list sections apply
+    // their per-window scroll offset.
     let scroll = match section {
-        Section::Disasm | Section::Memory => 0,
+        Section::Memory => 0,
         _ => panel.scroll[window],
     };
-    let pc_prefix = format!("{:06x}", panel.pc);
     for (row, line) in lines.iter().skip(scroll).take(content.height as usize).enumerate() {
         let y = content.y + row as u16;
-        let style = if section == Section::Disasm && line.starts_with(&pc_prefix) {
-            state.colors.debug_disasm_pc
-        } else {
-            body
-        };
-        if section == Section::Disasm {
-            // 1-column execution-coverage gutter: `|` when this line's leading
-            // address ran during the last command turn, else blank. Text is
-            // drawn one column in so the gutter never overlaps it.
-            let marked = line.get(0..6)
-                .and_then(|a| u32::from_str_radix(a, 16).ok())
-                .is_some_and(|addr| panel.snapshot.executed.contains(&addr));
-            let marker = if marked { "|" } else { " " };
-            draw_str_clipped(buf, content.x, y, marker, state.colors.debug_exec_mark, content);
-            let text_rect = Rect::new(content.x + 1, content.y, content.width.saturating_sub(1), content.height);
-            draw_str_clipped(buf, content.x + 1, y, line, style, text_rect);
-        } else {
-            draw_str_clipped(buf, content.x, y, line, style, content);
+        draw_str_clipped(buf, content.x, y, line, body, content);
+        if section == Section::CallStack {
+            underline_clickables(buf, content.x, y, line, body, section, content);
         }
     }
 }
@@ -116,7 +153,7 @@ mod tests {
     }
 
     #[test]
-    fn highlights_the_pc_line_in_disassembly() {
+    fn draws_a_pc_divider_row_above_the_pc_instruction() {
         let mut state = crate::state::AppState::default();
         state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
         let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
@@ -130,13 +167,22 @@ mod tests {
 
         let [left, ..] = crate::debug_panel::window_rects(area);
         let content_y = left.y + 1; // first content row under the top border
-        // left.x + 1 is the execution-marker gutter column; line text starts
-        // one column further in.
-        let pc_line_modifier = buf.cell((left.x + 2, content_y)).unwrap().style().add_modifier;
+        // content.x = left.x + 1 (border inset); divider text is drawn at
+        // content.x + 1 = left.x + 2, same column as regular disasm text.
+        // Row 0 is the divider (drawn ABOVE the PC line); row 1 is the actual
+        // "001000  add" instruction line, shifted down by the divider.
+        let divider_row: String = (left.x + 2..left.x + 2 + 10)
+            .map(|x| buf.cell((x, content_y)).unwrap().symbol().to_string())
+            .collect();
+        assert!(divider_row.starts_with("▼── PC ──▼"), "got {divider_row:?}");
+        let divider_modifier = buf.cell((left.x + 2, content_y)).unwrap().style().add_modifier;
         // Compare modifiers only: `Cell::style()` always reports concrete
         // Reset colors for unset fg/bg, so it never equals a Style::default()
         // built with `.add_modifier(...)` alone.
-        assert_eq!(pc_line_modifier, state.colors.debug_disasm_pc.add_modifier);
+        assert_eq!(divider_modifier, state.colors.debug_disasm_pc.add_modifier);
+
+        let text = buf_text(&buf);
+        assert!(text.contains("add"), "PC line still rendered below the divider");
     }
 
     #[test]
@@ -154,7 +200,11 @@ mod tests {
         draw_debug_panel(&state, area, &mut buf);
 
         let [left, ..] = crate::debug_panel::window_rects(area);
-        let content_y = left.y + 1;
+        // Row 0 is the PC divider; row 1 is "001000 add" (executed); row 2 is
+        // "001004 sub" (not executed).
+        let content_y = left.y + 1 + 1;
+        // left.x + 1 is the execution-marker gutter column (content.x); line
+        // text starts one column further in.
         // Executed line (0x1000): gutter column shows the marker.
         assert_eq!(buf.cell((left.x + 1, content_y)).unwrap().symbol(), "|");
         // Not-executed line (0x1004): gutter column is blank.

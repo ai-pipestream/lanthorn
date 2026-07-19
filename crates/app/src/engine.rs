@@ -357,6 +357,8 @@ pub trait Debugger {
     fn executed_pcs(&self) -> std::collections::HashSet<u32>;
     /// Call stack, one or more lines per frame, innermost last.
     fn stack_lines(&self) -> Vec<String>;
+    /// Evaluation/value stack, top first, marking frame-base boundaries.
+    fn eval_stack_lines(&self) -> Vec<String>;
     /// Locals of the innermost frame.
     fn locals_lines(&self) -> Vec<String>;
     /// Global variables, formatted.
@@ -650,6 +652,7 @@ mod debugger_trait_tests {
         fn prev_instr(&self, a: u32) -> u32 { a.saturating_sub(4) }
         fn executed_pcs(&self) -> std::collections::HashSet<u32> { std::collections::HashSet::new() }
         fn stack_lines(&self) -> Vec<String> { vec!["#0 main".into()] }
+        fn eval_stack_lines(&self) -> Vec<String> { vec!["(empty)".into()] }
         fn locals_lines(&self) -> Vec<String> { vec!["(none)".into()] }
         fn globals_lines(&self) -> Vec<String> { vec!["g00=0000".into()] }
         fn object_tree_lines(&self) -> Vec<String> { vec!["[1] thing".into()] }

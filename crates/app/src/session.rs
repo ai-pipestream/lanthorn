@@ -1090,6 +1090,19 @@ impl Debugger for GameSession {
         out
     }
 
+    fn eval_stack_lines(&self) -> Vec<String> {
+        let st = &self.machine.state;
+        if st.eval_stack.is_empty() {
+            return vec!["(empty)".to_string()];
+        }
+        let bases: std::collections::HashSet<usize> =
+            st.frames.iter().map(|f| f.eval_base).collect();
+        st.eval_stack.iter().enumerate().rev().map(|(i, v)| {
+            let b = if bases.contains(&i) { "  <- frame base" } else { "" };
+            format!("[{i:>3}] {:04x}  ({}){}", v, *v as i16, b)
+        }).collect()
+    }
+
     fn locals_lines(&self) -> Vec<String> {
         match self.machine.state.frames.last() {
             None => vec!["(no frame)".to_string()],
@@ -2512,6 +2525,14 @@ mod debugger_impl_tests {
         assert!(
             s.machine.mem.take_mem_fault().is_none(),
             "a debug read left a phantom fault that would halt the VM on its next step"
+        );
+        // prev_instr does far more boundary probing (a decode-chain sweep over
+        // a whole window) — verify it doesn't leak a fault either.
+        let _ = s.machine.mem.read_word(end + 100); // re-latch
+        let _ = dbg.prev_instr(pc);
+        assert!(
+            s.machine.mem.take_mem_fault().is_none(),
+            "prev_instr left a phantom fault that would halt the VM on its next step"
         );
     }
 

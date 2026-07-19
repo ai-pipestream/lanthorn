@@ -1616,6 +1616,18 @@ fn main() {
                             continue; // pre-empt the map wheel arms
                         }
                         MouseEventKind::Down(MouseButton::Left) => {
+                            // Clickable code-address navigation (branch targets in
+                            // Disasm, `fn@` frame addresses in Call Stack) takes
+                            // priority over the tab/body-focus logic below.
+                            let target = state.debug.as_ref()
+                                .and_then(|p| app::debug_panel::clickable_at(region, p, m.column, m.row));
+                            if let Some(target) = target {
+                                if let Some(dbg) = session.debugger() {
+                                    if let Some(p) = state.debug.as_mut() { p.goto(target, dbg); }
+                                    state.focus = Focus::Map;
+                                }
+                                continue;
+                            }
                             if let Some((w, t)) = state.debug.as_ref()
                                 .and_then(|p| app::debug_panel::tab_at(region, p, m.column, m.row)) {
                                 if let Some(p) = state.debug.as_mut() { p.activate_tab(w, t); }
