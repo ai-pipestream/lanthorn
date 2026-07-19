@@ -522,10 +522,15 @@ pub(crate) fn boot() -> BootResult {
         state.overlays.dialog_focus = 0;
     }
 
-    // If the game quit immediately (e.g. czech.z5 test suite), bail without
-    // entering raw mode.
+    // If the game quit immediately (e.g. czech.z5 or the glk-dev self-checking
+    // file tests), bail without entering raw mode. Such stories run to completion
+    // and quit before ever asking for input, so their output IS the point — print
+    // the captured transcript to stdout instead of discarding it.
     if session.has_quit() {
-        eprintln!("babelmap: story ended immediately (no interactive content).");
+        for line in &state.transcript {
+            println!("{}", line);
+        }
+        eprintln!("babelmap: story ended without asking for input.");
         std::process::exit(0);
     }
 
