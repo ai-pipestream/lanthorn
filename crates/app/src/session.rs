@@ -1131,6 +1131,15 @@ impl Debugger for GameSession {
         out
     }
 
+    fn disassemble_basic(&self, addr: u32, lines: usize) -> Vec<String> {
+        let version = self.machine.mem.version();
+        // Basic form: plain mnemonic disassembly with NO annotations (the
+        // `[obj#N]`/`[word]` reference-following stays exclusive to `disassemble`).
+        let out = zvm::cpu::disasm::disassemble_basic(&self.machine.mem, addr, version, lines);
+        self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
+        out
+    }
+
     fn next_instr(&self, addr: u32) -> u32 {
         let version = self.machine.mem.version();
         let out = zvm::cpu::disasm::next_instr(&self.machine.mem, addr, version);

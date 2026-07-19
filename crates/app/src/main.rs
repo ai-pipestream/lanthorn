@@ -607,8 +607,13 @@ fn draw_frame(
             let w = (pane_layout.help_row.width as usize).saturating_sub(leader_hint.chars().count() + 3);
             let rest = match state.focus {
                 Focus::Game => hint_bar(&state.keymap, &state.hotkeys, Context::Global, GAME_HINTS, w),
-                Focus::Map if state.debug.is_some() =>
-                    app::render::hintbar::literal_hint_bar(app::render::hintbar::DEBUG_HINTS, w),
+                Focus::Map if state.debug.is_some() => {
+                    // Show the live disassembly mode in the `r:` hint entry.
+                    let mode = state.debug.as_ref().map(|p| p.disasm_mode_label()).unwrap_or("full");
+                    let hints: Vec<(&str, &str)> = app::render::hintbar::DEBUG_HINTS.iter()
+                        .map(|&(k, v)| if k == "r" { ("r", mode) } else { (k, v) }).collect();
+                    app::render::hintbar::literal_hint_bar(&hints, w)
+                }
                 Focus::Map => hint_bar(&state.keymap, &state.hotkeys, Context::Map, MAP_HINTS, w),
             };
             if rest.is_empty() {

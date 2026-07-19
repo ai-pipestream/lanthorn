@@ -351,6 +351,10 @@ pub trait Debugger {
     /// (no mnemonic name, operand-role sigils, variable naming, or packed-address
     /// unpacking) — a diagnostic view to catch bugs in the translation layer.
     fn disassemble_raw(&self, addr: u32, lines: usize) -> Vec<String>;
+    /// Basic disassembly: plain mnemonic form — named mnemonics, `#hex`/named-
+    /// variable operands, and computed branch targets, but NO reference-following
+    /// (no operand-role sigils, packed-address unpacking, `VarRef`, or annotations).
+    fn disassemble_basic(&self, addr: u32, lines: usize) -> Vec<String>;
     /// Address of the instruction after the one at `addr` (clamped to memory);
     /// lets the panel advance the disassembly view by whole instructions.
     fn next_instr(&self, addr: u32) -> u32;
@@ -665,6 +669,7 @@ mod debugger_trait_tests {
         fn pc(&self) -> u32 { 0x4a2f }
         fn disassemble(&self, _a: u32, _n: usize) -> Vec<String> { vec!["4a2f  add".into()] }
         fn disassemble_raw(&self, _a: u32, _n: usize) -> Vec<String> { vec!["4a2f: 54 05 03 05   2OP:0x14".into()] }
+        fn disassemble_basic(&self, _a: u32, _n: usize) -> Vec<String> { vec!["4a2f  loadw #0abc".into()] }
         fn next_instr(&self, a: u32) -> u32 { a + 4 }
         fn prev_instr(&self, a: u32) -> u32 { a.saturating_sub(4) }
         fn executed_pcs(&self) -> std::collections::HashSet<u32> { std::collections::HashSet::new() }

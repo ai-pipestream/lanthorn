@@ -246,6 +246,46 @@ pub fn format_instr(instr: &Instr, unpack: &Unpack) -> String {
     s
 }
 
+/// Plain mnemonic disassembly: no operand-role sigils, no packed-address
+/// unpacking, no annotations — just mnemonic, `#hex`/named-variable operands,
+/// computed branch targets, and inline text. (Version only affects mnemonics.)
+pub fn format_instr_basic(instr: &Instr, version: u8) -> String {
+    let mut s = mnemonic(&instr.operand_count, instr.opcode, version).to_string();
+    if !instr.operands.is_empty() {
+        let is_print_char = matches!(instr.operand_count, OperandCount::Var) && instr.opcode == 0x05;
+        let ops: Vec<String> = instr.operands.iter().map(|op| {
+            if is_print_char {
+                let ch = match op { Operand::Small(n) => Some(*n as u32), Operand::Large(n) => Some(*n as u32), Operand::Var(_) => None };
+                if let Some(c) = ch.filter(|c| (32..=126).contains(c)) { return format!("'{}'", c as u8 as char); }
+            }
+            fmt_operand(op)
+        }).collect();
+        s.push(' ');
+        s.push_str(&ops.join(", "));
+    }
+    if let Some(v) = instr.store { s.push_str(&format!(" -> {}", fmt_var(v))); }
+    if let Some(b) = &instr.branch { s.push_str(&fmt_branch(b, instr.next_pc)); }
+    if let Some((text, _)) = &instr.text { s.push_str(&format!(" {:?}", text)); }
+    s
+}
+
+/// Basic-mode disassembly (see [`format_instr_basic`]). Mirrors [`disassemble`]
+/// but emits no annotations or reference sigils. Stops early at end of memory.
+pub fn disassemble_basic(mem: &Memory, start: u32, version: u8, lines: usize) -> Vec<String> {
+    let mut out = Vec::with_capacity(lines);
+    let mut pc = start.min(mem.len() as u32);
+    for _ in 0..lines {
+        if pc >= mem.len() as u32 {
+            break;
+        }
+        let instr = decode(mem, pc, version);
+        out.push(format!("{:06x}  {}", pc, format_instr_basic(&instr, version)));
+        // Guard against a decoder that fails to advance (malformed bytes).
+        pc = if instr.next_pc > pc { instr.next_pc } else { pc + 1 };
+    }
+    out
+}
+
 /// Disassemble `lines` instructions starting at `start`, each prefixed with its
 /// address. Stops early at the end of memory (never reads out of range).
 pub fn disassemble(mem: &Memory, start: u32, version: u8, lines: usize) -> Vec<String> {
@@ -602,6 +642,76 @@ mod tests {
             store: None, branch: None, text: None, next_pc: 0x1000,
         };
         assert!(format_instr(&inc, &Unpack::plain(5)).contains("local0"), "var 1 = local0");
+    }
+
+    #[test]
+    fn format_instr_basic_uses_plain_operands_no_reference_following() {
+        use crate::cpu::decode::Form;
+        // loadw #0x0abc, #00 -> V01: base is a plain `#0abc` (NO `@0x`), store named.
+        let loadw = Instr {
+            opcode: 0x0F, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Large(0x0abc), Operand::Small(0x00)],
+            store: Some(1), branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr_basic(&loadw, 5);
+        assert_eq!(s, "loadw #0abc, #00 -> local0", "got {s:?}");
+        assert!(!s.contains("@0x"), "no memory sigil in basic: {s:?}");
+
+        // store #0x10, #01: operand 0 stays a plain `#10` (NO VarRef `g00`).
+        let store = Instr {
+            opcode: 0x0D, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Small(0x10), Operand::Small(0x01)],
+            store: None, branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr_basic(&store, 5);
+        assert_eq!(s, "store #10, #01", "got {s:?}");
+        assert!(!s.contains("g00"), "no VarRef naming in basic: {s:?}");
+
+        // An actual Var(0) operand still renders `sp` (runtime variable sigil).
+        let loadw_var = Instr {
+            opcode: 0x0F, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Var(0), Operand::Small(0x00)],
+            store: Some(0), branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr_basic(&loadw_var, 5);
+        assert!(s.contains("sp"), "got {s:?}");
+
+        // A branch renders the computed `?0x……` target (same as Full).
+        let je = Instr {
+            opcode: 0x01, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Small(1), Operand::Small(2)],
+            store: None, branch: Some(Branch { on_true: true, offset: 5, len: 1 }),
+            text: None, next_pc: 0x1000,
+        };
+        let s = format_instr_basic(&je, 5);
+        // target = next_pc + offset - 2 = 0x1000 + 5 - 2 = 0x1003
+        assert!(s.contains("?0x001003"), "got {s:?}");
+
+        // print_char #0x41 -> 'A' (char special-case preserved).
+        let pc = Instr {
+            opcode: 0x05, form: Form::Variable, operand_count: OperandCount::Var,
+            operands: vec![Operand::Small(0x41)],
+            store: None, branch: None, text: None, next_pc: 0x1000,
+        };
+        assert!(format_instr_basic(&pc, 5).contains("'A'"), "got {:?}", format_instr_basic(&pc, 5));
+    }
+
+    #[test]
+    fn disassemble_basic_prefixes_address_and_names_mnemonics() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let start = mem.initial_pc();
+        let lines = disassemble_basic(&mem, start, mem.version(), 8);
+        assert!(!lines.is_empty());
+        // Basic names mnemonics (like Full) but never emits role sigils/annotations.
+        assert!(lines.iter().any(|l| !l.contains("op:")), "all fallbacks: {lines:?}");
+        assert!(lines.iter().all(|l| !l.contains("@0x") && !l.contains("obj#") && !l.contains('[')),
+            "basic view leaked a reference sigil/annotation: {lines:?}");
+        // Translated-path address separator (two spaces), not the raw `:` form.
+        assert!(lines[0].as_bytes()[6] == b' ', "addr sep: {:?}", lines[0]);
     }
 
     #[test]

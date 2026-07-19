@@ -18,6 +18,13 @@ use crossterm::event::KeyCode;
 pub const DISASM_WINDOW: usize = 256;
 pub const MEM_WINDOW: usize = 256;
 
+/// Disassembly view mode, cycled by `r` in the Disasm tab: **Full** (operand-role
+/// sigils, `[obj#N]`/`[word]` annotations, `VarRef`, packed unpacking, variable
+/// naming, branch targets), **Basic** (plain mnemonic disassembly — no reference-
+/// following), **Raw** (bytes + untranslated decode, no lookups).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DisasmMode { Full, Basic, Raw }
+
 /// A displayable section (one tab's content).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section { Disasm, Globals, Locals, Objects, Dict, CallStack, EvalStack, Memory }
@@ -117,9 +124,8 @@ pub struct DebugPanelState {
     /// List-content scroll offset per window (reset on tab change).
     pub scroll: [usize; 3],
     pub disasm_addr: u32,
-    /// Disassembly view mode: `true` = RAW (bytes + untranslated decode, no
-    /// lookups), `false` = the translated view. Toggled by `r` in the Disasm tab.
-    pub raw_disasm: bool,
+    /// Disassembly view mode (Full / Basic / Raw), cycled by `r` in the Disasm tab.
+    pub disasm_mode: DisasmMode,
     pub mem_addr: u32,
     /// Memory address-input edit buffer (hex digits typed so far). `None`
     /// when not editing; `Some` while the Memory tab's `:`/`/`-opened input
@@ -151,7 +157,7 @@ impl DebugPanelState {
             tab: [0, 0, 0],
             scroll: [0, 0, 0],
             disasm_addr: pc,
-            raw_disasm: false,
+            disasm_mode: DisasmMode::Full,
             mem_addr: 0,
             mem_input: None,
             expanded_objects: std::collections::HashSet::new(),
@@ -201,10 +207,19 @@ impl DebugPanelState {
     /// Build the disassembly for `addr` honoring the current view mode, so every
     /// site that (re)builds `snapshot.disasm` picks up the raw/translated toggle.
     fn load_disasm(&self, dbg: &dyn Debugger, addr: u32) -> Vec<String> {
-        if self.raw_disasm {
-            dbg.disassemble_raw(addr, DISASM_WINDOW)
-        } else {
-            dbg.disassemble(addr, DISASM_WINDOW)
+        match self.disasm_mode {
+            DisasmMode::Full => dbg.disassemble(addr, DISASM_WINDOW),
+            DisasmMode::Basic => dbg.disassemble_basic(addr, DISASM_WINDOW),
+            DisasmMode::Raw => dbg.disassemble_raw(addr, DISASM_WINDOW),
+        }
+    }
+
+    /// Label for the live disassembly mode (for the hint bar `r:` entry).
+    pub fn disasm_mode_label(&self) -> &'static str {
+        match self.disasm_mode {
+            DisasmMode::Full => "full",
+            DisasmMode::Basic => "basic",
+            DisasmMode::Raw => "raw",
         }
     }
 
@@ -235,7 +250,11 @@ impl DebugPanelState {
             }
             // Only in the Disasm tab, so it doesn't shadow keys in other sections.
             KeyCode::Char('r') if self.active_section(self.focus) == Section::Disasm => {
-                self.raw_disasm = !self.raw_disasm;
+                self.disasm_mode = match self.disasm_mode {
+                    DisasmMode::Full => DisasmMode::Basic,
+                    DisasmMode::Basic => DisasmMode::Raw,
+                    DisasmMode::Raw => DisasmMode::Full,
+                };
                 self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
             }
             KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp
@@ -933,9 +952,14 @@ mod tests {
             (0..n).map(|i| format!("{:06x}  add", addr + i as u32 * 4)).collect()
         }
         // Raw form is distinguishable from the translated `add` above (carries a
-        // class tag) so the `r` toggle is testable.
+        // class tag) so the `r` cycle is testable.
         fn disassemble_raw(&self, addr: u32, n: usize) -> Vec<String> {
             (0..n).map(|i| format!("{:06x}: 54  2OP:0x14", addr + i as u32 * 4)).collect()
+        }
+        // Basic form: plain mnemonic, no `@0x` sigil, no `2OP:` class tag —
+        // distinct from both `disassemble` and `disassemble_raw` above.
+        fn disassemble_basic(&self, addr: u32, n: usize) -> Vec<String> {
+            (0..n).map(|i| format!("{:06x}  loadw #0abc", addr + i as u32 * 4)).collect()
         }
         fn next_instr(&self, a: u32) -> u32 { a + 4 }
         fn prev_instr(&self, a: u32) -> u32 { a.saturating_sub(4) }
@@ -957,21 +981,28 @@ mod tests {
     }
 
     #[test]
-    fn r_toggles_raw_disasm_in_the_disasm_tab() {
+    fn r_cycles_disasm_mode_full_basic_raw_in_the_disasm_tab() {
         let mut p = DebugPanelState::new(0x1000);
-        p.refresh(&MockDbg); // focus 0 / tab 0 = Disasm, translated view first.
-        assert!(!p.raw_disasm);
-        assert!(p.snapshot.disasm.iter().all(|l| !l.contains("2OP:0x14")),
-            "translated view: {:?}", p.snapshot.disasm.first());
-        // Toggle on → raw form.
+        p.refresh(&MockDbg); // focus 0 / tab 0 = Disasm, Full view first.
+        assert_eq!(p.disasm_mode, DisasmMode::Full);
+        // Full: `add`, no basic `loadw`, no raw class tag.
+        assert!(p.snapshot.disasm.iter().all(|l| l.contains("add") && !l.contains("loadw") && !l.contains("2OP:0x14")),
+            "full view: {:?}", p.snapshot.disasm.first());
+        // Full → Basic.
         assert_eq!(p.handle_key(KeyCode::Char('r'), &MockDbg), DebugKey::Consumed);
-        assert!(p.raw_disasm, "flag flipped on");
+        assert_eq!(p.disasm_mode, DisasmMode::Basic);
+        assert!(p.snapshot.disasm.iter().all(|l| l.contains("loadw") && !l.contains("2OP:0x14")),
+            "basic view: {:?}", p.snapshot.disasm.first());
+        // Basic → Raw.
+        assert_eq!(p.handle_key(KeyCode::Char('r'), &MockDbg), DebugKey::Consumed);
+        assert_eq!(p.disasm_mode, DisasmMode::Raw);
         assert!(p.snapshot.disasm.iter().all(|l| l.contains("2OP:0x14")),
             "raw view: {:?}", p.snapshot.disasm.first());
-        // Toggle back → translated form restored.
+        // Raw → Full (wraps).
         assert_eq!(p.handle_key(KeyCode::Char('r'), &MockDbg), DebugKey::Consumed);
-        assert!(!p.raw_disasm);
-        assert!(p.snapshot.disasm.iter().all(|l| !l.contains("2OP:0x14")));
+        assert_eq!(p.disasm_mode, DisasmMode::Full);
+        assert!(p.snapshot.disasm.iter().all(|l| l.contains("add") && !l.contains("2OP:0x14")),
+            "full view restored: {:?}", p.snapshot.disasm.first());
     }
 
     #[test]
@@ -979,7 +1010,17 @@ mod tests {
         let mut p = DebugPanelState::new(0x1000);
         p.focus = 1; // Locals | Objects | Dictionary — not Disasm.
         assert_eq!(p.handle_key(KeyCode::Char('r'), &MockDbg), DebugKey::Ignored);
-        assert!(!p.raw_disasm, "no flip outside the Disasm tab");
+        assert_eq!(p.disasm_mode, DisasmMode::Full, "no cycle outside the Disasm tab");
+    }
+
+    #[test]
+    fn disasm_mode_label_names_each_variant() {
+        let mut p = DebugPanelState::new(0x1000);
+        assert_eq!(p.disasm_mode_label(), "full");
+        p.disasm_mode = DisasmMode::Basic;
+        assert_eq!(p.disasm_mode_label(), "basic");
+        p.disasm_mode = DisasmMode::Raw;
+        assert_eq!(p.disasm_mode_label(), "raw");
     }
 
     #[test]
