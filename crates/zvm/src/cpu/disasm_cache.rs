@@ -162,8 +162,14 @@ impl DisasmCache {
                 }
                 units.push(Unit::Instr { addr: cur, next });
                 cur = next;
-                // Stop at an aligned soft boundary so its header is emitted next.
-                if extra.contains(&cur) {
+                // Stop at an aligned soft boundary so its header is emitted next —
+                // but ONLY when the instruction that reached it is a block
+                // terminator. A real routine header follows a control-flow break
+                // (ret/jump/…), never fall-through; a soft boundary reached by
+                // fall-through is mid-code (a linear-scan false positive — a byte
+                // ≤15 that looked like a locals count), so decode straight through
+                // it instead of emitting a phantom routine header.
+                if extra.contains(&cur) && is_terminator(instr.operand_count.clone(), instr.opcode) {
                     break;
                 }
             }
@@ -1334,6 +1340,34 @@ mod tests {
         for w in u.windows(2) {
             assert!(w[0].addr() < w[1].addr(), "not sorted: {:#x?} {:#x?}", w[0], w[1]);
             assert_eq!(w[0].end(), w[1].addr(), "gap/overlap: {:#x?} {:#x?}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn soft_routine_headers_follow_a_control_break_not_fall_through() {
+        // A linear-scan (soft) routine header must be reached by a control break
+        // (ret/jump/…), never by fall-through — a fall-through-reached candidate is
+        // mid-code (a byte ≤15 that looked like a locals count). RD (hard) headers
+        // are proven call targets and may follow fall-through in memory, so they're
+        // exempt. (fall-through heuristic)
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let version = mem.version();
+        let rd = discover_rd(&mem, version, &Unpack::from_mem(&mem), code_region(&mem));
+        let cache = DisasmCache::build(&mem);
+        let u = cache.units();
+        for i in 1..u.len() {
+            let Unit::RoutineHeader { addr, .. } = u[i] else { continue };
+            if rd.contains(&addr) { continue; } // hard header: any predecessor is fine
+            let Unit::Instr { addr: paddr, .. } = u[i - 1] else { continue }; // Data/header pred: fine
+            let prev = decode(&mem, paddr, version);
+            assert!(
+                is_terminator(prev.operand_count.clone(), prev.opcode),
+                "soft RoutineHeader at {addr:06x} is preceded by fall-through instr at {paddr:06x}"
+            );
         }
     }
 
