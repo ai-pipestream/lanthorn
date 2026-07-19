@@ -15,7 +15,15 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
     if area.width < 2 || area.height < 2 { return; }
     let focused = panel.focus == window;
     let border = if focused { state.colors.debug_pane_focused } else { state.colors.debug_pane };
-    let frame = draw_pane_frame(buf, area, state.colors.dialog_box_style, &state.colors.dialog_glyphs, border);
+    // Tabs are drawn on the top border row; guarantee a border row exists even
+    // when the dialog box style resolves to None, or content row 0 would overwrite
+    // (hide) the tabs — which are now the primary navigation affordance.
+    let box_style = if matches!(state.colors.dialog_box_style, crate::render::paneframe::BorderStyle::None) {
+        crate::render::paneframe::BorderStyle::Single
+    } else {
+        state.colors.dialog_box_style
+    };
+    let frame = draw_pane_frame(buf, area, box_style, &state.colors.dialog_glyphs, border);
 
     // Tab strip: embedded in the window's top border row. `tab_hit_rects` is
     // the SAME geometry the mouse click handler uses (crate::debug_panel::tab_at),
