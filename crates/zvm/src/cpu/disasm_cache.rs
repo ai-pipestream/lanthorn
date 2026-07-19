@@ -106,6 +106,18 @@ impl DisasmCache {
             starts.insert(initial_pc);
         }
 
+        // Truncation boundaries are HARD: only real RD routine entries (reached
+        // by a constant call) and the initial-PC main context force an
+        // instruction to end. Linear-scan entries (`extra`) are SOFT — honoured
+        // only where the instruction stream lands on them exactly. A soft
+        // boundary an instruction straddles is a false positive (e.g. a call's
+        // store byte, `0x01`, misread as a 1-local routine header) and is
+        // dropped so it can never split a real instruction.
+        let mut hard: BTreeSet<u32> = rd.clone();
+        if initial_pc >= rstart && initial_pc < rend {
+            hard.insert(initial_pc);
+        }
+
         let mut units: Vec<Unit> = Vec::new();
         let mut cur = rstart;
         while cur < rend {
@@ -129,24 +141,31 @@ impl DisasmCache {
                 cur = first_instr;
             }
 
-            // This run's extent ends at the NEXT code start (strictly greater
-            // than `start`), clamped to region end.
-            let limit = starts
+            // This run decodes forward, truncating only at the next HARD
+            // boundary (or region end); it flows across soft (linear-only)
+            // boundaries. Landing exactly on a soft boundary ends the run so the
+            // outer loop emits that routine's header next; a straddled soft
+            // boundary is skipped (dropped), so it can't split an instruction.
+            let hard_limit = hard
                 .range((start + 1)..)
                 .next()
                 .copied()
                 .unwrap_or(rend)
                 .min(rend);
 
-            while cur < limit {
+            while cur < hard_limit {
                 let instr = decode(mem, cur, version);
                 let mut next = if instr.next_pc > cur { instr.next_pc } else { cur + 1 };
-                // Boundary wins: never cross into the next code start / region end.
-                if next > limit {
-                    next = limit;
+                // Boundary wins only at a HARD boundary / region end.
+                if next > hard_limit {
+                    next = hard_limit;
                 }
                 units.push(Unit::Instr { addr: cur, next });
                 cur = next;
+                // Stop at an aligned soft boundary so its header is emitted next.
+                if extra.contains(&cur) {
+                    break;
+                }
             }
         }
 
@@ -990,6 +1009,39 @@ mod tests {
             found,
             "initial_pc {initial_pc:#x} not inside any Instr unit"
         );
+    }
+
+    #[test]
+    fn build_never_truncates_an_instruction_at_a_soft_boundary_on_minizork() {
+        // Regression: a linear-scan false positive (e.g. a call's store byte
+        // misread as a routine header) must not truncate a real instruction.
+        // Every Instr unit is either full length, or truncated ONLY where a
+        // HARD boundary (an RD routine entry / initial_pc) or region end falls
+        // inside it — never at a soft (linear-only) boundary.
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let version = mem.version();
+        let cache = DisasmCache::build(&mem);
+        let (rstart, rend) = code_region(&mem);
+        let mut hard = discover_rd(&mem, version, &Unpack::from_mem(&mem), (rstart, rend));
+        let initial_pc = mem.read_word(0x06) as u32;
+        if initial_pc >= rstart && initial_pc < rend {
+            hard.insert(initial_pc);
+        }
+        for u in cache.units() {
+            if let Unit::Instr { addr, next } = *u {
+                let natural = decode(&mem, addr, version).next_pc;
+                assert!(
+                    next == natural
+                        || (next < natural && (hard.contains(&next) || next == rend)),
+                    "instr at {addr:#x} truncated to {next:#x} (natural {natural:#x}) \
+                     at a non-hard boundary"
+                );
+            }
+        }
     }
 
     #[test]
