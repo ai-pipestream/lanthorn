@@ -331,6 +331,12 @@ pub struct ColorScheme {
     pub dialog: Style,
     /// Dialog title text style.
     pub dialog_title: Style,
+    /// Debug-inspector pane body (unfocused).
+    pub debug_pane: Style,
+    /// Debug-inspector pane body/border when focused.
+    pub debug_pane_focused: Style,
+    /// Debug-inspector pane title.
+    pub debug_title: Style,
     /// Leader-panel hotkey letter style.
     pub hotkey_key: Style,
     /// Dialog button (normal) style.
@@ -501,6 +507,9 @@ impl ColorScheme {
             notification_style: BorderStyle::Single,
             dialog: Style::new().fg(Color::White).bg(Color::Black),
             dialog_title: Style::new().fg(Color::Cyan),
+            debug_pane: Style::default(),
+            debug_pane_focused: Style::default().add_modifier(Modifier::BOLD),
+            debug_title: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             hotkey_key: Style::new().fg(Color::Cyan),
             dialog_button: Style::new().add_modifier(Modifier::REVERSED),
             dialog_button_active: Style::new().fg(Color::Black).bg(Color::Cyan),
@@ -711,6 +720,9 @@ impl ColorScheme {
             notification_style: BorderStyle::Single,
             dialog: Style::new().fg(fg).bg(bg),
             dialog_title: Style::new().fg(scheme.palette[6]),
+            debug_pane: Style::default(),
+            debug_pane_focused: Style::default().add_modifier(Modifier::BOLD),
+            debug_title: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
             hotkey_key: Style::new().fg(scheme.palette[6]),
             dialog_button: Style::new().fg(fg).add_modifier(Modifier::REVERSED),
             dialog_button_active: Style::new().fg(bg).bg(scheme.palette[6]),

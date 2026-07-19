@@ -743,7 +743,7 @@ mod tests {
         let mut s = AppState::default();
         crate::input::open_style_editor_hermetic(&mut s);
         // A very tall area fits all selectors; should not panic and should not draw a thumb.
-        let area = Rect::new(0, 0, 120, 80);
+        let area = Rect::new(0, 0, 120, 100);
         let mut buf = Buffer::empty(area);
         let result = draw_style_editor(&s, area, &mut buf);
         assert!(result.is_some(), "draw_style_editor must succeed on a large area");

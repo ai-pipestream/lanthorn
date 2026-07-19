@@ -222,6 +222,9 @@ pub const SELECTOR_FIELDS: &[&str] = &[
     "input_line",
     "dialog",
     "dialog:title",
+    "debug_pane",
+    "debug_pane:focused",
+    "debug_title",
     "hotkey:key",
     "dialog:button",
     "dialog:button:active",
@@ -269,6 +272,7 @@ pub const SELECTOR_GROUPS: &[(&str, &[&str])] = &[
     ("Dialogs", &[
         "dialog", "dialog:title", "hotkey:key", "dialog:button", "dialog:button:active", "dialog:shadow",
     ]),
+    ("Debug", &["debug_pane", "debug_pane:focused", "debug_title"]),
     ("Upper window", &["room_panel", "upper_window", "upper_window_border"]),
     ("Sound", &["sound_beep_high", "sound_beep_low"]),
     ("Graphics", &["graphics", "inline_image"]),
@@ -319,6 +323,9 @@ pub fn style_for_selector(cs: &colors::ColorScheme, selector: &str) -> Style {
         "map_layer_tab"        => cs.map_layer_tab,
         "map_layer_tab_active" => cs.map_layer_tab_active,
         "dialog:title"         => cs.dialog_title,
+        "debug_pane"           => cs.debug_pane,
+        "debug_pane:focused"   => cs.debug_pane_focused,
+        "debug_title"          => cs.debug_title,
         "hotkey:key"           => cs.hotkey_key,
         "dialog:button"        => cs.dialog_button,
         "dialog:button:active" => cs.dialog_button_active,
@@ -553,6 +560,9 @@ pub fn apply_color_decls(
                 cs.dialog_glyphs = decl_glyphs(decl);
             }
             "dialog:title"         => cs.dialog_title = cs.dialog_title.patch(style),
+            "debug_pane"           => cs.debug_pane = cs.debug_pane.patch(style),
+            "debug_pane:focused"   => cs.debug_pane_focused = cs.debug_pane_focused.patch(style),
+            "debug_title"          => cs.debug_title = cs.debug_title.patch(style),
             "hotkey:key"           => cs.hotkey_key = cs.hotkey_key.patch(style),
             "dialog:button"        => cs.dialog_button = cs.dialog_button.patch(style),
             "dialog:button:active" => cs.dialog_button_active = cs.dialog_button_active.patch(style),
@@ -1472,6 +1482,9 @@ pub fn write_style_full(
         doc.colors.selectors.insert("dialog".to_string(), d);
     }
     doc.colors.selectors.insert("dialog:title".to_string(),         style_to_decl(&cs.dialog_title));
+    doc.colors.selectors.insert("debug_pane".to_string(),           style_to_decl(&cs.debug_pane));
+    doc.colors.selectors.insert("debug_pane:focused".to_string(),   style_to_decl(&cs.debug_pane_focused));
+    doc.colors.selectors.insert("debug_title".to_string(),          style_to_decl(&cs.debug_title));
     doc.colors.selectors.insert("hotkey:key".to_string(),           style_to_decl(&cs.hotkey_key));
     doc.colors.selectors.insert("dialog:button".to_string(),        style_to_decl(&cs.dialog_button));
     doc.colors.selectors.insert("dialog:button:active".to_string(), style_to_decl(&cs.dialog_button_active));
@@ -2524,6 +2537,19 @@ box_style = "rounded"
         assert_eq!(style_for_selector(&cs, "room:current").fg, Some(ratatui::style::Color::Green));
         // Unknown selector → default (empty) style, no panic.
         assert_eq!(style_for_selector(&cs, "nope"), ratatui::style::Style::default());
+    }
+
+    #[test]
+    fn debug_selectors_resolve_and_patch() {
+        let cs = crate::colors::ColorScheme::default();
+        // read direction: selector maps to a field (no panic, returns a Style)
+        let _ = style_for_selector(&cs, "debug_pane");
+        let _ = style_for_selector(&cs, "debug_pane:focused");
+        let _ = style_for_selector(&cs, "debug_title");
+        // registry lists them (so the style editor shows them)
+        assert!(SELECTOR_FIELDS.contains(&"debug_pane"));
+        assert!(SELECTOR_FIELDS.contains(&"debug_pane:focused"));
+        assert!(SELECTOR_FIELDS.contains(&"debug_title"));
     }
 
     #[test]
