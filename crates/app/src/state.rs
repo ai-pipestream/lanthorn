@@ -2551,6 +2551,23 @@ impl AppState {
         self.scroll_anim = None;
     }
 
+    /// Truncate the transcript — and every parallel sidecar vec — back to `len`,
+    /// collapsing a menu-redraw reprint to a screen-clear boundary so consecutive
+    /// reprints replace each other instead of piling up in scrollback. A no-op if
+    /// `len` is already at/beyond the end. (SQ-0407)
+    pub fn truncate_transcript(&mut self, len: usize) {
+        if len >= self.transcript.len() {
+            return;
+        }
+        self.transcript.truncate(len);
+        self.transcript_kinds.truncate(len);
+        self.transcript_styles.truncate(len);
+        self.transcript_runs.truncate(len);
+        self.transcript_para.truncate(len);
+        self.transcript_images.truncate(len);
+        self.bump_transcript_gen();
+    }
+
     pub fn push_transcript(&mut self, text: &str) {
         self.push_transcript_kind(text, TranscriptKind::Story);
     }
@@ -3686,6 +3703,33 @@ mod tests {
         assert_eq!(st.transcript_para.len(), st.transcript.len());
         assert_eq!(st.transcript_para[0], ParaFmt::default(), "first line is left/no-indent");
         assert_eq!(st.transcript_para[1], centered, "second line takes its run's Centered layout");
+    }
+
+    #[test]
+    fn truncate_transcript_trims_all_sidecars_and_bumps_gen() {
+        // SQ-0407: collapsing a menu reprint truncates the transcript AND every
+        // parallel sidecar vec (they must stay length-synced) and invalidates the
+        // wrap cache via the generation bump.
+        let mut s = AppState::default();
+        s.push_transcript("line1");
+        s.push_transcript("line2");
+        s.push_transcript("line3");
+        let gen = s.transcript_gen;
+
+        s.truncate_transcript(1);
+        assert_eq!(s.transcript.len(), 1);
+        assert_eq!(s.transcript_kinds.len(), 1);
+        assert_eq!(s.transcript_styles.len(), 1);
+        assert_eq!(s.transcript_runs.len(), 1);
+        assert_eq!(s.transcript_para.len(), 1);
+        assert_eq!(s.transcript_images.len(), 1);
+        assert_ne!(s.transcript_gen, gen, "truncation must bump the wrap-cache generation");
+
+        // No-op when the length is already at/beyond the end.
+        let gen2 = s.transcript_gen;
+        s.truncate_transcript(5);
+        assert_eq!(s.transcript.len(), 1);
+        assert_eq!(s.transcript_gen, gen2, "a no-op truncate must not bump the generation");
     }
 
     #[test]

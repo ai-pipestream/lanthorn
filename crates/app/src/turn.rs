@@ -574,7 +574,18 @@ pub(crate) fn apply_game_driven_result(
     game_dir: &std::path::Path,
     map_area: Rect,
 ) -> bool {
-    if result.erase_lower { state.mark_screen_clear(); }
+    if result.erase_lower {
+        // A game-driven screen clear is a menu redraw navigated by keystrokes —
+        // Counterfeit Monkey's help menu clears the primary buffer and reprints
+        // the whole menu on EVERY arrow press. Collapse the previous reprint by
+        // truncating back to the prior clear anchor, so the reprints replace each
+        // other instead of piling up invisibly in scrollback (hidden by the
+        // SQ-0403 view-pin, then revealed when you exit the menu). (SQ-0407)
+        if let Some(anchor) = state.clear_anchor {
+            state.truncate_transcript(anchor);
+        }
+        state.mark_screen_clear();
+    }
     if result.transcript_elems.is_empty() {
         state.push_transcript_runs(&result.transcript, TranscriptKind::Story, &result.transcript_runs);
     } else {
@@ -870,6 +881,43 @@ mod tests {
             timed_out: false,
             transcript_elems: Vec::new(),
         }
+    }
+
+    fn clearing_result(text: &str) -> super::TurnResult {
+        let mut r = game_driven_result(None);
+        r.erase_lower = true;
+        r.transcript = text.to_string();
+        r
+    }
+
+    #[test]
+    fn game_driven_screen_clear_collapses_menu_reprints() {
+        // SQ-0407: a menu navigated by keystrokes (CM's help) clears + reprints the
+        // whole menu into the primary buffer every keypress. Consecutive game-driven
+        // clears must COLLAPSE — each reprint replaces the last instead of piling up
+        // in scrollback — while pre-menu content is preserved.
+        let tmp = std::env::temp_dir().join(format!("babelmap-collapse-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut state = app::state::AppState::default();
+        state.config.user_dir = tmp.clone();
+        let mut m = mapper::mapper::Mapper::default();
+        let rect = ratatui::layout::Rect::new(0, 0, 20, 20);
+
+        state.push_transcript("room description"); // pre-menu content
+
+        // First menu draw (a clearing turn): appends MENU v1.
+        super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v1"), &tmp, rect);
+        assert!(state.transcript.iter().any(|l| l.contains("MENU v1")));
+        let len_after_v1 = state.transcript.len();
+
+        // Second draw (an arrow keypress): collapses v1, appends MENU v2.
+        super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v2"), &tmp, rect);
+        assert!(!state.transcript.iter().any(|l| l.contains("MENU v1")), "v1 must be collapsed, not stacked");
+        assert!(state.transcript.iter().any(|l| l.contains("MENU v2")), "v2 present");
+        assert!(state.transcript.iter().any(|l| l.contains("room description")), "pre-menu content preserved");
+        assert!(state.transcript.len() <= len_after_v1, "transcript did not grow across reprints");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
