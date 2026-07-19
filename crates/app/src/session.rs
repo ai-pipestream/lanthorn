@@ -730,8 +730,8 @@ pub fn resolve_title(
 // mirrors the Z-machine screen into the neutral `ScreenModel`.
 
 use crate::engine::{
-    BorderPref, BufferWindow, Engine, EngineError, EngineSave, GridCell, GridWindow, Introspect,
-    KeyInput, LocationInfo, ScreenModel, Split, StatusField, StatusModel, WinNode,
+    BorderPref, BufferWindow, Debugger, Engine, EngineError, EngineSave, GridCell, GridWindow,
+    Introspect, KeyInput, LocationInfo, ScreenModel, Split, StatusField, StatusModel, WinNode,
 };
 
 /// The engine tag recorded in an `EngineSave` produced by the Z-machine adapter.
@@ -996,6 +996,10 @@ impl Engine for GameSession {
     fn introspect(&self) -> Option<&dyn Introspect> {
         Some(self)
     }
+
+    fn debugger(&self) -> Option<&dyn Debugger> {
+        Some(self)
+    }
 }
 
 impl Introspect for GameSession {
@@ -1024,6 +1028,94 @@ impl Introspect for GameSession {
 
     fn player_object(&self) -> Option<u16> {
         zvm::find_player_object(&self.machine)
+    }
+}
+
+impl Debugger for GameSession {
+    fn pc(&self) -> u32 {
+        self.machine.state.pc
+    }
+
+    fn disassemble(&self, addr: u32, lines: usize) -> Vec<String> {
+        let version = self.machine.mem.version();
+        zvm::cpu::disasm::disassemble(&self.machine.mem, addr, version, lines)
+    }
+
+    fn next_instr(&self, addr: u32) -> u32 {
+        let version = self.machine.mem.version();
+        zvm::cpu::disasm::next_instr(&self.machine.mem, addr, version)
+    }
+
+    fn stack_lines(&self) -> Vec<String> {
+        let st = &self.machine.state;
+        if st.frames.is_empty() {
+            return vec!["(no frames)".to_string()];
+        }
+        let mut out = Vec::with_capacity(st.frames.len());
+        for (i, f) in st.frames.iter().enumerate() {
+            let locals: Vec<String> = f.locals.iter().map(|w| format!("{:04x}", w)).collect();
+            out.push(format!(
+                "#{i}  fn@{:06x}  ret={:06x}  args={}  locals=[{}]",
+                f.func_addr, f.return_pc, f.arg_count, locals.join(",")
+            ));
+        }
+        out
+    }
+
+    fn locals_lines(&self) -> Vec<String> {
+        match self.machine.state.frames.last() {
+            None => vec!["(no frame)".to_string()],
+            Some(f) if f.locals.is_empty() => vec!["(none)".to_string()],
+            Some(f) => f.locals.iter().enumerate()
+                .map(|(i, w)| format!("local{i} = {:04x}  ({})", w, w))
+                .collect(),
+        }
+    }
+
+    fn globals_lines(&self) -> Vec<String> {
+        (0u8..240).map(|n| format!("g{:02x} = {:04x}", n, self.machine.global(n))).collect()
+    }
+
+    fn object_tree_lines(&self) -> Vec<String> {
+        // Indent each object by its depth in the parent chain.
+        let mem = &self.machine.mem;
+        let snaps = zvm::object_tree_view(&self.machine);
+        snaps.iter().map(|s| {
+            let mut depth = 0usize;
+            let mut p = s.parent;
+            while p != 0 && depth < 32 {
+                depth += 1;
+                p = zvm::objects::get_parent(mem, p);
+            }
+            format!("{}[{}] {}", "  ".repeat(depth), s.number, s.name)
+        }).collect()
+    }
+
+    fn dictionary_lines(&self) -> Vec<String> {
+        zvm::dictionary::load(&self.machine.mem).words(&self.machine.mem)
+    }
+
+    fn memory_hex(&self, addr: u32, rows: usize) -> Vec<String> {
+        let bytes = self.machine.mem.raw_bytes();
+        let len = bytes.len() as u32;
+        let mut out = Vec::with_capacity(rows);
+        let mut a = addr.min(len);
+        for _ in 0..rows {
+            if a >= len { break; }
+            let end = (a + 16).min(len);
+            let row = &bytes[a as usize..end as usize];
+            let hex: String = row.iter().map(|b| format!("{:02x} ", b)).collect();
+            let ascii: String = row.iter()
+                .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+                .collect();
+            out.push(format!("{:06x}  {:<48}{}", a, hex, ascii));
+            a = end;
+        }
+        out
+    }
+
+    fn memory_len(&self) -> u32 {
+        self.machine.mem.len() as u32
     }
 }
 
@@ -2343,5 +2435,39 @@ mod tests {
         assert_eq!(s.line_key_terminator(&KeyInput::Char('x')), None);
         assert_eq!(s.line_key_terminator(&KeyInput::Enter), None);
         assert_eq!(s.line_key_terminator(&KeyInput::Backspace), None);
+    }
+}
+
+#[cfg(test)]
+mod debugger_impl_tests {
+    use super::*;
+    use crate::engine::Engine;
+
+    // minizork.z3 is a real game with a populated dictionary and object table
+    // (unlike the synthetic read_char_story_v5 fixture, which has neither), so
+    // it exercises every Debugger method meaningfully. It's the same fixture
+    // zvm's own dictionary/objects/location tests use for this reason.
+    fn zvm_session() -> Option<GameSession> {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/minizork.z3");
+        if !fixture_path.exists() {
+            return None; // fixture absent — skip
+        }
+        let story = std::fs::read(&fixture_path).expect("read minizork.z3");
+        Some(GameSession::new(story, true, false, None).expect("GameSession::new with minizork.z3"))
+    }
+
+    #[test]
+    fn zvm_exposes_a_debugger() {
+        let Some(s) = zvm_session() else { return };
+        let d = s.debugger().expect("zvm has a debugger");
+        assert_eq!(d.pc(), s.machine.state.pc);
+        assert_eq!(d.globals_lines().len(), 240);
+        assert!(!d.dictionary_lines().is_empty());
+        assert!(!d.object_tree_lines().is_empty());
+        assert_eq!(d.memory_len(), s.machine.mem.len() as u32);
+        let hex = d.memory_hex(0, 2);
+        assert_eq!(hex.len(), 2);
+        assert!(hex[0].starts_with("000000"));
     }
 }
