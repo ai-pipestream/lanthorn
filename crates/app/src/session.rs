@@ -782,9 +782,16 @@ impl GameSession {
     }
 
     /// Public entry for the per-turn confirmation fold (also callable in tests).
+    ///
+    /// Only marks the per-turn gate when the cache actually exists, so calling
+    /// this before the cache is built (a bare public call) does not poison the
+    /// gate and skip the first real fold.
     pub fn confirm_disasm(&self) {
-        self.fold_confirmations();
-        self.last_confirmed_pc.set(Some(self.machine.state.pc));
+        let built = self.disasm_cache.borrow().is_some();
+        if built {
+            self.fold_confirmations();
+            self.last_confirmed_pc.set(Some(self.machine.state.pc));
+        }
     }
 
     /// object entry base address -> object number.
