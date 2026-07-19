@@ -586,6 +586,8 @@ pub(crate) fn apply_game_driven_result(
     }
     // apply_turn: this input doesn't carry direction info (no text command to
     // parse), but we still observe any location change so the map stays in sync.
+    let rooms_before = mapper.graph.rooms().count();
+    let conns_before = mapper.graph.connections().len();
     apply_turn(mapper, "", result);
     // Game-initiated (v4+) save/restore: open the saves dialog in in-game mode
     // and defer the rest of the turn.
@@ -593,7 +595,19 @@ pub(crate) fn apply_game_driven_result(
         open_ingame_saves(io, game_dir, state);
         return false;
     }
-    state.graph_gen = state.graph_gen.wrapping_add(1);
+    // Bump the graph generation ONLY when this game-driven turn actually changed
+    // the routed geometry (a room/connection added). A char-input keypress —
+    // menu navigation, a "press any key" prompt — changes nothing, so it must NOT
+    // re-route the whole map on the main thread every keystroke (the Counterfeit
+    // Monkey help-menu pause). Mirrors the line-input path's gate in
+    // `finish_command_turn` (SQ-0378), which this path was missing. The current-
+    // room highlight + recenter below still update cheaply without a re-route.
+    // (SQ-0406)
+    if mapper.graph.rooms().count() != rooms_before
+        || mapper.graph.connections().len() != conns_before
+    {
+        state.graph_gen = state.graph_gen.wrapping_add(1);
+    }
     // Select and recenter on the current room if it changed.
     if let Some(snap) = &result.location {
         let rid = snap.number as mapper::graph::RoomId;
@@ -837,6 +851,54 @@ mod tests {
             timed_out: false,
             transcript_elems: Vec::new(),
         }
+    }
+
+    fn game_driven_result(location: Option<zvm::ObjectSnapshot>) -> super::TurnResult {
+        super::TurnResult {
+            transcript: String::new(),
+            transcript_runs: Vec::new(),
+            location,
+            quit: false,
+            erase_lower: false,
+            info: None,
+            sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(),
+            diagnostics: vec![],
+            fault: None,
+            location_method: None,
+            pending_io: None,
+            timed_out: false,
+            transcript_elems: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn game_driven_turn_bumps_graph_gen_only_on_new_geometry() {
+        // SQ-0406: a char-input keypress (menu navigation / "press any key") is a
+        // game-driven turn that changes no geometry — it must NOT bump graph_gen,
+        // which would re-route the whole map on the main thread every keystroke
+        // (the Counterfeit Monkey help-menu pause). A turn that reveals a NEW room
+        // still must bump so the map updates.
+        let tmp = std::env::temp_dir().join(format!("babelmap-gdr-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut state = app::state::AppState::default();
+        state.config.user_dir = tmp.clone();
+        let mut m = mapper::mapper::Mapper::default();
+        m.observe(1, "Lab", None); // a known, placed room
+        let gen0 = state.graph_gen;
+        let rect = ratatui::layout::Rect::new(0, 0, 20, 20);
+
+        // Re-reporting the SAME room (a menu keystroke) must not re-route.
+        let same = game_driven_result(Some(zvm::ObjectSnapshot { number: 1, parent: 0, name: "Lab".into() }));
+        super::apply_game_driven_result(&mut state, &mut m, &same, &tmp, rect);
+        assert_eq!(state.graph_gen, gen0, "re-reporting a known room must not bump graph_gen");
+
+        // Revealing a NEW room must bump (the map has to update).
+        let moved = game_driven_result(Some(zvm::ObjectSnapshot { number: 2, parent: 0, name: "Hall".into() }));
+        super::apply_game_driven_result(&mut state, &mut m, &moved, &tmp, rect);
+        assert_ne!(state.graph_gen, gen0, "a new room on a game-driven turn must bump graph_gen");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

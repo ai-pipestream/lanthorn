@@ -505,17 +505,6 @@ fn location_to_snapshot(loc: &Location) -> zvm::ObjectSnapshot {
 /// observation so the live map never shows an illegal connector overlap.
 /// No-op when `result.location` is `None`.
 pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
-    // A screen-clearing turn is a menu / status takeover — Counterfeit Monkey's
-    // help menu (navigated by keystrokes), a character sheet, an "amusing" list —
-    // NOT a room the player walked into. Its `Subheader` text is a menu title,
-    // which `heading_to_room` would hash to a synthetic room id and mint as a
-    // phantom room on EVERY keystroke: each one changes the room count, bumps
-    // `graph_gen`, and re-routes the whole map on the main thread (the pause).
-    // Inform/Glulx (and the Z-machine) never clear the screen on a normal room
-    // entry — they scroll — so `erase_lower` cleanly marks a non-room turn. (SQ-0406)
-    if result.erase_lower {
-        return;
-    }
     if let Some(snap) = &result.location {
         // Suppress an unvalidated NameOnly location until the map holds a real,
         // object-backed room. A NameOnly before any room is a pre-game
@@ -1197,35 +1186,6 @@ mod tests {
         };
         apply_turn(&mut m, "look", &result);
         assert_eq!(m.graph.current(), None);
-    }
-
-    #[test]
-    fn apply_turn_ignores_location_on_screen_clear_menu_turn() {
-        // SQ-0406: a screen-clearing turn (erase_lower) is a menu/status takeover
-        // (e.g. Counterfeit Monkey's help menu). Its Subheader "heading" is a menu
-        // title, not a room — observing it would mint a phantom room per keystroke
-        // and re-route the whole map. The observe must be suppressed on such turns.
-        let mut m = Mapper::default();
-        let menu = TurnResult {
-            transcript: String::new(),
-            transcript_runs: Vec::new(),
-            location: Some(ObjectSnapshot { number: 99, parent: 0, name: "Help — Basic Commands".into() }),
-            quit: false,
-            erase_lower: true, // the menu redraw cleared the primary window
-            info: None,
-            sounds: Vec::new(),
-            glulx_sound_ops: Vec::new(),
-            diagnostics: vec![],
-            fault: None,
-            location_method: None,
-            pending_io: None,
-            timed_out: false,
-            transcript_elems: Vec::new(),
-        };
-        apply_turn(&mut m, "", &menu);
-        assert!(m.graph.room(99).is_none(), "a menu heading on a screen-clear turn must not mint a room");
-        assert_eq!(m.graph.current(), None, "no room observed on a menu turn");
-        assert_eq!(m.graph.rooms().count(), 0);
     }
 
     #[test]
