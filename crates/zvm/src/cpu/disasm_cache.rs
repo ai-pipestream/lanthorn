@@ -5,7 +5,7 @@
 //! `units`/`routines`) lands in later tasks.
 
 use crate::cpu::decode::{decode, Operand, OperandCount};
-use crate::cpu::disasm::{format_instr, format_instr_basic, format_instr_raw, Unpack};
+use crate::cpu::disasm::{format_instr, format_instr_basic, format_instr_raw, mnemonic, Unpack};
 use crate::memory::Memory;
 use std::collections::{BTreeSet, HashSet};
 
@@ -93,7 +93,9 @@ impl DisasmCache {
         let (rstart, rend) = code_region(mem);
         let version = mem.version();
         let unpack = Unpack::from_mem(mem);
-        let routines = discover_rd(mem, version, &unpack, (rstart, rend));
+        let rd = discover_rd(mem, version, &unpack, (rstart, rend));
+        let extra = discover_linear(mem, version, (rstart, rend), &rd);
+        let routines: BTreeSet<u32> = rd.union(&extra).copied().collect();
 
         // Code starts to tile from: routine entries (which carry a header) plus
         // the headerless initial-PC main context. Kept as one sorted set so
@@ -394,6 +396,110 @@ pub fn discover_rd(mem: &Memory, version: u8, unpack: &Unpack, region: (u32, u32
     routines
 }
 
+/// Linear-scan augmentation: scan `region` for routine headers not already in
+/// `known`, accepting a candidate only if it validates as real code. Returns
+/// the NEW entries found (not already in `known`).
+///
+/// Finds routines RD misses because they are only ever called indirectly (via
+/// object properties, grammar/action tables, or a `call` with a variable
+/// operand). Validation — a clean forward decode to a terminator or a known
+/// boundary — is what keeps data that happens to look like a header out.
+fn discover_linear(
+    mem: &Memory,
+    version: u8,
+    region: (u32, u32),
+    known: &std::collections::BTreeSet<u32>,
+) -> std::collections::BTreeSet<u32> {
+    let (rstart, rend) = region;
+    let mut extra: BTreeSet<u32> = BTreeSet::new();
+
+    let mut p = rstart;
+    while p < rend {
+        // Skip addresses RD already owns (RD wins on conflict).
+        if known.contains(&p) {
+            p += 1;
+            continue;
+        }
+        // (a) plausible locals-count byte.
+        if mem.read_byte(p) > 15 {
+            p += 1;
+            continue;
+        }
+        // (b) forward decode from the first instruction must validate cleanly.
+        match validate_routine(mem, version, p, region, known) {
+            // ACCEPTED: record it and skip past its validated body. Routines
+            // do not overlap, so the body cannot hide another real header.
+            Some(extent) => {
+                extra.insert(p);
+                p = extent.max(p + 1);
+            }
+            // Ambiguous bytes are classified as data, not a routine.
+            None => p += 1,
+        }
+    }
+
+    extra
+}
+
+/// Validate a candidate routine header at `entry`: decode forward from its
+/// first instruction until a terminator or a `known` routine boundary. Returns
+/// the one-past-the-end address of the validated run, or `None` if the run is
+/// not clean code (unassigned opcode, non-advancing decode, a read crossing
+/// `region.1`, reaching region end without a terminator, or the instruction
+/// cap). Errs toward rejection.
+fn validate_routine(
+    mem: &Memory,
+    version: u8,
+    entry: u32,
+    region: (u32, u32),
+    known: &std::collections::BTreeSet<u32>,
+) -> Option<u32> {
+    /// Safety cap on instructions decoded while validating a candidate; a
+    /// cap-hit is treated as INVALID (err toward rejecting).
+    const VALIDATE_INSTR_CAP: u32 = 4096;
+
+    let (_rstart, rend) = region;
+    let first = routine_first_instr(mem, entry, version);
+    if first > rend {
+        return None; // header alone crosses the region end
+    }
+
+    let mut pc = first;
+    let mut steps = 0u32;
+    loop {
+        if steps >= VALIDATE_INSTR_CAP {
+            return None;
+        }
+        // Clean boundary: the run flowed contiguously up to a known routine.
+        if pc > first && known.contains(&pc) {
+            return Some(pc);
+        }
+        // Reached region end without a terminator: reject (err toward data).
+        if pc >= rend {
+            return None;
+        }
+        steps += 1;
+        let instr = decode(mem, pc, version);
+
+        // Every opcode must be assigned in this version.
+        if mnemonic(&instr.operand_count, instr.opcode, version).starts_with("op:") {
+            return None;
+        }
+        // No read may cross the region end.
+        if instr.next_pc > rend {
+            return None;
+        }
+        // Decode must strictly advance.
+        if instr.next_pc <= pc {
+            return None;
+        }
+        if is_terminator(instr.operand_count.clone(), instr.opcode) {
+            return Some(instr.next_pc);
+        }
+        pc = instr.next_pc;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -568,6 +674,121 @@ mod tests {
             routines.contains(&expected),
             "RD did not include first-call target {expected:#x}"
         );
+    }
+
+    #[test]
+    fn linear_finds_indirect_routines_rd_misses() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let version = mem.version();
+        let unpack = Unpack::from_mem(&mem);
+        let region = code_region(&mem);
+
+        let rd = discover_rd(&mem, version, &unpack, region);
+        let extra = discover_linear(&mem, version, region, &rd);
+        eprintln!(
+            "counts: rd={} linear={} total={}",
+            rd.len(),
+            extra.len(),
+            rd.len() + extra.len()
+        );
+        assert!(!extra.is_empty(), "linear scan found no extra routines");
+        for &e in &extra {
+            assert!(
+                e >= region.0 && e < region.1,
+                "extra {e:#x} outside region {region:#x?}"
+            );
+            assert!(mem.read_byte(e) <= 15, "extra {e:#x} locals byte > 15");
+            assert!(!rd.contains(&e), "extra {e:#x} already in rd");
+        }
+    }
+
+    #[test]
+    fn linear_rejects_dictionary_data() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let version = mem.version();
+        // Dictionary base lives in static memory (header word 0x08) — a
+        // data-heavy region. Scan a 256-byte window as its own region so
+        // validation reads never leave it.
+        let dict = mem.read_word(0x08) as u32;
+        let window = 256u32;
+        let empty = BTreeSet::new();
+        let accepted = discover_linear(&mem, version, (dict, dict + window), &empty);
+        eprintln!(
+            "dictionary-window false positives: {} of {window}",
+            accepted.len()
+        );
+        assert!(
+            (accepted.len() as u32) < window / 8,
+            "validator accepted too many data bytes: {} of {window}",
+            accepted.len()
+        );
+    }
+
+    #[test]
+    fn build_tiles_gaplessly_with_linear_augmented_routines() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let version = mem.version();
+        let unpack = Unpack::from_mem(&mem);
+        let region = code_region(&mem);
+        let (rstart, rend) = region;
+
+        let rd = discover_rd(&mem, version, &unpack, region);
+        let cache = DisasmCache::build(&mem);
+        let u = cache.units();
+
+        // Task 3 tiling invariant still holds with the larger routine set.
+        assert!(!u.is_empty(), "build produced no units");
+        for w in u.windows(2) {
+            assert!(
+                w[0].addr() < w[1].addr(),
+                "not strictly sorted: {:#x} !< {:#x}",
+                w[0].addr(),
+                w[1].addr()
+            );
+            assert_eq!(
+                w[0].end(),
+                w[1].addr(),
+                "gap/overlap between {:#x?} and {:#x?}",
+                w[0],
+                w[1]
+            );
+        }
+        assert_eq!(u[0].addr(), rstart, "first unit does not start at region_start");
+        assert_eq!(u.last().unwrap().end(), rend, "last unit does not end at region_end");
+
+        // Linear scan added routines: more RoutineHeader units than RD alone.
+        let header_count = u
+            .iter()
+            .filter(|x| matches!(x, Unit::RoutineHeader { .. }))
+            .count();
+        assert!(
+            header_count > rd.len(),
+            "linear scan added no routines: {header_count} headers <= {} rd",
+            rd.len()
+        );
+    }
+
+    #[test]
+    fn build_with_linear_scan_completes() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let cache = DisasmCache::build(&mem);
+        assert!(!cache.units().is_empty(), "build produced no units");
     }
 
     #[test]
