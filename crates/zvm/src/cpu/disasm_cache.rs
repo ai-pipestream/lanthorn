@@ -275,6 +275,132 @@ impl DisasmCache {
         }
         out
     }
+
+    /// A confirmed instruction start (a PC the VM executed). If the cache
+    /// disagrees — `pc` lands inside a `Data` unit, or mid-instruction (not at
+    /// an existing unit boundary) — re-anchor at `pc` and re-decode forward,
+    /// replacing the overlapped unit locally so `pc` becomes an `Instr` unit
+    /// boundary. Returns true iff the cache changed. A `pc` already at an
+    /// `Instr` unit boundary is a no-op (returns false). `pc` outside
+    /// `[region_start, region_end)` is ignored (returns false).
+    ///
+    /// Observed execution is ground truth: it overrides any static
+    /// classification of those bytes as data or a differently-aligned
+    /// instruction.
+    pub fn confirm_pc(&mut self, mem: &Memory, pc: u32) -> bool {
+        if pc < self.region_start || pc >= self.region_end {
+            return false;
+        }
+        let i = self.unit_index_at(pc);
+        if matches!(self.units[i], Unit::Instr { .. }) && self.units[i].addr() == pc {
+            return false; // already an Instr boundary
+        }
+        // Repair within the single containing unit: rebuild `[lo, hi)` as an
+        // optional leading Data run up to `pc`, then a linear decode from `pc`.
+        let lo = self.units[i].addr();
+        let hi = self.units[i].end();
+        let mut new_units: Vec<Unit> = Vec::new();
+        if pc > lo {
+            new_units.push(Unit::Data { addr: lo, len: pc - lo });
+        }
+        new_units.extend(self.decode_instrs(mem, pc, hi));
+        self.units.splice(i..i + 1, new_units);
+        #[cfg(debug_assertions)]
+        self.debug_check_tiling();
+        true
+    }
+
+    /// A confirmed routine ENTRY (a call-stack `func_addr` — the strongest
+    /// signal). Ensures a `RoutineHeader` unit at `entry` and an `Instr` unit
+    /// at its first instruction, re-aligning that routine forward. Returns true
+    /// iff the units changed. Adds `entry` to `self.routines`.
+    pub fn confirm_routine(&mut self, mem: &Memory, entry: u32) -> bool {
+        if entry < self.region_start || entry >= self.region_end {
+            return false;
+        }
+        self.routines.insert(entry);
+
+        let first = routine_first_instr(mem, entry, self.version).min(self.region_end);
+        let i = self.unit_index_at(entry);
+        let lo = self.units[i].addr();
+        // Repair span end: the unit containing `first` (so the header AND its
+        // first instruction both fit). When `first == region_end` there is no
+        // instruction to place; the span ends at the last unit.
+        let end_i = if first < self.region_end {
+            self.unit_index_at(first)
+        } else {
+            self.units.len() - 1
+        };
+        let hi = self.units[end_i].end();
+
+        let mut new_units: Vec<Unit> = Vec::new();
+        if entry > lo {
+            new_units.push(Unit::Data { addr: lo, len: entry - lo });
+        }
+        let nlocals = mem.read_byte(entry);
+        new_units.push(Unit::RoutineHeader { addr: entry, nlocals, first_instr: first });
+        new_units.extend(self.decode_instrs(mem, first, hi));
+
+        // Idempotent: nothing to do if the span already tiles exactly this way.
+        if self.units[i..=end_i] == new_units[..] {
+            return false;
+        }
+        self.units.splice(i..=end_i, new_units);
+        #[cfg(debug_assertions)]
+        self.debug_check_tiling();
+        true
+    }
+
+    /// Linear decode of `Instr` units over `[from, hi)`, boundary-wins at `hi`
+    /// exactly like `build`: each instruction's extent is truncated so it never
+    /// crosses `hi`, and a non-advancing decode is forced forward one byte.
+    fn decode_instrs(&self, mem: &Memory, from: u32, hi: u32) -> Vec<Unit> {
+        let mut out = Vec::new();
+        let mut cur = from;
+        while cur < hi {
+            let instr = decode(mem, cur, self.version);
+            let mut next = if instr.next_pc > cur { instr.next_pc } else { cur + 1 };
+            if next > hi {
+                next = hi;
+            }
+            out.push(Unit::Instr { addr: cur, next });
+            cur = next;
+        }
+        out
+    }
+
+    /// Debug-only invariant guard: `units` is non-empty, sorted, gapless, and
+    /// exactly tiles `[region_start, region_end)`. Catches splice bugs at the
+    /// point of the repair.
+    #[cfg(debug_assertions)]
+    fn debug_check_tiling(&self) {
+        assert!(!self.units.is_empty(), "tiling: empty units after repair");
+        assert_eq!(
+            self.units[0].addr(),
+            self.region_start,
+            "tiling: first unit does not start at region_start"
+        );
+        assert_eq!(
+            self.units.last().unwrap().end(),
+            self.region_end,
+            "tiling: last unit does not end at region_end"
+        );
+        for w in self.units.windows(2) {
+            assert!(
+                w[0].addr() < w[1].addr(),
+                "tiling: not strictly sorted: {:#x?} !< {:#x?}",
+                w[0],
+                w[1]
+            );
+            assert_eq!(
+                w[0].end(),
+                w[1].addr(),
+                "tiling: gap/overlap between {:#x?} and {:#x?}",
+                w[0],
+                w[1]
+            );
+        }
+    }
 }
 
 /// Code-region bounds: `(region_start, region_end)`.
@@ -1089,5 +1215,136 @@ mod tests {
         }
         // lines=1 stops after a single row, mid-run.
         assert_eq!(cache.disassemble(&mem, addr, 1, CacheFmt::Full).len(), 1);
+    }
+
+    /// Assert the gapless/sorted/bounds tiling invariant directly in a test
+    /// (independent of the debug-only internal guard).
+    fn assert_tiling(cache: &DisasmCache) {
+        let (rstart, rend) = cache.region();
+        let u = cache.units();
+        assert!(!u.is_empty(), "no units");
+        assert_eq!(u[0].addr(), rstart, "first unit not at region_start");
+        assert_eq!(u.last().unwrap().end(), rend, "last unit not at region_end");
+        for w in u.windows(2) {
+            assert!(w[0].addr() < w[1].addr(), "not sorted: {:#x?} {:#x?}", w[0], w[1]);
+            assert_eq!(w[0].end(), w[1].addr(), "gap/overlap: {:#x?} {:#x?}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn confirm_pc_heals_inside_a_data_unit() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let mut cache = DisasmCache::build(&mem);
+        let Some(&Unit::Data { addr, .. }) = cache
+            .units()
+            .iter()
+            .find(|u| matches!(u, Unit::Data { len, .. } if *len >= 6))
+        else {
+            eprintln!("skipping: no Data unit with len >= 6 in minizork.z3");
+            return;
+        };
+        let pc = addr + 2; // strictly inside the Data run
+        assert!(cache.confirm_pc(&mem, pc), "confirm_pc should report a change");
+        let i = cache.unit_index_at(pc);
+        assert!(
+            matches!(cache.units()[i], Unit::Instr { .. }),
+            "pc should now name an Instr unit"
+        );
+        assert_eq!(cache.units()[i].addr(), pc, "Instr unit should start at pc");
+        assert_tiling(&cache);
+    }
+
+    #[test]
+    fn confirm_pc_no_op_on_existing_instr_boundary() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let mut cache = DisasmCache::build(&mem);
+        let instr_addr = cache
+            .units()
+            .iter()
+            .find_map(|u| match u {
+                Unit::Instr { addr, .. } => Some(*addr),
+                _ => None,
+            })
+            .expect("no Instr unit");
+        let before = cache.units().to_vec();
+        assert!(!cache.confirm_pc(&mem, instr_addr), "boundary confirm should be a no-op");
+        assert_eq!(cache.units(), &before[..], "units must be byte-identical");
+    }
+
+    #[test]
+    fn confirm_pc_is_idempotent() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let mut cache = DisasmCache::build(&mem);
+        let Some(&Unit::Data { addr, .. }) = cache
+            .units()
+            .iter()
+            .find(|u| matches!(u, Unit::Data { len, .. } if *len >= 6))
+        else {
+            eprintln!("skipping: no Data unit with len >= 6 in minizork.z3");
+            return;
+        };
+        let pc = addr + 2;
+        assert!(cache.confirm_pc(&mem, pc), "first confirm heals");
+        let after_first = cache.units().to_vec();
+        assert!(!cache.confirm_pc(&mem, pc), "second confirm is a no-op");
+        assert_eq!(cache.units(), &after_first[..], "units unchanged on 2nd call");
+        assert_tiling(&cache);
+    }
+
+    #[test]
+    fn confirm_routine_promotes_an_entry() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let version = mem.version();
+        let mut cache = DisasmCache::build(&mem);
+        let (_rstart, rend) = cache.region();
+
+        // Pick an address inside a Data unit that is not already a routine
+        // header, with a plausible locals byte and a first instruction inside
+        // the region.
+        let candidate = cache.units().iter().find_map(|u| {
+            let Unit::Data { addr, len } = *u else { return None };
+            (0..len).map(|k| addr + k).find(|&a| {
+                mem.read_byte(a) <= 15
+                    && routine_first_instr(&mem, a, version) < rend
+                    && !cache.routines().contains(&a)
+            })
+        });
+        let Some(e) = candidate else {
+            eprintln!("skipping: no promotable entry candidate in minizork.z3");
+            return;
+        };
+
+        assert!(!cache.routines().contains(&e));
+        assert!(cache.confirm_routine(&mem, e), "confirm_routine should report a change");
+        assert!(cache.routines().contains(&e), "entry must be tracked");
+        assert!(
+            cache.units().iter().any(|u| matches!(u, Unit::RoutineHeader { addr, .. } if *addr == e)),
+            "a RoutineHeader unit at e must exist"
+        );
+        let first = routine_first_instr(&mem, e, version);
+        assert!(
+            cache.units().iter().any(|u| matches!(u, Unit::Instr { addr, .. } if *addr == first)),
+            "an Instr unit at first_instr must exist"
+        );
+        assert_tiling(&cache);
+        // Idempotent.
+        assert!(!cache.confirm_routine(&mem, e), "second confirm_routine is a no-op");
+        assert_tiling(&cache);
     }
 }
