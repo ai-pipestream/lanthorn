@@ -125,6 +125,48 @@ standard linear-sweep technique:
   scroll-down = `next_instr(disasm_addr)`, scroll-up = `prev_instr(disasm_addr)`. Drop the
   `disasm_history` stack. This lets the view scroll freely before the PC.
 
+## Revision 5 (2026-07-19) — eval-stack view, PC divider, clickable navigation
+
+Three additions after TTY use.
+
+### A. Evaluation-stack view + rename
+The Z-machine has one register (PC) and two stacks: the **evaluation/value stack**
+(`eval_stack`, variable 0 / push-pull) and the **call stack** (`frames`). Today's "Stack" tab
+shows the call stack. Split them:
+- Rename `Section::Stack` → `Section::CallStack` (label **"Call Stack"**), backed by the
+  existing `stack_lines` (frames).
+- Add `Section::EvalStack` (label **"Stack"**), backed by a new
+  `Debugger::eval_stack_lines(&self) -> Vec<String>` (formats `machine.state.eval_stack`,
+  ideally annotated with per-frame region boundaries; no memory read → no fault-drain needed).
+- Right-bottom window tabs become `Call Stack | Stack | Memory`. (Left `Disassembly | Globals`
+  and right-top `Locals | Objects | Dictionary` unchanged.)
+- Snapshot gains `eval_stack: Vec<String>`; `refresh` fills it; `DebugSnapshot::section` maps
+  both new sections.
+
+### B. PC indicator as a divider (replaces the line tint)
+In the Disassembly section, draw a divider row **`▼── PC ──▼`** (styled `debug_disasm_pc`)
+immediately ABOVE the instruction at `pc` (the next-to-execute line), instead of tinting the
+PC line. The divider consumes one render row; the row accounting must account for it when the
+PC line is within the visible window. The `debug_disasm_pc` selector is reused for the divider
+(the separate line-tint is removed).
+
+### C. Clickable navigation + underlined clickables
+Make code addresses clickable to navigate the disassembly, and underline them so they read as
+links. Scope v1 to targets already shown as ABSOLUTE addresses (call/jump targets are
+packed/offset — a follow-up):
+- **Call-stack lines** (`Section::CallStack`): clicking a frame line jumps the disassembly to
+  that frame's address and focuses the Left window on its Disasm tab.
+- **Branch targets in disassembly**: the `0x{:06x}` a branch prints (`?…0x……`) is clickable →
+  jump the disassembly there.
+- **Underline** those spans (add the UNDERLINED modifier) so they're discoverable.
+- **Shared span helper** (pure, used by BOTH render-underline and mouse-hit-test to avoid
+  drift): `fn clickable_spans(section, line) -> Vec<(core::ops::Range<usize>, u32)>` returning
+  the char range within the line and its target address. Render underlines those ranges; the
+  mouse handler maps a click `(col,row)` → visible line → char offset → matching span → jump.
+- Jump action: set `disasm_addr = target`, `focus = 0` (Left window), `tab[0] = 0` (Disasm),
+  and `state.focus = Focus::Map`. Within-turn (the next per-turn refresh re-anchors to PC,
+  same as scrolling).
+
 ## Goal
 
 Give a developer a read-only window into the running Z-machine: disassemble code at any
