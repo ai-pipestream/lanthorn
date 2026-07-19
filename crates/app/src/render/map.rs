@@ -1516,8 +1516,8 @@ fn arrow_for_direction(dir: Direction, arrows: &crate::symbols::Arrows) -> char 
 }
 
 /// Stamp collapsed secondary directions as arrow glyphs in the border slot beside the
-/// retained connector's arrowhead — along the corner's border edge for a diagonal end, one
-/// cell inward from the side for a cardinal end (stacking for multiples). Boxes zoom only;
+/// retained connector's arrowhead — along the corner's border edge for a diagonal end, along
+/// the side's border edge for a cardinal end (stacking for multiples). Boxes zoom only;
 /// caller passes the axis tables. Color is `shared_path`.
 fn draw_secondary_markers(
     rm: &RenderMap,
@@ -1539,9 +1539,9 @@ fn draw_secondary_markers(
 
     // Stamp the secondaries at one end, in the border slot right next to the retained arrowhead.
     // DIAGONAL end: the arrowhead is on the box CORNER (`corner_anchor`); each secondary hugs a
-    // border edge one slot from the corner — a vertical secondary (N/S) slides along the corner's
-    // horizontal edge, a horizontal one (E/W) along its vertical edge, a diagonal one steps
-    // inward diagonally. CARDINAL end: the arrowhead is on a side (`box_edge_anchor` at its slot);
+    // border edge one slot from the corner — cardinal secondaries (N/S and E/W) slide along the
+    // corner's horizontal (top/bottom) edge, a diagonal one steps inward diagonally. CARDINAL end:
+    // the arrowhead is on a side (`box_edge_anchor` at its slot);
     // the marker steps one cell inward, perpendicular to that side. `ix`/`iy` are the inward signs.
     let stamp = |dirs: &[Direction], cell: (i32, i32), side: Side, slot: u16,
                  diag: Option<Direction>, buf: &mut Buffer| {
@@ -1555,33 +1555,37 @@ fn draw_secondary_markers(
                     Direction::SW => (1, -1),
                     _ => (0, 0),
                 };
-                let (mut sx, mut sy) = (0, 0); // per-axis stack counters for multiple secondaries
+                // `sx` stacks cardinal (N/S and E/W) markers ALONG the corner's horizontal
+                // (top/bottom) border edge; `sy` steps diagonal markers inward diagonally. E/W
+                // markers slide along the horizontal edge too (not down the vertical edge, which
+                // stranded them on the room's side — zork1 #143/#217, SQ-0414 follow-up).
+                let (mut sx, mut sy) = (0, 0);
                 for dir in dirs {
                     let Some(go) = mapper::direction::grid_offset(*dir) else { continue };
                     let (mx, my) = if go.0 != 0 && go.1 != 0 {
-                        sx += 1; sy += 1;
-                        (cx + ix * sx, cy + iy * sy) // diagonal secondary: step in diagonally
-                    } else if go.1 != 0 {
-                        sx += 1;
-                        (cx + ix * sx, cy) // vertical (N/S): slide along the horizontal edge
-                    } else {
                         sy += 1;
-                        (cx, cy + iy * sy) // horizontal (E/W): slide along the vertical edge
+                        (cx + ix * sy, cy + iy * sy) // diagonal secondary: step in diagonally
+                    } else {
+                        sx += 1;
+                        (cx + ix * sx, cy) // cardinal (N/S or E/W): slide along the horizontal edge
                     };
                     put_char(buf, mx + off_x, my + off_y, arrow_for_direction(*dir, arrows), style, area);
                 }
             }
             _ => {
                 let (ax, ay) = box_edge_anchor(cols, rows, cell, side, slot);
-                let (dx, dy) = match side {
-                    Side::Right => (-1, 0),
-                    Side::Left => (1, 0),
-                    Side::Top => (0, 1),
-                    Side::Bottom => (0, -1),
-                };
+                let (bx, by) = (cols.room_pixel(cell.0), rows.room_pixel(cell.1));
                 for (k, dir) in dirs.iter().enumerate() {
                     let step = k as i32 + 1;
-                    put_char(buf, ax + dx * step + off_x, ay + dy * step + off_y,
+                    // Stack secondaries ALONG the border edge (tangential to `side`) beside the
+                    // retained arrowhead — stepping inward would strand them inside the room
+                    // (SQ-0414). Clamp to the box's interior extent so markers stay on the outline,
+                    // off the corners.
+                    let (mx, my) = match side {
+                        Side::Top | Side::Bottom => ((ax + step).min(bx + BOX_W - 2), ay),
+                        Side::Left | Side::Right => (ax, (ay + step).min(by + BOX_H - 2)),
+                    };
+                    put_char(buf, mx + off_x, my + off_y,
                         arrow_for_direction(*dir, arrows), style, area);
                 }
             }
@@ -6167,6 +6171,93 @@ mod tests {
         // beside it — NOT one cell diagonally inward (dx+dy==2), which reads as "a space away".
         assert_eq!(dx + dy, 1,
             "S marker must sit in the border slot beside the SE arrowhead, got arrow={arrow:?} marker={marker:?}");
+    }
+
+    #[test]
+    fn cardinal_secondary_marker_stacks_along_the_shared_border() {
+        // Regression (SQ-0414): when a pair shares BOTH an n/s and an e/w connection, the retained
+        // connector exits on a CARDINAL side (here S, on the shared horizontal border), and the e/w
+        // edge collapses to a secondary. That marker must stack ALONG the border beside the retained
+        // arrowhead — same border row — NOT step one cell inward into the room interior (the bug).
+        use crate::state::AppState;
+        use mapper::graph::MapGraph;
+        use mapper::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(100, "A".into());
+        g.upsert_room(200, "B".into());
+        g.set_pos(100, (0, 0));
+        g.set_pos(200, (0, 1)); // B directly south of A -> shared horizontal border
+        for (o, d, dst) in [(100, Direction::S, 200), (100, Direction::E, 200),
+                            (200, Direction::N, 100), (200, Direction::W, 100)] {
+            g.add_edge(o, d, dst);
+        }
+        let state = AppState::default();
+        let south = state.symbols.arrows.south.to_string(); // retained S departure arrowhead (at A)
+        let east = state.symbols.arrows.east.to_string();    // E secondary marker (at A)
+        let shared_fg = state.colors.shared_path.fg.expect("shared_path has an fg color");
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        let all = |glyph: &str| (0..area.width as i32)
+            .flat_map(|x| (0..area.height as i32).map(move |y| (x, y)))
+            .filter(|&(x, y)| buf.cell((x as u16, y as u16))
+                .map(|c| c.symbol() == glyph && c.fg == shared_fg).unwrap_or(false))
+            .collect::<Vec<_>>();
+        let marker = *all(&east).first().expect("E secondary marker present in shared color");
+        // The retained S arrowhead must be orthogonally adjacent to the marker...
+        let arrow = all(&south).into_iter()
+            .find(|s| (s.0 - marker.0).abs() + (s.1 - marker.1).abs() == 1)
+            .expect("retained S arrowhead adjacent to the E secondary marker");
+        // ...and on the SAME row: the marker sits in the next border slot along the shared edge,
+        // not one row inward (arrow.1 != marker.1), which would strand it inside the room.
+        assert_eq!(arrow.1, marker.1,
+            "E secondary must stack along the shared border (same row as the S arrowhead), \
+             got arrow={arrow:?} marker={marker:?}");
+    }
+
+    #[test]
+    fn diagonal_case_e_w_secondary_stacks_on_the_horizontal_border() {
+        // Regression (SQ-0414 follow-up, zork1 #143/#217): when the retained connector is DIAGONAL,
+        // an E/W secondary used to slide down the box's VERTICAL edge, stranding it on the side of
+        // the room. It must instead stack along the corner's HORIZONTAL (top/bottom) border edge,
+        // same row as the retained arrowhead. The 68/217 collapse retains the SE/NW diagonal and
+        // drops S (at 68) and W (at 217) as secondaries; W is the E/W case under test.
+        use crate::state::AppState;
+        use mapper::graph::MapGraph;
+        use mapper::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(68, "W".into());
+        g.upsert_room(217, "S".into());
+        g.set_pos(68, (0, 0));
+        g.set_pos(217, (1, 1));
+        for (o, d, dst) in [(68, Direction::S, 217), (68, Direction::SE, 217),
+                            (217, Direction::W, 68), (217, Direction::NW, 68)] {
+            g.add_edge(o, d, dst);
+        }
+        let state = AppState::default();
+        let nw = state.symbols.arrows.nw.to_string();     // retained NW arrival arrowhead (at 217's corner)
+        let west = state.symbols.arrows.west.to_string(); // W secondary marker (at 217)
+        let shared_fg = state.colors.shared_path.fg.expect("shared_path has an fg color");
+        let rm = mapper::render::render(&g);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &state, area, &mut buf);
+        let all = |glyph: &str| (0..area.width as i32)
+            .flat_map(|x| (0..area.height as i32).map(move |y| (x, y)))
+            .filter(|&(x, y)| buf.cell((x as u16, y as u16))
+                .map(|c| c.symbol() == glyph && c.fg == shared_fg).unwrap_or(false))
+            .collect::<Vec<_>>();
+        let marker = *all(&west).first().expect("W secondary marker present in shared color");
+        // The retained NW arrowhead must be orthogonally adjacent to the marker...
+        let arrow = all(&nw).into_iter()
+            .find(|a| (a.0 - marker.0).abs() + (a.1 - marker.1).abs() == 1)
+            .expect("retained NW arrowhead adjacent to the W secondary marker");
+        // ...and on the SAME row: the marker sits in the next slot ALONG the horizontal border,
+        // not one row down the vertical edge (arrow.1 != marker.1 = stranded on the side).
+        assert_eq!(arrow.1, marker.1,
+            "W secondary must stack along the horizontal border (same row as the NW arrowhead), \
+             got arrow={arrow:?} marker={marker:?}");
     }
 
     #[test]
