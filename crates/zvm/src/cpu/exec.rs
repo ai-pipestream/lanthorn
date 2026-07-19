@@ -2022,6 +2022,16 @@ impl Machine {
         crate::quetzal::save_quetzal(self)
     }
 
+    /// The PC of the `read`/`read_char` instruction the machine is suspended on
+    /// while awaiting input, if any. `step()` advances `state.pc` PAST the read
+    /// before it suspends (so the resume lands on the code that consumes the input),
+    /// so `state.pc` points to the NEXT instruction; this returns the read itself.
+    /// The debugger folds it into the disassembly cache as a confirmed boundary so
+    /// the parked read renders correctly instead of being eaten by a stale tiling.
+    pub fn pending_read_pc(&self) -> Option<u32> {
+        self.pending_input.as_ref().map(|pi| pi.instr_pc)
+    }
+
     /// The program counter to record in a save file. For an in-game `@save`
     /// (pending_save set) this is the result descriptor's address, per Quetzal
     /// §5.8; otherwise (host Save State, undo snapshots) it is the current pc.
@@ -2334,6 +2344,22 @@ pub(crate) mod tests {
     use super::*;
     use crate::header::tests_support::sample_story;
     use crate::screen::ZColour;
+
+    #[test]
+    fn pending_read_pc_is_the_read_instruction_not_the_advanced_pc() {
+        // A read suspends with state.pc advanced PAST the read; pending_read_pc
+        // returns the read instruction's own PC so the debugger can render it.
+        let mut story = sample_story(3);
+        story[0x40] = 0xe4; // VAR sread
+        story[0x41] = 0xbf; // types: text_buf (large const), then omitted
+        story[0x42] = 0x00; story[0x43] = 0x50; // text_buf = 0x0050
+        let mem = crate::memory::Memory::new(story).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x40;
+        assert!(matches!(m.step(), StepResult::NeedLine { .. }));
+        assert_eq!(m.pending_read_pc(), Some(0x40), "read instruction pc");
+        assert!(m.state.pc > 0x40, "state.pc advanced past the read");
+    }
 
     // ── In-game restore-success: the original @save "returns 2" on restore ─────
     //

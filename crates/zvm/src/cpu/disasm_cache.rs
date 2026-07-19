@@ -330,19 +330,48 @@ impl DisasmCache {
         if matches!(self.units[i], Unit::Instr { .. }) && self.units[i].addr() == pc {
             return false; // already an Instr boundary
         }
-        // Repair within the single containing unit: rebuild `[lo, hi)` as an
-        // optional leading Data run up to `pc`, then a linear decode from `pc`.
+        // Re-decode forward from `pc`, ABSORBING any following units the decoded
+        // instruction stream overlaps, until it re-syncs with an existing unit
+        // boundary at or beyond the containing unit's end. A confirmed instruction
+        // can be LONGER than the stale unit `pc` landed in — e.g. a `read` (4 bytes)
+        // misclassified as a shorter op whose length ate the read's opcode byte, so
+        // `pc` lands inside a 2-byte unit. Truncating the re-decode to that unit's
+        // end would strand a phantom fragment (the old bug); absorbing the overlapped
+        // units instead lets the real instruction span its full extent.
         let lo = self.units[i].addr();
-        let hi = self.units[i].end();
+        let start_hi = self.units[i].end();
+        let mut new_instrs: Vec<Unit> = Vec::new();
+        let mut cur = pc;
+        loop {
+            let instr = decode(mem, cur, self.version);
+            let next = if instr.next_pc > cur { instr.next_pc } else { cur + 1 };
+            let next = next.min(self.region_end);
+            new_instrs.push(Unit::Instr { addr: cur, next });
+            cur = next;
+            // Re-synced: past the original unit end and landed on an existing
+            // boundary, so the tiling is already consistent from here on.
+            if cur >= start_hi && self.is_unit_boundary(cur) {
+                break;
+            }
+            if cur >= self.region_end {
+                break;
+            }
+        }
+        let end_excl = if cur >= self.region_end { self.units.len() } else { self.unit_index_at(cur) };
         let mut new_units: Vec<Unit> = Vec::new();
         if pc > lo {
             new_units.push(Unit::Data { addr: lo, len: pc - lo });
         }
-        new_units.extend(self.decode_instrs(mem, pc, hi));
-        self.units.splice(i..i + 1, new_units);
+        new_units.extend(new_instrs);
+        self.units.splice(i..end_excl, new_units);
         #[cfg(debug_assertions)]
         self.debug_check_tiling();
         true
+    }
+
+    /// True if `addr` is an existing unit start (or exactly `region_end`).
+    fn is_unit_boundary(&self, addr: u32) -> bool {
+        addr == self.region_end || self.units[self.unit_index_at(addr)].addr() == addr
     }
 
     /// A confirmed routine ENTRY (a call-stack `func_addr` — the strongest
@@ -1306,6 +1335,44 @@ mod tests {
             assert!(w[0].addr() < w[1].addr(), "not sorted: {:#x?} {:#x?}", w[0], w[1]);
             assert_eq!(w[0].end(), w[1].addr(), "gap/overlap: {:#x?} {:#x?}", w[0], w[1]);
         }
+    }
+
+    #[test]
+    fn confirm_pc_absorbs_an_instruction_longer_than_the_stale_unit() {
+        // Regression: a `read` (4 bytes) whose opcode byte was eaten by a stale
+        // 2-byte unit, so the confirmed pc lands INSIDE that unit and the real
+        // instruction overlaps the following unit. confirm_pc must extend the read
+        // to its full span and absorb the overlap — not truncate it to the stale
+        // unit's end (which stranded a phantom fragment and hid the read).
+        let mut story = crate::header::tests_support::sample_story(3);
+        let b = 0x40usize; // [filler, e4 sread, af=two vars, var, var, ba quit]
+        story[b] = 0x00;
+        story[b + 1] = 0xe4;
+        story[b + 2] = 0xaf;
+        story[b + 3] = 0x10;
+        story[b + 4] = 0x11;
+        story[b + 5] = 0xba;
+        let mem = Memory::new(story).unwrap();
+        let base = b as u32;
+        // Stale tiling: [base,base+2) ate the read's 0xe4; [base+2,base+5); quit.
+        let mut cache = DisasmCache {
+            units: vec![
+                Unit::Instr { addr: base, next: base + 2 },
+                Unit::Instr { addr: base + 2, next: base + 5 },
+                Unit::Instr { addr: base + 5, next: base + 6 },
+            ],
+            routines: Default::default(),
+            region_start: base,
+            region_end: base + 6,
+            version: 3,
+            unpack: Unpack::from_mem(&mem),
+        };
+        assert!(cache.confirm_pc(&mem, base + 1), "confirm changes the tiling");
+        assert_tiling(&cache);
+        assert_eq!(cache.next_addr(base + 1), base + 5, "read spans its full 4 bytes");
+        assert_eq!(cache.prev_addr(base + 5), base + 1, "the read is quit's predecessor");
+        let row = &cache.disassemble(&mem, base + 1, 1, CacheFmt::Full)[0];
+        assert!(row.contains("sread"), "read renders as a read op: {row:?}");
     }
 
     #[test]

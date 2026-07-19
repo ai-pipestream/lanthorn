@@ -773,6 +773,14 @@ impl GameSession {
             cache.confirm_routine(mem, f.func_addr);
         }
         cache.confirm_pc(mem, self.machine.state.pc);
+        // When parked at an input prompt, `state.pc` points PAST the read to the
+        // code that consumes the input; confirm the read instruction itself too, so
+        // it renders as a real op instead of being eaten by a stale tiling. This is
+        // independent of `trace_exec` (the read may have executed before tracing was
+        // on — e.g. during startup, for the first prompt). (SQ read-pc fix)
+        if let Some(read_pc) = self.machine.pending_read_pc() {
+            cache.confirm_pc(mem, read_pc);
+        }
         for &pc in &self.machine.exec_pcs {
             cache.confirm_pc(mem, pc);
         }
@@ -2811,6 +2819,24 @@ mod debugger_impl_tests {
         }
         let story = std::fs::read(&fixture_path).expect("read minizork.z3");
         Some(GameSession::new(story, true, false, None).expect("GameSession::new with minizork.z3"))
+    }
+
+    #[test]
+    fn parked_read_renders_as_a_read_op_before_the_pc() {
+        // At an input prompt, `step()` advances state.pc PAST the read, so `pc()`
+        // is the code that consumes the input — NOT the read. fold_confirmations
+        // confirms the parked read instruction (pending_read_pc) so it still renders
+        // as a real read op immediately before the PC, instead of being eaten by a
+        // stale tiling and shown as some other opcode. (read-pc disasm fix)
+        let Some(session) = zvm_session() else { return };
+        assert_eq!(session.pending_input(), InputKind::Line,
+            "GameSession::new runs minizork to its first line prompt");
+        let dbg = session.debugger().expect("z-machine debugger");
+        let pc = dbg.pc();
+        let read_addr = dbg.prev_instr(pc);
+        let row = &dbg.disassemble(read_addr, 1)[0];
+        assert!(row.contains("read"), "parked read renders as a read op, got {row:?}");
+        assert_eq!(dbg.next_instr(read_addr), pc, "the read is the instruction immediately before the parked PC");
     }
 
     // A read-only debug inspection must never leave a latched memory fault in the
