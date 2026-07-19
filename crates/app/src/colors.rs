@@ -343,6 +343,9 @@ pub struct ColorScheme {
     pub debug_tab: Style,
     /// Debug-inspector tab label (active).
     pub debug_tab_active: Style,
+    /// Debug-inspector execution-coverage gutter marker (`|`) beside disasm
+    /// lines that ran during the last command turn.
+    pub debug_exec_mark: Style,
     /// Leader-panel hotkey letter style.
     pub hotkey_key: Style,
     /// Dialog button (normal) style.
@@ -519,6 +522,7 @@ impl ColorScheme {
             debug_disasm_pc: Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
             debug_tab: Style::default(),
             debug_tab_active: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            debug_exec_mark: Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             hotkey_key: Style::new().fg(Color::Cyan),
             dialog_button: Style::new().add_modifier(Modifier::REVERSED),
             dialog_button_active: Style::new().fg(Color::Black).bg(Color::Cyan),
@@ -735,6 +739,7 @@ impl ColorScheme {
             debug_disasm_pc: Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
             debug_tab: Style::default(),
             debug_tab_active: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            debug_exec_mark: Style::new().fg(scheme.palette[3]).add_modifier(Modifier::BOLD),
             hotkey_key: Style::new().fg(scheme.palette[6]),
             dialog_button: Style::new().fg(fg).add_modifier(Modifier::REVERSED),
             dialog_button_active: Style::new().fg(bg).bg(scheme.palette[6]),

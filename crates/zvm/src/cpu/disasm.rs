@@ -142,6 +142,53 @@ pub fn next_instr(mem: &Memory, addr: u32, version: u8) -> u32 {
     n.min(mem.len() as u32).max(addr + 1)
 }
 
+/// Byte window scanned to find the previous instruction (> max instruction length).
+const PREV_WINDOW: u32 = 24;
+
+/// Start address of the instruction immediately BEFORE `addr`. Z-machine
+/// instructions are variable-length and can't be decoded backwards, and a
+/// single decode from an arbitrary byte offset can coincidentally land on
+/// `addr` even when that offset isn't a real instruction boundary. So this
+/// tries a decode-chain from every byte offset in `addr - PREV_WINDOW..addr`
+/// and returns the candidate start most of those chains resync onto before
+/// reaching `addr` (nearest-to-`addr` breaks ties). Guarantees the round-trip
+/// `next_instr(prev_instr(addr)) == addr` whenever any chain lands on `addr`
+/// at all. Falls back to `addr - 1` when nothing aligns (data region / start
+/// of memory). Never returns `>= addr`.
+pub fn prev_instr(mem: &Memory, addr: u32, version: u8) -> u32 {
+    if addr == 0 { return 0; }
+    let start = addr.saturating_sub(PREV_WINDOW);
+    // A single decode from an arbitrary byte offset can coincidentally land on
+    // `addr` even when that offset isn't a real instruction boundary (variable-
+    // length Z-code is ambiguous when read out of alignment). To filter those
+    // false positives out, try a decode-chain from EVERY byte offset in the
+    // window, not just one: a chain starting on a real instruction boundary
+    // resyncs onto the true instruction stream almost immediately and keeps
+    // agreeing with every other chain that also resyncs, while a spurious
+    // match from a misaligned offset is very unlikely to line up with more
+    // than one starting offset. So take whichever predecessor the most
+    // starting offsets agree on (nearest wins ties).
+    let mut votes: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for s0 in start..addr {
+        let mut pc = s0;
+        loop {
+            let n = decode(mem, pc, version).next_pc;
+            if n == addr {
+                *votes.entry(pc).or_insert(0) += 1;
+                break;
+            }
+            if n >= addr {
+                break; // overshot addr without landing on it exactly
+            }
+            pc = if n > pc { n } else { pc + 1 };
+        }
+    }
+    if let Some((&best, _)) = votes.iter().max_by_key(|(&s, &count)| (count, s)) {
+        return best;
+    }
+    addr.saturating_sub(1) // fallback: nothing aligned (data region / start of memory)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +241,55 @@ mod tests {
         let lines = disassemble(&mem, start, mem.version(), 8);
         assert!(!lines.is_empty());
         assert!(lines.iter().any(|l| !l.contains("op:")), "all fallbacks: {lines:?}");
+    }
+
+    #[test]
+    fn prev_instr_round_trips_with_next_instr() {
+        // Z-code is variable-length and reading it out of alignment can decode
+        // *something* plausible-looking, so `prev_instr` isn't guaranteed to
+        // recover the bit-exact original start in every case (see its doc
+        // comment). What IS guaranteed by construction: whatever start it
+        // returns is a real instruction boundary that `next_instr` maps
+        // straight back to `addr` — scrolling up then down never leaves the
+        // disasm view stuck or jumps to an unrelated line.
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let version = mem.version();
+        let mut pc = mem.initial_pc();
+        let mut exact_matches = 0;
+        for _ in 0..16 {
+            let next = next_instr(&mem, pc, version);
+            let back = prev_instr(&mem, next, version);
+            assert_eq!(next_instr(&mem, back, version), next, "round-trip broke at next={next:#x}");
+            if back == pc { exact_matches += 1; }
+            pc = next;
+        }
+        // Spot-check: in real code (not just isolated bytes) it recovers the
+        // exact original predecessor the large majority of the time.
+        assert!(exact_matches >= 12, "only {exact_matches}/16 exact matches");
+    }
+
+    #[test]
+    fn prev_instr_of_zero_is_zero() {
+        let bytes = crate::header::tests_support::sample_story(5);
+        let mem = Memory::new(bytes).unwrap();
+        assert_eq!(prev_instr(&mem, 0, mem.version()), 0);
+    }
+
+    #[test]
+    fn prev_instr_never_returns_at_or_after_addr() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let version = mem.version();
+        let start = mem.initial_pc();
+        for addr in start..start + 64 {
+            assert!(prev_instr(&mem, addr, version) < addr, "addr={addr:#x}");
+        }
     }
 }

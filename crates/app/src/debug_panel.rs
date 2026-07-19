@@ -55,6 +55,9 @@ pub struct DebugSnapshot {
     pub dict: Vec<String>,
     pub stack: Vec<String>,
     pub memory: Vec<String>,
+    /// Instruction start-PCs executed during the last command turn (execution-
+    /// coverage marking — a `|` gutter is drawn beside these disasm lines).
+    pub executed: std::collections::HashSet<u32>,
 }
 
 impl DebugSnapshot {
@@ -81,7 +84,6 @@ pub struct DebugPanelState {
     /// List-content scroll offset per window (reset on tab change).
     pub scroll: [usize; 3],
     pub disasm_addr: u32,
-    pub disasm_history: Vec<u32>,
     pub mem_addr: u32,
     /// Focused-window content height captured by the last draw (for paging).
     pub viewport: usize,
@@ -101,7 +103,6 @@ impl DebugPanelState {
             tab: [0, 0, 0],
             scroll: [0, 0, 0],
             disasm_addr: pc,
-            disasm_history: Vec::new(),
             mem_addr: 0,
             viewport: 1,
             pc,
@@ -115,13 +116,12 @@ impl DebugPanelState {
     }
 
     /// Recompute the whole snapshot for the current cursor positions.
-    /// **PC-follow:** re-anchors the disassembly to the live PC and clears
-    /// its scroll-back history, so the executing instruction is always at
-    /// the top of the Disassembly tab after a turn.
+    /// **PC-follow:** re-anchors the disassembly to the live PC, so the
+    /// executing instruction is always at the top of the Disassembly tab
+    /// after a turn.
     pub fn refresh(&mut self, dbg: &dyn Debugger) {
         self.pc = dbg.pc();
         self.disasm_addr = self.pc;
-        self.disasm_history.clear();
         self.snapshot.disasm = dbg.disassemble(self.disasm_addr, DISASM_WINDOW);
         self.snapshot.globals = dbg.globals_lines();
         self.snapshot.locals = dbg.locals_lines();
@@ -129,6 +129,7 @@ impl DebugPanelState {
         self.snapshot.dict = dbg.dictionary_lines();
         self.snapshot.stack = dbg.stack_lines();
         self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
+        self.snapshot.executed = dbg.executed_pcs();
     }
 
     fn page(&self) -> usize { self.viewport.max(1) }
@@ -149,7 +150,6 @@ impl DebugPanelState {
             KeyCode::Right => self.cycle_tab(1),
             KeyCode::Char('g') => {
                 self.disasm_addr = self.pc;
-                self.disasm_history.clear();
                 self.snapshot.disasm = dbg.disassemble(self.disasm_addr, DISASM_WINDOW);
             }
             KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp
@@ -185,13 +185,9 @@ impl DebugPanelState {
 
     fn step_disasm(&mut self, down: bool, dbg: &dyn Debugger) {
         if down {
-            let next = dbg.next_instr(self.disasm_addr);
-            if next > self.disasm_addr {
-                self.disasm_history.push(self.disasm_addr);
-                self.disasm_addr = next;
-            }
-        } else if let Some(prev) = self.disasm_history.pop() {
-            self.disasm_addr = prev;
+            self.disasm_addr = dbg.next_instr(self.disasm_addr);
+        } else {
+            self.disasm_addr = dbg.prev_instr(self.disasm_addr);
         }
         self.snapshot.disasm = dbg.disassemble(self.disasm_addr, DISASM_WINDOW);
     }
@@ -313,6 +309,8 @@ mod tests {
             (0..n).map(|i| format!("{:06x}  add", addr + i as u32 * 4)).collect()
         }
         fn next_instr(&self, a: u32) -> u32 { a + 4 }
+        fn prev_instr(&self, a: u32) -> u32 { a.saturating_sub(4) }
+        fn executed_pcs(&self) -> std::collections::HashSet<u32> { std::collections::HashSet::new() }
         fn stack_lines(&self) -> Vec<String> { vec!["#0 main".into()] }
         fn locals_lines(&self) -> Vec<String> { vec!["(none)".into()] }
         fn globals_lines(&self) -> Vec<String> { (0..240).map(|i| format!("g{i:02x}")).collect() }
@@ -356,9 +354,11 @@ mod tests {
     }
 
     #[test]
-    fn disasm_scroll_advances_by_instruction_and_up_pops_history() {
+    fn disasm_scroll_advances_and_retreats_by_instruction_symmetrically() {
         let mut p = DebugPanelState::new(0x1000);
-        // focus 0 / tab 0 is Disasm by default.
+        // focus 0 / tab 0 is Disasm by default. MockDbg's next_instr/prev_instr
+        // are inverses (+4/-4), so scrolling down then up round-trips exactly —
+        // no history buffer needed (unlike the old disasm_history model).
         p.handle_key(KeyCode::Down, &MockDbg);
         assert_eq!(p.disasm_addr, 0x1004);
         p.handle_key(KeyCode::Down, &MockDbg);
@@ -367,8 +367,10 @@ mod tests {
         assert_eq!(p.disasm_addr, 0x1004);
         p.handle_key(KeyCode::Up, &MockDbg);
         assert_eq!(p.disasm_addr, 0x1000);
-        p.handle_key(KeyCode::Up, &MockDbg); // history empty -> no-op
-        assert_eq!(p.disasm_addr, 0x1000);
+        // Scrolling up before ever scrolling down still retreats — Feature B:
+        // backward scroll is not gated on scroll-down history.
+        p.handle_key(KeyCode::Up, &MockDbg);
+        assert_eq!(p.disasm_addr, 0x0ffc);
     }
 
     #[test]
@@ -382,14 +384,12 @@ mod tests {
     }
 
     #[test]
-    fn refresh_re_anchors_disasm_to_pc_and_clears_history() {
+    fn refresh_re_anchors_disasm_to_pc() {
         let mut p = DebugPanelState::new(0x2000);
-        p.disasm_history.push(0x1ffc);
         p.disasm_addr = 0x3000;
         p.refresh(&MockDbg);
         assert_eq!(p.pc, 0x1000);
         assert_eq!(p.disasm_addr, 0x1000);
-        assert!(p.disasm_history.is_empty());
         assert!(!p.snapshot.disasm.is_empty());
     }
 

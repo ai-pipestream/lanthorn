@@ -865,12 +865,14 @@ pub fn status_model_from_machine(machine: &Machine) -> StatusModel {
 
 impl Engine for GameSession {
     fn submit(&mut self, command: &str) -> TurnResult {
+        if self.machine.trace_exec { self.machine.exec_pcs.clear(); }
         // Dot syntax resolves to the inherent `GameSession::submit` (inherent
         // methods take precedence over trait methods), so this is not recursive.
         self.submit(command)
     }
 
     fn submit_key(&mut self, key: KeyInput) -> Option<TurnResult> {
+        if self.machine.trace_exec { self.machine.exec_pcs.clear(); }
         let byte = GameSession::key_input_to_zscii(key)?;
         Some(self.submit_char(byte))
     }
@@ -985,6 +987,11 @@ impl Engine for GameSession {
         std::mem::take(&mut self.machine.screen_trace)
     }
 
+    fn set_debug_trace(&mut self, on: bool) {
+        self.machine.trace_exec = on;
+        if !on { self.machine.exec_pcs.clear(); }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -1054,6 +1061,17 @@ impl Debugger for GameSession {
         let out = zvm::cpu::disasm::next_instr(&self.machine.mem, addr, version);
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
+    }
+
+    fn prev_instr(&self, addr: u32) -> u32 {
+        let version = self.machine.mem.version();
+        let out = zvm::cpu::disasm::prev_instr(&self.machine.mem, addr, version);
+        self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
+        out
+    }
+
+    fn executed_pcs(&self) -> std::collections::HashSet<u32> {
+        self.machine.exec_pcs.clone()
     }
 
     fn stack_lines(&self) -> Vec<String> {

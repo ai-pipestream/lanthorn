@@ -56,7 +56,20 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
         } else {
             body
         };
-        draw_str_clipped(buf, content.x, y, line, style, content);
+        if section == Section::Disasm {
+            // 1-column execution-coverage gutter: `|` when this line's leading
+            // address ran during the last command turn, else blank. Text is
+            // drawn one column in so the gutter never overlaps it.
+            let marked = line.get(0..6)
+                .and_then(|a| u32::from_str_radix(a, 16).ok())
+                .is_some_and(|addr| panel.snapshot.executed.contains(&addr));
+            let marker = if marked { "|" } else { " " };
+            draw_str_clipped(buf, content.x, y, marker, state.colors.debug_exec_mark, content);
+            let text_rect = Rect::new(content.x + 1, content.y, content.width.saturating_sub(1), content.height);
+            draw_str_clipped(buf, content.x + 1, y, line, style, text_rect);
+        } else {
+            draw_str_clipped(buf, content.x, y, line, style, content);
+        }
     }
 }
 
@@ -117,11 +130,35 @@ mod tests {
 
         let [left, ..] = crate::debug_panel::window_rects(area);
         let content_y = left.y + 1; // first content row under the top border
-        let pc_line_modifier = buf.cell((left.x + 1, content_y)).unwrap().style().add_modifier;
+        // left.x + 1 is the execution-marker gutter column; line text starts
+        // one column further in.
+        let pc_line_modifier = buf.cell((left.x + 2, content_y)).unwrap().style().add_modifier;
         // Compare modifiers only: `Cell::style()` always reports concrete
         // Reset colors for unset fg/bg, so it never equals a Style::default()
         // built with `.add_modifier(...)` alone.
         assert_eq!(pc_line_modifier, state.colors.debug_disasm_pc.add_modifier);
+    }
+
+    #[test]
+    fn marks_executed_disasm_lines_with_a_gutter_bar() {
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        panel.pc = 0x1000;
+        panel.snapshot.disasm = vec!["001000  add".into(), "001004  sub".into()];
+        panel.snapshot.executed = std::collections::HashSet::from([0x1000]);
+        state.debug = Some(panel);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        draw_debug_panel(&state, area, &mut buf);
+
+        let [left, ..] = crate::debug_panel::window_rects(area);
+        let content_y = left.y + 1;
+        // Executed line (0x1000): gutter column shows the marker.
+        assert_eq!(buf.cell((left.x + 1, content_y)).unwrap().symbol(), "|");
+        // Not-executed line (0x1004): gutter column is blank.
+        assert_eq!(buf.cell((left.x + 1, content_y + 1)).unwrap().symbol(), " ");
     }
 
     #[test]

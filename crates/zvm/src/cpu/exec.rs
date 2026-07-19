@@ -184,6 +184,11 @@ pub struct Machine {
     pub trace_screen: bool,
     /// Accumulated `screen`-trace lines since the host last drained them.
     pub screen_trace: Vec<String>,
+    /// When true, `step()` records each instruction's start PC into `exec_pcs`
+    /// (the debug inspector's execution-coverage marking).
+    pub trace_exec: bool,
+    /// Start PCs of instructions executed since the host last cleared them.
+    pub exec_pcs: std::collections::HashSet<u32>,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -240,6 +245,8 @@ impl Machine {
             cur_instr_pc: 0,
             trace_screen: false,
             screen_trace: Vec::new(),
+            trace_exec: false,
+            exec_pcs: std::collections::HashSet::new(),
         }
     }
 
@@ -300,6 +307,9 @@ impl Machine {
         let version = self.mem.version();
         let instr_start_pc = self.state.pc;
         self.cur_instr_pc = instr_start_pc;
+        if self.trace_exec {
+            self.exec_pcs.insert(instr_start_pc);
+        }
         let instr = decode(&self.mem, self.state.pc, version);
         let op_name = opcode_name(instr.operand_count.clone(), instr.opcode);
 
@@ -5660,6 +5670,27 @@ pub(crate) mod tests {
         m2.trace_screen = false;
         run_until_quit(&mut m2);
         assert!(m2.screen_trace.is_empty());
+    }
+
+    #[test]
+    fn trace_exec_records_executed_instruction_start_pcs() {
+        // Two 2OP `add` instructions (long form: opcode, op1, op2, store -> sp),
+        // then quit.
+        let mut buf = sample_story(5);
+        let mut pos = 0x10usize;
+        buf[pos] = 0x14; buf[pos + 1] = 1; buf[pos + 2] = 1; buf[pos + 3] = 0; pos += 4; // add 1,1 -> sp
+        let first_pc = 0x10u32;
+        let second_pc = pos as u32;
+        buf[pos] = 0x14; buf[pos + 1] = 2; buf[pos + 2] = 2; buf[pos + 3] = 0; pos += 4; // add 2,2 -> sp
+        buf[pos] = 0xBA; // quit
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        m.trace_exec = true;
+        m.step();
+        m.step();
+        assert!(m.exec_pcs.contains(&first_pc), "{:?}", m.exec_pcs);
+        assert!(m.exec_pcs.contains(&second_pc), "{:?}", m.exec_pcs);
     }
 
     // -----------------------------------------------------------------------

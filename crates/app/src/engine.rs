@@ -350,6 +350,11 @@ pub trait Debugger {
     /// Address of the instruction after the one at `addr` (clamped to memory);
     /// lets the panel advance the disassembly view by whole instructions.
     fn next_instr(&self, addr: u32) -> u32;
+    /// Start address of the instruction before `addr` (for backward scrolling).
+    fn prev_instr(&self, addr: u32) -> u32;
+    /// The set of instruction start-PCs executed during the last command turn
+    /// (empty until a turn runs with tracing on).
+    fn executed_pcs(&self) -> std::collections::HashSet<u32>;
     /// Call stack, one or more lines per frame, innermost last.
     fn stack_lines(&self) -> Vec<String>;
     /// Locals of the innermost frame.
@@ -500,6 +505,9 @@ pub trait Engine {
         Vec::new()
     }
 
+    /// Enable/disable per-turn execution tracing for the debug inspector.
+    fn set_debug_trace(&mut self, _on: bool) {}
+
     // ── persistence (engine-tagged) ──
     /// Capture the game state as an engine-tagged save.
     fn save_state(&self) -> EngineSave;
@@ -639,6 +647,8 @@ mod debugger_trait_tests {
         fn pc(&self) -> u32 { 0x4a2f }
         fn disassemble(&self, _a: u32, _n: usize) -> Vec<String> { vec!["4a2f  add".into()] }
         fn next_instr(&self, a: u32) -> u32 { a + 4 }
+        fn prev_instr(&self, a: u32) -> u32 { a.saturating_sub(4) }
+        fn executed_pcs(&self) -> std::collections::HashSet<u32> { std::collections::HashSet::new() }
         fn stack_lines(&self) -> Vec<String> { vec!["#0 main".into()] }
         fn locals_lines(&self) -> Vec<String> { vec!["(none)".into()] }
         fn globals_lines(&self) -> Vec<String> { vec!["g00=0000".into()] }
