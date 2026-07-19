@@ -144,6 +144,204 @@ pub fn operand_role(count: &OperandCount, opcode: u8, version: u8, index: usize)
     }
 }
 
+/// One-line, plain-English description of what an opcode does, keyed by the
+/// mnemonic string that [`mnemonic`] already resolved (so version-specific
+/// spellings like `call_1n`/`not` are unambiguous). Returns `None` for an
+/// unrecognised mnemonic (e.g. the `op:2op` placeholder). Descriptions follow
+/// the Z-Machine Standards Document opcode tables (§14–15, §EXT).
+pub fn describe_mnemonic(name: &str) -> Option<&'static str> {
+    let d = match name {
+        // 2OP
+        "je" => "Branch if the first value equals any of the others.",
+        "jl" => "Branch if a < b (signed comparison).",
+        "jg" => "Branch if a > b (signed comparison).",
+        "dec_chk" => "Decrement a variable, then branch if it is now less than the value.",
+        "inc_chk" => "Increment a variable, then branch if it is now greater than the value.",
+        "jin" => "Branch if object a is a direct child of object b (a is 'in' b).",
+        "test" => "Bitmap test: branch if every bit set in b is also set in a (a & b == b).",
+        "or" => "Bitwise OR of two values; store the result.",
+        "and" => "Bitwise AND of two values; store the result.",
+        "test_attr" => "Branch if the object has the given attribute set.",
+        "set_attr" => "Set the given attribute flag on the object.",
+        "clear_attr" => "Clear the given attribute flag on the object.",
+        "store" => "Store a value into the variable named by number.",
+        "insert_obj" => "Move an object to become the first child of a destination object.",
+        "loadw" => "Read the word at array + 2*index; store it. (16-bit array read.)",
+        "loadb" => "Read the byte at array + index; store it. (8-bit array read.)",
+        "get_prop" => "Read object property N (its default if absent); store the value.",
+        "get_prop_addr" => "Store the byte address of object property N's data (0 if absent).",
+        "get_next_prop" => "Store the number of the property after N on the object (0 at end).",
+        "add" => "Signed 16-bit addition; store the result.",
+        "sub" => "Signed 16-bit subtraction; store the result.",
+        "mul" => "Signed 16-bit multiplication; store the result.",
+        "div" => "Signed 16-bit division; store the result (÷0 halts).",
+        "mod" => "Signed 16-bit remainder; store the result.",
+        "call_2s" => "Call a routine with one argument; store its return value.",
+        "call_2n" => "Call a routine with one argument; discard the return value.",
+        "set_colour" => "Set the foreground and background text colours.",
+        "throw" => "Return past all frames up to the one captured by an earlier catch.",
+        // 1OP
+        "jz" => "Branch if the value is zero.",
+        "get_sibling" => "Store the object's next sibling; branch if it is nonzero.",
+        "get_child" => "Store the object's first child; branch if it is nonzero.",
+        "get_parent" => "Store the object's parent (0 if none). No branch.",
+        "get_prop_len" => "Given a property-data address, store that property's length in bytes.",
+        "inc" => "Increment the named variable by 1 (signed).",
+        "dec" => "Decrement the named variable by 1 (signed).",
+        "print_addr" => "Print the Z-string stored at the given byte address.",
+        "call_1s" => "Call a routine with no arguments; store its return value.",
+        "remove_obj" => "Detach an object from its parent, leaving it parentless.",
+        "print_obj" => "Print the object's short name.",
+        "ret" => "Return from the current routine with the given value.",
+        "jump" => "Unconditional jump by a signed offset (NOT a routine call).",
+        "print_paddr" => "Print the Z-string at the given packed string address.",
+        "load" => "Store the current value of the variable named by number.",
+        "call_1n" => "Call a routine with no arguments; discard the return value. (v5+)",
+        "not" => "Bitwise NOT of the value; store the result.",
+        // 0OP
+        "rtrue" => "Return from the current routine with the value 1 (true).",
+        "rfalse" => "Return from the current routine with the value 0 (false).",
+        "print" => "Print the literal Z-string that follows the opcode.",
+        "print_ret" => "Print the inline Z-string, print a newline, then return true.",
+        "nop" => "Do nothing.",
+        "save" => "Save the game state (v3: branch on success; v4+: store result).",
+        "restore" => "Restore a saved game state; on success execution resumes there.",
+        "restart" => "Restart the game from the beginning.",
+        "ret_popped" => "Pop the top stack value and return it from the current routine.",
+        "catch" => "Store the current call-frame handle for a later throw. (v5+)",
+        "pop" => "Discard the top value of the stack. (v1–4)",
+        "quit" => "End the game.",
+        "new_line" => "Print a newline.",
+        "show_status" => "Redraw the version-3 status line.",
+        "verify" => "Branch if the story file's checksum matches the header.",
+        "extended" => "Marker byte introducing an extended (EXT) opcode. (v5+)",
+        "piracy" => "Branch as if the game is genuine (piracy check; normally taken).",
+        // VAR
+        "call_vs" => "Call a routine with up to 3 arguments; store its return value.",
+        "storew" => "Write a word to array + 2*index. (16-bit array write.)",
+        "storeb" => "Write a byte to array + index. (8-bit array write.)",
+        "put_prop" => "Write a value into object property N (which must exist).",
+        "aread" => "Read a line of input, tokenise it, store the terminating key. (v5+)",
+        "sread" => "Read a line of input into a text buffer and tokenise it. (v1–4)",
+        "print_char" => "Print one ZSCII character.",
+        "print_num" => "Print a signed number in decimal.",
+        "random" => "arg>0: store a random number 1..arg; arg≤0: (re)seed the generator.",
+        "push" => "Push a value onto the stack.",
+        "pull" => "Pop the stack into the named variable.",
+        "split_window" => "Split off an upper window of the given number of lines.",
+        "set_window" => "Select the window (0 lower, 1 upper) for later output.",
+        "call_vs2" => "Call a routine with up to 7 arguments; store its return value.",
+        "erase_window" => "Clear a window (or the whole screen).",
+        "erase_line" => "Erase from the cursor to the end of the line.",
+        "set_cursor" => "Move the cursor to a row/column in the upper window.",
+        "get_cursor" => "Store the cursor's current row and column into an array.",
+        "set_text_style" => "Set text style bits (roman, reverse, bold, italic, fixed).",
+        "buffer_mode" => "Turn word-wrap buffering of the lower window on or off.",
+        "output_stream" => "Enable or disable an output stream (screen, transcript, table…).",
+        "input_stream" => "Select the input stream (keyboard or a command file).",
+        "sound_effect" => "Play a sound effect or beep.",
+        "read_char" => "Read a single keypress; store the ZSCII code. (v4+)",
+        "scan_table" => "Search a table for a value; store its address (0 if absent), branch if found.",
+        "call_vn" => "Call a routine with up to 3 arguments; discard the return value. (v5+)",
+        "call_vn2" => "Call a routine with up to 7 arguments; discard the return value. (v5+)",
+        "tokenise" => "Tokenise text against a dictionary into a parse buffer. (v5+)",
+        "encode_text" => "Encode text into the dictionary's packed Z-string form. (v5+)",
+        "copy_table" => "Copy or zero a block of bytes between two table addresses. (v5+)",
+        "print_table" => "Print a rectangular block of text from a table. (v5+)",
+        "check_arg_count" => "Branch if the numbered argument was actually supplied. (v5+)",
+        // EXT
+        "log_shift" => "Logical bit shift (left if positive, right if negative); store result.",
+        "art_shift" => "Arithmetic (sign-preserving) bit shift; store result.",
+        "set_font" => "Select a text font; store the previous font (0 if unavailable).",
+        "draw_picture" => "Draw a picture at a screen position. (v6 graphics)",
+        "picture_data" => "Query a picture's size/availability; branch if it exists. (v6)",
+        "erase_picture" => "Erase a picture from the screen. (v6)",
+        "set_margins" => "Set the left/right margins of a window. (v6)",
+        "save_undo" => "Save an in-memory undo state; store 1 on success, 0 if unsupported. (v5+)",
+        "restore_undo" => "Restore the most recent save_undo state. (v5+)",
+        "print_unicode" => "Print one Unicode character. (v5+)",
+        "check_unicode" => "Store whether a Unicode character can be printed/read. (v5+)",
+        "set_true_colour" => "Set foreground/background using true (RGB) colours. (v5+)",
+        "move_window" => "Move a window to a screen position. (v6)",
+        "window_size" => "Set a window's size. (v6)",
+        "window_style" => "Set window style flags. (v6)",
+        "get_wind_prop" => "Read a window property; store the value. (v6)",
+        "scroll_window" => "Scroll a window by a number of pixels. (v6)",
+        "pop_stack" => "Discard N values from a stack. (v6)",
+        "read_mouse" => "Store the current mouse position and button state. (v6)",
+        "mouse_window" => "Constrain the mouse to a window. (v6)",
+        "push_stack" => "Push a value onto a user stack; branch on success. (v6)",
+        "put_wind_prop" => "Write a window property. (v6)",
+        "print_form" => "Print a formatted table of text. (v6)",
+        "make_menu" => "Create or remove a menu; branch on success. (v6)",
+        "picture_table" => "Preload a set of pictures. (v6)",
+        "buffer_screen" => "Control deferred screen redraw/buffering. (v6)",
+        _ => return None,
+    };
+    Some(d)
+}
+
+/// Numeric value of a constant operand (`None` for a variable operand).
+fn const_operand(op: &Operand) -> Option<u16> {
+    match op {
+        Operand::Small(n) => Some(*n as u16),
+        Operand::Large(n) => Some(*n),
+        Operand::Var(_) => None,
+    }
+}
+
+/// Explain one operand given its semantic role (unpacking packed
+/// routine/string constants so the tooltip shows the real target).
+fn describe_operand(op: &Operand, role: OpRole, unpack: &Unpack) -> String {
+    let val = fmt_operand(op);
+    match role {
+        OpRole::Routine => match const_operand(op) {
+            Some(p) if p != 0 => format!("routine to call → 0x{:06x}", unpack.routine(p)),
+            _ => format!("routine to call (address held in {val})"),
+        },
+        OpRole::StringAddr => match const_operand(op) {
+            Some(p) => format!("packed string → 0x{:06x}", unpack.string(p)),
+            None => format!("packed string address held in {val}"),
+        },
+        OpRole::MemAddr => format!("byte address {val}"),
+        OpRole::Object => format!("object {val}"),
+        OpRole::JumpOffset => format!("jump offset {val}"),
+        OpRole::VarRef => match const_operand(op) {
+            Some(n) => format!("the variable {}", fmt_var(n as u8)),
+            None => format!("the variable numbered by {val}"),
+        },
+        OpRole::Plain => format!("value {val}"),
+    }
+}
+
+/// Instruction-aware help lines for a hover tooltip: the opcode's purpose,
+/// then the semantic role of each operand, plus where the result is stored,
+/// whether/when it branches, and any inline text. Engine-neutral display text
+/// (the app renders these lines verbatim).
+pub fn describe_instruction(instr: &Instr, version: u8, unpack: &Unpack) -> Vec<String> {
+    let name = mnemonic(&instr.operand_count, instr.opcode, version);
+    let mut lines = Vec::new();
+    match describe_mnemonic(name) {
+        Some(desc) => lines.push(format!("{name} — {desc}")),
+        None => lines.push(name.to_string()),
+    }
+    for (i, op) in instr.operands.iter().enumerate() {
+        let role = operand_role(&instr.operand_count, instr.opcode, version, i);
+        lines.push(format!("  arg{}: {}", i + 1, describe_operand(op, role, unpack)));
+    }
+    if let Some(v) = instr.store {
+        lines.push(format!("  → result stored in {}", fmt_var(v)));
+    }
+    if let Some(b) = &instr.branch {
+        let sense = if b.on_true { "true" } else { "false" };
+        lines.push(format!("  → branches when the test is {sense}"));
+    }
+    if instr.text.is_some() {
+        lines.push("  → prints the inline text shown".to_string());
+    }
+    lines
+}
+
 /// Header-derived context for unpacking packed routine/string addresses.
 /// `routine_off`/`string_off` are only consulted for versions 6 and 7.
 #[derive(Clone, Copy)]
@@ -588,6 +786,75 @@ mod tests {
         let s = format_instr(&jump, &Unpack::plain(5));
         // target = next_pc + offset - 2 = 0x1000 + 0x10 - 2 = 0x100e
         assert!(s.contains("0x00100e"), "got {s:?}");
+    }
+
+    #[test]
+    fn describe_mnemonic_covers_the_opcode_set_and_rejects_unknowns() {
+        // Every mnemonic the disassembler can emit (except the op:* placeholders)
+        // must have a help string — otherwise a hover shows a bare mnemonic.
+        for count in [
+            OperandCount::Two, OperandCount::One,
+            OperandCount::Zero, OperandCount::Var, OperandCount::Ext,
+        ] {
+            for opcode in 0u8..=0x1f {
+                for &version in &[3u8, 5, 8] {
+                    let name = mnemonic(&count, opcode, version);
+                    if name.starts_with("op:") {
+                        continue; // unassigned opcode — no help expected
+                    }
+                    assert!(
+                        describe_mnemonic(name).is_some(),
+                        "no help for {name} ({count:?} 0x{opcode:02x} v{version})"
+                    );
+                }
+            }
+        }
+        // A couple of spot checks on the content.
+        assert!(describe_mnemonic("loadw").unwrap().contains("array"));
+        assert!(describe_mnemonic("je").unwrap().to_lowercase().contains("equal"));
+        // Unknown / placeholder mnemonics have no help.
+        assert_eq!(describe_mnemonic("op:2op"), None);
+        assert_eq!(describe_mnemonic("nonsense"), None);
+    }
+
+    #[test]
+    fn describe_instruction_folds_in_operand_roles_store_and_branch() {
+        use crate::cpu::decode::Form;
+        // call_1s #0x0a2f -> local0 : header + routine role (unpacked) + store.
+        let call = Instr {
+            opcode: 0x08, form: Form::Short, operand_count: OperandCount::One,
+            operands: vec![Operand::Large(0x0a2f)],
+            store: Some(1), branch: None, text: None, next_pc: 0x1000,
+        };
+        let lines = describe_instruction(&call, 3, &Unpack::plain(3));
+        assert!(lines[0].starts_with("call_1s — "), "got {:?}", lines[0]);
+        assert!(lines.iter().any(|l| l.contains("routine to call") && l.contains("0x00145e")),
+            "missing unpacked routine role: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("result stored in local0")),
+            "missing store line: {lines:?}");
+
+        // je #01, #02 ?true : header + two plain operands + branch sense.
+        let je = Instr {
+            opcode: 0x01, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Small(1), Operand::Small(2)],
+            store: None, branch: Some(Branch { on_true: true, offset: 4, len: 1 }),
+            text: None, next_pc: 0x1000,
+        };
+        let lines = describe_instruction(&je, 5, &Unpack::plain(5));
+        assert!(lines[0].starts_with("je — "), "got {:?}", lines[0]);
+        assert!(lines.iter().any(|l| l.contains("branches when the test is true")),
+            "missing branch line: {lines:?}");
+
+        // store #10, #01 : VarRef operand 0 names the target variable.
+        let store = Instr {
+            opcode: 0x0D, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Small(0x10), Operand::Small(0x01)],
+            store: None, branch: None, text: None, next_pc: 0x1000,
+        };
+        let lines = describe_instruction(&store, 5, &Unpack::plain(5));
+        // variable 0x10 = global g00 (16 → g00).
+        assert!(lines.iter().any(|l| l.contains("the variable g00")),
+            "VarRef operand should name the variable: {lines:?}");
 
         // A variable operand ignores the role and stays a variable sigil.
         let loadw_var = Instr {
