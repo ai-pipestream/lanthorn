@@ -360,6 +360,12 @@ pub trait Debugger {
     fn next_instr(&self, addr: u32) -> u32;
     /// Start address of the instruction before `addr` (for backward scrolling).
     fn prev_instr(&self, addr: u32) -> u32;
+    /// Human-readable help lines for the instruction at `addr` (what the opcode
+    /// does, its operand roles, store/branch) — for the hover tooltip. Returns
+    /// `None` if the engine has no descriptions or `addr` isn't an instruction.
+    fn describe_line(&self, _addr: u32) -> Option<Vec<String>> {
+        None
+    }
     /// The set of instruction start-PCs executed during the last command turn
     /// (empty until a turn runs with tracing on).
     fn executed_pcs(&self) -> std::collections::HashSet<u32>;

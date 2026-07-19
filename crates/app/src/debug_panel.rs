@@ -113,6 +113,12 @@ impl HoverTip {
         };
         HoverTip { col, row, lines }
     }
+
+    /// Build a tooltip from ready-made `lines` anchored at `col`/`row`
+    /// (e.g. opcode help from the debugger).
+    pub fn for_lines(lines: Vec<String>, col: u16, row: u16) -> Self {
+        HoverTip { col, row, lines }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -823,6 +829,54 @@ pub fn hover_var_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -
             _ => return None,
         };
         return Some((var, content.x + 1 + range.start as u16, row));
+    }
+    None
+}
+
+/// If `(col, row)` is over the mnemonic (opcode) token of a Disassembly
+/// instruction line, returns `(instruction_address, tooltip_col, row)` for an
+/// opcode-help tooltip. Returns `None` over the address, operands, a
+/// header/`.byte`/Raw line, or outside the Disassembly window — mirrors
+/// [`hover_var_at`]'s geometry.
+pub fn hover_help_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -> Option<(u32, u16, u16)> {
+    let windows = window_rects(region);
+    for (w, window_rect) in windows.iter().enumerate() {
+        if col < window_rect.x || col >= window_rect.right()
+            || row < window_rect.y || row >= window_rect.bottom() {
+            continue;
+        }
+        let content = Rect::new(
+            window_rect.x + 1, window_rect.y + 1,
+            window_rect.width.saturating_sub(2), window_rect.height.saturating_sub(2),
+        );
+        if col < content.x || col >= content.right() || row < content.y || row >= content.bottom() {
+            return None;
+        }
+        if w != 0 || panel.active_section(0) != Section::Disasm {
+            return None;
+        }
+        let r = (row - content.y) as usize;
+        let rows = disasm_rows(&panel.snapshot.disasm, panel.pc, content.height as usize);
+        let row_entry = rows.get(r)?;
+        if row_entry.divider {
+            return None;
+        }
+        let line = panel.snapshot.disasm.get(row_entry.line_idx)?;
+        // Lines are "AAAAAA  mnemonic operands…" (Full/Basic) — 6 hex address, two
+        // spaces, then the mnemonic at column 8. Raw ("AAAAAA: …"), header
+        // ("…  ; routine") and data ("…  .byte") lines have no lowercase-letter
+        // token at column 8 and are rejected below.
+        let addr = u32::from_str_radix(line.get(0..6)?, 16).ok()?;
+        let after = line.get(8..)?;
+        let tok_len = after.find([' ', ',']).unwrap_or(after.len());
+        if !after.starts_with(|c: char| c.is_ascii_lowercase()) {
+            return None;
+        }
+        let off = col.checked_sub(content.x + 1)? as usize;
+        if off < 8 || off >= 8 + tok_len {
+            return None;
+        }
+        return Some((addr, content.x + 1 + 8, row));
     }
     None
 }
@@ -1691,6 +1745,35 @@ mod tests {
         assert_eq!(hover_var_at(region, &p, obj_col, row_y), None);
         let const_col = content.x + 1 + line.find("#01").unwrap() as u16;
         assert_eq!(hover_var_at(region, &p, const_col, row_y), None);
+    }
+
+    #[test]
+    fn hover_help_at_resolves_the_mnemonic_token_only() {
+        let line = "001000  loadw g0f, local0 -> sp";
+        let (p, region, content, row_y) = hover_panel(line);
+        // Over the mnemonic (column 8) → the instruction address + anchor col.
+        let mcol = content.x + 1 + 8;
+        assert_eq!(hover_help_at(region, &p, mcol, row_y), Some((0x1000, mcol, row_y)));
+        // Over the address prefix → None.
+        assert_eq!(hover_help_at(region, &p, content.x + 1 + 2, row_y), None);
+        // Over an operand → None (opcode help is mnemonic-only; operands use hover_var_at).
+        let op_col = content.x + 1 + line.find("g0f").unwrap() as u16;
+        assert_eq!(hover_help_at(region, &p, op_col, row_y), None);
+    }
+
+    #[test]
+    fn hover_help_at_ignores_header_data_and_raw_lines() {
+        // Address 001000 matches hover_panel's pc so the divider lands at row 0
+        // and row_y hits this line (row 1).
+        for line in [
+            "001000  ; routine, 1 local",   // Full/Basic header marker
+            "001000  .byte 01 02 03",       // data row
+            "001000: 88 1b82 01   1OP:0x08", // Raw line (colon prefix, hex token)
+        ] {
+            let (p, region, content, row_y) = hover_panel(line);
+            let col = content.x + 1 + 8; // column 8 (where a mnemonic would be)
+            assert_eq!(hover_help_at(region, &p, col, row_y), None, "line {line:?}");
+        }
     }
 
     #[test]

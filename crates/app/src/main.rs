@@ -1691,11 +1691,21 @@ fn main() {
                             // then `as_mut`.
                             let hv = state.debug.as_ref()
                                 .and_then(|p| app::debug_panel::hover_var_at(region, p, m.column, m.row));
-                            match hv {
-                                Some((var, acol, arow)) => {
-                                    let value = session.debugger().and_then(|dbg| dbg.var_value(var));
+                            if let Some((var, acol, arow)) = hv {
+                                let value = session.debugger().and_then(|dbg| dbg.var_value(var));
+                                if let Some(p) = state.debug.as_mut() {
+                                    p.hover = Some(app::debug_panel::HoverTip::for_var(var, value, acol, arow));
+                                }
+                                continue;
+                            }
+                            // Otherwise, hovering an opcode mnemonic shows its help.
+                            let hh = state.debug.as_ref()
+                                .and_then(|p| app::debug_panel::hover_help_at(region, p, m.column, m.row));
+                            match hh {
+                                Some((addr, acol, arow)) => {
+                                    let lines = session.debugger().and_then(|dbg| dbg.describe_line(addr));
                                     if let Some(p) = state.debug.as_mut() {
-                                        p.hover = Some(app::debug_panel::HoverTip::for_var(var, value, acol, arow));
+                                        p.hover = lines.map(|l| app::debug_panel::HoverTip::for_lines(l, acol, arow));
                                     }
                                 }
                                 None => { if let Some(p) = state.debug.as_mut() { p.hover = None; } }

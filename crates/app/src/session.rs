@@ -1206,6 +1206,15 @@ impl Debugger for GameSession {
         out
     }
 
+    fn describe_line(&self, addr: u32) -> Option<Vec<String>> {
+        let version = self.machine.mem.version();
+        let instr = zvm::cpu::decode::decode(&self.machine.mem, addr, version);
+        let unpack = zvm::cpu::disasm::Unpack::from_mem(&self.machine.mem);
+        let lines = zvm::cpu::disasm::describe_instruction(&instr, version, &unpack);
+        self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
+        Some(lines)
+    }
+
     fn executed_pcs(&self) -> std::collections::HashSet<u32> {
         self.machine.exec_pcs.clone()
     }
