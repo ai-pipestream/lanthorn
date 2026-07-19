@@ -6,6 +6,35 @@
 **Quest:** SQ-0169 — "Story debug + disassembly", a developer/curiosity feature riding the
 SP3b `Engine` abstraction's reserved `Debugger` capability seam.
 
+## Revision 2 (2026-07-18) — tiled pane, not a full-screen modal
+
+The first build made the inspector a **full-screen modal** (component 3 below, "The debug
+panel"). Superseded by user direction: the debugger must be a **tiled pane that lives in
+the main layout alongside the story pane**, so the game stays visible and playable while
+inspecting. This section governs where it disagrees with component 3.
+
+- **Placement:** `/debug` **replaces the map pane's slot** with the debug region while
+  active (map hidden until closed). Active layout is three columns:
+  `Story │ Disasm (full height) │ Locals (top) / Stack (bottom)` — the debug region is the
+  existing three-pane Execution view occupying the map's rect. The World-state view
+  (`Globals │ Objects/Dictionary`, Memory in the cycle) is still reachable via the view
+  toggle. The `DebugPanelState` view/pane model is unchanged.
+- **Not a modal.** It does NOT swallow all keys and is NOT an `any_overlay_open` overlay.
+  Reuse the app's **map focus model**: `Tab` focuses the debug region like it focuses the
+  map today; when the debug region is focused, arrows/PgUp-PgDn scroll the focused sub-pane
+  and `Tab`/`Shift-Tab` (or the view toggle) cycle panes/views, `g` jumps to PC. When the
+  **story** is focused, keys type to the game as normal. `Esc` or `/debug` closes (map
+  returns). The game keeps running beside the inspector — timers are **not** frozen.
+- **Live refresh** each turn (unchanged from below).
+- **Carries over unchanged:** the zvm disassembler (component 2), the `Debugger` seam +
+  `GameSession` impl (components 1–2), the `DebugPanelState` nav logic, and the theme
+  selectors. **Reworked:** the render integrates into the layout (draw into the map rect,
+  not the overlay path), and the wiring becomes a layout mode + pane-focus key routing
+  (the modal key-intercept and the `e6c3c066` `any_overlay_open` inclusion are removed).
+
+Where component 3 ("The debug panel", "full-screen takeover") and the modal wiring in the
+plan conflict with this section, **this section wins**.
+
 ## Goal
 
 Give a developer a read-only window into the running Z-machine: disassemble code at any
