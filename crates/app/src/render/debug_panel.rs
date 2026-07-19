@@ -8,7 +8,7 @@ use ratatui::style::{Modifier, Style};
 
 use crate::debug_panel::{self, DebugPanelState, HoverTip, Section, WINDOW_TABS};
 use crate::render::draw_str_clipped;
-use crate::render::paneframe::{draw_pane_frame, BorderStyle};
+use crate::render::paneframe::draw_pane_frame;
 use crate::state::AppState;
 
 /// Redraw the char ranges `clickable_spans` reports within `line` with the
@@ -176,29 +176,35 @@ fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
 /// small to hold it (never panics).
 fn draw_tooltip(buf: &mut Buffer, area: Rect, tip: &HoverTip, state: &AppState) {
     let inner = tip.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
-    let w = inner + 2; // + borders
-    let h = tip.lines.len() as u16 + 2;
-    if area.width < w || area.height < h { return; }
+    let h = tip.lines.len() as u16;
+    let w = inner + 2; // one space of horizontal padding on each side
+    if h == 0 || area.width < w || area.height < h { return; }
 
-    // Preferred: just below the token; clamp into `area`.
+    // Preferred: just below the token; clamp into `area` (flip above if needed).
     let mut x = tip.col;
     let mut y = tip.row + 1;
     if x + w > area.right() { x = area.right().saturating_sub(w); }
-    if y + h > area.bottom() { y = tip.row.saturating_sub(h); } // flip above
+    if y + h > area.bottom() { y = tip.row.saturating_sub(h); }
     x = x.max(area.x);
     y = y.max(area.y);
 
     let box_rect = Rect::new(x, y, w, h);
     let style = state.colors.debug_tooltip;
-    // Fill the interior so it reads as a solid box over the disasm, then frame
-    // and text over it.
-    let pad: String = " ".repeat(inner as usize);
-    for i in 0..tip.lines.len() as u16 {
-        draw_str_clipped(buf, x + 1, y + 1 + i, &pad, style, box_rect);
+    // Reset every cell the box covers before drawing: draw_char_clipped PATCHES
+    // cell styles, so a modifier already on the disasm underneath (e.g. the
+    // UNDERLINED on a clickable operand) would otherwise bleed through the
+    // tooltip. A clean reset makes the borderless box fully opaque.
+    for yy in box_rect.y..box_rect.bottom() {
+        for xx in box_rect.x..box_rect.right() {
+            if let Some(cell) = buf.cell_mut((xx, yy)) { cell.reset(); }
+        }
     }
-    draw_pane_frame(buf, box_rect, BorderStyle::Single, &state.colors.dialog_glyphs, style);
+    // Borderless: fill each row with the tooltip background, then the padded text.
+    let pad: String = " ".repeat(w as usize);
     for (i, line) in tip.lines.iter().enumerate() {
-        draw_str_clipped(buf, x + 1, y + 1 + i as u16, line, style, box_rect);
+        let ry = y + i as u16;
+        draw_str_clipped(buf, x, ry, &pad, style, box_rect);
+        draw_str_clipped(buf, x + 1, ry, line, style, box_rect);
     }
 }
 
@@ -366,6 +372,33 @@ mod tests {
 
         let text = buf_text(&buf);
         assert!(text.contains("g0f = 0x1234"), "tooltip value text is painted");
+    }
+
+    #[test]
+    fn hover_tooltip_is_opaque_and_clears_underline_underneath() {
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        panel.pc = 0x1000;
+        panel.snapshot.disasm = vec!["001000  loadw g0f -> sp".into()];
+        panel.hover = Some(crate::debug_panel::HoverTip::for_var(0x1f, Some(0x1234), 5, 5));
+        state.debug = Some(panel);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        // Pre-underline everything, as clickable-span underlines would leave the
+        // disasm cells beneath the tooltip.
+        for cell in buf.content.iter_mut() {
+            cell.set_style(Style::new().add_modifier(Modifier::UNDERLINED));
+        }
+        draw_debug_panel(&state, area, &mut buf);
+
+        // The tooltip anchors at (5,5) → box at (5,6); its first text cell (6,6)
+        // is the 'g' of "g0f = …" and must not carry a bled-through underline.
+        let cell = buf.cell((6, 6)).expect("cell in bounds");
+        assert_eq!(cell.symbol(), "g", "tooltip text painted here");
+        assert!(!cell.style().add_modifier.contains(Modifier::UNDERLINED),
+            "underline underneath must not bleed through the tooltip");
     }
 
     #[test]
