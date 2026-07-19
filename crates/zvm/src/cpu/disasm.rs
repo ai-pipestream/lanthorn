@@ -96,12 +96,95 @@ fn fmt_branch(b: &Branch, next_pc: u32) -> String {
     format!(" ?{}{}", neg, target)
 }
 
+/// Semantic role of a constant operand, so the app (Phase 6b-2) can recognize
+/// references and make them clickable. Only constant operands (`Small`/`Large`)
+/// ever carry a non-`Plain` role; a `Var` is a runtime value, not a static
+/// reference, and always renders as its variable sigil.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OpRole { Plain, Object, MemAddr, Routine, StringAddr, JumpOffset }
+
+/// Semantic role of operand `index` for this opcode (version-aware). `Plain`
+/// for every operand not in the table below. Verified against this file's
+/// `mnemonic` table AND the crate's `execute()` operand semantics.
+pub fn operand_role(count: &OperandCount, opcode: u8, version: u8, index: usize) -> OpRole {
+    use OpRole::*;
+    match count {
+        OperandCount::One => match opcode {
+            0x01 | 0x02 | 0x03 | 0x09 | 0x0A if index == 0 => Object,
+            0x07 if index == 0 => MemAddr,
+            0x08 if index == 0 => Routine,
+            0x0F if index == 0 && version >= 5 => Routine,
+            0x0D if index == 0 => StringAddr,
+            0x0C if index == 0 => JumpOffset,
+            _ => Plain,
+        },
+        OperandCount::Two => match opcode {
+            0x06 | 0x0E if index == 0 || index == 1 => Object,
+            0x0A | 0x0B | 0x0C | 0x11 | 0x12 | 0x13 if index == 0 => Object,
+            0x0F | 0x10 if index == 0 => MemAddr,
+            0x19 | 0x1A if index == 0 => Routine,
+            _ => Plain,
+        },
+        OperandCount::Var => match opcode {
+            0x03 if index == 0 => Object,
+            0x01 | 0x02 if index == 0 => MemAddr,
+            0x00 | 0x0C | 0x19 | 0x1A if index == 0 => Routine,
+            _ => Plain,
+        },
+        _ => Plain,
+    }
+}
+
+/// Header-derived context for unpacking packed routine/string addresses.
+/// `routine_off`/`string_off` are only consulted for versions 6 and 7.
+#[derive(Clone, Copy)]
+pub struct Unpack { pub version: u8, pub routine_off: u16, pub string_off: u16 }
+
+impl Unpack {
+    /// Build from a story's header. Reads the routine-offset word at 0x28 and
+    /// the string-offset word at 0x2A (big-endian) only for v6/7; 0 otherwise.
+    pub fn from_mem(mem: &Memory) -> Self {
+        let version = mem.version();
+        let (routine_off, string_off) = if version == 6 || version == 7 {
+            (mem.read_word(0x28), mem.read_word(0x2A))
+        } else {
+            (0, 0)
+        };
+        Unpack { version, routine_off, string_off }
+    }
+    /// Version-only context (offsets 0) — convenience for tests / v<6.
+    pub fn plain(version: u8) -> Self { Unpack { version, routine_off: 0, string_off: 0 } }
+    /// Byte address of a packed routine address (ZMSD §1.2.3).
+    pub fn routine(&self, p: u16) -> u32 {
+        let p = p as u32;
+        match self.version {
+            1..=3 => 2 * p,
+            4 | 5 => 4 * p,
+            6 | 7 => 4 * p + 8 * self.routine_off as u32,
+            8 => 8 * p,
+            _ => 2 * p,
+        }
+    }
+    /// Byte address of a packed string address (ZMSD §1.2.3).
+    pub fn string(&self, p: u16) -> u32 {
+        let p = p as u32;
+        match self.version {
+            1..=3 => 2 * p,
+            4 | 5 => 4 * p,
+            6 | 7 => 4 * p + 8 * self.string_off as u32,
+            8 => 8 * p,
+            _ => 2 * p,
+        }
+    }
+}
+
 /// Format one decoded instruction as "mnemonic op, op -> store ?branch [\"text\"]".
-pub fn format_instr(instr: &Instr, version: u8) -> String {
+pub fn format_instr(instr: &Instr, unpack: &Unpack) -> String {
+    let version = unpack.version;
     let mut s = mnemonic(&instr.operand_count, instr.opcode, version).to_string();
     if !instr.operands.is_empty() {
         let is_print_char = matches!(instr.operand_count, OperandCount::Var) && instr.opcode == 0x05;
-        let ops: Vec<String> = instr.operands.iter().map(|op| {
+        let ops: Vec<String> = instr.operands.iter().enumerate().map(|(i, op)| {
             if is_print_char {
                 let ch = match op {
                     Operand::Small(n) => Some(*n as u32),
@@ -112,7 +195,29 @@ pub fn format_instr(instr: &Instr, version: u8) -> String {
                     return format!("'{}'", c as u8 as char);
                 }
             }
-            fmt_operand(op)
+            // A variable is a runtime value, never a static reference: always
+            // render its variable sigil regardless of the opcode's operand role.
+            let value = match op {
+                Operand::Small(n) => *n as u16,
+                Operand::Large(n) => *n,
+                Operand::Var(_) => return fmt_operand(op),
+            };
+            match operand_role(&instr.operand_count, instr.opcode, version, i) {
+                OpRole::Object => format!("obj#{}", value),
+                OpRole::MemAddr => format!("@0x{:06x}", value as u32),
+                OpRole::Routine => format!("0x{:06x}", unpack.routine(value)),
+                OpRole::StringAddr => format!("@0x{:06x}", unpack.string(value)),
+                OpRole::JumpOffset => {
+                    let offset = match op {
+                        Operand::Large(n) => *n as i16,
+                        Operand::Small(n) => *n as i8 as i16,
+                        Operand::Var(_) => unreachable!(),
+                    };
+                    let target = (instr.next_pc as i64 + offset as i64 - 2) as u32;
+                    format!("0x{:06x}", target)
+                }
+                OpRole::Plain => fmt_operand(op),
+            }
         }).collect();
         s.push(' ');
         s.push_str(&ops.join(", "));
@@ -132,6 +237,7 @@ pub fn format_instr(instr: &Instr, version: u8) -> String {
 /// Disassemble `lines` instructions starting at `start`, each prefixed with its
 /// address. Stops early at the end of memory (never reads out of range).
 pub fn disassemble(mem: &Memory, start: u32, version: u8, lines: usize) -> Vec<String> {
+    let unpack = Unpack::from_mem(mem);
     let mut out = Vec::with_capacity(lines);
     let mut pc = start.min(mem.len() as u32);
     for _ in 0..lines {
@@ -139,7 +245,7 @@ pub fn disassemble(mem: &Memory, start: u32, version: u8, lines: usize) -> Vec<S
             break;
         }
         let instr = decode(mem, pc, version);
-        out.push(format!("{:06x}  {}", pc, format_instr(&instr, version)));
+        out.push(format!("{:06x}  {}", pc, format_instr(&instr, &unpack)));
         // Guard against a decoder that fails to advance (malformed bytes).
         pc = if instr.next_pc > pc { instr.next_pc } else { pc + 1 };
     }
@@ -234,7 +340,7 @@ mod tests {
             operands: vec![Operand::Var(1), Operand::Small(5)],
             store: Some(0), branch: None, text: None, next_pc: 0x1000,
         };
-        let s = format_instr(&instr, 5);
+        let s = format_instr(&instr, &Unpack::plain(5));
         assert!(s.starts_with("add "), "got {s:?}");
         assert!(s.contains("local0"), "got {s:?}");
         assert!(s.contains("#05"), "got {s:?}");
@@ -250,7 +356,7 @@ mod tests {
             operands: vec![Operand::Small(0x41)],
             store: None, branch: None, text: None, next_pc: 0x1000,
         };
-        let s = format_instr(&instr, 5);
+        let s = format_instr(&instr, &Unpack::plain(5));
         assert!(s.contains("'A'"), "got {s:?}");
     }
 
@@ -262,14 +368,116 @@ mod tests {
             operands: vec![Operand::Var(1)],
             store: None, branch: None, text: None, next_pc: 0x1000,
         };
-        assert!(format_instr(&var_op, 5).contains("local0"), "got {:?}", format_instr(&var_op, 5));
+        assert!(format_instr(&var_op, &Unpack::plain(5)).contains("local0"), "got {:?}", format_instr(&var_op, &Unpack::plain(5)));
         let non_printable = Instr {
             opcode: 0x05, form: Form::Variable, operand_count: OperandCount::Var,
             operands: vec![Operand::Small(0x0a)],
             store: None, branch: None, text: None, next_pc: 0x1000,
         };
-        let s = format_instr(&non_printable, 5);
+        let s = format_instr(&non_printable, &Unpack::plain(5));
         assert!(s.contains("#0a"), "got {s:?}");
+    }
+
+    #[test]
+    fn operand_role_classifies_each_family() {
+        // Object: test_attr (2OP:0x0A) index 0 is the object, index 1 is an attribute #.
+        assert_eq!(operand_role(&OperandCount::Two, 0x0A, 5, 0), OpRole::Object);
+        assert_eq!(operand_role(&OperandCount::Two, 0x0A, 5, 1), OpRole::Plain);
+        // MemAddr: loadw (2OP:0x0F) base address is index 0; the word index is Plain.
+        assert_eq!(operand_role(&OperandCount::Two, 0x0F, 5, 0), OpRole::MemAddr);
+        assert_eq!(operand_role(&OperandCount::Two, 0x0F, 5, 1), OpRole::Plain);
+        // Routine: call_vs (VAR:0x00) packed routine is index 0; args are Plain.
+        assert_eq!(operand_role(&OperandCount::Var, 0x00, 5, 0), OpRole::Routine);
+        assert_eq!(operand_role(&OperandCount::Var, 0x00, 5, 1), OpRole::Plain);
+        // StringAddr: print_paddr (1OP:0x0D).
+        assert_eq!(operand_role(&OperandCount::One, 0x0D, 5, 0), OpRole::StringAddr);
+        // JumpOffset: jump (1OP:0x0C).
+        assert_eq!(operand_role(&OperandCount::One, 0x0C, 5, 0), OpRole::JumpOffset);
+        // 1OP:0x0F is call_1n (Routine) at v5+, but `not` (Plain) at v3.
+        assert_eq!(operand_role(&OperandCount::One, 0x0F, 5, 0), OpRole::Routine);
+        assert_eq!(operand_role(&OperandCount::One, 0x0F, 3, 0), OpRole::Plain);
+        // jin (2OP:0x06) and insert_obj (2OP:0x0E) take an object in BOTH operands.
+        assert_eq!(operand_role(&OperandCount::Two, 0x06, 5, 0), OpRole::Object);
+        assert_eq!(operand_role(&OperandCount::Two, 0x06, 5, 1), OpRole::Object);
+        assert_eq!(operand_role(&OperandCount::Two, 0x0E, 5, 1), OpRole::Object);
+    }
+
+    #[test]
+    fn packed_address_unpacking_scales_by_version() {
+        // Routine/string both double in v1-3, quadruple in v4/5, x8 in v8.
+        assert_eq!(Unpack::plain(3).routine(0x0a2f), 0x00145e);
+        assert_eq!(Unpack::plain(3).string(0x0a2f), 0x00145e);
+        assert_eq!(Unpack::plain(5).routine(0x0050), 0x000140);
+        assert_eq!(Unpack::plain(8).routine(0x0010), 0x000080);
+        // v6/7 add 8*offset.
+        let u = Unpack { version: 7, routine_off: 2, string_off: 4 };
+        assert_eq!(u.routine(0x0010), 4 * 0x0010 + 8 * 2);
+        assert_eq!(u.string(0x0010), 4 * 0x0010 + 8 * 4);
+    }
+
+    #[test]
+    fn format_instr_renders_role_sigils() {
+        use crate::cpu::decode::Form;
+        // loadw #0x1234, #0x00 -> the base address renders as a memory sigil,
+        // the word index stays a plain constant.
+        let loadw = Instr {
+            opcode: 0x0F, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Large(0x1234), Operand::Small(0x00)],
+            store: Some(0), branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr(&loadw, &Unpack::plain(5));
+        assert!(s.contains("@0x001234"), "got {s:?}");
+        assert!(s.contains("#00"), "got {s:?}");
+
+        // call_vs with a packed routine constant unpacks (v3 doubling).
+        let call = Instr {
+            opcode: 0x00, form: Form::Variable, operand_count: OperandCount::Var,
+            operands: vec![Operand::Large(0x0a2f)],
+            store: Some(0), branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr(&call, &Unpack::plain(3));
+        assert!(s.contains("0x00145e"), "got {s:?}");
+        assert!(!s.contains("@0x00145e"), "routine is a code addr, not @-prefixed: {s:?}");
+
+        // print_paddr packed string renders with the @-prefixed memory sigil.
+        let pp = Instr {
+            opcode: 0x0D, form: Form::Short, operand_count: OperandCount::One,
+            operands: vec![Operand::Large(0x0a2f)],
+            store: None, branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr(&pp, &Unpack::plain(3));
+        assert!(s.contains("@0x00145e"), "got {s:?}");
+
+        // test_attr #5, #10 -> object sigil for operand 0, plain for the attribute.
+        let ta = Instr {
+            opcode: 0x0A, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Small(5), Operand::Small(10)],
+            store: None, branch: Some(Branch { on_true: true, offset: 4, len: 1 }),
+            text: None, next_pc: 0x1000,
+        };
+        let s = format_instr(&ta, &Unpack::plain(5));
+        assert!(s.contains("obj#5"), "got {s:?}");
+        assert!(s.contains("#0a"), "attribute stays a plain constant: {s:?}");
+
+        // jump with a signed offset renders the resolved code target.
+        let jump = Instr {
+            opcode: 0x0C, form: Form::Short, operand_count: OperandCount::One,
+            operands: vec![Operand::Large(0x0010)],
+            store: None, branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr(&jump, &Unpack::plain(5));
+        // target = next_pc + offset - 2 = 0x1000 + 0x10 - 2 = 0x100e
+        assert!(s.contains("0x00100e"), "got {s:?}");
+
+        // A variable operand ignores the role and stays a variable sigil.
+        let loadw_var = Instr {
+            opcode: 0x0F, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Var(0), Operand::Small(0x00)],
+            store: Some(0), branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr(&loadw_var, &Unpack::plain(5));
+        assert!(s.contains("sp"), "got {s:?}");
+        assert!(!s.contains("@0x"), "var base must not render as a memory addr: {s:?}");
     }
 
     #[test]
