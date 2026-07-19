@@ -555,6 +555,11 @@ fn glk_trace_args(sel: u32, args: &[u32]) -> String {
         0x1101 => format!("str={}, fg={}, bg={}", a(0), glk_color_hex(a(1)), glk_color_hex(a(2))), // _stream
         0x0004 => format!("{}, {}", glk_gestalt_name(a(0)), a(1)),          // glk_gestalt(sel, val)
         0x0005 => format!("{}, {}", glk_gestalt_name(a(0)), a(1)),          // glk_gestalt_ext(sel, val, ...)
+        // The `glk_select` arg is the event_t out-pointer (where the result is
+        // written); the decoded event follows on the next `event -> …` line. (SQ-0405)
+        0x00C0 | 0x00C1 => format!("event=0x{:X}", a(0)),                   // glk_select[_poll](&event)
+        0x00D0 | 0x0141 => format!("win={}, buf=0x{:X}, maxlen={}, initlen={}", a(0), a(1), a(2), a(3)), // request_line_event[_uni]
+        0x00D2 | 0x0140 => format!("win={}", a(0)),                         // request_char_event[_uni]
         _ => args.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", "),
     }
 }
@@ -3293,6 +3298,23 @@ impl Machine {
         self.store(s[0], result)
     }
 
+    /// For selectors that return their result through out-pointers (not the
+    /// return value), read the values back from memory after the call for the
+    /// trace's `-> …` suffix. Skips the Glulx dispatch sentinels (`0` = value not
+    /// wanted, `-1` = written to the stack), showing `?` for those. (SQ-0405)
+    fn glk_out_result(&self, sel: u32, args: &[u32]) -> Option<String> {
+        let a = |i: usize| args.get(i).copied().unwrap_or(0);
+        let rd = |addr: u32| -> Option<u32> {
+            if addr == 0 || addr == 0xffff_ffff { None } else { self.mem.read32(addr) }
+        };
+        let num = |o: Option<u32>| o.map(|v| v.to_string()).unwrap_or_else(|| "?".to_string());
+        match sel {
+            // glk_window_get_size(win, awidthptr, aheightptr)
+            0x0025 => Some(format!("{}×{}", num(rd(a(1))), num(rd(a(2))))),
+            _ => None,
+        }
+    }
+
     /// Dispatch one `@glk` selector against the Glk model + backend. Output-side
     /// selectors only (input/events are phase 3a-2). Unknown selectors record a
     /// diagnostic and return 0; nothing here panics on bad ids.
@@ -4223,7 +4245,10 @@ impl Machine {
             }
         };
         if let Some(call) = trace_call {
-            match glk_trace_ret(selector, ret) {
+            // Prefer an out-pointer result (read back from memory), else the
+            // return value; either rides on the call line as `-> …`. (SQ-0405)
+            let result = self.glk_out_result(selector, args).or_else(|| glk_trace_ret(selector, ret));
+            match result {
                 Some(r) => self.screen_trace.push(format!("{call} -> {r}")),
                 None => self.screen_trace.push(call),
             }
@@ -5312,6 +5337,26 @@ mod tests {
         assert_eq!(glk_trace_args(0x0086, &[3]), "Header");
         // gestalt selector decoded to its name
         assert_eq!(glk_trace_args(0x0004, &[15, 0]), "Unicode, 0");
+        // glk_select's event pointer is labelled (the decoded event follows separately)
+        assert_eq!(glk_trace_args(0x00C0, &[0x36E5DA]), "event=0x36E5DA");
+        // request_line_event args are named
+        assert_eq!(glk_trace_args(0x00D0, &[1, 0x1000, 256, 0]), "win=1, buf=0x1000, maxlen=256, initlen=0");
+    }
+
+    #[test]
+    fn glk_out_result_reads_get_size_out_pointers() {
+        // SQ-0405: glk_window_get_size returns its width/height through the
+        // pointer args; the trace reads them back after the call for `-> W×H`.
+        let mut m = super::tests::machine_with_glk(&[]);
+        // Write 80/25 to two RAM cells, then decode as the get_size out-params.
+        let (wp, hp) = (0x0120u32, 0x0124u32);
+        if m.mem.write32(wp, 80).is_ok() && m.mem.write32(hp, 25).is_ok() {
+            assert_eq!(m.glk_out_result(0x0025, &[2, wp, hp]).as_deref(), Some("80×25"));
+        }
+        // Null (value-not-wanted) and the -1 stack sentinel both show `?`.
+        assert_eq!(m.glk_out_result(0x0025, &[2, 0, 0xffff_ffff]).as_deref(), Some("?×?"));
+        // A non-out-pointer selector is not handled here (falls back to glk_trace_ret).
+        assert_eq!(m.glk_out_result(0x0023, &[0, 0, 3]), None);
     }
 
     #[test]
