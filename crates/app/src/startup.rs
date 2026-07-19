@@ -279,6 +279,9 @@ pub(crate) fn boot() -> BootResult {
     let mut startup_history: Vec<app::history::TurnRecord> = Vec::new();
     // Command history (Up/Down recall) carried from the archive, always loaded.
     let mut startup_command_history: Vec<String> = Vec::new();
+    // Turn counter carried from the archive when the game is auto-restored, so a
+    // later save records the cumulative count rather than only post-resume moves.
+    let mut startup_turns: Option<u32> = None;
     // When auto_load is false but a save exists and prompt_load_on_launch is true,
     // stash the save for the launch dialog instead of discarding it.
     let mut pending_resume_stash: app::state::PendingResume = None;
@@ -296,6 +299,11 @@ pub(crate) fn boot() -> BootResult {
                             }
                             startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs, ac.transcript_para));
                             startup_history = ac.history;
+                            // Restore the turn counter from the same archive (SQ-0429):
+                            // the auto_load resume path mirrors the interactive restore,
+                            // which sets state.turns = ac.meta.turns. Without this, a
+                            // resumed game's later save records only post-resume moves.
+                            startup_turns = Some(ac.meta.turns);
                         }
                         Err(e) => {
                             eprintln!("babelmap: warning: could not restore game from archive: {}; starting fresh", restore_error_msg(e));
@@ -513,6 +521,9 @@ pub(crate) fn boot() -> BootResult {
         state.history = startup_history;
     }
     state.command_history = startup_command_history;
+    if let Some(turns) = startup_turns {
+        state.turns = turns;
+    }
 
     // If a save was found but auto_load is off and prompt_load_on_launch is on,
     // open the launch dialog so the user can choose to resume or start fresh.
