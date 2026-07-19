@@ -96,12 +96,15 @@ fn fmt_branch(b: &Branch, next_pc: u32) -> String {
     format!(" ?{}{}", neg, target)
 }
 
-/// Semantic role of a constant operand, so the app (Phase 6b-2) can recognize
-/// references and make them clickable. Only constant operands (`Small`/`Large`)
-/// ever carry a non-`Plain` role; a `Var` is a runtime value, not a static
-/// reference, and always renders as its variable sigil.
+/// Semantic role of a constant operand, so the app can render/link it
+/// appropriately. Only constant operands (`Small`/`Large`) ever carry a
+/// non-`Plain` role; a `Var` is a runtime value and always renders as its
+/// variable sigil. `VarRef` marks a constant that IS a variable number (an
+/// indirect variable reference — `load`/`store`/`inc`/`dec`/`inc_chk`/
+/// `dec_chk`/`pull`): rendered as the variable it names (`sp`/`localN`/`gNN`)
+/// rather than a bare constant.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum OpRole { Plain, Object, MemAddr, Routine, StringAddr, JumpOffset }
+pub enum OpRole { Plain, Object, MemAddr, Routine, StringAddr, JumpOffset, VarRef }
 
 /// Semantic role of operand `index` for this opcode (version-aware). `Plain`
 /// for every operand not in the table below. Verified against this file's
@@ -116,6 +119,8 @@ pub fn operand_role(count: &OperandCount, opcode: u8, version: u8, index: usize)
             0x0F if index == 0 && version >= 5 => Routine,
             0x0D if index == 0 => StringAddr,
             0x0C if index == 0 => JumpOffset,
+            // load / inc / dec: operand 0 is a variable number.
+            0x0E | 0x05 | 0x06 if index == 0 => VarRef,
             _ => Plain,
         },
         OperandCount::Two => match opcode {
@@ -123,12 +128,16 @@ pub fn operand_role(count: &OperandCount, opcode: u8, version: u8, index: usize)
             0x0A | 0x0B | 0x0C | 0x11 | 0x12 | 0x13 if index == 0 => Object,
             0x0F | 0x10 if index == 0 => MemAddr,
             0x19 | 0x1A if index == 0 => Routine,
+            // store / dec_chk / inc_chk: operand 0 is a variable number.
+            0x0D | 0x04 | 0x05 if index == 0 => VarRef,
             _ => Plain,
         },
         OperandCount::Var => match opcode {
             0x03 if index == 0 => Object,
             0x01 | 0x02 if index == 0 => MemAddr,
             0x00 | 0x0C | 0x19 | 0x1A if index == 0 => Routine,
+            // pull: operand 0 is the variable number to pull into.
+            0x09 if index == 0 => VarRef,
             _ => Plain,
         },
         _ => Plain,
@@ -216,6 +225,9 @@ pub fn format_instr(instr: &Instr, unpack: &Unpack) -> String {
                     let target = (instr.next_pc as i64 + offset as i64 - 2) as u32;
                     format!("0x{:06x}", target)
                 }
+                // The constant IS a variable number — render the variable it
+                // names (sp/localN/gNN) rather than a bare `#nn`.
+                OpRole::VarRef => fmt_var(value as u8),
                 OpRole::Plain => fmt_operand(op),
             }
         }).collect();
@@ -478,6 +490,50 @@ mod tests {
         let s = format_instr(&loadw_var, &Unpack::plain(5));
         assert!(s.contains("sp"), "got {s:?}");
         assert!(!s.contains("@0x"), "var base must not render as a memory addr: {s:?}");
+    }
+
+    #[test]
+    fn operand_role_marks_indirect_variable_references() {
+        // load/inc/dec (1OP), store/dec_chk/inc_chk (2OP), pull (VAR): operand 0
+        // is a variable number, not a value.
+        assert_eq!(operand_role(&OperandCount::One, 0x0E, 5, 0), OpRole::VarRef); // load
+        assert_eq!(operand_role(&OperandCount::One, 0x05, 5, 0), OpRole::VarRef); // inc
+        assert_eq!(operand_role(&OperandCount::One, 0x06, 5, 0), OpRole::VarRef); // dec
+        assert_eq!(operand_role(&OperandCount::Two, 0x0D, 5, 0), OpRole::VarRef); // store
+        assert_eq!(operand_role(&OperandCount::Two, 0x0D, 5, 1), OpRole::Plain);  // store's value
+        assert_eq!(operand_role(&OperandCount::Two, 0x04, 5, 0), OpRole::VarRef); // dec_chk
+        assert_eq!(operand_role(&OperandCount::Two, 0x05, 5, 0), OpRole::VarRef); // inc_chk
+        assert_eq!(operand_role(&OperandCount::Var, 0x09, 5, 0), OpRole::VarRef); // pull
+        // push (VAR:0x08) pushes a VALUE — not an indirect variable reference.
+        assert_eq!(operand_role(&OperandCount::Var, 0x08, 5, 0), OpRole::Plain);
+    }
+
+    #[test]
+    fn format_instr_renders_varref_as_the_named_variable() {
+        use crate::cpu::decode::Form;
+        // store #0x10, #0x05 -> target is variable 0x10 = g00; the value stays plain.
+        let store = Instr {
+            opcode: 0x0D, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Small(0x10), Operand::Small(0x05)],
+            store: None, branch: None, text: None, next_pc: 0x1000,
+        };
+        let s = format_instr(&store, &Unpack::plain(5));
+        assert!(s.contains("g00"), "target variable named, not a constant: {s:?}");
+        assert!(s.contains("#05"), "the value operand stays a plain constant: {s:?}");
+        // load #0x00 -> reads variable 0 = the stack (store target set elsewhere).
+        let load = Instr {
+            opcode: 0x0E, form: Form::Short, operand_count: OperandCount::One,
+            operands: vec![Operand::Small(0x00)],
+            store: Some(0x10), branch: None, text: None, next_pc: 0x1000,
+        };
+        assert!(format_instr(&load, &Unpack::plain(5)).contains("load sp"), "var 0 = stack");
+        // inc #0x01 -> variable 1 = local0.
+        let inc = Instr {
+            opcode: 0x05, form: Form::Short, operand_count: OperandCount::One,
+            operands: vec![Operand::Small(0x01)],
+            store: None, branch: None, text: None, next_pc: 0x1000,
+        };
+        assert!(format_instr(&inc, &Unpack::plain(5)).contains("local0"), "var 1 = local0");
     }
 
     #[test]
