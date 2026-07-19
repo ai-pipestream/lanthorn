@@ -1202,6 +1202,15 @@ impl Debugger for GameSession {
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
     }
+
+    fn var_value(&self, var: u8) -> Option<u16> {
+        let st = &self.machine.state;
+        match var {
+            0 => st.eval_stack.last().copied(), // peek the top; never pops
+            1..=15 => st.frames.last()?.locals.get((var - 1) as usize).copied(),
+            n => Some(self.machine.global(n - 16)),
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

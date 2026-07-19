@@ -146,22 +146,21 @@ fn draw_objects(buf: &mut Buffer, content: Rect, window: usize, panel: &DebugPan
     }
 }
 
-/// Draw the Memory section: when `mem_input` is editing, an address-input
-/// line occupies the top content row (with a `_` cursor) and the hex dump is
-/// drawn below it (content height − 1); otherwise the hex dump fills the
-/// whole content rect. Memory is pre-windowed by its addr, so it never
-/// applies a scroll offset.
+/// Draw the Memory section: an address line always occupies the top content
+/// row so the jump affordance is discoverable — it shows the current address
+/// (with a `press : to jump` hint) when idle, and becomes the edit field with
+/// a `_` cursor while `mem_input` is editing. The hex dump fills the rows
+/// below it. Memory is pre-windowed by its addr, so it never applies a scroll
+/// offset.
 fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: &AppState, body: Style) {
-    let mut y = content.y;
-    let mut height = content.height;
-    if let Some(input) = &panel.mem_input {
-        let line = format!("addr: 0x{input}_");
-        draw_str_clipped(buf, content.x, y, &line, state.colors.debug_pane_focused, content);
-        y += 1;
-        height = height.saturating_sub(1);
-    }
-    for (row, line) in panel.snapshot.memory.iter().take(height as usize).enumerate() {
-        draw_str_clipped(buf, content.x, y + row as u16, line, body, content);
+    let (line, style) = match &panel.mem_input {
+        Some(input) => (format!("jump: {input}_"), state.colors.debug_pane_focused),
+        None => (format!("addr: 0x{:06x}  (: jump — hex, gNN, localN, sp)", panel.mem_addr), body),
+    };
+    draw_str_clipped(buf, content.x, content.y, &line, style, content);
+    let height = content.height.saturating_sub(1);
+    for (row, hex) in panel.snapshot.memory.iter().take(height as usize).enumerate() {
+        draw_str_clipped(buf, content.x, content.y + 1 + row as u16, hex, body, content);
     }
 }
 

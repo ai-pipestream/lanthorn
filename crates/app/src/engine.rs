@@ -375,6 +375,11 @@ pub trait Debugger {
     /// table (number → hex bytes) — shown inline when the Objects tree entry
     /// is expanded.
     fn object_detail(&self, obj: u16) -> Vec<String>;
+    /// Current value of Z-machine variable `var` (0 = top of the eval stack,
+    /// 1..=15 = locals of the innermost frame, 16..=255 = globals). `None` when
+    /// unavailable (no frame, empty stack, or no such local). Read-only peek —
+    /// never pops. Lets the Memory jump box dereference a variable to an address.
+    fn var_value(&self, var: u8) -> Option<u16>;
 }
 
 // ── Engine-tagged save ──────────────────────────────────────────────────────
@@ -664,6 +669,7 @@ mod debugger_trait_tests {
         fn memory_hex(&self, _a: u32, _r: usize) -> Vec<String> { vec!["000000  00".into()] }
         fn memory_len(&self) -> u32 { 0x10000 }
         fn object_detail(&self, _obj: u16) -> Vec<String> { vec!["attrs: (none)".into()] }
+        fn var_value(&self, _var: u8) -> Option<u16> { None }
     }
 
     #[test]

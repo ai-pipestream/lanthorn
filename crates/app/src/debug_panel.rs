@@ -213,7 +213,9 @@ impl DebugPanelState {
             };
         }
         match code {
-            KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' => {
+            // Alphanumerics so variable tokens (`g44`, `local10`, `sp`) type as
+            // well as hex addresses; unparseable input is simply a no-op on Enter.
+            KeyCode::Char(c) if c.is_ascii_alphanumeric() => {
                 self.mem_input.as_mut().expect("checked Some above").push(c);
             }
             KeyCode::Backspace => {
@@ -221,9 +223,10 @@ impl DebugPanelState {
             }
             KeyCode::Enter => {
                 let buf = self.mem_input.take().expect("checked Some above");
-                let trimmed = buf.trim().trim_start_matches("0x");
-                if let Ok(parsed) = u32::from_str_radix(trimmed, 16) {
-                    self.mem_addr = parsed.min(dbg.memory_len());
+                if let Some(addr) = resolve_mem_target(buf.trim(), dbg) {
+                    // Align down to the 16-byte row grid so the jump doesn't
+                    // shift every row off the hex dump's column alignment.
+                    self.mem_addr = addr.min(dbg.memory_len()) & !0xF;
                     self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
                 }
             }
@@ -302,6 +305,9 @@ impl DebugPanelState {
         self.tab[window] = tab;
         self.scroll[window] = 0;
         self.focus = window;
+        // Switching tabs abandons any in-progress memory address input, so it
+        // can't be left open-but-hidden (which would swallow Esc's pop-to-story).
+        self.mem_input = None;
     }
 
     /// Navigate the disassembly to `addr` (focus the Left window's Disasm
@@ -330,7 +336,9 @@ impl DebugPanelState {
     pub fn goto_memory(&mut self, addr: u32, dbg: &dyn Debugger) {
         self.focus = 2;
         self.tab[2] = 2; // Memory is WINDOW_TABS[2][2]
-        self.mem_addr = addr.min(dbg.memory_len());
+        // Align down to the 16-byte row grid so the jump keeps the hex dump's
+        // column alignment (scroll then advances by whole 16-byte rows).
+        self.mem_addr = addr.min(dbg.memory_len()) & !0xF;
         self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
     }
 
@@ -378,6 +386,35 @@ pub fn disasm_rows(disasm: &[String], pc: u32, height: usize) -> Vec<DisasmRow> 
 /// (`di` indexes into that object's `object_details` entry).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObjRow { Tree { line_idx: usize, obj: Option<u16> }, Detail { obj: u16, di: usize } }
+
+/// Resolve a Memory-jump input to a target address. A variable token (`sp`,
+/// `localN`, `gNN` — matching the disassembly's rendering) dereferences to the
+/// variable's current value used AS an address; anything else parses as a
+/// literal hex address.
+fn resolve_mem_target(s: &str, dbg: &dyn Debugger) -> Option<u32> {
+    if let Some(var) = parse_var_token(s) {
+        return dbg.var_value(var).map(|v| v as u32);
+    }
+    u32::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+}
+
+/// Parse a variable token into a Z-machine variable number: `sp` → 0,
+/// `localN` → N+1 (N decimal, 0..=14), `gNN` → 16+NN (NN hex, 0..=0xef, matching
+/// the disassembly's `g{:02x}`). `None` if `s` is not a variable token.
+fn parse_var_token(s: &str) -> Option<u8> {
+    if s == "sp" {
+        return Some(0);
+    }
+    if let Some(n) = s.strip_prefix("local") {
+        let idx: u8 = n.parse().ok()?;
+        return (idx <= 14).then_some(idx + 1);
+    }
+    if let Some(n) = s.strip_prefix('g') {
+        let idx = u8::from_str_radix(n, 16).ok()?;
+        return (idx <= 0xef).then_some(idx + 16);
+    }
+    None
+}
 
 /// Parse the leading `[N]` object id from a tree line (e.g. `"  [12] lamp"`).
 fn parse_obj_id(line: &str) -> Option<u16> {
@@ -619,6 +656,8 @@ mod tests {
         }
         fn memory_len(&self) -> u32 { 0x10000 }
         fn object_detail(&self, _obj: u16) -> Vec<String> { vec!["attrs: (none)".into()] }
+        // Deterministic, distinct-per-var value so deref jumps are testable.
+        fn var_value(&self, var: u8) -> Option<u16> { Some(0x1000 + var as u16 * 0x10) }
     }
 
     #[test]
@@ -935,6 +974,18 @@ mod tests {
     }
 
     #[test]
+    fn switching_tabs_clears_an_open_memory_input() {
+        // Opening the address input then switching tabs (e.g. a mouse click on
+        // the Stack tab) must not leave it open-but-hidden — a stale mem_input
+        // swallows Esc's pop-to-story shortcut.
+        let mut p = memory_focused_panel();
+        p.handle_key(KeyCode::Char(':'), &MockDbg);
+        assert!(p.mem_input.is_some());
+        p.activate_tab(2, 0); // switch window 2 to the Call Stack tab
+        assert!(p.mem_input.is_none(), "tab switch must abandon the input");
+    }
+
+    #[test]
     fn colon_does_not_open_input_outside_the_memory_section() {
         let mut p = DebugPanelState::new(0x1000); // focus 0 = Disasm
         assert_eq!(p.handle_key(KeyCode::Char(':'), &MockDbg), DebugKey::Ignored);
@@ -1022,6 +1073,36 @@ mod tests {
         assert_eq!(p.tab[2], 2);
         assert_eq!(p.mem_addr, 0x300);
         assert_eq!(p.snapshot.memory[0], format!("{:06x}", 0x300));
+    }
+
+    #[test]
+    fn memory_input_dereferences_a_global_token_to_its_value_as_an_address() {
+        // MockDbg::var_value returns 0x1000 + var*0x10. `g00` = global index 0
+        // = variable 16 → 0x1000 + 16*0x10 = 0x1100, used as the jump address.
+        let mut p = memory_focused_panel();
+        p.handle_key(KeyCode::Char(':'), &MockDbg);
+        for c in "g00".chars() { p.handle_key(KeyCode::Char(c), &MockDbg); }
+        p.handle_key(KeyCode::Enter, &MockDbg);
+        assert_eq!(p.mem_addr, 0x1100, "jumps to the value held in the variable");
+        assert!(p.mem_input.is_none(), "input closes on Enter");
+    }
+
+    #[test]
+    fn parse_var_token_maps_the_variable_families() {
+        assert_eq!(parse_var_token("sp"), Some(0));
+        assert_eq!(parse_var_token("local0"), Some(1));
+        assert_eq!(parse_var_token("local10"), Some(11));
+        assert_eq!(parse_var_token("g00"), Some(16));
+        assert_eq!(parse_var_token("g44"), Some(0x44 + 16)); // NN is hex, matches g{:02x}
+        assert_eq!(parse_var_token("local15"), None, "only 0..=14 locals");
+        assert_eq!(parse_var_token("1234"), None, "a bare hex address is not a var");
+    }
+
+    #[test]
+    fn goto_memory_aligns_an_unaligned_jump_down_to_the_row_grid() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.goto_memory(0x30b, &MockDbg);
+        assert_eq!(p.mem_addr, 0x300, "jump aligns down to the 16-byte row boundary");
     }
 
     #[test]
