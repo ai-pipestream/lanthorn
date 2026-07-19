@@ -2172,6 +2172,7 @@ impl AppState {
             || self.overlays.launch_dialog
             || self.overlays.hints.is_some()
             || self.overlays.replay.is_some()
+            || self.overlays.debug_panel.is_some()
             || self.resize_mode
     }
 
@@ -4134,6 +4135,11 @@ mod tests {
         s.overlays.launch_dialog = true;
         assert!(s.any_overlay_open(), "launch_dialog true => any_overlay_open true");
         s.overlays.launch_dialog = false;
+
+        // debug_panel
+        s.overlays.debug_panel = Some(crate::debug_panel::DebugPanelState::new(0));
+        assert!(s.any_overlay_open(), "debug_panel open => any_overlay_open true");
+        s.overlays.debug_panel = None;
 
         assert!(!s.any_overlay_open(), "all cleared => any_overlay_open false again");
     }
