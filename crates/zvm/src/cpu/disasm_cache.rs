@@ -80,6 +80,84 @@ impl DisasmCache {
         }
     }
 
+    /// Build the RD-discovered cache: discover routines, then tile the code
+    /// region `[region_start, region_end)` into sorted, gapless `Unit`s.
+    ///
+    /// Code starts are the discovered routine entries plus the headerless
+    /// initial-PC "main" context. Untiled bytes before the next code start
+    /// become a single `Data` run. At a routine entry a `RoutineHeader` is
+    /// emitted (the main context has none); then instructions are decoded
+    /// linearly up to the next code start (or `region_end`), with the final
+    /// instruction truncated so it never crosses that boundary.
+    pub fn build(mem: &Memory) -> DisasmCache {
+        let (rstart, rend) = code_region(mem);
+        let version = mem.version();
+        let unpack = Unpack::from_mem(mem);
+        let routines = discover_rd(mem, version, &unpack, (rstart, rend));
+
+        // Code starts to tile from: routine entries (which carry a header) plus
+        // the headerless initial-PC main context. Kept as one sorted set so
+        // each run's extent is bounded by the next code start of either kind.
+        let initial_pc = mem.read_word(0x06) as u32;
+        let mut starts: BTreeSet<u32> = routines.clone();
+        if initial_pc >= rstart && initial_pc < rend {
+            starts.insert(initial_pc);
+        }
+
+        let mut units: Vec<Unit> = Vec::new();
+        let mut cur = rstart;
+        while cur < rend {
+            // Smallest code start >= cur, else region end.
+            let next_start = starts.range(cur..).next().copied().unwrap_or(rend);
+
+            if cur < next_start {
+                // Data gap before the next code start.
+                units.push(Unit::Data { addr: cur, len: next_start - cur });
+                cur = next_start;
+                continue;
+            }
+
+            // cur == next_start == a code start. Routine entries carry a
+            // header; the main context (initial_pc) does not.
+            let start = cur;
+            if routines.contains(&start) {
+                let nlocals = mem.read_byte(start);
+                let first_instr = routine_first_instr(mem, start, version).min(rend);
+                units.push(Unit::RoutineHeader { addr: start, nlocals, first_instr });
+                cur = first_instr;
+            }
+
+            // This run's extent ends at the NEXT code start (strictly greater
+            // than `start`), clamped to region end.
+            let limit = starts
+                .range((start + 1)..)
+                .next()
+                .copied()
+                .unwrap_or(rend)
+                .min(rend);
+
+            while cur < limit {
+                let instr = decode(mem, cur, version);
+                let mut next = if instr.next_pc > cur { instr.next_pc } else { cur + 1 };
+                // Boundary wins: never cross into the next code start / region end.
+                if next > limit {
+                    next = limit;
+                }
+                units.push(Unit::Instr { addr: cur, next });
+                cur = next;
+            }
+        }
+
+        DisasmCache {
+            units,
+            routines,
+            region_start: rstart,
+            region_end: rend,
+            version,
+            unpack,
+        }
+    }
+
     /// Code-region bounds this cache was built for: `(region_start, region_end)`.
     pub fn region(&self) -> (u32, u32) {
         (self.region_start, self.region_end)
@@ -400,5 +478,97 @@ mod tests {
             routines.contains(&expected),
             "RD did not include first-call target {expected:#x}"
         );
+    }
+
+    #[test]
+    fn build_tiles_the_region_gaplessly_on_minizork() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let (rstart, rend) = code_region(&mem);
+        let cache = DisasmCache::build(&mem);
+        let u = cache.units();
+
+        assert!(!u.is_empty(), "build produced no units");
+        // Strictly sorted, gapless, no overlap.
+        for w in u.windows(2) {
+            assert!(
+                w[0].addr() < w[1].addr(),
+                "not strictly sorted: {:#x} !< {:#x}",
+                w[0].addr(),
+                w[1].addr()
+            );
+            assert_eq!(
+                w[0].end(),
+                w[1].addr(),
+                "gap/overlap between {:#x?} and {:#x?}",
+                w[0],
+                w[1]
+            );
+        }
+        assert_eq!(u[0].addr(), rstart, "first unit does not start at region_start");
+        assert_eq!(
+            u.last().unwrap().end(),
+            rend,
+            "last unit does not end at region_end"
+        );
+    }
+
+    #[test]
+    fn build_emits_routine_headers_and_instructions_on_minizork() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let cache = DisasmCache::build(&mem);
+        let has_header = cache
+            .units()
+            .iter()
+            .any(|u| matches!(u, Unit::RoutineHeader { .. }));
+        let has_instr = cache
+            .units()
+            .iter()
+            .any(|u| matches!(u, Unit::Instr { .. }));
+        assert!(has_header, "no RoutineHeader units");
+        assert!(has_instr, "no Instr units");
+    }
+
+    #[test]
+    fn build_places_initial_pc_inside_an_instr_unit_on_minizork() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let initial_pc = mem.read_word(0x06) as u32;
+        let cache = DisasmCache::build(&mem);
+        let found = cache.units().iter().any(|u| {
+            matches!(u, Unit::Instr { .. }) && u.addr() <= initial_pc && initial_pc < u.end()
+        });
+        assert!(
+            found,
+            "initial_pc {initial_pc:#x} not inside any Instr unit"
+        );
+    }
+
+    #[test]
+    fn build_returns_and_stays_consistent_on_synthetic_story() {
+        // No fixture required: build must return and hold its invariant on any
+        // valid story (guards against panic / infinite-loop on sparse code).
+        let bytes = crate::header::tests_support::sample_story(5);
+        let mem = Memory::new(bytes).unwrap();
+        let (rstart, rend) = code_region(&mem);
+        let cache = DisasmCache::build(&mem);
+        let u = cache.units();
+        assert!(!u.is_empty());
+        for w in u.windows(2) {
+            assert!(w[0].addr() < w[1].addr());
+            assert_eq!(w[0].end(), w[1].addr());
+        }
+        assert_eq!(u[0].addr(), rstart);
+        assert_eq!(u.last().unwrap().end(), rend);
     }
 }
