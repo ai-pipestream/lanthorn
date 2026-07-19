@@ -82,6 +82,7 @@ pub(crate) fn dispatch_slash_outcome(
                 state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
         }
+        SlashOutcome::OpenDebug => open_debug(state, session),
         SlashOutcome::DumpNotifications => {
             let history = state.notifications.history().to_vec();
             state.push_transcript_internal("[notifications]", TranscriptKind::Meta);
@@ -396,4 +397,92 @@ pub(crate) fn dispatch_slash_outcome(
         }
     }
     false
+}
+
+/// Open the Z-machine debug inspector: seed a fresh `DebugPanelState` at the
+/// engine's current PC and refresh it, or report unavailability. Factored out
+/// of the `OpenDebug` arm so it's testable without a full `dispatch_slash_outcome`
+/// call.
+fn open_debug(state: &mut AppState, session: &mut dyn Engine) {
+    if let Some(dbg) = session.debugger() {
+        let mut panel = app::debug_panel::DebugPanelState::new(dbg.pc());
+        panel.refresh(dbg);
+        state.overlays.debug_panel = Some(panel);
+    } else {
+        state.push_transcript_internal(
+            "debugger not available for this engine", TranscriptKind::Meta);
+    }
+}
+
+#[cfg(test)]
+mod debug_dispatch_tests {
+    use super::*;
+    use app::engine::{Debugger, EngineError, EngineSave, KeyInput, LocationInfo, ScreenModel};
+    use app::session::{InputKind, TurnResult};
+    use std::any::Any;
+    use std::collections::BTreeMap;
+
+    /// A minimal `Engine` double: every method the debug-open path doesn't touch
+    /// panics if called, so a wiring mistake fails loudly instead of silently.
+    struct MockEngine {
+        has_debugger: bool,
+        aux: BTreeMap<String, Vec<u8>>,
+    }
+
+    struct MockDebugger;
+    impl Debugger for MockDebugger {
+        fn pc(&self) -> u32 { 0x1234 }
+        fn disassemble(&self, _addr: u32, _lines: usize) -> Vec<String> { vec!["1234  nop".into()] }
+        fn next_instr(&self, addr: u32) -> u32 { addr + 1 }
+        fn stack_lines(&self) -> Vec<String> { Vec::new() }
+        fn locals_lines(&self) -> Vec<String> { Vec::new() }
+        fn globals_lines(&self) -> Vec<String> { Vec::new() }
+        fn object_tree_lines(&self) -> Vec<String> { Vec::new() }
+        fn dictionary_lines(&self) -> Vec<String> { Vec::new() }
+        fn memory_hex(&self, _addr: u32, _rows: usize) -> Vec<String> { Vec::new() }
+        fn memory_len(&self) -> u32 { 0x10000 }
+    }
+
+    impl Engine for MockEngine {
+        fn submit(&mut self, _command: &str) -> TurnResult { unimplemented!() }
+        fn submit_key(&mut self, _key: KeyInput) -> Option<TurnResult> { unimplemented!() }
+        fn take_transcript(&mut self) -> String { unimplemented!() }
+        fn pending_input(&self) -> InputKind { InputKind::Line }
+        fn resume_save(&mut self, _wrote_ok: bool) -> TurnResult { unimplemented!() }
+        fn resume_restore(&mut self, _data: Option<&[u8]>) -> TurnResult { unimplemented!() }
+        fn has_quit(&self) -> bool { false }
+        fn screen(&self) -> ScreenModel { unimplemented!() }
+        fn save_state(&self) -> EngineSave { EngineSave::new("mock", 1, Vec::new()) }
+        fn restore_state(&mut self, _save: &EngineSave) -> Result<(), EngineError> { Ok(()) }
+        fn restore_game_save(&mut self, _bytes: &[u8]) -> Result<(), EngineError> { Ok(()) }
+        fn aux_data(&self) -> &BTreeMap<String, Vec<u8>> { &self.aux }
+        fn set_aux_data(&mut self, data: BTreeMap<String, Vec<u8>>) { self.aux = data; }
+        fn aux_dirty(&self) -> bool { false }
+        fn clear_aux_dirty(&mut self) {}
+        fn current_location(&self) -> Option<LocationInfo> { None }
+        fn as_any(&self) -> &dyn Any { self }
+        fn as_any_mut(&mut self) -> &mut dyn Any { self }
+        fn debugger(&self) -> Option<&dyn Debugger> {
+            if self.has_debugger { Some(&MockDebugger) } else { None }
+        }
+    }
+
+    #[test]
+    fn open_debug_opens_panel_when_engine_has_debugger() {
+        let mut state = AppState::default();
+        let mut engine = MockEngine { has_debugger: true, aux: BTreeMap::new() };
+        open_debug(&mut state, &mut engine);
+        assert!(state.overlays.debug_panel.is_some());
+        let panel = state.overlays.debug_panel.as_ref().unwrap();
+        assert_eq!(panel.disasm_addr, 0x1234);
+    }
+
+    #[test]
+    fn open_debug_reports_when_engine_has_no_debugger() {
+        let mut state = AppState::default();
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        open_debug(&mut state, &mut engine);
+        assert!(state.overlays.debug_panel.is_none());
+        assert!(state.transcript.iter().any(|l| l.contains("debugger not available")));
+    }
 }

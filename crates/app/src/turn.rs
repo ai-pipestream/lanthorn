@@ -219,6 +219,15 @@ pub(crate) fn finish_command_turn(
     // behind it). Every other engine keeps exiting on a clean quit.
     let should_exit = should_exit_on_turn(&result, state);
     let is_scott = crate::engine_helpers::engine_tag(session) == "scott";
+
+    // If the debug inspector is open, refresh its snapshot from the VM state
+    // this turn just produced (globals/objects/PC may have moved).
+    if let Some(p) = &mut state.overlays.debug_panel {
+        if let Some(dbg) = session.debugger() {
+            p.refresh(dbg);
+        }
+    }
+
     intercept_scott_game_over(should_exit, is_scott, state)
 }
 
@@ -573,6 +582,7 @@ pub(crate) fn apply_game_driven_result(
     result: &TurnResult,
     game_dir: &std::path::Path,
     map_area: Rect,
+    session: &dyn Engine,
 ) -> bool {
     if result.erase_lower {
         // A game-driven screen clear is a menu redraw navigated by keystrokes —
@@ -630,6 +640,15 @@ pub(crate) fn apply_game_driven_result(
             }
         }
     }
+
+    // If the debug inspector is open, refresh its snapshot from the VM state
+    // this turn just produced (globals/objects/PC may have moved).
+    if let Some(p) = &mut state.overlays.debug_panel {
+        if let Some(dbg) = session.debugger() {
+            p.refresh(dbg);
+        }
+    }
+
     should_exit_on_turn(result, state)
 }
 
@@ -902,16 +921,17 @@ mod tests {
         state.config.user_dir = tmp.clone();
         let mut m = mapper::mapper::Mapper::default();
         let rect = ratatui::layout::Rect::new(0, 0, 20, 20);
+        let eng = TraceOnlyEngine { line: None };
 
         state.push_transcript("room description"); // pre-menu content
 
         // First menu draw (a clearing turn): appends MENU v1.
-        super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v1"), &tmp, rect);
+        super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v1"), &tmp, rect, &eng);
         assert!(state.transcript.iter().any(|l| l.contains("MENU v1")));
         let len_after_v1 = state.transcript.len();
 
         // Second draw (an arrow keypress): collapses v1, appends MENU v2.
-        super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v2"), &tmp, rect);
+        super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v2"), &tmp, rect, &eng);
         assert!(!state.transcript.iter().any(|l| l.contains("MENU v1")), "v1 must be collapsed, not stacked");
         assert!(state.transcript.iter().any(|l| l.contains("MENU v2")), "v2 present");
         assert!(state.transcript.iter().any(|l| l.contains("room description")), "pre-menu content preserved");
@@ -935,15 +955,16 @@ mod tests {
         m.observe(1, "Lab", None); // a known, placed room
         let gen0 = state.graph_gen;
         let rect = ratatui::layout::Rect::new(0, 0, 20, 20);
+        let eng = TraceOnlyEngine { line: None };
 
         // Re-reporting the SAME room (a menu keystroke) must not re-route.
         let same = game_driven_result(Some(zvm::ObjectSnapshot { number: 1, parent: 0, name: "Lab".into() }));
-        super::apply_game_driven_result(&mut state, &mut m, &same, &tmp, rect);
+        super::apply_game_driven_result(&mut state, &mut m, &same, &tmp, rect, &eng);
         assert_eq!(state.graph_gen, gen0, "re-reporting a known room must not bump graph_gen");
 
         // Revealing a NEW room must bump (the map has to update).
         let moved = game_driven_result(Some(zvm::ObjectSnapshot { number: 2, parent: 0, name: "Hall".into() }));
-        super::apply_game_driven_result(&mut state, &mut m, &moved, &tmp, rect);
+        super::apply_game_driven_result(&mut state, &mut m, &moved, &tmp, rect, &eng);
         assert_ne!(state.graph_gen, gen0, "a new room on a game-driven turn must bump graph_gen");
 
         let _ = std::fs::remove_dir_all(&tmp);

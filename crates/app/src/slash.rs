@@ -63,6 +63,9 @@ pub enum SlashOutcome {
     /// Diagnostic: dump the live Glk window layout (sizes, borders, per-window
     /// colours) to the transcript as Meta lines. Handled in `slash_dispatch`.
     DumpWindows,
+    /// Open the Z-machine debug inspector. Handled in `slash_dispatch` (needs
+    /// AppState + the engine's debugger capability).
+    OpenDebug,
     /// Replay the notification history into the transcript as Meta lines, in case
     /// a toast was missed. Handled in `slash_dispatch`. (SQ-0176)
     DumpNotifications,
@@ -435,6 +438,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "dump-windows", category: Category::Help, context: Context::Global,
         usage: "dump-windows", description: "dump the live Glk window layout (sizes, borders, colours)",
         dispatch: |_| SlashOutcome::DumpWindows },
+    CommandSpec { name: "debug", category: Category::Help, context: Context::Global,
+        usage: "debug", description: "open the Z-machine debug inspector (disassembly + live VM state)",
+        dispatch: |_| SlashOutcome::OpenDebug },
     CommandSpec {
         name: "trace", category: Category::Help, context: Context::Global,
         usage: "trace [sections|all|none]",
@@ -730,7 +736,7 @@ mod tests {
         }
         // Verb-noun lint: every name contains '-' except the whitelist.
         for c in COMMANDS {
-            if c.name == "quit" || c.name == "help" || c.name == "volume" || c.name == "trace" { continue; }
+            if c.name == "quit" || c.name == "help" || c.name == "volume" || c.name == "trace" || c.name == "debug" { continue; }
             assert!(c.name.contains('-'), "non-verb-noun command name: {}", c.name);
         }
         // Spot-check representative commands exist with the right category.
@@ -739,9 +745,10 @@ mod tests {
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
         // Total count matches the spec table (Game 11, Map 21, View 6,
-        // Transcript 3, Style 7, Export 3, Animation 4, Help 2). `open-saves`
+        // Transcript 3, Style 7, Export 3, Animation 4, Help 3). `open-saves`
         // was removed — `restore-state` (bare) opens the saves dialog instead.
-        assert_eq!(COMMANDS.len(), 59, "registry must match the spec's Full command table");
+        // `debug` (SQ-0169) opens the Z-machine debug inspector.
+        assert_eq!(COMMANDS.len(), 60, "registry must match the spec's Full command table");
     }
 
     #[test]
@@ -784,6 +791,12 @@ mod tests {
     fn dump_windows_command_parses() {
         assert!(find_command("dump-windows").is_some());
         assert!(matches!(parse("dump-windows", '/'), SlashOutcome::DumpWindows));
+    }
+
+    #[test]
+    fn debug_command_parses_to_open_debug() {
+        assert!(find_command("debug").is_some());
+        assert!(matches!(parse("debug", '/'), SlashOutcome::OpenDebug));
     }
 
     #[test]

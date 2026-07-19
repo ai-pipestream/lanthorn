@@ -958,7 +958,7 @@ fn main() {
                         state.input_deadline = None;
                         needs_redraw = true; // interrupt ran → repaint any output
                         if turn::apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &game_dir, last_panes.map,
+                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                         ) {
                             break;
                         }
@@ -976,7 +976,7 @@ fn main() {
                     if let Some(gs) = glulx_session_opt_mut(&mut *session) {
                         let result = gs.deliver_timer();
                         if turn::apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &game_dir, last_panes.map,
+                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                         ) {
                             break;
                         }
@@ -997,7 +997,7 @@ fn main() {
                         if let Some(zs) = zvm_session_opt_mut(&mut *session) {
                             let result = zs.run_sound_finish(routine);
                             if turn::apply_game_driven_result(
-                                &mut state, &mut mapper, &result, &game_dir, last_panes.map,
+                                &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                             ) {
                                 break 'event_loop;
                             }
@@ -1010,7 +1010,7 @@ fn main() {
                     if let Some(gs) = glulx_session_opt_mut(&mut *session) {
                         let result = gs.sound_notify(snd, notify);
                         if turn::apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &game_dir, last_panes.map,
+                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                         ) {
                             break 'event_loop;
                         }
@@ -1039,7 +1039,7 @@ fn main() {
                 if let Some(gs) = glulx_session_opt_mut(&mut *session) {
                     let result = gs.volume_notify(notify);
                     if turn::apply_game_driven_result(
-                        &mut state, &mut mapper, &result, &game_dir, last_panes.map,
+                        &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                     ) {
                         break 'event_loop;
                     }
@@ -1515,6 +1515,36 @@ fn main() {
             continue;
         }
 
+        // ── Debug inspector — full-screen modal; swallow all events while open ──
+        // Highest-priority non-common-dialog overlay (drawn last in the ladder
+        // below the common-dialog trait modals): intercepted before the
+        // config/saves Tab intercepts and well before the char-mode/line-
+        // terminator game-input gates, so no keystroke leaks to the VM while
+        // the panel is up.
+        if state.overlays.debug_panel.is_some() {
+            if let Event::Resize(_, _) = &event { let _ = terminal.clear(); continue; }
+            if let Event::Key(k) = &event {
+                if k.kind == KeyEventKind::Press {
+                    // Approximate the focused-pane content height for PageUp/PageDown
+                    // paging: the right column is split top/bottom over the story
+                    // pane's area (the nearest cached rect to the debug inspector's
+                    // actual full-screen dialog_area, which isn't threaded out here).
+                    if let Some(p) = &mut state.overlays.debug_panel {
+                        p.viewport = (last_panes.story.height.saturating_sub(2) / 2).max(1) as usize;
+                    }
+                    let outcome = if let Some(dbg) = session.debugger() {
+                        state.overlays.debug_panel.as_mut().map(|p| p.handle_key(k.code, dbg))
+                    } else {
+                        Some(app::debug_panel::DebugKey::Close)
+                    };
+                    if outcome == Some(app::debug_panel::DebugKey::Close) {
+                        state.overlays.debug_panel = None;
+                    }
+                }
+            }
+            continue;
+        }
+
         // ── Config-screen Tab focus intercept ────────────────────────────────
         // Ring length 2: [Save(0), Cancel(1)].
         if state.overlays.config_screen.is_some() {
@@ -1573,7 +1603,7 @@ fn main() {
                             })
                         {
                             if turn::apply_game_driven_result(
-                                &mut state, &mut mapper, &result, &game_dir, last_panes.map,
+                                &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                             ) {
                                 break;
                             }
@@ -1683,7 +1713,7 @@ fn main() {
                                     ) {
                                         let result = gs.deliver_hyperlink(win, link);
                                         if turn::apply_game_driven_result(
-                                            &mut state, &mut mapper, &result, &game_dir, last_panes.map,
+                                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                                         ) {
                                             break 'event_loop;
                                         }
@@ -1709,7 +1739,7 @@ fn main() {
                             if let Some((win, vx, vy)) = target {
                                 let result = gs.deliver_mouse(win, vx, vy);
                                 if turn::apply_game_driven_result(
-                                    &mut state, &mut mapper, &result, &game_dir, last_panes.map,
+                                    &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                                 ) {
                                     break 'event_loop;
                                 }
