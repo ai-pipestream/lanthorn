@@ -364,126 +364,164 @@ fn draw_frame(
             }
         };
 
-        match state.layout {
-            Layout::TranscriptFull => {
-                let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
-                let c = story_fp.content;
-                let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
-                transcript_max_scroll = m.max_scroll;
-                transcript_viewport_rows = m.viewport_rows;
-                transcript_total_rows = m.total_rows;
-                transcript_links_out = m.links;
-                if let Some(hrect) = story_fp.header {
-                    let segs = [InsetSegment { text: &state.title, active: false }];
-                    if story_fp.header_bordered {
-                        draw_top_inset(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
-                    } else {
-                        draw_header_plain(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
-                    }
+        if state.debug.is_some() {
+            // ── Debug inspector (tiled): story pane drawn normally; the map slot
+            // renders the debug region instead of the map — no room rects, layer
+            // tabs, or tidy pulse (those belong to the real map). `pane_layout`
+            // already reserved a right-hand rect for this (`compute_pane_layout`
+            // treats debug-active as `Layout::Split`).
+            let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
+            let story_border_color = if resize_split_hl { state.colors.focused_border } else { story_border_style };
+            let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
+            let c = story_fp.content;
+            let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
+            transcript_max_scroll = m.max_scroll;
+            transcript_viewport_rows = m.viewport_rows;
+            transcript_total_rows = m.total_rows;
+            transcript_links_out = m.links;
+            if let Some(hrect) = story_fp.header {
+                let segs = [InsetSegment { text: &state.title, active: false }];
+                if story_fp.header_bordered {
+                    draw_top_inset(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                } else {
+                    draw_header_plain(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
                 }
-                story_area = story_fp.content;
-                map_area = Rect::default();
             }
-            Layout::Split => {
-                // Split 50/50 horizontally with bordered blocks (no divider column).
-                // In resize mode, the StoryMap target covers this whole split, so
-                // both borders pick up the `focused_border` accent to show it's live.
-                let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
-                let story_border_color = if resize_split_hl { state.colors.focused_border } else { story_border_style };
-                let map_border_color = if resize_split_hl { state.colors.focused_border } else { state.colors.map_border };
-                let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
-                let c = story_fp.content;
-                let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
-                transcript_max_scroll = m.max_scroll;
-                transcript_viewport_rows = m.viewport_rows;
-                transcript_total_rows = m.total_rows;
-                transcript_links_out = m.links;
-                if let Some(hrect) = story_fp.header {
-                    let segs = [InsetSegment { text: &state.title, active: false }];
-                    if story_fp.header_bordered {
-                        draw_top_inset(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
-                    } else {
-                        draw_header_plain(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
-                    }
-                }
-                story_area = story_fp.content;
+            story_area = story_fp.content;
 
-                let map_fp = draw_framed(buf, pane_layout.map, state.colors.map_border_sides, &state.colors.map_border_glyphs, map_border_color, state.colors.map_header_on);
-                render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
-                if let Some(anim) = &state.tidy_anim {
-                    let tidy_ds = make_dialog_style(state);
-                    if let Some(dr) = draw_tidy_panel(anim.current(), map_fp.content, buf, &tidy_ds) {
-                        dialog_rects_out = Some(dr);
-                    }
-                }
-                map_area = map_fp.content;
-                // Overlay layer tabs
-                {
-                    // The tab strip names every layer, so it reads the LIVE graph — never an
-                    // animation frame. A frame is a `layer_subgraph`, whose `layers()` is always
-                    // main-only, so asking it made the tidied layer's own tab vanish mid-animation
-                    // (SQ-0359). `layer` (from `frame_layer`) marks the active tab.
-                    let graph = if let Some(g) = &replay_graph { g } else { &mapper.graph };
-                    let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
-                    let active_layer = layer;
-                    let owned_segs = build_layer_segments(&layer_ids, active_layer,
-                    |id| format!("{}({})", graph.layer_name(id), graph.rooms_in_layer(id).len()));
-                    let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
-                    if let Some(hrect) = map_fp.header {
-                        let tab_rects = if map_fp.header_bordered {
-                            draw_top_inset(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
+            app::render::debug_panel::draw_debug_panel(state, pane_layout.map, buf);
+            map_area = pane_layout.map;
+
+            // Story pane dims when the debug region has focus (mirrors the map's
+            // focus-dim rule below).
+            if state.focus == Focus::Map {
+                dim_area(buf, story_fp.content);
+            }
+        } else {
+            match state.layout {
+                Layout::TranscriptFull => {
+                    let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
+                    let c = story_fp.content;
+                    let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
+                    transcript_max_scroll = m.max_scroll;
+                    transcript_viewport_rows = m.viewport_rows;
+                    transcript_total_rows = m.total_rows;
+                    transcript_links_out = m.links;
+                    if let Some(hrect) = story_fp.header {
+                        let segs = [InsetSegment { text: &state.title, active: false }];
+                        if story_fp.header_bordered {
+                            draw_top_inset(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
                         } else {
-                            draw_header_plain(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
-                        };
-                        layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
+                            draw_header_plain(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                        }
                     }
+                    story_area = story_fp.content;
+                    map_area = Rect::default();
                 }
-                // Apply pulsing border color overlay when a tidy job is in flight
-                if let Some(pulse_color) = map_border_override {
-                    let pulse_style = Style::default().fg(pulse_color);
-                    for cy in pane_layout.map.y..pane_layout.map.bottom() {
-                        if let Some(c) = buf.cell_mut((pane_layout.map.x, cy)) { c.set_style(pulse_style); }
-                        if let Some(c) = buf.cell_mut((pane_layout.map.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
+                Layout::Split => {
+                    // Split 50/50 horizontally with bordered blocks (no divider column).
+                    // In resize mode, the StoryMap target covers this whole split, so
+                    // both borders pick up the `focused_border` accent to show it's live.
+                    let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
+                    let story_border_color = if resize_split_hl { state.colors.focused_border } else { story_border_style };
+                    let map_border_color = if resize_split_hl { state.colors.focused_border } else { state.colors.map_border };
+                    let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
+                    let c = story_fp.content;
+                    let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
+                    transcript_max_scroll = m.max_scroll;
+                    transcript_viewport_rows = m.viewport_rows;
+                    transcript_total_rows = m.total_rows;
+                    transcript_links_out = m.links;
+                    if let Some(hrect) = story_fp.header {
+                        let segs = [InsetSegment { text: &state.title, active: false }];
+                        if story_fp.header_bordered {
+                            draw_top_inset(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                        } else {
+                            draw_header_plain(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                        }
                     }
-                    for cx in pane_layout.map.x..pane_layout.map.right() {
-                        if let Some(c) = buf.cell_mut((cx, pane_layout.map.y)) { c.set_style(pulse_style); }
-                        if let Some(c) = buf.cell_mut((cx, pane_layout.map.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
-                    }
-                }
+                    story_area = story_fp.content;
 
-                // While the async map-render worker runs, list each phase it has
-                // started in the map's top-right corner so the source of any map
-                // update delay is visible; the trace clears when the job lands
-                // (SQ-0379). The inner content rect keeps it off the pulsing border.
-                if state.map_render_in_flight() {
-                    let area = map_fp.content;
-                    let style = state.colors.map_layer_tab;
-                    for (i, step) in state.render_steps_snapshot().iter().enumerate() {
-                        let y = area.y + i as u16;
-                        if y >= area.bottom() { break; }
-                        let w = (step.chars().count() as u16).min(area.width);
-                        let x = area.right().saturating_sub(w);
-                        buf.set_stringn(x, y, step, w as usize, style);
+                    let map_fp = draw_framed(buf, pane_layout.map, state.colors.map_border_sides, &state.colors.map_border_glyphs, map_border_color, state.colors.map_header_on);
+                    render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
+                    if let Some(anim) = &state.tidy_anim {
+                        let tidy_ds = make_dialog_style(state);
+                        if let Some(dr) = draw_tidy_panel(anim.current(), map_fp.content, buf, &tidy_ds) {
+                            dialog_rects_out = Some(dr);
+                        }
                     }
-                }
+                    map_area = map_fp.content;
+                    // Overlay layer tabs
+                    {
+                        // The tab strip names every layer, so it reads the LIVE graph — never an
+                        // animation frame. A frame is a `layer_subgraph`, whose `layers()` is always
+                        // main-only, so asking it made the tidied layer's own tab vanish mid-animation
+                        // (SQ-0359). `layer` (from `frame_layer`) marks the active tab.
+                        let graph = if let Some(g) = &replay_graph { g } else { &mapper.graph };
+                        let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
+                        let active_layer = layer;
+                        let owned_segs = build_layer_segments(&layer_ids, active_layer,
+                        |id| format!("{}({})", graph.layer_name(id), graph.rooms_in_layer(id).len()));
+                        let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
+                        if let Some(hrect) = map_fp.header {
+                            let tab_rects = if map_fp.header_bordered {
+                                draw_top_inset(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
+                            } else {
+                                draw_header_plain(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
+                            };
+                            layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
+                        }
+                    }
+                    // Apply pulsing border color overlay when a tidy job is in flight
+                    if let Some(pulse_color) = map_border_override {
+                        let pulse_style = Style::default().fg(pulse_color);
+                        for cy in pane_layout.map.y..pane_layout.map.bottom() {
+                            if let Some(c) = buf.cell_mut((pane_layout.map.x, cy)) { c.set_style(pulse_style); }
+                            if let Some(c) = buf.cell_mut((pane_layout.map.right().saturating_sub(1), cy)) { c.set_style(pulse_style); }
+                        }
+                        for cx in pane_layout.map.x..pane_layout.map.right() {
+                            if let Some(c) = buf.cell_mut((cx, pane_layout.map.y)) { c.set_style(pulse_style); }
+                            if let Some(c) = buf.cell_mut((cx, pane_layout.map.bottom().saturating_sub(1))) { c.set_style(pulse_style); }
+                        }
+                    }
 
-                // Map pane is NEVER dimmed (always full brightness).
-                // Story pane dims when map has focus.
-                if state.focus == Focus::Map {
-                    dim_area(buf, story_fp.content);
+                    // While the async map-render worker runs, list each phase it has
+                    // started in the map's top-right corner so the source of any map
+                    // update delay is visible; the trace clears when the job lands
+                    // (SQ-0379). The inner content rect keeps it off the pulsing border.
+                    if state.map_render_in_flight() {
+                        let area = map_fp.content;
+                        let style = state.colors.map_layer_tab;
+                        for (i, step) in state.render_steps_snapshot().iter().enumerate() {
+                            let y = area.y + i as u16;
+                            if y >= area.bottom() { break; }
+                            let w = (step.chars().count() as u16).min(area.width);
+                            let x = area.right().saturating_sub(w);
+                            buf.set_stringn(x, y, step, w as usize, style);
+                        }
+                    }
+
+                    // Map pane is NEVER dimmed (always full brightness).
+                    // Story pane dims when map has focus.
+                    if state.focus == Focus::Map {
+                        dim_area(buf, story_fp.content);
+                    }
                 }
             }
         }
 
-        // Compute room screen rects for accurate mouse hit-testing.
-        room_rects_out = if map_area.height > 0 {
+        // Compute room screen rects for accurate mouse hit-testing. Skipped while
+        // the debug inspector occupies the map slot — `map_area` is the debug
+        // rect, not a real map, so there is nothing to hit-test.
+        room_rects_out = if map_area.height > 0 && state.debug.is_none() {
             room_screen_rects(&rm, state, map_area)
         } else {
             Vec::new()
         };
 
-        // ── Room panel overlay ────────────────────────────────────────────────
-        if map_area.height > 0 {
+        // ── Room panel overlay (map-only; skipped while the debug inspector is
+        // tiled into the map slot) ──────────────────────────────────────────────
+        if map_area.height > 0 && state.debug.is_none() {
             if let Some(panel) = state.room_panel {
                 let graph = if let Some(g) = &replay_graph {
                     g
@@ -1515,34 +1553,37 @@ fn main() {
             continue;
         }
 
-        // ── Debug inspector — full-screen modal; swallow all events while open ──
-        // Highest-priority non-common-dialog overlay (drawn last in the ladder
-        // below the common-dialog trait modals): intercepted before the
-        // config/saves Tab intercepts and well before the char-mode/line-
-        // terminator game-input gates, so no keystroke leaks to the VM while
-        // the panel is up.
-        if state.overlays.debug_panel.is_some() {
-            if let Event::Resize(_, _) = &event { let _ = terminal.clear(); continue; }
+        // ── Debug inspector (tiled): drive it while its region is focused ──────
+        // Not a modal: only intercepts while the debug region holds `Focus::Map`,
+        // and runs before the normal key→command dispatch so it pre-empts
+        // Tab→ToggleFocus. `Esc` pops focus back to the story (panel stays open);
+        // anything the panel doesn't consume falls through to normal dispatch.
+        if state.debug.is_some() && state.focus == Focus::Map {
             if let Event::Key(k) = &event {
                 if k.kind == KeyEventKind::Press {
-                    // Approximate the focused-pane content height for PageUp/PageDown
-                    // paging: the right column is split top/bottom over the story
-                    // pane's area (the nearest cached rect to the debug inspector's
-                    // actual full-screen dialog_area, which isn't threaded out here).
-                    if let Some(p) = &mut state.overlays.debug_panel {
-                        p.viewport = (last_panes.story.height.saturating_sub(2) / 2).max(1) as usize;
+                    if k.code == crossterm::event::KeyCode::Esc {
+                        state.focus = Focus::Game; // pop back to typing; keep the panel open
+                        continue;
                     }
-                    let outcome = if let Some(dbg) = session.debugger() {
-                        state.overlays.debug_panel.as_mut().map(|p| p.handle_key(k.code, dbg))
+                    // Focused-pane height for PageUp/PageDown paging, from the real
+                    // debug-region rect (the map slot).
+                    let vp = (last_panes.map.height.saturating_sub(2) / 2).max(1) as usize;
+                    let dk = if let Some(dbg) = session.debugger() {
+                        state.debug.as_mut().map(|p| { p.viewport = vp; p.handle_key(k.code, dbg) })
                     } else {
-                        Some(app::debug_panel::DebugKey::Close)
+                        None
                     };
-                    if outcome == Some(app::debug_panel::DebugKey::Close) {
-                        state.overlays.debug_panel = None;
+                    // Consume keys the panel handled; let anything it ignored fall through
+                    // to normal global dispatch (e.g. quit).
+                    if dk == Some(app::debug_panel::DebugKey::Consumed) { continue; }
+                    if dk == Some(app::debug_panel::DebugKey::Close) {
+                        state.debug = None;
+                        state.focus = Focus::Game;
+                        continue;
                     }
+                    // Ignored → fall through (do not `continue`).
                 }
             }
-            continue;
         }
 
         // ── Config-screen Tab focus intercept ────────────────────────────────

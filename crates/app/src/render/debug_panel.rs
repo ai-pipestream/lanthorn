@@ -26,7 +26,7 @@ fn draw_pane(
 }
 
 pub fn draw_debug_panel(state: &AppState, area: Rect, buf: &mut Buffer) {
-    let Some(panel) = &state.overlays.debug_panel else { return };
+    let Some(panel) = &state.debug else { return };
     let view = panel.focus.view();
 
     // Left column full height; right column split into two stacked panes.
@@ -83,7 +83,7 @@ mod tests {
         panel.snapshot.disasm = vec!["1000  add".into()];
         panel.snapshot.locals = vec!["local0 = 0001".into()];
         panel.snapshot.stack = vec!["#0 main".into()];
-        state.overlays.debug_panel = Some(panel);
+        state.debug = Some(panel);
 
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);

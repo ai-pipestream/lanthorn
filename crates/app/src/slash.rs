@@ -63,9 +63,9 @@ pub enum SlashOutcome {
     /// Diagnostic: dump the live Glk window layout (sizes, borders, per-window
     /// colours) to the transcript as Meta lines. Handled in `slash_dispatch`.
     DumpWindows,
-    /// Open the Z-machine debug inspector. Handled in `slash_dispatch` (needs
-    /// AppState + the engine's debugger capability).
-    OpenDebug,
+    /// Toggle the Z-machine debug inspector tiled pane. Handled in `slash_dispatch`
+    /// (needs AppState + the engine's debugger capability).
+    ToggleDebug,
     /// Replay the notification history into the transcript as Meta lines, in case
     /// a toast was missed. Handled in `slash_dispatch`. (SQ-0176)
     DumpNotifications,
@@ -439,8 +439,8 @@ pub static COMMANDS: &[CommandSpec] = &[
         usage: "dump-windows", description: "dump the live Glk window layout (sizes, borders, colours)",
         dispatch: |_| SlashOutcome::DumpWindows },
     CommandSpec { name: "debug", category: Category::Help, context: Context::Global,
-        usage: "debug", description: "open the Z-machine debug inspector (disassembly + live VM state)",
-        dispatch: |_| SlashOutcome::OpenDebug },
+        usage: "debug", description: "toggle the Z-machine debug inspector pane",
+        dispatch: |_| SlashOutcome::ToggleDebug },
     CommandSpec {
         name: "trace", category: Category::Help, context: Context::Global,
         usage: "trace [sections|all|none]",
@@ -794,9 +794,9 @@ mod tests {
     }
 
     #[test]
-    fn debug_command_parses_to_open_debug() {
+    fn debug_command_parses_to_toggle_debug() {
         assert!(find_command("debug").is_some());
-        assert!(matches!(parse("debug", '/'), SlashOutcome::OpenDebug));
+        assert!(matches!(parse("debug", '/'), SlashOutcome::ToggleDebug));
     }
 
     #[test]

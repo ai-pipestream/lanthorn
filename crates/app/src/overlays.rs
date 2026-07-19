@@ -149,11 +149,6 @@ pub(crate) fn draw_all(
         out.style_editor = draw_style_editor(state, dialog_area, buf);
     }
 
-    // ── Debug inspector — full-screen, drawn last ──────────────────────────
-    if state.overlays.debug_panel.is_some() {
-        app::render::debug_panel::draw_debug_panel(state, dialog_area, buf);
-    }
-
     // ── Glyph-picker modal — drawn over the style editor ──────────────────
     if state.overlays.glyph_picker.is_some() {
         out.glyph_picker = app::render::glyph_picker::draw_glyph_picker(state, dialog_area, buf);

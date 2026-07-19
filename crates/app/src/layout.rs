@@ -80,7 +80,10 @@ pub fn compute_pane_layout(area: Rect, state: &AppState, inv_item_count: usize) 
     let verb_dock_area = horiz[0];
     let panes_area = horiz[1];
 
-    let (story, map) = match state.layout {
+    // The debug inspector tiles into the map slot; make sure a right-slot rect
+    // exists for it even when the current layout is TranscriptFull (map hidden).
+    let effective_layout = if state.debug.is_some() { Layout::Split } else { state.layout };
+    let (story, map) = match effective_layout {
         Layout::TranscriptFull => (panes_area, Rect::default()),
         Layout::Split => {
             let chunks = RatatuiLayout::default()

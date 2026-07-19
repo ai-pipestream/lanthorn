@@ -222,7 +222,7 @@ pub(crate) fn finish_command_turn(
 
     // If the debug inspector is open, refresh its snapshot from the VM state
     // this turn just produced (globals/objects/PC may have moved).
-    if let Some(p) = &mut state.overlays.debug_panel {
+    if let Some(p) = &mut state.debug {
         if let Some(dbg) = session.debugger() {
             p.refresh(dbg);
         }
@@ -643,7 +643,7 @@ pub(crate) fn apply_game_driven_result(
 
     // If the debug inspector is open, refresh its snapshot from the VM state
     // this turn just produced (globals/objects/PC may have moved).
-    if let Some(p) = &mut state.overlays.debug_panel {
+    if let Some(p) = &mut state.debug {
         if let Some(dbg) = session.debugger() {
             p.refresh(dbg);
         }

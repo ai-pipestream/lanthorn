@@ -10,7 +10,7 @@ use app::export::export_transcript;
 use app::input::{apply_action, Action};
 use app::persist_files::{load_map, save_named};
 use app::slash::{self, SlashOutcome, TranscriptFilterArg};
-use app::state::{AppState, SavesState, TranscriptFilter, TranscriptKind};
+use app::state::{AppState, Focus, SavesState, TranscriptFilter, TranscriptKind};
 use mapper::mapper::Mapper;
 use ratatui::layout::Rect;
 
@@ -82,7 +82,7 @@ pub(crate) fn dispatch_slash_outcome(
                 state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
         }
-        SlashOutcome::OpenDebug => open_debug(state, session),
+        SlashOutcome::ToggleDebug => toggle_debug(state, session),
         SlashOutcome::DumpNotifications => {
             let history = state.notifications.history().to_vec();
             state.push_transcript_internal("[notifications]", TranscriptKind::Meta);
@@ -399,15 +399,19 @@ pub(crate) fn dispatch_slash_outcome(
     false
 }
 
-/// Open the Z-machine debug inspector: seed a fresh `DebugPanelState` at the
-/// engine's current PC and refresh it, or report unavailability. Factored out
-/// of the `OpenDebug` arm so it's testable without a full `dispatch_slash_outcome`
-/// call.
-fn open_debug(state: &mut AppState, session: &mut dyn Engine) {
-    if let Some(dbg) = session.debugger() {
+/// Toggle the Z-machine debug inspector pane: activate it at the engine's current PC
+/// (focusing the region), or deactivate it (map returns, focus back to the game).
+/// Factored out of the `ToggleDebug` arm so it's testable without a full
+/// `dispatch_slash_outcome` call.
+fn toggle_debug(state: &mut AppState, session: &mut dyn Engine) {
+    if state.debug.is_some() {
+        state.debug = None;
+        state.focus = Focus::Game;
+    } else if let Some(dbg) = session.debugger() {
         let mut panel = app::debug_panel::DebugPanelState::new(dbg.pc());
         panel.refresh(dbg);
-        state.overlays.debug_panel = Some(panel);
+        state.debug = Some(panel);
+        state.focus = Focus::Map;
     } else {
         state.push_transcript_internal(
             "debugger not available for this engine", TranscriptKind::Meta);
@@ -468,21 +472,33 @@ mod debug_dispatch_tests {
     }
 
     #[test]
-    fn open_debug_opens_panel_when_engine_has_debugger() {
+    fn toggle_debug_opens_panel_when_engine_has_debugger() {
         let mut state = AppState::default();
         let mut engine = MockEngine { has_debugger: true, aux: BTreeMap::new() };
-        open_debug(&mut state, &mut engine);
-        assert!(state.overlays.debug_panel.is_some());
-        let panel = state.overlays.debug_panel.as_ref().unwrap();
+        toggle_debug(&mut state, &mut engine);
+        assert!(state.debug.is_some());
+        let panel = state.debug.as_ref().unwrap();
         assert_eq!(panel.disasm_addr, 0x1234);
+        assert_eq!(state.focus, Focus::Map);
     }
 
     #[test]
-    fn open_debug_reports_when_engine_has_no_debugger() {
+    fn toggle_debug_closes_panel_when_already_open() {
+        let mut state = AppState::default();
+        let mut engine = MockEngine { has_debugger: true, aux: BTreeMap::new() };
+        toggle_debug(&mut state, &mut engine);
+        assert!(state.debug.is_some());
+        toggle_debug(&mut state, &mut engine);
+        assert!(state.debug.is_none());
+        assert_eq!(state.focus, Focus::Game);
+    }
+
+    #[test]
+    fn toggle_debug_reports_when_engine_has_no_debugger() {
         let mut state = AppState::default();
         let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
-        open_debug(&mut state, &mut engine);
-        assert!(state.overlays.debug_panel.is_none());
+        toggle_debug(&mut state, &mut engine);
+        assert!(state.debug.is_none());
         assert!(state.transcript.iter().any(|l| l.contains("debugger not available")));
     }
 }

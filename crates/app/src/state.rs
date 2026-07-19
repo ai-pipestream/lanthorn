@@ -1283,8 +1283,6 @@ pub struct OverlayState {
     pub config_screen: Option<ConfigScreenState>,
     /// Active style-editor full-screen state. `None` means the editor is closed.
     pub style_editor: Option<StyleEditorState>,
-    /// Active debug-inspector panel. `None` = closed.
-    pub debug_panel: Option<crate::debug_panel::DebugPanelState>,
     /// Active glyph-picker modal state. `None` means the picker is closed.
     /// Opened over the style editor; closes on pick/clear/cancel.
     pub glyph_picker: Option<GlyphPickerState>,
@@ -1330,6 +1328,8 @@ pub struct OverlayState {
 #[derive(Debug)]
 pub struct AppState {
     pub focus: Focus,
+    /// Active debug-inspector pane. Tiled into the map slot while `Some`; `None` = closed.
+    pub debug: Option<crate::debug_panel::DebugPanelState>,
     pub layout: Layout,
     pub zoom: Zoom,
     /// Fine zoom level (0–8): 0–2 = Overview, 3–5 = Compact, 6–8 = Boxes.
@@ -1774,6 +1774,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             focus: Focus::Game,
+            debug: None,
             layout: Layout::Split,
             zoom: Zoom::Boxes,
             zoom_level: 7, // default = Boxes (level 7)
@@ -2172,7 +2173,6 @@ impl AppState {
             || self.overlays.launch_dialog
             || self.overlays.hints.is_some()
             || self.overlays.replay.is_some()
-            || self.overlays.debug_panel.is_some()
             || self.resize_mode
     }
 
@@ -2345,11 +2345,12 @@ impl AppState {
         self.render_steps.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
-    /// Toggle focus between the game and map panes. The map pane is focusable
-    /// only when it's visible (`Split` layout); when the map panel is hidden,
-    /// focus stays on the game so Tab can't land on a hidden pane (SQ-0333).
+    /// Toggle focus between the game and map/debug panes. The right-hand pane
+    /// is focusable when it's visible (`Split` layout) or the debug inspector
+    /// is tiled into that slot; otherwise focus stays on the game so Tab can't
+    /// land on a hidden pane (SQ-0333).
     pub fn toggle_focus(&mut self) {
-        if self.layout != Layout::Split {
+        if self.layout != Layout::Split && self.debug.is_none() {
             self.focus = Focus::Game;
             return;
         }
@@ -4136,10 +4137,10 @@ mod tests {
         assert!(s.any_overlay_open(), "launch_dialog true => any_overlay_open true");
         s.overlays.launch_dialog = false;
 
-        // debug_panel
-        s.overlays.debug_panel = Some(crate::debug_panel::DebugPanelState::new(0));
-        assert!(s.any_overlay_open(), "debug_panel open => any_overlay_open true");
-        s.overlays.debug_panel = None;
+        // debug: a tiled pane, not a modal overlay
+        s.debug = Some(crate::debug_panel::DebugPanelState::new(0));
+        assert!(!s.any_overlay_open(), "debug pane open => any_overlay_open still false");
+        s.debug = None;
 
         assert!(!s.any_overlay_open(), "all cleared => any_overlay_open false again");
     }
@@ -4167,6 +4168,21 @@ mod tests {
         assert!(matches!(s.layout, Layout::TranscriptFull));
         s.toggle_focus();
         assert!(matches!(s.focus, Focus::Game), "Tab can't focus a hidden map");
+    }
+
+    #[test]
+    fn toggle_focus_reaches_debug_region_when_map_hidden() {
+        let mut s = AppState::default();
+        s.toggle_map(); // → TranscriptFull, map hidden
+        assert!(matches!(s.layout, Layout::TranscriptFull));
+        s.debug = Some(crate::debug_panel::DebugPanelState::new(0));
+        s.toggle_focus();
+        assert!(
+            matches!(s.focus, Focus::Map),
+            "Tab reaches the debug region even though the map itself is hidden"
+        );
+        s.toggle_focus();
+        assert!(matches!(s.focus, Focus::Game));
     }
 
     #[test]
