@@ -611,11 +611,16 @@ pub fn clickable_spans(section: Section, line: &str) -> Vec<(core::ops::Range<us
         Section::Disasm => classify_disasm_tokens(line).into_iter()
             .filter(|(_, t)| matches!(t, ClickTarget::Code(_) | ClickTarget::Memory(_) | ClickTarget::Object(_)))
             .collect(),
-        Section::CallStack => find_hex_spans(line, "fn@", 6)
-            .into_iter()
-            .filter(|(_, addr)| *addr != 0)
-            .map(|(range, addr)| (range, ClickTarget::Code(addr)))
-            .collect(),
+        Section::CallStack => {
+            // Both the routine entry (`fn@……`) and the return PC (`ret=……`) are
+            // clickable code addresses → jump to the Disassembly.
+            let mut spans = find_hex_spans(line, "fn@", 6);
+            spans.extend(find_hex_spans(line, "ret=", 6));
+            spans.into_iter()
+                .filter(|(_, addr)| *addr != 0)
+                .map(|(range, addr)| (range, ClickTarget::Code(addr)))
+                .collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -1244,14 +1249,20 @@ mod tests {
 
     #[test]
     fn clickable_spans_finds_a_call_stack_frame_address_and_skips_a_zero_address() {
-        let line = "#0  fn@004a00  ret=004a35  args=2  locals=[]";
+        let line = "#0  fn@004a00  ret=004a35  args=2";
         let spans = clickable_spans(Section::CallStack, line);
-        assert_eq!(spans.len(), 1);
+        // Both the entry (fn@) and the return PC (ret=) are clickable.
+        assert_eq!(spans.len(), 2);
         assert_eq!(spans[0].1, ClickTarget::Code(0x4a00));
         assert_eq!(&line[spans[0].0.clone()], "fn@004a00");
+        assert_eq!(spans[1].1, ClickTarget::Code(0x4a35));
+        assert_eq!(&line[spans[1].0.clone()], "ret=004a35");
 
-        let zero_line = "#0  fn@000000  ret=004a35  args=2  locals=[]";
-        assert!(clickable_spans(Section::CallStack, zero_line).is_empty());
+        // A zero entry address is skipped, but the non-zero return PC still clicks.
+        let zero_line = "#0  fn@000000  ret=004a35  args=2";
+        let spans = clickable_spans(Section::CallStack, zero_line);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].1, ClickTarget::Code(0x4a35));
     }
 
     #[test]
