@@ -150,6 +150,14 @@ pub struct DebugPanelState {
     /// Floating value tooltip for the variable operand under the mouse (set by
     /// the `Moved` handler, cleared on move-off and on each per-turn `refresh`).
     pub hover: Option<HoverTip>,
+    /// Active mouse text selection: `(window, range)` in that window's
+    /// content-relative coordinates (row/col inside the frame, border excluded).
+    /// Cleared whenever the window's content moves (scroll / tab / turn). (SQ-0420)
+    pub sel: Option<(usize, crate::clipboard::Selection)>,
+    /// Copy text for `sel`, published by the renderer (which reads the drawn
+    /// cells) and consumed on mouse-release to emit OSC 52 — mirrors the story
+    /// pane's `selection_text`. (SQ-0420)
+    pub selection_text: std::cell::RefCell<Option<String>>,
 }
 
 /// Result of a keypress.
@@ -172,6 +180,8 @@ impl DebugPanelState {
             pc,
             snapshot: DebugSnapshot::default(),
             hover: None,
+            sel: None,
+            selection_text: std::cell::RefCell::new(None),
         }
     }
 
@@ -186,8 +196,10 @@ impl DebugPanelState {
     /// after a turn.
     pub fn refresh(&mut self, dbg: &dyn Debugger) {
         // A new turn re-anchors the disassembly, so a stale tooltip (anchored to
-        // last turn's rows) must not linger.
+        // last turn's rows) must not linger. A selection anchored to those rows
+        // is stale for the same reason (SQ-0420).
         self.hover = None;
+        self.sel = None;
         self.pc = dbg.pc();
         self.disasm_addr = self.pc;
         self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
@@ -235,6 +247,7 @@ impl DebugPanelState {
         let n = WINDOW_TABS[window].len() as i32;
         self.tab[window] = (self.tab[window] as i32 + dir).rem_euclid(n) as usize;
         self.scroll[window] = 0;
+        self.sel = None; // switching sections invalidates the selection (SQ-0420)
     }
 
     pub fn handle_key(&mut self, code: KeyCode, dbg: &dyn Debugger) -> DebugKey {
@@ -329,6 +342,7 @@ impl DebugPanelState {
     /// lines — never calls `refresh`, which would re-anchor the disassembly
     /// to the PC and fight a manual scroll within the turn.
     pub fn scroll_active(&mut self, window: usize, down: bool, dbg: &dyn Debugger) {
+        self.sel = None; // scrolling moves content out from under any selection (SQ-0420)
         match self.active_section(window) {
             Section::Disasm => self.step_disasm(down, dbg),
             Section::Memory => self.step_memory(down, dbg),
@@ -366,6 +380,7 @@ impl DebugPanelState {
     }
 
     fn scroll_list_key(&mut self, window: usize, section: Section, code: KeyCode) {
+        self.sel = None; // scrolling moves content out from under any selection (SQ-0420)
         let len = self.snapshot.section(section).len();
         let vp = self.page();
         let max = len.saturating_sub(1);
@@ -390,6 +405,7 @@ impl DebugPanelState {
         self.tab[window] = tab;
         self.scroll[window] = 0;
         self.focus = window;
+        self.sel = None; // switching sections invalidates the selection (SQ-0420)
         // Switching tabs abandons any in-progress memory address input, so it
         // can't be left open-but-hidden (which would swallow Esc's pop-to-story).
         self.mem_input = None;
@@ -993,6 +1009,43 @@ pub fn window_rects(region: Rect) -> [Rect; 3] {
     let r_top = Rect::new(right_x, region.y, right_w, top_h);
     let r_bot = Rect::new(right_x, region.y + top_h, right_w, region.height - top_h);
     [left, r_top, r_bot]
+}
+
+/// The content rect of debug window `i` in `region` — the frame inset by its
+/// 1-cell border. `None` if the window is too small to hold content. This is the
+/// SAME inset the click hit-tests use, so a selection's coordinates line up with
+/// what the renderer draws. (SQ-0420)
+pub fn window_content(region: Rect, i: usize) -> Option<Rect> {
+    let w = window_rects(region).get(i).copied()?;
+    if w.width < 3 || w.height < 3 { return None; }
+    Some(Rect::new(w.x + 1, w.y + 1, w.width - 2, w.height - 2))
+}
+
+/// Map a screen `(col, row)` to `(window, content-relative point)` — `None` if it
+/// is not over any window's content area (borders/tabs excluded). Used to START a
+/// mouse selection. (SQ-0420)
+pub fn debug_point_at(region: Rect, col: u16, row: u16) -> Option<(usize, crate::clipboard::Point)> {
+    for i in 0..3 {
+        if let Some(c) = window_content(region, i) {
+            if col >= c.x && col < c.x + c.width && row >= c.y && row < c.y + c.height {
+                return Some((i, crate::clipboard::Point { row: (row - c.y) as usize, col: col - c.x }));
+            }
+        }
+    }
+    None
+}
+
+/// Clamp a screen `(col, row)` to window `win`'s content rect and return the
+/// content-relative point — so a drag that strays outside the window clings to its
+/// edge instead of jumping to another window. (SQ-0420)
+pub fn debug_point_clamped(region: Rect, win: usize, col: u16, row: u16) -> crate::clipboard::Point {
+    match window_content(region, win) {
+        Some(c) => crate::clipboard::Point {
+            row: (row.clamp(c.y, c.y + c.height - 1) - c.y) as usize,
+            col: col.clamp(c.x, c.x + c.width - 1) - c.x,
+        },
+        None => crate::clipboard::Point { row: 0, col: 0 },
+    }
 }
 
 /// The on-screen rect of each tab label in `window_rect`'s header (its top
@@ -1895,5 +1948,21 @@ mod tests {
         assert_eq!(targets, vec![ClickTarget::Memory(0x1234), ClickTarget::Code(0x4b00)]);
         assert!(!targets.iter().any(|t| matches!(t,
             ClickTarget::Global(_) | ClickTarget::Local(_) | ClickTarget::Stack)));
+    }
+
+    #[test]
+    fn debug_point_maps_and_clamps_to_window_content() {
+        // 80x24: window 0 content = (1,1,38,22); window 1 content = (41,1,38,10).
+        let region = Rect::new(0, 0, 80, 24);
+        assert_eq!(debug_point_at(region, 5, 3),
+            Some((0, crate::clipboard::Point { row: 2, col: 4 })));
+        assert_eq!(debug_point_at(region, 45, 2),
+            Some((1, crate::clipboard::Point { row: 1, col: 4 })));
+        // A click on the border/gap is not over any content area.
+        assert_eq!(debug_point_at(region, 0, 0), None);
+        // A drag past window 1's far corner clings to its last content cell.
+        let c1 = window_content(region, 1).unwrap();
+        assert_eq!(debug_point_clamped(region, 1, 200, 200),
+            crate::clipboard::Point { row: (c1.height - 1) as usize, col: c1.width - 1 });
     }
 }

@@ -251,6 +251,31 @@ pub fn draw_debug_panel(state: &AppState, area: Rect, buf: &mut Buffer) {
     for (i, w) in windows.iter().enumerate() {
         draw_window(buf, *w, i, panel, state);
     }
+    // Mouse selection (SQ-0420): reverse-video the selected cells and publish the
+    // copy text read back from the drawn buffer, so a mouse-release can emit it via
+    // OSC 52 — mirrors the story pane's highlight+extract. The selection lives in
+    // the window's content-relative coordinates.
+    if let Some((win, sel)) = panel.sel {
+        if !sel.is_empty() {
+            if let Some(content) = debug_panel::window_content(area, win) {
+                let mut out: Vec<String> = Vec::new();
+                for r in 0..content.height {
+                    if let Some((c0, c1)) = crate::clipboard::row_span(content.width, sel, r as usize) {
+                        let mut line = String::new();
+                        for c in c0..=c1 {
+                            if let Some(cell) = buf.cell_mut((content.x + c, content.y + r)) {
+                                let s = cell.style();
+                                cell.set_style(s.add_modifier(ratatui::style::Modifier::REVERSED));
+                                line.push_str(cell.symbol());
+                            }
+                        }
+                        out.push(line.trim_end().to_string());
+                    }
+                }
+                *panel.selection_text.borrow_mut() = Some(out.join("\n"));
+            }
+        }
+    }
     // Tooltip paints on top of the windows.
     if let Some(tip) = &panel.hover { draw_tooltip(buf, area, tip, state); }
 }
@@ -263,6 +288,38 @@ mod tests {
 
     fn buf_text(buf: &Buffer) -> String {
         buf.content.iter().map(|c| c.symbol()).collect()
+    }
+
+    #[test]
+    fn selection_highlights_cells_and_publishes_copy_text() {
+        // SQ-0420: a selection over the Locals list (window 1, no synthetic rows)
+        // reverse-videos the selected cells and publishes the logical lines as the
+        // copy text read back from the drawn buffer.
+        use ratatui::style::Modifier;
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        panel.snapshot.locals = vec!["local0 = 0001".into(), "local1 = 0002".into()];
+        // Window 1 (right-top) shows Locals by default; select its first two content
+        // rows in full (cols 0..=12 covers "local0 = 0001").
+        panel.sel = Some((1, crate::clipboard::Selection {
+            anchor: crate::clipboard::Point { row: 0, col: 0 },
+            head: crate::clipboard::Point { row: 1, col: 12 },
+        }));
+        state.debug = Some(panel);
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        draw_debug_panel(&state, area, &mut buf);
+
+        let copied = state.debug.as_ref().unwrap().selection_text.borrow().clone();
+        assert_eq!(copied.as_deref(), Some("local0 = 0001\nlocal1 = 0002"));
+        // Window 1 content starts at (41,1); the first selected cell is reverse-video.
+        let cell = buf.cell((41, 1)).expect("cell in window 1 content");
+        assert!(cell.modifier.contains(Modifier::REVERSED), "selected cell must be reversed");
+        // A cell outside the selection (window 0) is not reversed.
+        let other = buf.cell((2, 1)).expect("cell in window 0");
+        assert!(!other.modifier.contains(Modifier::REVERSED), "unselected cell not reversed");
     }
 
     #[test]

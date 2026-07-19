@@ -1692,6 +1692,14 @@ fn main() {
                                 .and_then(|p| app::debug_panel::tab_at(region, p, m.column, m.row)) {
                                 if let Some(p) = state.debug.as_mut() { p.activate_tab(w, t); }
                                 state.focus = Focus::Map;
+                            } else if let Some((win, pt)) = app::debug_panel::debug_point_at(region, m.column, m.row) {
+                                // Click in a window's body starts a text selection there (SQ-0420).
+                                if let Some(p) = state.debug.as_mut() {
+                                    p.focus_window(win);
+                                    p.sel = Some((win, app::clipboard::Selection::new(pt)));
+                                    p.selection_text.borrow_mut().take();
+                                }
+                                state.focus = Focus::Map;
                             } else if let Some(i) = over {
                                 if let Some(p) = state.debug.as_mut() { p.focus_window(i); }
                                 state.focus = Focus::Map;
@@ -1724,6 +1732,39 @@ fn main() {
                                     }
                                 }
                                 None => { if let Some(p) = state.debug.as_mut() { p.hover = None; } }
+                            }
+                            continue;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            // Extend the active selection, clamped to its window (SQ-0420).
+                            if let Some(p) = state.debug.as_mut() {
+                                if let Some((win, sel)) = p.sel.as_mut() {
+                                    sel.head = app::debug_panel::debug_point_clamped(region, *win, m.column, m.row);
+                                }
+                            }
+                            continue;
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            // Release: copy the selected text (published by render) via
+                            // OSC 52, then clear the selection (SQ-0420). Mirrors the
+                            // story pane's EndSelection copy.
+                            let copied = state.debug.as_mut().and_then(|p| {
+                                let real = matches!(p.sel, Some((_, s)) if !s.is_empty());
+                                p.sel = None;
+                                if real { p.selection_text.borrow_mut().take() } else { None }
+                            });
+                            if let Some(text) = copied {
+                                if !text.trim().is_empty() {
+                                    use std::io::Write;
+                                    let seq = app::clipboard::osc52_copy_sequence(&text);
+                                    let mut out = std::io::stdout();
+                                    let _ = out.write_all(seq.as_bytes());
+                                    let _ = out.flush();
+                                    state.push_transcript_internal(
+                                        &format!("Copied {} chars to clipboard", text.chars().count()),
+                                        app::state::TranscriptKind::Meta,
+                                    );
+                                }
                             }
                             continue;
                         }
