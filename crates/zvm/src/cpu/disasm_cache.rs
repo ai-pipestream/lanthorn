@@ -273,10 +273,25 @@ impl DisasmCache {
                     };
                     out.push(row);
                 }
-                Unit::RoutineHeader { addr, nlocals, .. } => {
-                    let plural = if nlocals == 1 { "local" } else { "locals" };
-                    out.push(format!("{:06x}  ; routine, {} {}", addr, nlocals, plural));
-                }
+                Unit::RoutineHeader { addr, nlocals, first_instr } => match fmt {
+                    // Raw mode shows the untranslated header bytes (no `;` comment
+                    // or decoded local count), matching the raw-instruction style.
+                    CacheFmt::Raw => {
+                        let end = first_instr.min(addr + 12);
+                        let mut hex = (addr..end)
+                            .map(|a| format!("{:02x}", mem.read_byte(a)))
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if first_instr.saturating_sub(addr) > 12 {
+                            hex.push_str(" …");
+                        }
+                        out.push(format!("{:06x}: {}   routine", addr, hex));
+                    }
+                    CacheFmt::Full | CacheFmt::Basic => {
+                        let plural = if nlocals == 1 { "local" } else { "locals" };
+                        out.push(format!("{:06x}  ; routine, {} {}", addr, nlocals, plural));
+                    }
+                },
                 Unit::Data { addr, len } => {
                     let end = addr + len;
                     let mut row_addr = addr;
@@ -1222,6 +1237,14 @@ mod tests {
         assert!(row.contains("; routine,"), "got {row:?}");
         let noun = if nlocals == 1 { "local" } else { "locals" };
         assert!(row.contains(&format!("{} {}", nlocals, noun)), "got {row:?}");
+        // Basic keeps the marker too.
+        let basic = &cache.disassemble(&mem, addr, 1, CacheFmt::Basic)[0];
+        assert!(basic.contains("; routine,"), "got {basic:?}");
+        // Raw shows the untranslated header bytes + "routine", no `;` comment.
+        let raw = &cache.disassemble(&mem, addr, 1, CacheFmt::Raw)[0];
+        assert!(raw.starts_with(&format!("{:06x}: ", addr)), "raw prefix: {raw:?}");
+        assert!(raw.ends_with("   routine"), "raw suffix: {raw:?}");
+        assert!(!raw.contains("; routine"), "raw must not use the `;` marker: {raw:?}");
     }
 
     #[test]
