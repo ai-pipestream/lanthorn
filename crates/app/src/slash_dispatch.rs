@@ -451,6 +451,7 @@ mod debug_dispatch_tests {
         fn dictionary_lines(&self) -> Vec<String> { Vec::new() }
         fn memory_hex(&self, _addr: u32, _rows: usize) -> Vec<String> { Vec::new() }
         fn memory_len(&self) -> u32 { 0x10000 }
+        fn object_detail(&self, _obj: u16) -> Vec<String> { Vec::new() }
     }
 
     impl Engine for MockEngine {

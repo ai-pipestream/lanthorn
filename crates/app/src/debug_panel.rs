@@ -60,6 +60,10 @@ pub struct DebugSnapshot {
     /// Instruction start-PCs executed during the last command turn (execution-
     /// coverage marking — a `|` gutter is drawn beside these disasm lines).
     pub executed: std::collections::HashSet<u32>,
+    /// Detail lines (attributes + properties) for each currently-expanded
+    /// object, keyed by object number. Refreshed each turn for whichever
+    /// objects are still in `DebugPanelState::expanded_objects`.
+    pub object_details: std::collections::HashMap<u16, Vec<String>>,
 }
 
 impl DebugSnapshot {
@@ -88,6 +92,12 @@ pub struct DebugPanelState {
     pub scroll: [usize; 3],
     pub disasm_addr: u32,
     pub mem_addr: u32,
+    /// Memory address-input edit buffer (hex digits typed so far). `None`
+    /// when not editing; `Some` while the Memory tab's `:`/`/`-opened input
+    /// line is active.
+    pub mem_input: Option<String>,
+    /// Object numbers currently expanded inline in the Objects tree.
+    pub expanded_objects: std::collections::HashSet<u16>,
     /// Focused-window content height captured by the last draw (for paging).
     pub viewport: usize,
     /// Live PC (for disasm PC-follow + highlight).
@@ -107,6 +117,8 @@ impl DebugPanelState {
             scroll: [0, 0, 0],
             disasm_addr: pc,
             mem_addr: 0,
+            mem_input: None,
+            expanded_objects: std::collections::HashSet::new(),
             viewport: 1,
             pc,
             snapshot: DebugSnapshot::default(),
@@ -134,6 +146,9 @@ impl DebugPanelState {
         self.snapshot.eval_stack = dbg.eval_stack_lines();
         self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
         self.snapshot.executed = dbg.executed_pcs();
+        self.snapshot.object_details = self.expanded_objects.iter()
+            .map(|&o| (o, dbg.object_detail(o)))
+            .collect();
     }
 
     fn page(&self) -> usize { self.viewport.max(1) }
@@ -147,6 +162,13 @@ impl DebugPanelState {
     }
 
     pub fn handle_key(&mut self, code: KeyCode, dbg: &dyn Debugger) -> DebugKey {
+        // Memory address-input line intercepts first, so typing hex digits
+        // (or cancelling/submitting) never falls through to scroll/tab keys.
+        if self.active_section(self.focus) == Section::Memory {
+            if let Some(result) = self.handle_memory_input_key(code, dbg) {
+                return result;
+            }
+        }
         match code {
             KeyCode::Tab => self.focus = (self.focus + 1) % 3,
             KeyCode::BackTab => self.focus = (self.focus + 2) % 3,
@@ -172,6 +194,45 @@ impl DebugPanelState {
             _ => return DebugKey::Ignored,
         }
         DebugKey::Consumed
+    }
+
+    /// Handle a key while the focused window's active section is Memory.
+    /// Returns `None` when the key isn't part of the address-input flow (so
+    /// `handle_key` falls through to the normal scroll/tab dispatch);
+    /// `Some(DebugKey::Consumed)` once the input flow handles it — including
+    /// swallowing keys while editing, so typing/navigating the buffer never
+    /// leaks into scrolling or tab-switching.
+    fn handle_memory_input_key(&mut self, code: KeyCode, dbg: &dyn Debugger) -> Option<DebugKey> {
+        if self.mem_input.is_none() {
+            return match code {
+                KeyCode::Char(':') | KeyCode::Char('/') => {
+                    self.mem_input = Some(String::new());
+                    Some(DebugKey::Consumed)
+                }
+                _ => None,
+            };
+        }
+        match code {
+            KeyCode::Char(c) if c.is_ascii_hexdigit() || c == 'x' => {
+                self.mem_input.as_mut().expect("checked Some above").push(c);
+            }
+            KeyCode::Backspace => {
+                self.mem_input.as_mut().expect("checked Some above").pop();
+            }
+            KeyCode::Enter => {
+                let buf = self.mem_input.take().expect("checked Some above");
+                let trimmed = buf.trim().trim_start_matches("0x");
+                if let Ok(parsed) = u32::from_str_radix(trimmed, 16) {
+                    self.mem_addr = parsed.min(dbg.memory_len());
+                    self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
+                }
+            }
+            KeyCode::Esc => {
+                self.mem_input = None;
+            }
+            _ => {} // swallow anything else while editing
+        }
+        Some(DebugKey::Consumed)
     }
 
     /// Scroll `window`'s active section by one step. Used by the key path
@@ -253,6 +314,39 @@ impl DebugPanelState {
         self.tab[0] = 0;
         self.snapshot.disasm = dbg.disassemble(self.disasm_addr, DISASM_WINDOW);
     }
+
+    /// Mouse: toggle object `n`'s expansion in the Objects tree (collapse if
+    /// already expanded, else expand + fetch its detail lines).
+    pub fn toggle_object(&mut self, n: u16, dbg: &dyn Debugger) {
+        if self.expanded_objects.remove(&n) {
+            self.snapshot.object_details.remove(&n);
+        } else {
+            self.expanded_objects.insert(n);
+            self.snapshot.object_details.insert(n, dbg.object_detail(n));
+        }
+    }
+
+    /// Focus the Memory window/tab and point it at `addr`.
+    pub fn goto_memory(&mut self, addr: u32, dbg: &dyn Debugger) {
+        self.focus = 2;
+        self.tab[2] = 2; // Memory is WINDOW_TABS[2][2]
+        self.mem_addr = addr.min(dbg.memory_len());
+        self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
+    }
+
+    /// Focus the Objects window/tab, expand object `n`, and scroll it into
+    /// view.
+    pub fn goto_object(&mut self, n: u16, dbg: &dyn Debugger) {
+        self.focus = 1;
+        self.tab[1] = 1; // Objects is WINDOW_TABS[1][1]
+        if self.expanded_objects.insert(n) {
+            self.snapshot.object_details.insert(n, dbg.object_detail(n));
+        }
+        let rows = objects_rows(&self.snapshot.objects, &self.expanded_objects, &self.snapshot.object_details, 0, usize::MAX);
+        if let Some(idx) = rows.iter().position(|r| matches!(r, ObjRow::Tree { obj: Some(id), .. } if *id == n)) {
+            self.scroll[1] = idx;
+        }
+    }
 }
 
 // ── Geometry (pure; shared by render and mouse hit-testing) ───────────────────
@@ -277,6 +371,48 @@ pub fn disasm_rows(disasm: &[String], pc: u32, height: usize) -> Vec<DisasmRow> 
         if rows.len() >= height { break; }
     }
     rows
+}
+
+/// One screen row of the Objects section: either a tree line (`obj` is its
+/// parsed `[N]` id, if any) or one of an expanded object's detail lines
+/// (`di` indexes into that object's `object_details` entry).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObjRow { Tree { line_idx: usize, obj: Option<u16> }, Detail { obj: u16, di: usize } }
+
+/// Parse the leading `[N]` object id from a tree line (e.g. `"  [12] lamp"`).
+fn parse_obj_id(line: &str) -> Option<u16> {
+    let start = line.find('[')?;
+    let rest = line.get(start + 1..)?;
+    let end = rest.find(']')?;
+    rest.get(..end)?.parse().ok()
+}
+
+/// Interleave each object tree line with its expanded detail lines (if any),
+/// apply `scroll` (display rows, not tree lines) and cap at `height`. Pure;
+/// shared by the renderer and the click hit-test so scroll offset and
+/// click-row→object mapping never drift (same discipline as `disasm_rows`).
+pub fn objects_rows(
+    objects: &[String],
+    expanded: &std::collections::HashSet<u16>,
+    details: &std::collections::HashMap<u16, Vec<String>>,
+    scroll: usize,
+    height: usize,
+) -> Vec<ObjRow> {
+    let mut all = Vec::new();
+    for (i, line) in objects.iter().enumerate() {
+        let obj = parse_obj_id(line);
+        all.push(ObjRow::Tree { line_idx: i, obj });
+        if let Some(n) = obj {
+            if expanded.contains(&n) {
+                if let Some(det) = details.get(&n) {
+                    for di in 0..det.len() {
+                        all.push(ObjRow::Detail { obj: n, di });
+                    }
+                }
+            }
+        }
+    }
+    all.into_iter().skip(scroll).take(height).collect()
 }
 
 /// Clickable code-address spans within a rendered line: the char range and the
@@ -371,6 +507,38 @@ pub fn clickable_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -
     None
 }
 
+/// Hit-test a click at `(col, row)` against the Objects section's tree rows
+/// (window 1, right-top). Returns the object id if the click landed on a
+/// `Tree` row that carries one (a toggle target). Uses the same
+/// `window_rects` / `objects_rows` geometry the renderer uses, so it never
+/// drifts.
+pub fn objects_click_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -> Option<u16> {
+    let window_rect = window_rects(region)[1];
+    if col < window_rect.x || col >= window_rect.right()
+        || row < window_rect.y || row >= window_rect.bottom() {
+        return None;
+    }
+    if panel.active_section(1) != Section::Objects {
+        return None;
+    }
+    let content = Rect::new(
+        window_rect.x + 1, window_rect.y + 1,
+        window_rect.width.saturating_sub(2), window_rect.height.saturating_sub(2),
+    );
+    if col < content.x || col >= content.right() || row < content.y || row >= content.bottom() {
+        return None;
+    }
+    let r = (row - content.y) as usize;
+    let rows = objects_rows(
+        &panel.snapshot.objects, &panel.expanded_objects, &panel.snapshot.object_details,
+        panel.scroll[1], content.height as usize,
+    );
+    match rows.get(r)? {
+        ObjRow::Tree { obj: Some(n), .. } => Some(*n),
+        _ => None,
+    }
+}
+
 /// Tile `region` into the three window rects: left full-height, right column
 /// split top/bottom. Must match exactly what `render/debug_panel.rs` draws.
 pub fn window_rects(region: Rect) -> [Rect; 3] {
@@ -450,6 +618,7 @@ mod tests {
             (0..r).map(|i| format!("{:06x}", a + i as u32 * 16)).collect()
         }
         fn memory_len(&self) -> u32 { 0x10000 }
+        fn object_detail(&self, _obj: u16) -> Vec<String> { vec!["attrs: (none)".into()] }
     }
 
     #[test]
@@ -626,6 +795,22 @@ mod tests {
     }
 
     #[test]
+    fn clickable_spans_does_not_panic_on_embedded_multi_byte_story_text() {
+        // `print`-family instructions can embed arbitrary (multi-byte UTF-8)
+        // story text right in the disasm line, near a real `0x……` marker.
+        // find_hex_spans is byte-indexed; every slice must go through
+        // `str::get` (never direct indexing) or a byte offset landing mid
+        // char boundary panics. Spans may come back empty or correct — the
+        // only requirement is no panic.
+        let line = "004a2f  print \"café ➤ 0x1234\"";
+        let spans = clickable_spans(Section::Disasm, line);
+        // If a span was found, its range must still slice cleanly.
+        for (range, _) in &spans {
+            let _ = &line[range.clone()];
+        }
+    }
+
+    #[test]
     fn clickable_at_resolves_a_branch_target_click_in_disasm() {
         let region = Rect::new(0, 0, 61, 40);
         let mut p = DebugPanelState::new(0x1000);
@@ -683,5 +868,172 @@ mod tests {
         assert_eq!(p.tab[0], 0);
         assert_eq!(p.pc, 0x1000, "goto must not re-anchor to PC (that's refresh's job)");
         assert_eq!(p.snapshot.disasm[0], format!("{:06x}  add", 0x2000));
+    }
+
+    // ── Memory address-input line ───────────────────────────────────────────
+
+    fn memory_focused_panel() -> DebugPanelState {
+        let mut p = DebugPanelState::new(0x1000);
+        p.focus = 2;
+        p.tab[2] = 2; // Memory
+        p
+    }
+
+    #[test]
+    fn colon_opens_the_memory_input_and_digits_edit_it() {
+        let mut p = memory_focused_panel();
+        assert_eq!(p.handle_key(KeyCode::Char(':'), &MockDbg), DebugKey::Consumed);
+        assert_eq!(p.mem_input.as_deref(), Some(""));
+        p.handle_key(KeyCode::Char('1'), &MockDbg);
+        p.handle_key(KeyCode::Char('a'), &MockDbg);
+        assert_eq!(p.mem_input.as_deref(), Some("1a"));
+        p.handle_key(KeyCode::Backspace, &MockDbg);
+        assert_eq!(p.mem_input.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn enter_parses_the_memory_input_as_hex_and_jumps_mem_addr() {
+        let mut p = memory_focused_panel();
+        p.handle_key(KeyCode::Char(':'), &MockDbg);
+        for c in "2000".chars() { p.handle_key(KeyCode::Char(c), &MockDbg); }
+        assert_eq!(p.handle_key(KeyCode::Enter, &MockDbg), DebugKey::Consumed);
+        assert_eq!(p.mem_addr, 0x2000);
+        assert!(p.mem_input.is_none());
+        assert_eq!(p.snapshot.memory[0], format!("{:06x}", 0x2000));
+    }
+
+    #[test]
+    fn esc_cancels_the_memory_input_without_changing_mem_addr() {
+        let mut p = memory_focused_panel();
+        p.mem_addr = 0x40;
+        p.handle_key(KeyCode::Char(':'), &MockDbg);
+        p.handle_key(KeyCode::Char('9'), &MockDbg);
+        assert_eq!(p.handle_key(KeyCode::Esc, &MockDbg), DebugKey::Consumed);
+        assert!(p.mem_input.is_none());
+        assert_eq!(p.mem_addr, 0x40, "Esc must not commit the in-progress buffer");
+    }
+
+    #[test]
+    fn typing_while_editing_the_memory_input_does_not_scroll_or_switch_tabs() {
+        let mut p = memory_focused_panel();
+        p.mem_addr = 0x100;
+        p.handle_key(KeyCode::Char(':'), &MockDbg);
+        // Down/Left would normally scroll memory / switch the window's tab —
+        // while editing they must be swallowed, not fall through.
+        p.handle_key(KeyCode::Down, &MockDbg);
+        p.handle_key(KeyCode::Left, &MockDbg);
+        assert_eq!(p.mem_addr, 0x100, "arrow keys must not scroll while editing");
+        assert_eq!(p.tab[2], 2, "arrow keys must not switch tabs while editing");
+        assert!(p.mem_input.is_some(), "still editing");
+    }
+
+    #[test]
+    fn slash_also_opens_the_memory_input() {
+        let mut p = memory_focused_panel();
+        assert_eq!(p.handle_key(KeyCode::Char('/'), &MockDbg), DebugKey::Consumed);
+        assert_eq!(p.mem_input.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn colon_does_not_open_input_outside_the_memory_section() {
+        let mut p = DebugPanelState::new(0x1000); // focus 0 = Disasm
+        assert_eq!(p.handle_key(KeyCode::Char(':'), &MockDbg), DebugKey::Ignored);
+        assert!(p.mem_input.is_none());
+    }
+
+    // ── objects_rows (shared Objects display model) ─────────────────────────
+
+    #[test]
+    fn objects_rows_interleaves_detail_lines_after_an_expanded_object() {
+        let objects = vec!["[1] lamp".to_string(), "[2] rock".to_string()];
+        let expanded = std::collections::HashSet::from([1u16]);
+        let details = std::collections::HashMap::from([
+            (1u16, vec!["attrs: 5".to_string(), "  prop 1: 01 02".to_string()]),
+        ]);
+        let rows = objects_rows(&objects, &expanded, &details, 0, 10);
+        assert_eq!(rows.len(), 4); // tree[1] + 2 detail lines + tree[2]
+        assert!(matches!(rows[0], ObjRow::Tree { line_idx: 0, obj: Some(1) }));
+        assert!(matches!(rows[1], ObjRow::Detail { obj: 1, di: 0 }));
+        assert!(matches!(rows[2], ObjRow::Detail { obj: 1, di: 1 }));
+        assert!(matches!(rows[3], ObjRow::Tree { line_idx: 1, obj: Some(2) }));
+    }
+
+    #[test]
+    fn objects_rows_applies_scroll_and_height_over_the_interleaved_rows() {
+        let objects = vec!["[1] lamp".to_string(), "[2] rock".to_string()];
+        let expanded = std::collections::HashSet::from([1u16]);
+        let details = std::collections::HashMap::from([(1u16, vec!["attrs: 5".to_string()])]);
+        let rows = objects_rows(&objects, &expanded, &details, 1, 1);
+        assert_eq!(rows.len(), 1);
+        assert!(matches!(rows[0], ObjRow::Detail { obj: 1, di: 0 }));
+    }
+
+    #[test]
+    fn parse_obj_id_reads_the_leading_bracketed_number() {
+        assert_eq!(parse_obj_id("[12] West of House"), Some(12));
+        assert_eq!(parse_obj_id("  [3] lamp"), Some(3));
+        assert_eq!(parse_obj_id("no brackets here"), None);
+    }
+
+    #[test]
+    fn toggle_object_expands_then_collapses() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.snapshot.objects = vec!["[1] lamp".to_string()];
+        p.toggle_object(1, &MockDbg);
+        assert!(p.expanded_objects.contains(&1));
+        assert!(p.snapshot.object_details.contains_key(&1));
+        p.toggle_object(1, &MockDbg);
+        assert!(!p.expanded_objects.contains(&1));
+        assert!(!p.snapshot.object_details.contains_key(&1));
+    }
+
+    #[test]
+    fn objects_click_at_resolves_a_tree_row_click() {
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        p.focus = 1;
+        p.tab[1] = 1; // Objects
+        p.snapshot.objects = vec!["[1] lamp".to_string()];
+        let [_, top, _] = window_rects(region);
+        let content = Rect::new(top.x + 1, top.y + 1, top.width.saturating_sub(2), top.height.saturating_sub(2));
+        let hit = objects_click_at(region, &p, content.x, content.y);
+        assert_eq!(hit, Some(1));
+    }
+
+    #[test]
+    fn objects_click_at_ignores_clicks_when_objects_is_not_the_active_tab() {
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        p.tab[1] = 0; // Locals, not Objects
+        p.snapshot.objects = vec!["[1] lamp".to_string()];
+        let [_, top, _] = window_rects(region);
+        let content = Rect::new(top.x + 1, top.y + 1, top.width.saturating_sub(2), top.height.saturating_sub(2));
+        assert_eq!(objects_click_at(region, &p, content.x, content.y), None);
+    }
+
+    // ── Navigation primitives (goto_memory / goto_object) ───────────────────
+
+    #[test]
+    fn goto_memory_focuses_the_memory_tab_and_jumps_mem_addr() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.focus = 0;
+        p.goto_memory(0x300, &MockDbg);
+        assert_eq!(p.focus, 2);
+        assert_eq!(p.tab[2], 2);
+        assert_eq!(p.mem_addr, 0x300);
+        assert_eq!(p.snapshot.memory[0], format!("{:06x}", 0x300));
+    }
+
+    #[test]
+    fn goto_object_focuses_objects_tab_expands_and_scrolls_to_the_object() {
+        let mut p = DebugPanelState::new(0x1000);
+        p.focus = 0;
+        p.snapshot.objects = vec!["[1] lamp".to_string(), "[2] rock".to_string()];
+        p.goto_object(2, &MockDbg);
+        assert_eq!(p.focus, 1);
+        assert_eq!(p.tab[1], 1);
+        assert!(p.expanded_objects.contains(&2));
+        assert!(p.snapshot.object_details.contains_key(&2));
+        assert_eq!(p.scroll[1], 1, "object [2]'s display row is index 1");
     }
 }

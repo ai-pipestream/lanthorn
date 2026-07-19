@@ -144,7 +144,7 @@ const UNICODE_TABLE: [char; 69] = [
 /// matches that (a blank column showing the current background) instead of the
 /// stray '?' the generic fallback would print.
 /// Everything else maps to '?'.
-pub(crate) fn zscii_to_char(zscii: u16) -> char {
+pub fn zscii_to_char(zscii: u16) -> char {
     match zscii {
         10 => ' ',
         13 => '\n',

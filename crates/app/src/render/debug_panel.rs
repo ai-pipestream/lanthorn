@@ -95,18 +95,73 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
         return;
     }
 
-    // Memory is pre-windowed by its addr (offset 0); list sections apply
-    // their per-window scroll offset.
-    let scroll = match section {
-        Section::Memory => 0,
-        _ => panel.scroll[window],
-    };
+    if section == Section::Objects {
+        draw_objects(buf, content, window, panel, body);
+        return;
+    }
+
+    if section == Section::Memory {
+        draw_memory(buf, content, panel, state, body);
+        return;
+    }
+
+    // List sections apply their per-window scroll offset.
+    let scroll = panel.scroll[window];
     for (row, line) in lines.iter().skip(scroll).take(content.height as usize).enumerate() {
         let y = content.y + row as u16;
         draw_str_clipped(buf, content.x, y, line, body, content);
         if section == Section::CallStack {
             underline_clickables(buf, content.x, y, line, body, section, content);
         }
+    }
+}
+
+/// Draw the Objects section: `objects_rows` interleaves each tree line with
+/// its expanded detail lines (if any), so render and the click hit-test
+/// (`objects_click_at`) always agree on which screen row is which object row.
+/// Tree rows that carry an object id are underlined (clickable to toggle);
+/// detail rows are drawn plain and indented.
+fn draw_objects(buf: &mut Buffer, content: Rect, window: usize, panel: &DebugPanelState, body: Style) {
+    let rows = debug_panel::objects_rows(
+        &panel.snapshot.objects, &panel.expanded_objects, &panel.snapshot.object_details,
+        panel.scroll[window], content.height as usize,
+    );
+    for (r, row_entry) in rows.iter().enumerate() {
+        let y = content.y + r as u16;
+        match row_entry {
+            debug_panel::ObjRow::Tree { line_idx, obj } => {
+                let Some(line) = panel.snapshot.objects.get(*line_idx) else { continue };
+                draw_str_clipped(buf, content.x, y, line, body, content);
+                if obj.is_some() {
+                    draw_str_clipped(buf, content.x, y, line, body.add_modifier(Modifier::UNDERLINED), content);
+                }
+            }
+            debug_panel::ObjRow::Detail { obj, di } => {
+                let Some(det) = panel.snapshot.object_details.get(obj) else { continue };
+                let Some(line) = det.get(*di) else { continue };
+                let indented = format!("    {line}");
+                draw_str_clipped(buf, content.x, y, &indented, body, content);
+            }
+        }
+    }
+}
+
+/// Draw the Memory section: when `mem_input` is editing, an address-input
+/// line occupies the top content row (with a `_` cursor) and the hex dump is
+/// drawn below it (content height − 1); otherwise the hex dump fills the
+/// whole content rect. Memory is pre-windowed by its addr, so it never
+/// applies a scroll offset.
+fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: &AppState, body: Style) {
+    let mut y = content.y;
+    let mut height = content.height;
+    if let Some(input) = &panel.mem_input {
+        let line = format!("addr: 0x{input}_");
+        draw_str_clipped(buf, content.x, y, &line, state.colors.debug_pane_focused, content);
+        y += 1;
+        height = height.saturating_sub(1);
+    }
+    for (row, line) in panel.snapshot.memory.iter().take(height as usize).enumerate() {
+        draw_str_clipped(buf, content.x, y + row as u16, line, body, content);
     }
 }
 

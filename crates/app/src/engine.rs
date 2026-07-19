@@ -371,6 +371,10 @@ pub trait Debugger {
     fn memory_hex(&self, addr: u32, rows: usize) -> Vec<String>;
     /// Total addressable memory length (so the panel can clamp scroll).
     fn memory_len(&self) -> u32;
+    /// Detail lines for object `obj`: its set attributes, then its property
+    /// table (number → hex bytes) — shown inline when the Objects tree entry
+    /// is expanded.
+    fn object_detail(&self, obj: u16) -> Vec<String>;
 }
 
 // ── Engine-tagged save ──────────────────────────────────────────────────────
@@ -659,6 +663,7 @@ mod debugger_trait_tests {
         fn dictionary_lines(&self) -> Vec<String> { vec!["word".into()] }
         fn memory_hex(&self, _a: u32, _r: usize) -> Vec<String> { vec!["000000  00".into()] }
         fn memory_len(&self) -> u32 { 0x10000 }
+        fn object_detail(&self, _obj: u16) -> Vec<String> { vec!["attrs: (none)".into()] }
     }
 
     #[test]

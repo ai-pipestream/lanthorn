@@ -1563,7 +1563,13 @@ fn main() {
         if state.debug.is_some() && state.focus == Focus::Map {
             if let Event::Key(k) = &event {
                 if k.kind == KeyEventKind::Press {
-                    if k.code == crossterm::event::KeyCode::Esc {
+                    // Esc normally pops focus straight back to the story. But while
+                    // the Memory address-input line is open, Esc must cancel that
+                    // input first (handled by `handle_key` below) rather than
+                    // immediately leaving the debug region — so skip the early pop
+                    // in that case and fall through to the normal handle_key call.
+                    let editing_mem_addr = state.debug.as_ref().is_some_and(|p| p.mem_input.is_some());
+                    if k.code == crossterm::event::KeyCode::Esc && !editing_mem_addr {
                         state.focus = Focus::Game; // pop back to typing; keep the panel open
                         continue;
                     }
@@ -1624,6 +1630,17 @@ fn main() {
                             if let Some(target) = target {
                                 if let Some(dbg) = session.debugger() {
                                     if let Some(p) = state.debug.as_mut() { p.goto(target, dbg); }
+                                    state.focus = Focus::Map;
+                                }
+                                continue;
+                            }
+                            // Object-tree expand/collapse click (Objects tab) — same
+                            // priority as the code-address clicks above.
+                            let obj_target = state.debug.as_ref()
+                                .and_then(|p| app::debug_panel::objects_click_at(region, p, m.column, m.row));
+                            if let Some(obj) = obj_target {
+                                if let Some(dbg) = session.debugger() {
+                                    if let Some(p) = state.debug.as_mut() { p.toggle_object(obj, dbg); }
                                     state.focus = Focus::Map;
                                 }
                                 continue;

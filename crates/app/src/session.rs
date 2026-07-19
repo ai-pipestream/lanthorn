@@ -1153,8 +1153,20 @@ impl Debugger for GameSession {
             let end = (a + 16).min(len);
             let row = &bytes[a as usize..end as usize];
             let hex: String = row.iter().map(|b| format!("{:02x} ", b)).collect();
+            // VM-correct char column: basic ASCII printable range is a direct
+            // identity mapping (same result zscii_to_char would give); the
+            // 155-223 ZSCII extended range goes through the story's custom
+            // Unicode table if it has one, else zvm's default ZSCII table
+            // (mirrors decode_string's own zscii lookup in text/decode.rs).
+            // Everything else (control bytes, unassigned ZSCII) is undecodable
+            // as a single glyph → '.'.
             let ascii: String = row.iter()
-                .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+                .map(|&b| match b {
+                    0x20..=0x7e => b as char,
+                    155..=223 => self.machine.mem.unicode_char(b as u16)
+                        .unwrap_or_else(|| zvm::text::decode::zscii_to_char(b as u16)),
+                    _ => '.',
+                })
                 .collect();
             out.push(format!("{:06x}  {:<48}{}", a, hex, ascii));
             a = end;
@@ -1164,6 +1176,31 @@ impl Debugger for GameSession {
 
     fn memory_len(&self) -> u32 {
         self.machine.mem.len() as u32
+    }
+
+    fn object_detail(&self, obj: u16) -> Vec<String> {
+        let mem = &self.machine.mem;
+        let attr_count: u8 = if mem.version() <= 3 { 32 } else { 48 };
+        let attrs: Vec<u8> = (0..attr_count).filter(|&a| zvm::objects::get_attr(mem, obj, a)).collect();
+        let mut out = Vec::new();
+        if attrs.is_empty() {
+            out.push("attrs: (none)".to_string());
+        } else {
+            let list: Vec<String> = attrs.iter().map(|a| a.to_string()).collect();
+            out.push(format!("attrs: {}", list.join(", ")));
+        }
+        let mut prop = zvm::objects::get_next_prop(mem, obj, 0);
+        while prop != 0 {
+            let addr = zvm::objects::get_prop_addr(mem, obj, prop);
+            let len = zvm::objects::get_prop_len(mem, addr);
+            let bytes: Vec<String> = (0..len as u32)
+                .map(|i| format!("{:02x}", mem.read_byte(addr as u32 + i)))
+                .collect();
+            out.push(format!("  prop {}: {}", prop, bytes.join(" ")));
+            prop = zvm::objects::get_next_prop(mem, obj, prop);
+        }
+        self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
+        out
     }
 }
 
@@ -2533,6 +2570,13 @@ mod debugger_impl_tests {
         assert!(
             s.machine.mem.take_mem_fault().is_none(),
             "prev_instr left a phantom fault that would halt the VM on its next step"
+        );
+        // object_detail reads attributes + property bytes — verify it drains too.
+        let _ = s.machine.mem.read_word(end + 100); // re-latch
+        let _ = dbg.object_detail(1);
+        assert!(
+            s.machine.mem.take_mem_fault().is_none(),
+            "object_detail left a phantom fault that would halt the VM on its next step"
         );
     }
 
