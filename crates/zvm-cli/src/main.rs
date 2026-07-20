@@ -741,8 +741,37 @@ fn maybe_resize(
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+const HELP: &str = "\
+zvm-cli — DOS-style Z-machine player (no map)
+
+Usage: zvm-cli [OPTIONS] <story-file>
+
+Arguments:
+  <story-file>          Z-code story (.z3/.z5/.z8 …, or a .zblorb container)
+
+Options:
+      --no-status       Suppress the pinned status/upper-window line (alias: --lower-only)
+      --no-aux          Don't read or write v5 auxiliary (VFS) sidecar files
+      --no-more         Disable [MORE] paging on long output (alias: --no-page)
+      --no-timed-input  Ignore timed-input interrupts
+      --no-sound        Disable sound (bleeps + sampled audio)
+      --volume <0-100>  Set the master volume
+  -I, --interpreter <n> Set the Z-machine interpreter number
+      --data-dir <path> Base dir for saves/sidecars (default: beside the story)
+  -V, --version         Print version and exit
+  -h, --help            Print this help and exit
+";
+
 fn main() {
     let argv: Vec<String> = env::args().collect();
+    if argv.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{HELP}");
+        return;
+    }
+    if argv.iter().any(|a| a == "--version" || a == "-V") {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let args = parse_args(&argv);
     let Some(story_arg) = args.story.clone() else {
         eprintln!(

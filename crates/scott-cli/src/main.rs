@@ -129,7 +129,30 @@ fn parse_args() -> Result<Args, String> {
     Ok(Args { path, seed, max_turns })
 }
 
+const HELP: &str = "\
+scott-cli — DOS-style Scott Adams (ScottFree) player (no map)
+
+Usage: scott-cli [OPTIONS] <adv.dat>
+
+Arguments:
+  <adv.dat>           Scott Adams ScottFree .dat adventure
+
+Options:
+      --seed <n>      Seed the RNG for reproducible play
+      --max-turns <n> Stop after n turns (headless/testing)
+  -V, --version       Print version and exit
+  -h, --help          Print this help and exit
+";
+
 fn main() {
+    if env::args().any(|a| a == "--help" || a == "-h") {
+        print!("{HELP}");
+        return;
+    }
+    if env::args().any(|a| a == "--version" || a == "-V") {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let args = match parse_args() {
         Ok(a) => a,
         Err(e) => {

@@ -5,8 +5,10 @@ members = ["crates/zvm", "crates/zvm-cli", "crates/mapper", "crates/app", "crate
 exclude = ["crates/gvm/tables-gen"]
 resolver = "2"
 
-# Shared package metadata inherited by each crate via `license.workspace = true`.
+# Shared package metadata inherited by each crate via `<field>.workspace = true`.
+# Bump `version` here to version every crate (and the binaries' --version) at once.
 [workspace.package]
+version = "0.1.0"
 license = "BSD-3-Clause"
 
 # Line-tables-only debug info: keeps panic backtraces with file/line, but drops

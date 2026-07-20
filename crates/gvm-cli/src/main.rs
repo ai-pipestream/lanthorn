@@ -485,8 +485,32 @@ fn resolve_save_input(input: &str, game_dir: &std::path::Path) -> std::path::Pat
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
+const HELP: &str = "\
+gvm-cli — DOS-style Glulx player (no map)
+
+Usage: gvm-cli [OPTIONS] <story>
+
+Arguments:
+  <story>               Glulx story (.ulx) or Blorb (.gblorb)
+
+Options:
+      --no-game-colours Ignore the game's Glk stylehint colours
+      --no-accel        Disable Glulx accelerated-function interception
+      --data-dir <path> Base dir for saves/sidecars (default: beside the story)
+  -V, --version         Print version and exit
+  -h, --help            Print this help and exit
+";
+
 fn main() {
     let argv: Vec<String> = env::args().collect();
+    if argv.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{HELP}");
+        return;
+    }
+    if argv.iter().any(|a| a == "--version" || a == "-V") {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return;
+    }
     // Honour the game's stylehint colours by default; --no-game-colours opts out
     // (mirrors zvm-cli). The story path is the first non-flag argument.
     let honor = !argv.iter().any(|a| a == "--no-game-colours");

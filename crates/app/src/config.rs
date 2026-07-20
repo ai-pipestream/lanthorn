@@ -168,7 +168,13 @@ impl Default for SearchConfig {
 
 /// babelmap: a Z-machine interpreter with live automapping.
 #[derive(Parser, Debug)]
-#[command(name = "babelmap", about = "Z-machine interpreter with live automapping")]
+#[command(
+    name = "babelmap",
+    version,
+    about = "Interactive-fiction interpreter (Z-machine, Glulx, Scott Adams) with live automapping",
+    // Show `babelmap <version>` at the top of --help (clap omits it by default).
+    help_template = "{before-help}{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\n{all-args}{after-help}"
+)]
 pub struct Cli {
     /// Path to the story file (.z3/.z5/.z8 etc.)
     pub story: PathBuf,
