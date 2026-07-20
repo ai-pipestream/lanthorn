@@ -155,28 +155,18 @@ container (`.zblorb`/`.blorb`/`.gblorb`).
 
 ---
 
-## What it is
+## Under the hood
 
-babelmap is a Rust workspace. The interpreter and the mapper are deliberately
-decoupled: a VM reports *where you are*, and the mapper turns the stream of
-locations and movements into a spatial graph without knowing anything about the
-underlying engine.
+babelmap is a Rust workspace of three from-scratch, zero-dependency virtual
+machines — Z-machine, Glulx, and Scott Adams — plus a VM-agnostic automapper, all
+tied together by a terminal UI. The interpreter and the mapper are deliberately
+decoupled (a VM reports *where you are*; the mapper builds the map), and every
+engine renders through one neutral screen model so a single renderer draws them
+all.
 
-| Crate | Responsibility |
-|-------|----------------|
-| `zvm` | A from-scratch Z-machine virtual machine — executes story files, standard Quetzal save/restore. Zero-dependency. |
-| `gvm` | A Glulx virtual machine (Glk I/O) for modern Inform 7 games — accelerated Inform veneer, full float opcodes. Zero-dependency. |
-| `scott` | A Scott Adams (ScottFree `.dat`) virtual machine for the classic text adventures. Zero-dependency. |
-| `mapper` | A VM-agnostic map model: rooms, connections, layered 2-D layout, overlap removal, edge routing. Serializable. |
-| `app` | The `babelmap` TUI binary (ratatui + crossterm): play loop, live map rendering, debug inspector, all interactive features. |
-| `zvm-cli` / `gvm-cli` / `scott-cli` | Standalone DOS-style command-line players (no map): save/restore, single-key input, terminal-bell bleeps — and, piped, a clean deterministic harness for testing/scripting. |
-| `blorb` | Blorb container parsing — bundled story, cover art, and sound/image resources. |
-| `audio` | Sound playback (rodio) — synthesized bleeps and sampled AIFF / Ogg / ProTracker MOD. |
-
-The crates are layered `zvm`/`gvm`/`scott` → `mapper` → `app`; the CLIs are thin
-VM front-ends. The mapper has no dependency on any VM, so layout logic can be
-tested in isolation, and the VM crates stay zero-dependency (image/audio/resource
-types live in `app`, `blorb`, and `audio`).
+For the crate layout, the **"Glk only for Glulx, native for Z-machine and Scott"**
+I/O decision and why it was made, and how the engines converge on one renderer,
+see **[`docs/architecture.md`](docs/architecture.md)**.
 
 ---
 
