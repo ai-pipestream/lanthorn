@@ -13,6 +13,14 @@ on:
       - 'v*'
   workflow_dispatch: {}
 
+# A new run cancels an in-progress one for the same ref — e.g. repeated dry-runs
+# on main, or re-pushing a tag. Distinct tags get their own group, so two real
+# releases never cancel each other. (Drop the `-${{ github.ref }}` to make it a
+# single global lane where any new run cancels any in-progress run.)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: build (${{ matrix.name }})
