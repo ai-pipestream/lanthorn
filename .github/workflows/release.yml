@@ -77,8 +77,13 @@ jobs:
               lipo -create -output "target/universal/release/$bin" \
                 "target/aarch64-apple-darwin/release/$bin" \
                 "target/x86_64-apple-darwin/release/$bin"
+              # Ad-hoc re-sign: lipo can invalidate the per-slice signatures, and
+              # Apple Silicon refuses to run a binary without a valid one. Not a
+              # Developer-ID signature (still un-notarized), just enough to launch.
+              codesign --force --sign - "target/universal/release/$bin"
             done
             lipo -info target/universal/release/babelmap
+            codesign --verify --verbose target/universal/release/babelmap
           else
             rustup target add ${{ matrix.target }}
             cargo build --release --locked $BINS --target ${{ matrix.target }}
@@ -171,7 +176,14 @@ jobs:
               **`libasound2`** at runtime for audio —
               `sudo apt-get install libasound2` (Debian/Ubuntu) or your distro's
               equivalent.
-            - **macOS** is a universal binary (Apple Silicon + Intel).
-            - **Windows** is `x86_64`.
+            - **macOS** is a universal binary (Apple Silicon + Intel), ad-hoc
+              signed but **not notarized** with an Apple Developer ID. If you
+              download it with a **browser**, Gatekeeper quarantines it — clear
+              the flag with `xattr -dr com.apple.quarantine <extracted-folder>`
+              (or approve it once in System Settings → Privacy & Security).
+              Downloading and extracting from the **Terminal** avoids quarantine
+              entirely: `curl -L <url> -o babelmap.tar.gz && tar xzf babelmap.tar.gz`.
+            - **Windows** is `x86_64`. It is unsigned, so SmartScreen may warn on
+              first launch (More info → Run anyway).
 
             Verify a download against its `.sha256` sidecar.
