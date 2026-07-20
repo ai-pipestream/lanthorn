@@ -5,6 +5,7 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+buildinfo = { path = "../buildinfo" }
 gvm = { path = "../gvm" }
 blorb = { path = "../blorb" }
 crossterm = "0.29"

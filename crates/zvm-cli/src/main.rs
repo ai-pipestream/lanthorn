@@ -769,7 +769,7 @@ fn main() {
         return;
     }
     if argv.iter().any(|a| a == "--version" || a == "-V") {
-        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        println!("{} {}", env!("CARGO_PKG_NAME"), buildinfo::LONG);
         return;
     }
     let args = parse_args(&argv);

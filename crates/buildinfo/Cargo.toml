@@ -1,0 +1,7 @@
+[package]
+name = "buildinfo"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+
+# No dependencies — build.rs uses std only, so this stays as light as the VM crates.

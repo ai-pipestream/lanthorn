@@ -5,6 +5,7 @@ edition = "2021"
 license.workspace = true
 
 [dependencies]
+buildinfo = { path = "../buildinfo" }
 zvm = { path = "../zvm" }
 blorb = { path = "../blorb" }
 audio = { path = "../audio" }

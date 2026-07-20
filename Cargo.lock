@@ -118,6 +118,7 @@ version = "0.1.0"
 dependencies = [
  "audio",
  "blorb",
+ "buildinfo",
  "clap",
  "crossterm",
  "gvm",
@@ -275,6 +276,10 @@ dependencies = [
 
 [[package]]
 name = "blorb"
+version = "0.1.0"
+
+[[package]]
+name = "buildinfo"
 version = "0.1.0"
 
 [[package]]
@@ -1057,6 +1062,7 @@ name = "gvm-cli"
 version = "0.1.0"
 dependencies = [
  "blorb",
+ "buildinfo",
  "crossterm",
  "gvm",
  "jiff",
@@ -2501,6 +2507,7 @@ version = "0.1.0"
 name = "scott-cli"
 version = "0.1.0"
 dependencies = [
+ "buildinfo",
  "crossterm",
  "scott",
 ]
@@ -3882,6 +3889,7 @@ version = "0.1.0"
 dependencies = [
  "audio",
  "blorb",
+ "buildinfo",
  "crossterm",
  "zvm",
 ]

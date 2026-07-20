@@ -150,7 +150,7 @@ fn main() {
         return;
     }
     if env::args().any(|a| a == "--version" || a == "-V") {
-        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        println!("{} {}", env!("CARGO_PKG_NAME"), buildinfo::LONG);
         return;
     }
     let args = match parse_args() {

@@ -16,6 +16,7 @@ name = "babelmap"
 path = "src/main.rs"
 
 [dependencies]
+buildinfo = { path = "../buildinfo" }
 zvm = { path = "../zvm" }
 gvm = { path = "../gvm" }
 scott = { path = "../scott" }

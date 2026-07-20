@@ -170,7 +170,7 @@ impl Default for SearchConfig {
 #[derive(Parser, Debug)]
 #[command(
     name = "babelmap",
-    version,
+    version = buildinfo::LONG,
     about = "Interactive-fiction interpreter (Z-machine, Glulx, Scott Adams) with live automapping",
     // Show `babelmap <version>` at the top of --help (clap omits it by default).
     help_template = "{before-help}{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\n{all-args}{after-help}"

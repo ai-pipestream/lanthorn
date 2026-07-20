@@ -508,7 +508,7 @@ fn main() {
         return;
     }
     if argv.iter().any(|a| a == "--version" || a == "-V") {
-        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        println!("{} {}", env!("CARGO_PKG_NAME"), buildinfo::LONG);
         return;
     }
     // Honour the game's stylehint colours by default; --no-game-colours opts out
