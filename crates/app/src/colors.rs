@@ -507,8 +507,14 @@ impl ColorScheme {
             map_layer_tab_active: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             status_header: Style::new(),
             input_line: Style::new(),
-            map_border_style: BorderStyle::None,
-            story_border_style: BorderStyle::None,
+            // SQ-0309: previously injected by DEFAULT_STYLE_TOML's `[colors]`
+            // "map_border"/"story_border" `style = "single"` (applied via the
+            // now-removed `apply_color_decls`). That was the only path that ever
+            // set these away from `None` for the built-in default look, so the
+            // literal default moves here to keep it (render/map.rs's layer-strip
+            // suppression and the single-line pane border still depend on it).
+            map_border_style: BorderStyle::Single,
+            story_border_style: BorderStyle::Single,
             status_header_style: BorderStyle::None,
             input_line_style: BorderStyle::None,
             suggestion_line_style: BorderStyle::None,
@@ -535,8 +541,8 @@ impl ColorScheme {
             upper_window: Style::new(),
             upper_window_border: Style::new().fg(Color::Cyan),
             virtual_window_border: BorderStyle::Single,
-            map_border_sides: PaneSides::all(BorderStyle::None),
-            story_border_sides: PaneSides::all(BorderStyle::None),
+            map_border_sides: PaneSides::all(BorderStyle::Single),
+            story_border_sides: PaneSides::all(BorderStyle::Single),
             status_header_sides: PaneSides::all(BorderStyle::None),
             input_line_sides: PaneSides::all(BorderStyle::None),
             suggestion_line_sides: PaneSides::all(BorderStyle::None),
@@ -1078,8 +1084,9 @@ mod tests {
         assert_eq!(cs.upper_window_border_sides, PaneSides::all(cs.virtual_window_border));
         assert!(cs.story_header_on);
         assert!(cs.map_header_on);
-        // None base → all sides None.
-        assert_eq!(cs.map_border_sides, PaneSides::all(BorderStyle::None));
+        // Single base (SQ-0309: the default single-line map/story border, formerly
+        // injected by DEFAULT_STYLE_TOML) → all sides Single.
+        assert_eq!(cs.map_border_sides, PaneSides::all(BorderStyle::Single));
     }
 
     #[test]

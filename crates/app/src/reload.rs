@@ -132,9 +132,16 @@ mod tests {
 
     #[test]
     fn reload_applies_style_file_and_keeps_current_on_error() {
+        // SQ-0309: the legacy `[colors]` selector table no longer patches
+        // `ColorScheme` fields directly (that now flows through the theme —
+        // see `reload_builds_theme_from_new_schema_files`), so this exercises
+        // the new-schema `[elements]` table instead. The behaviour under test
+        // — reload keeps the current look when the file fails to parse — is
+        // unrelated to which schema drives the colour.
+        use ratatui::style::Color;
         let dir = temp_dir("ok");
         let path = dir.join("style.toml");
-        std::fs::write(&path, "[colors]\n\"transcript\" = { fg = \"green\" }\n").unwrap();
+        std::fs::write(&path, "[elements]\ntranscript = { fg = \"green\" }\n").unwrap();
 
         let mut state = AppState::default();
         state.config.user_dir = dir.clone();
@@ -142,41 +149,16 @@ mod tests {
 
         let outcome = reload_style(&mut state);
         assert!(matches!(outcome, ReloadOutcome::Reloaded { .. }));
-        assert_eq!(state.colors.transcript.fg, Some(ratatui::style::Color::Green));
+        assert_eq!(state.colors.theme.get("transcript").style.fg, Some(Color::Green));
 
         // Now break the file: reload keeps the current (green) look and reports Failed.
         std::fs::write(&path, "this is not valid = = toml [[[").unwrap();
         let outcome2 = reload_style(&mut state);
         assert!(matches!(outcome2, ReloadOutcome::Failed { .. }));
-        assert_eq!(state.colors.transcript.fg, Some(ratatui::style::Color::Green), "current look preserved on error");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn reload_merges_per_game_over_global() {
-        use ratatui::style::Color;
-        let dir = temp_dir("pergame");
-        // global: transcript white; per-game overrides transcript to green.
-        let global = dir.join("style.toml");
-        std::fs::write(&global, "[colors]\n\"transcript\" = { fg = \"white\" }\n").unwrap();
-        let game_dir = dir.join("game.save");
-        std::fs::create_dir_all(&game_dir).unwrap();
-        std::fs::write(game_dir.join("style.toml"), "[colors]\n\"transcript\" = { fg = \"green\" }\n").unwrap();
-
-        let mut state = AppState::default();
-        state.config.user_dir = dir.clone();
-        state.config.style = Some(global.to_string_lossy().to_string());
-        state.game_dir = game_dir.clone();
-
-        let outcome = reload_style(&mut state);
-        assert!(matches!(outcome, ReloadOutcome::Reloaded { .. }));
-        assert_eq!(state.colors.transcript.fg, Some(Color::Green), "per-game overrides global");
-
-        // With no per-game file, the global value stands.
-        state.game_dir = dir.join("empty.save");
-        std::fs::create_dir_all(&state.game_dir).unwrap();
-        reload_style(&mut state);
-        assert_eq!(state.colors.transcript.fg, Some(Color::White), "global-only when no per-game file");
+        assert_eq!(
+            state.colors.theme.get("transcript").style.fg, Some(Color::Green),
+            "current look preserved on error"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

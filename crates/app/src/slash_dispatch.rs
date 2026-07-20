@@ -70,7 +70,7 @@ pub(crate) fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::PrintColors { actual } => {
-            for (line, style_opt) in app::style::describe_scheme(&state.colors) {
+            for (line, style_opt) in app::theme::describe_theme(&state.colors.theme) {
                 match (actual, style_opt) {
                     (true, Some(style)) => state.push_transcript_internal_styled(&line, TranscriptKind::Meta, style),
                     _ => state.push_transcript_internal(&line, TranscriptKind::Meta),
