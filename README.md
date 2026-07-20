@@ -68,8 +68,11 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   state + metadata), named slots, Quetzal import/export, auto-save/auto-load, and
   Glulx games' external file storage (Glk file streams) auto-persisting across
   sessions. → [saves](docs/features/saves.md) · [persistence model](docs/persistence.md)
-- **Deeply themeable** — shareable `style.toml` files, per-game looks, a
-  templated status bar, and a fully configurable keymap. →
+- **Deeply themeable** — a small role palette (7 roots) that the whole UI
+  derives from, first-class styling for all 11 standard Glk styles, per-game
+  looks, a templated status bar, and a fully configurable keymap. Edit a
+  fully-commented, auto-seeded `style.toml` and apply changes live with
+  `reload-style` (or auto-reload on save). →
   [customization](docs/features/customization.md)
 - **Story picker** — launch a directory to browse your games with type/artifact
   badges, a sortable author/year list or a `g` cover-gallery grid, an info
