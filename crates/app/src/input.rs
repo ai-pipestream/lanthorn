@@ -172,7 +172,7 @@ pub enum Action {
     /// Caller: export the map as a Graphviz DOT graph. `Some(dest)` is the optional `[file]` arg.
     ExportDot(Option<String>),
     /// Caller: write an annotatable text/ASCII map dump. `Some(dest)` is the optional `[file]` arg.
-    ExportDump(Option<String>),
+    ExportMap(Option<String>),
     /// Toggle the in-box alignment code overlay (Ctrl+A).
     ToggleAlignment,
     /// Toggle portal destination name labels beside in-room portal icons (Ctrl+P).
@@ -2246,7 +2246,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::RestoreGame
         | Action::ExportSvg(_)
         | Action::ExportDot(_)
-        | Action::ExportDump(_)
+        | Action::ExportMap(_)
         | Action::SavesLoad
         | Action::SavesImport
         | Action::FbEnter
@@ -2939,7 +2939,7 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::ExportSvg(_)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::ExportDot(_)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::ExportDump(_)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::ExportMap(_)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::ToggleMap));
     }
 

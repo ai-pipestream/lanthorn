@@ -368,7 +368,7 @@ const DEFAULT_GROUPS: &[(&str, &[(char, &str)])] = &[
     ("Edit", &[('r', "rename-room"), ('o', "edit-notes"), ('d', "delete-connection"), ('e', "relabel-edge")]),
     ("Files", &[
         ('s', "restore-state"), ('h', "open-history"), ('x', "reset-game"),
-        ('v', "export-svg"), ('g', "export-dot"), ('u', "export-dump"),
+        ('v', "export-svg"), ('g', "export-dot"), ('u', "export-map"),
     ]),
     ("View", &[
         ('i', "toggle-inspector"), ('b', "open-verb-menu"),

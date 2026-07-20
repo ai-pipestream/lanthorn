@@ -402,9 +402,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "export-dot", category: Category::Export, context: Context::Global,
         usage: "export-dot [file]", description: "export the map as Graphviz DOT; default path when omitted",
         dispatch: |a| SlashOutcome::Action(crate::input::Action::ExportDot(a.first().map(|s| s.to_string()))) },
-    CommandSpec { name: "export-dump", category: Category::Export, context: Context::Global,
-        usage: "export-dump [file]", description: "dump the map structure; default path when omitted",
-        dispatch: |a| SlashOutcome::Action(crate::input::Action::ExportDump(a.first().map(|s| s.to_string()))) },
+    CommandSpec { name: "export-map", category: Category::Export, context: Context::Global,
+        usage: "export-map [file]", description: "dump the map structure; default path when omitted",
+        dispatch: |a| SlashOutcome::Action(crate::input::Action::ExportMap(a.first().map(|s| s.to_string()))) },
 
     // ── Animation ─────────────────────────────────────────────────────────
     CommandSpec { name: "animate-tidy", category: Category::Animation, context: Context::Global,

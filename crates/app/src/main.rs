@@ -745,7 +745,7 @@ fn handle_map_export(
             }
             true
         }
-        Action::ExportDump(dest) => {
+        Action::ExportMap(dest) => {
             let path = app::export::resolve_export_path(dest.as_deref(), game_dir, "map.txt");
             if let Some(p) = path.parent() { let _ = std::fs::create_dir_all(p); }
             match std::fs::write(&path, render_dump(&mapper.graph)) {
@@ -2107,7 +2107,7 @@ fn main() {
 
             // SQ-0297: shared with the slash-command path via handle_map_export
             // (dispatch_slash_outcome never reaches this match).
-            a @ (Action::ExportSvg(_) | Action::ExportDot(_) | Action::ExportDump(_)) => {
+            a @ (Action::ExportSvg(_) | Action::ExportDot(_) | Action::ExportMap(_)) => {
                 handle_map_export(&a, &game_dir, &mapper, &mut state);
             }
 
@@ -2774,7 +2774,7 @@ mod tests {
         assert!(super::handle_map_export(&Action::ExportDot(Some("mymap".into())), &dir, &mapper, &mut state));
         assert!(dir.join("mymap.dot").exists(), "DOT export with a bare-name arg must land in the game dir");
 
-        assert!(super::handle_map_export(&Action::ExportDump(None), &dir, &mapper, &mut state));
+        assert!(super::handle_map_export(&Action::ExportMap(None), &dir, &mapper, &mut state));
         assert!(dir.join("map.txt").exists(), "dump export must write map.txt into the game dir");
 
         assert!(!super::handle_map_export(&Action::ToggleWatch, &dir, &mapper, &mut state),
