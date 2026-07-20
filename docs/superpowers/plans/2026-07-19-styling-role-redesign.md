@@ -156,19 +156,17 @@ Spec: `docs/design/2026-07-14-styling-role-redesign.md` (the source of truth for
 - [ ] **Step 2–4:** widen the type, bump the version, update the (dozen) `GlkStyleColour` initializers, green.
 - [ ] **Step 5: Commit.**
 
-### Task 2.2: garglk.ini stylehint + runtime stylehint → modifiers
-**Files:** Modify `crates/app/src/garglk_ini.rs`, the runtime stylehint plumbing (`session`/gvm bridge); Tests: inline.
+### Task 2.2: ~~garglk.ini stylehint~~ + runtime stylehint → modifiers
+**DROPPED / RE-SCOPED (2026-07-19).** The garglk.ini half targeted a directive that does not exist:
+verified against Gargoyle, garglk.ini's `stylehint` is a global boolean (`0|1` → `honor_game_colours`,
+already parsed); there is NO per-style `stylehint <wintype> <style> <hint> <value>` line (spec §3a
+draft conflated the .ini directive with the Glk API). garglk.ini carries no per-style modifier signal
+(bold/italic there are font files = terminal no-ops). So there is nothing to import from garglk.ini.
 
-**Interfaces:**
-- Produces: garglk.ini `stylehint <wintype> <style> <hint> <value>` maps weight→bold, oblique→italic,
-  underline→underline, reverse→reversed (proportional/size = no-op); imports into the glk slots (§3a).
-- Produces: runtime `glk_stylehint_set` uses the same hint→modifier mapping in the game-stylehint layer.
-
-**Steps:**
-- [ ] **Step 1: Failing test** — a garglk.ini `stylehint … weight 1` sets bold on the target slot;
-  `oblique 1` sets italic.
-- [ ] **Step 2–4: implement + green** (verify hint constants against gvm/authoritative Glk table).
-- [ ] **Step 5: Commit.**
+The REAL per-style modifier source is the game's runtime `glk_stylehint_set(wintype, style,
+Weight/Oblique, value)` — gvm already records these (`weight`/`oblique` + resolver). Wiring them to
+render modifiers is honor-gated and belongs with the runtime resolution chain: **folded into Wave 3
+Task 3.1**. No standalone Wave-2 task. (Wave 2 = Task 2.1 only.)
 
 ---
 
@@ -187,6 +185,24 @@ Spec: `docs/design/2026-07-14-styling-role-redesign.md` (the source of truth for
 - [ ] **Step 1: Failing tests** — `explicit_per_game_slot_beats_game_stylehint`;
   `global_theme_still_yields_to_game_when_honor_on`; `shipped_garglk_ini_does_not_clobber_per_game`.
 - [ ] **Step 2–4: implement + green.**
+- [ ] **Step 5: Commit.**
+
+### Task 3.2: Runtime game-stylehint MODIFIERS (folded in from old Task 2.2)
+**Files:** the gvm→render bridge (whatever surfaces per-run/per-cell Glk `(wintype, style)` to the app),
+`render::glk_theme_modifiers`/the buffer+grid render sites; Tests: inline. **Verify gvm already exposes
+resolved Weight(4)/Oblique(5)** (`crates/gvm/src/glk.rs` `set_style_hint` + the ~1440 resolver) — read
+it, do NOT bump the snapshot.
+
+**Interfaces:**
+- Consumes: gvm's recorded per-`(wintype, style)` Weight/Oblique; `honor_game_colours`.
+- Produces: the game-stylehint layer contributes MODIFIERS too, not just colours — `weight 1`→BOLD,
+  `oblique 1`→ITALIC (weight -1 / proportional / size = no-op), honor-gated exactly like the game
+  colour channel, layered between the theme slot and the explicit per-game slot (§5 order).
+
+**Steps:**
+- [ ] **Step 1: Failing tests** — a game stylehint `Weight=1` on Emphasized renders BOLD when honor on,
+  is ignored when honor off; `Oblique=1` → ITALIC. An explicit per-game slot still wins.
+- [ ] **Step 2–4: implement + green** (constants verified against gvm's stylehint table).
 - [ ] **Step 5: Commit.**
 
 ---

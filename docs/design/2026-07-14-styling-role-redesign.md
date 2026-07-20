@@ -169,14 +169,21 @@ The slots are the single sink for every style source, so import is one merge per
 source into the same 22-slot table (most-specific source wins per channel):
 
 - **garglk.ini** (SQ-0319 importer): `tcolor N` → `glk.buffer.<N>` fg/bg;
-  `gcolor N` → `glk.grid.<N>` fg/bg (already implemented). **New:** the
-  per-style `stylehint <wintype> <style> <hint> <value>` lines map to modifiers —
-  `weight 1`→bold / `weight -1`→(dim, terminal has none → ignore), `oblique 1`→
-  italic, `underline 1`→underline, `reverse 1`→reversed; `proportional` and
-  `size` are TUI no-ops. Today's importer drops these; the redesign consumes them.
-- **Runtime `glk_stylehint_set(wintype, style, hint, value)`** (gvm): the same
-  hint→modifier/colour mapping, applied per-window as the SQ-0328 game-stylehint
-  layer — no new plumbing, it already targets `(wintype, style)`.
+  `gcolor N` → `glk.grid.<N>` fg/bg (already implemented). Colour is the ONLY
+  per-style signal garglk.ini carries. (CORRECTION 2026-07-19, verified against
+  Gargoyle: garglk.ini's `stylehint` directive is a **global boolean** — `0`/`1`
+  disables/enables honoring the game's style hints, already mapped to
+  `honor_game_colours`. There is NO per-style `stylehint <wintype> <style> <hint>
+  <value>` line in the .ini; bold/italic in Gargoyle come from separate font files
+  (`monob`/`monoi`/`propb`/`propi`), which are terminal no-ops. The earlier draft of
+  this section conflated the .ini directive with the Glk *API* below.)
+- **Runtime `glk_stylehint_set(wintype, style, hint, value)`** (the Glk API the
+  game calls; gvm records `Weight`(4)/`Oblique`(5) per `(wintype, style)`): map
+  `weight 1`→bold / `weight -1`→(dim, no terminal equivalent → ignore),
+  `oblique 1`→italic (underline/reverse are colour-hint driven). Applied per-window
+  as the SQ-0328 game-stylehint layer, honor-gated. gvm already stores the values;
+  wiring them to render modifiers lands with §5's runtime chain (plan Wave 3), NOT
+  as a garglk import. This is the real per-style modifier source.
 - **`style.toml`** author overrides: `[glk.buffer]` / `[glk.grid]` tables set any
   slot's fg/bg/modifiers directly (see schema below).
 
