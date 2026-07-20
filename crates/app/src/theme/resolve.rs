@@ -64,6 +64,38 @@ impl Roles {
             _ => return None,
         })
     }
+
+    /// A mutable reference to a role's [`Style`] by name, for applying `[roles]`
+    /// overrides in place. `None` for an unrecognised name.
+    fn by_name_mut(&mut self, name: &str) -> Option<&mut Style> {
+        Some(match name {
+            "text" => &mut self.text,
+            "chrome" => &mut self.chrome,
+            "border" => &mut self.border,
+            "accent" => &mut self.accent,
+            "muted" => &mut self.muted,
+            "alert" => &mut self.alert,
+            "heading" => &mut self.heading,
+            _ => return None,
+        })
+    }
+
+    /// Derive the 7 role roots from a base colour scheme, matching today's
+    /// `ColorScheme::from_ghostty` element→scheme mapping so the derived theme
+    /// reproduces the current look.
+    pub fn from_scheme(scheme: &crate::colors::GhosttyScheme) -> Roles {
+        let fg = scheme.foreground;
+        let bg = scheme.background;
+        Roles {
+            text: Style::default().fg(fg),               // transcript = foreground
+            chrome: Style::default().fg(fg).bg(bg),       // ink on a UI surface
+            border: Style::default().fg(scheme.palette[6]), // cyan slot (focused_border/connector)
+            accent: Style::default().fg(scheme.palette[6]), // highlight = cyan slot
+            muted: Style::default().fg(scheme.palette[8]),  // suggestion = bright-black slot
+            alert: Style::default().fg(scheme.palette[3]),  // yellow slot (room_selected)
+            heading: Style::default().fg(fg).add_modifier(Modifier::BOLD),
+        }
+    }
 }
 
 /// The glyph(s) a resolved selector carries. Mirrors [`Delta`]'s two glyph slots:
@@ -266,6 +298,61 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
     Theme { map, fallback }
 }
 
+/// Build the flat [`Theme`] from a base colour `scheme` and a parsed style document.
+///
+/// Roles start from [`Roles::from_scheme`] and are overridden by `parsed.roles`
+/// (fg/bg only — roles carry no user modifiers today, aside from `heading`'s
+/// already-baked-in bold). `parsed.decls` lower to a single GLOBAL [`Decls`]
+/// layer (fg/bg + modifier flags). Colour strings resolve against `scheme` via
+/// [`crate::colors::parse_color_value`].
+///
+/// DEFERRED (later waves): a decl's `parent` re-rooting and a decl's
+/// `glyph`/`glyphs` overrides are NOT applied here — the registry [`Delta`]'s
+/// glyph fields are `&'static`, and per-decl parent override needs resolver
+/// support (Wave 5). Only fg/bg/modifiers flow now. Modifiers are additive only
+/// (an unset/`false` flag is a no-op, matching [`apply_style`]) — a user cannot
+/// yet CLEAR a default modifier.
+pub fn resolve_theme(
+    scheme: &crate::colors::GhosttyScheme,
+    parsed: &super::toml_schema::ParsedStyle,
+) -> Theme {
+    use crate::colors::parse_color_value;
+
+    // 1. base roles from scheme, then [roles] fg/bg overrides.
+    let mut roles = Roles::from_scheme(scheme);
+    for (name, raw) in &parsed.roles {
+        let Some(style) = roles.by_name_mut(name) else { continue };
+        if let Some(fg) = raw.fg.as_deref().and_then(|s| parse_color_value(s, scheme)) {
+            *style = style.fg(fg);
+        }
+        if let Some(bg) = raw.bg.as_deref().and_then(|s| parse_color_value(s, scheme)) {
+            *style = style.bg(bg);
+        }
+        // Wave 5: role modifiers (bold/italic/...) from `[roles]` are not applied
+        // yet — today's roles carry no user modifiers except heading's baked-in bold.
+    }
+
+    // 2. lower parsed.decls -> a single GLOBAL Decls layer.
+    let mut global = Decls::new();
+    for (name, raw) in &parsed.decls {
+        let delta = Delta {
+            fg: raw.fg.as_deref().and_then(|s| parse_color_value(s, scheme)),
+            bg: raw.bg.as_deref().and_then(|s| parse_color_value(s, scheme)),
+            bold: raw.bold.unwrap_or(false),
+            italic: raw.italic.unwrap_or(false),
+            underline: raw.underline.unwrap_or(false),
+            reversed: raw.reversed.unwrap_or(false),
+            dim: raw.dim.unwrap_or(false),
+            glyph: None, // Wave 5: glyph overrides not applied here.
+            glyphs: &[], // Wave 5: glyph-slot overrides not applied here.
+        };
+        global.insert(name.clone(), delta);
+        // Wave 5: raw.parent re-rooting not applied here.
+    }
+
+    resolve(&roles, &global, &Decls::new(), &Decls::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -393,5 +480,70 @@ mod tests {
         assert_eq!(theme.get("transcript").provenance, Provenance::Default);
         // And the touched selector is stamped, confirming Default isn't a blanket.
         assert_eq!(theme.get("status_bar").provenance, Provenance::GlobalUser);
+    }
+
+    // ── Task 1.2a: Roles::from_scheme + resolve_theme ─────────────────────────
+
+    use super::super::toml_schema::ParsedStyle;
+    use crate::colors::GhosttyScheme;
+
+    /// A `GhosttyScheme` whose fg/bg/palette line up with
+    /// `ColorScheme::terminal_default()` so `resolve_theme` should byte-match it.
+    fn terminal_default_scheme() -> GhosttyScheme {
+        let mut scheme = GhosttyScheme { foreground: Color::White, ..GhosttyScheme::default() };
+        scheme.palette[3] = Color::Yellow; // alert slot (room_selected)
+        scheme.palette[6] = Color::Cyan; // border/accent slot (focused_border/connector)
+        scheme.palette[8] = Color::DarkGray; // muted slot (suggestion)
+        scheme
+    }
+
+    #[test]
+    fn resolve_theme_reproduces_terminal_defaults() {
+        let scheme = terminal_default_scheme();
+        let theme = resolve_theme(&scheme, &ParsedStyle::default());
+
+        assert_eq!(theme.get("transcript").style.fg, Some(Color::White));
+        assert_eq!(theme.get("map.connector").style.fg, Some(Color::Cyan));
+        assert_eq!(theme.get("map.connector_distorted").style.fg, Some(Color::Magenta));
+        assert_eq!(theme.get("map.shared_path").style.fg, Some(Color::LightCyan));
+        assert_eq!(theme.get("panel.border").style.fg, Some(Color::Cyan));
+
+        let border_active = theme.get("panel.border:active").style;
+        assert_eq!(border_active.fg, Some(Color::Cyan));
+        assert!(border_active.add_modifier.contains(Modifier::BOLD));
+
+        assert!(theme.get("status_bar").style.add_modifier.contains(Modifier::REVERSED));
+        assert!(theme.get("help_bar").style.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(theme.get("suggestion").style.fg, Some(Color::DarkGray));
+        assert!(theme.get("glk.buffer.header").style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn parsed_roles_and_decls_lower() {
+        let scheme = terminal_default_scheme();
+
+        // (a) a [roles] override on `accent` flows to a role-derived selector.
+        let mut with_role = ParsedStyle::default();
+        with_role.roles.insert(
+            "accent".to_string(),
+            super::super::toml_schema::RawDelta {
+                fg: Some("red".to_string()),
+                ..super::super::toml_schema::RawDelta::default()
+            },
+        );
+        let theme = resolve_theme(&scheme, &with_role);
+        assert_eq!(theme.get("map.room_current").style.fg, Some(Color::Red));
+
+        // (b) a decl override on `transcript` wins over its default (text role).
+        let mut with_decl = ParsedStyle::default();
+        with_decl.decls.insert(
+            "transcript".to_string(),
+            super::super::toml_schema::RawDelta {
+                fg: Some("green".to_string()),
+                ..super::super::toml_schema::RawDelta::default()
+            },
+        );
+        let theme = resolve_theme(&scheme, &with_decl);
+        assert_eq!(theme.get("transcript").style.fg, Some(Color::Green));
     }
 }
