@@ -1,5 +1,7 @@
 # babelmap
 
+[![Made with Side-Quest](https://img.shields.io/badge/Made%20with-Side--Quest-f97316)](https://github.com/sharkusk/side-quest)
+
 **Play interactive fiction in your terminal while babelmap draws the map for you — live, as you explore.**
 
 > ⚠️ **Alpha software.** babelmap is under active development and considered
