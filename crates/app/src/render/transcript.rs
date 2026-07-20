@@ -859,7 +859,7 @@ pub(crate) fn draw_str_runs(
             // bit. Colour is gated on `honor`, matching the prior behaviour.
             if run.map(|r| r.link).unwrap_or(0) != 0 {
                 if honor {
-                    s = s.patch(scheme.hyperlink);
+                    s = s.patch(scheme.theme.get("hyperlink").style);
                 }
                 s = s.add_modifier(ratatui::style::Modifier::UNDERLINED);
             }
@@ -992,7 +992,7 @@ pub fn render_transcript(
         return (false, 0, 0, Vec::new());
     }
 
-    let normal_style = state.colors.transcript;
+    let normal_style = state.colors.theme.get("transcript").style;
 
     // ── Determine status and input heights based on border style ─────────────
 
@@ -1022,7 +1022,8 @@ pub fn render_transcript(
 
     if status_boxed {
         // Draw a pane frame around the status region.
-        let frame = draw_framed(buf, status_region, state.colors.status_header_sides, &state.colors.status_header_glyphs, state.colors.status_header, false);
+        let status_header = state.colors.theme.get("status_header").style;
+        let frame = draw_framed(buf, status_region, state.colors.status_header_sides, &state.colors.status_header_glyphs, status_header, false);
         // Render status text into the inner content row.
         render_status_content(status, state, buf, frame.content);
     } else {
@@ -1043,7 +1044,8 @@ pub fn render_transcript(
     // after the last transcript row (the game's kept `>` prompt).
     if state.config.command_bar {
         if input_boxed {
-            let frame = draw_framed(buf, input_region, state.colors.input_line_sides, &state.colors.input_line_glyphs, state.colors.input_line, false);
+            let input_line = state.colors.theme.get("input_line").style;
+            let frame = draw_framed(buf, input_region, state.colors.input_line_sides, &state.colors.input_line_glyphs, input_line, false);
             render_input_content(state, buf, frame.content, normal_style, game_input);
         } else {
             render_input_content(state, buf, input_region, normal_style, game_input);
@@ -1073,7 +1075,7 @@ pub fn render_notifications(buf: &mut Buffer, area: Rect, state: &AppState) {
     if notes.is_empty() || area.width < 6 || area.height == 0 {
         return;
     }
-    let style = state.colors.notification;
+    let style = state.colors.theme.get("notification").style;
     let animate = state.config.animation.enabled;
     let easing = state.config.animation.easing;
     // A single-bordered box by default (SQ-0176); collapses to a 1-row strip only
@@ -1136,7 +1138,7 @@ fn render_status_content(
     if region.height == 0 || region.width == 0 {
         return;
     }
-    let base = state.colors.status_bar;
+    let base = state.colors.theme.get("status_bar").style;
     let status_y = region.y;
     let w = region.width as usize;
 
@@ -1216,8 +1218,10 @@ fn render_input_content(
     // The "> " prompt and the typed text are separately styleable (patched over
     // the normal style, so an unset selector renders identically to before).
     // The game's current colour, when honoured, wins over the theme fields.
-    let base_prompt = normal_style.patch(state.colors.input_prompt);
-    let base_text = normal_style.patch(state.colors.input_text);
+    let input_prompt = state.colors.theme.get("input_prompt").style;
+    let input_text = state.colors.theme.get("input_text").style;
+    let base_prompt = normal_style.patch(input_prompt);
+    let base_text = normal_style.patch(input_text);
     let (prompt_style, text_style) = match game_input {
         Some(gs) => (base_prompt.patch(gs), base_text.patch(gs)),
         None => (base_prompt, base_text),
@@ -1288,16 +1292,17 @@ fn render_middle(
         && (sug_style_kind != BorderStyle::None || state.colors.suggestion_line_sides.any_on())
         && area.height >= 5;
     let box_top = middle_bottom.saturating_sub(3);
+    let suggestion = state.colors.theme.get("suggestion").style;
 
     if suggestion_boxed {
         // Draw a pane frame around the 3-row popup region, then render the
         // suggestion strip into the inner content row.
         let box_region = Rect::new(area.x, box_top, area.width, 3);
-        let frame = draw_framed(buf, box_region, state.colors.suggestion_line_sides, &state.colors.suggestion_line_glyphs, state.colors.suggestion, false);
+        let frame = draw_framed(buf, box_region, state.colors.suggestion_line_sides, &state.colors.suggestion_line_glyphs, suggestion, false);
         let content = frame.content;
         if content.height >= 1 && content.width >= 1 {
             let sug_line = visible_suggestion_line(&state.suggestions, state.suggestion_idx, content.width as usize);
-            draw_str_clipped(buf, content.x, content.y, &sug_line, state.colors.suggestion, content);
+            draw_str_clipped(buf, content.x, content.y, &sug_line, suggestion, content);
         }
     } else if has_search && area.height >= 2 && suggestion_y > area.y {
         // Draw the search hint line.
@@ -1311,13 +1316,13 @@ fn render_middle(
             q, cur_idx, match_count, key_back, key_forward
         );
         let hint_trunc = truncate_line(&hint, w);
-        let hint_style = state.colors.suggestion;
+        let hint_style = suggestion;
         draw_str_clipped(buf, area.x, suggestion_y, hint_trunc, hint_style, area);
     } else if has_suggestions && area.height >= 2 && suggestion_y > area.y {
         // Horizontally scroll so the highlighted entry stays on screen rather
         // than being clipped off the right edge.
         let sug_line = visible_suggestion_line(&state.suggestions, state.suggestion_idx, w);
-        let sug_style = state.colors.suggestion;
+        let sug_style = suggestion;
         draw_str_clipped(buf, area.x, suggestion_y, &sug_line, sug_style, area);
     }
 
@@ -1400,6 +1405,9 @@ fn render_middle(
         // kinds use their fixed per-category style. Resolving here (not per wrapped
         // fragment) keeps whole-line matching correct when a line wraps.
         let room_name = state.current_room_name.as_deref();
+        let transcript_input = state.colors.theme.get("transcript_input").style;
+        let transcript_meta = state.colors.theme.get("transcript_meta").style;
+        let transcript_warning = state.colors.theme.get("transcript_warning").style;
         let filtered_styles: Vec<Style> = visible_indices
             .iter()
             .zip(filtered_kinds.iter())
@@ -1409,9 +1417,9 @@ fn render_middle(
                 }
                 match kind {
                     TranscriptKind::Story   => state.colors.resolve_story_style(&state.transcript[i], room_name),
-                    TranscriptKind::Input   => state.colors.transcript_input,
-                    TranscriptKind::Meta    => state.colors.transcript_meta,
-                    TranscriptKind::Warning => state.colors.transcript_warning,
+                    TranscriptKind::Input   => transcript_input,
+                    TranscriptKind::Meta    => transcript_meta,
+                    TranscriptKind::Warning => transcript_warning,
                 }
             })
             .collect();
@@ -1504,6 +1512,8 @@ fn render_middle(
     // The current game-set background band, carried across blank rows so the gaps
     // between a game's coloured paragraphs fill too (SQ-0263).
     let mut band_bg: Option<ratatui::style::Color> = None;
+    let meta_marker = state.colors.theme.get("meta_marker").style;
+    let warning_marker = state.colors.theme.get("warning_marker").style;
 
     for (i, wr) in lines.iter().enumerate() {
         let row_y = transcript_top + i as u16;
@@ -1518,8 +1528,8 @@ fn render_middle(
         // Story/Input draw flush left. The text style was resolved per logical
         // line above and is carried on every wrapped row.
         let (gutter, marker_style) = match wr.kind {
-            TranscriptKind::Meta    => (Some(state.symbols.meta_gutter), state.colors.meta_marker),
-            TranscriptKind::Warning => (Some(state.symbols.warning_gutter), state.colors.warning_marker),
+            TranscriptKind::Meta    => (Some(state.symbols.meta_gutter), meta_marker),
+            TranscriptKind::Warning => (Some(state.symbols.warning_gutter), warning_marker),
             TranscriptKind::Story | TranscriptKind::Input => (None, Style::default()),
         };
         let text_x = if let Some(glyph) = gutter {
@@ -1615,7 +1625,8 @@ fn render_middle(
             // Flush after the last line's text — matching Task 3's flush command
             // echo. Use the SAME text_x the draw loop used for this row's kind:
             // Story/Input draw at body_area.x; Meta/Warning reserve the gutter.
-            let base_text = normal_style.patch(state.colors.input_text);
+            let input_text = state.colors.theme.get("input_text").style;
+            let base_text = normal_style.patch(input_text);
             let text_style = match game_input {
                 Some(gs) => base_text.patch(gs),
                 None => base_text,
@@ -1702,12 +1713,12 @@ fn render_middle(
             total_rows,
             transcript_rows,
             start,
-            state.colors.scrollbar,
+            state.colors.theme.get("scrollbar").style,
         );
     }
     // [more] pager prompt (SQ-0404): a reverse-video bar on the reserved row.
     if let Some(row) = more_row {
-        let mp = state.colors.more_prompt;
+        let mp = state.colors.theme.get("more_prompt").style;
         for x in area.x..area.right() {
             if let Some(cell) = buf.cell_mut((x, row)) {
                 cell.set_symbol(" ").set_style(mp);
@@ -1736,6 +1747,23 @@ mod tests {
 
     // ── Pure helper tests (no Machine required) ──────────────────────────────
 
+    /// Build a `Theme` with the given selectors' fg overridden (like a
+    /// `style.toml` decl), so tests exercising render code migrated to
+    /// `theme.get("<selector>")` (SQ-0309) can still inject a custom colour
+    /// instead of mutating the (no-longer-read) legacy `ColorScheme` field.
+    fn theme_with_overrides(overrides: &[(&str, ratatui::style::Color)]) -> crate::theme::resolve::Theme {
+        let mut decls = std::collections::HashMap::new();
+        for &(sel, fg) in overrides {
+            decls.insert(sel.to_string(), crate::theme::registry::Delta { fg: Some(fg), ..crate::theme::registry::Delta::EMPTY });
+        }
+        crate::theme::resolve::resolve(
+            &crate::theme::resolve::Roles::terminal_default(),
+            &decls,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+    }
+
     /// A helper: read `row` of `buf` as a String across `[x0, x1)`.
     fn read_row(buf: &Buffer, row: u16, x0: u16, x1: u16) -> String {
         (x0..x1)
@@ -1763,9 +1791,14 @@ mod tests {
         // Borders drawn above and below (non-blank in the box columns).
         assert!(!read_row(&buf, 0, 23, 40).trim().is_empty(), "top border drawn");
         assert!(!read_row(&buf, 2, 23, 40).trim().is_empty(), "bottom border drawn");
-        // The notification style (default cyan bg) is applied to the content cells.
+        // The notification style — the registry's `notification` selector, which
+        // derives from the `accent` role reversed (cyan reverse-video) — is
+        // applied to the content cells. (SQ-0309: was a baked black-on-cyan
+        // Style; now REVERSED cyan fg, same visual result.)
         let cell = buf.cell((30, 1)).expect("content cell exists");
-        assert_eq!(cell.style().bg, state.colors.notification.bg, "toast uses the themed notification style");
+        let themed = state.colors.theme.get("notification").style;
+        assert_eq!(Some(cell.fg), themed.fg, "toast uses the themed notification fg");
+        assert_eq!(cell.modifier, themed.add_modifier, "toast uses the themed notification modifiers");
     }
 
     #[test]
@@ -2075,7 +2108,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
         let mut cs = crate::colors::ColorScheme::terminal_default();
-        cs.hyperlink = Style::new().fg(Color::Magenta);
+        cs.theme = theme_with_overrides(&[("hyperlink", Color::Magenta)]);
         // chars 2..5 carry link 7 (bold too, to prove the link layers on top).
         let runs = vec![StyleRun { start: 2, end: 5, bits: 0x02, fg: 0, bg: 0, link: 7, glk_style: 0 }];
         draw_str_runs(&mut buf, 0, 0, "abcdefgh", Style::default(), &runs, None, area, &cs, true);
@@ -3032,8 +3065,7 @@ mod tests {
         state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.focus = Focus::Game;
         state.input.set("zq", true);
-        state.colors.input_prompt = Style::new().fg(Color::Green);
-        state.colors.input_text = Style::new().fg(Color::Red);
+        state.colors.theme = theme_with_overrides(&[("input_prompt", Color::Green), ("input_text", Color::Red)]);
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
@@ -3177,7 +3209,7 @@ mod tests {
         let mut state = AppState::default();
         // Far more lines than the viewport → scrollbar must appear.
         state.transcript = (0..50).map(|i| format!("L{}", i)).collect();
-        state.colors.scrollbar = Style::new().fg(Color::Magenta);
+        state.colors.theme = theme_with_overrides(&[("scrollbar", Color::Magenta)]);
 
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
