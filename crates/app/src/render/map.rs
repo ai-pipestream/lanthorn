@@ -347,14 +347,15 @@ fn in_area(sx: i32, sy: i32, area: Rect) -> bool {
 /// room is visually distinct from either state alone.
 fn room_style(room: &RenderRoom, state: &AppState) -> Style {
     let is_selected = state.selected_room == Some(room.id);
+    let theme = &state.colors.theme;
     if room.is_current && is_selected {
-        state.colors.room_selected.add_modifier(Modifier::REVERSED)
+        theme.get("map.room_selected").style.add_modifier(Modifier::REVERSED)
     } else if room.is_current {
-        state.colors.room_current
+        theme.get("map.room_current").style
     } else if is_selected {
-        state.colors.room_selected
+        theme.get("map.room_selected").style
     } else {
-        state.colors.room_normal
+        theme.get("map.room").style
     }
 }
 
@@ -510,10 +511,11 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
                 0
             };
             let avail_h = area.height.saturating_sub(top);
+            let transcript_style = state.colors.theme.get("transcript").style;
             for (i, line) in lines.iter().take(avail_h as usize).enumerate() {
                 let clamped: String = line.chars().take(area.width as usize).collect();
                 put_str(buf, area.x as i32, (area.y + top) as i32 + i as i32, &clamped,
-                    state.colors.transcript, area);
+                    transcript_style, area);
             }
             return;
         }
@@ -566,9 +568,10 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
     // ── 2. Stub (portal) edges at non-Boxes zoom keep the bare-label `draw_stub`; Boxes zoom draws
     //       the in-room portal-icon overlay after the rooms (below).
+    let connector_style = state.colors.theme.get("map.connector").style;
     for edge in &rm.edges {
         if edge.is_stub && !boxes {
-            draw_stub(edge, &placed, off_x, off_y, area, buf, state.colors.connector);
+            draw_stub(edge, &placed, off_x, off_y, area, buf, connector_style);
         }
     }
 
@@ -734,7 +737,7 @@ pub fn render_map_layered(
             if area.width >= 1 && area.height >= 1 {
                 let y = area.bottom() - 1;
                 let x = area.right().saturating_sub(w.min(area.width));
-                let style = state.colors.loc_indicator;
+                let style = state.colors.theme.get("map.loc_indicator").style;
                 for (cx, ch) in (x..).zip(label.chars()) {
                     if cx >= area.right() {
                         break;
@@ -791,7 +794,7 @@ fn draw_tidy_progress(
     let box_h = 3u16;
     let bx = area.x + area.width.saturating_sub(box_w) / 2;
     let by = area.y + area.height.saturating_sub(box_h) / 2;
-    let style = state.colors.tidy_progress;
+    let style = state.colors.theme.get("tidy_progress").style;
     let right = bx + box_w - 1;
     let bottom = by + box_h - 1;
 
@@ -919,8 +922,8 @@ fn lane_pixel(
 
 /// A departure/arrival glyph queued by `render_lane_connectors` for `draw_connector_arrows` to
 /// paint on top of the rooms: `(virtual pixel, glyph string, distorted, is_portal, owning room,
-/// shared)`. `is_portal` selects `colors.portal_connector` for up/down glyphs instead of
-/// `colors.connector`/`colors.connector_distorted`. `shared` selects `colors.shared_path` for a
+/// shared)`. `is_portal` selects the `map.connector_portal` theme style for up/down glyphs instead
+/// of `map.connector`/`map.connector_distorted`. `shared` selects `map.shared_path` for a
 /// connector that collapsed secondary compass directions into itself.
 type Arrowhead = ((i32, i32), String, bool, bool, RoomId, bool);
 
@@ -1277,14 +1280,14 @@ fn plot_connector(
 ///
 /// Up/Down connectors (`exit_dir == Up | Down`) are lane-routed like any compass connector but
 /// render differently: their body uses the portal's DOTTED glyphs (not the shared solid set),
-/// styled with `colors.portal_connector` (not `colors.connector`/`colors.connector_distorted` —
-/// up/down are never distorted), and their departure anchor carries the up/down glyph instead of
+/// styled with the `map.connector_portal` theme style (not `map.connector`/`map.connector_distorted`
+/// — up/down are never distorted), and their departure anchor carries the up/down glyph instead of
 /// an arrowhead. They accumulate into a SEPARATE per-cell mask (`updown_cells`) from the compass
 /// connectors' `cells` map, so compass crossings/turns are computed exactly as before — up/down
 /// never contributes to or reads a compass cell's mask. A matching Up/Down pair now collapses to
 /// one RECIPROCAL connector (SQ-0216): the far-end block below draws the up/down glyph (derived
 /// from `entry_dir`) at the arrival end too, instead of an arrowhead, so both ends show their own
-/// glyph — styled `colors.portal_connector` just like the departure end.
+/// glyph — styled `map.connector_portal` just like the departure end.
 fn render_lane_connectors(
     plan: &RoutePlan,
     cols: &PosTable,
@@ -1303,6 +1306,12 @@ fn render_lane_connectors(
     // walks the same corner orthogonally for terminals that lack the glyphs.
     let diag = diagonal_corners.then_some(path);
 
+    // Bound once: this loop below reads these per connector, not per cell.
+    let connector_distorted = colors.theme.get("map.connector_distorted").style;
+    let connector = colors.theme.get("map.connector").style;
+    let connector_portal = colors.theme.get("map.connector_portal").style;
+    let shared_path = colors.theme.get("map.shared_path").style;
+
     // Per-cell accumulated direction mask. ORing masks means a perpendicular crossing of
     // two connectors (one ─, one │) combines to ┼; a connector revisiting its own cell is
     // idempotent and harmless. Compass connectors accumulate in `cells`; up/down connectors
@@ -1320,8 +1329,8 @@ fn render_lane_connectors(
     };
     // Arrowheads: (virtual pixel, glyph string, distorted, is_portal, owning room id). Returned
     // for the caller to draw on top of the rooms (the arrow embeds in the room border). Up/down
-    // glyphs are flagged `is_portal` so the caller styles them with `colors.portal_connector`
-    // instead of `colors.connector`/`colors.connector_distorted`.
+    // glyphs are flagged `is_portal` so the caller styles them with `map.connector_portal`
+    // instead of `map.connector`/`map.connector_distorted`.
     let mut arrowheads: Vec<Arrowhead> = Vec::new();
 
     // Plot every connector up front: the diagonal-chain merge below needs to know whether ANY
@@ -1347,13 +1356,13 @@ fn render_lane_connectors(
         // a connector with collapsed secondaries uses the brighter shared_path color;
         // compass connectors otherwise keep their existing connector/connector_distorted styling.
         let style = if is_updown {
-            colors.portal_connector
+            connector_portal
         } else if has_secondary {
-            colors.shared_path
+            shared_path
         } else if conn.distorted {
-            colors.connector_distorted
+            connector_distorted
         } else {
-            colors.connector
+            connector
         };
         let (cell_map, glyphs) = if is_updown {
             (&mut updown_cells, &dotted_path)
@@ -1441,8 +1450,8 @@ fn render_lane_connectors(
 /// for normal, current, selected, and current+selected rooms alike.  This mirrors
 /// `room_style`'s precedence.  The current room reverses only its interior, so its border
 /// (where the arrow sits) is not reverse-video and its background is the style's plain `bg`.
-/// The arrow glyph foreground is always the connector/path color — `colors.portal_connector`
-/// for up/down glyphs (`is_portal`), otherwise `colors.connector`/`colors.connector_distorted`.
+/// The arrow glyph foreground is always the connector/path color — `map.connector_portal`
+/// for up/down glyphs (`is_portal`), otherwise `map.connector`/`map.connector_distorted`.
 fn draw_connector_arrows(
     arrowheads: &[Arrowhead],
     offset: (i32, i32),
@@ -1453,18 +1462,26 @@ fn draw_connector_arrows(
     current_room: Option<RoomId>,
 ) {
     let (off_x, off_y) = offset;
+    // Bound once: the loop below reads these per arrowhead, not per cell.
+    let connector_distorted = colors.theme.get("map.connector_distorted").style;
+    let connector = colors.theme.get("map.connector").style;
+    let connector_portal = colors.theme.get("map.connector_portal").style;
+    let shared_path = colors.theme.get("map.shared_path").style;
+    let room_selected = colors.theme.get("map.room_selected").style;
+    let room_current = colors.theme.get("map.room_current").style;
+    let room_normal = colors.theme.get("map.room").style;
     for (pos, glyph, distorted, is_portal, room_id, shared) in arrowheads {
         let (vx, vy) = *pos;
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
             let connector_style = if *is_portal {
-                colors.portal_connector
+                connector_portal
             } else if *shared {
-                colors.shared_path
+                shared_path
             } else if *distorted {
-                colors.connector_distorted
+                connector_distorted
             } else {
-                colors.connector
+                connector
             };
             let connector_fg = connector_style.fg;
             // Pick the room box's base style with the same precedence as room_style, then
@@ -1472,13 +1489,13 @@ fn draw_connector_arrows(
             let is_sel = selected_room == Some(*room_id);
             let is_cur = current_room == Some(*room_id);
             let base = if is_cur && is_sel {
-                colors.room_selected
+                room_selected
             } else if is_cur {
-                colors.room_current
+                room_current
             } else if is_sel {
-                colors.room_selected
+                room_selected
             } else {
-                colors.room_normal
+                room_normal
             };
             // The arrow sits on the box border, which is never reverse-video, so the
             // visible background is the style's plain `bg`.
@@ -1529,7 +1546,7 @@ fn draw_secondary_markers(
     buf: &mut Buffer,
 ) {
     let (off_x, off_y) = offset;
-    let style = state.colors.shared_path;
+    let style = state.colors.theme.get("map.shared_path").style;
     let arrows = &state.symbols.arrows;
     // Room-cell lookup built once (was an O(rooms) `.iter().find` per connector end,
     // i.e. O(connectors × rooms) over the loop below). (SQ-0305)
@@ -2168,7 +2185,10 @@ fn draw_compact_room(
 ) {
     let (bw, bh) = zoom_box_size(Zoom::Compact); // (8, 3)
     let (bw, bh) = (bw as i32, bh as i32);
-    let is_current = style.add_modifier.contains(Modifier::REVERSED);
+    // `room.is_current` directly (SQ-0309): the old "REVERSED bit ⇒ current" sniff broke once
+    // `map.room_selected`'s own theme default also carries `reversed` — that would misidentify
+    // a merely-selected (not current) room as current.
+    let is_current = room.is_current;
 
     // The current room reverses only its interior; keep its border non-reversed.
     let mut border_style = style;
@@ -2262,7 +2282,9 @@ fn draw_box_room(
 ) {
     let (w, h) = zoom_box_size(Zoom::Boxes); // (11, 5)
     let (w, h) = (w as i32, h as i32);
-    let is_current = style.add_modifier.contains(Modifier::REVERSED);
+    // `room.is_current` directly (SQ-0309): see `draw_compact_room` for why the old
+    // "REVERSED bit ⇒ current" sniff is no longer sound against the themed styles.
+    let is_current = room.is_current;
 
     // The current room reverses only its interior; its border keeps the plain
     // (non-reversed) style so the heavy outline stays readable.
@@ -2724,6 +2746,34 @@ mod tests {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
+    /// Build a `Theme` with the given selectors' style (fg/bg/modifiers) overridden (like a
+    /// `style.toml` decl), so tests exercising render code migrated to `theme.get("<selector>")`
+    /// (SQ-0309) can still inject a custom style instead of mutating the (no-longer-read) legacy
+    /// `ColorScheme` field. See `render/transcript.rs`'s `theme_with_overrides` for the fg-only
+    /// original; this copy also carries bg + modifiers since several map.rs tests need both.
+    fn theme_with_overrides(overrides: &[(&str, Style)]) -> crate::theme::resolve::Theme {
+        let mut decls = std::collections::HashMap::new();
+        for &(sel, style) in overrides {
+            let m = style.add_modifier;
+            decls.insert(sel.to_string(), crate::theme::registry::Delta {
+                fg: style.fg,
+                bg: style.bg,
+                bold: m.contains(Modifier::BOLD),
+                italic: m.contains(Modifier::ITALIC),
+                underline: m.contains(Modifier::UNDERLINED),
+                reversed: m.contains(Modifier::REVERSED),
+                dim: m.contains(Modifier::DIM),
+                ..crate::theme::registry::Delta::EMPTY
+            });
+        }
+        crate::theme::resolve::resolve(
+            &crate::theme::resolve::Roles::terminal_default(),
+            &decls,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+    }
+
     /// The two edge-midpoints each half-diagonal reaches, per its Unicode name. Guards the
     /// bits table against the endpoints actually being somewhere else (SQ-0356).
     #[test]
@@ -3115,6 +3165,13 @@ mod tests {
         // Scroll up by 1 row so that cell (0,-1) maps to screen y=0.
         let mut state = AppState::default();
         state.scroll = (0, -1); // scroll y=-1 so cell (0,-1) → screen y = 0 + (-1-(-1))*6 = 0
+        // The default `map.room_current` theme style (accent, no reversed) no longer exercises
+        // the border/interior REVERSED split this test guards, so override it to a REVERSED
+        // style (like the old ColorScheme default) via the theme, matching SQ-0309's rewire of
+        // direct `ColorScheme` field mutation to `theme_with_overrides` for migrated selectors.
+        state.colors.theme = theme_with_overrides(&[
+            ("map.room_current", Style::new().add_modifier(Modifier::REVERSED).fg(Color::White)),
+        ]);
 
         let area = Rect::new(0, 0, 40, 20);
         let mut buf = Buffer::empty(area);
@@ -4203,10 +4260,10 @@ mod tests {
     #[test]
     fn updown_connector_uses_portal_connector_color_not_connector() {
         // Regression (SQ-0216 review finding): up/down connectors must style their dotted body
-        // AND their up/down border glyphs with `colors.portal_connector`, not the generic
-        // `colors.connector` used by compass connectors. Build a map with BOTH an up/down pair
+        // AND their up/down border glyphs with `map.connector_portal`, not the generic
+        // `map.connector` used by compass connectors. Build a map with BOTH an up/down pair
         // (far apart so the body draws a routed dotted line, not just a direct bridge) and an
-        // unrelated compass connector, set `portal_connector` and `connector` to distinct
+        // unrelated compass connector, set `map.connector_portal` and `map.connector` to distinct
         // colors, and assert each connector kind picked up the right one.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
@@ -4227,14 +4284,16 @@ mod tests {
         let mut st = AppState::default();
         st.zoom = Zoom::Boxes;
         st.scroll = rm.bounds.0;
-        st.colors.connector = Style::new().fg(Color::Green);
-        st.colors.portal_connector = Style::new().fg(Color::Rgb(10, 20, 30));
+        st.colors.theme = theme_with_overrides(&[
+            ("map.connector", Style::new().fg(Color::Green)),
+            ("map.connector_portal", Style::new().fg(Color::Rgb(10, 20, 30))),
+        ]);
         let area = Rect::new(0, 0, 100, 40);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &st, area, &mut buf);
 
-        let portal_fg = st.colors.portal_connector.fg;
-        let connector_fg = st.colors.connector.fg;
+        let portal_fg = st.colors.theme.get("map.connector_portal").style.fg;
+        let connector_fg = st.colors.theme.get("map.connector").style.fg;
         assert_ne!(portal_fg, connector_fg, "test colors must be distinct to be meaningful");
 
         // Every dotted body glyph and up/down border glyph must use portal_connector's fg.
@@ -4256,12 +4315,12 @@ mod tests {
         assert!(found_dotted, "expected at least one dotted up/down body glyph");
         assert!(found_updown_glyph, "expected at least one up/down border glyph");
 
-        // The unrelated compass connector (C -E-> D) must still use `colors.connector`.
+        // The unrelated compass connector (C -E-> D) must still use `map.connector`.
         let mut found_compass_arrow = false;
         for cell in buf.content.iter() {
             if cell.symbol() == "▶" {
                 found_compass_arrow = true;
-                assert_eq!(cell.fg, connector_fg.unwrap(), "compass arrowhead must keep colors.connector fg");
+                assert_eq!(cell.fg, connector_fg.unwrap(), "compass arrowhead must keep map.connector fg");
                 assert_ne!(cell.fg, portal_fg.unwrap(), "compass arrowhead must not use portal_connector fg");
             }
         }
@@ -5318,7 +5377,7 @@ mod tests {
         );
         // The base must NOT be room_current alone (which would be REVERSED on its own style).
         // It should be room_selected with REVERSED added.
-        let expected = state.colors.room_selected.add_modifier(Modifier::REVERSED);
+        let expected = state.colors.theme.get("map.room_selected").style.add_modifier(Modifier::REVERSED);
         assert_eq!(style, expected, "current+selected must equal room_selected + REVERSED");
     }
 
@@ -5342,7 +5401,7 @@ mod tests {
         state.selected_room = Some(99); // different room selected
 
         let style = room_style(&room, &state);
-        assert_eq!(style, state.colors.room_current, "current-only room must use room_current style");
+        assert_eq!(style, state.colors.theme.get("map.room_current").style, "current-only room must use room_current style");
     }
 
     /// When a room is selected but NOT current, room_style returns room_selected.
@@ -5365,7 +5424,7 @@ mod tests {
         state.selected_room = Some(3);
 
         let style = room_style(&room, &state);
-        assert_eq!(style, state.colors.room_selected, "selected-only room must use room_selected style");
+        assert_eq!(style, state.colors.theme.get("map.room_selected").style, "selected-only room must use room_selected style");
     }
 
     // ── Item 4: arrow color does not bleed selection bg ───────────────────────
@@ -5417,9 +5476,11 @@ mod tests {
         // Use a color scheme where room_selected has a distinct bg.
         let mut colors = ColorScheme::terminal_default();
         let selected_bg = Color::Cyan;
-        colors.room_selected = Style::new().fg(Color::White).bg(selected_bg);
         // connector fg is Green so we can check it independently.
-        colors.connector = Style::new().fg(Color::Green);
+        colors.theme = theme_with_overrides(&[
+            ("map.room_selected", Style::new().fg(Color::White).bg(selected_bg)),
+            ("map.connector", Style::new().fg(Color::Green)),
+        ]);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is the selected room (not current).
         let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7, false)];
@@ -5452,8 +5513,10 @@ mod tests {
 
         let mut colors = ColorScheme::terminal_default();
         // Distinct fg/bg so the reversed-swap is observable.
-        colors.room_selected = Style::new().fg(Color::Magenta).bg(Color::Cyan);
-        colors.connector = Style::new().fg(Color::Green);
+        colors.theme = theme_with_overrides(&[
+            ("map.room_selected", Style::new().fg(Color::Magenta).bg(Color::Cyan)),
+            ("map.connector", Style::new().fg(Color::Green)),
+        ]);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is BOTH selected AND current.
         let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7, false)];
@@ -5484,8 +5547,10 @@ mod tests {
         let mut colors = ColorScheme::terminal_default();
         // room_current carries REVERSED, but the border it sits on is drawn non-reversed;
         // give it a distinct plain bg so the border background is observable.
-        colors.room_current = Style::new().add_modifier(Modifier::REVERSED).fg(Color::Blue).bg(Color::Yellow);
-        colors.connector = Style::new().fg(Color::Green);
+        colors.theme = theme_with_overrides(&[
+            ("map.room_current", Style::new().add_modifier(Modifier::REVERSED).fg(Color::Blue).bg(Color::Yellow)),
+            ("map.connector", Style::new().fg(Color::Green)),
+        ]);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is the current room, NOT selected.
         let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7, false)];
@@ -5513,8 +5578,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
 
         let mut colors = ColorScheme::terminal_default();
-        colors.room_selected = Style::new().fg(Color::White).bg(Color::Cyan);
-        colors.connector = Style::new().fg(Color::Green);
+        colors.theme = theme_with_overrides(&[
+            ("map.room_selected", Style::new().fg(Color::White).bg(Color::Cyan)),
+            ("map.connector", Style::new().fg(Color::Green)),
+        ]);
 
         // Arrow belongs to room 5; selected room is 7 — different rooms.
         let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 5, false)];
@@ -5565,7 +5632,7 @@ mod tests {
         use crate::state::AppState;
 
         let state = AppState::default();
-        let normal_border_color = state.colors.focused_border.fg.unwrap_or(Color::White);
+        let normal_border_color = state.colors.theme.get("panel.border:active").style.fg.unwrap_or(Color::White);
 
         // At quarter period the pulse is the green endpoint.
         let quarter = Duration::from_secs_f64(1.0 / (4.0 * PULSE_HZ));
@@ -6095,7 +6162,7 @@ mod tests {
         // Compared via `cell.fg` (not `cell.style() ==`, which can never match a partially-set
         // Style: ratatui's `Cell::set_style` patches rather than replaces, so `Cell::style()`
         // always synthesizes concrete `bg`/`underline_color`, unlike `shared_path`'s bg: None).
-        let shared_fg = state.colors.shared_path.fg.expect("shared_path has an fg color");
+        let shared_fg = state.colors.theme.get("map.shared_path").style.fg.expect("shared_path has an fg color");
         let found = (0..area.width).flat_map(|x| (0..area.height).map(move |y| (x, y)))
             .any(|(x, y)| buf.cell((x, y)).map(|c| c.fg == shared_fg).unwrap_or(false));
         assert!(found, "the collapsed pair's shared path must paint with shared_path color");
@@ -6121,7 +6188,7 @@ mod tests {
         // Compared via `cell.fg` (not `cell.style() ==`), matching
         // `shared_connector_line_uses_shared_path_color` above: `Cell::set_style` patches
         // rather than replaces, so `Cell::style()` never equals a partially-set `Style`.
-        let shared_fg = state.colors.shared_path.fg.expect("shared_path has an fg color");
+        let shared_fg = state.colors.theme.get("map.shared_path").style.fg.expect("shared_path has an fg color");
         let rm = mapper::render::render(&g);
         let area = Rect::new(0, 0, 60, 30);
         let mut buf = Buffer::empty(area);
@@ -6155,7 +6222,7 @@ mod tests {
         let state = AppState::default();
         let se = state.symbols.arrows.se.to_string();       // retained SE departure arrowhead (at 68)
         let south = state.symbols.arrows.south.to_string(); // S secondary marker (at 68)
-        let shared_fg = state.colors.shared_path.fg.expect("shared_path has an fg color");
+        let shared_fg = state.colors.theme.get("map.shared_path").style.fg.expect("shared_path has an fg color");
         let rm = mapper::render::render(&g);
         let area = Rect::new(0, 0, 60, 30);
         let mut buf = Buffer::empty(area);
@@ -6194,7 +6261,7 @@ mod tests {
         let state = AppState::default();
         let south = state.symbols.arrows.south.to_string(); // retained S departure arrowhead (at A)
         let east = state.symbols.arrows.east.to_string();    // E secondary marker (at A)
-        let shared_fg = state.colors.shared_path.fg.expect("shared_path has an fg color");
+        let shared_fg = state.colors.theme.get("map.shared_path").style.fg.expect("shared_path has an fg color");
         let rm = mapper::render::render(&g);
         let area = Rect::new(0, 0, 60, 30);
         let mut buf = Buffer::empty(area);
@@ -6238,7 +6305,7 @@ mod tests {
         let state = AppState::default();
         let nw = state.symbols.arrows.nw.to_string();     // retained NW arrival arrowhead (at 217's corner)
         let west = state.symbols.arrows.west.to_string(); // W secondary marker (at 217)
-        let shared_fg = state.colors.shared_path.fg.expect("shared_path has an fg color");
+        let shared_fg = state.colors.theme.get("map.shared_path").style.fg.expect("shared_path has an fg color");
         let rm = mapper::render::render(&g);
         let area = Rect::new(0, 0, 60, 30);
         let mut buf = Buffer::empty(area);
