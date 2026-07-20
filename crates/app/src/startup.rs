@@ -63,6 +63,14 @@ pub(crate) fn boot() -> BootResult {
 
     let cli = Cli::parse();
     let mut cfg = resolve(&cli);
+
+    // Auto-seed a fresh style.toml (SQ-0309, Task 6b) on every startup — before the
+    // story picker — so browsing (even without launching a story) leaves the fully
+    // commented, registry-derived template, and the picker reads the same file the
+    // game does. Never overwrites an existing file; best-effort (a read-only home
+    // must not crash startup).
+    app::theme::template::auto_seed(&cfg.user_dir);
+
     let story_path = cli.story.clone();
 
     // Storage base for saves/sidecars (SQ-0284): `--data-dir` overrides the
@@ -143,12 +151,6 @@ pub(crate) fn boot() -> BootResult {
     let vfs_sidecar = app::vfs_store::read_vfs(&game_dir);
     app::trace::hostio(&cfg.user_dir, cfg.trace.hostio,
         format!("vfs_read({} bytes)", vfs_sidecar.len()));
-
-    // Auto-seed a fresh style.toml (SQ-0309, Task 6b): the interactive style
-    // editors are gone, so a user dir with no style.toml yet gets a fully
-    // commented, registry-derived template on first run. Never overwrites an
-    // existing file; best-effort (a read-only home must not crash startup).
-    app::theme::template::auto_seed(&cfg.user_dir);
 
     // Resolve the look from style.toml (the single styling source) BEFORE the
     // engine builds: a Glulx game may probe glk_style_measure for the host's
