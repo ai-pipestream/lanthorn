@@ -344,8 +344,9 @@ mod tests {
         let mut state = crate::state::AppState::default();
         state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
         let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        panel.tab[1] = crate::debug_panel::locate_section(crate::debug_panel::Section::Locals).1;
         panel.snapshot.locals = vec!["local0 = 0001".into(), "local1 = 0002".into()];
-        // Window 1 (right-top) shows Locals by default; select its first two content
+        // Window 1 (right-top) shows Locals here; select its first two content
         // rows in full (cols 0..=12 covers "local0 = 0001").
         panel.sel = Some((1, crate::clipboard::Selection {
             anchor: crate::clipboard::Point { row: 0, col: 0 },
@@ -454,9 +455,9 @@ mod tests {
     fn shows_a_non_default_active_tab_and_hides_the_others_content() {
         let mut state = crate::state::AppState::default();
         let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
-        panel.tab[0] = 1; // Globals instead of Disassembly
-        panel.snapshot.disasm = vec!["001000  should-not-show".into()];
-        panel.snapshot.globals = vec!["g00=0012".into()];
+        panel.tab[1] = crate::debug_panel::locate_section(crate::debug_panel::Section::Locals).1; // a non-default tab
+        panel.snapshot.locals = vec!["local0 = 0001".into()];
+        panel.snapshot.globals = vec!["g00 = should-not-show".into()];
         state.debug = Some(panel);
 
         let area = Rect::new(0, 0, 80, 24);
@@ -464,7 +465,7 @@ mod tests {
         draw_debug_panel(&state, area, &mut buf);
 
         let text = buf_text(&buf);
-        assert!(text.contains("g00=0012"));
+        assert!(text.contains("local0 = 0001"));
         assert!(!text.contains("should-not-show"));
     }
 
@@ -473,7 +474,7 @@ mod tests {
         let mut state = crate::state::AppState::default();
         state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
         let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
-        panel.tab[1] = 1; // Objects tab (window 1)
+        panel.tab[1] = crate::debug_panel::locate_section(crate::debug_panel::Section::Objects).1; // Objects tab
         panel.snapshot.objects = vec!["[1] lamp".into(), "[2] rock".into()];
         panel.expanded_objects = std::collections::HashSet::from([1u16]);
         state.debug = Some(panel);

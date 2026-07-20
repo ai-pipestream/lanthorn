@@ -46,12 +46,30 @@ impl Section {
 }
 
 /// Which tabs each window offers, in order. Window 0 = left (full height),
-/// 1 = right-top, 2 = right-bottom.
+/// 1 = right-top, 2 = right-bottom. The first tab in each window is the one it
+/// opens on (see [`DEFAULT_SECTIONS`]).
 pub const WINDOW_TABS: [&[Section]; 3] = [
-    &[Section::Disasm, Section::Globals],
-    &[Section::Locals, Section::Objects, Section::Dict],
+    &[Section::Disasm],
+    &[Section::Globals, Section::Locals, Section::Objects, Section::Dict],
     &[Section::CallStack, Section::EvalStack, Section::Memory],
 ];
+
+/// The section each window shows by default. Kept as sections (not indices) so
+/// reordering [`WINDOW_TABS`] can never silently change which tab opens.
+pub const DEFAULT_SECTIONS: [Section; 3] =
+    [Section::Disasm, Section::Globals, Section::CallStack];
+
+/// The `(window, tab)` position that renders `section`. Every [`Section`] lives
+/// in exactly one window (guarded by `window_tabs_cover_every_section`), so this
+/// is total — callers navigate by section and never hard-code tab indices.
+pub fn locate_section(section: Section) -> (usize, usize) {
+    for (w, tabs) in WINDOW_TABS.iter().enumerate() {
+        if let Some(t) = tabs.iter().position(|&s| s == section) {
+            return (w, t);
+        }
+    }
+    (0, 0)
+}
 
 /// The formatted lines the render code paints, refreshed from the Debugger.
 #[derive(Debug, Default, Clone)]
@@ -166,9 +184,15 @@ pub enum DebugKey { Consumed, Ignored, Close }
 
 impl DebugPanelState {
     pub fn new(pc: u32) -> Self {
+        // Each window opens on its DEFAULT_SECTIONS entry, resolved to a tab index.
+        let tab = [
+            locate_section(DEFAULT_SECTIONS[0]).1,
+            locate_section(DEFAULT_SECTIONS[1]).1,
+            locate_section(DEFAULT_SECTIONS[2]).1,
+        ];
         DebugPanelState {
             focus: 0,
-            tab: [0, 0, 0],
+            tab,
             scroll: [0, 0, 0],
             disasm_addr: pc,
             disasm_mode: DisasmMode::Full,
@@ -411,14 +435,23 @@ impl DebugPanelState {
         self.mem_input = None;
     }
 
-    /// Navigate the disassembly to `addr` (focus the Left window's Disasm
-    /// tab). Does NOT call `refresh` — that re-anchors to the live PC, which
-    /// would instantly undo the jump. Within-turn nav, like scrolling; the
-    /// next per-turn refresh re-anchors to PC as usual.
+    /// Focus the window and select the tab that renders `section`. Returns the
+    /// window index, so callers can address that window's per-window state
+    /// (scroll, etc.) without hard-coding it.
+    fn show_section(&mut self, section: Section) -> usize {
+        let (w, t) = locate_section(section);
+        self.focus = w;
+        self.tab[w] = t;
+        w
+    }
+
+    /// Navigate the disassembly to `addr` (focus the Disassembly tab). Does NOT
+    /// call `refresh` — that re-anchors to the live PC, which would instantly
+    /// undo the jump. Within-turn nav, like scrolling; the next per-turn refresh
+    /// re-anchors to PC as usual.
     pub fn goto(&mut self, addr: u32, dbg: &dyn Debugger) {
         self.disasm_addr = addr;
-        self.focus = 0;
-        self.tab[0] = 0;
+        self.show_section(Section::Disasm);
         self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
     }
 
@@ -446,8 +479,7 @@ impl DebugPanelState {
 
     /// Focus the Memory window/tab and point it at `addr`.
     pub fn goto_memory(&mut self, addr: u32, dbg: &dyn Debugger) {
-        self.focus = 2;
-        self.tab[2] = 2; // Memory is WINDOW_TABS[2][2]
+        self.show_section(Section::Memory);
         // Align down to the 16-byte row grid so the jump keeps the hex dump's
         // column alignment (scroll then advances by whole 16-byte rows).
         self.mem_addr = addr.min(dbg.memory_len()) & !0xF;
@@ -457,14 +489,13 @@ impl DebugPanelState {
     /// Focus the Objects window/tab, expand object `n`, and scroll it into
     /// view.
     pub fn goto_object(&mut self, n: u16, dbg: &dyn Debugger) {
-        self.focus = 1;
-        self.tab[1] = 1; // Objects is WINDOW_TABS[1][1]
+        let w = self.show_section(Section::Objects);
         if self.expanded_objects.insert(n) {
             self.snapshot.object_details.insert(n, dbg.object_detail(n));
         }
         let rows = objects_rows(&self.snapshot.objects, &self.expanded_objects, &self.snapshot.object_details, 0, usize::MAX);
         if let Some(idx) = rows.iter().position(|r| matches!(r, ObjRow::Tree { obj: Some(id), .. } if *id == n)) {
-            self.scroll[1] = idx;
+            self.scroll[w] = idx;
         }
     }
 }
@@ -1190,7 +1221,8 @@ mod tests {
     #[test]
     fn left_right_cycle_focused_tab_with_wrap_and_reset_scroll() {
         let mut p = DebugPanelState::new(0x1000);
-        p.focus = 1; // Locals | Objects | Dictionary
+        p.focus = 1; // a 4-tab window (Globals | Locals | Objects | Dictionary)
+        p.tab[1] = 0; // start from the first tab
         p.scroll[1] = 5;
         p.handle_key(KeyCode::Right, &MockDbg);
         assert_eq!(p.tab[1], 1);
@@ -1198,10 +1230,12 @@ mod tests {
         p.scroll[1] = 3;
         p.handle_key(KeyCode::Right, &MockDbg);
         assert_eq!(p.tab[1], 2);
+        p.handle_key(KeyCode::Right, &MockDbg);
+        assert_eq!(p.tab[1], 3); // Globals
         p.handle_key(KeyCode::Right, &MockDbg); // wraps
         assert_eq!(p.tab[1], 0);
         p.handle_key(KeyCode::Left, &MockDbg); // wraps the other way
-        assert_eq!(p.tab[1], 2);
+        assert_eq!(p.tab[1], 3);
     }
 
     #[test]
@@ -1247,15 +1281,34 @@ mod tests {
     #[test]
     fn active_section_mapping() {
         let mut p = DebugPanelState::new(0x1000);
+        // Each window opens on its DEFAULT_SECTIONS entry.
         assert_eq!(p.active_section(0), Section::Disasm);
-        assert_eq!(p.active_section(1), Section::Locals);
+        assert_eq!(p.active_section(1), Section::Globals);
         assert_eq!(p.active_section(2), Section::CallStack);
-        p.tab[0] = 1;
-        p.tab[1] = 2;
-        p.tab[2] = 2;
-        assert_eq!(p.active_section(0), Section::Globals);
-        assert_eq!(p.active_section(1), Section::Dict);
-        assert_eq!(p.active_section(2), Section::Memory);
+        // Selecting any section's tab makes active_section report it, whatever
+        // the tab order (locate_section is the single source of truth).
+        for sec in [
+            Section::Disasm, Section::Globals, Section::Locals, Section::Objects,
+            Section::Dict, Section::CallStack, Section::EvalStack, Section::Memory,
+        ] {
+            let (w, t) = locate_section(sec);
+            p.tab[w] = t;
+            assert_eq!(p.active_section(w), sec);
+        }
+    }
+
+    #[test]
+    fn window_tabs_cover_every_section() {
+        // locate_section / DEFAULT_SECTIONS are total only if every Section lives
+        // in exactly one window — guard that invariant so a future edit can't
+        // silently drop or duplicate a tab.
+        for sec in [
+            Section::Disasm, Section::Globals, Section::Locals, Section::Objects,
+            Section::Dict, Section::CallStack, Section::EvalStack, Section::Memory,
+        ] {
+            let count = WINDOW_TABS.iter().flat_map(|w| w.iter()).filter(|&&s| s == sec).count();
+            assert_eq!(count, 1, "{sec:?} must appear in exactly one window");
+        }
     }
 
     #[test]
@@ -1560,7 +1613,6 @@ mod tests {
         let mut p = DebugPanelState::new(0x1000);
         p.pc = 0x1000;
         p.focus = 2;
-        p.tab[0] = 1;
         p.goto(0x2000, &MockDbg);
         assert_eq!(p.disasm_addr, 0x2000);
         assert_eq!(p.focus, 0);
@@ -1702,11 +1754,12 @@ mod tests {
     fn objects_click_at_resolves_a_tree_row_click() {
         let region = Rect::new(0, 0, 61, 40);
         let mut p = DebugPanelState::new(0x1000);
-        p.focus = 1;
-        p.tab[1] = 1; // Objects
+        let (ow, ot) = locate_section(Section::Objects);
+        p.focus = ow;
+        p.tab[ow] = ot;
         p.snapshot.objects = vec!["[1] lamp".to_string()];
-        let [_, top, _] = window_rects(region);
-        let content = Rect::new(top.x + 1, top.y + 1, top.width.saturating_sub(2), top.height.saturating_sub(2));
+        let wrect = window_rects(region)[ow];
+        let content = Rect::new(wrect.x + 1, wrect.y + 1, wrect.width.saturating_sub(2), wrect.height.saturating_sub(2));
         let hit = objects_click_at(region, &p, content.x, content.y);
         assert_eq!(hit, Some(1));
     }
@@ -1835,11 +1888,12 @@ mod tests {
         p.focus = 0;
         p.snapshot.objects = vec!["[1] lamp".to_string(), "[2] rock".to_string()];
         p.goto_object(2, &MockDbg);
-        assert_eq!(p.focus, 1);
-        assert_eq!(p.tab[1], 1);
+        let (ow, _) = locate_section(Section::Objects);
+        assert_eq!(p.focus, ow);
+        assert_eq!(p.active_section(ow), Section::Objects);
         assert!(p.expanded_objects.contains(&2));
         assert!(p.snapshot.object_details.contains_key(&2));
-        assert_eq!(p.scroll[1], 1, "object [2]'s display row is index 1");
+        assert_eq!(p.scroll[ow], 1, "object [2]'s display row is index 1");
     }
 
     // ── Variable hover tooltips ─────────────────────────────────────────────
