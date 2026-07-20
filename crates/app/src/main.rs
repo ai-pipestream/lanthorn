@@ -355,12 +355,16 @@ fn draw_frame(
                     let beep_color = match p.kind {
                         app::state::BeepKind::High => state
                             .colors
-                            .sound_beep_high
+                            .theme
+                            .get("sound_beep_high")
+                            .style
                             .fg
                             .unwrap_or(ratatui::style::Color::Rgb(255, 180, 40)),
                         app::state::BeepKind::Low => state
                             .colors
-                            .sound_beep_low
+                            .theme
+                            .get("sound_beep_low")
+                            .style
                             .fg
                             .unwrap_or(ratatui::style::Color::Rgb(60, 140, 220)),
                     };

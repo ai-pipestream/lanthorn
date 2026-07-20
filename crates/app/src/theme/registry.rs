@@ -261,8 +261,10 @@ pub const REGISTRY: &[RegRow] = &[
     // dialog_shadow: the one explicit-colour row — keeps a distinctive dark-gray bg.
     row("dialog_shadow", Section::Elements, Kind::Style, Some("muted"), Delta { bg: Some(Color::DarkGray), ..Delta::EMPTY }),
     row("hotkey_key", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
-    row("sound_beep_high", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
-    row("sound_beep_low", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    // Sound-beep pulse colours are bespoke (warm amber / cool blue) — no role
+    // reproduces them, so they carry explicit fg like map.connector_distorted.
+    row("sound_beep_high", Section::Elements, Kind::Style, None, fg(Color::Rgb(255, 180, 40))),
+    row("sound_beep_low", Section::Elements, Kind::Style, None, fg(Color::Rgb(60, 140, 220))),
     row("transcript_input", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
     row("transcript_system", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     row("warning_marker", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
@@ -414,8 +416,8 @@ mod tests {
         assert_eq!(blurb.fg, roles.muted.fg);
         assert!(blurb.add_modifier.contains(Modifier::ITALIC));
 
-        // sound_beep_high: plain alert derivation (orange -> yellow accepted).
-        assert_eq!(theme.get("sound_beep_high").style.fg, theme.get("alert").style.fg);
+        // sound_beep_high: bespoke amber, explicit fg (not a role derivation).
+        assert_eq!(theme.get("sound_beep_high").style.fg, Some(Color::Rgb(255, 180, 40)));
 
         // dialog_shadow: the one explicit-colour row — keeps an explicit dark-gray bg.
         assert_eq!(theme.get("dialog_shadow").style.bg, Some(Color::DarkGray));

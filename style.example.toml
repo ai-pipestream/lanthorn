@@ -65,8 +65,8 @@
 # dialog_button_active = { parent = "accent", reversed = true }
 # dialog_shadow = { parent = "muted", bg = "dark-gray" }
 # hotkey_key = { parent = "accent" }
-# sound_beep_high = { parent = "alert" }
-# sound_beep_low = { parent = "accent" }
+# sound_beep_high = { fg = "#ffb428" }
+# sound_beep_low = { fg = "#3c8cdc" }
 # transcript_input = { parent = "accent" }
 # transcript_system = { parent = "muted" }
 # warning_marker = { parent = "alert" }

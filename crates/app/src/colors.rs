@@ -266,18 +266,6 @@ pub struct ColorScheme {
     /// Whether the story title / map layer-tab header strip is shown.
     pub story_header_on: bool,
     pub map_header_on: bool,
-    /// Border pulse color for the high-pitched bleep (sound_effect #1). SQ-0309:
-    /// kept — live production reader in `main.rs`'s border-pulse logic, and the
-    /// registry's `sound_beep_high` row (`alert`, no delta → plain Yellow) does
-    /// NOT reproduce this field's bespoke amber `Rgb(255, 180, 40)`; the design
-    /// spec (`docs/design/2026-07-14-styling-role-redesign.md`) doesn't call
-    /// out `sound_beep_*` at all, so the role default isn't confirmed
-    /// intentional. Migrating would silently change the pulse colour.
-    pub sound_beep_high: Style,
-    /// Border pulse color for the low-pitched bleep (sound_effect #2). SQ-0309:
-    /// kept for the same reason as `sound_beep_high` — the registry's `accent`
-    /// default (Cyan) doesn't reproduce the bespoke `Rgb(60, 140, 220)`.
-    pub sound_beep_low: Style,
     /// Compiled user story-styling rules, in evaluation order.
     pub transcript_rules: Vec<CompiledRule>,
     /// The status-bar segment layout (default reproduces today's bar).
@@ -359,8 +347,6 @@ impl ColorScheme {
             dialog_glyphs: PaneGlyphs::default(),
             story_header_on: true,
             map_header_on: true,
-            sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
-            sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
             transcript_rules: Vec::new(),
             statusbar_layout: StatusBarLayout::default(),
             palette: [
@@ -447,8 +433,6 @@ impl ColorScheme {
             dialog_glyphs: PaneGlyphs::default(),
             story_header_on: true,
             map_header_on: true,
-            sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
-            sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
             transcript_rules: Vec::new(),
             statusbar_layout: StatusBarLayout::default(),
             palette: scheme.palette,
@@ -974,8 +958,8 @@ unknown-key = ignored
     #[test]
     fn sound_beep_defaults_are_amber_and_cyan_blue() {
         let cs = ColorScheme::terminal_default();
-        assert_eq!(cs.sound_beep_high.fg, Some(Color::Rgb(255, 180, 40)));
-        assert_eq!(cs.sound_beep_low.fg, Some(Color::Rgb(60, 140, 220)));
+        assert_eq!(cs.theme.get("sound_beep_high").style.fg, Some(Color::Rgb(255, 180, 40)));
+        assert_eq!(cs.theme.get("sound_beep_low").style.fg, Some(Color::Rgb(60, 140, 220)));
     }
 
     #[test]
