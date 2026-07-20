@@ -7,4 +7,5 @@
 
 pub mod registry;
 pub mod resolve;
+pub mod template;
 pub mod toml_schema;

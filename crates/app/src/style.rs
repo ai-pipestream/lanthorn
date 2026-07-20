@@ -1148,7 +1148,11 @@ fn style_to_decl(s: &Style) -> Decl {
 }
 
 /// Encode a [`Color`] as a string suitable for a [`Decl`] fg/bg field.
-fn color_to_str(c: ratatui::style::Color) -> String {
+///
+/// `pub(crate)`: also reused by `theme::template::commented_template` (the
+/// registry-driven `style.toml` template generator, SQ-0309) as the inverse of
+/// `colors::parse_color_value`.
+pub(crate) fn color_to_str(c: ratatui::style::Color) -> String {
     use ratatui::style::Color::*;
     match c {
         Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
@@ -1674,14 +1678,16 @@ align = "right"
 
     #[test]
     fn style_example_toml_parses_and_resolves_clean() {
-        // The repo-root style.example.toml is the user-facing reference; it must
-        // parse and resolve with zero warnings so the docs cannot drift from the code.
+        // The repo-root style.example.toml is the user-facing reference (SQ-0309:
+        // now the registry-generated, fully-commented new-schema template — see
+        // `theme::template::style_example_matches_generated_template` for the
+        // byte-for-byte check). It must still parse clean under the new schema so
+        // the docs cannot drift from the code.
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../style.example.toml");
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
-        let doc = parse_style_toml(&text).expect("style.example.toml must parse");
-        let (_cs, _set, warnings) = resolve(&doc, path.parent().unwrap());
-        assert!(warnings.is_empty(), "style.example.toml resolved with warnings: {warnings:?}");
+        let parsed = crate::theme::toml_schema::parse(&text);
+        assert!(parsed.is_ok(), "style.example.toml failed to parse: {parsed:?}");
     }
 
     #[test]

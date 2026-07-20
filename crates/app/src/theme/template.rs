@@ -1,0 +1,331 @@
+//! Registry-driven commented `style.toml` template (SQ-0309, Task 6b).
+//!
+//! [`commented_template`] emits the whole new-schema `style.toml`, grouped by
+//! [`Section`] and with every line commented out — a no-op until the user
+//! uncomments a line. Each selector's line is reconstructed straight from its
+//! [`RegRow`]'s `parent` + `default_delta`, so uncommenting it reproduces
+//! exactly the registry default (see `theme::resolve`). This replaces the
+//! interactive style editors: [`auto_seed`] writes this template to the user's
+//! `style.toml` on first run, and the file is then edited by hand + applied
+//! live with `/reload`.
+
+use super::registry::{Kind, RegRow, Section, LAYER_CYCLE_DEFAULT, REGISTRY};
+use crate::style::{color_to_str, personal_style_path};
+
+/// Auto-seed `user_dir/style.toml` with [`commented_template`] if it does not
+/// already exist. NEVER overwrites an existing file. Best-effort: a write
+/// failure (e.g. a read-only home) is swallowed so startup never crashes.
+pub fn auto_seed(user_dir: &std::path::Path) {
+    let path = personal_style_path(user_dir);
+    if path.exists() {
+        return;
+    }
+    let _ = std::fs::write(&path, commented_template());
+}
+
+/// The sections emitted, in order: (registry [`Section`], TOML header, a short
+/// blurb comment shown above the header).
+const SECTIONS: &[(Section, &str, &str)] = &[
+    (Section::Roles, "[roles]", "Roles: the 7 roots everything else derives from."),
+    (
+        Section::Elements,
+        "[elements]",
+        "Elements: app chrome/text. Every line already equals its default.",
+    ),
+    (
+        Section::Panel,
+        "[panel]",
+        "Panel: shared chrome for every panel (border/title/tabs). Story/Glk\n# windows use [glk.*] instead, not this section.",
+    ),
+    (Section::GlkBuffer, "[glk.buffer]", "The 11 Glk styles for text-buffer windows (base: text)."),
+    (Section::GlkGrid, "[glk.grid]", "The 11 Glk styles for text-grid windows (base: chrome)."),
+    (Section::Map, "[map]", "Map colours + glyph-set presets."),
+    (Section::Debug, "[debug]", "Debug inspector disassembly selectors."),
+];
+
+/// Emit the full new-schema `style.toml`, entirely commented out.
+pub fn commented_template() -> String {
+    let mut out = String::new();
+
+    out.push_str(
+        "# babelmap style.toml — auto-seeded, every line commented out.\n\
+         # This file is a no-op until you uncomment lines: every commented value here\n\
+         # is already the built-in default, reconstructed straight from the style\n\
+         # registry. Edit, uncomment, save, then run /reload in-app to apply changes\n\
+         # live (or turn on config.toml's watch_style to auto-reload on save).\n\
+         #\n\
+         # Color values accept: a named color (cyan, dark-gray, light-blue, …),\n\
+         # palette:N (0-15 from the active scheme), #rrggbb hex, a 256-index (\"17\"),\n\
+         # or background / foreground (the scheme's bg/fg).\n\
+         \n\
+         # scheme = \"tomorrow-night\"   # optional base: built-in name or a Ghostty theme path; omit for terminal colours\n\
+         \n",
+    );
+
+    for (section, header, blurb) in SECTIONS {
+        out.push_str("# ── ");
+        out.push_str(blurb);
+        out.push('\n');
+        out.push_str("# ");
+        out.push_str(header);
+        out.push('\n');
+        for row in REGISTRY.iter().filter(|r| r.section == *section) {
+            out.push_str(&row_line(*section, row));
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+
+    out.push_str(STATIC_EXAMPLES);
+
+    out
+}
+
+/// Reconstruct one registry row as a single commented TOML line.
+fn row_line(section: Section, row: &RegRow) -> String {
+    if row.name == "map.layer_cycle" {
+        let list =
+            LAYER_CYCLE_DEFAULT.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+        return format!("# layer_cycle = [{list}]");
+    }
+
+    let key = toml_key(&strip_section_prefix(section, row.name));
+
+    if row.kind == Kind::Placement {
+        let preset = row.default_delta.glyph.unwrap_or_default();
+        return format!("# {key} = \"{preset}\"");
+    }
+
+    let fields = row_fields(row);
+    if fields.is_empty() {
+        format!("# {key} = {{}}")
+    } else {
+        format!("# {key} = {{ {} }}", fields.join(", "))
+    }
+}
+
+/// The `parent = ...` + delta fields for a row's inline table, in the order a
+/// user would naturally write them.
+fn row_fields(row: &RegRow) -> Vec<String> {
+    let d = &row.default_delta;
+    let mut fields = Vec::new();
+    if let Some(parent) = row.parent {
+        fields.push(format!("parent = \"{parent}\""));
+    }
+    if let Some(fg) = d.fg {
+        fields.push(format!("fg = \"{}\"", color_to_str(fg)));
+    }
+    if let Some(bg) = d.bg {
+        fields.push(format!("bg = \"{}\"", color_to_str(bg)));
+    }
+    if d.bold {
+        fields.push("bold = true".to_string());
+    }
+    if d.italic {
+        fields.push("italic = true".to_string());
+    }
+    if d.underline {
+        fields.push("underline = true".to_string());
+    }
+    if d.reversed {
+        fields.push("reversed = true".to_string());
+    }
+    if d.dim {
+        fields.push("dim = true".to_string());
+    }
+    if let Some(border) = d.border {
+        fields.push(format!("style = \"{border}\""));
+    }
+    if let Some(glyph) = d.glyph {
+        fields.push(format!("glyph = \"{glyph}\""));
+    }
+    fields
+}
+
+/// Strip a section's TOML-header prefix off a full registry selector name,
+/// leaving the bare key written under that header (e.g. `panel.border:active`
+/// → `border:active`, `glk.buffer.normal` → `normal`).
+fn strip_section_prefix(section: Section, name: &str) -> String {
+    let prefix = match section {
+        Section::Panel => "panel.",
+        Section::GlkBuffer => "glk.buffer.",
+        Section::GlkGrid => "glk.grid.",
+        Section::Map => "map.",
+        Section::Debug => "debug.",
+        Section::Roles | Section::Elements | Section::Statusbar => "",
+    };
+    name.strip_prefix(prefix).unwrap_or(name).to_string()
+}
+
+/// Quote a TOML key if it contains `:` or `.` (e.g. `"border:active"`).
+fn toml_key(key: &str) -> String {
+    if key.contains(':') || key.contains('.') {
+        format!("\"{key}\"")
+    } else {
+        key.to_string()
+    }
+}
+
+/// Static commented examples with no registry row of their own: a
+/// `[[transcript.rule]]` pair and a `[statusbar]` + `[[statusbar.segment]]`
+/// block, copied (commented) from the design spec's example.
+const STATIC_EXAMPLES: &str = r#"# ── Story-line styling rules: recolour whole transcript lines matching a ────
+# ── regex. Rules are tried in order; the first match wins. ──────────────────
+# [[transcript.rule]]
+# match = "^>.*"                 # your echoed command lines → magenta bold
+# fg = "magenta"
+# bold = true
+
+# [[transcript.rule]]
+# match = "(?i)\\bgrue\\b"       # any line mentioning a "grue" → red (flavour example)
+# fg = "red"
+
+# ── Status bar. Omit [statusbar] for the built-in default. ───────────────────
+# Placeholders: {location} {score} {moves} {time} {turns} {title} {filter}
+# [statusbar]
+# border = "none"
+
+# [[statusbar.segment]]
+# text  = "{location}"
+# align = "left"
+# parent = "accent"              # segments may reference a role or set fg/bg directly
+# bold  = true
+
+# [[statusbar.segment]]
+# text  = "Score: {score}  Moves: {moves}"
+# align = "right"
+
+# [[statusbar.segment]]
+# text  = "{time}"
+# align = "right"
+"#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::colors::GhosttyScheme;
+    use crate::theme::resolve::resolve_theme;
+    use crate::theme::toml_schema::{self, ParsedStyle};
+    use ratatui::style::Color;
+
+    /// Every non-`Statusbar` registry row's local key must appear somewhere in
+    /// the generated template (regression: a new row without a template line).
+    #[test]
+    fn template_covers_every_registry_selector() {
+        let template = commented_template();
+        for row in REGISTRY.iter().filter(|r| r.section != Section::Statusbar) {
+            let leaf = row.name.rsplit('.').next().unwrap();
+            assert!(
+                template.contains(leaf),
+                "registry row {:?} (leaf {leaf:?}) missing from commented_template()",
+                row.name
+            );
+        }
+    }
+
+    /// The whole template is comments/blanks only, so it parses as an empty
+    /// (all-default) document.
+    #[test]
+    fn template_parses_clean() {
+        let parsed = toml_schema::parse(&commented_template());
+        assert!(parsed.is_ok(), "template failed to parse: {parsed:?}");
+    }
+
+    /// Uncomment every real TOML line (section headers + `key = value` /
+    /// `key = {..}` assignments) while leaving prose/blurb comments alone,
+    /// then parse it.
+    fn uncomment_toml_lines(template: &str) -> String {
+        template
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim_start();
+                if let Some(rest) = trimmed.strip_prefix("# ") {
+                    if rest.starts_with('[') || rest.contains(" = ") {
+                        return rest.to_string();
+                    }
+                }
+                line.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A `GhosttyScheme` matching `Roles::terminal_default()`/the resolver's
+    /// default test fixture, so `resolve_theme` reproduces registry defaults.
+    fn terminal_default_scheme() -> GhosttyScheme {
+        let mut scheme = GhosttyScheme { foreground: Color::White, ..GhosttyScheme::default() };
+        scheme.palette[3] = Color::Yellow;
+        scheme.palette[6] = Color::Cyan;
+        scheme.palette[8] = Color::DarkGray;
+        scheme
+    }
+
+    /// Uncommenting the whole template and resolving it must reproduce the
+    /// registry-default theme (spot-checked across sections).
+    #[test]
+    fn uncommented_template_resolves_to_registry_defaults() {
+        let scheme = terminal_default_scheme();
+        let uncommented = uncomment_toml_lines(&commented_template());
+        let parsed = toml_schema::parse(&uncommented)
+            .unwrap_or_else(|e| panic!("uncommented template failed to parse: {e:?}"));
+
+        let seeded = resolve_theme(&scheme, &parsed);
+        let default = resolve_theme(&scheme, &ParsedStyle::default());
+
+        // roles
+        assert_eq!(seeded.get("accent").style, default.get("accent").style);
+        // an element
+        assert_eq!(seeded.get("transcript_meta").style, default.get("transcript_meta").style);
+        assert_eq!(seeded.get("transcript_meta").glyph, default.get("transcript_meta").glyph);
+        // panel.border style
+        assert_eq!(seeded.get("panel.border").border, default.get("panel.border").border);
+        assert_eq!(seeded.get("panel.border").style, default.get("panel.border").style);
+        // a glk slot
+        assert_eq!(seeded.get("glk.buffer.header").style, default.get("glk.buffer.header").style);
+        // a map colour
+        assert_eq!(seeded.get("map.connector_distorted").style, default.get("map.connector_distorted").style);
+        // a debug tier
+        assert_eq!(seeded.get("debug.disasm_data").style, default.get("debug.disasm_data").style);
+        assert_eq!(seeded.get("debug.disasm_data").glyph, default.get("debug.disasm_data").glyph);
+    }
+
+    /// The repo-root `style.example.toml` must be exactly `commented_template()`'s
+    /// output, so the checked-in example can never drift from the generator.
+    /// Regenerate it with the generator's output whenever this fails.
+    #[test]
+    fn style_example_matches_generated_template() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../style.example.toml");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+        assert_eq!(text, commented_template(), "style.example.toml is stale — regenerate it from commented_template()");
+    }
+
+    #[test]
+    fn auto_seed_writes_when_missing_and_never_overwrites() {
+        let dir = std::env::temp_dir().join(format!(
+            "babelmap-template-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = personal_style_path(&dir);
+
+        assert!(!path.exists());
+        auto_seed(&dir);
+        assert!(path.exists());
+        let seeded = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(seeded, commented_template());
+
+        // Modify the file, then seed again — must be left byte-unchanged.
+        std::fs::write(&path, "# user was here\n").unwrap();
+        auto_seed(&dir);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, "# user was here\n");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

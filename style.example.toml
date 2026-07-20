@@ -1,128 +1,174 @@
-# babelmap style reference — copy to ~/.babelmap/style.toml and edit.
-# Point config.toml at it with:  style = "~/.babelmap/style.toml"
+# babelmap style.toml — auto-seeded, every line commented out.
+# This file is a no-op until you uncomment lines: every commented value here
+# is already the built-in default, reconstructed straight from the style
+# registry. Edit, uncomment, save, then run /reload in-app to apply changes
+# live (or turn on config.toml's watch_style to auto-reload on save).
 #
 # Color values accept: a named color (cyan, dark-gray, light-blue, …),
 # palette:N (0-15 from the active scheme), #rrggbb hex, a 256-index ("17"),
 # or background / foreground (the scheme's bg/fg).
-#
-# Edit this file and run /reload in-app to apply changes live, or set
-# watch_style = true in config.toml to auto-reload on save. A syntax error
-# keeps your current look and shows a warning.
 
-[colors]
-# Optional base scheme: a built-in (mono / high-contrast / tomorrow-night) or a
-# path to a Ghostty theme file. Omit to use your terminal's colors.
-# scheme = "tomorrow-night"
+# scheme = "tomorrow-night"   # optional base: built-in name or a Ghostty theme path; omit for terminal colours
 
-# Each selector is an inline table of fg / bg / bold / italic / underline / dim /
-# reversed. Border selectors also take style = "<border>"; the dialog selector
-# also takes shadow = true.
+# ── Roles: the 7 roots everything else derives from.
+# [roles]
+# text = {}
+# chrome = {}
+# border = {}
+# accent = {}
+# muted = {}
+# alert = {}
+# heading = {}
 
-# ── Map ──────────────────────────────────────────────────────────────────────
-"room"                 = { fg = "white" }       # normal room
-"room:current"         = { reversed = true }    # the room you're in
-"room:selected"        = { fg = "yellow" }      # cursor-highlighted room
-"connector"            = { fg = "cyan" }        # normal connector
-"connector:distorted"  = { fg = "magenta" }     # one-way / distorted
-"connector:portal"     = { fg = "cyan" }        # up/down/in/out portals
-"shared_path"          = { fg = "light-cyan" }  # collapsed multi-direction connector + its markers
-"map_border"           = { style = "single", fg = "cyan" }
-# Per-side borders: override individual sides (none/single/double/thick); a side
-# falls back to `style`. `header = false` hides the title / layer-tab strip.
-# "map_border"  = { style = "none", style_left = "single", style_right = "single" }
-# "story_border" = { style = "single", style_top = "thick", header = false }
-"map_layer_tab"        = { fg = "dark-gray" }   # inactive layer tab
-"map_layer_tab_active" = { fg = "cyan", bold = true }
-"loc_indicator"        = { fg = "dark-gray" }   # room-detection method indicator
+# ── Elements: app chrome/text. Every line already equals its default.
+# [elements]
+# transcript = { parent = "text" }
+# status_bar = { parent = "chrome", reversed = true }
+# help_bar = { parent = "chrome", reversed = true }
+# upper_window = { parent = "chrome" }
+# story_info = { parent = "chrome" }
+# status_header = { parent = "heading", bg = "black" }
+# story_title = { parent = "heading" }
+# input_line = { parent = "border" }
+# suggestion_line = { parent = "border" }
+# scrollbar = { parent = "border" }
+# transcript_location = { parent = "accent" }
+# story_badge = { parent = "accent", reversed = true }
+# hyperlink = { parent = "accent", underline = true }
+# story_info_label = { parent = "muted" }
+# suggestion = { parent = "muted" }
+# transcript_meta = { parent = "muted", glyph = "▏" }
+# transcript_warning = { parent = "alert", glyph = "!" }
+# transcript_crash = { parent = "alert", bold = true }
+# more_prompt = { parent = "chrome", reversed = true }
+# tidy_progress = { parent = "accent" }
+# meta_marker = { parent = "muted" }
+# inventory_dock = { parent = "accent" }
+# story_info_title = { parent = "heading" }
+# story_info_value = { parent = "text" }
+# story_info_blurb = { parent = "muted", italic = true }
+# story_info_link = { parent = "accent", underline = true }
+# story_info_cover = { parent = "chrome" }
+# graphics = { parent = "chrome" }
+# inline_image = { parent = "chrome" }
+# story_header = { parent = "muted" }
+# story_header_active = { parent = "accent", bold = true }
+# story_author = { parent = "text" }
+# story_year = { parent = "text" }
+# story_no_metadata = { parent = "muted" }
+# story_tile = { parent = "text" }
+# story_tile_selected = { parent = "accent", bold = true, reversed = true }
+# notification = { parent = "accent", reversed = true }
+# dialog = { parent = "chrome" }
+# dialog_title = { parent = "accent" }
+# dialog_button = { parent = "chrome", reversed = true }
+# dialog_button_active = { parent = "accent", reversed = true }
+# dialog_shadow = { parent = "muted", bg = "dark-gray" }
+# hotkey_key = { parent = "accent" }
+# sound_beep_high = { parent = "alert" }
+# sound_beep_low = { parent = "accent" }
+# transcript_input = { parent = "accent" }
+# transcript_system = { parent = "muted" }
+# warning_marker = { parent = "alert" }
+# input_text = { parent = "text" }
+# input_prompt = { parent = "text" }
+# upper_window_border = { parent = "border" }
+# room_panel = { parent = "accent", reversed = true }
 
-# ── Story / transcript ───────────────────────────────────────────────────────
-"transcript"           = { fg = "white" }       # base game text
-"transcript:input"     = { fg = "cyan" }        # your echoed commands
-"transcript:meta"      = { fg = "dark-gray" }   # app / slash output
-"transcript:warning"   = { fg = "yellow" }      # VM warnings
-"transcript:location"  = { bold = true }        # room-name header lines
-"transcript:system"    = { fg = "dark-gray" }   # [bracketed] system lines
-"meta_marker"          = { fg = "dark-gray" }   # meta gutter color
-"warning_marker"       = { fg = "yellow" }      # warning gutter color
-"story_border"         = { style = "single", fg = "cyan" }
-"story_title"          = { fg = "white" }
-"suggestion"           = { fg = "dark-gray" }   # autocomplete line
-"suggestion_line"      = { }                    # set style = "single" to box the popup
+# ── Panel: shared chrome for every panel (border/title/tabs). Story/Glk
+# windows use [glk.*] instead, not this section.
+# [panel]
+# background = { parent = "chrome" }
+# border = { parent = "border", style = "single" }
+# "border:active" = { parent = "border", bold = true, style = "single" }
+# title = { parent = "heading" }
+# tab = { parent = "muted" }
+# "tab:active" = { parent = "accent", bold = true }
+# tab_divider = { parent = "border", glyph = "│" }
+# terminator_left = { parent = "border", glyph = "┤" }
+# terminator_right = { parent = "border", glyph = "├" }
 
-# ── Status & input chrome ────────────────────────────────────────────────────
-"statusbar"            = { reversed = true }    # status-bar base style (see [statusbar])
-"input_line"           = { }                    # set style = "single" to box it
-"helpbar"              = { reversed = true }
+# ── The 11 Glk styles for text-buffer windows (base: text).
+# [glk.buffer]
+# normal = { parent = "text" }
+# emphasized = { parent = "text", italic = true }
+# preformatted = { parent = "text" }
+# header = { parent = "heading", bold = true }
+# subheader = { parent = "heading", bold = true }
+# alert = { parent = "alert", bold = true }
+# note = { parent = "muted", italic = true }
+# blockquote = { parent = "muted" }
+# input = { parent = "accent" }
+# user1 = { parent = "text" }
+# user2 = { parent = "text" }
 
-# ── Dialogs / overlays ───────────────────────────────────────────────────────
-"dialog"               = { style = "single", bg = "black", shadow = true }
-"dialog:title"         = { fg = "cyan" }
-"dialog:button"        = { fg = "white" }
-"dialog:button:active" = { fg = "black", bg = "cyan" }
-"dialog:shadow"        = { bg = "dark-gray" }
-"upper_window"         = { }                    # v4+ game-drawn screen
-"upper_window_border"  = { style = "single", fg = "cyan" }
+# ── The 11 Glk styles for text-grid windows (base: chrome).
+# [glk.grid]
+# normal = { parent = "chrome" }
+# emphasized = { parent = "chrome", italic = true }
+# preformatted = { parent = "chrome" }
+# header = { parent = "heading", bold = true }
+# subheader = { parent = "heading", bold = true }
+# alert = { parent = "alert", bold = true }
+# note = { parent = "muted", italic = true }
+# blockquote = { parent = "muted" }
+# input = { parent = "accent" }
+# user1 = { parent = "chrome" }
+# user2 = { parent = "chrome" }
 
-# ── Sound-event border pulse ─────────────────────────────────────────────────
-"sound_beep_high"      = { fg = "#ffb428" }
-"sound_beep_low"       = { fg = "#3c8cdc" }
+# ── Map colours + glyph-set presets.
+# [map]
+# background = {}
+# room = { parent = "text" }
+# room_current = { parent = "accent" }
+# room_selected = { parent = "accent", reversed = true }
+# connector = { parent = "accent" }
+# connector_distorted = { fg = "magenta" }
+# connector_portal = { parent = "accent" }
+# shared_path = { fg = "light-cyan" }
+# loc_indicator = { parent = "muted" }
+# layer_cycle = ["cyan", "green", "magenta", "yellow", "blue"]
+# box_style = "rounded"
+# arrow_set = "filled"
+# portal_icons = "ascii"
+# path_style = "light"
+# portal_path_style = "dotted"
 
-# ── Story-line styling rules ─────────────────────────────────────────────────
-# Each rule matches a Story line by regex (whole-line) and patches its style.
-# Rules are tried in order; the first match wins, ahead of the built-in
-# location/system rules.
-[[transcript.rule]]
-match = "^>.*"          # your command echo
-fg = "magenta"
-bold = true
+# ── Debug inspector disassembly selectors.
+# [debug]
+# pc = { parent = "accent", reversed = true }
+# tooltip = { parent = "chrome" }
+# disasm_executed = { parent = "accent", glyph = "|" }
+# disasm_rd = { parent = "text", glyph = " " }
+# disasm_soft = { parent = "muted", glyph = " " }
+# disasm_data = { parent = "muted", italic = true, glyph = " " }
 
-[[transcript.rule]]
-match = "(?i)\\bgrue\\b"
-fg = "red"
+# ── Story-line styling rules: recolour whole transcript lines matching a ────
+# ── regex. Rules are tried in order; the first match wins. ──────────────────
+# [[transcript.rule]]
+# match = "^>.*"                 # your echoed command lines → magenta bold
+# fg = "magenta"
+# bold = true
 
-# ── Status bar ───────────────────────────────────────────────────────────────
-# The bar is an ordered list of segments in three clusters (align = left | center
-# | right). Omit [statusbar] entirely to keep the built-in default bar.
-#
+# [[transcript.rule]]
+# match = "(?i)\\bgrue\\b"       # any line mentioning a "grue" → red (flavour example)
+# fg = "red"
+
+# ── Status bar. Omit [statusbar] for the built-in default. ───────────────────
 # Placeholders: {location} {score} {moves} {time} {turns} {title} {filter}
-#   {moves} = the game's move count; {turns} = your session command count;
-#   {filter} = the active /filter indicator (empty when showing both).
-# A segment with no placeholder is always shown; a segment whose placeholders all
-# resolve empty is hidden (so score segments vanish on clock games and vice-versa).
-[statusbar]
-border = "none"          # none | single | double | thick | rounded
-# border_fg = "cyan"
+# [statusbar]
+# border = "none"
 
-[[statusbar.segment]]
-text  = "{location}"
-align = "left"
-fg    = "cyan"
-bold  = true
+# [[statusbar.segment]]
+# text  = "{location}"
+# align = "left"
+# parent = "accent"              # segments may reference a role or set fg/bg directly
+# bold  = true
 
-[[statusbar.segment]]
-text  = "Score: {score}  Moves: {moves}"
-align = "right"
+# [[statusbar.segment]]
+# text  = "Score: {score}  Moves: {moves}"
+# align = "right"
 
-[[statusbar.segment]]
-text  = "{time}"
-align = "right"
-
-[[statusbar.segment]]
-text  = " {filter}"
-align = "right"
-fg    = "dark-gray"
-
-# ── Symbols ──────────────────────────────────────────────────────────────────
-# Presets per category; override individual glyphs under [symbols.overrides].
-[symbols]
-box_style    = "rounded"   # rounded | thick | double | solid | super-thick | ascii | borderless
-arrow_set    = "filled"    # filled | line | nerdfont | nf-bold | nf-box | nf-circle | nf-outline
-portal_icons = "ascii"     # ascii | nerdfont | nerdfont-stairs
-path_style   = "light"     # light | heavy | dotted
-
-[symbols.overrides]
-# Single-char overrides for any glyph slot. Examples:
-"gutter.meta"    = "▏"     # meta transcript gutter marker
-"gutter.warning" = "!"     # warning transcript gutter marker
-# "arrow.north"  = "^"
-# "room.normal.tl" = "+"
+# [[statusbar.segment]]
+# text  = "{time}"
+# align = "right"

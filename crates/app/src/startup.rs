@@ -144,6 +144,12 @@ pub(crate) fn boot() -> BootResult {
     app::trace::hostio(&cfg.user_dir, cfg.trace.hostio,
         format!("vfs_read({} bytes)", vfs_sidecar.len()));
 
+    // Auto-seed a fresh style.toml (SQ-0309, Task 6b): the interactive style
+    // editors are gone, so a user dir with no style.toml yet gets a fully
+    // commented, registry-derived template on first run. Never overwrites an
+    // existing file; best-effort (a read-only home must not crash startup).
+    app::theme::template::auto_seed(&cfg.user_dir);
+
     // Resolve the look from style.toml (the single styling source) BEFORE the
     // engine builds: a Glulx game may probe glk_style_measure for the host's
     // rendered colours during boot (Kerkerkruip's dark-background detection,
