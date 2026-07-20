@@ -2,45 +2,56 @@
 
 [← back to README](../../README.md)
 
-- **`.babelmap` Save States** — the emulator's own snapshot (Ctrl+S / `/save-state`
-  and Ctrl+R / `/restore-state`), a single file bundling the map, VM state, screen,
-  and transcript. By default a story starts fog-of-war (only what you've explored);
-  opt into a shared default map with `use_default_map`.
-- **Multiple named save slots** with a saves-manager modal (load / save-as /
-  delete), each slot tracking name, turn count, and timestamp.
-- **Import standard saves** — bring in a standard Quetzal `.qzl`/`.sav` game
-  save from another interpreter via the saves manager's built-in file browser,
-  keeping your accumulated map. Going the other way, the story's own `SAVE`
-  already writes the portable standard `.qzl` (see below).
-- **Standard in-game save/restore, all versions** — when a story runs its own
-  `save`/`restore`, babelmap writes and reads a bare standard Quetzal `.qzl` save
-  (the same format other interpreters use), now including v3 (Zork-era) games'
-  branch-form `@save`/`@restore`. This is a genuinely different file from the
-  emulator's `.babelmap` Save State: the game's `.qzl` holds VM state only, while
-  the `.babelmap` Save State also carries the map, screen, and transcript. These
-  standard `.qzl` saves are interoperability-tested against `dfrotz` in both
-  directions (babelmap reads dfrotz's saves and vice-versa); run the live suite
-  with `scripts/gen-interop-goldens.sh` or `cargo test -p zvm --test save_interop
-  -- --ignored`. Glulx now also writes a real, standard in-game save via its own
-  `@save`/`@restore` — VM state only, distinct from `.babelmap` — the same shape
-  as the Z-machine's `.qzl`. Its round-trip is verified internally, but Glulx
-  *cross-interpreter* save interop isn't golden-tested yet (tracked in SQ-0229).
-- **Auto-save** (per turn) and **auto-load** (resume on launch) — both
-  configurable.
-- **Glulx external file storage** — a Glulx game's own Glk files (its
-  transcripts, command recordings, and data files) are kept in an in-memory VFS
-  that auto-persists per story across sessions, so those files survive a plain
-  quit with no explicit save. When a game asks the *player* where to write
-  (`create_by_prompt`), babelmap prompts for a name; when it asks which file to
-  read, it shows a picker of the story's existing files. These files ride inside
-  `.babelmap` Save States too. A Glulx game's **own** fixed-name saves
-  (`create_by_name` — e.g. Counterfeit Monkey's init cache, autosave, undo) are
-  written and read **silently** with no prompt, and are hidden from the player
-  saves list; because they persist per story, a relaunch auto-restores them so
-  the game skips its init (SQ-0296). → [persistence model](../persistence.md)
-- **Rewind / replay / resume** — with `record_turn_history` on, babelmap records
-  a per-turn history (the game save plus a map snapshot and the transcript) into
-  the `.babelmap` archive. Press **F4** (or `/open-history`) to open the replay
-  modal: step or auto-play through every past turn with the map reconstructed as
-  it looked at that moment, then resume the game from any earlier turn — undo that
-  reaches back further than the game's own UNDO, and survives across sessions.
+Quit mid-dungeon and come back to exactly where you stood — same room, same
+inventory, same map, same screen. babelmap layers a few different kinds of save
+on top of each other so you never lose progress, whether you save deliberately,
+let the game save itself, or never save at all.
+
+- **`.babelmap` Save States — freeze the whole session, not just the game.**
+  Ctrl+S (`/save-state`) snapshots everything into one self-contained file: the
+  VM's exact state, the map you've drawn, the on-screen windows, and the
+  transcript. Ctrl+R (`/restore-state`) thaws it back. It's the emulator's own
+  save-anywhere snapshot — engine-neutral, and the game never knows it happened,
+  so you can bail out mid-sentence or mid-puzzle and land right back in it.
+- **Named slots.** Keep as many Save States as you like. The saves-manager modal
+  lists them (Enter to load, `s` to save-as, `d` to delete, `i` to import), each
+  slot showing its name, turn count, and timestamp.
+- **Bring saves in from other interpreters — standard Quetzal.** Point the saves
+  manager's built-in file browser at a `.qzl`/`.sav` game save from `dfrotz` (or
+  any other interpreter), import it, and keep the map you've already accumulated.
+  It works the other way too: when a story runs its own `SAVE`, babelmap writes a
+  bare, portable standard Quetzal `.qzl` — the same file any other interpreter
+  reads — for every Z-machine version, right down to v3 (Zork-era) branch-form
+  `@save`/`@restore`. That interoperability is golden-tested against `dfrotz` in
+  both directions (`scripts/gen-interop-goldens.sh`, or
+  `cargo test -p zvm --test save_interop -- --ignored`).
+
+  This game-written `.qzl` is a genuinely different file from a `.babelmap` Save
+  State: the `.qzl` holds VM state only, while the Save State also carries the
+  map, screen, and transcript. Glulx games likewise write a real, standard
+  Glulx-Quetzal in-game save — VM state only, the same shape as the Z-machine's
+  `.qzl`. Its round-trip is verified internally; Glulx *cross-interpreter* save
+  interop isn't golden-tested yet (tracked in SQ-0229).
+- **Auto-save and auto-load.** Turn on auto-save and babelmap snapshots after
+  every turn; leave auto-load on (the default) and launching a story drops you
+  straight back where you quit, map and all. Both are configurable — start fresh
+  while keeping the accumulated map by switching auto-load off.
+- **Glulx external files just persist.** A Glulx game's own Glk files — its
+  transcripts, command recordings, and data files — live in an in-memory VFS that
+  auto-persists per story across sessions, so they survive a plain quit with no
+  explicit save (Kerkerkruip's scores and preferences stick, for instance). When
+  a game asks the *player* where to write (`create_by_prompt`), babelmap prompts
+  for a name; when it asks which file to read, it shows a picker of the story's
+  existing files. These files ride inside `.babelmap` Save States too. A Glulx
+  game's **own** fixed-name saves (`create_by_name` — e.g. Counterfeit Monkey's
+  init cache, autosave, and undo slots) are written and read **silently**, with no
+  prompt, and stay hidden from the player saves list; because they persist per
+  story, a relaunch auto-restores them so the game skips its long init (SQ-0296).
+  → [persistence model](../persistence.md)
+- **Rewind, replay, resume.** Switch on `record_turn_history` and babelmap keeps
+  a per-turn history — each turn's game save plus a snapshot of the map and
+  transcript — inside the `.babelmap` archive. Open the replay modal (the leader
+  key then `h`, or `/open-history`) and step or auto-play through every past turn
+  with the map reconstructed exactly as it looked at that moment, then resume the
+  game from any earlier turn. It's undo that reaches back further than the game's
+  own UNDO — and survives across sessions.

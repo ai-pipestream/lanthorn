@@ -12,10 +12,10 @@ network-audio feature and isn't going to grow one — routing audio off-box is
 entirely an OS/transport concern, outside babelmap's scope. This page just
 points you at the standard tools for doing that.
 
-babelmap's own audio controls (`--no-sound`, `--volume <0-100>` on the CLI,
-or `enable_sound` / `volume` in `~/.babelmap/config.toml`) only affect what
-babelmap sends to the local device — they don't change where that device is.
-Everything below sits underneath that layer.
+babelmap's own audio controls (`enable_sound` and `volume` in
+`~/.babelmap/config.toml`) only affect what babelmap sends to the local
+device — they don't change where that device is. Everything below sits
+underneath that layer.
 
 ## Option 1: PulseAudio / PipeWire network forwarding
 

@@ -4,10 +4,17 @@
 
 ## Customization
 
+Almost every pixel babelmap paints is yours to repaint. Colours, borders, box
+glyphs, the status line, the keymap, even the easing curve on a scroll — all of
+it lives in two plain TOML files you can edit and reload without leaving the
+game. This page walks the knobs from the ones you'll reach for first to the ones
+that let you rebuild the whole look from scratch.
+
 ### Styling model — roles, panels, and Glk styles
-`style.toml` is built on a small **role palette** that everything else derives
-from, so a theme author sets a handful of colors and the whole app stays
-coherent, while power users can still override any single selector.
+Set seven colours and you've themed the entire app. That's the payoff of
+`style.toml`'s **role palette**: a handful of roots that everything else derives
+from, so a coherent theme falls out of almost no typing — while power users can
+still reach in and override any single selector by name.
 
 - **7 roles** (`[roles]`) are the roots a theme actually sets: `text` (body ink),
   `chrome` (ink on a UI surface — bars/panels/upper window), `line`
@@ -52,12 +59,13 @@ coherent, while power users can still override any single selector.
   `map.room` for box corners, `glyphs = { north = "^" }` on `map.connector` for
   arrows — there is no separate override table.
 - **`[debug]`** holds only the disassembly-specific selectors for the debug
-  inspector (`pc` and the SQ-0428 confidence tiers `disasm_executed`
-  / `disasm_rd` / `disasm_soft` / `disasm_data`); each tier carries both a line
-  style and a gutter **`glyph`** (e.g. `disasm_executed`'s `|` mark), so the
-  color and the mark are both themeable. The panel's frame/body/tabs come from
-  the shared `[panel]` chrome above, and its opcode hover tooltip from the shared
-  `[tooltip]` surface (below), not from `[debug]`.
+  inspector: `pc` and the confidence tiers `disasm_executed` / `disasm_rd`
+  / `disasm_soft` / `disasm_data` that shade how sure the disassembler is that a
+  byte is really code. Each tier carries both a line style and a gutter
+  **`glyph`** (e.g. `disasm_executed`'s `|` mark), so the colour and the mark are
+  both themeable. The panel's frame/body/tabs come from the shared `[panel]`
+  chrome above, and its opcode hover tooltip from the shared `[tooltip]` surface
+  (below), not from `[debug]`.
 - **Surfaces beyond `[panel]`.** Dialogs and tooltips are their own **surface**
   sections — a background + optional frame + the text on them — separate from
   `[panel]`. `[dialog]` styles the modal surface (`background`, its own `border`
@@ -67,9 +75,12 @@ coherent, while power users can still override any single selector.
   keys.
 
 ### Everyday customization
+Below the full role system sit the knobs most people actually touch — the small
+switches that make babelmap feel like yours without opening the whole registry.
+
 - **Room numbers** — room id numbers are hidden by default (portal icons take the
-  freed bottom row); toggle them with the `toggle-room-numbers` command, persisted
-  via the `show_room_numbers` setting.
+  freed bottom row); flip them on with the `toggle-room-numbers` command,
+  persisted via the `show_room_numbers` setting.
 - **Color schemes** — recolor rooms, connectors, and chrome from a
   [Ghostty](https://ghostty.org) theme file or a built-in (mono / high-contrast /
   tomorrow-night), with per-role and per-selector overrides. Defaults to your
@@ -82,9 +93,10 @@ coherent, while power users can still override any single selector.
   `{moves}`, `{time}`, `{turns}`, `{title}`, `{filter}` — so you can compose
   exactly the readout you want (e.g. `Score: {score}  Moves: {moves}`) instead
   of a fixed layout.
-- **Animations** — smooth, eased transcript scrolling instead of instant jumps,
-  configured under `[animation]` in `config.toml` (`enabled`, `easing`,
-  `scroll_ms`). Set `enabled = false` for instant scrolling.
+- **Animations** — the transcript glides to its new position on an easing curve
+  instead of snapping there. Tune it under `[animation]` in `config.toml`
+  (`enabled`, `easing`, `scroll_ms`), or set `enabled = false` (or `scroll_ms =
+  0`) to have every scroll land instantly.
 - **Transcript text styling** — color each transcript category independently via
   bare selectors — `transcript`, `transcript_input`, `transcript_meta`,
   `transcript_warning`, `transcript_system`, `transcript_crash` (`fg`/`bg`/
@@ -135,19 +147,20 @@ coherent, while power users can still override any single selector.
   corner with a margin — via `[dialog]`'s `placement` / `margin` keys.
 
 ### Editing your theme
-All visual settings live in a standalone `style.toml`, referenced from
-`config.toml` by `style = "<name or path>"` (the single styling source —
-`config.toml` no longer carries style). There is no in-app editor: on first
-run, if you have no `style.toml`, babelmap writes one to your user directory
-**fully commented out** — every selector present, grouped by section (roles,
-panels, Glk styles, map, debug, transcript rules, status bar), with a short
-explanatory comment per section and every commented line already equal to the
-built-in default. It never overwrites an existing file. Edit it, uncomment the
-lines you want to change, save, and run **`reload-style`** to apply the change
-live (a syntax error keeps the current look and warns instead of crashing); set
-`watch_style = true` in `config.toml` (or run **`toggle-watch`**) to
-auto-reload on every save instead. `style.example.toml` at the repo root is
-generated from the same registry, so it always matches the seeded template.
+The file *is* the editor. All visual settings live in a standalone `style.toml`,
+referenced from `config.toml` by `style = "<name or path>"` (the single styling
+source — `config.toml` carries no style of its own). On first run, if you have no
+`style.toml`, babelmap seeds one in your user directory **fully commented out**:
+every selector is there, grouped by section (roles, panels, Glk styles, map,
+debug, transcript rules, status bar), each with a short explanatory comment, and
+every commented line already spelling out the built-in default — so the seeded
+file is a working reference you edit in place, not a blank page. It never
+overwrites an existing file. Uncomment the lines you want to change, save, and
+run **`reload-style`** to see the change live (a syntax error keeps the current
+look and warns you instead of crashing); flip `watch_style = true` in
+`config.toml` (or run **`toggle-watch`**) and every save reloads on its own.
+`style.example.toml` at the repo root is generated from the same registry, so it
+always matches the seeded template.
 
 **Per-game looks**: drop a `style.toml` into the game's own save directory
 (`<data-base>/<story-key>.save/style.toml` — the same folder as its saves and
@@ -179,7 +192,11 @@ re-seed the new template, or hand-write the new shape from
   cursor-addressed games (forms, status displays) want a roomy story pane.
 - `undo_levels` (default 16) — how many in-memory undo states the Z-machine
   keeps for the game's own UNDO command (0 disables undo).
-- **In-app config screen** (`F2`) — a settings modal for the common options
-  with an explicit Save (writes the config file, format-preserving) and Cancel;
-  changes apply live.
-- Configurable babelmap home directory.
+- **In-app config screen** — pop the leader panel (default `Ctrl+K`) and press
+  the `open-config` key for a settings modal covering the common options, with an
+  explicit Save (writes the config file, comments and layout preserved) and
+  Cancel; changes apply live.
+- **Portable home** — everything babelmap keeps (config, style, saves, sidecars)
+  lives under `~/.babelmap` by default; point `--user-dir` somewhere else to
+  relocate the whole home, or `--data-dir` to split just the saves and sidecars
+  off on their own.

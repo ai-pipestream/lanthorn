@@ -21,6 +21,14 @@ what each one captures, when it triggers, and what survives.
 The two are genuinely different files with different contents — keep the names
 straight.
 
+**A third engine, Scott Adams, has no Layer 1 at all.** The Scott VM has no
+in-game Quetzal `@save`/`@restore` suspension protocol; its in-game `SAVE GAME`
+action (opcode 71) instead routes to a host **Save State** snapshot (Layer 2),
+and it keeps no Layer 3 sidecar. Wherever this page says "both engines" it means
+the Z-machine and Glulx — the two engines with an in-game `@save`/`@restore`
+(Layer 1); their in-game saves are Quetzal (`.qzl`) and Glulx (`.glksave`)
+respectively.
+
 ## Layer 1 — the game's own save (`@save` / `@restore`)
 
 Player-initiated, from inside the story ("Type SAVE to save your position").
@@ -66,13 +74,19 @@ babelmap's own save-anywhere snapshot, explicit and per-slot. Triggered by Ctrl+
 It captures the **entire machine plus babelmap's session context**: VM state, the
 Glk window/stream tree and screen, the map, the transcript, turn history, and
 metadata. Crucially it **includes the entire Glk file VFS** — every file a Glulx
-game has written through Glk file streams — via the SQ-0277 v4 `Glk ` snapshot
-(`crates/gvm/src/glk.rs`, `GLK_SNAPSHOT_VERSION = 4`).
+game has written through Glk file streams — embedded in the `Glk ` snapshot
+(`crates/gvm/src/glk.rs`, `GLK_SNAPSHOT_VERSION = 6`; the VFS has been embedded
+since v4, SQ-0277, and restore still accepts v4 onward).
 
 Save States are bundled into a self-contained `.babelmap` archive
 (`crates/app/src/archive.rs`). Inside the archive the engine-tagged VM save is
-`game.qzl` for the Z-machine and `game.glksave` for Glulx. Named slots, auto-save
-(per turn) and auto-load (resume on launch) all operate on this layer.
+`game.glksave` for Glulx and `game.qzl` otherwise (the `save_ext` fallback, so
+the Z-machine's Quetzal and the Scott VM's `Vm::snapshot` blob both land as
+`game.qzl` — the recorded engine tag, not the extension, tells them apart on
+restore). This is Scott Adams' **only** persistence layer: with no in-game
+Quetzal save and no sidecar, its in-game `SAVE GAME` and the host Ctrl+S both
+write here. Named slots, auto-save (per turn) and auto-load (resume on launch)
+all operate on this layer.
 
 ## Layer 3 — automatic per-story persistence (no explicit save)
 
@@ -87,7 +101,7 @@ sessions.
   auxiliary-file mechanism (save/restore of a memory table to a named external
   file) persist to `<base>/<story-key>.save/default.aux` — in the app
   (`crates/app/src/aux_store.rs`) and in `zvm-cli` (`ZAUX` format,
-  `crates/zvm-cli/src/aux.rs`), each keyed by the story filename, not IFID.
+  `crates/zvm-cli/src/auxiliary.rs`), each keyed by the story filename, not IFID.
 - **Glulx — the Glk file VFS (new, SQ-0278).** Every file a Glulx game writes
   through Glk file streams now auto-persists to
   `<base>/<story-key>.save/default.glkvfs` — in the app
@@ -166,7 +180,7 @@ silently (see Layer 1, SQ-0296).
 
 ### Map/transcript exports (SQ-0288)
 
-The app's `/export-svg`, `/export-dot`, `/export-dump`, and `/export-transcript`
+The app's `/export-svg`, `/export-dot`, `/export-map`, and `/export-transcript`
 commands write into the same per-game directory, using fixed default names —
 `map.svg`, `map.dot`, `map.txt`, `transcript.txt` — overwriting on repeat
 export. Each takes an optional `[file]` argument that resolves the same way as
@@ -194,6 +208,7 @@ directory (renaming to the `default.*` / `<slug>.*` names above as needed).
 | 1 — game's own save (`create_by_name`, SQ-0296) | Glulx | app & `gvm-cli` | `<base>/<story-key>.save/<name>.qzl` — silent, no prompt; hidden from the saves list |
 | 2 — Save State / Restore State | Z-machine | app | `<base>/<story-key>.save/default.babelmap` or `<slug>.babelmap` (`game.qzl` inside) |
 | 2 — Save State / Restore State | Glulx | app | `<base>/<story-key>.save/default.babelmap` or `<slug>.babelmap` (`game.glksave` inside; embeds full Glk VFS) |
+| 2 — Save State / Restore State | Scott Adams | app | `<base>/<story-key>.save/default.babelmap` or `<slug>.babelmap` (`game.qzl` inside = `Vm::snapshot` blob; Scott's only layer) |
 | 3 — auto per-story (aux) | Z-machine | app | `<base>/<story-key>.save/default.aux` |
 | 3 — auto per-story (aux) | Z-machine | `zvm-cli` | `<base>/<story-key>.save/default.aux` (`ZAUX`) |
 | 3 — auto per-story (Glk VFS) | Glulx | app | `<base>/<story-key>.save/default.glkvfs` (`GVFS`) |

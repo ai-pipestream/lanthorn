@@ -7,9 +7,9 @@ you can check our behaviour against the source of truth. Section references (e.g
 
 ## Virtual machines
 
-- **Z-Machine Standards Document 1.1** — the Infocom/Inform Z-code VM (v3–v8) that the `zvm`
-  crate implements: opcodes, object model, text encoding, the v3/v5 status line, and the
-  save/restore/undo model.
+- **Z-Machine Standards Document 1.1** — the Infocom/Inform Z-code VM that the `zvm`
+  crate implements (versions 3, 4, 5, 7, and 8; the graphical v6 is not supported): opcodes,
+  object model, text encoding, the v3/v5 status line, and the save/restore/undo model.
   <https://inform-fiction.org/zmachine/standards/z1point1/index.html>
 
 - **Glulx Specification (3.1.3)** — Andrew Plotkin's 32-bit VM for large Inform 7 games,
@@ -17,13 +17,23 @@ you can check our behaviour against the source of truth. Section references (e.g
   (`@accelfunc`) opcodes, and `@save`/`@restore` (Glulx spec §1.8).
   <https://eblong.com/zarf/glulx/Glulx-Spec.html> · [home](https://eblong.com/zarf/glulx/)
 
+- **Scott Adams / ScottFree `.dat`** — the classic Scott Adams adventure format, implemented
+  by the `scott` crate. There is no formal standards document; the de-facto reference is Alan
+  Cox's **ScottFree** interpreter and the tokenized `.dat` database it reads (header counts,
+  actions, verbs/nouns, rooms, messages). This format is entirely its own — **not** built on
+  Glk or Quetzal — with its own text display and its own save/restore.
+  <https://ifarchive.org/indexes/if-archive/scott-adams/>
+  (Scott Adams games and ScottFree ports)
+
 ## I/O layer
 
-- **Glk API Specification (0.7.6)** — the windowing/stream/event abstraction both VMs drive
-  their display through (text-buffer and text-grid windows, graphics windows, line/char and
-  timer/mouse/hyperlink input events, file streams). babelmap projects the Glk window tree
-  onto its terminal UI. Referenced in-code at e.g. §3.3 (window sizing), §4.2/§4.4 (event
-  model), §11.2 (file streams).
+- **Glk API Specification (0.7.6)** — the windowing/stream/event abstraction the **Glulx**
+  engine drives its display through (text-buffer and text-grid windows, graphics windows,
+  line/char and timer/mouse/hyperlink input events, file streams). babelmap projects the Glk
+  window tree onto its terminal UI. Only `gvm` uses Glk; the Z-machine and Scott Adams engines
+  render through their own native display models and converge with Glulx only at babelmap's
+  neutral `ScreenModel` (see [architecture](architecture.md)). Referenced in-code at e.g. §3.3
+  (window sizing), §4.2/§4.4 (event model), §11.2 (file streams).
   <https://eblong.com/zarf/glk/Glk-Spec-076.html> · [home](https://eblong.com/zarf/glk/)
 
 - **Gargoyle `garglk_*` extensions** — the de-facto colour and reverse-video Glk extensions
