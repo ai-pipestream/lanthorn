@@ -168,7 +168,13 @@ impl DialogStyle {
     pub fn from_colors(cs: &crate::colors::ColorScheme) -> DialogStyle {
         DialogStyle {
             frame: cs.theme.get("dialog").style,
-            box_style: cs.dialog_box_style,
+            // The modal frame is the theme's active panel border (§2a: dialog frame
+            // = panel.border:active), single-line by default.
+            box_style: cs
+                .theme
+                .get("panel.border:active")
+                .border
+                .unwrap_or(crate::render::paneframe::BorderStyle::None),
             glyphs: cs.dialog_glyphs.clone(),
             title: cs.theme.get("dialog_title").style,
             button: cs.theme.get("dialog_button").style,
@@ -496,7 +502,7 @@ mod tests {
         let cs = crate::colors::ColorScheme::terminal_default();
         let ds = DialogStyle::from_colors(&cs);
         assert_eq!(ds.frame, cs.theme.get("dialog").style);
-        assert_eq!(ds.box_style, cs.dialog_box_style);
+        assert_eq!(ds.box_style, cs.theme.get("panel.border:active").border.unwrap());
         assert_eq!(ds.glyphs, cs.dialog_glyphs);
         assert_eq!(ds.title, cs.theme.get("dialog_title").style);
         assert_eq!(ds.button, cs.theme.get("dialog_button").style);

@@ -264,6 +264,15 @@ fn panel_border(theme: &app::theme::resolve::Theme, focused: bool) -> Style {
     theme.get(if focused { "panel.border:active" } else { "panel.border" }).style
 }
 
+/// The panel border box style from the theme (SQ-0309 §2a): all sides use
+/// `panel.border`'s resolved `BorderStyle` (single-line by default). Replaces the
+/// legacy per-panel `*_border_sides` so the unified frame is theme-driven.
+fn panel_border_sides(theme: &app::theme::resolve::Theme) -> app::render::paneframe::PaneSides {
+    app::render::paneframe::PaneSides::all(
+        theme.get("panel.border").border.unwrap_or(app::render::paneframe::BorderStyle::None),
+    )
+}
+
 /// Render one frame. Returns both pane inner-content rects so the event loop
 /// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
@@ -373,7 +382,7 @@ fn draw_frame(
             // treats debug-active as `Layout::Split`).
             let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
             let story_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { story_border_style };
-            let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
+            let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme), &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
             let c = story_fp.content;
             let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
             transcript_max_scroll = m.max_scroll;
@@ -401,7 +410,7 @@ fn draw_frame(
         } else {
             match state.layout {
                 Layout::TranscriptFull => {
-                    let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
+                    let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme), &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                     let c = story_fp.content;
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                     transcript_max_scroll = m.max_scroll;
@@ -426,7 +435,7 @@ fn draw_frame(
                     let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
                     let story_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { story_border_style };
                     let map_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { panel_border(&state.colors.theme, state.focus == Focus::Map) };
-                    let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
+                    let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme), &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
                     let c = story_fp.content;
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                     transcript_max_scroll = m.max_scroll;
@@ -443,7 +452,7 @@ fn draw_frame(
                     }
                     story_area = story_fp.content;
 
-                    let map_fp = draw_framed(buf, pane_layout.map, state.colors.map_border_sides, &state.colors.map_border_glyphs, map_border_color, state.colors.map_header_on);
+                    let map_fp = draw_framed(buf, pane_layout.map, panel_border_sides(&state.colors.theme), &state.colors.map_border_glyphs, map_border_color, state.colors.map_header_on);
                     render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                     if let Some(anim) = &state.tidy_anim {
                         let tidy_ds = make_dialog_style(state);
