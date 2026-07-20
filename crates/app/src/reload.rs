@@ -89,6 +89,28 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
     let garglk_honor = state.garglk_overlay.as_ref().and_then(|o| o.honor_game_colours);
     state.config.honor_game_colours =
         per_game_honor.or(garglk_honor).unwrap_or(state.honor_game_colours_base);
+
+    // SQ-0309: rebuild the registry theme from the same global + per-game files, with
+    // provenance. Render still reads the legacy fields above; the theme is consumed by
+    // the Wave-5 render migration. New-schema sections drive it; an old-schema file
+    // (only [colors]/[symbols]) parses to empty new-schema decls → registry defaults.
+    {
+        use crate::theme::{resolve::resolve_theme_layered, toml_schema};
+        let parse_file = |p: Option<std::path::PathBuf>| -> toml_schema::ParsedStyle {
+            p.and_then(|p| std::fs::read_to_string(&p).ok())
+                .and_then(|t| toml_schema::parse(&t).ok())
+                .unwrap_or_default()
+        };
+        let global = parse_file(resolved_style_path(pointer.as_deref(), &user_dir));
+        let per_game = if state.game_dir.as_os_str().is_empty() {
+            toml_schema::ParsedStyle::default()
+        } else {
+            parse_file(Some(crate::styles::per_game_style_path(&state.game_dir)))
+        };
+        let (_, gs, _) = crate::colors::resolve_base(global.scheme.as_deref(), &user_dir);
+        state.colors.theme = resolve_theme_layered(&gs, &global, &per_game);
+    }
+
     ReloadOutcome::Reloaded { warnings }
 }
 
@@ -214,6 +236,29 @@ mod tests {
         crate::styles::write_per_game_honor(&game_dir, None).unwrap();
         reload_style(&mut state);
         assert!(state.config.honor_game_colours, "auto falls back to garglk stylehint");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reload_builds_theme_from_new_schema_files() {
+        use ratatui::style::Color;
+        let dir = temp_dir("theme-newschema");
+        let global = dir.join("style.toml");
+        std::fs::write(&global, "[roles]\naccent = { fg = \"green\" }\n").unwrap();
+        let game_dir = dir.join("game.save");
+        std::fs::create_dir_all(&game_dir).unwrap();
+        std::fs::write(game_dir.join("style.toml"), "[roles]\naccent = { fg = \"red\" }\n").unwrap();
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.style = Some(global.to_string_lossy().to_string());
+        state.game_dir = game_dir.clone();
+
+        let outcome = reload_style(&mut state);
+        assert!(matches!(outcome, ReloadOutcome::Reloaded { .. }));
+        let r = state.colors.theme.get("accent");
+        assert_eq!(r.style.fg, Some(Color::Red), "per-game [roles] wins");
+        assert_eq!(r.provenance, crate::theme::resolve::Provenance::PerGame);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

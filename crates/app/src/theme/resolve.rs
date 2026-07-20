@@ -316,25 +316,92 @@ pub fn resolve_theme(
     scheme: &crate::colors::GhosttyScheme,
     parsed: &super::toml_schema::ParsedStyle,
 ) -> Theme {
+    resolve_theme_layered(scheme, parsed, &super::toml_schema::ParsedStyle::default())
+}
+
+/// Build the flat [`Theme`] from a base `scheme` and TWO parsed layers: the global
+/// user `style.toml` and the per-game overlay (per-game wins, §5). Roles start from
+/// [`Roles::from_scheme`], then global `[roles]` fg/bg overrides, then per-game
+/// `[roles]` overrides. Each layer's `decls` lower to its own [`Decls`] (fg/bg +
+/// modifiers) so [`resolve`] stamps [`Provenance`] per selector (GlobalUser / PerGame).
+/// The garglk layer is empty here (it rides the legacy field path until Wave 5).
+///
+/// DEFERRED (unchanged from Wave 1, marked `// Wave 5:`): decl `parent` re-rooting,
+/// decl `glyph`/`glyphs` overrides, role modifiers, modifier-clearing.
+pub fn resolve_theme_layered(
+    scheme: &crate::colors::GhosttyScheme,
+    global: &super::toml_schema::ParsedStyle,
+    per_game: &super::toml_schema::ParsedStyle,
+) -> Theme {
+    // 1. base roles from scheme, then [roles] fg/bg overrides (global, then per-game).
+    let mut roles = Roles::from_scheme(scheme);
+    let global_role_decls = lower_role_decls(&global.roles, scheme);
+    let per_game_role_decls = lower_role_decls(&per_game.roles, scheme);
+    apply_role_overrides(&mut roles, &global_role_decls);
+    apply_role_overrides(&mut roles, &per_game_role_decls);
+
+    // 2. lower each layer's decls -> its own Decls layer. The [roles] fg/bg
+    //    overrides join the same layer (keyed by role name, which is itself a
+    //    REGISTRY row name) so the role selector's own Provenance is stamped
+    //    consistently with every other selector, via the same `resolve` pass.
+    let mut global_decls = lower_decls(&global.decls, scheme);
+    global_decls.extend(global_role_decls);
+    let mut per_game_decls = lower_decls(&per_game.decls, scheme);
+    per_game_decls.extend(per_game_role_decls);
+
+    resolve(&roles, &global_decls, &Decls::new(), &per_game_decls)
+}
+
+/// Apply a layer's already-lowered `[roles]` fg/bg [`Decls`] onto `roles` in
+/// place (so dependent selectors inherit the override via their parent role).
+/// Unrecognised role names are ignored. Modifiers are not applied (Wave 5).
+fn apply_role_overrides(roles: &mut Roles, role_decls: &Decls) {
+    for (name, delta) in role_decls {
+        let Some(style) = roles.by_name_mut(name) else { continue };
+        *style = apply_style(*style, delta);
+    }
+}
+
+/// Lower a layer's raw `[roles]` overrides to a [`Decls`] map of fg/bg-only
+/// [`Delta`]s (role modifiers are Wave 5 — a role entry with neither fg nor bg
+/// set is dropped). Shared by [`apply_role_overrides`] (role-derived selectors)
+/// and [`resolve_theme_layered`]'s own decls layer (the role selector's stamp).
+fn lower_role_decls(
+    raw_roles: &std::collections::BTreeMap<String, super::toml_schema::RawDelta>,
+    scheme: &crate::colors::GhosttyScheme,
+) -> Decls {
     use crate::colors::parse_color_value;
 
-    // 1. base roles from scheme, then [roles] fg/bg overrides.
-    let mut roles = Roles::from_scheme(scheme);
-    for (name, raw) in &parsed.roles {
-        let Some(style) = roles.by_name_mut(name) else { continue };
-        if let Some(fg) = raw.fg.as_deref().and_then(|s| parse_color_value(s, scheme)) {
-            *style = style.fg(fg);
+    let mut decls = Decls::new();
+    for (name, raw) in raw_roles {
+        let fg = raw.fg.as_deref().and_then(|s| parse_color_value(s, scheme));
+        let bg = raw.bg.as_deref().and_then(|s| parse_color_value(s, scheme));
+        if fg.is_none() && bg.is_none() {
+            continue;
         }
-        if let Some(bg) = raw.bg.as_deref().and_then(|s| parse_color_value(s, scheme)) {
-            *style = style.bg(bg);
-        }
-        // Wave 5: role modifiers (bold/italic/...) from `[roles]` are not applied
-        // yet — today's roles carry no user modifiers except heading's baked-in bold.
+        decls.insert(name.clone(), Delta { fg, bg, ..Delta::EMPTY });
     }
+    decls
+}
 
-    // 2. lower parsed.decls -> a single GLOBAL Decls layer.
-    let mut global = Decls::new();
-    for (name, raw) in &parsed.decls {
+/// Lower a layer's raw `decls` (fg/bg strings + modifier flags) to a [`Decls`]
+/// map of resolved [`Delta`]s. Colour strings resolve against `scheme` via
+/// [`crate::colors::parse_color_value`].
+///
+/// DEFERRED (later waves): a decl's `parent` re-rooting and a decl's
+/// `glyph`/`glyphs` overrides are NOT applied here — the registry [`Delta`]'s
+/// glyph fields are `&'static`, and per-decl parent override needs resolver
+/// support (Wave 5). Only fg/bg/modifiers flow now. Modifiers are additive only
+/// (an unset/`false` flag is a no-op, matching [`apply_style`]) — a user cannot
+/// yet CLEAR a default modifier.
+fn lower_decls(
+    raw_decls: &std::collections::BTreeMap<String, super::toml_schema::RawDelta>,
+    scheme: &crate::colors::GhosttyScheme,
+) -> Decls {
+    use crate::colors::parse_color_value;
+
+    let mut decls = Decls::new();
+    for (name, raw) in raw_decls {
         let delta = Delta {
             fg: raw.fg.as_deref().and_then(|s| parse_color_value(s, scheme)),
             bg: raw.bg.as_deref().and_then(|s| parse_color_value(s, scheme)),
@@ -346,11 +413,10 @@ pub fn resolve_theme(
             glyph: None, // Wave 5: glyph overrides not applied here.
             glyphs: &[], // Wave 5: glyph-slot overrides not applied here.
         };
-        global.insert(name.clone(), delta);
+        decls.insert(name.clone(), delta);
         // Wave 5: raw.parent re-rooting not applied here.
     }
-
-    resolve(&roles, &global, &Decls::new(), &Decls::new())
+    decls
 }
 
 #[cfg(test)]
@@ -545,5 +611,59 @@ mod tests {
         );
         let theme = resolve_theme(&scheme, &with_decl);
         assert_eq!(theme.get("transcript").style.fg, Some(Color::Green));
+    }
+
+    // ── Task 3.1: resolve_theme_layered (global + per-game, provenance) ──────
+
+    #[test]
+    fn layered_per_game_beats_global_with_provenance() {
+        use super::super::toml_schema::RawDelta;
+        let scheme = terminal_default_scheme();
+
+        let mut global = ParsedStyle::default();
+        global.decls.insert(
+            "transcript".to_string(),
+            RawDelta { fg: Some("green".to_string()), ..RawDelta::default() },
+        );
+
+        // per_game overrides transcript to red.
+        let mut per_game = ParsedStyle::default();
+        per_game.decls.insert(
+            "transcript".to_string(),
+            RawDelta { fg: Some("red".to_string()), ..RawDelta::default() },
+        );
+        let theme = resolve_theme_layered(&scheme, &global, &per_game);
+        let r = theme.get("transcript");
+        assert_eq!(r.style.fg, Some(Color::Red));
+        assert_eq!(r.provenance, Provenance::PerGame);
+
+        // With per_game default (no override), global wins.
+        let theme = resolve_theme_layered(&scheme, &global, &ParsedStyle::default());
+        let r = theme.get("transcript");
+        assert_eq!(r.style.fg, Some(Color::Green));
+        assert_eq!(r.provenance, Provenance::GlobalUser);
+    }
+
+    #[test]
+    fn layered_roles_override_applies() {
+        use super::super::toml_schema::RawDelta;
+        let scheme = terminal_default_scheme();
+
+        let mut global = ParsedStyle::default();
+        global.roles.insert(
+            "accent".to_string(),
+            RawDelta { fg: Some("green".to_string()), ..RawDelta::default() },
+        );
+        let theme = resolve_theme_layered(&scheme, &global, &ParsedStyle::default());
+        assert_eq!(theme.get("accent").style.fg, Some(Color::Green));
+
+        // A per-game [roles] override wins over the global one.
+        let mut per_game = ParsedStyle::default();
+        per_game.roles.insert(
+            "accent".to_string(),
+            RawDelta { fg: Some("red".to_string()), ..RawDelta::default() },
+        );
+        let theme = resolve_theme_layered(&scheme, &global, &per_game);
+        assert_eq!(theme.get("accent").style.fg, Some(Color::Red));
     }
 }
