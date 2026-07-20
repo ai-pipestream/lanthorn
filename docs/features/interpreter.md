@@ -1,9 +1,15 @@
-# Interpreter (Z-machine & Glulx)
+# Interpreter (Z-machine, Glulx & Scott Adams)
 
 [← back to README](../../README.md)
 
-babelmap runs two virtual machines: a from-scratch Z-machine (`zvm`) and a
-Glulx engine (`gvm`). Both feed the same host features below.
+babelmap runs three from-scratch, zero-dependency virtual machines: a Z-machine
+(`zvm`), a Glulx engine (`gvm`), and a Scott Adams / ScottFree engine (`scott`).
+The format is auto-detected from the file, and all three feed the same host
+features below.
+
+- **Scott Adams (ScottFree `.dat` / SAGA)** — the classic illustrated 8-bit
+  adventures (*Adventureland*, *Pirate Adventure*, …), including their vector
+  line-art room graphics, played through the same TUI and live automap.
 
 - Full play of v3/v4/v5/v7/v8 Z-machine story files.
 - Standard **Quetzal** save/restore — interchangeable with other interpreters.

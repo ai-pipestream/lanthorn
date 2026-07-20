@@ -18,6 +18,25 @@
 - Pane focus with clear visual highlighting; Tab / Shift-Tab cycle the layout
   (split, map-only, transcript-only).
 
+## Debug inspector (Z-machine)
+
+`/debug` turns the map pane into a live **Z-machine debug inspector** — a
+built-in debugger that follows the running story in real time.
+
+![The debug inspector: live disassembly, call stack, and opcode hover help](../debug-inspector.png)
+
+- **Live disassembly** that tracks the program counter, with a `PC` divider
+  marking the next instruction to execute.
+- **Tabbed views** across three windows: Disassembly / Globals · Locals /
+  Objects / Dictionary · Call Stack / Stack / Memory — Tab moves between windows,
+  `↔` switches the section within a window, `↑`/`↓` scroll.
+- **Opcode hover help** — hover an instruction and a tooltip decodes the opcode
+  and its operands (what each argument is, where the result lands).
+- **Clickable operands** — addresses in the disassembly are underlined and jump
+  to their target; `g` recenters on the PC, `r` toggles a full-width view.
+- Select-and-copy works inside the inspector just like the transcript. `Esc`
+  closes it and restores the map.
+
 ## Playing aids
 - **Verb/noun menu** — a two-pane token palette of common verbs and in-scope
   nouns; pick tokens to build a command (multi-noun via prepositions).

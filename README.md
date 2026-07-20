@@ -2,16 +2,149 @@
 
 **Play interactive fiction in your terminal while babelmap draws the map for you — live, as you explore.**
 
-babelmap is an interactive-fiction interpreter with a built-in *automapper*. Load
-a story file — the Infocom catalog and Z-machine classics (Zork), or modern
-Inform 7 / Glulx games — play it in a clean TUI, and watch a room-and-connection
-map assemble itself from your movements. No graph paper, no manual annotation:
-every room you enter and every exit you take is placed and routed automatically,
-then continuously tidied into a readable layout.
+> ⚠️ **Alpha software.** babelmap is under active development and considered
+> **alpha** — expect rough edges and breaking changes. Formats are not yet
+> stable: the `config.toml` and `style.toml` schemas (and on-disk save data) may
+> change between versions.
+
+![babelmap playing Zork I with a live automap of the Great Underground Empire](docs/automapping.png)
+
+babelmap is a terminal interactive-fiction interpreter with a built-in *automapper*.
+Load a story — the Infocom catalog and Z-machine classics like *Zork*, modern
+Inform 7 / Glulx games, or an illustrated Scott Adams adventure — play it in a
+clean TUI, and watch a room-and-connection map assemble itself from your
+movements. No graph paper, no manual annotation: every room you enter and every
+exit you take is placed, routed, and de-overlapped automatically, then
+continuously tidied into a readable layout.
 
 ```
 babelmap path/to/story.z5
 ```
+
+---
+
+## A quick tour
+
+### Three engines, one player
+
+Point babelmap at any supported story and it detects the format and picks the
+right engine — you never choose. Under the hood are **three brand-new, clean-room
+virtual machines written from scratch in pure Rust** — no forks of Frotz or
+Glulxe, no C bindings, zero runtime dependencies:
+
+- **Z-machine** (v3/v4/v5/v7/v8) — the Infocom canon and decades of Inform 6
+  games, including the v4+ cursor-addressed upper window, timed/interrupt input,
+  and per-title header tuning.
+- **Glulx** — modern Inform 7 games, with an accelerated Inform veneer, full
+  float opcodes, and a complete **Glk 0.7.6** layer verified against the standard
+  Glulx/Glk test suites.
+- **Scott Adams** (ScottFree `.dat` / SAGA) — the illustrated 8-bit classics,
+  vector line-art graphics and all.
+
+![A Scott Adams SAGA adventure with vector graphics, playing beside its live map](docs/scott-adams-graphics.png)
+
+### Live automapping
+
+The mapper watches the stream of locations and movements and turns it into a
+spatial graph — rooms boxed, exits routed, overlaps removed, multi-level areas
+split into switchable **layers** (see the `Main / Cellar / Maze` tabs above). The
+current room glows; the whole layout re-tidies itself as you discover more. It's
+completely engine-agnostic: the same map grows whether you're playing *Zork*,
+*Counterfeit Monkey*, or *Adventureland*.
+
+### Pictures in your terminal
+
+Cover art, in-game Glulx graphics windows, and inline images in the text render
+with your terminal's best protocol — **Kitty, iTerm2, or Sixel** — and fall back
+to a universal Unicode half-block renderer everywhere else.
+
+![In-game graphics rendered with the Kitty graphics protocol](docs/kitty-graphics.png)
+
+### Multi-window games, faithfully
+
+Games that split the screen into multiple Glk windows — status panes, quote
+boxes, side-by-side layouts — are laid out as the author intended, right in the
+terminal.
+
+![A game using a multi-window Glk layout](docs/multi-window-layout.png)
+
+### A Z-machine debugger, built in
+
+Type `/debug` and the map pane becomes a live **debug inspector**: a running
+disassembly that tracks the PC, tabbed views of Globals, Locals, Objects,
+Dictionary, the Call Stack, and Memory — plus **hover help** that decodes the
+opcode under your cursor and clickable operands that jump to their address.
+
+![The built-in Z-machine debug inspector: live disassembly, call stack, and opcode hover help](docs/debug-inspector.png)
+
+### Browse your library
+
+Launch a directory instead of a file to open the **story picker**. Two view
+modes — a sortable, badged **list** or a `g` **cover-gallery grid** — each paired
+with a live **info panel**: the selected game's cover art, full metadata (author,
+year, genre, blurb), format, and IFID, fetched on demand from IFDB and cached per
+game. The type badges even tell the three engines apart at a glance (`Z5`,
+`Scott`, `G3.1.2`).
+
+![The story picker's list view: a sortable, badged catalogue beside the info panel — the cover art here is drawn with the universal Unicode half-block fallback renderer](docs/story-list.png)
+![The story picker's cover-gallery grid, with the selected game's info panel](docs/cover-gallery.png)
+
+---
+
+## Every headline feature
+
+- **Three engines** — Z-machine (v3/v4/v5/v7/v8), Glulx (Inform 7), and Scott
+  Adams (ScottFree), auto-detected from the file. Full Glk 0.7.6 support for
+  Glulx: file/resource streams, date/time with real local timezones, sound
+  channels with pause and volume ramps, echo streams, and Unicode normalization.
+  → [interpreter](docs/features/interpreter.md)
+- **Live automapping** — rooms and connections placed, routed, and de-overlapped
+  as you explore, across layered multi-level areas, and continuously re-tidied.
+  Works for every engine. → [mapping](docs/features/mapping.md)
+- **Built-in debug inspector** — a live Z-machine disassembler with PC tracking,
+  Globals/Locals/Objects/Dictionary/Call-Stack/Memory tabs, opcode hover help,
+  and click-to-jump operands. Open it with `/debug`.
+  → [interface](docs/features/interface.md)
+- **Graphics** — cover art, in-game Glulx graphics windows, and inline images,
+  rendered with the terminal's best protocol (Kitty / iTerm2 / Sixel) and a
+  universal half-block fallback. → [interface](docs/features/interface.md)
+- **Sound** — Z-machine `sound_effect` bleeps and Blorb sampled audio, plus Glulx
+  Glk sound channels with per-channel volume and finish events (AIFF/Ogg/MOD).
+  → [interpreter](docs/features/interpreter.md) · [remote audio](docs/remote-sound.md)
+- **Game-driven colour & text styling** — `set_colour` / `set_true_colour` and Glk
+  style hints honored at 24-bit RGB, with per-span bold/italic/reverse emphasis.
+  → [interpreter](docs/features/interpreter.md) · [customization](docs/features/customization.md)
+- **Rewind & replay** — step back through a recorded per-turn history with the map
+  reconstructed at each moment, and resume from any earlier turn. → [saves](docs/features/saves.md)
+- **A full TUI** — mouse support, select-and-copy, verb/noun menu, dictionary
+  autocomplete, inventory strip, command history, in-game Invisiclues hints,
+  animated top-right notification toasts (with a `dump-notifications` recall), and
+  transcript search / filter / export. → [interface](docs/features/interface.md)
+- **Saves & persistence** — self-contained `.babelmap` Save States (map + VM
+  state + metadata), named slots, Quetzal import/export, auto-save/auto-load, and
+  Glulx games' external file storage (Glk file streams) auto-persisting across
+  sessions. → [saves](docs/features/saves.md) · [persistence model](docs/persistence.md)
+- **Deeply themeable** — a small role palette (7 roots) that the whole UI derives
+  from, first-class styling for all 11 standard Glk styles, per-game looks, a
+  templated status bar, and a fully configurable keymap. Edit a fully-commented,
+  auto-seeded `style.toml` and apply changes live with `reload-style` (or
+  auto-reload on save). → [customization](docs/features/customization.md)
+- **Story picker** — browse a directory with type/artifact badges, a sortable
+  author/year list or a `g` cover-gallery grid, an info side-panel with full
+  metadata and cover art, and on-demand IFDB metadata fetch, cached per game.
+  → [interface](docs/features/interface.md)
+- **Robust** — a faulting story halts with a call-frame stack trace (written to
+  `~/.babelmap/crash.log`) while the app stays interactive, instead of taking the
+  interpreter down. → [interpreter](docs/features/interpreter.md)
+
+For the full, exhaustive feature list, see **[`docs/features/`](docs/features/)**. For the
+interactive-fiction standards babelmap implements (Z-Machine, Glulx, Glk, Quetzal, Blorb,
+Treaty of Babel), see **[`docs/standards.md`](docs/standards.md)**.
+
+**Supported story formats:** Z-machine v3, v4, v5, v7, and v8; Glulx; and Scott
+Adams (ScottFree `.dat` / SAGA). (Z-machine v6 is graphical and unsupported;
+v1/v2 are not supported.) Story files load raw, from a `.zip`, or from a **Blorb**
+container (`.zblorb`/`.blorb`/`.gblorb`).
 
 ---
 
@@ -26,65 +159,17 @@ underlying engine.
 |-------|----------------|
 | `zvm` | A from-scratch Z-machine virtual machine — executes story files, standard Quetzal save/restore. Zero-dependency. |
 | `gvm` | A Glulx virtual machine (Glk I/O) for modern Inform 7 games — accelerated Inform veneer, full float opcodes. Zero-dependency. |
+| `scott` | A Scott Adams (ScottFree `.dat`) virtual machine for the classic illustrated adventures. Zero-dependency. |
 | `mapper` | A VM-agnostic map model: rooms, connections, layered 2-D layout, overlap removal, edge routing. Serializable. |
-| `app` | The `babelmap` TUI binary (ratatui + crossterm): play loop, live map rendering, all interactive features. |
-| `zvm-cli` / `gvm-cli` | Standalone DOS-style command-line players (no map): save/restore, single-key input, terminal-bell bleeps — and, piped, a clean deterministic harness for testing/scripting. |
+| `app` | The `babelmap` TUI binary (ratatui + crossterm): play loop, live map rendering, debug inspector, all interactive features. |
+| `zvm-cli` / `gvm-cli` / `scott-cli` | Standalone DOS-style command-line players (no map): save/restore, single-key input, terminal-bell bleeps — and, piped, a clean deterministic harness for testing/scripting. |
 | `blorb` | Blorb container parsing — bundled story, cover art, and sound/image resources. |
 | `audio` | Sound playback (rodio) — synthesized bleeps and sampled AIFF / Ogg / ProTracker MOD. |
 
-**Supported story formats:** Z-machine v3, v4, v5, v7, and v8, and Glulx. (Z-machine
-v6 is graphical and unsupported; v1/v2 are not supported.) Story files load raw,
-from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
-
----
-
-## Highlights
-
-- **Two engines** — full Z-machine (v3/v4/v5/v7/v8) *and* Glulx (Inform 7) play,
-  including the v4+ cursor-addressed upper-window screen model, timed/interrupt
-  input, per-title header tuning, and a **full Glk 0.7.6 layer** (file/resource
-  streams, date/time with real local timezones, sound channels with pause and
-  volume ramps, echo streams, Unicode normalization) verified against the
-  standard Glulx/Glk test suites. → [interpreter](docs/features/interpreter.md)
-- **Live automapping** — rooms and connections placed, routed, and de-overlapped
-  automatically as you explore, across layered multi-level areas, and continuously
-  re-tidied. Works for Z-machine *and* Glulx/Inform 7 games. → [mapping](docs/features/mapping.md)
-- **Sound** — Z-machine `sound_effect` bleeps and Blorb sampled audio, plus Glulx
-  Glk sound channels with per-channel volume and finish events (AIFF/Ogg/MOD).
-  → [interpreter](docs/features/interpreter.md) · [remote audio](docs/remote-sound.md)
-- **Graphics** — cover art, in-game Glulx graphics windows, and inline images in
-  text, rendered with the terminal's best protocol (Kitty / iTerm2 / Sixel) and a
-  universal half-block fallback. → [interface](docs/features/interface.md)
-- **Game-driven colour & text styling** — `set_colour` / `set_true_colour` and Glk
-  style hints honored at 24-bit RGB, with per-span bold/italic/reverse emphasis.
-  → [interpreter](docs/features/interpreter.md) · [customization](docs/features/customization.md)
-- **Rewind & replay** — step back through a recorded per-turn history with the map
-  reconstructed at each moment, and resume from any earlier turn. → [saves](docs/features/saves.md)
-- **A full TUI** — mouse support, select-and-copy, verb/noun menu, dictionary
-  autocomplete, inventory strip, command history, in-game Invisiclues hints,
-  animated top-right notification toasts (with a `dump-notifications` recall), and
-  transcript search / filter / export. → [interface](docs/features/interface.md)
-- **Saves & persistence** — self-contained `.babelmap` Save States (map + VM
-  state + metadata), named slots, Quetzal import/export, auto-save/auto-load, and
-  Glulx games' external file storage (Glk file streams) auto-persisting across
-  sessions. → [saves](docs/features/saves.md) · [persistence model](docs/persistence.md)
-- **Deeply themeable** — a small role palette (7 roots) that the whole UI
-  derives from, first-class styling for all 11 standard Glk styles, per-game
-  looks, a templated status bar, and a fully configurable keymap. Edit a
-  fully-commented, auto-seeded `style.toml` and apply changes live with
-  `reload-style` (or auto-reload on save). →
-  [customization](docs/features/customization.md)
-- **Story picker** — launch a directory to browse your games with type/artifact
-  badges, a sortable author/year list or a `g` cover-gallery grid, an info
-  side-panel with full metadata (author, year, genre, blurb) and cover art, and
-  on-demand metadata fetch from IFDB, cached per-game. → [interface](docs/features/interface.md)
-- **Robust** — a faulting story halts with a call-frame stack trace (written to
-  `~/.babelmap/crash.log`) while the app stays interactive, instead of taking the
-  interpreter down. → [interpreter](docs/features/interpreter.md)
-
-For the full, exhaustive feature list, see **[`docs/features/`](docs/features/)**. For the
-interactive-fiction standards babelmap implements (Z-Machine, Glulx, Glk, Quetzal, Blorb,
-Treaty of Babel), see **[`docs/standards.md`](docs/standards.md)**.
+The crates are layered `zvm`/`gvm`/`scott` → `mapper` → `app`; the CLIs are thin
+VM front-ends. The mapper has no dependency on any VM, so layout logic can be
+tested in isolation, and the VM crates stay zero-dependency (image/audio/resource
+types live in `app`, `blorb`, and `audio`).
 
 ---
 
@@ -102,6 +187,9 @@ cargo build --release
 cargo run --release -p app -- path/to/story.z5
 # or, after building:
 ./target/release/babelmap path/to/story.z5
+
+# Point it at a directory to open the story picker instead
+./target/release/babelmap ~/if-games/
 ```
 
 You type commands at the story's own inline `>` prompt in the transcript, the
@@ -134,8 +222,9 @@ model](docs/persistence.md)
 cargo build --workspace          # build everything
 cargo test --workspace           # fast suite (a few slow tests are skipped)
 cargo test --workspace -- --include-ignored  # everything, incl. slow tests
-cargo run -p zvm-cli -- story.z5 # DOS-style CLI player (no map)
-cargo run -p gvm-cli -- story.ulx # DOS-style Glulx CLI player (no map)
+cargo run -p zvm-cli -- story.z5   # DOS-style CLI player (no map)
+cargo run -p gvm-cli -- story.ulx  # DOS-style Glulx CLI player (no map)
+cargo run -p scott-cli -- story.dat # DOS-style Scott Adams CLI player (no map)
 ```
 
 A few slow full-game Glulx walkthroughs (Kerkerkruip, Counterfeit Monkey) are
@@ -143,26 +232,21 @@ marked `#[ignore]` so the default `cargo test` stays quick; pass
 `--include-ignored` to run them (CI should). Doctests are disabled workspace-wide
 (`doctest = false`) — there are none, and the rustdoc pass cost seconds.
 
-`zvm-cli` / `gvm-cli` render a basic DOS-style screen (pinned status line / upper
-window via ANSI when interactive, clearing the screen on start) and degrade to a
-clean line stream when piped. Interactively they do single-key input (arrow/function
-keys decoded for `read_char` menus) and `[MORE]` paging on long output; saves and
-aux/VFS sidecars persist per game under `<story-dir>/<story-filename>.save/` by
-default (`--data-dir <path>` overrides the base). A bare filename typed at the
-**player's** SAVE/RESTORE prompt (e.g. `quick`) lands in that per-game
-directory; a path-bearing value (e.g. `/tmp/x.qzl`) is honored verbatim. A Glulx
-game's *own* fixed-name saves (its init cache, autosave, undo) are written and
-read there **silently** — no prompt — so e.g. Counterfeit Monkey auto-restores
-its startup cache on relaunch and skips its long init. On
+`zvm-cli` / `gvm-cli` / `scott-cli` render a basic DOS-style screen (pinned status
+line / upper window via ANSI when interactive, clearing the screen on start) and
+degrade to a clean line stream when piped. Interactively they do single-key input
+(arrow/function keys decoded for `read_char` menus) and `[MORE]` paging on long
+output; saves and aux/VFS sidecars persist per game under
+`<story-dir>/<story-filename>.save/` by default (`--data-dir <path>` overrides the
+base). A bare filename typed at the **player's** SAVE/RESTORE prompt (e.g. `quick`)
+lands in that per-game directory; a path-bearing value (e.g. `/tmp/x.qzl`) is
+honored verbatim. A Glulx game's *own* fixed-name saves (its init cache, autosave,
+undo) are written and read there **silently** — no prompt — so e.g. Counterfeit
+Monkey auto-restores its startup cache on relaunch and skips its long init. On
 piped stdin, a `read_char` menu exits cleanly at true EOF instead of spinning.
 The flags `--no-status` (byte-identical lower-stream output), `--no-aux`, and
 `--no-more` keep the headless test harness deterministic; `--no-sound`
 disables audio and `--volume <0-100>` sets the master volume.
-
-The crates are layered `zvm`/`gvm` → `mapper` → `app`; the CLIs are thin VM
-front-ends. The mapper has no dependency on any VM, so layout logic can be tested
-in isolation, and the VM crates stay zero-dependency (image/audio/resource types
-live in `app`, `blorb`, and `audio`).
 
 The `audio` crate carries two default-on features: `playback` (real output via
 `rodio`) and `mod-music` (ProTracker `.mod` playback via `mod_player`, requires
