@@ -148,8 +148,15 @@ impl GarglkOverlay {
             set("upper_window_border", Some(c), None);
         }
         if let Some(c) = self.windowcolor {
-            set("transcript", None, Some(c));
-            set("upper_window", None, Some(c));
+            // `windowcolor` is the generic page background; an explicit `tcolor 0`
+            // / `gcolor 0` background (Normal style) is more specific and wins, so
+            // only fall back to `windowcolor` where that slot didn't set a bg.
+            if self.buffer[0].is_none() {
+                set("transcript", None, Some(c));
+            }
+            if self.grid[0].is_none() {
+                set("upper_window", None, Some(c));
+            }
         }
         d
     }
@@ -547,9 +554,11 @@ stylehint 0
         );
         let d = ov.color_decls();
         assert_eq!(d["transcript"].fg, Some(Color::Rgb(0xff, 0xff, 0xff)));
-        // windowcolor overrides the buffer bg (applied after tcolor 0 bg).
-        assert_eq!(d["transcript"].bg, Some(Color::Rgb(0x10, 0x10, 0x10)));
+        // tcolor 0's explicit bg wins over the generic windowcolor (precedence).
+        assert_eq!(d["transcript"].bg, Some(Color::Rgb(0x00, 0x00, 0x00)));
         assert_eq!(d["upper_window"].fg, Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
+        // gcolor 0's explicit bg likewise wins over windowcolor.
+        assert_eq!(d["upper_window"].bg, Some(Color::Rgb(0x00, 0x11, 0x22)));
         assert_eq!(d["hyperlink"].fg, Some(Color::Rgb(0, 0xff, 0xff)));
         assert_eq!(d["upper_window_border"].fg, Some(Color::Rgb(0xff, 0x88, 0)));
     }
