@@ -685,12 +685,17 @@ enum FbEntryAction {
 
 // ── main ──────────────────────────────────────────────────────────────────────
 
-/// Toggle the opt-in style.toml file-watcher on/off, updating the status line.
-fn toggle_style_watch(
+/// Start or stop the style.toml file-watcher to match `on`, updating the status
+/// line. A no-op when the watcher is already in the requested state.
+fn set_style_watch(
     state: &mut app::state::AppState,
     watcher: &mut Option<app::watch::StyleWatcher>,
+    on: bool,
 ) {
-    if watcher.is_some() {
+    if on == watcher.is_some() {
+        return; // already in the requested state
+    }
+    if !on {
         *watcher = None;
         state.set_status("style watch off");
     } else if let Some(p) =
@@ -708,6 +713,14 @@ fn toggle_style_watch(
     } else {
         state.set_status("style watch: no file to watch");
     }
+}
+
+/// Toggle the opt-in style.toml file-watcher on/off.
+fn toggle_style_watch(
+    state: &mut app::state::AppState,
+    watcher: &mut Option<app::watch::StyleWatcher>,
+) {
+    set_style_watch(state, watcher, watcher.is_none());
 }
 
 /// Run a map-export Action (SVG/DOT/dump) into the per-game dir. Returns true if
@@ -2392,6 +2405,11 @@ fn main() {
             if let Some(gs) = glulx_session_opt_mut(&mut *session) {
                 gs.set_sound(on);
             }
+        }
+        // A config-screen Save may have flipped watch_style: start/stop the
+        // file-watcher live to match (no-op when already in that state).
+        if let Some(on) = state.pending_watch_style.take() {
+            set_style_watch(&mut state, &mut style_watcher, on);
         }
 
         // After dispatch: resume an in-game (v4+) save/restore whose dialog was

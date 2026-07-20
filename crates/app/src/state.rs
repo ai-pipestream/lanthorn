@@ -1348,6 +1348,9 @@ pub struct AppState {
     /// (it holds the session) and calls `GlulxSession::set_sound`, so a game that
     /// re-queries `gestalt_Sound` per play honors the toggle. `None` = nothing pending.
     pub pending_vm_sound: Option<bool>,
+    /// Set by a config-screen Save when `watch_style` changed; the run loop
+    /// (which owns the file-watcher) reconciles it live and clears this.
+    pub pending_watch_style: Option<bool>,
     /// In-flight smooth transcript-scroll animation, if any. `transcript_scroll`
     /// holds the target; this eases the displayed offset toward it.
     pub scroll_anim: Option<ScrollAnim>,
@@ -1676,6 +1679,7 @@ impl Default for AppState {
             glulx_gain: std::collections::HashMap::new(),
             glulx_volume_ramp: std::collections::HashMap::new(),
             pending_vm_sound: None,
+            pending_watch_style: None,
             scroll_anim: None,
             graph_gen: 0,
             viewed_layer: None,

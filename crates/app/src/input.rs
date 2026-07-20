@@ -2215,6 +2215,8 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 }
                 // Sync the running Glulx VM's Sound gestalt (applied by the event loop).
                 state.pending_vm_sound = Some(state.config.enable_sound);
+                // Reconcile the style file-watcher live (the run loop owns it).
+                state.pending_watch_style = Some(state.config.watch_style);
                 // Re-resolve the live look from style.toml (the single styling source).
                 let (base, _w1) =
                     crate::style::load_style(cs.working.style.as_deref(), &cs.working.user_dir);
@@ -3493,6 +3495,20 @@ mod tests {
         apply_action(Action::ToggleSound, &mut s, &mut m);
         assert!(!s.config.enable_sound, "second toggle turns sound off");
         assert_eq!(s.pending_vm_sound, Some(false), "turning sound off queues a gestalt sync to false");
+    }
+
+    #[test]
+    fn config_save_queues_live_watch_style_reconcile() {
+        // Saving the settings screen must hand the new watch_style to the run
+        // loop (which owns the file-watcher) so the watcher starts/stops live.
+        let mut s = AppState::default();
+        let mut working = clone_config(&s.config);
+        working.watch_style = true;
+        s.overlays.config_screen =
+            Some(crate::state::ConfigScreenState { working, scroll: Default::default() });
+        apply_action(Action::ConfigSave, &mut s, &mut Mapper::default());
+        assert_eq!(s.pending_watch_style, Some(true), "ConfigSave should queue a live watch reconcile");
+        assert!(s.config.watch_style, "ConfigSave should apply the working config");
     }
 
     #[test]
