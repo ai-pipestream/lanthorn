@@ -87,7 +87,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
 
     // Draw "> <input>" on the input row.
     let input_line = format!("> {}", session.input);
-    let input_style = state.colors.dialog;
+    let input_style = state.colors.theme.get("dialog").style;
     crate::render::draw_str_clipped(buf, content.x, input_y, &input_line, input_style, content);
 
     // The transcript display area: content rows above the input row.
@@ -109,7 +109,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
         let dim_style = Style::new()
             .fg(Color::Yellow)
             .add_modifier(Modifier::DIM)
-            .patch(state.colors.dialog);
+            .patch(state.colors.theme.get("dialog").style);
         crate::render::draw_str_clipped(
             buf,
             transcript_area.x,
@@ -152,7 +152,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
     let start = end.saturating_sub(rows);
     let visible = &wrapped[start..end];
 
-    let body_style = state.colors.dialog;
+    let body_style = state.colors.theme.get("dialog").style;
     for (i, line) in visible.iter().enumerate() {
         let row_y = body_top + i as u16;
         if row_y >= text_area.bottom() {
@@ -164,7 +164,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
     if scrollbar_visible {
         let sb_area = Rect::new(body_area.right().saturating_sub(1), body_area.y, 1, body_area.height);
         // `start` is the index of the first visible row (0 = oldest/top).
-        crate::render::scroll::draw_scrollbar(buf, sb_area, n, rows, start, state.colors.scrollbar);
+        crate::render::scroll::draw_scrollbar(buf, sb_area, n, rows, start, state.colors.theme.get("scrollbar").style);
     }
 
     Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect, max_scroll })

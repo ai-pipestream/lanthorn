@@ -65,9 +65,9 @@ pub fn draw_save_name_dialog(
         cursor: dlg.field.cursor,
         show_caret: field_focused && dlg.active,
         dim: !dlg.active,
-        text_style: state.colors.dialog,
-        dim_style: state.colors.dialog.add_modifier(Modifier::DIM),
-        caret_style: state.colors.dialog.add_modifier(Modifier::REVERSED),
+        text_style: state.colors.theme.get("dialog").style,
+        dim_style: state.colors.theme.get("dialog").style.add_modifier(Modifier::DIM),
+        caret_style: state.colors.theme.get("dialog").style.add_modifier(Modifier::REVERSED),
     };
 
     let spec = DialogSpec {

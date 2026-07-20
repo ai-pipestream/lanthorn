@@ -48,7 +48,7 @@ pub fn draw_history(
     let rects = draw_dialog(buf, area, &spec, &st);
     let content = rects.content;
 
-    let normal = state.colors.dialog;
+    let normal = state.colors.theme.get("dialog").style;
     let selected_style = Style::new()
         .fg(ratatui::style::Color::Black)
         .bg(ratatui::style::Color::Cyan)
@@ -56,7 +56,7 @@ pub fn draw_history(
 
     let dim_style = Style::new()
         .fg(ratatui::style::Color::DarkGray)
-        .patch(state.colors.dialog);
+        .patch(state.colors.theme.get("dialog").style);
 
     // Partition the content: footer (1 row) at the bottom, the selected turn's
     // transcript just above it, and the turn list filling the rest at the top.
@@ -101,7 +101,7 @@ pub fn draw_history(
             total,
             visible,
             replay.scroll.target_offset(),
-            state.colors.scrollbar,
+            state.colors.theme.get("scrollbar").style,
         );
     }
 

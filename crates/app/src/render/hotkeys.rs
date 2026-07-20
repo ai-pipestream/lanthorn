@@ -65,9 +65,9 @@ pub fn draw_hotkey_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
 
     let heading_style = Style::default()
         .add_modifier(Modifier::BOLD)
-        .patch(state.colors.dialog_title);
-    let key_style = state.colors.hotkey_key;
-    let label_style = state.colors.dialog;
+        .patch(state.colors.theme.get("dialog_title").style);
+    let key_style = state.colors.theme.get("hotkey_key").style;
+    let label_style = state.colors.theme.get("dialog").style;
 
     for (y, row) in (content.y..).zip(rows.iter()) {
         if y >= content.bottom() {

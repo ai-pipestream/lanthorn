@@ -32,7 +32,7 @@ pub(crate) fn try_blit_band_row(
 ) -> bool {
     if let Some(band) = &wr.band {
         if let Some(picker) = state.game_picker.as_ref() {
-            blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, state.colors.inline_image, buf);
+            blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, state.colors.theme.get("inline_image").style, buf);
         }
         return true;
     }

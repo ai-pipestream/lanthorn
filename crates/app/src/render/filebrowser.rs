@@ -61,19 +61,19 @@ pub fn draw_file_browser(
     // ── CWD row ───────────────────────────────────────────────────────────────
 
     let cwd_str = format!("  {}", fb.cwd.display());
-    let cwd_style = Style::default().fg(Color::Yellow).patch(state.colors.dialog);
+    let cwd_style = Style::default().fg(Color::Yellow).patch(state.colors.theme.get("dialog").style);
     if content.height > 0 {
         crate::render::draw_str_clipped(buf, content.x, content.y, &cwd_str, cwd_style, content);
     }
 
     // ── Entry rows ────────────────────────────────────────────────────────────
 
-    let normal = state.colors.dialog;
+    let normal = state.colors.theme.get("dialog").style;
     let selected_style = Style::new()
         .fg(Color::Black)
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
-    let dir_style = Style::default().fg(Color::Cyan).patch(state.colors.dialog);
+    let dir_style = Style::default().fg(Color::Cyan).patch(state.colors.theme.get("dialog").style);
     let dir_selected_style = Style::new()
         .fg(Color::Black)
         .bg(Color::Cyan)
@@ -141,7 +141,7 @@ pub fn draw_file_browser(
             total,
             viewport,
             fb.scroll.target_offset(),
-            state.colors.scrollbar,
+            state.colors.theme.get("scrollbar").style,
         );
     }
 
@@ -149,7 +149,7 @@ pub fn draw_file_browser(
 
     let footer_y = entries_max_y;
     if footer_y < entries_area.bottom() {
-        let footer_style = Style::default().fg(Color::DarkGray).patch(state.colors.dialog);
+        let footer_style = Style::default().fg(Color::DarkGray).patch(state.colors.theme.get("dialog").style);
         let footer = match fb.mode {
             FbMode::PickFile => "Up/Dn:move  Enter:open/import  Esc:cancel",
         };

@@ -42,8 +42,8 @@ pub fn draw_inventory_dock(items: &[String], area: Rect, colors: &ColorScheme, h
     if area.width == 0 || area.height == 0 {
         return;
     }
-    let style = colors.inventory_dock;
-    let border_color = if highlighted { colors.focused_border } else { style };
+    let style = colors.theme.get("inventory_dock").style;
+    let border_color = if highlighted { colors.theme.get("panel.border:active").style } else { style };
 
     // Fill the band's background first so panes behind it never show through
     // while it's mid-slide (shorter than its final bordered content needs).
@@ -87,11 +87,28 @@ pub fn draw_inventory_dock(items: &[String], area: Rect, colors: &ColorScheme, h
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::style::{Color, Style};
+    use ratatui::style::Color;
 
     fn buf_contains(buf: &Buffer, s: &str) -> bool {
         let all: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
         all.contains(s)
+    }
+
+    /// Build a `Theme` with the given selectors' fg overridden (like a
+    /// `style.toml` decl), so tests exercising render code migrated to
+    /// `theme.get("<selector>")` (SQ-0309) can still inject a custom colour
+    /// instead of mutating the (no-longer-read) legacy `ColorScheme` field.
+    fn theme_with_overrides(overrides: &[(&str, Color)]) -> crate::theme::resolve::Theme {
+        let mut decls = std::collections::HashMap::new();
+        for &(sel, fg) in overrides {
+            decls.insert(sel.to_string(), crate::theme::registry::Delta { fg: Some(fg), ..crate::theme::registry::Delta::EMPTY });
+        }
+        crate::theme::resolve::resolve(
+            &crate::theme::resolve::Roles::terminal_default(),
+            &decls,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
     }
 
     #[test]
@@ -148,7 +165,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 5);
         let mut buf = Buffer::empty(area);
         let mut colors = ColorScheme::default();
-        colors.inventory_dock = Style::new().fg(Color::Rgb(1, 2, 3));
+        colors.theme = theme_with_overrides(&[("inventory_dock", Color::Rgb(1, 2, 3))]);
         draw_inventory_dock(&["lamp".to_string()], area, &colors, false, &mut buf);
         assert_eq!(buf.cell((0, 0)).unwrap().style().fg, Some(Color::Rgb(1, 2, 3)));
     }
