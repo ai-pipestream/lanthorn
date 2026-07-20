@@ -851,7 +851,7 @@ mod tests {
             map: ratatui::layout::Rect::default(), story: ratatui::layout::Rect::default(),
             room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None,
             reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
-            style_editor: None, verb_menu: Default::default(), glyph_picker: None,
+            verb_menu: Default::default(),
             transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0,
             transcript_total_rows: 0,
             modal_list_viewport: 0,

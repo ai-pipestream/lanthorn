@@ -5,8 +5,7 @@
 //! 1. Ctrl+Q / Ctrl+C → Quit (always wins, even during a prompt).
 //! 2. Prompt active → route to prompt only; all other keys absorbed as None.
 //! 3. Tidy-anim sub-mode → KeyMap lookup in Anim context; no fallthrough.
-//! 4. Gallery sub-mode → gallery_key_to_action.
-//! 5. Saves-manager sub-mode → saves_key_to_action.
+//! 4. Saves-manager sub-mode → saves_key_to_action.
 //! 6. Hotkey dialog open → hotkey_dialog_key_to_action.
 //! 7. Key == hotkeys.prefix → OpenHotkeyDialog.
 //! 8. Tab (no modifiers) → autocomplete-or-ToggleFocus special case.
@@ -36,18 +35,6 @@ use mapper::mapper::Mapper;
 use crate::complete::{room_words_from_text, suggest};
 use crate::keymap::{Context, KeySpec};
 use crate::state::{AppState, Focus, TextEntryDialog, TextEntryKind};
-
-// ── AttrKind ──────────────────────────────────────────────────────────────────
-
-/// Which text-modifier attribute to toggle on the active selector's `Decl`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttrKind {
-    Bold,
-    Italic,
-    Underline,
-    Dim,
-    Reversed,
-}
 
 // ── VerbMenuNavKind ───────────────────────────────────────────────────────────
 
@@ -255,23 +242,6 @@ pub enum Action {
     FilePickerPick,
     /// Close the VFS file-picker modal without picking.
     FilePickerClose,
-    /// Open the symbol gallery modal.
-    OpenGallery,
-    /// Move to next preset in the current gallery category.
-    GalleryNext,
-    /// Move to previous preset in the current gallery category.
-    GalleryPrev,
-    /// Switch to the next gallery category.
-    GalleryCategoryNext,
-    /// Switch to the previous gallery category.
-    GalleryCategoryPrev,
-    /// Close the gallery and persist selections to config (persistence handled by main.rs).
-    GalleryClose,
-    /// Apply the current gallery selection: persist to personal style then close (handled by main.rs).
-    GalleryApply,
-    /// Export all current settings to the personal style file and repoint config
-    /// (handled by main.rs); leaves the gallery open.
-    GalleryExportStyle,
     /// Toggle the inventory strip at the bottom of the story pane.
     ToggleInventory,
     /// Open a confirmation prompt to reset the game to its opening state (keeps map).
@@ -297,67 +267,6 @@ pub enum Action {
     ResizeReset,
     /// Navigate resize mode: `Tab`/`Shift+Tab` switches the target pane; arrows adjust it.
     ResizeNav(ResizeNavKind),
-    /// Open the live style editor full-screen mode.
-    OpenStyleEditor,
-    /// Cancel the style editor without saving (drops the working doc).
-    StyleEditorCancel,
-    /// Navigate the style-editor board by delta (-1 = up, +1 = down).
-    StyleNav(i32),
-    /// Toggle an attribute chip on the active selector's Decl.
-    StyleToggleAttr(AttrKind),
-    /// Cycle the style-editor focus ring forward (+1) or backward (-1).
-    StyleFocusCycle(i32),
-    /// Move the attribute-chip cursor left (-1) or right (+1) within the Attrs focus.
-    StyleAttrChipNav(i32),
-    /// Set the fg (is_bg=false) or bg (is_bg=true) of the active selector.
-    /// `value` is a color token (ANSI name, #rrggbb hex, or "default"); `None` clears to default.
-    StyleSetColor { is_bg: bool, value: Option<String> },
-    /// Commit the custom hex buffer to the slot chosen by `color_target`.
-    StyleCommitCustom,
-    /// Move the swatch cursor by `d` (-1 or +1), wrapping over 17 cells.
-    StyleSwatchNav(i32),
-    /// Apply the swatch at `swatch_cursor` to the `color_target` slot.
-    StyleSwatchPick,
-    /// Append a character to the style-editor custom hex buffer.
-    StyleCustomChar(char),
-    /// Delete the last character from the style-editor custom hex buffer.
-    StyleCustomBackspace,
-    /// Save the style editor: resolve working doc to live colors and close.
-    StyleSave,
-    /// Save the style editor to the current game's per-game style file and close.
-    StyleSaveGame,
-    /// Reset the active selector's Decl to the built-in default.
-    StyleReset,
-    /// Cycle the border type for the active selector by delta (+1/-1) over ["none","single","double","rounded","thick"].
-    StyleBorderTypeCycle(i32),
-    /// Move the border zone cursor by delta (-1/+1), wrapping over 0..8.
-    StyleBorderZoneNav(i32),
-    /// Clear the glyph override for the current border zone.
-    StyleBorderClearZone,
-    /// Toggle the header flag on the active selector's Decl.
-    StyleBorderToggleHeader,
-    /// Toggle the shadow flag on the active selector's Decl.
-    StyleBorderToggleShadow,
-    /// Open the glyph-picker modal over the style editor, targeting `zone`.
-    StyleOpenGlyphPicker(crate::state::BorderZone),
-    /// Navigate the glyph grid by `delta` cells (wraps within current block).
-    GlyphPickerNav(i32),
-    /// Shift the curated block by `delta` (−1 / +1), or cycle.
-    GlyphPickerBlock(i32),
-    /// Feed a character into the picker's pending slot (direct char entry path).
-    GlyphPickerChar(char),
-    /// Commit: write the selected/pending glyph to the target zone and close.
-    GlyphPickerPick,
-    /// Clear: set the target zone to None and close.
-    GlyphPickerClear,
-    /// Cancel: close without any change.
-    GlyphPickerCancel,
-    /// Enter the custom-range hex-entry mode (focus the U+____ field).
-    GlyphPickerCustomFocus,
-    /// Feed a hex digit into the custom-range codepoint buffer.
-    GlyphPickerCustomChar(char),
-    /// Remove the last hex digit from the custom-range codepoint buffer.
-    GlyphPickerCustomBackspace,
     /// Open the config screen modal.
     OpenConfig,
     /// Navigate the config screen by delta (-1 = up, +1 = down).
@@ -467,7 +376,7 @@ pub enum KeyResolve {
 /// 1. Ctrl+Q / Ctrl+C → Quit (hardwired, always wins).
 /// 2. (text-entry / confirm-delete modals are intercepted in the run loop.)
 /// 3. Tidy-anim active → Anim context lookup (Ctrl+Left/Right stage-jump hardwired).
-///    4-6. Modal sub-modes (gallery/saves/replay/file-browser/verb-menu/style-editor/
+///    4-6. Modal sub-modes (saves/replay/file-browser/verb-menu/
 ///    config-screen/hotkey-dialog/room-panel) → their handlers (hardwired Actions).
 /// 7. Key == hotkeys.prefix → OpenHotkeyDialog.
 /// 8. Tab (no modifiers) → autocomplete-or-ToggleFocus.
@@ -503,9 +412,6 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     }
 
     // 4-6. Modal sub-modes: route to their handlers (all hardwired Actions).
-    if state.overlays.gallery.is_some() {
-        return KeyResolve::Action(gallery_key_to_action(key));
-    }
     if state.overlays.saves.is_some() {
         return KeyResolve::Action(saves_key_to_action(key, state.overlays.dialog_focus));
     }
@@ -524,9 +430,6 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
         }
         // else: fall through — the story input is live, so the key is handled normally.
     }
-    if state.overlays.style_editor.is_some() {
-        return KeyResolve::Action(style_editor_key_to_action(key, state));
-    }
     if state.overlays.config_screen.is_some() {
         return KeyResolve::Action(config_screen_key_to_action(key, state.overlays.dialog_focus));
     }
@@ -542,7 +445,7 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     }
 
     // 6.5. Room panel close: Esc or Enter while a panel is open.
-    // Comes after steps 2-6 (prompt/anim/gallery/saves/hotkey_dialog checks) so those
+    // Comes after steps 2-6 (prompt/anim/saves/hotkey_dialog checks) so those
     // modes still take priority, but before the prefix key and normal dispatch.
     // Room panel is read-only (no text input), so Enter is safe as a close key.
     if state.room_panel.is_some() && key.modifiers == KeyModifiers::NONE
@@ -760,36 +663,6 @@ fn filebrowser_dialog_action(
     None
 }
 
-/// Per-modal button-to-action mapping for the style editor.
-pub fn style_dialog_action(
-    rects: &crate::render::dialog::DialogRects,
-    col: u16,
-    row: u16,
-) -> Option<Action> {
-    use crate::render::dialog::ButtonId;
-
-    // Check close [X]
-    if let Some(close_rect) = rects.close {
-        if hit(close_rect, col, row) {
-            return Some(Action::StyleEditorCancel);
-        }
-    }
-
-    // Check buttons
-    for (id, rect) in &rects.buttons {
-        if hit(*rect, col, row) {
-            return Some(match id {
-                ButtonId::Save     => Action::StyleSave,
-                ButtonId::SaveGame => Action::StyleSaveGame,
-                ButtonId::Cancel   => Action::StyleEditorCancel,
-                _                  => Action::None,
-            });
-        }
-    }
-
-    None
-}
-
 /// Per-modal action mapping for the room-info panel ([X] → CloseRoomPanel).
 fn roominfo_dialog_action(
     rects: &crate::render::dialog::DialogRects,
@@ -886,34 +759,6 @@ fn hotkeys_dialog_action(
     None
 }
 
-/// Per-modal button-to-action mapping for the gallery.
-fn gallery_dialog_action(
-    rects: &crate::render::dialog::DialogRects,
-    col: u16,
-    row: u16,
-) -> Option<Action> {
-    use crate::render::dialog::ButtonId;
-
-    // Check close [X]
-    if let Some(close_rect) = rects.close {
-        if hit(close_rect, col, row) {
-            return Some(Action::GalleryClose);
-        }
-    }
-
-    // Check buttons: Ok → GalleryApply
-    for (id, rect) in &rects.buttons {
-        if hit(*rect, col, row) {
-            return Some(match id {
-                ButtonId::Ok => Action::GalleryApply,
-                _            => Action::None,
-            });
-        }
-    }
-
-    None
-}
-
 /// Map a vertical mouse-wheel event to a step: `ScrollUp` → `-1`, `ScrollDown`
 /// → `+1`, swapped when `invert`; `None` for non-wheel events. The single place
 /// wheel direction and the `mouse_wheel_invert` preference are resolved, so no
@@ -974,9 +819,6 @@ pub fn mouse_to_action(
     let wheel_up = wheel_delta(kind, false).map(|d| d < 0);
     if let Some(up) = wheel_up {
         // Priority mirrors the keyboard modal routing order above.
-        if state.overlays.gallery.is_some() {
-            return if up { Action::GalleryPrev } else { Action::GalleryNext };
-        }
         if state.overlays.config_screen.is_some() {
             return if up { Action::ConfigNav(-1) } else { Action::ConfigNav(1) };
         }
@@ -996,9 +838,6 @@ pub fn mouse_to_action(
                 Action::VerbMenuNav(VerbMenuNavKind::Down)
             };
         }
-        if state.overlays.style_editor.is_some() {
-            return if up { Action::StyleNav(-1) } else { Action::StyleNav(1) };
-        }
     }
 
     // ── Dialog chrome hit-testing (checked FIRST) ─────────────────────────────
@@ -1008,17 +847,13 @@ pub fn mouse_to_action(
             // all other clicks fall through to normal map/room routing below.
             // But if a centered modal is also open (stacked on top), it takes
             // priority and must swallow all outside clicks.
-            let centered_open = state.overlays.gallery.is_some() || state.overlays.config_screen.is_some()
+            let centered_open = state.overlays.config_screen.is_some()
                 || state.overlays.saves.is_some() || state.overlays.file_browser.is_some()
                 || state.overlays.hotkey_dialog;
             let is_corner_overlay = !centered_open
                 && (state.room_panel.is_some() || state.tidy_anim.is_some());
 
-            if state.overlays.gallery.is_some() {
-                if let Some(action) = gallery_dialog_action(rects, col, row) {
-                    return action;
-                }
-            } else if state.overlays.config_screen.is_some() {
+            if state.overlays.config_screen.is_some() {
                 if let Some(action) = config_dialog_action(rects, col, row) {
                     return action;
                 }
@@ -1058,7 +893,7 @@ pub fn mouse_to_action(
         } else {
             // For non-left-click events (wheel/drag): swallow unless a corner overlay
             // is active and no centered modal is stacked on top.
-            let centered_open = state.overlays.gallery.is_some() || state.overlays.config_screen.is_some()
+            let centered_open = state.overlays.config_screen.is_some()
                 || state.overlays.saves.is_some() || state.overlays.file_browser.is_some()
                 || state.overlays.hotkey_dialog;
             let is_corner_overlay = !centered_open
@@ -1269,21 +1104,6 @@ fn filebrowser_key_to_action(key: KeyEvent) -> Action {
     }
 }
 
-// ── Internal: gallery key routing ─────────────────────────────────────────────
-
-fn gallery_key_to_action(key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Up => Action::GalleryPrev,
-        KeyCode::Down => Action::GalleryNext,
-        KeyCode::Left => Action::GalleryCategoryPrev,
-        KeyCode::Right => Action::GalleryCategoryNext,
-        KeyCode::Enter => Action::GalleryApply,
-        KeyCode::Esc => Action::GalleryClose,
-        KeyCode::Char('o') | KeyCode::Char('O') => Action::GalleryExportStyle,
-        _ => Action::None,
-    }
-}
-
 // ── Internal: verb-menu key routing ──────────────────────────────────────────
 
 /// Focus-aware key intercept for the verb dock. Returns `Some(action)` ONLY for
@@ -1336,108 +1156,6 @@ fn resize_mode_key_to_action(key: KeyEvent) -> Action {
         KeyCode::Down => Action::ResizeNav(ResizeNavKind::Down),
         KeyCode::Char('0') => Action::ResizeReset,
         KeyCode::Esc | KeyCode::Enter => Action::ResizeExit,
-        _ => Action::None,
-    }
-}
-
-// ── Internal: style-editor key routing ───────────────────────────────────────
-
-/// Key dispatch for the style-editor full-screen mode.
-fn style_editor_key_to_action(key: KeyEvent, state: &crate::state::AppState) -> Action {
-    use crate::state::StyleFocus;
-    let ed_ref = state.overlays.style_editor.as_ref();
-    let focus = ed_ref.map(|e| e.focus).unwrap_or(StyleFocus::Board);
-    let attr_cursor = ed_ref.map(|e| e.attr_cursor).unwrap_or(0);
-
-    // When Custom focus is active, route printable keys into the custom_buf.
-    if focus == StyleFocus::Custom {
-        match key.code {
-            KeyCode::Char(c)
-                if key.modifiers == KeyModifiers::NONE
-                    || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                return Action::StyleCustomChar(c);
-            }
-            KeyCode::Backspace => return Action::StyleCustomBackspace,
-            KeyCode::Enter if key.modifiers == KeyModifiers::NONE => {
-                let buf = ed_ref.map(|e| e.custom_buf.as_str()).unwrap_or("");
-                return if crate::style_mru::is_valid_color_token(buf) {
-                    Action::StyleCommitCustom
-                } else {
-                    Action::None
-                };
-            }
-            _ => {}
-        }
-    }
-
-    match key.code {
-        KeyCode::Up   => Action::StyleNav(-1),
-        KeyCode::Down => Action::StyleNav(1),
-        KeyCode::Tab if key.modifiers == KeyModifiers::NONE => Action::StyleFocusCycle(1),
-        KeyCode::BackTab => Action::StyleFocusCycle(-1),
-        KeyCode::Left if focus == StyleFocus::Attrs => Action::StyleAttrChipNav(-1),
-        KeyCode::Right if focus == StyleFocus::Attrs => Action::StyleAttrChipNav(1),
-        KeyCode::Left if focus == StyleFocus::Fg || focus == StyleFocus::Bg => Action::StyleSwatchNav(-1),
-        KeyCode::Right if focus == StyleFocus::Fg || focus == StyleFocus::Bg => Action::StyleSwatchNav(1),
-        KeyCode::Enter if key.modifiers == KeyModifiers::NONE
-            && (focus == StyleFocus::Fg || focus == StyleFocus::Bg) =>
-        {
-            Action::StyleSwatchPick
-        }
-        KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE
-            && (focus == StyleFocus::Fg || focus == StyleFocus::Bg) =>
-        {
-            Action::StyleSwatchPick
-        }
-        KeyCode::Char(' ') if key.modifiers == KeyModifiers::NONE
-            && focus == StyleFocus::Attrs =>
-        {
-            match attr_cursor {
-                0 => Action::StyleToggleAttr(AttrKind::Bold),
-                1 => Action::StyleToggleAttr(AttrKind::Italic),
-                2 => Action::StyleToggleAttr(AttrKind::Underline),
-                3 => Action::StyleToggleAttr(AttrKind::Dim),
-                _ => Action::StyleToggleAttr(AttrKind::Reversed),
-            }
-        }
-        // Border focus only occurs on bordered selectors; see StyleFocusCycle/StyleNav gating.
-        KeyCode::Left if focus == StyleFocus::Border => Action::StyleBorderZoneNav(-1),
-        KeyCode::Right if focus == StyleFocus::Border => Action::StyleBorderZoneNav(1),
-        KeyCode::Enter if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
-            let zone = ed_ref.map(|e| border_zone_from_index(e.border_zone))
-                .unwrap_or(crate::state::BorderZone::Top);
-            Action::StyleOpenGlyphPicker(zone)
-        }
-        KeyCode::Char('t') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
-            Action::StyleBorderTypeCycle(1)
-        }
-        KeyCode::Char('[') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
-            Action::StyleBorderTypeCycle(-1)
-        }
-        KeyCode::Char(']') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
-            Action::StyleBorderTypeCycle(1)
-        }
-        KeyCode::Delete if focus == StyleFocus::Border => Action::StyleBorderClearZone,
-        KeyCode::Char('h') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
-            Action::StyleBorderToggleHeader
-        }
-        KeyCode::Char('d') if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Border => {
-            Action::StyleBorderToggleShadow
-        }
-        // Footer-button focus: Tab/Shift-Tab step between the buttons (handled by
-        // StyleFocusCycle above); Enter activates the focused button.
-        KeyCode::Enter if key.modifiers == KeyModifiers::NONE && focus == StyleFocus::Buttons => {
-            match state.overlays.dialog_focus {
-                0 => Action::StyleSave,
-                1 => Action::StyleSaveGame,
-                _ => Action::StyleEditorCancel,
-            }
-        }
-        KeyCode::Char('s') if key.modifiers == KeyModifiers::NONE => Action::StyleSave,
-        KeyCode::Char('g') if key.modifiers == KeyModifiers::NONE => Action::StyleSaveGame,
-        KeyCode::Char('r') if key.modifiers == KeyModifiers::NONE => Action::StyleReset,
-        KeyCode::Esc  => Action::StyleEditorCancel,
         _ => Action::None,
     }
 }
@@ -1539,19 +1257,6 @@ pub fn cycle_focus(idx: usize, len: usize, delta: i32) -> usize {
     }
     let next = idx as i32 + delta;
     next.rem_euclid(len as i32) as usize
-}
-
-// ── Gallery helpers ───────────────────────────────────────────────────────────
-
-/// Return the number of presets for the given gallery category index.
-fn preset_count(cat: usize) -> usize {
-    use crate::symbols::{Arrows, BoxStyle, PathGlyphs, PortalGlyphs};
-    match cat {
-        0 => BoxStyle::preset_names().len(),
-        1 => Arrows::preset_names().len(),
-        2 => PortalGlyphs::preset_names().len(),
-        _ => PathGlyphs::preset_names().len(),
-    }
 }
 
 // ── apply_action ──────────────────────────────────────────────────────────────
@@ -1974,7 +1679,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::OpenHotkeyDialog => {
             state.overlays.hotkey_dialog = true;
             // Close other overlays if open.
-            state.overlays.gallery = None;
             state.overlays.saves = None;
         }
 
@@ -2139,63 +1843,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::FbClose => {
             state.overlays.file_browser = None;
-        }
-
-        Action::OpenGallery => {
-            state.overlays.hotkey_dialog = false;
-            state.overlays.dialog_focus = 0;
-            state.overlays.gallery = Some(crate::state::GalleryState {
-                category_idx: 0,
-                selections: [0, 0, 0, 0],
-            });
-        }
-
-        Action::GalleryNext => {
-            if let Some(g) = &mut state.overlays.gallery {
-                let cat = g.category_idx;
-                let count = preset_count(cat);
-                g.selections[cat] = (g.selections[cat] + 1) % count;
-            }
-            if let Some(g) = &state.overlays.gallery {
-                state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
-            }
-        }
-
-        Action::GalleryPrev => {
-            if let Some(g) = &mut state.overlays.gallery {
-                let cat = g.category_idx;
-                let count = preset_count(cat);
-                g.selections[cat] = (g.selections[cat] + count - 1) % count;
-            }
-            if let Some(g) = &state.overlays.gallery {
-                state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
-            }
-        }
-
-        Action::GalleryCategoryNext => {
-            if let Some(g) = &mut state.overlays.gallery {
-                g.category_idx = (g.category_idx + 1) % 4;
-            }
-        }
-
-        Action::GalleryCategoryPrev => {
-            if let Some(g) = &mut state.overlays.gallery {
-                g.category_idx = (g.category_idx + 3) % 4;
-            }
-        }
-
-        Action::GalleryClose => {
-            if let Some(g) = state.overlays.gallery.take() {
-                state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
-                // Persistence is handled by the caller (main.rs detects GalleryClose).
-            }
-        }
-
-        Action::GalleryApply => {
-            if let Some(g) = state.overlays.gallery.take() {
-                state.symbols = crate::symbols::SymbolSet::resolve(&g.symbol_config());
-                // Persistence is handled by the caller (main.rs detects GalleryApply).
-            }
         }
 
         // ── Mouse room-panel actions ──────────────────────────────────────────
@@ -2464,40 +2111,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.config.inv_dock_pct = state.pane_sizes.inv_dock_pct;
         }
 
-        // ── Style editor actions (delegated to crate::style_actions) ───────────
-        Action::OpenStyleEditor
-        | Action::StyleEditorCancel
-        | Action::StyleNav(_)
-        | Action::StyleToggleAttr(_)
-        | Action::StyleFocusCycle(_)
-        | Action::StyleAttrChipNav(_)
-        | Action::StyleSetColor { .. }
-        | Action::StyleCommitCustom
-        | Action::StyleSwatchNav(_)
-        | Action::StyleSwatchPick
-        | Action::StyleCustomChar(_)
-        | Action::StyleCustomBackspace
-        | Action::StyleSave
-        | Action::StyleSaveGame
-        | Action::StyleReset
-        | Action::StyleBorderTypeCycle(_)
-        | Action::StyleBorderZoneNav(_)
-        | Action::StyleBorderClearZone
-        | Action::StyleBorderToggleHeader
-        | Action::StyleBorderToggleShadow => crate::style_actions::apply_style_action(action, state),
-
-        // ── Glyph-picker modal actions (delegated to crate::glyph_actions) ─────
-        Action::StyleOpenGlyphPicker(_)
-        | Action::GlyphPickerNav(_)
-        | Action::GlyphPickerBlock(_)
-        | Action::GlyphPickerChar(_)
-        | Action::GlyphPickerPick
-        | Action::GlyphPickerClear
-        | Action::GlyphPickerCancel
-        | Action::GlyphPickerCustomFocus
-        | Action::GlyphPickerCustomChar(_)
-        | Action::GlyphPickerCustomBackspace => crate::glyph_actions::apply_glyph_action(action, state),
-
         // ── Config screen actions ─────────────────────────────────────────────
 
         Action::OpenConfig => {
@@ -2631,7 +2244,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         | Action::SavesLoad
         | Action::SavesImport
         | Action::FbEnter
-        | Action::GalleryExportStyle
         | Action::TranscriptScrollPage(_)
         | Action::PagerAdvance
         | Action::PagerDismiss
@@ -3037,71 +2649,6 @@ fn recenter_target(state: &AppState, graph: &mapper::graph::MapGraph) -> (i32, i
         .unwrap_or((0, 0))
 }
 
-// ── Glyph-picker helpers ──────────────────────────────────────────────────────
-
-/// Number of glyph columns in the picker grid (matches `GRID_COLS` in the render module).
-pub const GLYPH_GRID_COLS: usize = 16;
-
-/// Curated Unicode blocks offered by the glyph picker.
-/// Each entry is (display name, first codepoint, last codepoint inclusive).
-pub(crate) const GLYPH_BLOCKS: &[(&str, u32, u32)] = &[
-    ("Box Drawing",       0x2500, 0x257F),
-    ("Block Elements",    0x2580, 0x259F),
-    ("Geometric Shapes",  0x25A0, 0x25FF),
-    ("Arrows",            0x2190, 0x21FF),
-];
-
-/// Return the (lo, hi) codepoint range for the picker's current block/custom range.
-pub(crate) fn picker_block_range(picker: &crate::state::GlyphPickerState) -> (u32, u32) {
-    if let Some(start) = picker.custom_start {
-        (start, start.saturating_add(127))
-    } else {
-        let (_, lo, hi) = GLYPH_BLOCKS[picker.block.min(GLYPH_BLOCKS.len() - 1)];
-        (lo, hi)
-    }
-}
-
-/// Returns `true` for the six selectors that have configurable borders.
-pub fn is_bordered_selector(sel: &str) -> bool {
-    matches!(sel, "map_border" | "story_border" | "dialog" | "upper_window_border" | "status_header" | "input_line")
-}
-
-/// Map the 8-slot border_zone cursor to a BorderZone.
-/// Layout: 0=Tl, 1=Top, 2=Tr, 3=Left, 4=Right, 5=Bl, 6=Bottom, 7=Br
-pub(crate) fn border_zone_from_index(i: usize) -> crate::state::BorderZone {
-    use crate::state::BorderZone::*;
-    match i {
-        0 => Tl,
-        1 => Top,
-        2 => Tr,
-        3 => Left,
-        4 => Right,
-        5 => Bl,
-        6 => Bottom,
-        7 => Br,
-        _ => Top,
-    }
-}
-
-/// Write `g` into the `decl` field that corresponds to `zone`.
-pub(crate) fn set_zone_glyph(
-    decl: &mut crate::style::Decl,
-    zone: crate::state::BorderZone,
-    g: Option<String>,
-) {
-    use crate::state::BorderZone::*;
-    match zone {
-        Top    => decl.glyph_top    = g,
-        Bottom => decl.glyph_bottom = g,
-        Left   => decl.glyph_left   = g,
-        Right  => decl.glyph_right  = g,
-        Tl     => decl.glyph_tl     = g,
-        Tr     => decl.glyph_tr     = g,
-        Bl     => decl.glyph_bl     = g,
-        Br     => decl.glyph_br     = g,
-    }
-}
-
 // ── Config screen helpers ─────────────────────────────────────────────────────
 
 /// Number of rows in the config screen — derived from the row list so it cannot drift.
@@ -3110,24 +2657,6 @@ pub(crate) const CONFIG_ROW_COUNT: usize = crate::render::config_screen::CONFIG_
 /// Clone a Config (Config derives Clone, this is a convenience wrapper for tests).
 pub(crate) fn clone_config(cfg: &crate::config::Config) -> crate::config::Config {
     cfg.clone()
-}
-
-/// Test-only: open the style editor over a fresh, empty temp `user_dir` so it
-/// reads the built-in default style instead of the contributor's real
-/// `~/.babelmap/style.toml`. Without this, an on-disk style that overrides an
-/// asserted selector (fg/bg/glyph/style) causes spurious failures, and
-/// `StyleSave`/`save_mru` would write into the real user directory during tests.
-/// Each call gets a unique directory so save-path tests never collide.
-#[cfg(test)]
-pub(crate) fn open_style_editor_hermetic(state: &mut AppState) {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir()
-        .join(format!("babelmap-style-test-{}-{}", std::process::id(), n));
-    let _ = std::fs::create_dir_all(&dir);
-    state.config.user_dir = dir;
-    crate::style_actions::open_style_editor(state);
 }
 
 /// Return the ConfigPathField for a row, if the row is a path type.
@@ -3215,46 +2744,6 @@ mod tests {
 
     use super::*;
     use crate::state::AppState;
-
-    #[test]
-    fn editor_opens_over_merged_per_game_style() {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir()
-            .join(format!("bm-merge-open-{}-{}", std::process::id(), n));
-        std::fs::create_dir_all(&dir).unwrap();
-        // Global: room fg = white, connector fg = cyan.
-        std::fs::write(
-            dir.join("style.toml"),
-            "[colors]\n\"room\" = { fg = \"white\" }\n\"connector\" = { fg = \"cyan\" }\n[symbols]\n",
-        ).unwrap();
-        // Per-game override in the game dir: room fg = red (connector untouched).
-        let game_dir = dir.join("game.save");
-        std::fs::create_dir_all(&game_dir).unwrap();
-        std::fs::write(
-            game_dir.join("style.toml"),
-            "[colors]\n\"room\" = { fg = \"red\" }\n[symbols]\n",
-        ).unwrap();
-
-        let mut s = AppState::default();
-        s.config.user_dir = dir;
-        s.config.style = None; // load global from user_dir/style.toml
-        s.game_dir = game_dir;
-        crate::style_actions::open_style_editor(&mut s);
-
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        assert_eq!(
-            ed.doc.colors.selectors.get("room").and_then(|d| d.fg.as_deref()),
-            Some("red"),
-            "per-game override wins for room",
-        );
-        assert_eq!(
-            ed.doc.colors.selectors.get("connector").and_then(|d| d.fg.as_deref()),
-            Some("cyan"),
-            "global value survives for non-overridden connector",
-        );
-    }
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
@@ -3724,23 +3213,6 @@ mod tests {
         apply_action(Action::Retidy, &mut s, &mut m);
         assert_eq!(m.graph.room(1).unwrap().pos, Some((5, 5)), "Manual: retidy must not move rooms");
         assert_eq!(m.graph.room(2).unwrap().pos, Some((0, 0)));
-    }
-
-    #[test]
-    fn reload_action_applies_style_file() {
-        let dir = std::env::temp_dir().join(format!("babelmap-reloadact-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("style.toml");
-        std::fs::write(&path, "[colors]\n\"transcript\" = { fg = \"magenta\" }\n").unwrap();
-
-        let mut state = AppState::default();
-        state.config.user_dir = dir.clone();
-        state.config.style = Some(path.to_string_lossy().to_string());
-        let mut mapper = Mapper::default();
-
-        apply_action(Action::ReloadStyle, &mut state, &mut mapper);
-        assert_eq!(state.colors.transcript.fg, Some(ratatui::style::Color::Magenta));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -4450,64 +3922,6 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('s'))), Action::None));
     }
 
-    #[test]
-    fn gallery_submode_routes_arrow_keys() {
-        use crate::state::GalleryState;
-        let mut s = AppState::default();
-        s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
-        assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::GalleryPrev));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::GalleryNext));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::GalleryCategoryPrev));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::GalleryCategoryNext));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::GalleryClose));
-        // Enter no longer closes the gallery; ESC/[X]/[Done] are the close paths.
-        assert!(!matches!(key_to_action(&s, key(KeyCode::Enter)), Action::GalleryClose),
-            "Enter must no longer close the gallery");
-    }
-
-    #[test]
-    fn gallery_next_wraps_and_updates_symbols() {
-        use crate::state::GalleryState;
-        use crate::symbols::BoxStyle;
-        let mut s = AppState::default();
-        let n = BoxStyle::preset_names().len();
-        s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [n - 1, 0, 0, 0] });
-        let mut m = mapper::mapper::Mapper::default();
-        apply_action(Action::GalleryNext, &mut s, &mut m);
-        assert_eq!(s.overlays.gallery.as_ref().unwrap().selections[0], 0, "wraps to 0");
-        // symbols should be updated live
-        let expected = crate::symbols::SymbolSet::resolve(&s.overlays.gallery.as_ref().unwrap().symbol_config());
-        assert_eq!(s.symbols, expected);
-    }
-
-    #[test]
-    fn gallery_close_clears_state() {
-        use crate::state::GalleryState;
-        let mut s = AppState::default();
-        s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
-        let mut m = mapper::mapper::Mapper::default();
-        apply_action(Action::GalleryClose, &mut s, &mut m);
-        assert!(s.overlays.gallery.is_none());
-    }
-
-    #[test]
-    fn gallery_enter_is_apply() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let a = gallery_key_to_action(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        assert!(matches!(a, Action::GalleryApply));
-    }
-
-    #[test]
-    fn open_gallery_key_in_map_focus() {
-        let mut s = AppState::default();
-        s.toggle_focus(); // Map
-        // OpenGallery is dialog-only: returns None when dialog is closed.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('f'))), Action::None));
-        // Returns the action when dialog is open, via its authored leader letter 'f'.
-        s.overlays.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('f'))), Action::OpenGallery));
-    }
-
     // ── Saves-manager sub-mode tests ──────────────────────────────────────────
 
     fn state_with_saves_open() -> AppState {
@@ -4868,21 +4282,6 @@ mod tests {
     }
 
     #[test]
-    fn wheel_drives_gallery_selection() {
-        use crate::state::GalleryState;
-        let mut s = AppState::default();
-        s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
-        assert!(matches!(
-            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
-            Action::GalleryPrev
-        ));
-        assert!(matches!(
-            mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
-            Action::GalleryNext
-        ));
-    }
-
-    #[test]
     fn wheel_drives_saves_selection() {
         use crate::state::SavesState;
         let mut s = AppState::default();
@@ -4948,20 +4347,6 @@ mod tests {
         assert!(matches!(
             mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
             Action::VerbMenuNav(VerbMenuNavKind::Down)
-        ));
-    }
-
-    #[test]
-    fn wheel_drives_style_editor_selection() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        assert!(matches!(
-            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
-            Action::StyleNav(-1)
-        ));
-        assert!(matches!(
-            mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
-            Action::StyleNav(1)
         ));
     }
 
@@ -6469,7 +5854,7 @@ mod tests {
     fn esc_equals_x_click_for_every_modal() {
         use ratatui::layout::Rect;
         use crate::render::dialog::{ButtonId, DialogRects};
-        use crate::state::{GalleryState, SavesState};
+        use crate::state::SavesState;
         use crate::persist_files::SaveInfo;
         use std::path::PathBuf;
 
@@ -6485,19 +5870,6 @@ mod tests {
             buttons: vec![(ButtonId::Done, Rect::new(90, 23, 8, 1))],
             field: None,
         };
-
-        // 1. Gallery: ESC → GalleryClose, [X] → GalleryClose
-        {
-            let mut s = AppState::default();
-            s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
-            let esc_action = key_to_action(&s, key(KeyCode::Esc));
-            assert!(matches!(esc_action, Action::GalleryClose),
-                "gallery ESC should produce GalleryClose, got {:?}", esc_action);
-            let dialog = Some(make_rects());
-            let x_action = mouse_to_action(&s, mouse_left_click(99, 0), map, story, room_rects, &dialog);
-            assert!(matches!(x_action, Action::GalleryClose),
-                "gallery [X] click should produce GalleryClose, got {:?}", x_action);
-        }
 
         // 2. Saves: ESC → SavesClose, [X] → SavesClose
         {
@@ -6564,18 +5936,9 @@ mod tests {
     /// Assert no modal key handler still binds q to a close action.
     #[test]
     fn no_modal_binds_q_to_close() {
-        use crate::state::{GalleryState, SavesState, VerbMenuState};
+        use crate::state::{SavesState, VerbMenuState};
         use crate::persist_files::SaveInfo;
         use std::path::PathBuf;
-
-        // Gallery: q → not GalleryClose
-        {
-            let mut s = AppState::default();
-            s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
-            let a = key_to_action(&s, key(KeyCode::Char('q')));
-            assert!(!matches!(a, Action::GalleryClose),
-                "q must not close the gallery");
-        }
 
         // Saves: q → not SavesClose
         {
@@ -6632,51 +5995,15 @@ mod tests {
         }
     }
 
-    /// Assert gallery [X] produces GalleryClose and [OK] produces GalleryApply.
-    #[test]
-    fn gallery_dialog_x_and_done_produce_gallery_close() {
-        use ratatui::layout::Rect;
-        use crate::render::dialog::{ButtonId, DialogRects};
-        use crate::state::GalleryState;
-
-        let rects = DialogRects {
-            area:    Rect::new(5, 3, 70, 24),
-            content: Rect::new(6, 5, 68, 19),
-            close:   Some(Rect::new(73, 3, 1, 1)),
-            buttons: vec![(ButtonId::Ok, Rect::new(65, 26, 8, 1))],
-            field: None,
-        };
-
-        let mut state = AppState::default();
-        state.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
-
-        let map   = Rect::default();
-        let story = Rect::default();
-        let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
-        let dialog = Some(rects);
-
-        // Close [X] → GalleryClose
-        let a = mouse_to_action(&state, mouse_left_click(73, 3), map, story, room_rects, &dialog);
-        assert!(matches!(a, Action::GalleryClose), "gallery [X] click should produce GalleryClose, got {:?}", a);
-
-        // OK button → GalleryApply
-        let a = mouse_to_action(&state, mouse_left_click(67, 26), map, story, room_rects, &dialog);
-        assert!(matches!(a, Action::GalleryApply), "gallery [OK] click should produce GalleryApply, got {:?}", a);
-
-        // Click outside → swallowed (None)
-        let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
-        assert!(matches!(a, Action::None), "outside gallery dialog should be swallowed, got {:?}", a);
-    }
-
-    /// Regression: a centered modal (gallery) stacked on top of an open corner
-    /// overlay (room_panel) must swallow all outside-dialog clicks.  Without the
-    /// fix, is_corner_overlay was true even when a centered modal was open, so the
-    /// outside click fell through to ShowRoomInfo / ActivatePane.
+    /// Regression: a centered modal (config screen) stacked on top of an open
+    /// corner overlay (room_panel) must swallow all outside-dialog clicks. Without
+    /// the fix, is_corner_overlay was true even when a centered modal was open, so
+    /// the outside click fell through to ShowRoomInfo / ActivatePane.
     #[test]
     fn centered_modal_swallows_outside_clicks_even_with_room_panel_open() {
         use ratatui::layout::Rect;
         use crate::render::dialog::{ButtonId, DialogRects};
-        use crate::state::{GalleryState, RoomPanel, RoomPanelMode};
+        use crate::state::{ConfigScreenState, RoomPanel, RoomPanelMode};
         use crate::state::Zoom;
 
         // Build a real map rect and room_rects so a click at (0,0) would normally
@@ -6695,13 +6022,14 @@ mod tests {
             );
         }
 
-        // Now open BOTH room_panel (corner overlay) AND gallery (centered modal).
+        // Now open BOTH room_panel (corner overlay) AND config screen (centered modal).
         let mut state = AppState::default();
         state.zoom = Zoom::Compact;
         state.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
-        state.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
+        let working = clone_config(&state.config);
+        state.overlays.config_screen = Some(ConfigScreenState { working, scroll: Default::default() });
 
-        // The dialog rects represent the gallery centered dialog (not covering (0,0)).
+        // The dialog rects represent the config screen's centered dialog (not covering (0,0)).
         let dialog = Some(DialogRects {
             area:    Rect::new(5, 3, 70, 24),
             content: Rect::new(6, 5, 68, 19),
@@ -6710,12 +6038,12 @@ mod tests {
             field: None,
         });
 
-        // Click OUTSIDE the gallery dialog (at (0,0), which is on the room).
+        // Click OUTSIDE the config screen dialog (at (0,0), which is on the room).
         // Must be swallowed — NOT ShowRoomInfo or ActivatePane.
         let a = mouse_to_action(&state, mouse_left_click(0, 0), map_r, story_r, &live_room_rects, &dialog);
         assert!(
             matches!(a, Action::None),
-            "outside-gallery click with room_panel also open must be swallowed (None), got {:?}", a
+            "outside-config-screen click with room_panel also open must be swallowed (None), got {:?}", a
         );
     }
 
@@ -7314,588 +6642,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn open_style_editor_seeds_doc_and_preview() {
-        let mut s = AppState::default();
-        apply_action(Action::OpenStyleEditor, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.overlays.style_editor.as_ref().expect("editor open");
-        assert_eq!(ed.active, 0);
-        assert!(!ed.selectors.is_empty(), "selector list seeded");
-        // Cancel closes it.
-        apply_action(Action::StyleEditorCancel, &mut s, &mut mapper::mapper::Mapper::default());
-        assert!(s.overlays.style_editor.is_none());
-    }
-
-    #[test]
-    fn hermetic_editor_ignores_ambient_user_dir() {
-        // Even when config.user_dir already points at a directory containing a
-        // poison style.toml, the hermetic helper rebinds to a fresh empty dir,
-        // so the editor loads the built-in default (room has no fg) — proving
-        // tests never inherit the contributor's real ~/.babelmap/style.toml.
-        let poison =
-            std::env::temp_dir().join(format!("bm-poison-{}", std::process::id()));
-        std::fs::create_dir_all(&poison).unwrap();
-        std::fs::write(
-            poison.join("style.toml"),
-            "[colors]\n\"room\" = { fg = \"#123456\" }\n[symbols]\n",
-        )
-        .unwrap();
-        let mut s = AppState::default();
-        s.config.user_dir = poison;
-        open_style_editor_hermetic(&mut s);
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        assert!(
-            ed.doc.colors.selectors.get("room").and_then(|d| d.fg.as_ref()).is_none(),
-            "hermetic editor must not inherit the ambient user_dir's style.toml",
-        );
-    }
-
-    #[test]
-    fn toggling_bold_updates_decl_and_preview() {
-        let mut s = AppState::default();
-        crate::input::open_style_editor_hermetic(&mut s);
-        let sel = s.overlays.style_editor.as_ref().unwrap().selectors[0].to_string();
-        apply_action(Action::StyleToggleAttr(AttrKind::Bold), &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.bold), Some(true));
-        // Smoke: preview was recomputed (exercises the code path).
-        let _ = ed.preview;
-    }
-
-    #[test]
-    fn style_set_color_sets_fg_and_pushes_hex_to_mru() {
-        let mut s = AppState::default();
-        // Use a non-existent user_dir so load_mru returns empty regardless of disk state.
-        s.config.user_dir = std::path::PathBuf::from("/tmp/babelmap-test-empty-mru-dir");
-        open_style_editor_hermetic(&mut s);
-        let sel = s.overlays.style_editor.as_ref().unwrap().selectors[0].to_string();
-
-        // Set fg to a named color — no MRU push.
-        apply_action(Action::StyleSetColor { is_bg: false, value: Some("red".into()) },
-                     &mut s, &mut mapper::mapper::Mapper::default());
-        {
-            let ed = s.overlays.style_editor.as_ref().unwrap();
-            assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("red"));
-            assert!(ed.mru.is_empty(), "named colors do not push to MRU");
-        }
-
-        // Set fg to a hex color — should push to MRU.
-        apply_action(Action::StyleSetColor { is_bg: false, value: Some("#aabbcc".into()) },
-                     &mut s, &mut mapper::mapper::Mapper::default());
-        {
-            let ed = s.overlays.style_editor.as_ref().unwrap();
-            assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("#aabbcc"));
-            assert_eq!(ed.mru, vec!["#aabbcc".to_string()]);
-        }
-
-        // Set bg to None — clears to default.
-        apply_action(Action::StyleSetColor { is_bg: true, value: None },
-                     &mut s, &mut mapper::mapper::Mapper::default());
-        {
-            let ed = s.overlays.style_editor.as_ref().unwrap();
-            assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.bg.as_deref()), None);
-        }
-    }
-
-    #[test]
-    fn style_custom_char_and_backspace_edit_buf() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        let m = &mut mapper::mapper::Mapper::default();
-
-        apply_action(Action::StyleCustomChar('#'), &mut s, m);
-        apply_action(Action::StyleCustomChar('f'), &mut s, m);
-        apply_action(Action::StyleCustomChar('f'), &mut s, m);
-        apply_action(Action::StyleCustomChar('0'), &mut s, m);
-        apply_action(Action::StyleCustomChar('0'), &mut s, m);
-        apply_action(Action::StyleCustomChar('0'), &mut s, m);
-        apply_action(Action::StyleCustomChar('0'), &mut s, m);
-        assert_eq!(s.overlays.style_editor.as_ref().unwrap().custom_buf, "#ff0000");
-
-        apply_action(Action::StyleCustomBackspace, &mut s, m);
-        apply_action(Action::StyleCustomBackspace, &mut s, m);
-        assert_eq!(s.overlays.style_editor.as_ref().unwrap().custom_buf, "#ff00");
-    }
-
-    #[test]
-    fn style_focus_cycle_to_custom_seeds_hash() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        let m = &mut mapper::mapper::Mapper::default();
-        // Cycle delta=3 lands on Custom (Board=0 → index 3).
-        apply_action(Action::StyleFocusCycle(3), &mut s, m);
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        assert_eq!(ed.focus, crate::state::StyleFocus::Custom);
-        assert_eq!(ed.custom_buf, "#", "entering Custom via Tab seeds custom_buf with '#'");
-    }
-
-    #[test]
-    fn style_tab_cycles_through_each_footer_button() {
-        use crate::state::StyleFocus;
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        let m = &mut mapper::mapper::Mapper::default();
-        // The three buttons are the final stops, so Shift-Tab from Board steps
-        // backward through them: Cancel (2), Save Game (1), Save (0). Each button
-        // is its own tab stop, regardless of selector borderedness.
-        for expected in [2usize, 1, 0] {
-            apply_action(Action::StyleFocusCycle(-1), &mut s, m);
-            assert_eq!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons);
-            assert_eq!(s.overlays.dialog_focus, expected);
-        }
-        // Forward Tab steps through them the other way, then leaves the row and
-        // wraps back to the top of the body ring (Board).
-        apply_action(Action::StyleFocusCycle(1), &mut s, m); // Save -> Save Game
-        assert_eq!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons);
-        assert_eq!(s.overlays.dialog_focus, 1);
-        apply_action(Action::StyleFocusCycle(1), &mut s, m); // -> Cancel
-        assert_eq!(s.overlays.dialog_focus, 2);
-        apply_action(Action::StyleFocusCycle(1), &mut s, m); // -> wraps to Board
-        assert_eq!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Board);
-    }
-
-    #[test]
-    fn style_buttons_enter_activates_focused_button() {
-        use crate::state::StyleFocus;
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        s.overlays.style_editor.as_mut().unwrap().focus = StyleFocus::Buttons;
-        s.overlays.dialog_focus = 0;
-        assert!(matches!(style_editor_key_to_action(key(KeyCode::Enter), &s), Action::StyleSave));
-        s.overlays.dialog_focus = 1;
-        assert!(matches!(style_editor_key_to_action(key(KeyCode::Enter), &s), Action::StyleSaveGame));
-        s.overlays.dialog_focus = 2;
-        assert!(matches!(style_editor_key_to_action(key(KeyCode::Enter), &s), Action::StyleEditorCancel));
-    }
-
-    #[test]
-    fn style_buttons_enter_on_cancel_closes_editor() {
-        use crate::state::StyleFocus;
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        let m = &mut mapper::mapper::Mapper::default();
-        s.overlays.style_editor.as_mut().unwrap().focus = StyleFocus::Buttons;
-        s.overlays.dialog_focus = 2; // Cancel
-        let action = style_editor_key_to_action(key(KeyCode::Enter), &s);
-        apply_action(action, &mut s, m);
-        assert!(s.overlays.style_editor.is_none(), "activating Cancel closes the editor");
-    }
-
-    #[test]
-    fn style_custom_backspace_cannot_delete_leading_hash() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        let m = &mut mapper::mapper::Mapper::default();
-        // Seed via focus cycle.
-        apply_action(Action::StyleFocusCycle(3), &mut s, m);
-        assert_eq!(s.overlays.style_editor.as_ref().unwrap().custom_buf, "#");
-        // Backspace on lone '#' must be a no-op.
-        apply_action(Action::StyleCustomBackspace, &mut s, m);
-        assert_eq!(s.overlays.style_editor.as_ref().unwrap().custom_buf, "#",
-            "backspace on lone '#' must not delete it");
-    }
-
-    #[test]
-    fn style_save_applies_to_live_colors_and_closes() {
-        let mut s = AppState::default();
-        crate::input::open_style_editor_hermetic(&mut s);
-        apply_action(
-            Action::StyleSetColor { is_bg: false, value: Some("#ff0000".into()) },
-            &mut s, &mut mapper::mapper::Mapper::default(),
-        );
-        apply_action(Action::StyleSave, &mut s, &mut mapper::mapper::Mapper::default());
-        // Save must close the editor.
-        assert!(s.overlays.style_editor.is_none(), "save closes the editor");
-        // The live color scheme must have been updated (resolve ran).
-        // We can't assert a specific selector value without knowing which selector is first,
-        // but we can verify that state.colors is a valid ColorScheme (non-default fields
-        // may have changed). The smoke is: resolve ran without panic.
-        let _ = &s.colors;
-    }
-
-    #[test]
-    fn style_reset_reverts_active_selector_to_default() {
-        let mut s = AppState::default();
-        crate::input::open_style_editor_hermetic(&mut s);
-        let sel = s.overlays.style_editor.as_ref().unwrap().selectors[0].to_string();
-        // Mutate the first selector's fg.
-        apply_action(
-            Action::StyleSetColor { is_bg: false, value: Some("#ff0000".into()) },
-            &mut s, &mut mapper::mapper::Mapper::default(),
-        );
-        // Reset should revert it to the built-in default.
-        apply_action(Action::StyleReset, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        let default_doc = crate::style::parse_style_toml(crate::style::DEFAULT_STYLE_TOML).unwrap();
-        assert_eq!(
-            ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()),
-            default_doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()),
-            "reset restores the default fg for selector '{}'", sel,
-        );
-    }
-
-    #[test]
-    fn open_style_editor_resets_dialog_focus() {
-        let mut s = AppState::default();
-        s.overlays.dialog_focus = 5; // non-zero stale value
-        open_style_editor_hermetic(&mut s);
-        assert_eq!(s.overlays.dialog_focus, 0, "open_style_editor must reset dialog_focus to 0");
-    }
-
-    #[test]
-    fn style_dialog_action_buttons() {
-        use crate::render::dialog::{ButtonId, DialogRects};
-        use ratatui::layout::Rect;
-
-        // Build a minimal DialogRects with a Save button at (10,5), Cancel at (20,5),
-        // and a close [X] at (30,5).
-        let save_rect   = Rect { x: 10, y: 5, width: 4, height: 1 };
-        let cancel_rect = Rect { x: 20, y: 5, width: 6, height: 1 };
-        let close_rect  = Rect { x: 30, y: 5, width: 3, height: 1 };
-
-        let rects = DialogRects {
-            area: Rect::default(),
-            content: Rect::default(),
-            close: Some(close_rect),
-            buttons: vec![
-                (ButtonId::Save,   save_rect),
-                (ButtonId::Cancel, cancel_rect),
-            ],
-            field: None,
-        };
-
-        // Save button click → StyleSave
-        assert!(
-            matches!(style_dialog_action(&rects, 11, 5), Some(Action::StyleSave)),
-            "Save button must return StyleSave"
-        );
-
-        // Cancel button click → StyleEditorCancel
-        assert!(
-            matches!(style_dialog_action(&rects, 22, 5), Some(Action::StyleEditorCancel)),
-            "Cancel button must return StyleEditorCancel"
-        );
-
-        // Close [X] click → StyleEditorCancel
-        assert!(
-            matches!(style_dialog_action(&rects, 31, 5), Some(Action::StyleEditorCancel)),
-            "Close [X] must return StyleEditorCancel"
-        );
-
-        // Miss → None
-        assert!(
-            style_dialog_action(&rects, 0, 0).is_none(),
-            "miss must return None"
-        );
-    }
-
-    #[test]
-    fn style_dialog_action_maps_save_game() {
-        use crate::render::dialog::{ButtonId, DialogRects};
-        use ratatui::layout::Rect;
-        let save_rect     = Rect { x: 10, y: 5, width: 18, height: 1 };
-        let savegame_rect = Rect { x: 30, y: 5, width: 16, height: 1 };
-        let cancel_rect   = Rect { x: 48, y: 5, width: 10, height: 1 };
-        let rects = DialogRects {
-            area: Rect::default(),
-            content: Rect::default(),
-            close: None,
-            buttons: vec![
-                (ButtonId::Save,     save_rect),
-                (ButtonId::SaveGame, savegame_rect),
-                (ButtonId::Cancel,   cancel_rect),
-            ],
-            field: None,
-        };
-        assert!(matches!(style_dialog_action(&rects, 31, 5), Some(Action::StyleSaveGame)),
-            "clicking Save Game Style maps to StyleSaveGame");
-        assert!(matches!(style_dialog_action(&rects, 11, 5), Some(Action::StyleSave)),
-            "clicking Save Global Style maps to StyleSave");
-    }
-
-    #[test]
-    fn custom_commit_targets_bg_when_color_target_is_bg() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        {
-            let ed = s.overlays.style_editor.as_mut().unwrap();
-            ed.color_target = true; // bg
-            ed.custom_buf = "#abcdef".into();
-        }
-        apply_action(Action::StyleCommitCustom, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        let sel = ed.selectors[ed.active].to_string();
-        assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.bg.clone()), Some("#abcdef".into()));
-        assert!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.clone()).is_none());
-    }
-
-    #[test]
-    fn swatch_pick_default_cell_sets_reset() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        {
-            let ed = s.overlays.style_editor.as_mut().unwrap();
-            ed.color_target = false; // fg
-            ed.swatch_cursor = crate::style_mru::ANSI_NAMES.len(); // the "default" cell
-        }
-        apply_action(Action::StyleSwatchPick, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        let sel = ed.selectors[ed.active].to_string();
-        assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("reset"),
-            "picking the default swatch cell stores the reset token");
-    }
-
-    #[test]
-    fn custom_commit_default_stores_reset() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        {
-            let ed = s.overlays.style_editor.as_mut().unwrap();
-            ed.color_target = false; // fg
-            ed.custom_buf = "default".into();
-        }
-        apply_action(Action::StyleCommitCustom, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        let sel = ed.selectors[ed.active].to_string();
-        assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("reset"),
-            "typing default in the custom field stores the reset token");
-    }
-
-    #[test]
-    fn glyph_picker_pick_sets_zone_glyph_and_closes() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        {
-            let ed = s.overlays.style_editor.as_mut().unwrap();
-            ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
-            ed.doc.colors.selectors.entry("map_border".into()).or_default().style = None;
-        }
-        apply_action(Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top), &mut s, &mut Mapper::default());
-        assert!(s.overlays.glyph_picker.is_some(), "picker opens");
-        // Feed '═' via the pending path then commit.
-        apply_action(Action::GlyphPickerChar('═'), &mut s, &mut Mapper::default());
-        apply_action(Action::GlyphPickerPick, &mut s, &mut Mapper::default());
-        assert!(s.overlays.glyph_picker.is_none(), "pick closes the picker");
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        assert_eq!(
-            ed.doc.colors.selectors.get("map_border").and_then(|d| d.glyph_top.clone()),
-            Some("═".into()),
-            "glyph written to the doc",
-        );
-    }
-
-    #[test]
-    fn glyph_picker_clear_sets_zone_to_none_and_closes() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        {
-            let ed = s.overlays.style_editor.as_mut().unwrap();
-            ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
-            // Pre-set a glyph so we can verify clear removes it.
-            let decl = ed.doc.colors.selectors.entry("map_border".into()).or_default();
-            decl.glyph_top = Some("═".into());
-            decl.style = None;
-        }
-        apply_action(Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top), &mut s, &mut Mapper::default());
-        assert!(s.overlays.glyph_picker.is_some());
-        apply_action(Action::GlyphPickerClear, &mut s, &mut Mapper::default());
-        assert!(s.overlays.glyph_picker.is_none(), "clear closes the picker");
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        assert_eq!(
-            ed.doc.colors.selectors.get("map_border").and_then(|d| d.glyph_top.clone()),
-            None,
-            "glyph cleared from the doc",
-        );
-    }
-
-    #[test]
-    fn glyph_picker_custom_range_entry() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        apply_action(
-            Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top),
-            &mut s,
-            &mut Mapper::default(),
-        );
-        assert!(s.overlays.glyph_picker.is_some(), "picker opens");
-
-        // Enter custom-entry focus via the action.
-        apply_action(Action::GlyphPickerCustomFocus, &mut s, &mut Mapper::default());
-        assert!(s.overlays.glyph_picker.as_ref().unwrap().custom_focus, "custom_focus set");
-
-        // Type '2', '5', '0', '0' → U+2500.
-        for c in ['2', '5', '0', '0'] {
-            apply_action(Action::GlyphPickerCustomChar(c), &mut s, &mut Mapper::default());
-        }
-        {
-            let picker = s.overlays.glyph_picker.as_ref().unwrap();
-            assert_eq!(picker.custom_buf, "2500", "buf accumulates hex digits");
-            assert_eq!(picker.custom_start, Some(0x2500), "custom_start set to U+2500");
-        }
-
-        // Backspace removes last digit; custom_start updates.
-        apply_action(Action::GlyphPickerCustomBackspace, &mut s, &mut Mapper::default());
-        {
-            let picker = s.overlays.glyph_picker.as_ref().unwrap();
-            assert_eq!(picker.custom_buf, "250");
-            assert_eq!(picker.custom_start, Some(0x250));
-        }
-
-        // Block navigation clears custom state.
-        apply_action(Action::GlyphPickerBlock(1), &mut s, &mut Mapper::default());
-        {
-            let picker = s.overlays.glyph_picker.as_ref().unwrap();
-            assert!(!picker.custom_focus, "block nav exits custom focus");
-            assert!(picker.custom_buf.is_empty(), "block nav clears custom_buf");
-            assert_eq!(picker.custom_start, None, "block nav clears custom_start");
-        }
-    }
-
-    #[test]
-    fn glyph_picker_custom_focus_blocks_pending() {
-        // Verify that GlyphPickerChar is ignored when custom_focus is active.
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        apply_action(
-            Action::StyleOpenGlyphPicker(crate::state::BorderZone::Top),
-            &mut s,
-            &mut Mapper::default(),
-        );
-        apply_action(Action::GlyphPickerCustomFocus, &mut s, &mut Mapper::default());
-        apply_action(Action::GlyphPickerChar('═'), &mut s, &mut Mapper::default());
-        assert!(
-            s.overlays.glyph_picker.as_ref().unwrap().pending.is_none(),
-            "GlyphPickerChar should not set pending while in custom focus",
-        );
-    }
-
-    #[test]
-    fn swatch_pick_sets_color_for_target_and_default_clears() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        { let ed = s.overlays.style_editor.as_mut().unwrap(); ed.color_target = false; ed.swatch_cursor = 16; } // default cell
-        apply_action(Action::StyleSwatchPick, &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        let sel = ed.selectors[ed.active].to_string();
-        // default cell stores the reset token (freezes terminal-default)
-        assert_eq!(ed.doc.colors.selectors.get(&sel).and_then(|d| d.fg.as_deref()), Some("reset"));
-    }
-
-    #[test]
-    fn border_type_cycle_updates_decl_style() {
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        { let ed = s.overlays.style_editor.as_mut().unwrap();
-          ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap(); }
-        apply_action(Action::StyleBorderTypeCycle(1), &mut s, &mut mapper::mapper::Mapper::default());
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        let st = ed.doc.colors.selectors.get("map_border").and_then(|d| d.style.clone());
-        assert!(st.is_some(), "cycling sets the border style name on the decl");
-    }
-    #[test]
-    fn is_bordered_selector_covers_the_six() {
-        for sel in ["map_border","story_border","dialog","upper_window_border","status_header","input_line"] {
-            assert!(crate::input::is_bordered_selector(sel), "{sel} is bordered");
-        }
-        assert!(!crate::input::is_bordered_selector("transcript"));
-    }
-
-    /// SQ-0357: every border now has per-zone glyphs. The gate that suppressed the picker
-    /// existed only for `picture-frame`, a composite border with no zones to override.
-    #[test]
-    fn a_border_selector_opens_the_glyph_picker() {
-        use crate::state::BorderZone;
-
-        let mut state = AppState::default();
-        open_style_editor_hermetic(&mut state);
-        {
-            let ed = state.overlays.style_editor.as_mut().unwrap();
-            ed.active = ed.selectors.iter().position(|x| *x == "map_border").unwrap();
-            ed.doc.colors.selectors.entry("map_border".into()).or_default().style = None;
-        }
-        apply_action(
-            Action::StyleOpenGlyphPicker(BorderZone::Top),
-            &mut state,
-            &mut Mapper::default(),
-        );
-        assert!(state.overlays.glyph_picker.is_some(), "a border selector opens the picker");
-    }
-
-    #[test]
-    fn border_focus_only_on_bordered_selectors() {
-        use crate::state::StyleFocus;
-        let m = &mut mapper::mapper::Mapper::default();
-
-        // ── non-bordered selector: cycling from Attrs wraps to Board, never Border ──
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        {
-            let ed = s.overlays.style_editor.as_mut().unwrap();
-            let non_bordered_idx = ed.selectors.iter()
-                .position(|sel| !crate::input::is_bordered_selector(sel))
-                .expect("at least one non-bordered selector exists");
-            ed.active = non_bordered_idx;
-            ed.focus = StyleFocus::Attrs;
-        }
-        // Attrs → the footer buttons; cycling a full loop never enters Border for
-        // a non-bordered selector.
-        apply_action(Action::StyleFocusCycle(1), &mut s, m);
-        assert_eq!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Buttons,
-            "non-bordered selector goes from Attrs to the footer buttons");
-        for _ in 0..10 {
-            apply_action(Action::StyleFocusCycle(1), &mut s, m);
-            assert_ne!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Border,
-                "non-bordered selector must never enter Border focus");
-        }
-
-        // ── bordered selector: cycling from Attrs reaches Border ──
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        {
-            let ed = s.overlays.style_editor.as_mut().unwrap();
-            let bordered_idx = ed.selectors.iter()
-                .position(|sel| crate::input::is_bordered_selector(sel))
-                .expect("at least one bordered selector exists");
-            ed.active = bordered_idx;
-            ed.focus = StyleFocus::Attrs;
-        }
-        apply_action(Action::StyleFocusCycle(1), &mut s, m);
-        assert_eq!(s.overlays.style_editor.as_ref().unwrap().focus, StyleFocus::Border,
-            "bordered selector must reach Border focus");
-
-        // ── navigating away from bordered selector drops stale Border focus ──
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s);
-        {
-            let ed = s.overlays.style_editor.as_mut().unwrap();
-            let bordered_idx = ed.selectors.iter()
-                .position(|sel| crate::input::is_bordered_selector(sel))
-                .expect("at least one bordered selector exists");
-            ed.active = bordered_idx;
-            ed.focus = StyleFocus::Border;
-        }
-        apply_action(Action::StyleNav(1), &mut s, m);
-        let ed = s.overlays.style_editor.as_ref().unwrap();
-        if !crate::input::is_bordered_selector(ed.selectors[ed.active]) {
-            assert_ne!(ed.focus, StyleFocus::Border,
-                "Border focus must drop on a non-bordered selector");
-        }
-    }
-
-    #[test]
-    fn style_save_game_guards_no_game_and_closes_with_game() {
-        // No game loaded: editor stays open (cannot save a per-game style).
-        let mut s = AppState::default();
-        open_style_editor_hermetic(&mut s); // ifid is empty by default
-        assert!(s.ifid.is_empty());
-        apply_action(Action::StyleSaveGame, &mut s, &mut mapper::mapper::Mapper::default());
-        assert!(s.overlays.style_editor.is_some(), "no game: Save Game Style is a no-op, editor stays open");
-
-        // Game loaded: applies the look live and closes the editor.
-        let mut s2 = AppState::default();
-        open_style_editor_hermetic(&mut s2);
-        s2.ifid = "ZCODE-1-ABCDEF-0001".to_string();
-        apply_action(Action::StyleSaveGame, &mut s2, &mut mapper::mapper::Mapper::default());
-        assert!(s2.overlays.style_editor.is_none(), "with game: Save Game Style closes the editor");
-    }
 }

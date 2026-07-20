@@ -210,8 +210,6 @@ impl Default for KeyMap {
 
         bind!(ctrl(Char('s')), "save-state", Context::Global);
         bind!(ctrl(Char('r')), "restore-state", Context::Global);
-        // F3 → open style editor (F3 is unbound; F2/F4–F9 are taken).
-        bind!(plain(F(3)), "open-style-editor", Context::Global);
 
         // F6-F9 → Nudge (plain function keys; ctrl+arrow removed so all direct
         // bindings remain modifier-free).
@@ -373,7 +371,7 @@ const DEFAULT_GROUPS: &[(&str, &[(char, &str)])] = &[
         ('v', "export-svg"), ('g', "export-dot"), ('u', "export-dump"),
     ]),
     ("View", &[
-        ('i', "toggle-inspector"), ('f', "open-gallery"), ('b', "open-verb-menu"),
+        ('i', "toggle-inspector"), ('b', "open-verb-menu"),
         ('w', "open-config"), ('y', "toggle-inventory"), ('j', "toggle-alignment"),
         ('q', "toggle-portal-labels"), ('z', "resize-panes"), ('k', "reset-pane-size"),
     ]),
@@ -564,7 +562,7 @@ mod tests {
         assert!(layout.is_direct_name("toggle-focus"), "toggle-focus should be direct");
         // Non-direct (dialog-only) commands
         assert!(!layout.is_direct_name("tidy-map"), "tidy-map should NOT be direct");
-        assert!(!layout.is_direct_name("open-gallery"), "open-gallery should NOT be direct");
+        assert!(!layout.is_direct_name("open-config"), "open-config should NOT be direct");
         // Groups
         assert_eq!(layout.groups.len(), 5, "default layout should have 5 groups");
         assert_eq!(layout.groups[0].0, "Layout", "first group title should be Layout");
@@ -853,7 +851,7 @@ mod tests {
             .collect();
         let unique: std::collections::HashSet<char> = letters.iter().copied().collect();
         assert_eq!(letters.len(), unique.len(), "leader letters must be unique");
-        assert_eq!(letters.len(), 26, "expected 26 authored leader letters");
+        assert_eq!(letters.len(), 25, "expected 25 authored leader letters");
     }
 
     #[test]

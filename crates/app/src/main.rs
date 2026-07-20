@@ -19,10 +19,9 @@ use app::export_dot::export_dot;
 use app::export_svg::export_svg;
 use app::map_dump::render_dump;
 use app::archive::{load_archive, save_archive_meta};
-use app::input::{apply_action, apply_text_entry, key_to_command, mouse_to_action, style_dialog_action, Action, KeyResolve};
+use app::input::{apply_action, apply_text_entry, key_to_command, mouse_to_action, Action, KeyResolve};
 use app::tidy::should_bg_tidy;
 use app::persist_files::{list_saves, restore_game};
-use app::render::style_editor::StyleEditorRects;
 use app::render::dialog::{DialogRects, DialogStyle};
 use app::render::hints_panel::{hint_key_routes, HintKeyKind, HintsPanelRects};
 use app::render::verbmenu::draw_verb_menu;
@@ -216,12 +215,8 @@ struct PaneRects {
     pub launch_dialog: Option<app::render::launch_dialog::LaunchDialogRects>,
     /// Hit-rects for the hints panel (when open).
     pub hints_panel: Option<HintsPanelRects>,
-    /// Hit-rects for the style-editor board (when open).
-    pub style_editor: Option<StyleEditorRects>,
     /// Hit-rects for the verb dock's token rows and section headers (when open).
     pub verb_menu: app::render::verbmenu::VerbMenuHits,
-    /// Hit-rects for the glyph-picker modal (when open).
-    pub glyph_picker: Option<app::render::glyph_picker::GlyphPickerRects>,
     /// Per-frame map from rendered story-pane cell `(col, row)` → Glk hyperlink
     /// value. Built during transcript render; the mouse handler hit-tests these
     /// on click to deliver the hyperlink event. Empty when nothing on screen is
@@ -584,8 +579,6 @@ fn draw_frame(
             "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc: cancel".to_string()
         } else if state.overlays.saves.is_some() {
             "Saves | \u{2191}\u{2193}: select | Enter: load | s: save-as | d: delete | i: import | Esc: close".to_string()
-        } else if state.overlays.gallery.is_some() {
-            "Symbol Gallery | \u{2191}\u{2193}: preset | \u{2190}\u{2192}: category | Esc/Enter: close".to_string()
         } else if let Some(anim) = &state.tidy_anim {
             // Playback status: stage progress + the transport controls.
             let f = anim.current();
@@ -664,7 +657,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, style_editor: overlay_rects.style_editor, verb_menu: verb_hits, glyph_picker: overlay_rects.glyph_picker, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, verb_menu: verb_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -792,7 +785,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, style_editor: None, verb_menu: Default::default(), glyph_picker: None, transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_total_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, verb_menu: Default::default(), transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_total_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1436,136 +1429,6 @@ fn main() {
             }
         }
 
-        // ── Glyph-picker intercept — modal over the style editor ─────────────
-        // When the glyph picker is open, route all keyboard events here and
-        // continue (swallowing events the picker doesn't handle).
-        if state.overlays.glyph_picker.is_some() {
-            match &event {
-                Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    use crossterm::event::KeyCode;
-                    match k.code {
-                        KeyCode::Esc => {
-                            // In custom-entry focus: exit focus only; otherwise cancel picker.
-                            if state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
-                                if let Some(p) = &mut state.overlays.glyph_picker {
-                                    p.custom_focus = false;
-                                }
-                            } else {
-                                apply_action(Action::GlyphPickerCancel, &mut state, &mut mapper);
-                            }
-                        }
-                        KeyCode::Enter => {
-                            // In custom-entry focus: commit the typed range (custom_start already
-                            // updated on each digit) and exit focus so the grid is browsable.
-                            if state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
-                                if let Some(p) = &mut state.overlays.glyph_picker {
-                                    p.custom_focus = false;
-                                }
-                            } else {
-                                apply_action(Action::GlyphPickerPick, &mut state, &mut mapper);
-                            }
-                        }
-                        KeyCode::Delete | KeyCode::Backspace => {
-                            if state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
-                                apply_action(Action::GlyphPickerCustomBackspace, &mut state, &mut mapper);
-                            } else {
-                                // Clear the pending selection (revert to grid cursor).
-                                if let Some(p) = &mut state.overlays.glyph_picker {
-                                    p.pending = None;
-                                }
-                            }
-                        }
-                        KeyCode::Left => {
-                            if !state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
-                                apply_action(Action::GlyphPickerNav(-1), &mut state, &mut mapper);
-                            }
-                        }
-                        KeyCode::Right => {
-                            if !state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
-                                apply_action(Action::GlyphPickerNav(1), &mut state, &mut mapper);
-                            }
-                        }
-                        KeyCode::Up => {
-                            if !state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
-                                apply_action(Action::GlyphPickerNav(-(app::input::GLYPH_GRID_COLS as i32)), &mut state, &mut mapper);
-                            }
-                        }
-                        KeyCode::Down => {
-                            if !state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
-                                apply_action(Action::GlyphPickerNav(app::input::GLYPH_GRID_COLS as i32), &mut state, &mut mapper);
-                            }
-                        }
-                        KeyCode::Char(',') | KeyCode::Char('[') => {
-                            apply_action(Action::GlyphPickerBlock(-1), &mut state, &mut mapper);
-                        }
-                        KeyCode::Char('.') | KeyCode::Char(']') => {
-                            apply_action(Action::GlyphPickerBlock(1), &mut state, &mut mapper);
-                        }
-                        KeyCode::Char(c) => {
-                            if state.overlays.glyph_picker.as_ref().is_some_and(|p| p.custom_focus) {
-                                // In custom-entry mode: only hex digits are accepted.
-                                if c.is_ascii_hexdigit() {
-                                    apply_action(Action::GlyphPickerCustomChar(c), &mut state, &mut mapper);
-                                }
-                                // Non-hex chars swallowed (modal intercept).
-                            } else {
-                                apply_action(Action::GlyphPickerChar(c), &mut state, &mut mapper);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Event::Mouse(m) => {
-                    use crossterm::event::{MouseEventKind, MouseButton};
-                    if m.kind == MouseEventKind::Down(MouseButton::Left) {
-                        let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                        if let Some(gp) = &last_panes.glyph_picker {
-                            // Close button.
-                            if gp.close.is_some_and(|r| r.contains(pt)) {
-                                apply_action(Action::GlyphPickerCancel, &mut state, &mut mapper);
-                            // Glyph cells: set pending + pick.
-                            } else {
-                                let mut picked = false;
-                                for (g, r) in &gp.glyphs {
-                                    if r.contains(pt) {
-                                        apply_action(Action::GlyphPickerChar(g.chars().next().unwrap_or(' ')), &mut state, &mut mapper);
-                                        apply_action(Action::GlyphPickerPick, &mut state, &mut mapper);
-                                        picked = true;
-                                        break;
-                                    }
-                                }
-                                if !picked {
-                                    for (g, r) in &gp.mru {
-                                        if r.contains(pt) {
-                                            apply_action(Action::GlyphPickerChar(g.chars().next().unwrap_or(' ')), &mut state, &mut mapper);
-                                            apply_action(Action::GlyphPickerPick, &mut state, &mut mapper);
-                                            picked = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                                if !picked {
-                                    if gp.blocks_prev.is_some_and(|r| r.contains(pt)) {
-                                        apply_action(Action::GlyphPickerBlock(-1), &mut state, &mut mapper);
-                                    } else if gp.blocks_next.is_some_and(|r| r.contains(pt)) {
-                                        apply_action(Action::GlyphPickerBlock(1), &mut state, &mut mapper);
-                                    } else if gp.clear.is_some_and(|r| r.contains(pt)) {
-                                        apply_action(Action::GlyphPickerClear, &mut state, &mut mapper);
-                                    } else if gp.custom.is_some_and(|r| r.contains(pt)) {
-                                        apply_action(Action::GlyphPickerCustomFocus, &mut state, &mut mapper);
-                                    }
-                                    // Clicks outside modal area: swallow (modal is top).
-                                }
-                            }
-                        }
-                    }
-                }
-                Event::Resize(_, _) => { let _ = terminal.clear(); }
-                _ => {}
-            }
-            continue;
-        }
-
         // ── Debug inspector (tiled): drive it while its region is focused ──────
         // Not a modal: only intercepts while the debug region holds `Focus::Map`,
         // and runs before the normal key→command dispatch so it pre-empts
@@ -2019,148 +1882,7 @@ fn main() {
                         }
                     }
                 }
-                // Style-editor board: intercept left-clicks on sample rows and property pane.
-                if state.overlays.style_editor.is_some() {
-                    // Holds a dialog-button action that must flow through the normal
-                    // run-loop path (so the style_save flag fires save_style_and_repoint).
-                    let mut click_action = Action::None;
-                    if matches!(m.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left)) {
-                        if let Some(rects) = &last_panes.style_editor {
-                            // Helper: is the cursor inside a rect?
-                            let hit = |rect: &ratatui::layout::Rect| {
-                                rect.width > 0 && rect.height > 0
-                                    && m.column >= rect.x && m.column < rect.right()
-                                    && m.row >= rect.y && m.row < rect.bottom()
-                            };
-
-                            // Sample board: set active selector.
-                            for (idx, rect) in &rects.samples {
-                                if hit(rect) {
-                                    if let Some(ed) = &mut state.overlays.style_editor {
-                                        ed.active = *idx;
-                                    }
-                                    continue 'event_loop;
-                                }
-                            }
-
-                            // Attribute chips.
-                            for (kind, rect) in &rects.attr_chips {
-                                if hit(rect) {
-                                    let kind = *kind;
-                                    apply_action(Action::StyleToggleAttr(kind), &mut state, &mut mapper);
-                                    continue 'event_loop;
-                                }
-                            }
-
-                            // Fg swatch row (17 rects: 0-15 = ANSI, 16 = default).
-                            for (i, rect) in rects.fg_swatches.iter().enumerate() {
-                                if hit(rect) {
-                                    if let Some(ed) = &mut state.overlays.style_editor { ed.color_target = false; }
-                                    let value = if i < app::style_mru::ANSI_NAMES.len() {
-                                        Some(app::style_mru::ANSI_NAMES[i].to_string())
-                                    } else {
-                                        Some("reset".to_string())
-                                    };
-                                    apply_action(Action::StyleSetColor { is_bg: false, value }, &mut state, &mut mapper);
-                                    continue 'event_loop;
-                                }
-                            }
-
-                            // Bg swatch row.
-                            for (i, rect) in rects.bg_swatches.iter().enumerate() {
-                                if hit(rect) {
-                                    if let Some(ed) = &mut state.overlays.style_editor { ed.color_target = true; }
-                                    let value = if i < app::style_mru::ANSI_NAMES.len() {
-                                        Some(app::style_mru::ANSI_NAMES[i].to_string())
-                                    } else {
-                                        Some("reset".to_string())
-                                    };
-                                    apply_action(Action::StyleSetColor { is_bg: true, value }, &mut state, &mut mapper);
-                                    continue 'event_loop;
-                                }
-                            }
-
-                            // MRU row.
-                            for (i, rect) in rects.mru_rects.iter().enumerate() {
-                                if hit(rect) {
-                                    let hex = state.overlays.style_editor.as_ref()
-                                        .and_then(|ed| ed.mru.get(i).cloned());
-                                    if let Some(hex) = hex {
-                                        let is_bg = state.overlays.style_editor.as_ref().is_some_and(|e| e.color_target);
-                                        apply_action(Action::StyleSetColor { is_bg, value: Some(hex) }, &mut state, &mut mapper);
-                                    }
-                                    continue 'event_loop;
-                                }
-                            }
-
-                            // Custom hex entry cell → switch focus to Custom.
-                            if let Some(rect) = &rects.custom_rect {
-                                if hit(rect) {
-                                    use app::state::StyleFocus;
-                                    if let Some(ed) = &mut state.overlays.style_editor {
-                                        ed.focus = StyleFocus::Custom;
-                                        if ed.custom_buf.is_empty() {
-                                            ed.custom_buf = "#".to_string();
-                                        }
-                                    }
-                                    continue 'event_loop;
-                                }
-                            }
-
-                            // Border zone cells.
-                            for (zone, rect) in &rects.border_zones {
-                                if hit(rect) {
-                                    let zone = *zone;
-                                    apply_action(Action::StyleOpenGlyphPicker(zone), &mut state, &mut mapper);
-                                    continue 'event_loop;
-                                }
-                            }
-                            // Border type cycle arrows.
-                            if let Some(rect) = &rects.border_type_prev {
-                                if hit(rect) {
-                                    apply_action(Action::StyleBorderTypeCycle(-1), &mut state, &mut mapper);
-                                    continue 'event_loop;
-                                }
-                            }
-                            if let Some(rect) = &rects.border_type_next {
-                                if hit(rect) {
-                                    apply_action(Action::StyleBorderTypeCycle(1), &mut state, &mut mapper);
-                                    continue 'event_loop;
-                                }
-                            }
-                            // Header/shadow toggles.
-                            if let Some(rect) = &rects.border_header {
-                                if hit(rect) {
-                                    apply_action(Action::StyleBorderToggleHeader, &mut state, &mut mapper);
-                                    continue 'event_loop;
-                                }
-                            }
-                            if let Some(rect) = &rects.border_shadow {
-                                if hit(rect) {
-                                    apply_action(Action::StyleBorderToggleShadow, &mut state, &mut mapper);
-                                    continue 'event_loop;
-                                }
-                            }
-
-                            // Dialog buttons: Save / Cancel / close [X].
-                            // These must reach the run-loop action path so the style_save
-                            // flag fires and save_style_and_repoint writes style.toml.
-                            if let Some(act) = style_dialog_action(&rects.dialog, m.column, m.row) {
-                                click_action = act;
-                            }
-                        }
-                    }
-                    // Wheel drives the selector list via mouse_to_action's
-                    // modal-precedence branch; swallow all other unhandled mouse
-                    // events. Dialog-button actions flow through the run-loop path.
-                    if matches!(m.kind, crossterm::event::MouseEventKind::ScrollUp | crossterm::event::MouseEventKind::ScrollDown) {
-                        mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
-                    } else {
-                        click_action
-                    }
-                } else {
-                    mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
-                }
+                mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
             }
             // Resize: continue so the next draw uses the updated terminal size.
             // Resize: force a full repaint so no stale cells survive the size change.
@@ -2173,16 +1895,6 @@ fn main() {
             toggle_style_watch(&mut state, &mut style_watcher);
             continue;
         }
-
-        // Note whether this action closes the gallery (persist the look afterward).
-        let gallery_cfg_on_close = matches!(action, Action::GalleryClose | Action::GalleryApply);
-
-        // Note whether this action is the on-demand "Output all settings" export.
-        let export_style_now = matches!(action, Action::GalleryExportStyle);
-
-        // Note whether this action is a style-editor save (for post-apply disk write).
-        let style_save = matches!(action, Action::StyleSave);
-        let style_save_game = matches!(action, Action::StyleSaveGame);
 
         // Snapshot working config before apply_action clears it on ConfigSave.
         let config_to_save = if matches!(action, Action::ConfigSave) {
@@ -2674,24 +2386,6 @@ fn main() {
         // calls placed right before its `continue`s above.
         lifecycle::flush_pending_config_write(&mut state);
 
-        // After apply_action: if gallery was just closed, write the resolved look to
-        // the personal style file and repoint config.toml at it.
-        if gallery_cfg_on_close {
-            let user_dir = state.config.user_dir.clone();
-            save_style_and_repoint(&mut state, &user_dir);
-        }
-
-        // After apply_action: if the "Output all settings" button was pressed, sync the
-        // live gallery selections, then write_style_full + repoint on demand (gallery
-        // stays open).
-        if export_style_now {
-            if let Some(g) = state.overlays.gallery.as_ref() {
-                state.symbols = app::symbols::SymbolSet::resolve(&g.symbol_config());
-            }
-            let user_dir = state.config.user_dir.clone();
-            save_style_and_repoint(&mut state, &user_dir);
-        }
-
         // After apply_action: if config screen was just saved, write the resolved look
         // to the personal style file and repoint config.toml at it.
         if let Some(cfg_to_write) = config_to_save {
@@ -2714,20 +2408,6 @@ fn main() {
             }
         }
 
-        // After apply_action: if the style editor was just saved, write the live
-        // colors (already set by the handler) to the personal style file and repoint.
-        if style_save {
-            let user_dir = state.config.user_dir.clone();
-            save_style_and_repoint(&mut state, &user_dir);
-        }
-
-        // After apply_action: if Save Game Style was used, write the live look
-        // self-contained to the current game's per-game style file.
-        if style_save_game && !state.game_dir.as_os_str().is_empty() {
-            let _ = app::styles::save_per_game_style(
-                &state.game_dir, &state.colors, &state.symbols,
-            );
-        }
     }
 
     // ── 6. Exit: restore terminal + (optional) autosave ───────────────────────
@@ -3437,18 +3117,6 @@ mod tests {
         );
         apply_action(action, &mut s, &mut Mapper::default());
         assert!(!s.overlays.hotkey_dialog, "hotkey_dialog should be false after CloseHotkeyDialog");
-    }
-
-    #[test]
-    fn apply_open_gallery_clears_hotkey_dialog() {
-        use app::input::{apply_action, Action};
-        use app::state::AppState;
-        use mapper::mapper::Mapper;
-        let mut s = AppState::default();
-        s.overlays.hotkey_dialog = true;
-        apply_action(Action::OpenGallery, &mut s, &mut Mapper::default());
-        assert!(!s.overlays.hotkey_dialog, "OpenGallery should clear hotkey_dialog");
-        assert!(s.overlays.gallery.is_some(), "gallery should be open");
     }
 
     // ── dim_area ──────────────────────────────────────────────────────────────

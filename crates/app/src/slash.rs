@@ -327,10 +327,6 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "toggle-portal-labels", category: Category::Map, context: Context::Global,
         usage: "toggle-portal-labels", description: "toggle portal labels",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::TogglePortalLabels) },
-    CommandSpec { name: "open-gallery", category: Category::Map, context: Context::Map,
-        usage: "open-gallery", description: "open the symbol gallery",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenGallery) },
-
     // ── View ──────────────────────────────────────────────────────────────
     CommandSpec { name: "toggle-map", category: Category::View, context: Context::Global,
         usage: "toggle-map", description: "show or hide the map panel",
@@ -368,9 +364,6 @@ pub static COMMANDS: &[CommandSpec] = &[
         dispatch: |a| SlashOutcome::Export(a.first().map(|s| s.to_string())) },
 
     // ── Style ─────────────────────────────────────────────────────────────
-    CommandSpec { name: "open-style-editor", category: Category::Style, context: Context::Global,
-        usage: "open-style-editor", description: "open the live style editor",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenStyleEditor) },
     CommandSpec { name: "open-config", category: Category::Style, context: Context::Global,
         usage: "open-config", description: "open the settings screen",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::OpenConfig) },
@@ -670,14 +663,6 @@ mod tests {
     }
 
     #[test]
-    fn slash_style_opens_editor() {
-        use crate::input::Action;
-        assert!(matches!(parse("open-style-editor", '/'), SlashOutcome::Action(Action::OpenStyleEditor)));
-        // old short name no longer resolves (clean break):
-        assert!(matches!(parse("style", '/'), SlashOutcome::Error(_)));
-    }
-
-    #[test]
     fn parse_search_filter_export() {
         assert!(matches!(parse("search-transcript twisty maze", '/'), SlashOutcome::Search(Some(q)) if q == "twisty maze"));
         assert!(matches!(parse("search-transcript a  b", '/'), SlashOutcome::Search(Some(q)) if q == "a  b"));
@@ -744,11 +729,13 @@ mod tests {
         assert_eq!(by("save-state").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (Game 11, Map 21, View 6,
-        // Transcript 3, Style 7, Export 3, Animation 4, Help 3). `open-saves`
+        // Total count matches the spec table (Game 11, Map 20, View 6,
+        // Transcript 3, Style 6, Export 3, Animation 4, Help 3). `open-saves`
         // was removed — `restore-state` (bare) opens the saves dialog instead.
-        // `debug` (SQ-0169) opens the Z-machine debug inspector.
-        assert_eq!(COMMANDS.len(), 60, "registry must match the spec's Full command table");
+        // `debug` (SQ-0169) opens the Z-machine debug inspector. `open-gallery`
+        // and `open-style-editor` were removed (SQ-0309): the interactive
+        // gallery/style-editor UIs are gone; `reload-style` remains.
+        assert_eq!(COMMANDS.len(), 58, "registry must match the spec's Full command table");
     }
 
     #[test]

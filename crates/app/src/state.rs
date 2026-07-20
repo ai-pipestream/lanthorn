@@ -168,22 +168,8 @@ impl VerbMenuState {
     }
 }
 
-// ── Gallery constants ─────────────────────────────────────────────────────────
-
-/// Category index for box-style gallery column.
 /// Maximum number of submitted command lines retained in `command_history`.
 pub const COMMAND_HISTORY_CAP: usize = 500;
-
-pub const GALLERY_CATEGORY_BOX: usize = 0;
-/// Category index for arrow-set gallery column.
-pub const GALLERY_CATEGORY_ARROWS: usize = 1;
-/// Category index for portal-icons gallery column.
-pub const GALLERY_CATEGORY_PORTAL: usize = 2;
-/// Category index for path-style gallery column.
-pub const GALLERY_CATEGORY_PATH: usize = 3;
-
-/// Category names displayed in the gallery left pane.
-pub const GALLERY_CATEGORY_NAMES: &[&str] = &["Box style", "Arrows", "Portals", "Path"];
 
 use mapper::direction::Direction;
 use mapper::graph::{MapGraph, RoomId};
@@ -770,39 +756,6 @@ impl FilePickerState {
     }
 }
 
-// ── Gallery state ─────────────────────────────────────────────────────────────
-
-/// Transient state for the symbol gallery modal.
-/// `None` in AppState.gallery = closed.
-#[derive(Debug, Clone)]
-pub struct GalleryState {
-    /// Which category column is currently active (0..4).
-    pub category_idx: usize,
-    /// Selected preset index within each category (indices into preset_names()).
-    /// Order: [box, arrows, portal, path]
-    pub selections: [usize; 4],
-}
-
-impl GalleryState {
-    /// Build a SymbolConfig from the current gallery selections.
-    pub fn symbol_config(&self) -> crate::config::SymbolConfig {
-        use crate::symbols::{Arrows, BoxStyle, PathGlyphs, PortalGlyphs};
-        crate::config::SymbolConfig {
-            box_style: BoxStyle::preset_names()[self.selections[GALLERY_CATEGORY_BOX]].to_owned(),
-            arrow_set: Arrows::preset_names()[self.selections[GALLERY_CATEGORY_ARROWS]].to_owned(),
-            portal_icons: PortalGlyphs::preset_names()[self.selections[GALLERY_CATEGORY_PORTAL]].to_owned(),
-            path_style: PathGlyphs::preset_names()[self.selections[GALLERY_CATEGORY_PATH]].to_owned(),
-            badge_zcode: crate::config::default_badge_zcode(),
-            badge_glulx: crate::config::default_badge_glulx(),
-            badge_blorb: crate::config::default_badge_blorb(),
-            badge_save: crate::config::default_badge_save(),
-            badge_hint: crate::config::default_badge_hint(),
-            diagonal_corners: crate::config::default_diagonal_corners(),
-            overrides: Default::default(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Game,
@@ -1002,96 +955,6 @@ impl FileBrowserState {
     }
 }
 
-// ── Glyph-picker modal state ─────────────────────────────────────────────────
-
-/// Which border zone a glyph-picker commit targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BorderZone {
-    Top,
-    Bottom,
-    Left,
-    Right,
-    Tl,
-    Tr,
-    Bl,
-    Br,
-}
-
-/// Transient state for the glyph-picker modal.
-/// Opened over the style editor; `None` in `AppState.glyph_picker` means closed.
-#[derive(Debug, Clone)]
-pub struct GlyphPickerState {
-    /// The CSS-ish selector name that will receive the glyph on commit.
-    pub target_selector: String,
-    /// Which border zone to write into on commit.
-    pub target_zone: BorderZone,
-    /// Index into the curated block list (0–3: Box Drawing, Block Elements,
-    /// Geometric Shapes, Arrows). Ignored when `custom_start` is set.
-    pub block: usize,
-    /// When `Some`, overrides the curated block with a custom U+start range.
-    pub custom_start: Option<u32>,
-    /// Whether the custom-range hex-entry field has keyboard focus.
-    pub custom_focus: bool,
-    /// Accumulates hex digits for a custom codepoint (U+XXXXXX, up to 6 chars).
-    pub custom_buf: String,
-    /// Cursor position within the current glyph grid (0-based index).
-    pub cursor: usize,
-    /// A pending glyph set via direct character input (`GlyphPickerChar`).
-    /// When `Some`, `GlyphPickerPick` uses this instead of the grid cursor.
-    pub pending: Option<String>,
-    /// Most-recently-used glyphs (up to 32), loaded from the sidecar on open.
-    pub mru: Vec<String>,
-}
-
-// ── Style editor state ────────────────────────────────────────────────────────
-
-/// Which sub-widget has keyboard focus inside the style editor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StyleFocus {
-    Board,
-    Fg,
-    Bg,
-    Custom,
-    Attrs,
-    Border,
-    /// The dialog footer buttons (Save / Save Game / Cancel). The highlighted
-    /// button is tracked by `AppState.dialog_focus`; Left/Right move among them
-    /// and Enter activates the focused one.
-    Buttons,
-}
-
-/// Transient state for the live style-editor full-screen mode.
-/// `None` in `AppState.style_editor` = editor closed.
-#[derive(Debug)]
-pub struct StyleEditorState {
-    /// Working copy of the loaded style doc (edited in place; dropped on cancel).
-    pub doc: crate::style::StyleDoc,
-    /// Cached resolved preview scheme (rebuilt from `doc` on every change).
-    pub preview: crate::colors::ColorScheme,
-    /// Ordered list of all known CSS-ish selector names.
-    pub selectors: Vec<&'static str>,
-    /// Index of the currently-active selector row.
-    pub active: usize,
-    /// Which sub-widget has keyboard focus.
-    pub focus: StyleFocus,
-    /// Buffer for a user-typed custom hex/name color value.
-    pub custom_buf: String,
-    /// Most-recently-used color list (populated by Task 5).
-    pub mru: Vec<String>,
-    /// Which attribute chip (0-4) is selected when focus == Attrs.
-    /// Order: Bold=0, Italic=1, Underline=2, Dim=3, Reversed=4.
-    pub attr_cursor: usize,
-    /// Which color slot the next custom-entry commit or swatch pick targets.
-    /// `false` = fg, `true` = bg. Follows focus: Fg→false, Bg→true.
-    pub color_target: bool,
-    /// Cursor position within the swatch row (0..=16; 16 = default cell).
-    /// Active when focus == Fg or focus == Bg.
-    pub swatch_cursor: usize,
-    /// Which of the 8 border zones (0..8) has keyboard focus when focus == Border.
-    /// Mapping: 0=Tl, 1=Top, 2=Tr, 3=Left, 4=Right, 5=Bl, 6=Bottom, 7=Br
-    pub border_zone: usize,
-}
-
 // ── Config screen state ───────────────────────────────────────────────────────
 
 /// Transient state for the config-screen modal.
@@ -1268,8 +1131,6 @@ pub struct OverlayState {
     /// When true, show the hotkey dialog overlay. Opened by the prefix key (Ctrl+K),
     /// closed by the prefix key again or 'q'.
     pub hotkey_dialog: bool,
-    /// Active symbol gallery modal state. `None` means the gallery is closed.
-    pub gallery: Option<GalleryState>,
     /// Active saves-manager modal state. `None` means the modal is closed.
     pub saves: Option<SavesState>,
     /// Active file-browser modal state. `None` means the browser is closed.
@@ -1281,11 +1142,6 @@ pub struct OverlayState {
     pub verb_menu: Option<VerbMenuState>,
     /// Active config-screen modal state. `None` means the screen is closed.
     pub config_screen: Option<ConfigScreenState>,
-    /// Active style-editor full-screen state. `None` means the editor is closed.
-    pub style_editor: Option<StyleEditorState>,
-    /// Active glyph-picker modal state. `None` means the picker is closed.
-    /// Opened over the style editor; closes on pick/clear/cancel.
-    pub glyph_picker: Option<GlyphPickerState>,
     /// Active rewind/replay modal state. `None` means the modal is closed.
     pub replay: Option<ReplayState>,
     /// When true, the reset-confirmation dialog is open.
@@ -2152,13 +2008,10 @@ impl AppState {
     ///
     /// Used to suppress the story input cursor while an overlay is covering the pane.
     pub fn any_overlay_open(&self) -> bool {
-        self.overlays.gallery.is_some()
-            || self.overlays.saves.is_some()
+        self.overlays.saves.is_some()
             || self.overlays.file_browser.is_some()
             || self.overlays.file_picker.is_some()
             || self.overlays.config_screen.is_some()
-            || self.overlays.style_editor.is_some()
-            || self.overlays.glyph_picker.is_some()
             || self.overlays.verb_menu.is_some()
             || self.overlays.hotkey_dialog
             || self.room_panel.is_some()
@@ -4063,11 +3916,6 @@ mod tests {
         let mut s = AppState::default();
         assert!(!s.any_overlay_open(), "default AppState must have no overlay open");
 
-        // gallery
-        s.overlays.gallery = Some(GalleryState { category_idx: 0, selections: [0; 4] });
-        assert!(s.any_overlay_open(), "gallery open => any_overlay_open true");
-        s.overlays.gallery = None;
-
         // saves
         s.overlays.saves = Some(SavesState { entries: vec![], scroll: Default::default() });
         assert!(s.any_overlay_open(), "saves open => any_overlay_open true");
@@ -4488,19 +4336,6 @@ mod tests {
             s.render_job.borrow().is_none(),
             "a current-room change must NOT spawn a re-route worker"
         );
-    }
-
-    #[test]
-    fn gallery_state_symbol_config_roundtrips() {
-        let g = GalleryState {
-            category_idx: 0,
-            selections: [0, 0, 0, 0], // rounded, filled, ascii, light (the defaults)
-        };
-        let cfg = g.symbol_config();
-        assert_eq!(cfg.box_style, "rounded");
-        assert_eq!(cfg.arrow_set, "filled");
-        assert_eq!(cfg.portal_icons, "ascii");
-        assert_eq!(cfg.path_style, "light");
     }
 
     // ── FileBrowserState tests ────────────────────────────────────────────────

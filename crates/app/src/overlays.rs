@@ -2,7 +2,7 @@
 //! dialog area, plus the [`Overlay`] trait that unifies the common-dialog
 //! modals (aux / reset / save-name / text-entry / confirm-delete / quit /
 //! launch) for both drawing and run-loop input decoding (SQ-0307). The richer
-//! non-dialog modals (hotkey / gallery / saves / …) keep their bespoke draw
+//! non-dialog modals (hotkey / saves / …) keep their bespoke draw
 //! branches. Each branch/impl calls a render or key fn that already lives in
 //! `app::render::*`; this module owns only the dispatch + the returned hit-rects.
 
@@ -25,8 +25,6 @@ use app::render::game_over_dialog::{
     draw_game_over_dialog, game_over_dialog_key_focused, GameOverAction, GameOverDialogRects,
 };
 use app::render::file_picker::draw_file_picker;
-use app::render::gallery::draw_gallery;
-use app::render::glyph_picker::GlyphPickerRects;
 use app::render::hints_panel::{draw_hints_panel, HintsPanelRects};
 use app::render::history::draw_history;
 use app::render::hotkeys::draw_hotkey_dialog;
@@ -37,7 +35,6 @@ use app::render::quit_dialog::{draw_quit_dialog, quit_dialog_key_focused, QuitDi
 use app::render::reset_dialog::{draw_reset_dialog, reset_dialog_key_focused, ResetDialogAction, ResetDialogRects};
 use app::render::save_name_dialog::{draw_save_name_dialog, save_name_dialog_key, SaveNameAction, SaveNameDialogRects};
 use app::render::saves::draw_saves;
-use app::render::style_editor::{draw_style_editor, StyleEditorRects};
 use app::render::text_entry_dialog::{
     draw_text_entry_dialog, text_entry_dialog_key, TextEntryAction, TextEntryDialogRects,
 };
@@ -62,8 +59,6 @@ pub(crate) struct OverlayRects {
     pub quit_dialog: Option<QuitDialogRects>,
     pub launch_dialog: Option<LaunchDialogRects>,
     pub hints_panel: Option<HintsPanelRects>,
-    pub style_editor: Option<StyleEditorRects>,
-    pub glyph_picker: Option<GlyphPickerRects>,
 }
 
 /// Draw the z-ordered modal/overlay ladder over the current frame.
@@ -93,8 +88,6 @@ pub(crate) fn draw_all(
         quit_dialog: None,
         launch_dialog: None,
         hints_panel: None,
-        style_editor: None,
-        glyph_picker: None,
     };
 
     // Modal dialogs center within the graphics-free text region (story text +
@@ -112,14 +105,7 @@ pub(crate) fn draw_all(
         out.dialog = draw_hotkey_dialog(state, dialog_area, buf);
     }
 
-    // ── Gallery overlay — drawn after hotkey dialog ───────────────────────
-    if state.overlays.gallery.is_some() {
-        if let Some(dr) = draw_gallery(state, dialog_area, buf) {
-            out.dialog = Some(dr);
-        }
-    }
-
-    // ── Saves-manager overlay — drawn after gallery ───────────────────────
+    // ── Saves-manager overlay — drawn after the hotkey dialog ─────────────
     if state.overlays.saves.is_some() {
         out.dialog = draw_saves(state, dialog_area, buf, modal_list_viewport);
     }
@@ -142,16 +128,6 @@ pub(crate) fn draw_all(
     // ── Config screen overlay — drawn after other modals ──────────────────
     if state.overlays.config_screen.is_some() {
         out.dialog = draw_config_screen(state, dialog_area, buf, modal_list_viewport);
-    }
-
-    // ── Style editor overlay — full-screen, drawn after config screen ──────
-    if state.overlays.style_editor.is_some() {
-        out.style_editor = draw_style_editor(state, dialog_area, buf);
-    }
-
-    // ── Glyph-picker modal — drawn over the style editor ──────────────────
-    if state.overlays.glyph_picker.is_some() {
-        out.glyph_picker = app::render::glyph_picker::draw_glyph_picker(state, dialog_area, buf);
     }
 
     // ── Common-dialog modals — drawn through the `Overlay` trait in the exact
