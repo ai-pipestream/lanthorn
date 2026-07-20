@@ -135,7 +135,7 @@ fn grid_scheme<'a>(state: &'a AppState, model: &ScreenModel) -> std::borrow::Cow
     // SQ-0309: `draw_grid`/`draw_window_separator` read `upper_window` and
     // `upper_window_border` through `c.theme` (the legacy fields are gone), so
     // the override must land in the theme those selectors derive from (their
-    // registry parents are the `chrome`/`border` roles with no delta of their
+    // registry parents are the `chrome`/`line` roles with no delta of their
     // own, so seeding just those two roles reproduces `base`/`border` exactly).
     // Other role-derived selectors this Cow's theme could serve (e.g.
     // `hyperlink`, off `accent`) fall back to the terminal-default role rather
@@ -143,7 +143,7 @@ fn grid_scheme<'a>(state: &'a AppState, model: &ScreenModel) -> std::borrow::Cow
     // reads this Cow's theme, and only while a game page colour is honoured.
     let mut roles = crate::theme::resolve::Roles::terminal_default();
     roles.chrome = base;
-    roles.border = border;
+    roles.line = border;
     c.theme = crate::theme::resolve::resolve(&roles, &Default::default(), &Default::default(), &Default::default());
     std::borrow::Cow::Owned(c)
 }

@@ -168,6 +168,18 @@ pub fn parse(text: &str) -> Result<ParsedStyle, Vec<String>> {
         }
     }
 
+    // Surface sections: modal dialogs and hover tooltips. Same shape as [panel]
+    // (bare keys prefixed with the section name), each a distinct surface.
+    for section in ["dialog", "tooltip"] {
+        if let Some(toml::Value::Table(tbl)) = root.get(section) {
+            for (key, val) in tbl {
+                if let toml::Value::Table(t) = val {
+                    parsed.decls.insert(format!("{section}.{key}"), delta_from_table(t));
+                }
+            }
+        }
+    }
+
     if let Some(toml::Value::Table(tr_table)) = root.get("transcript") {
         if let Some(toml::Value::Array(rules)) = tr_table.get("rule") {
             for item in rules {
@@ -249,7 +261,7 @@ scheme = "tomorrow-night"     # optional base: built-in name or a Ghostty theme 
 [roles]
 text    = { fg = "white",     bg = "background" }  # body ink on the page
 chrome  = { fg = "white",     bg = "black" }       # ink on a UI surface (bars/panels/upper window)
-border  = { fg = "cyan" }                          # lines / frames
+line    = { fg = "cyan" }                          # lines, frames, rules, dividers
 accent  = { fg = "cyan" }                          # highlight: links, selection, current room, badges
 muted   = { fg = "dark-gray" }                     # dim / secondary
 alert   = { fg = "yellow" }                        # warning / error
@@ -259,14 +271,14 @@ heading = { fg = "white",     bold = true }        # titles / headers
 # ── (Story/VM windows have their own borders — see [glk.*], not here.) ────────
 [panel]
 background       = { parent = "chrome" }                               # standard panel body fill (all panels)
-border           = { parent = "border", style = "single" }             # unfocused frame
-"border:active"  = { parent = "border", style = "single", bold = true } # focused frame (today's cyan+bold)
+border           = { parent = "line", style = "single" }             # unfocused frame
+"border:active"  = { parent = "line", style = "single", bold = true } # focused frame (today's cyan+bold)
 title            = { parent = "heading" }                              # a plain panel title
 tab              = { parent = "muted" }                                # inactive tab
 "tab:active"     = { parent = "accent", bold = true }                  # active/selected tab
-tab_divider      = { glyph = "│", parent = "border" }                  # between tabs
-terminator_left  = { parent = "border" }        # cap where the strip meets the frame; glyph defaults to border style (┤)
-terminator_right = { parent = "border" }        # …├ ; set glyph = "…" to override
+tab_divider      = { glyph = "│", parent = "line" }                  # between tabs
+terminator_left  = { parent = "line" }        # cap where the strip meets the frame; glyph defaults to border style (┤)
+terminator_right = { parent = "line" }        # …├ ; set glyph = "…" to override
 
 # ── Elements: parent + delta. Shown in full; every line == its default, so a ──
 # ── minimal theme may delete this whole section and look identical. ───────────
@@ -278,10 +290,10 @@ upper_window         = { parent = "chrome" }
 story_info           = { parent = "chrome" }
 status_header        = { parent = "heading", bg = "black" }
 story_title          = { parent = "heading" }
-input_line           = { parent = "border" }        # add style = "single" to box it
-suggestion_line      = { parent = "border" }        # add style = "single" to box the popup
+input_line           = { parent = "line" }        # add style = "single" to box it
+suggestion_line      = { parent = "line" }        # add style = "single" to box the popup
 dialog               = { bg = "black", shadow = true }   # frame = panel.border:active (modal); shadow/title/buttons are dialog-specific
-scrollbar            = { parent = "border" }
+scrollbar            = { parent = "line" }
 transcript_location  = { parent = "accent" }
 story_badge          = { parent = "text" }
 hyperlink            = { parent = "accent", underline = true }

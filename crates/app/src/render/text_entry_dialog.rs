@@ -90,9 +90,9 @@ pub fn draw_text_entry_dialog(
         cursor: dlg.field.cursor,
         show_caret: field_focused,
         dim: false,
-        text_style: state.colors.theme.get("dialog").style,
-        dim_style: state.colors.theme.get("dialog").style,
-        caret_style: state.colors.theme.get("dialog").style.add_modifier(ratatui::style::Modifier::REVERSED),
+        text_style: state.colors.theme.get("dialog.background").style,
+        dim_style: state.colors.theme.get("dialog.background").style,
+        caret_style: state.colors.theme.get("dialog.background").style.add_modifier(ratatui::style::Modifier::REVERSED),
     };
 
     let spec = DialogSpec {

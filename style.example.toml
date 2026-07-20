@@ -17,13 +17,16 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 [roles]
 # text    = { fg = "foreground" }                     # body ink on the page (scheme foreground)
 # chrome  = { fg = "foreground", bg = "background" }  # ink on a UI surface: bars, panels, upper window
-# border  = { fg = "palette:6" }                      # lines and frames (scheme cyan slot)
+# line    = { fg = "palette:6" }                      # lines, frames, rules, dividers (scheme cyan slot)
 # accent  = { fg = "palette:6" }                      # highlights: links, selection, current room, badges
 # muted   = { fg = "palette:8" }                      # dim / secondary text (scheme bright-black slot)
 # alert   = { fg = "palette:3" }                      # warnings and errors (scheme yellow slot)
 # heading = { fg = "foreground", bold = true }        # titles and headers (bold)
 
-# ── Elements: app chrome/text. Every line already equals its default.
+# ═══ TEXT — foreground colour + emphasis (these selectors have no surface of their own) ═══
+
+# ── Elements: app text + host surfaces (status/help bars, upper window,
+# story browser). Every line already equals its default.
 [elements]
 # transcript = { parent = "text" }
 # status_bar = { parent = "chrome", reversed = true }
@@ -32,9 +35,9 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # story_info = { parent = "chrome" }
 # status_header = { parent = "heading", bg = "black" }
 # story_title = { parent = "heading" }
-# input_line = { parent = "border" }
-# suggestion_line = { parent = "border" }
-# scrollbar = { parent = "border" }
+# input_line = { parent = "line" }
+# suggestion_line = { parent = "line" }
+# scrollbar = { parent = "line" }
 # transcript_location = { parent = "accent" }
 # story_badge = { parent = "text" }
 # hyperlink = { parent = "accent", underline = true }
@@ -62,11 +65,6 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # story_tile = { parent = "text" }
 # story_tile_selected = { parent = "accent", bold = true, reversed = true }
 # notification = { parent = "accent", reversed = true }
-# dialog = { parent = "chrome" }
-# dialog_title = { parent = "accent" }
-# dialog_button = { parent = "chrome", reversed = true }
-# dialog_button_active = { parent = "accent", reversed = true }
-# dialog_shadow = { parent = "muted", bg = "dark-gray" }
 # hotkey_key = { parent = "accent" }
 # sound_beep_high = { fg = "#ffb428" }
 # sound_beep_low = { fg = "#3c8cdc" }
@@ -75,21 +73,8 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # warning_marker = { parent = "alert" }
 # input_text = { parent = "text" }
 # input_prompt = { parent = "text" }
-# upper_window_border = { parent = "border" }
+# upper_window_border = { parent = "line" }
 # room_panel = { parent = "accent", reversed = true }
-
-# ── Panel: shared chrome for every panel (border/title/tabs). Story/Glk
-# windows use [glk.*] instead, not this section.
-[panel]
-# background = {}
-# border = { parent = "border", style = "single" }   # style: none | single | double | thick | rounded
-# "border:active" = { parent = "border", bold = true, style = "single" }   # style: none | single | double | thick | rounded
-# title = { parent = "heading" }
-# tab = { parent = "muted" }
-# "tab:active" = { parent = "accent", bold = true }
-# tab_divider = { parent = "border", glyph = "│" }
-# terminator_left = { parent = "border", glyph = "┤" }
-# terminator_right = { parent = "border", glyph = "├" }
 
 # ── The 11 Glk styles for text-buffer windows (base: text).
 [glk.buffer]
@@ -140,11 +125,39 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # ── Debug inspector disassembly selectors.
 [debug]
 # pc = { parent = "accent", reversed = true }
-# tooltip = { parent = "chrome" }
 # disasm_executed = { parent = "accent", glyph = "|" }
 # disasm_rd = { parent = "text", glyph = " " }
 # disasm_soft = { parent = "muted", glyph = " " }
 # disasm_data = { parent = "muted", italic = true, glyph = " " }
+
+# ═══ SURFACES — bordered boxes: a background + frame + the text drawn on them ═══
+
+# ── Panel: the tiled panes (story/map/verb/debug frames) — background,
+# border, title, tabs. Story/Glk windows use [glk.*], not this section.
+[panel]
+# background = {}
+# border = { parent = "line", style = "single" }   # style: none | single | double | thick | rounded
+# "border:active" = { parent = "line", bold = true, style = "single" }   # style: none | single | double | thick | rounded
+# title = { parent = "heading" }
+# tab = { parent = "muted" }
+# "tab:active" = { parent = "accent", bold = true }
+# tab_divider = { parent = "line", glyph = "│" }
+# terminator_left = { parent = "line", glyph = "┤" }
+# terminator_right = { parent = "line", glyph = "├" }
+
+# ── Dialog: modal pop-ups — background, its own border, title, buttons, shadow.
+[dialog]
+# background = { parent = "chrome" }
+# border = { parent = "line", bold = true, style = "single" }   # style: none | single | double | thick | rounded
+# title = { parent = "accent" }
+# button = { parent = "chrome", reversed = true }
+# "button:active" = { parent = "accent", reversed = true }
+# shadow = { parent = "muted", bg = "dark-gray" }
+
+# ── Tooltip: hover pop-ups — background and an optional border.
+[tooltip]
+# background = { parent = "chrome" }
+# border = { parent = "line", style = "none" }   # style: none | single | double | thick | rounded
 
 # ── Story-line styling rules: recolour whole transcript lines matching a ────
 # ── regex. Rules are tried in order; the first match wins. ──────────────────

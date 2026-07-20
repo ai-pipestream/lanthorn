@@ -8,7 +8,7 @@ use ratatui::style::{Modifier, Style};
 
 use crate::debug_panel::{self, DebugPanelState, HoverTip, Section, WINDOW_TABS};
 use crate::render::draw_str_clipped;
-use crate::render::paneframe::draw_pane_frame;
+use crate::render::paneframe::{draw_pane_frame, BorderStyle, PaneGlyphs};
 use crate::state::AppState;
 
 /// Redraw the char ranges `clickable_spans` reports within `line` with the
@@ -227,9 +227,21 @@ fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
 /// small to hold it (never panics).
 fn draw_tooltip(buf: &mut Buffer, area: Rect, tip: &HoverTip, state: &AppState) {
     let inner = tip.lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
-    let h = tip.lines.len() as u16;
-    let w = inner + 2; // one space of horizontal padding on each side
-    if h == 0 || area.width < w || area.height < h { return; }
+    let n = tip.lines.len() as u16;
+    if n == 0 { return; }
+
+    let style = state.colors.theme.get("tooltip.background").style;
+    // Optional frame (§2d): borderless by default; a themed `tooltip.border`
+    // style wraps the box in a frame (colour + glyphs from that selector).
+    let border = state.colors.theme.get("tooltip.border");
+    let box_style = border.border.unwrap_or(BorderStyle::None);
+    let bordered = !matches!(box_style, BorderStyle::None);
+
+    // Content is `inner` wide with one space of padding each side; a frame (when
+    // set) adds one more cell all around.
+    let pad_w = inner + 2;
+    let (w, h) = if bordered { (pad_w + 2, n + 2) } else { (pad_w, n) };
+    if area.width < w || area.height < h { return; }
 
     // Preferred: just below the token; clamp into `area` (flip above if needed).
     let mut x = tip.col;
@@ -240,22 +252,29 @@ fn draw_tooltip(buf: &mut Buffer, area: Rect, tip: &HoverTip, state: &AppState) 
     y = y.max(area.y);
 
     let box_rect = Rect::new(x, y, w, h);
-    let style = state.colors.theme.get("debug.tooltip").style;
     // Reset every cell the box covers before drawing: draw_char_clipped PATCHES
     // cell styles, so a modifier already on the disasm underneath (e.g. the
     // UNDERLINED on a clickable operand) would otherwise bleed through the
-    // tooltip. A clean reset makes the borderless box fully opaque.
+    // tooltip. A clean reset makes the box fully opaque.
     for yy in box_rect.y..box_rect.bottom() {
         for xx in box_rect.x..box_rect.right() {
             if let Some(cell) = buf.cell_mut((xx, yy)) { cell.reset(); }
         }
     }
-    // Borderless: fill each row with the tooltip background, then the padded text.
+    // Fill the whole box with the tooltip background.
     let pad: String = " ".repeat(w as usize);
-    for (i, line) in tip.lines.iter().enumerate() {
-        let ry = y + i as u16;
+    for ry in box_rect.y..box_rect.bottom() {
         draw_str_clipped(buf, x, ry, &pad, style, box_rect);
-        draw_str_clipped(buf, x + 1, ry, line, style, box_rect);
+    }
+    // Frame in tooltip.border's colour, then position the text inside it.
+    let (tx, ty) = if bordered {
+        draw_pane_frame(buf, box_rect, box_style, &PaneGlyphs::default(), border.style);
+        (x + 1, y + 1)
+    } else {
+        (x, y)
+    };
+    for (i, line) in tip.lines.iter().enumerate() {
+        draw_str_clipped(buf, tx + 1, ty + i as u16, line, style, box_rect);
     }
 }
 

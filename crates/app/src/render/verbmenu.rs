@@ -128,7 +128,7 @@ pub fn draw_verb_menu(
         return;
     }
 
-    let base = state.colors.theme.get("dialog").style;
+    let base = state.colors.theme.get("dialog.background").style;
 
     // Fill the band's background first so panes behind it never show through
     // while it's mid-slide (shorter than its final bordered content needs).
@@ -221,7 +221,7 @@ fn draw_pane_header(title: &str, active: bool, area: Rect, buf: &mut Buffer, sta
     if area.height == 0 {
         return;
     }
-    let base = state.colors.theme.get("dialog").style;
+    let base = state.colors.theme.get("dialog.background").style;
     let style = if active {
         Style::new().add_modifier(Modifier::BOLD).patch(base)
     } else {
@@ -254,7 +254,7 @@ fn draw_list(
         return;
     }
 
-    let base = state.colors.theme.get("dialog").style;
+    let base = state.colors.theme.get("dialog.background").style;
     let visible = area.height as usize;
     let total = items.len();
     let selected = scroll.selected;

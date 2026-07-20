@@ -1115,11 +1115,11 @@ fn draw_story_picker(
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
     let mut header_rects: Vec<(SortKey, Rect)> = Vec::new();
 
-    let dialog = cs.theme.get("dialog").style;
-    let dialog_title = cs.theme.get("dialog_title").style;
+    let dialog = cs.theme.get("dialog.background").style;
+    let dialog_title = cs.theme.get("dialog.title").style;
     let story_header = cs.theme.get("story_header").style;
     let story_header_active = cs.theme.get("story_header_active").style;
-    let dialog_button_active = cs.theme.get("dialog_button_active").style;
+    let dialog_button_active = cs.theme.get("dialog.button:active").style;
     let story_author = cs.theme.get("story_author").style;
     let story_no_metadata = cs.theme.get("story_no_metadata").style;
     let story_year = cs.theme.get("story_year").style;
@@ -1319,8 +1319,8 @@ fn draw_story_gallery(
     use app::cover_gallery as g;
     let mut tile_rects: Vec<(usize, Rect)> = Vec::new();
 
-    let dialog = cs.theme.get("dialog").style;
-    let dialog_title = cs.theme.get("dialog_title").style;
+    let dialog = cs.theme.get("dialog.background").style;
+    let dialog_title = cs.theme.get("dialog.title").style;
     let story_tile_selected = cs.theme.get("story_tile_selected").style;
     let story_info_cover = cs.theme.get("story_info_cover").style;
     let story_tile = cs.theme.get("story_tile").style;

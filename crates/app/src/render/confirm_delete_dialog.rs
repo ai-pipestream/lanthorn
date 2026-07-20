@@ -69,7 +69,7 @@ pub fn draw_confirm_delete_dialog(
     // Body: the save file name being deleted (clipped to the content width).
     if content.height >= 1 {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("this save");
-        let body_style = state.colors.theme.get("dialog").style;
+        let body_style = state.colors.theme.get("dialog.background").style;
         crate::render::draw_str_clipped(buf, content.x, content.y, name, body_style, content);
         if content.height >= 3 {
             crate::render::draw_str_clipped(

@@ -148,6 +148,9 @@ pub struct DialogButton {
 
 pub struct DialogStyle {
     pub frame: Style,
+    /// Border colour for the modal frame (from `dialog.border`), drawn over the
+    /// `frame` fill. Distinct from `frame` so the border can differ from the body.
+    pub border: Style,
     pub box_style: BorderStyle,
     pub glyphs: PaneGlyphs,
     pub title: Style,
@@ -167,19 +170,20 @@ impl DialogStyle {
     /// animation) live in one place instead of being duplicated per modal.
     pub fn from_colors(cs: &crate::colors::ColorScheme) -> DialogStyle {
         DialogStyle {
-            frame: cs.theme.get("dialog").style,
-            // The modal frame is the theme's active panel border (§2a: dialog frame
-            // = panel.border:active), single-line by default.
+            frame: cs.theme.get("dialog.background").style,
+            // The modal frame is dialog's own border (§2c), single + bold by
+            // default; its colour and glyph style both come from `dialog.border`.
+            border: cs.theme.get("dialog.border").style,
             box_style: cs
                 .theme
-                .get("panel.border:active")
+                .get("dialog.border")
                 .border
                 .unwrap_or(crate::render::paneframe::BorderStyle::None),
             glyphs: cs.dialog_glyphs.clone(),
-            title: cs.theme.get("dialog_title").style,
-            button: cs.theme.get("dialog_button").style,
-            button_active: cs.theme.get("dialog_button_active").style,
-            shadow: cs.theme.get("dialog_shadow").style,
+            title: cs.theme.get("dialog.title").style,
+            button: cs.theme.get("dialog.button").style,
+            button_active: cs.theme.get("dialog.button:active").style,
+            shadow: cs.theme.get("dialog.shadow").style,
             shadow_on: cs.dialog_shadow_on,
             placement: cs.dialog_placement,
             margin: cs.dialog_margin,
@@ -297,8 +301,8 @@ pub fn draw_dialog(buf: &mut Buffer, bounds: Rect, spec: &DialogSpec, st: &Dialo
         }
     }
 
-    // (4) draw_pane_frame for the border
-    let pane = draw_pane_frame(buf, area, box_style, &st.glyphs, st.frame);
+    // (4) draw_pane_frame for the border, in dialog.border's colour
+    let pane = draw_pane_frame(buf, area, box_style, &st.glyphs, st.border);
 
     // (5) Overlay the centered title via draw_top_inset
     let title_seg = InsetSegment { text: spec.title, active: false };
@@ -435,7 +439,7 @@ mod tests {
         let mut buf = Buffer::empty(full);
         // pre-fill a REVERSED cell where the dialog will sit
         buf.cell_mut((20,6)).unwrap().set_symbol("X").set_style(Style::new().add_modifier(Modifier::REVERSED));
-        let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title: Style::default(), button: Style::default(), button_active: Style::default(), shadow: Style::default(), shadow_on:false , placement: DialogPlacement::Center, margin: 0 };
+        let st = DialogStyle{ frame: Style::new().bg(Color::Black), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title: Style::default(), button: Style::default(), button_active: Style::default(), shadow: Style::default(), shadow_on:false , placement: DialogPlacement::Center, margin: 0 };
         let spec = DialogSpec{ title:"Settings", placement: Placement::Centered{w:20,h:8}, buttons: &[DialogButton{id:ButtonId::Save,label:"Save"},DialogButton{id:ButtonId::Cancel,label:"Cancel"}], show_close:true, default: None, focus: None, field: None };
         let r = draw_dialog(&mut buf, full, &spec, &st);
         // opaque: the covered cell no longer REVERSED
@@ -453,7 +457,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
         let bounds = Rect::new(20, 0, 20, 12);
         let st = DialogStyle {
-            frame: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
+            frame: Style::default(), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
             title: Style::default(), button: Style::default(), button_active: Style::default(),
             shadow: Style::default(), shadow_on: false, placement: DialogPlacement::Center, margin: 0,
         };
@@ -501,13 +505,13 @@ mod tests {
         // rather than the legacy `ColorScheme` fields directly).
         let cs = crate::colors::ColorScheme::terminal_default();
         let ds = DialogStyle::from_colors(&cs);
-        assert_eq!(ds.frame, cs.theme.get("dialog").style);
-        assert_eq!(ds.box_style, cs.theme.get("panel.border:active").border.unwrap());
+        assert_eq!(ds.frame, cs.theme.get("dialog.background").style);
+        assert_eq!(ds.box_style, cs.theme.get("dialog.border").border.unwrap());
         assert_eq!(ds.glyphs, cs.dialog_glyphs);
-        assert_eq!(ds.title, cs.theme.get("dialog_title").style);
-        assert_eq!(ds.button, cs.theme.get("dialog_button").style);
-        assert_eq!(ds.button_active, cs.theme.get("dialog_button_active").style);
-        assert_eq!(ds.shadow, cs.theme.get("dialog_shadow").style);
+        assert_eq!(ds.title, cs.theme.get("dialog.title").style);
+        assert_eq!(ds.button, cs.theme.get("dialog.button").style);
+        assert_eq!(ds.button_active, cs.theme.get("dialog.button:active").style);
+        assert_eq!(ds.shadow, cs.theme.get("dialog.shadow").style);
         assert_eq!(ds.shadow_on, cs.dialog_shadow_on);
     }
 
@@ -573,7 +577,7 @@ mod tests {
     fn dialog_shadow_paints_offset_cells_when_on() {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Style,Color}};
         let mut buf = Buffer::empty(Rect::new(0,0,40,12));
-        let st = DialogStyle{ frame: Style::new().bg(Color::Black), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title:Style::default(), button:Style::default(), button_active:Style::default(), shadow: Style::new().bg(Color::DarkGray), shadow_on:true , placement: DialogPlacement::Center, margin: 0 };
+        let st = DialogStyle{ frame: Style::new().bg(Color::Black), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title:Style::default(), button:Style::default(), button_active:Style::default(), shadow: Style::new().bg(Color::DarkGray), shadow_on:true , placement: DialogPlacement::Center, margin: 0 };
         let spec = DialogSpec{ title:"T", placement: Placement::Centered{w:10,h:5}, buttons:&[], show_close:false, default: None, focus: None, field: None };
         let r = draw_dialog(&mut buf, Rect::new(0,0,40,12), &spec, &st);
         // a cell just below-right of the frame carries the shadow bg
@@ -587,7 +591,7 @@ mod tests {
         let full = Rect::new(0, 0, 40, 8);
         let mut buf = Buffer::empty(full);
         let st = DialogStyle {
-            frame: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
+            frame: Style::default(), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
             title: Style::default(), button: Style::default(), button_active: Style::default(),
             shadow: Style::default(), shadow_on: false, placement: DialogPlacement::Center, margin: 0,
         };
@@ -622,7 +626,7 @@ mod tests {
         let full = Rect::new(0, 0, 40, 8);
         let mut buf = Buffer::empty(full);
         let st = DialogStyle {
-            frame: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
+            frame: Style::default(), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
             title: Style::default(), button: Style::default(), button_active: Style::default(),
             shadow: Style::default(), shadow_on: false, placement: DialogPlacement::Center, margin: 0,
         };
@@ -641,7 +645,7 @@ mod tests {
         let mut buf = Buffer::empty(full);
         let st = DialogStyle {
             frame: Style::default(),
-            box_style: BorderStyle::Single,
+            border: Style::default(), box_style: BorderStyle::Single,
             glyphs: PaneGlyphs::default(),
             title: Style::default(),
             button: Style::default(),
@@ -683,7 +687,7 @@ mod tests {
         let mut buf = Buffer::empty(full);
         let st = DialogStyle {
             frame: Style::default(),
-            box_style: BorderStyle::Single,
+            border: Style::default(), box_style: BorderStyle::Single,
             glyphs: PaneGlyphs::default(),
             title: Style::default(),
             button: Style::default().add_modifier(Modifier::REVERSED),

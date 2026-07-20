@@ -60,7 +60,7 @@ pub fn draw_launch_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
 
     // Draw body line into the content area.
     if content.height >= 1 {
-        let body_style = state.colors.theme.get("dialog").style;
+        let body_style = state.colors.theme.get("dialog.background").style;
         crate::render::draw_str_clipped(
             buf,
             content.x,

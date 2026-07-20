@@ -23,24 +23,40 @@ pub fn auto_seed(user_dir: &std::path::Path) {
     let _ = std::fs::write(&path, commented_template());
 }
 
-/// The sections emitted, in order: (registry [`Section`], TOML header, a short
-/// blurb comment shown above the header).
-const SECTIONS: &[(Section, &str, &str)] = &[
-    (Section::Roles, "[roles]", "Roles: the 7 roots everything else derives from."),
+// A section to emit: (registry `Section`, TOML header, a short blurb comment
+// shown above the header). Sections fall into two groups — TEXT (colour/emphasis
+// only) and SURFACE (a background + optional border + the text drawn on them) —
+// so it's clear where you adjust text vs. where you adjust a bordered box.
+
+/// The roles: the roots everything else derives from, emitted first.
+const ROLES_SECTION: (Section, &str, &str) =
+    (Section::Roles, "[roles]", "Roles: the 7 roots everything else derives from.");
+
+/// TEXT sections: adjust the foreground colour / emphasis of text, story output,
+/// the map, and the debug view. These have no surface (background/border) of
+/// their own — that's what the SURFACE sections below are for.
+const TEXT_SECTIONS: &[(Section, &str, &str)] = &[
     (
         Section::Elements,
         "[elements]",
-        "Elements: app chrome/text. Every line already equals its default.",
-    ),
-    (
-        Section::Panel,
-        "[panel]",
-        "Panel: shared chrome for every panel (border/title/tabs). Story/Glk\n# windows use [glk.*] instead, not this section.",
+        "Elements: app text + host surfaces (status/help bars, upper window,\n# story browser). Every line already equals its default.",
     ),
     (Section::GlkBuffer, "[glk.buffer]", "The 11 Glk styles for text-buffer windows (base: text)."),
     (Section::GlkGrid, "[glk.grid]", "The 11 Glk styles for text-grid windows (base: chrome)."),
     (Section::Map, "[map]", "Map colours + glyph-set presets."),
     (Section::Debug, "[debug]", "Debug inspector disassembly selectors."),
+];
+
+/// SURFACE sections: bordered boxes with a background + frame + the text drawn
+/// on them. Each is a distinct surface — a tiled pane, a modal, a tooltip.
+const SURFACE_SECTIONS: &[(Section, &str, &str)] = &[
+    (
+        Section::Panel,
+        "[panel]",
+        "Panel: the tiled panes (story/map/verb/debug frames) — background,\n# border, title, tabs. Story/Glk windows use [glk.*], not this section.",
+    ),
+    (Section::Dialog, "[dialog]", "Dialog: modal pop-ups — background, its own border, title, buttons, shadow."),
+    (Section::Tooltip, "[tooltip]", "Tooltip: hover pop-ups — background and an optional border."),
 ];
 
 /// Emit the full new-schema `style.toml`, entirely commented out.
@@ -69,17 +85,32 @@ pub fn commented_template() -> String {
          \n",
     );
 
-    for (section, header, blurb) in SECTIONS {
+    let emit = |out: &mut String, section: Section, header: &str, blurb: &str| {
         out.push_str("# ── ");
         out.push_str(blurb);
         out.push('\n');
         out.push_str(header);
         out.push('\n');
-        for row in REGISTRY.iter().filter(|r| r.section == *section) {
-            out.push_str(&row_line(*section, row));
+        for row in REGISTRY.iter().filter(|r| r.section == section) {
+            out.push_str(&row_line(section, row));
             out.push('\n');
         }
         out.push('\n');
+    };
+
+    // Roles first (the roots).
+    emit(&mut out, ROLES_SECTION.0, ROLES_SECTION.1, ROLES_SECTION.2);
+
+    // TEXT group.
+    out.push_str("# ═══ TEXT — foreground colour + emphasis (these selectors have no surface of their own) ═══\n\n");
+    for (section, header, blurb) in TEXT_SECTIONS {
+        emit(&mut out, *section, header, blurb);
+    }
+
+    // SURFACE group.
+    out.push_str("# ═══ SURFACES — bordered boxes: a background + frame + the text drawn on them ═══\n\n");
+    for (section, header, blurb) in SURFACE_SECTIONS {
+        emit(&mut out, *section, header, blurb);
     }
 
     out.push_str(STATIC_EXAMPLES);
@@ -125,7 +156,7 @@ fn role_line(name: &str) -> String {
     let (value, desc) = match name {
         "text" => ("{ fg = \"foreground\" }", "body ink on the page (scheme foreground)"),
         "chrome" => ("{ fg = \"foreground\", bg = \"background\" }", "ink on a UI surface: bars, panels, upper window"),
-        "border" => ("{ fg = \"palette:6\" }", "lines and frames (scheme cyan slot)"),
+        "line" => ("{ fg = \"palette:6\" }", "lines, frames, rules, dividers (scheme cyan slot)"),
         "accent" => ("{ fg = \"palette:6\" }", "highlights: links, selection, current room, badges"),
         "muted" => ("{ fg = \"palette:8\" }", "dim / secondary text (scheme bright-black slot)"),
         "alert" => ("{ fg = \"palette:3\" }", "warnings and errors (scheme yellow slot)"),
@@ -198,6 +229,8 @@ fn strip_section_prefix(section: Section, name: &str) -> String {
         Section::GlkGrid => "glk.grid.",
         Section::Map => "map.",
         Section::Debug => "debug.",
+        Section::Dialog => "dialog.",
+        Section::Tooltip => "tooltip.",
         Section::Roles | Section::Elements | Section::Statusbar => "",
     };
     name.strip_prefix(prefix).unwrap_or(name).to_string()

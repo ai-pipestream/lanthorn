@@ -28,7 +28,7 @@ use super::registry::{Delta, RegRow, REGISTRY, ROLE_NAMES};
 pub struct Roles {
     pub text: Style,
     pub chrome: Style,
-    pub border: Style,
+    pub line: Style,
     pub accent: Style,
     pub muted: Style,
     pub alert: Style,
@@ -37,13 +37,13 @@ pub struct Roles {
 
 impl Roles {
     /// The spec's default (dark) role palette (design §1 / the `[roles]` example):
-    /// text = white on terminal bg, chrome = white on black, border/accent = cyan,
+    /// text = white on terminal bg, chrome = white on black, line/accent = cyan,
     /// muted = dark-gray, alert = yellow, heading = white + bold.
     pub fn terminal_default() -> Roles {
         Roles {
             text: Style::default().fg(Color::White),
             chrome: Style::default().fg(Color::White).bg(Color::Black),
-            border: Style::default().fg(Color::Cyan),
+            line: Style::default().fg(Color::Cyan),
             accent: Style::default().fg(Color::Cyan),
             muted: Style::default().fg(Color::DarkGray),
             alert: Style::default().fg(Color::Yellow),
@@ -56,7 +56,7 @@ impl Roles {
         Some(match name {
             "text" => self.text,
             "chrome" => self.chrome,
-            "border" => self.border,
+            "line" => self.line,
             "accent" => self.accent,
             "muted" => self.muted,
             "alert" => self.alert,
@@ -71,7 +71,7 @@ impl Roles {
         Some(match name {
             "text" => &mut self.text,
             "chrome" => &mut self.chrome,
-            "border" => &mut self.border,
+            "line" => &mut self.line,
             "accent" => &mut self.accent,
             "muted" => &mut self.muted,
             "alert" => &mut self.alert,
@@ -97,7 +97,7 @@ impl Roles {
         Roles {
             text: Style::default().fg(fg),               // transcript = foreground
             chrome: Style::default().fg(fg).bg(bg),       // ink on a UI surface
-            border: Style::default().fg(scheme.palette[6]), // cyan slot (focused_border/connector)
+            line: Style::default().fg(scheme.palette[6]), // cyan slot (focused_border/connector)
             accent: Style::default().fg(scheme.palette[6]), // highlight = cyan slot
             muted: Style::default().fg(scheme.palette[8]),  // suggestion = bright-black slot
             alert: Style::default().fg(scheme.palette[3]),  // yellow slot (room_selected)

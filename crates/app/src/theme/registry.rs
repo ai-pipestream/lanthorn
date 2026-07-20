@@ -30,6 +30,10 @@ pub enum Section {
     Map,
     /// Debug inspector disassembly selectors (§4b).
     Debug,
+    /// Modal dialog surface: background, border, title, buttons, shadow.
+    Dialog,
+    /// Hover-tooltip surface: background, border.
+    Tooltip,
     /// Status-bar segments (dynamic `[[statusbar.segment]]`; no fixed rows here).
     Statusbar,
 }
@@ -96,7 +100,7 @@ pub struct RegRow {
 /// from; their concrete colours come from the base scheme + `[roles]`, not this
 /// table, so their rows carry `parent = None` and an empty delta.
 pub const ROLE_NAMES: [&str; 7] =
-    ["text", "chrome", "border", "accent", "muted", "alert", "heading"];
+    ["text", "chrome", "line", "accent", "muted", "alert", "heading"];
 
 /// The default per-layer edge colour cycle for `map.layer_cycle` (§4). This is
 /// the sole list-valued selector, so its value lives here rather than in a
@@ -140,7 +144,7 @@ pub const REGISTRY: &[RegRow] = &[
     // Roots: colours come from the base scheme + `[roles]`, so no parent/delta.
     row("text", Section::Roles, Kind::Style, None, Delta::EMPTY),
     row("chrome", Section::Roles, Kind::Style, None, Delta::EMPTY),
-    row("border", Section::Roles, Kind::Style, None, Delta::EMPTY),
+    row("line", Section::Roles, Kind::Style, None, Delta::EMPTY),
     row("accent", Section::Roles, Kind::Style, None, Delta::EMPTY),
     row("muted", Section::Roles, Kind::Style, None, Delta::EMPTY),
     row("alert", Section::Roles, Kind::Style, None, Delta::EMPTY),
@@ -154,9 +158,9 @@ pub const REGISTRY: &[RegRow] = &[
     // heading on chrome: heading fg with the chrome bg (black).
     row("status_header", Section::Elements, Kind::Style, Some("heading"), Delta { bg: Some(Color::Black), ..Delta::EMPTY }),
     row("story_title", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
-    row("input_line", Section::Elements, Kind::Style, Some("border"), Delta::EMPTY),
-    row("suggestion_line", Section::Elements, Kind::Style, Some("border"), Delta::EMPTY),
-    row("scrollbar", Section::Elements, Kind::Style, Some("border"), Delta::EMPTY),
+    row("input_line", Section::Elements, Kind::Style, Some("line"), Delta::EMPTY),
+    row("suggestion_line", Section::Elements, Kind::Style, Some("line"), Delta::EMPTY),
+    row("scrollbar", Section::Elements, Kind::Style, Some("line"), Delta::EMPTY),
     row("transcript_location", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
     row("story_badge", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("hyperlink", Section::Elements, Kind::Style, Some("accent"), mods(false, false, true, false)),
@@ -172,16 +176,16 @@ pub const REGISTRY: &[RegRow] = &[
     row("panel.background", Section::Panel, Kind::Style, None, Delta::EMPTY),
     // border rows: default border style = "single" (unified panel frame, §2a).
     // `:active` = single + bold (today's cyan+bold).
-    row("panel.border", Section::Panel, Kind::BorderGlyphs, Some("border"), border("single")),
-    row("panel.border:active", Section::Panel, Kind::BorderGlyphs, Some("border"),
+    row("panel.border", Section::Panel, Kind::BorderGlyphs, Some("line"), border("single")),
+    row("panel.border:active", Section::Panel, Kind::BorderGlyphs, Some("line"),
         Delta { border: Some("single"), bold: true, ..Delta::EMPTY }),
     row("panel.title", Section::Panel, Kind::Style, Some("heading"), Delta::EMPTY),
     row("panel.tab", Section::Panel, Kind::Style, Some("muted"), Delta::EMPTY),
     row("panel.tab:active", Section::Panel, Kind::Style, Some("accent"), mods(true, false, false, false)),
-    row("panel.tab_divider", Section::Panel, Kind::BorderGlyphs, Some("border"), glyph("│")),
+    row("panel.tab_divider", Section::Panel, Kind::BorderGlyphs, Some("line"), glyph("│")),
     // terminator glyphs default to the single-border caps ┤/├ (spec §2b).
-    row("panel.terminator_left", Section::Panel, Kind::BorderGlyphs, Some("border"), glyph("┤")),
-    row("panel.terminator_right", Section::Panel, Kind::BorderGlyphs, Some("border"), glyph("├")),
+    row("panel.terminator_left", Section::Panel, Kind::BorderGlyphs, Some("line"), glyph("┤")),
+    row("panel.terminator_right", Section::Panel, Kind::BorderGlyphs, Some("line"), glyph("├")),
     // ── §3 glk.buffer.* (buffer base = text) ─────────────────────────────────
     row("glk.buffer.normal", Section::GlkBuffer, Kind::Style, Some("text"), Delta::EMPTY),
     row("glk.buffer.emphasized", Section::GlkBuffer, Kind::Style, Some("text"), mods(false, true, false, false)),
@@ -231,11 +235,24 @@ pub const REGISTRY: &[RegRow] = &[
     row("map.portal_path_style", Section::Map, Kind::Placement, None, glyph("dotted")),
     // ── §4b debug.* (disasm-only; each tier carries a gutter glyph) ───────────
     row("debug.pc", Section::Debug, Kind::Style, Some("accent"), mods(false, false, false, true)),
-    row("debug.tooltip", Section::Debug, Kind::Style, Some("chrome"), Delta::EMPTY),
     row("debug.disasm_executed", Section::Debug, Kind::Style, Some("accent"), glyph("|")),
     row("debug.disasm_rd", Section::Debug, Kind::Style, Some("text"), glyph(" ")),
     row("debug.disasm_soft", Section::Debug, Kind::Style, Some("muted"), glyph(" ")),
     row("debug.disasm_data", Section::Debug, Kind::Style, Some("muted"), Delta { italic: true, glyph: Some(" "), ..Delta::EMPTY }),
+    // ── §2c dialog.* (modal surface: background + own frame + title/buttons/shadow) ──
+    row("dialog.background", Section::Dialog, Kind::Style, Some("chrome"), Delta::EMPTY),
+    // Modal frame: its own border (was panel.border:active); modals are always
+    // "active", so single + bold reproduces today's cyan+bold dialog frame.
+    row("dialog.border", Section::Dialog, Kind::BorderGlyphs, Some("line"), Delta { border: Some("single"), bold: true, ..Delta::EMPTY }),
+    row("dialog.title", Section::Dialog, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("dialog.button", Section::Dialog, Kind::Style, Some("chrome"), mods(false, false, false, true)),
+    row("dialog.button:active", Section::Dialog, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    // dialog.shadow: the one explicit-colour row — keeps a distinctive dark-gray bg.
+    row("dialog.shadow", Section::Dialog, Kind::Style, Some("muted"), Delta { bg: Some(Color::DarkGray), ..Delta::EMPTY }),
+    // ── §2d tooltip.* (hover-tooltip surface: background + optional frame) ─────
+    row("tooltip.background", Section::Tooltip, Kind::Style, Some("chrome"), Delta::EMPTY),
+    // Borderless by default (style = "none"); set a style to frame the tooltip.
+    row("tooltip.border", Section::Tooltip, Kind::BorderGlyphs, Some("line"), border("none")),
     // ── §2 elements (expansion, Task 5.0): every remaining ColorScheme field ──
     row("more_prompt", Section::Elements, Kind::Style, Some("chrome"), mods(false, false, false, true)),
     row("tidy_progress", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
@@ -256,12 +273,6 @@ pub const REGISTRY: &[RegRow] = &[
     row("story_tile", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("story_tile_selected", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, true)),
     row("notification", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
-    row("dialog", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
-    row("dialog_title", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
-    row("dialog_button", Section::Elements, Kind::Style, Some("chrome"), mods(false, false, false, true)),
-    row("dialog_button_active", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
-    // dialog_shadow: the one explicit-colour row — keeps a distinctive dark-gray bg.
-    row("dialog_shadow", Section::Elements, Kind::Style, Some("muted"), Delta { bg: Some(Color::DarkGray), ..Delta::EMPTY }),
     row("hotkey_key", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
     // Sound-beep pulse colours are bespoke (warm amber / cool blue) — no role
     // reproduces them, so they carry explicit fg like map.connector_distorted.
@@ -272,7 +283,7 @@ pub const REGISTRY: &[RegRow] = &[
     row("warning_marker", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
     row("input_text", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("input_prompt", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
-    row("upper_window_border", Section::Elements, Kind::Style, Some("border"), Delta::EMPTY),
+    row("upper_window_border", Section::Elements, Kind::Style, Some("line"), Delta::EMPTY),
     row("room_panel", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
 ];
 
@@ -287,7 +298,7 @@ mod tests {
         // §1 roles
         "text",
         "chrome",
-        "border",
+        "line",
         "accent",
         "muted",
         "alert",
@@ -363,11 +374,19 @@ mod tests {
         "map.portal_path_style",
         // §4b debug.*
         "debug.pc",
-        "debug.tooltip",
         "debug.disasm_executed",
         "debug.disasm_rd",
         "debug.disasm_soft",
         "debug.disasm_data",
+        // §2c dialog.* / §2d tooltip.*
+        "dialog.background",
+        "dialog.border",
+        "dialog.title",
+        "dialog.button",
+        "dialog.button:active",
+        "dialog.shadow",
+        "tooltip.background",
+        "tooltip.border",
         // §2 elements (expansion, Task 5.0)
         "more_prompt",
         "tidy_progress",
@@ -388,11 +407,6 @@ mod tests {
         "story_tile",
         "story_tile_selected",
         "notification",
-        "dialog",
-        "dialog_title",
-        "dialog_button",
-        "dialog_button_active",
-        "dialog_shadow",
         "hotkey_key",
         "sound_beep_high",
         "sound_beep_low",
@@ -421,8 +435,8 @@ mod tests {
         // sound_beep_high: bespoke amber, explicit fg (not a role derivation).
         assert_eq!(theme.get("sound_beep_high").style.fg, Some(Color::Rgb(255, 180, 40)));
 
-        // dialog_shadow: the one explicit-colour row — keeps an explicit dark-gray bg.
-        assert_eq!(theme.get("dialog_shadow").style.bg, Some(Color::DarkGray));
+        // dialog.shadow: the one explicit-colour row — keeps an explicit dark-gray bg.
+        assert_eq!(theme.get("dialog.shadow").style.bg, Some(Color::DarkGray));
 
         // story_tile_selected: accent + reversed + bold.
         let tile_selected = theme.get("story_tile_selected").style;

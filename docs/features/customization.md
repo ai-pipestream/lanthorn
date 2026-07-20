@@ -10,10 +10,11 @@ from, so a theme author sets a handful of colors and the whole app stays
 coherent, while power users can still override any single selector.
 
 - **7 roles** (`[roles]`) are the roots a theme actually sets: `text` (body ink),
-  `chrome` (ink on a UI surface — bars/panels/upper window), `border`
-  (lines/frames), `accent` (highlights — links, selection, current room, tabs),
-  `muted` (dim/secondary text), `alert` (warnings/errors), and `heading`
-  (emphasized titles). Everything else is a **derivation** — `parent = "<role>"`
+  `chrome` (ink on a UI surface — bars/panels/upper window), `line`
+  (lines, frames, rules, dividers), `accent` (highlights — links, selection,
+  current room, tabs), `muted` (dim/secondary text), `alert` (warnings/errors),
+  and `heading` (emphasized titles). Everything else is a **derivation** —
+  `parent = "<role>"`
   plus an optional delta (fg/bg/bold/italic/underline/dim/reversed) — so a
   minimal theme that only touches `[roles]` still looks fully coherent.
 - **Panels vs. windows.** *Panels* are the frames babelmap itself draws — the
@@ -51,11 +52,19 @@ coherent, while power users can still override any single selector.
   `map.room` for box corners, `glyphs = { north = "^" }` on `map.connector` for
   arrows — there is no separate override table.
 - **`[debug]`** holds only the disassembly-specific selectors for the debug
-  inspector (`pc`, `tooltip`, and the SQ-0428 confidence tiers `disasm_executed`
+  inspector (`pc` and the SQ-0428 confidence tiers `disasm_executed`
   / `disasm_rd` / `disasm_soft` / `disasm_data`); each tier carries both a line
   style and a gutter **`glyph`** (e.g. `disasm_executed`'s `|` mark), so the
   color and the mark are both themeable. The panel's frame/body/tabs come from
-  the shared `[panel]` chrome above, not from `[debug]`.
+  the shared `[panel]` chrome above, and its opcode hover tooltip from the shared
+  `[tooltip]` surface (below), not from `[debug]`.
+- **Surfaces beyond `[panel]`.** Dialogs and tooltips are their own **surface**
+  sections — a background + optional frame + the text on them — separate from
+  `[panel]`. `[dialog]` styles the modal surface (`background`, its own `border`
+  frame, `title`, `button` / `button:active`, `shadow`); `[tooltip]` styles every
+  hover tooltip (`background` + an optional `border`, borderless by default). Keys
+  in these sections are bare (`title = { parent = "accent" }`), like `[panel]`
+  keys.
 
 ### Everyday customization
 - **Room numbers** — room id numbers are hidden by default (portal icons take the
@@ -120,10 +129,10 @@ coherent, while power users can still override any single selector.
   (the focused one is highlighted) and Enter then fires whichever is focused. `Esc` and **✕** always close. Text-entry modals
   keep **Enter** = submit the field; the navigation panels (verb menu, file browser)
   keep their own keys and just show the default button underlined. Colors are
-  configurable under the `dialog` / `dialog_title` / `dialog_button` /
-  `dialog_button_active` / `dialog_shadow` style selectors, and a modal's
-  on-screen **placement** — centered (default) or anchored to any edge or
-  corner with a margin — via the `dialog` selector's `placement` / `margin` keys.
+  configurable under the `[dialog]` surface section — `background`, `border` (the
+  dialog's own frame), `title`, `button` / `button:active`, and `shadow` — and a
+  modal's on-screen **placement** — centered (default) or anchored to any edge or
+  corner with a margin — via `[dialog]`'s `placement` / `margin` keys.
 
 ### Editing your theme
 All visual settings live in a standalone `style.toml`, referenced from

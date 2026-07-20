@@ -34,14 +34,14 @@ game-stylehint layers. The two never share a selector: panel chrome is host UI
 (never honors game colours); window chrome can (§5).
 
 ### 1. Roles — the ~7 roots a theme actually sets
-`text · chrome · border · accent · muted · alert · heading`
+`text · chrome · line · accent · muted · alert · heading`
 Each carries fg / bg / modifiers. (User chose "balanced".)
 
 | Role | meaning |
 |---|---|
 | text | body ink on the page |
 | chrome | ink on a UI surface (bars/panels/upper window) |
-| border | lines/frames |
+| line | lines / frames / rules / dividers |
 | accent | highlight (links, selection, current, badges) |
 | muted | dim / secondary (labels, meta, suggestions) |
 | alert | warning / error |
@@ -57,7 +57,7 @@ declared once (no `[elements]`/`[map]` overlap).
 | transcript | text | — |
 | status_bar, help_bar, upper_window, story_info | chrome | — |
 | status_header, story_title | heading | on chrome |
-| input_line, suggestion_line, scrollbar | border | (role/side deltas) |
+| input_line, suggestion_line, scrollbar | line | (role/side deltas) |
 | transcript_location | accent | — |
 | story_badge | accent | reverse |
 | hyperlink | accent | underline |
@@ -74,10 +74,10 @@ them):
 | selector | parent | delta | used when |
 |---|---|---|---|
 | `panel.background` | — (transparent) | — | the panel interior fill; transparent by default so panels show the terminal background, set a `bg` to give panels a solid surface |
-| `panel.border` | border | `style = "single"` | panel is unfocused (inactive) |
-| `panel.border:active` | border | `style = "single"`, bold | panel has focus (active) |
+| `panel.border` | line | `style = "single"` | panel is unfocused (inactive) |
+| `panel.border:active` | line | `style = "single"`, bold | panel has focus (active) |
 
-`:active` = `border + bold` reproduces today's `focused_border` (Cyan+BOLD)
+`:active` = `line + bold` reproduces today's `focused_border` (Cyan+BOLD)
 exactly; retheme it to `parent = "accent"` for a colour-shift focus highlight.
 Both border rows carry the full border grammar (`style`, per-side `style_<side>`,
 `header`). `panel.background` is the standard body fill for every panel. Every app
@@ -105,9 +105,9 @@ styling (the old `debug.tab`/`map.map_layer_tab` style selectors are removed):
 | `panel.title` | style | heading on chrome | a plain panel title inset in the top border |
 | `panel.tab` | style | muted | an inactive / unselected tab |
 | `panel.tab:active` | style | accent + bold | the active / selected tab |
-| `panel.tab_divider` | glyph + style | glyph `│`, border | separator drawn between adjacent tabs |
-| `panel.terminator_left` | glyph + style | matches border `style` (`┤`), border | left cap where the title/tab strip meets the frame |
-| `panel.terminator_right` | glyph + style | matches border `style` (`├`), border | right cap of the strip |
+| `panel.tab_divider` | glyph + style | glyph `│`, line | separator drawn between adjacent tabs |
+| `panel.terminator_left` | glyph + style | matches border `style` (`┤`), line | left cap where the title/tab strip meets the frame |
+| `panel.terminator_right` | glyph + style | matches border `style` (`├`), line | right cap of the strip |
 
 Terminator glyphs default to the panel's border `style` so they stay consistent
 across single/double/rounded frames (`┤`/`├`, `╡`/`╞`, …); override with an
@@ -121,6 +121,50 @@ special title (e.g. `story_title`, styled as the game name) still overrides it.
 - *Retire:* shortlist to remove entirely (bring to user to veto) — candidates:
   `meta_marker` / `warning_marker` (as separate from the text they mark),
   `story_info_cover`, `transcript_system` (merge into `transcript_meta`).
+
+**Text sections vs surface sections.** The schema splits along a clean line.
+**Text sections** — `[elements]`, `[glk.buffer]`, `[glk.grid]`, `[map]`,
+`[debug]` — only adjust a *foreground* colour + emphasis for content drawn on an
+existing surface. **Surface sections** — `[panel]`, `[dialog]`, `[tooltip]` —
+describe a whole surface: a background fill, an optional border/frame, and the
+text drawn on it. The panel is one such surface (§2a/§2b); dialogs (§2c) and
+tooltips (§2d) are two more, each with its own background + frame instead of
+borrowing the panel's.
+
+### 2c. `[dialog]` — the modal surface (its own frame)
+A dialog/overlay is a **surface**, not a plain panel: it has its own background,
+its own frame, a title, buttons, and a drop-shadow. These used to be flat
+`[elements]` selectors (`dialog`, `dialog_title`, `dialog_button`,
+`dialog_button_active`, `dialog_shadow`); they are now a dedicated `[dialog]`
+section with **bare** keys (the internal full lookup name in parens):
+
+| key | internal name | parent | delta |
+|---|---|---|---|
+| `background` | `dialog.background` | chrome | body fill |
+| `border` | `dialog.border` | line | **NEW:** the dialog's own frame — `style = "single"`, bold; colour *and* style both come from here |
+| `title` | `dialog.title` | accent | — |
+| `button` | `dialog.button` | chrome | reversed |
+| `button:active` | `dialog.button:active` | accent | reversed |
+| `shadow` | `dialog.shadow` | muted | bg dark-gray |
+
+The dialog frame used to borrow `panel.border:active`; it now has its **own**
+`dialog.border` (a full border grammar — colour + `style` come from it), so a
+theme can frame dialogs differently from panels.
+
+### 2d. `[tooltip]` — the shared hover-tooltip surface
+Hover tooltips (e.g. the debug inspector's opcode tooltip, formerly the
+`debug.tooltip` selector) are a shared **surface** section, so every tooltip in
+the app looks the same:
+
+| key | internal name | parent | default style |
+|---|---|---|---|
+| `background` | `tooltip.background` | chrome | body fill |
+| `border` | `tooltip.border` | line | `style = "none"` (borderless; set a style to frame the tooltip) |
+
+Keys under `[dialog]` / `[tooltip]` are written **without** the dotted prefix
+(e.g. `title = { parent = "accent" }`), exactly like the `[panel]` / `[map]`
+keys — the dotted form (`dialog.title`, `tooltip.border`) is only the internal
+lookup name.
 
 ### 3. `glk.*` — the 11 standard Glk styles (first-class, defaults to roles)
 The Glk spec defines exactly **11 styles**, numbered 0–10, which the gvm already
@@ -230,7 +274,7 @@ markers) that does not map cleanly onto the text-oriented roles. Give it its own
 - **(a) Own roots:** a small independent map palette (room, room-current,
   room-selected, connector, layer-cycle, map-border) — most control, more knobs.
 - **(b) Reference shared roles:** map elements derive from the shared roles
-  (room-current → accent, connector → border/muted) with map-specific deltas —
+  (room-current → accent, connector → line/muted) with map-specific deltas —
   fewer knobs, coupled to the app palette.
 - **(c) Hybrid:** map has its own *tokens* (fills/edges/layer cycle) but current
   /selection reference the shared `accent` so highlight colour stays consistent.
@@ -271,14 +315,13 @@ behind rooms/edges, defaulting to the page/terminal `background`. (Frame =
 ### 4b. `debug.*` — the /debug inspector windows (own namespace)
 The debug inspector (disassembly / registers / stack, SQ-0420) is a third visual
 domain with an existing selector family (`debug_pane`, `debug_title`,
-`debug_disasm_pc`, `debug_tab`/`_active`, `debug_exec_mark`, `debug_tooltip`) and
+`debug_disasm_pc`, `debug_tab`/`_active`, `debug_exec_mark`) and
 the pending SQ-0428 confidence tiers. Give it a `debug.*` sub-palette paralleling
 `map.*`, deriving from the shared roles so it stays coherent with the app chrome:
 
 | debug selector | kind | default | meaning |
 |---|---|---|---|
 | pc | style | accent + reverse | the line at the current PC |
-| tooltip | style | chrome | opcode hover tooltip |
 | disasm_executed *(SQ-0428)* | style + glyph | accent, glyph `|` | proven code (a PC that ran) — styles the line AND its gutter mark |
 | disasm_rd *(SQ-0428)* | style + glyph | text, glyph ` ` | reached by recursive descent from a call |
 | disasm_soft *(SQ-0428)* | style + glyph | muted, glyph ` ` | linear-scan guess (soft boundary) |
@@ -293,9 +336,11 @@ one a glyph to mark it (e.g. `?` on `disasm_soft`).
 
 The debug panel uses the **standard panel chrome** — body from `panel.background`,
 frame from `panel.border` / `panel.border:active` (§2a), title and window tabs
-from `panel.title` / `panel.tab` / `panel.tab:active` (§2b). So `debug.*` holds
+from `panel.title` / `panel.tab` / `panel.tab:active` (§2b), and its opcode hover
+tooltip is the shared `[tooltip]` surface (§2d), not a `debug.*` selector. So
+`debug.*` holds
 ONLY genuinely debug-specific content selectors (the disassembly rendering); there
-is no `debug.panel`, `debug.border`, `debug.title`, or `debug.tab`. Debug panels
+is no `debug.panel`, `debug.border`, `debug.title`, `debug.tab`, or `debug.tooltip`. Debug panels
 are host UI, never game surfaces
 — the §5 game-stylehint layers do NOT apply; they resolve straight from
 `debug.*` → role → terminal. This folds the SQ-0428 confidence-colouring work into
@@ -368,9 +413,11 @@ header    = { bold = true }                 # modifier delta on the heading role
 alert     = { fg = "...", bold = true }     # colour + modifier
 [glk.grid]
 input     = { parent = "text" }             # re-root a slot off its default role
-[panel]           # shared panel chrome: background, border(+:active), title, tab(+:active), dividers/terminators
+[panel]           # SURFACE: shared panel chrome — background, border(+:active), title, tab(+:active), dividers/terminators
+[dialog]          # SURFACE: modal — background, its OWN border, title, button(+:active), shadow
+[tooltip]         # SURFACE: shared hover tooltip — background + optional border (borderless by default)
 [map]             # map colours + glyph-set presets (old [symbols] merged in); per-glyph overrides via a `glyphs` sub-map on the selector
-[debug]           # disasm-only: pc, tooltip, confidence tiers (each with a gutter glyph)
+[debug]           # disasm-only: pc, confidence tiers (each with a gutter glyph)
 [statusbar] / [[transcript.rule]]  # carried over
 ```
 
@@ -390,7 +437,7 @@ scheme = "tomorrow-night"     # optional base: built-in name or a Ghostty theme 
 [roles]
 text    = { fg = "white",     bg = "background" }  # body ink on the page
 chrome  = { fg = "white",     bg = "black" }       # ink on a UI surface (bars/panels/upper window)
-border  = { fg = "cyan" }                          # lines / frames
+line    = { fg = "cyan" }                          # lines / frames / rules / dividers
 accent  = { fg = "cyan" }                          # highlight: links, selection, current room, badges
 muted   = { fg = "dark-gray" }                     # dim / secondary
 alert   = { fg = "yellow" }                        # warning / error
@@ -400,14 +447,31 @@ heading = { fg = "white",     bold = true }        # titles / headers
 # ── (Story/VM windows have their own borders — see [glk.*], not here.) ────────
 [panel]
 background       = { parent = "chrome" }                               # standard panel body fill (all panels)
-border           = { parent = "border", style = "single" }             # unfocused frame
-"border:active"  = { parent = "border", style = "single", bold = true } # focused frame (today's cyan+bold)
+border           = { parent = "line", style = "single" }               # unfocused frame
+"border:active"  = { parent = "line", style = "single", bold = true }  # focused frame (today's cyan+bold)
 title            = { parent = "heading" }                              # a plain panel title
 tab              = { parent = "muted" }                                # inactive tab
 "tab:active"     = { parent = "accent", bold = true }                  # active/selected tab
-tab_divider      = { glyph = "│", parent = "border" }                  # between tabs
-terminator_left  = { parent = "border" }        # cap where the strip meets the frame; glyph defaults to border style (┤)
-terminator_right = { parent = "border" }        # …├ ; set glyph = "…" to override
+tab_divider      = { glyph = "│", parent = "line" }                    # between tabs
+terminator_left  = { parent = "line" }          # cap where the strip meets the frame; glyph defaults to border style (┤)
+terminator_right = { parent = "line" }          # …├ ; set glyph = "…" to override
+
+# ── Dialog surface (§2c): a background + its OWN frame + the text on it. ───────
+# ── A SURFACE section, separate from [panel]: the modal frame is dialog.border ─
+# ── (not borrowed from panel.border:active). ─────────────────────────────────
+[dialog]
+background       = { parent = "chrome", bg = "black" }                 # the modal body fill
+border           = { parent = "line", style = "single", bold = true }  # dialog's OWN frame (colour + style)
+title            = { parent = "accent" }                               # the dialog title
+button           = { parent = "chrome", reversed = true }              # a dialog button
+"button:active"  = { parent = "accent", reversed = true }              # the focused/active button
+shadow           = { parent = "muted", bg = "dark-gray" }              # drop-shadow behind the frame
+
+# ── Tooltip surface (§2d): a background + optional frame + the text on it. ─────
+# ── Shared by every hover tooltip (e.g. the debug inspector's opcode hover). ──
+[tooltip]
+background       = { parent = "chrome" }                               # the tooltip body fill
+border           = { parent = "line", style = "none" }                 # borderless by default; set a style to frame it
 
 # ── Elements: parent + delta. Shown in full; every line == its default, so a ──
 # ── minimal theme may delete this whole section and look identical. ───────────
@@ -419,16 +483,15 @@ upper_window         = { parent = "chrome" }
 story_info           = { parent = "chrome" }
 status_header        = { parent = "heading", bg = "black" }
 story_title          = { parent = "heading" }
-input_line           = { parent = "border" }        # add style = "single" to box it
-suggestion_line      = { parent = "border" }        # add style = "single" to box the popup
-dialog               = { bg = "black", shadow = true }   # frame = panel.border:active (modal); shadow/title/buttons are dialog-specific
-scrollbar            = { parent = "border" }
+input_line           = { parent = "line" }          # add style = "single" to box it
+suggestion_line      = { parent = "line" }          # add style = "single" to box the popup
+scrollbar            = { parent = "line" }
 transcript_location  = { parent = "accent" }
 story_badge          = { parent = "accent", reversed = true }
 hyperlink            = { parent = "accent", underline = true }
-# NB: panel frames (story/map/verb/debug/dialog) come from [panel] (§2a); the
+# NB: panel frames (story/map/verb/debug) come from [panel] (§2a); the
 # upper-window frame is a WINDOW border (game domain), not set here; map/debug
-# selectors live in [map]/[debug].
+# selectors live in [map]/[debug]; dialog/tooltip surfaces live in [dialog]/[tooltip].
 story_info_label     = { parent = "muted" }
 suggestion           = { parent = "muted" }
 transcript_meta      = { parent = "muted", glyph = "▏" }   # glyph = the meta gutter mark (was symbols "gutter.meta")
@@ -492,7 +555,7 @@ portal_path_style    = "dotted"     # up/down/in/out connector line — styled s
 # ── Confidence tiers are the SQ-0428 disasm colouring folded into the registry.─
 [debug]
 pc                  = { parent = "accent", reversed = true }   # line at the current PC
-tooltip             = { parent = "chrome" }
+# (opcode hover tooltip is the shared [tooltip] surface, not a debug.* selector)
 # Confidence tiers (SQ-0428): each styles the disasm line AND sets its gutter mark
 # glyph. disasm_executed's glyph IS the executed gutter mark (was exec_mark).
 disasm_executed     = { parent = "accent", glyph = "|" }
@@ -544,10 +607,12 @@ Notes for review:
 - `[panel]` is the shared chrome for every panel we draw: body (`background`),
   frame (`border` / `border:active`, §2a), and header chrome (`title`, `tab` /
   `tab:active`, `tab_divider`, `terminator_left` / `terminator_right`, §2b). No
-  panel sets its own body, frame, or tab style — story/map/verb/debug/dialog all
+  panel sets its own body, frame, or tab style — story/map/verb/debug all
   resolve here, so debug window-tabs and map layer-tabs look identical. The only
   per-panel override in the example is `map.background` (the canvas). `[debug]`
-  therefore holds only disassembly-specific selectors. Story/VM **window** borders
+  therefore holds only disassembly-specific selectors. Dialogs and tooltips are
+  separate **surface** sections (`[dialog]` §2c, `[tooltip]` §2d) with their own
+  background + frame, not `[panel]` chrome. Story/VM **window** borders
   are separate (`glk.*`, game domain).
 - `tab_divider` / `terminator_*` carry a `glyph`; the terminator glyph defaults to
   the panel border `style` (┤/├ for single, ╡/╞ for double) so caps match the frame.

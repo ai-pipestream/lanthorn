@@ -69,7 +69,7 @@ pub fn draw_reset_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
     // Draw content into the content area.
     // Row 0: body line
     if content.height >= 1 {
-        let body_style = state.colors.theme.get("dialog").style;
+        let body_style = state.colors.theme.get("dialog.background").style;
         crate::render::draw_str_clipped(
             buf,
             content.x,
@@ -90,7 +90,7 @@ pub fn draw_reset_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opti
         }
         let check = if checked { "[x]" } else { "[ ]" };
         let label = format!("{} {}", check, text);
-        let style = if focused { state.colors.theme.get("dialog_button_active").style } else { state.colors.theme.get("dialog").style };
+        let style = if focused { state.colors.theme.get("dialog.button:active").style } else { state.colors.theme.get("dialog.background").style };
         crate::render::draw_str_clipped(buf, content.x, y, &label, style, content);
         let rect_w = (label.chars().count() as u16).min(content.width);
         Rect::new(content.x, y, rect_w, 1)

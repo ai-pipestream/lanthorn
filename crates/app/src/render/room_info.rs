@@ -233,7 +233,7 @@ mod tests {
         use crate::render::paneframe::PaneGlyphs;
         DialogStyle {
             frame: Style::default().bg(Color::Black),
-            box_style: BorderStyle::Single,
+            border: Style::default(), box_style: BorderStyle::Single,
             glyphs: PaneGlyphs::default(),
             title: Style::default().fg(Color::Cyan),
             button: Style::default(),

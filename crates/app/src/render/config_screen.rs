@@ -77,7 +77,7 @@ pub fn draw_config_screen(
     let hdr_style = Style::new()
         .fg(Color::White)
         .add_modifier(Modifier::UNDERLINED)
-        .patch(state.colors.theme.get("dialog").style);
+        .patch(state.colors.theme.get("dialog.background").style);
     let name_col_w = 22usize;
     let hdr = format!("{:<width$}  Value", "Setting", width = name_col_w);
     if content.height > 0 {
@@ -85,7 +85,7 @@ pub fn draw_config_screen(
     }
 
     // Row styles
-    let normal = state.colors.theme.get("dialog").style;
+    let normal = state.colors.theme.get("dialog.background").style;
     let selected_style = Style::new()
         .fg(Color::Black)
         .bg(Color::Cyan)

@@ -58,7 +58,7 @@ pub fn draw_saves(
 
     // ── Column headers ────────────────────────────────────────────────────────
 
-    let hdr_style = Style::new().add_modifier(Modifier::UNDERLINED).patch(state.colors.theme.get("dialog").style);
+    let hdr_style = Style::new().add_modifier(Modifier::UNDERLINED).patch(state.colors.theme.get("dialog.background").style);
     let hdr = format!("{:<25}  {:<5}  {:>5}  {:<16}", "Name", "Type", "Turns", "Saved at");
     if content.height > 0 {
         crate::render::draw_str_clipped(buf, content.x, content.y, &hdr, hdr_style, content);
@@ -66,7 +66,7 @@ pub fn draw_saves(
 
     // ── Entry rows ────────────────────────────────────────────────────────────
 
-    let normal = state.colors.theme.get("dialog").style;
+    let normal = state.colors.theme.get("dialog.background").style;
     let selected_style = Style::new()
         .fg(ratatui::style::Color::Black)
         .bg(ratatui::style::Color::Cyan)
@@ -136,7 +136,7 @@ pub fn draw_saves(
     if footer_y < content.bottom() {
         let footer_style = Style::new()
             .fg(ratatui::style::Color::DarkGray)
-            .patch(state.colors.theme.get("dialog").style);
+            .patch(state.colors.theme.get("dialog.background").style);
         let footer = "Enter:load  s:save-as  d:delete  i:import  Esc:close";
         crate::render::draw_str_clipped(buf, content.x, footer_y, footer, footer_style, content);
     }

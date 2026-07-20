@@ -60,7 +60,7 @@ pub fn draw_aux_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option
 
     // Draw body text into the content area.
     if content.height >= 1 {
-        let body_style = state.colors.theme.get("dialog").style;
+        let body_style = state.colors.theme.get("dialog.background").style;
         crate::render::draw_str_clipped(
             buf,
             content.x,
@@ -71,7 +71,7 @@ pub fn draw_aux_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Option
         );
     }
     if content.height >= 2 {
-        let body_style = state.colors.theme.get("dialog").style;
+        let body_style = state.colors.theme.get("dialog.background").style;
         crate::render::draw_str_clipped(
             buf,
             content.x,

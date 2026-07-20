@@ -57,7 +57,7 @@ pub fn draw_file_picker(
 
     // ── Entry rows ────────────────────────────────────────────────────────────
 
-    let normal = state.colors.theme.get("dialog").style;
+    let normal = state.colors.theme.get("dialog.background").style;
     let selected_style = Style::new()
         .fg(ratatui::style::Color::Black)
         .bg(ratatui::style::Color::Cyan)
@@ -70,7 +70,7 @@ pub fn draw_file_picker(
     *vp_out = viewport;
 
     if total == 0 {
-        let empty_style = Style::new().fg(ratatui::style::Color::DarkGray).patch(state.colors.theme.get("dialog").style);
+        let empty_style = Style::new().fg(ratatui::style::Color::DarkGray).patch(state.colors.theme.get("dialog.background").style);
         if content.height > 0 {
             crate::render::draw_str_clipped(buf, content.x, content.y, "(no files)", empty_style, content);
         }
@@ -124,7 +124,7 @@ pub fn draw_file_picker(
     if footer_y < content.bottom() {
         let footer_style = Style::new()
             .fg(ratatui::style::Color::DarkGray)
-            .patch(state.colors.theme.get("dialog").style);
+            .patch(state.colors.theme.get("dialog.background").style);
         let footer = "Enter:pick  Esc:cancel";
         crate::render::draw_str_clipped(buf, content.x, footer_y, footer, footer_style, content);
     }
