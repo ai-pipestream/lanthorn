@@ -7,7 +7,7 @@
 > stable: the `config.toml` and `style.toml` schemas (and on-disk save data) may
 > change between versions.
 
-![babelmap playing Zork I with a live automap of the Great Underground Empire](docs/automapping.png)
+![babelmap's cover-gallery view: a grid of story covers beside a metadata info panel](docs/cover-gallery.png)
 
 babelmap is a terminal interactive-fiction interpreter with a built-in *automapper*.
 Load a story — the Infocom catalog and Z-machine classics like *Zork*, modern
@@ -47,10 +47,12 @@ Glulxe, no C bindings, zero runtime dependencies:
 
 The mapper watches the stream of locations and movements and turns it into a
 spatial graph — rooms boxed, exits routed, overlaps removed, multi-level areas
-split into switchable **layers** (see the `Main / Cellar / Maze` tabs above). The
-current room glows; the whole layout re-tidies itself as you discover more. It's
-completely engine-agnostic: the same map grows whether you're playing *Zork*,
-*Counterfeit Monkey*, or *Adventureland*.
+split into switchable **layers** (the `Main / Cellar / Maze` tabs across the top
+of the map). The current room glows; the whole layout re-tidies itself as you
+discover more. It's completely engine-agnostic: the same map grows whether you're
+playing *Zork*, *Counterfeit Monkey*, or *Adventureland*.
+
+![babelmap playing Zork I with a live automap of the Great Underground Empire](docs/automapping.png)
 
 ### Pictures in your terminal
 
@@ -64,9 +66,11 @@ to a universal Unicode half-block renderer everywhere else.
 
 Games that split the screen into multiple Glk windows — status panes, quote
 boxes, side-by-side layouts — are laid out as the author intended, right in the
-terminal.
+terminal. **Glulx story colours are fully supported**, too: a game's `garglk`
+window and text colours (like the coloured panes in the screenshot below) render
+faithfully at 24-bit RGB.
 
-![A game using a multi-window Glk layout](docs/multi-window-layout.png)
+![A Glulx game using a multi-window Glk layout with story-set colours](docs/multi-window-layout.png)
 
 ### A Z-machine debugger, built in
 
@@ -80,14 +84,13 @@ opcode under your cursor and clickable operands that jump to their address.
 ### Browse your library
 
 Launch a directory instead of a file to open the **story picker**. Two view
-modes — a sortable, badged **list** or a `g` **cover-gallery grid** — each paired
-with a live **info panel**: the selected game's cover art, full metadata (author,
-year, genre, blurb), format, and IFID, fetched on demand from IFDB and cached per
-game. The type badges even tell the three engines apart at a glance (`Z5`,
-`Scott`, `G3.1.2`).
+modes — a sortable, badged **list** or a `g` **cover-gallery grid** (shown in the
+banner at the top of this page) — each paired with a live **info panel**: the
+selected game's cover art, full metadata (author, year, genre, blurb), format,
+and IFID, fetched on demand from IFDB and cached per game. The type badges even
+tell the three engines apart at a glance (`Z5`, `Scott`, `G3.1.2`).
 
 ![The story picker's list view: a sortable, badged catalogue beside the info panel — the cover art here is drawn with the universal Unicode half-block fallback renderer](docs/story-list.png)
-![The story picker's cover-gallery grid, with the selected game's info panel](docs/cover-gallery.png)
 
 ---
 
