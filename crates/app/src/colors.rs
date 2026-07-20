@@ -433,6 +433,11 @@ pub struct ColorScheme {
     /// garglk.ini importer will populate the rest. Not yet editable via style.toml
     /// (deferred to the SQ-0309 style redesign).
     pub glk_styles: [[GlkStyleColour; 11]; 2],
+    /// SQ-0309: the registry-resolved theme, carried alongside the legacy fields
+    /// during the migration. Later waves read `theme.get("<selector>")` instead of
+    /// the individual fields above; this is populated from the same scheme/roles as
+    /// those fields and must reproduce them.
+    pub theme: crate::theme::resolve::Theme,
 }
 
 /// Build the seed `glk_styles` array (SQ-0331): buffer Input(8) ← `input_text`,
@@ -587,6 +592,12 @@ impl ColorScheme {
                 Color::White,      // 15 bright white
             ],
             glk_styles: seed_glk_styles(Style::new(), Style::new().add_modifier(Modifier::BOLD)),
+            theme: crate::theme::resolve::resolve(
+                &crate::theme::resolve::Roles::terminal_default(),
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+                &std::collections::HashMap::new(),
+            ),
         }
     }
 
@@ -788,6 +799,7 @@ impl ColorScheme {
             statusbar_layout: StatusBarLayout::default(),
             palette: scheme.palette,
             glk_styles: seed_glk_styles(Style::new(), Style::new().add_modifier(Modifier::BOLD)),
+            theme: crate::theme::resolve::resolve_theme(scheme, &crate::theme::toml_schema::ParsedStyle::default()),
         }
     }
 
@@ -1241,6 +1253,16 @@ unknown-key = ignored
     }
 
     // ── ColorScheme::terminal_default ────────────────────────────────────────
+
+    #[test]
+    fn terminal_default_carries_a_matching_theme() {
+        let cs = ColorScheme::terminal_default();
+        // The attached registry theme reproduces the legacy fields it will replace.
+        assert_eq!(cs.theme.get("transcript").style.fg, cs.transcript.fg);
+        assert_eq!(cs.theme.get("panel.border:active").style.fg, cs.focused_border.fg);
+        assert!(cs.theme.get("panel.border:active").style.add_modifier
+            .contains(ratatui::style::Modifier::BOLD));
+    }
 
     #[test]
     fn terminal_default_connector_is_cyan() {

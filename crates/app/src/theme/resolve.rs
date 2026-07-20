@@ -143,7 +143,7 @@ pub struct Resolved {
 pub type Decls = HashMap<String, Delta>;
 
 /// The flat resolved theme: `selector name -> Resolved`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Theme {
     map: HashMap<String, Resolved>,
     /// Fallback for an unknown selector — the `text` role.
