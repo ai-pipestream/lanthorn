@@ -844,6 +844,14 @@ pub(crate) fn draw_str_runs(
                 if let Some(c) = resolve_glk_channel(game_bg, slot.bg, base_style.bg, honor) {
                     s = s.bg(c);
                 }
+                // SQ-0309 §3: apply the Glk style's typographic modifiers — the registry theme
+                // slot's canonical modifiers (Emphasized→italic, Header→bold, …) plus any override
+                // modifiers (garglk/game stylehints, populated later). Colours resolved above.
+                let glk_mods =
+                    crate::render::glk_theme_modifiers(scheme, false, glk) | slot.add_modifier;
+                if !glk_mods.is_empty() {
+                    s = s.add_modifier(glk_mods);
+                }
             }
             // Glk hyperlink affordance: layer the themeable `hyperlink` colour
             // and an underline ON TOP of the styling. The underline is applied
@@ -2086,13 +2094,12 @@ mod tests {
     #[test]
     fn draw_str_runs_glk_style_slots_seed_and_gate() {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Color, Style}};
-        use crate::colors::GlkStyleColour;
         let area = Rect::new(0, 0, 6, 1);
         let base = Style::new().fg(Color::White); // element = transcript White
         let mut cs = crate::colors::ColorScheme::terminal_default();
         // Seed buffer (row 0): Input(8) cyan, Subheader(4) green.
-        cs.glk_styles[0][8] = GlkStyleColour { fg: Some(Color::Cyan), bg: None };
-        cs.glk_styles[0][4] = GlkStyleColour { fg: Some(Color::Green), bg: None };
+        cs.glk_styles[0][8] = Style::default().fg(Color::Cyan);
+        cs.glk_styles[0][4] = Style::default().fg(Color::Green);
 
         let draw = |glk_style: u8, fg: u32, honor: bool| {
             let mut b = Buffer::empty(area);
@@ -2116,6 +2123,39 @@ mod tests {
         let red = crate::state::pack_zcolour(zvm::screen::ZColour::True24(0x00FF_0000));
         assert_eq!(draw(8, red, true), Color::Rgb(255, 0, 0), "honor ON: game colour wins over slot");
         assert_eq!(draw(8, red, false), Color::Cyan, "honor OFF: game ignored, slot wins");
+    }
+
+    #[test]
+    fn glk_buffer_emphasized_renders_italic() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        let area = Rect::new(0, 0, 6, 1);
+        let base = Style::new().fg(Color::White);
+        let cs = crate::colors::ColorScheme::terminal_default();
+
+        let draw = |glk_style: u8| {
+            let mut b = Buffer::empty(area);
+            let runs = vec![StyleRun { start: 0, end: 3, bits: 0, fg: 0, bg: 0, link: 0, glk_style }];
+            draw_str_runs(&mut b, 0, 0, "abc", base, &runs, None, area, &cs, false);
+            b[(0, 0)].modifier
+        };
+
+        // Emphasized (glk_style 1) → registry theme's italic modifier.
+        assert!(draw(1).contains(Modifier::ITALIC), "Emphasized run renders italic");
+        // Normal (glk_style 0) → no italic.
+        assert!(!draw(0).contains(Modifier::ITALIC), "Normal run has no italic");
+    }
+
+    #[test]
+    fn glk_buffer_header_renders_bold() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        let area = Rect::new(0, 0, 6, 1);
+        let base = Style::new().fg(Color::White);
+        let cs = crate::colors::ColorScheme::terminal_default();
+
+        let mut b = Buffer::empty(area);
+        let runs = vec![StyleRun { start: 0, end: 3, bits: 0, fg: 0, bg: 0, link: 0, glk_style: 3 }];
+        draw_str_runs(&mut b, 0, 0, "abc", base, &runs, None, area, &cs, false);
+        assert!(b[(0, 0)].modifier.contains(Modifier::BOLD), "Header run renders bold");
     }
 
     #[test]

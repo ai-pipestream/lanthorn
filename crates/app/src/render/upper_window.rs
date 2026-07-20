@@ -44,6 +44,11 @@ fn cell_style(cell: zvm::screen::Cell, glk_style: u8, scheme: &ColorScheme, hono
     if let Some(c) = crate::render::resolve_glk_channel(game(cell.bg), glk.bg, base.bg, honor_game_colours) {
         s = s.bg(c);
     }
+    let glk_mods =
+        crate::render::glk_theme_modifiers(scheme, true, glk_style as usize) | glk.add_modifier;
+    if !glk_mods.is_empty() {
+        s = s.add_modifier(glk_mods);
+    }
     s
 }
 
@@ -342,9 +347,8 @@ mod tests {
     #[test]
     fn cell_style_grid_glk_style_slot_uses_row1() {
         use zvm::screen::{Cell, ZColour};
-        use crate::colors::GlkStyleColour;
         let mut scheme = ColorScheme::default();
-        scheme.glk_styles[1][4] = GlkStyleColour { fg: Some(Color::Green), bg: None };
+        scheme.glk_styles[1][4] = Style::default().fg(Color::Green);
         // Subheader (glk_style 4) grid cell, no game colour → slot green, honor OFF.
         let s = cell_style(
             Cell { ch: 'x', style: 0, fg: ZColour::Default, bg: ZColour::Default },
@@ -357,6 +361,19 @@ mod tests {
             0, &scheme, false, None,
         );
         assert_eq!(n.fg, scheme.upper_window.fg, "grid Normal → upper_window element base");
+    }
+
+    /// Alert (glk_style 5) in a grid window renders bold — the registry theme's
+    /// canonical Alert modifier, applied unconditionally (SQ-0309 §3).
+    #[test]
+    fn glk_grid_alert_renders_bold() {
+        use zvm::screen::{Cell, ZColour};
+        let scheme = ColorScheme::default();
+        let s = cell_style(
+            Cell { ch: 'x', style: 0, fg: ZColour::Default, bg: ZColour::Default },
+            5, &scheme, false, None,
+        );
+        assert!(s.add_modifier.contains(ratatui::style::Modifier::BOLD), "Alert grid cell renders bold");
     }
 
     /// C1 regression guard: a reverse cell with DEFAULT colours (fg==bg==ZColour::Default)

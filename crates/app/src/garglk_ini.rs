@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use ratatui::style::Color;
 
-use crate::colors::{ColorScheme, GlkStyleColour};
+use crate::colors::ColorScheme;
 
 const NUM_STYLES: usize = 11;
 
@@ -130,7 +130,11 @@ impl GarglkOverlay {
                     // element, so fold it into the buffer element base instead.
                     cs.transcript = cs.transcript.fg(fg).bg(bg);
                 } else {
-                    cs.glk_styles[0][n] = GlkStyleColour { fg: Some(fg), bg: Some(bg) };
+                    cs.glk_styles[0][n] = ratatui::style::Style {
+                        fg: Some(fg),
+                        bg: Some(bg),
+                        ..ratatui::style::Style::default()
+                    };
                 }
             }
         }
@@ -140,7 +144,11 @@ impl GarglkOverlay {
                 if n == 0 {
                     cs.upper_window = cs.upper_window.fg(fg).bg(bg);
                 } else {
-                    cs.glk_styles[1][n] = GlkStyleColour { fg: Some(fg), bg: Some(bg) };
+                    cs.glk_styles[1][n] = ratatui::style::Style {
+                        fg: Some(fg),
+                        bg: Some(bg),
+                        ..ratatui::style::Style::default()
+                    };
                 }
             }
         }
@@ -470,15 +478,19 @@ stylehint 0
         // tcolor 3 → buffer Glk slot 3 (both channels concrete).
         assert_eq!(
             cs.glk_styles[0][3],
-            GlkStyleColour { fg: Some(Color::Rgb(0, 255, 0)), bg: Some(Color::Rgb(0, 0, 0)) }
+            ratatui::style::Style {
+                fg: Some(Color::Rgb(0, 255, 0)),
+                bg: Some(Color::Rgb(0, 0, 0)),
+                ..ratatui::style::Style::default()
+            }
         );
         // tcolor 0 → element base (slot 0 stays None).
-        assert_eq!(cs.glk_styles[0][0], GlkStyleColour::default());
+        assert_eq!(cs.glk_styles[0][0], ratatui::style::Style::default());
         assert_eq!(cs.transcript.fg, Some(Color::Rgb(255, 255, 255)));
         // windowcolor overrides the buffer background (applied after tcolor 0 bg).
         assert_eq!(cs.transcript.bg, Some(Color::Rgb(0x10, 0x10, 0x10)));
         // gcolor 0 → upper_window element (grid slot 0 stays None).
-        assert_eq!(cs.glk_styles[1][0], GlkStyleColour::default());
+        assert_eq!(cs.glk_styles[1][0], ratatui::style::Style::default());
         assert_eq!(cs.upper_window.fg, Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
         assert_eq!(cs.upper_window.bg, Some(Color::Rgb(0x00, 0x11, 0x22)));
         // linkcolor / bordercolor land on the element fields.

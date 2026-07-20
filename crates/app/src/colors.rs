@@ -36,15 +36,6 @@ impl PartialEq for CompiledRule {
     }
 }
 
-/// One per-Glk-style theme colour slot: an optional foreground / background
-/// applied between the game's stylehint and the per-app-element base (SQ-0331).
-/// `None` = inherit (fall through to the element). `Default` = both `None`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct GlkStyleColour {
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
-}
-
 /// Which alignment cluster a status-bar segment belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Align {
@@ -432,7 +423,7 @@ pub struct ColorScheme {
     /// `input_text`, buffer Subheader←`transcript_location`); the SQ-0319
     /// garglk.ini importer will populate the rest. Not yet editable via style.toml
     /// (deferred to the SQ-0309 style redesign).
-    pub glk_styles: [[GlkStyleColour; 11]; 2],
+    pub glk_styles: [[Style; 11]; 2],
     /// SQ-0309: the registry-resolved theme, carried alongside the legacy fields
     /// during the migration. Later waves read `theme.get("<selector>")` instead of
     /// the individual fields above; this is populated from the same scheme/roles as
@@ -444,10 +435,10 @@ pub struct ColorScheme {
 /// buffer Subheader(4) ← `transcript_location`; every other slot inherits its
 /// element (left `None`), so Normal is definitionally the element and the
 /// Z-machine render stays byte-identical.
-fn seed_glk_styles(input_text: Style, transcript_location: Style) -> [[GlkStyleColour; 11]; 2] {
-    let mut styles = [[GlkStyleColour::default(); 11]; 2];
-    styles[0][8] = GlkStyleColour { fg: input_text.fg, bg: input_text.bg };
-    styles[0][4] = GlkStyleColour { fg: transcript_location.fg, bg: transcript_location.bg };
+fn seed_glk_styles(input_text: Style, transcript_location: Style) -> [[Style; 11]; 2] {
+    let mut styles = [[Style::default(); 11]; 2];
+    styles[0][8] = Style { fg: input_text.fg, bg: input_text.bg, ..Style::default() };
+    styles[0][4] = Style { fg: transcript_location.fg, bg: transcript_location.bg, ..Style::default() };
     styles
 }
 
@@ -1045,16 +1036,19 @@ mod tests {
             Style::new().fg(Color::Green).add_modifier(Modifier::BOLD),
         );
         // Buffer (row 0): Input(8) ← input_text fg/bg; Subheader(4) ← transcript_location.
-        assert_eq!(styles[0][8], GlkStyleColour { fg: Some(Color::Cyan), bg: Some(Color::Black) });
-        assert_eq!(styles[0][4], GlkStyleColour { fg: Some(Color::Green), bg: None });
+        assert_eq!(
+            styles[0][8],
+            Style { fg: Some(Color::Cyan), bg: Some(Color::Black), ..Style::default() }
+        );
+        assert_eq!(styles[0][4], Style { fg: Some(Color::Green), ..Style::default() });
         // Normal(0) is always None → definitionally the element (byte-identical Z-machine).
-        assert_eq!(styles[0][0], GlkStyleColour::default());
+        assert_eq!(styles[0][0], Style::default());
         // Every other buffer slot and the entire grid row inherit (None).
         for i in [1usize, 2, 3, 5, 6, 7, 9, 10] {
-            assert_eq!(styles[0][i], GlkStyleColour::default(), "buffer slot {i} inherits");
+            assert_eq!(styles[0][i], Style::default(), "buffer slot {i} inherits");
         }
         for (i, slot) in styles[1].iter().enumerate() {
-            assert_eq!(*slot, GlkStyleColour::default(), "grid slot {i} inherits (row 1 unseeded)");
+            assert_eq!(*slot, Style::default(), "grid slot {i} inherits (row 1 unseeded)");
         }
     }
 
@@ -1065,7 +1059,7 @@ mod tests {
         let cs = ColorScheme::terminal_default();
         for row in 0..2 {
             for i in 0..11 {
-                assert_eq!(cs.glk_styles[row][i], GlkStyleColour::default(), "row {row} slot {i}");
+                assert_eq!(cs.glk_styles[row][i], Style::default(), "row {row} slot {i}");
             }
         }
     }

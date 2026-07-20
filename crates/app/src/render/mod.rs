@@ -111,6 +111,26 @@ pub(crate) fn resolve_glk_channel(
     }
 }
 
+/// The 11 standard Glk style names (index = `glk_Style` number), matching the
+/// registry `glk.buffer.<name>` / `glk.grid.<name>` selectors (SQ-0309 §3).
+pub(crate) const GLK_STYLE_NAMES: [&str; 11] = [
+    "normal", "emphasized", "preformatted", "header", "subheader", "alert",
+    "note", "blockquote", "input", "user1", "user2",
+];
+
+/// The registry theme's modifier delta for one Glk style slot — the canonical
+/// typography (Emphasized→italic, Header/Subheader/Alert→bold, Note→italic).
+/// `grid` selects the grid (status/upper-window) row vs the text-buffer row.
+pub(crate) fn glk_theme_modifiers(
+    scheme: &crate::colors::ColorScheme,
+    grid: bool,
+    glk: usize,
+) -> ratatui::style::Modifier {
+    let name = GLK_STYLE_NAMES.get(glk).copied().unwrap_or("normal");
+    let win = if grid { "grid" } else { "buffer" };
+    scheme.theme.get(&format!("glk.{win}.{name}")).style.add_modifier
+}
+
 // ── Shared clipped drawing helpers ────────────────────────────────────────────
 
 /// Write a single char into the buffer, clipped to `area`.
