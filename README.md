@@ -257,3 +257,9 @@ The `audio` crate carries two default-on features: `playback` (real output via
 backend for headless/CI environments; `--no-default-features --features
 playback` keeps AIFF/Ogg sample playback without MOD support. With `playback`
 on, a missing audio device at runtime degrades to silence rather than erroring.
+
+---
+
+## License
+
+babelmap is released under the **BSD 3-Clause License** — see [`LICENSE`](LICENSE).

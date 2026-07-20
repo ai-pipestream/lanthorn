@@ -5,6 +5,10 @@ members = ["crates/zvm", "crates/zvm-cli", "crates/mapper", "crates/app", "crate
 exclude = ["crates/gvm/tables-gen"]
 resolver = "2"
 
+# Shared package metadata inherited by each crate via `license.workspace = true`.
+[workspace.package]
+license = "BSD-3-Clause"
+
 # Line-tables-only debug info: keeps panic backtraces with file/line, but drops
 # the variable-inspection DWARF that bloats debug/test binaries to ~45 MB each
 # and makes every relink slow. Test builds inherit this from [profile.dev].
