@@ -207,12 +207,16 @@ pub const REGISTRY: &[RegRow] = &[
     // ── §4 map.* colours (hybrid (c): own tokens; current/selected → accent) ──
     // map.background: own token, defaults to terminal background (resolver-supplied).
     row("map.background", Section::Map, Kind::Style, None, Delta::EMPTY),
-    row("map.room", Section::Map, Kind::Style, None, fg(Color::White)),
+    // Room fill + cardinal/portal connectors derive from roles so a base scheme
+    // recolours them (old from_ghostty: room=foreground, connector=palette[6]).
+    // `text`/`accent` give white/cyan for the terminal default AND follow the scheme.
+    row("map.room", Section::Map, Kind::Style, Some("text"), Delta::EMPTY),
     row("map.room_current", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
     row("map.room_selected", Section::Map, Kind::Style, Some("accent"), mods(false, false, false, true)),
-    row("map.connector", Section::Map, Kind::Style, None, fg(Color::Cyan)),
+    row("map.connector", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
+    // `distorted` (magenta) has no matching role — kept explicit (a distinctive marker).
     row("map.connector_distorted", Section::Map, Kind::Style, None, fg(Color::Magenta)),
-    row("map.connector_portal", Section::Map, Kind::Style, None, fg(Color::Cyan)),
+    row("map.connector_portal", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
     row("map.shared_path", Section::Map, Kind::Style, None, fg(Color::LightCyan)),
     row("map.loc_indicator", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     // layer_cycle: sole list-valued selector; value in LAYER_CYCLE_DEFAULT.
