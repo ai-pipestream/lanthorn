@@ -114,7 +114,7 @@ fn grid_scheme<'a>(state: &'a AppState, model: &ScreenModel) -> std::borrow::Cow
         return std::borrow::Cow::Borrowed(&state.colors);
     }
     let mut c = state.colors.clone();
-    let mut base = c.upper_window;
+    let mut base = c.theme.get("upper_window").style;
     if !matches!(fg, ZColour::Default) {
         base = base.fg(crate::render::resolve_zcolour(fg, &state.colors));
     }
@@ -126,7 +126,7 @@ fn grid_scheme<'a>(state: &'a AppState, model: &ScreenModel) -> std::borrow::Cow
     // styling — so paint the frame in the same page colours as the content, making
     // the whole status area (content + border) one coloured block on the recoloured
     // page rather than a themed frame around a game-coloured interior. (SQ-0267)
-    let mut border = c.upper_window_border;
+    let mut border = c.theme.get("upper_window_border").style;
     if !matches!(fg, ZColour::Default) {
         border = border.fg(crate::render::resolve_zcolour(fg, &state.colors));
     }
@@ -134,6 +134,19 @@ fn grid_scheme<'a>(state: &'a AppState, model: &ScreenModel) -> std::borrow::Cow
         border = border.bg(crate::render::resolve_zcolour(bg, &state.colors));
     }
     c.upper_window_border = border;
+    // SQ-0309: `draw_grid`/`draw_window_separator` now read `upper_window` and
+    // `upper_window_border` through `c.theme`, not the legacy fields set above, so
+    // the override must also land in the theme those selectors derive from
+    // (their registry parents are the `chrome`/`border` roles with no delta of
+    // their own, so seeding just those two roles reproduces `base`/`border`
+    // exactly). Other role-derived selectors this Cow's theme could serve (e.g.
+    // `hyperlink`, off `accent`) fall back to the terminal-default role rather
+    // than the user's real one — narrow, since only the grid/separator draw path
+    // reads this Cow's theme, and only while a game page colour is honoured.
+    let mut roles = crate::theme::resolve::Roles::terminal_default();
+    roles.chrome = base;
+    roles.border = border;
+    c.theme = crate::theme::resolve::resolve(&roles, &Default::default(), &Default::default(), &Default::default());
     std::borrow::Cow::Owned(c)
 }
 
@@ -234,7 +247,7 @@ fn margin_style(model: &ScreenModel, state: &AppState) -> ratatui::style::Style 
             return ratatui::style::Style::new().bg(crate::render::resolve_zcolour(bg, &state.colors));
         }
     }
-    state.colors.transcript
+    state.colors.theme.get("transcript").style
 }
 
 /// Blank gvm's snap-margin — the L-shaped region of `area` outside `inner` (the
@@ -331,7 +344,7 @@ fn render_node(
             if crate::render::graphics::render_graphics_as_cells(gw, area, buf) {
                 // painted as cells
             } else if let Some(picker) = state.game_picker.as_ref() {
-                state.graphics_render.borrow_mut().render(picker, gw, area, state.colors.graphics, buf);
+                state.graphics_render.borrow_mut().render(picker, gw, area, state.colors.theme.get("graphics").style, buf);
             } else {
                 fill(area, buf, &state.colors);
             }
@@ -491,7 +504,7 @@ fn draw_window_separator(area: Rect, vertical: bool, key_fg: Option<u32>, key_bg
     // The separator adopts the split's KEY (new) window colour (SQ-0325 follow-up):
     // draw the rule glyph in `key_fg` on `key_bg` when the game set them, falling
     // back to the themed `upper_window_border` fg/bg per channel when `None`.
-    let mut style = colors.upper_window_border;
+    let mut style = colors.theme.get("upper_window_border").style;
     if let Some(rgb) = key_fg {
         style = style.fg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), colors));
     }
@@ -514,11 +527,11 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
     // theme background (today's behaviour).
     let base = match (b.panel, b.bg) {
         // A game-set window colour always wins.
-        (_, Some(rgb)) => state.colors.transcript.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), &state.colors)),
+        (_, Some(rgb)) => state.colors.theme.get("transcript").style.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), &state.colors)),
         // A chrome panel (Scott room panel) uses the themed `room_panel` colour so
         // the split's top and bottom read as distinct regions.
-        (true, None) => state.colors.room_panel,
-        (false, None) => state.colors.transcript,
+        (true, None) => state.colors.theme.get("room_panel").style,
+        (false, None) => state.colors.theme.get("transcript").style,
     };
     fill_style(area, buf, base);
     if b.lines.is_empty() {
@@ -565,7 +578,7 @@ fn render_inline_buffer(b: &BufferWindow, state: &AppState, area: Rect, buf: &mu
 
 /// Fill `area` with the transcript background style.
 fn fill(area: Rect, buf: &mut Buffer, colors: &crate::colors::ColorScheme) {
-    fill_style(area, buf, colors.transcript);
+    fill_style(area, buf, colors.theme.get("transcript").style);
 }
 
 /// Fill `area` with an explicit `style` (used for a per-window background override).
@@ -587,6 +600,23 @@ mod tests {
     use crate::engine::{GridWindow, Split};
     use crate::state::StyleRun;
     use ratatui::layout::Rect;
+
+    /// Build a `Theme` with the given selectors' bg overridden (like a
+    /// `style.toml` decl), so tests exercising render code migrated to
+    /// `theme.get("<selector>")` (SQ-0309) can still inject a custom colour
+    /// instead of mutating the (no-longer-read) legacy `ColorScheme` field.
+    fn theme_with_bg_overrides(overrides: &[(&str, ratatui::style::Color)]) -> crate::theme::resolve::Theme {
+        let mut decls = std::collections::HashMap::new();
+        for &(sel, bg) in overrides {
+            decls.insert(sel.to_string(), crate::theme::registry::Delta { bg: Some(bg), ..crate::theme::registry::Delta::EMPTY });
+        }
+        crate::theme::resolve::resolve(
+            &crate::theme::resolve::Roles::terminal_default(),
+            &decls,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        )
+    }
 
     fn grid_with(text: &str) -> GridWindow {
         let mut g = GridWindow::default();
@@ -639,6 +669,64 @@ mod tests {
             "border background matches the game page background");
         assert_eq!(gc.upper_window_border.fg, Some(ratatui::style::Color::Rgb(0, 0, 0)),
             "border line drawn in the game page foreground ink");
+    }
+
+    /// SQ-0309: `draw_upper_window`/`draw_grid`/`draw_window_separator` read
+    /// `upper_window`/`upper_window_border` through `colors.theme`, not the legacy
+    /// fields grid_scheme also sets — so the override must be visible through
+    /// `.theme.get(...)` too, or the page-colour honouring (SQ-0262/SQ-0267) goes
+    /// dead even though the legacy-field assertions above still pass.
+    #[test]
+    fn grid_scheme_override_is_visible_through_the_theme() {
+        use zvm::screen::ZColour;
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.config.honor_game_colours = true;
+        let model = model_with_page(ZColour::True24(0x00FF_FFFF), ZColour::True24(0));
+        let gc = grid_scheme(&state, &model);
+        assert_eq!(gc.theme.get("upper_window").style.fg, gc.upper_window.fg);
+        assert_eq!(gc.theme.get("upper_window").style.bg, gc.upper_window.bg);
+        assert_eq!(gc.theme.get("upper_window_border").style.fg, gc.upper_window_border.fg);
+        assert_eq!(gc.theme.get("upper_window_border").style.bg, gc.upper_window_border.bg);
+    }
+
+    /// End-to-end guard for the same fix: render the simple (Z-machine) path with
+    /// a game-set page scheme and check the actually-painted grid/border pixels,
+    /// not just `grid_scheme`'s returned struct.
+    #[test]
+    fn simple_path_grid_and_border_paint_the_game_page_colours() {
+        use ratatui::style::Color;
+        let mut grid = grid_with("HI");
+        grid.border = BorderPref::Border;
+        let model = ScreenModel {
+            root: WinNode::Pair {
+                vertical: true,
+                split: Split { fixed: 1 },
+                border: false,
+                key_bg: None,
+                key_fg: None,
+                first: Box::new(WinNode::Grid(grid)),
+                second: Box::new(WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })),
+            },
+            status: StatusModel::HostManaged,
+            bg: crate::state::pack_zcolour(zvm::screen::ZColour::True24(0x00FF_FFFF)),
+            fg: crate::state::pack_zcolour(zvm::screen::ZColour::True24(0)),
+            content_size: (0, 0),
+        };
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.config.honor_game_colours = true;
+        let area = Rect::new(0, 0, 20, 10);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // uw_w = 2 + 2 borders = 4, centered in 20 → x_off = 8; frame corner at
+        // (8,0), content at (9,1) (mirrors `simple_path_still_frames_a_bordered_grid`).
+        let border_cell = buf.cell((8, 0)).unwrap().style();
+        assert_eq!(border_cell.fg, Some(Color::Rgb(0, 0, 0)), "border painted in the game page fg");
+        assert_eq!(border_cell.bg, Some(Color::Rgb(255, 255, 255)), "border painted in the game page bg");
+        let content_cell = buf.cell((9, 1)).unwrap().style();
+        assert_eq!(content_cell.bg, Some(Color::Rgb(255, 255, 255)), "grid content painted in the game page bg");
     }
 
     #[test]
@@ -739,8 +827,10 @@ mod tests {
             content_size: (165, 60),
         };
         let mut colors = crate::colors::ColorScheme::terminal_default();
-        colors.transcript = ratatui::style::Style::new().bg(Color::Rgb(9, 9, 9)); // sentinel: an unpainted pane shows this
-        colors.upper_window = ratatui::style::Style::new().bg(Color::Rgb(9, 9, 9));
+        colors.theme = theme_with_bg_overrides(&[
+            ("transcript", Color::Rgb(9, 9, 9)), // sentinel: an unpainted pane shows this
+            ("upper_window", Color::Rgb(9, 9, 9)),
+        ]);
         let mut state = AppState::default();
         state.colors = colors;
         state.config.honor_game_colours = true;
@@ -797,8 +887,10 @@ mod tests {
         let model = ScreenModel { root, status: StatusModel::HostManaged, bg: 0, fg: 0, content_size: (0, 0) };
 
         let mut colors = crate::colors::ColorScheme::terminal_default();
-        colors.transcript = ratatui::style::Style::new().bg(Color::Rgb(9, 9, 9));
-        colors.room_panel = ratatui::style::Style::new().bg(Color::Rgb(0, 0, 128));
+        colors.theme = theme_with_bg_overrides(&[
+            ("transcript", Color::Rgb(9, 9, 9)),
+            ("room_panel", Color::Rgb(0, 0, 128)),
+        ]);
         let mut state = AppState::default();
         state.colors = colors;
         let area = Rect::new(0, 0, 20, 6);
