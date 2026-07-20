@@ -5,9 +5,13 @@
 //! row's `default_delta`, then applies any matching explicit override from
 //! `Decls`. The result is a flat `name -> Resolved` map queried by [`Theme::get`].
 //!
-//! This is the **single-`Decls`** resolver (SQ-0309 Task 0.2). Provenance and the
-//! layered (global / garglk / per-game) decls arrive in Task 0.3 and extend the
-//! `resolve` signature; nothing here records where a value came from.
+//! This is the **layered** resolver (SQ-0309 Task 0.3). It applies several
+//! [`Decls`] layers in the spec's static build order (registry default → global
+//! user → shipped garglk.ini → per-game overlay, per-game LAST) and stamps each
+//! resolved selector with the [`Provenance`] of the highest layer that supplied a
+//! value for it. The stamp is **per-selector** (which layer last wrote this
+//! selector name), not per-channel — sufficient for the static build order; the
+//! runtime per-cell lift lands in Wave 3.
 
 use std::collections::HashMap;
 
@@ -78,15 +82,32 @@ impl GlyphSet {
     }
 }
 
-/// A fully resolved selector: its concrete [`Style`] and any glyph(s) it carries.
+/// Which layer supplied a resolved selector's winning value (§5 static build
+/// order). Ordered low→high: a later layer overrides an earlier one, so the
+/// [`Provenance`] stamp records the *highest* layer that wrote the selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provenance {
+    /// The registry default (no explicit layer touched this selector).
+    Default,
+    /// The global user `style.toml`.
+    GlobalUser,
+    /// The shipped/bundled `garglk.ini`.
+    Garglk,
+    /// The per-game overlay (the highest layer).
+    PerGame,
+}
+
+/// A fully resolved selector: its concrete [`Style`], any glyph(s) it carries,
+/// and the [`Provenance`] of the layer that last set its value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolved {
     pub style: Style,
     pub glyph: Option<GlyphSet>,
+    pub provenance: Provenance,
 }
 
-/// Explicit per-selector overrides, layered on top of the registry default. For
-/// Task 0.2 this is a single flat map; Task 0.3 layers several of these.
+/// Explicit per-selector overrides for a single layer, on top of the registry
+/// default. [`resolve`] stacks several of these (global / garglk / per-game).
 pub type Decls = HashMap<String, Delta>;
 
 /// The flat resolved theme: `selector name -> Resolved`.
@@ -155,17 +176,24 @@ fn apply_glyph(inherited: Option<GlyphSet>, d: &Delta) -> Option<GlyphSet> {
 }
 
 /// Resolve one row against a known parent `Resolved` (or a bare parent style when
-/// the row has no parent), layering the registry default then any `Decls` override.
-fn resolve_row(row: &RegRow, parent: &Resolved, decls: &Decls) -> Resolved {
+/// the row has no parent): the registry default on the parent, then each explicit
+/// `layers` override in build order (lowest→highest). Each layer that carries a
+/// [`Delta`] for this selector overrides the running value AND advances the
+/// [`Provenance`] stamp, so the stamp reflects the highest layer that wrote it.
+fn resolve_row(row: &RegRow, parent: &Resolved, layers: &[(&Decls, Provenance)]) -> Resolved {
     // 1. registry default delta on the parent.
     let mut style = apply_style(parent.style, &row.default_delta);
     let mut glyph = apply_glyph(parent.glyph.clone(), &row.default_delta);
-    // 2. explicit override, if any, on top.
-    if let Some(over) = decls.get(row.name) {
-        style = apply_style(style, over);
-        glyph = apply_glyph(glyph, over);
+    // 2. each explicit layer, lowest→highest; the last to touch wins the stamp.
+    let mut provenance = Provenance::Default;
+    for (decls, prov) in layers {
+        if let Some(over) = decls.get(row.name) {
+            style = apply_style(style, over);
+            glyph = apply_glyph(glyph, over);
+            provenance = *prov;
+        }
     }
-    Resolved { style, glyph }
+    Resolved { style, glyph, provenance }
 }
 
 /// Compute the flat theme map from the registry via single-level parent fallback.
@@ -175,17 +203,24 @@ fn resolve_row(row: &RegRow, parent: &Resolved, decls: &Decls) -> Resolved {
 /// is handled generally: rows resolve in dependency order via a fixpoint loop, so a
 /// parent is always resolved before its child (the registry currently only parents
 /// roles, for which one pass suffices).
-pub fn resolve(roles: &Roles, decls: &Decls) -> Theme {
+pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) -> Theme {
+    // The layers in the spec's static build order (lowest → highest); per-game LAST.
+    let layers: [(&Decls, Provenance); 3] = [
+        (global, Provenance::GlobalUser),
+        (garglk, Provenance::Garglk),
+        (per_game, Provenance::PerGame),
+    ];
+
     let mut map: HashMap<String, Resolved> = HashMap::new();
 
     // Roles first: their Resolved is the bare role style (no glyph, no delta).
     for name in ROLE_NAMES {
         let style = roles.by_name(name).expect("ROLE_NAMES entry has a role style");
         // A role row may still carry an explicit override.
-        let base = Resolved { style, glyph: None };
+        let base = Resolved { style, glyph: None, provenance: Provenance::Default };
         let row = REGISTRY.iter().find(|r| r.name == name);
         let resolved = match row {
-            Some(r) => resolve_row(r, &Resolved { style, glyph: None }, decls),
+            Some(r) => resolve_row(r, &Resolved { style, glyph: None, provenance: Provenance::Default }, &layers),
             None => base,
         };
         map.insert(name.to_string(), resolved);
@@ -201,13 +236,13 @@ pub fn resolve(roles: &Roles, decls: &Decls) -> Theme {
         let before = pending.len();
         pending.retain(|row| {
             let parent = match row.parent {
-                None => Resolved { style: Style::default(), glyph: None },
+                None => Resolved { style: Style::default(), glyph: None, provenance: Provenance::Default },
                 Some(p) => match map.get(p) {
                     Some(res) => res.clone(),
                     None => return true, // parent not resolved yet; keep pending.
                 },
             };
-            let resolved = resolve_row(row, &parent, decls);
+            let resolved = resolve_row(row, &parent, &layers);
             map.insert(row.name.to_string(), resolved);
             false
         });
@@ -219,8 +254,8 @@ pub fn resolve(roles: &Roles, decls: &Decls) -> Theme {
             // The registry test guarantees parents exist, so treat any remainder
             // as parentless roots rather than looping forever.
             for row in pending.drain(..) {
-                let parent = Resolved { style: Style::default(), glyph: None };
-                let resolved = resolve_row(row, &parent, decls);
+                let parent = Resolved { style: Style::default(), glyph: None, provenance: Provenance::Default };
+                let resolved = resolve_row(row, &parent, &layers);
                 map.insert(row.name.to_string(), resolved);
             }
             break;
@@ -235,10 +270,22 @@ pub fn resolve(roles: &Roles, decls: &Decls) -> Theme {
 mod tests {
     use super::*;
 
+    /// Resolve with no explicit layers — the registry-default theme.
+    fn resolve_default(roles: &Roles) -> Theme {
+        resolve(roles, &Decls::new(), &Decls::new(), &Decls::new())
+    }
+
+    /// A one-entry [`Decls`] for `sel` carrying `delta`.
+    fn one(sel: &str, delta: Delta) -> Decls {
+        let mut d = Decls::new();
+        d.insert(sel.to_string(), delta);
+        d
+    }
+
     #[test]
     fn unset_selector_inherits_its_parent_role() {
         let roles = Roles::terminal_default();
-        let theme = resolve(&roles, &Decls::new());
+        let theme = resolve_default(&roles);
 
         // §2: `transcript` has no delta, so it IS the `text` role.
         assert_eq!(theme.get("transcript").style, roles.text);
@@ -254,7 +301,7 @@ mod tests {
     fn glk_buffer_emphasized_is_italic() {
         // §3 canonical defaults: Emphasized = base role + italic.
         let roles = Roles::terminal_default();
-        let theme = resolve(&roles, &Decls::new());
+        let theme = resolve_default(&roles);
 
         let emph = theme.get("glk.buffer.emphasized").style;
         assert_eq!(emph.fg, roles.text.fg); // buffer base = text
@@ -266,23 +313,19 @@ mod tests {
         let roles = Roles::terminal_default();
 
         // Without a decl, `transcript` is the text role (white fg).
-        let plain = resolve(&roles, &Decls::new());
+        let plain = resolve_default(&roles);
         assert_eq!(plain.get("transcript").style.fg, Some(Color::White));
 
         // An explicit override wins over the registry default.
-        let mut decls = Decls::new();
-        decls.insert(
-            "transcript".to_string(),
-            Delta { fg: Some(Color::Red), ..Delta::EMPTY },
-        );
-        let themed = resolve(&roles, &decls);
+        let decls = one("transcript", Delta { fg: Some(Color::Red), ..Delta::EMPTY });
+        let themed = resolve(&roles, &decls, &Decls::new(), &Decls::new());
         assert_eq!(themed.get("transcript").style.fg, Some(Color::Red));
     }
 
     #[test]
     fn glyph_carries_from_the_default_delta() {
         // A selector whose default delta carries a glyph exposes it in Resolved.
-        let theme = resolve(&Roles::terminal_default(), &Decls::new());
+        let theme = resolve_default(&Roles::terminal_default());
         let meta = theme.get("transcript_meta");
         assert_eq!(meta.glyph.and_then(|g| g.single), Some("▏".to_string()));
     }
@@ -290,7 +333,65 @@ mod tests {
     #[test]
     fn unknown_selector_falls_back_to_text() {
         let roles = Roles::terminal_default();
-        let theme = resolve(&roles, &Decls::new());
+        let theme = resolve_default(&roles);
         assert_eq!(theme.get("no.such.selector").style, roles.text);
+    }
+
+    // ── Task 0.3: layered decls + per-selector provenance ────────────────────
+
+    #[test]
+    fn per_game_layer_wins_and_is_stamped_pergame() {
+        let roles = Roles::terminal_default();
+        // Global and per-game both target `transcript`; per-game is the higher layer.
+        let global = one("transcript", Delta { fg: Some(Color::Green), ..Delta::EMPTY });
+        let per_game = one("transcript", Delta { fg: Some(Color::Red), ..Delta::EMPTY });
+        let theme = resolve(&roles, &global, &Decls::new(), &per_game);
+
+        let r = theme.get("transcript");
+        assert_eq!(r.style.fg, Some(Color::Red)); // per-game value wins
+        assert_eq!(r.provenance, Provenance::PerGame);
+    }
+
+    #[test]
+    fn global_over_default_stamped_globaluser() {
+        let roles = Roles::terminal_default();
+        let global = one("transcript", Delta { fg: Some(Color::Green), ..Delta::EMPTY });
+        let theme = resolve(&roles, &global, &Decls::new(), &Decls::new());
+
+        let r = theme.get("transcript");
+        assert_eq!(r.style.fg, Some(Color::Green));
+        assert_eq!(r.provenance, Provenance::GlobalUser);
+    }
+
+    #[test]
+    fn garglk_between_global_and_pergame() {
+        let roles = Roles::terminal_default();
+        // All three layers target the same selector; the order per-game > garglk >
+        // global > default must hold for both the value and the stamp.
+        let global = one("transcript", Delta { fg: Some(Color::Green), ..Delta::EMPTY });
+        let garglk = one("transcript", Delta { fg: Some(Color::Blue), ..Delta::EMPTY });
+
+        // garglk beats global when per-game is absent.
+        let t1 = resolve(&roles, &global, &garglk, &Decls::new());
+        assert_eq!(t1.get("transcript").style.fg, Some(Color::Blue));
+        assert_eq!(t1.get("transcript").provenance, Provenance::Garglk);
+
+        // per-game still beats garglk.
+        let per_game = one("transcript", Delta { fg: Some(Color::Red), ..Delta::EMPTY });
+        let t2 = resolve(&roles, &global, &garglk, &per_game);
+        assert_eq!(t2.get("transcript").style.fg, Some(Color::Red));
+        assert_eq!(t2.get("transcript").provenance, Provenance::PerGame);
+    }
+
+    #[test]
+    fn unset_stays_default() {
+        let roles = Roles::terminal_default();
+        // A selector no layer touches keeps Provenance::Default.
+        let global = one("status_bar", Delta { fg: Some(Color::Green), ..Delta::EMPTY });
+        let theme = resolve(&roles, &global, &Decls::new(), &Decls::new());
+
+        assert_eq!(theme.get("transcript").provenance, Provenance::Default);
+        // And the touched selector is stamped, confirming Default isn't a blanket.
+        assert_eq!(theme.get("status_bar").provenance, Provenance::GlobalUser);
     }
 }
