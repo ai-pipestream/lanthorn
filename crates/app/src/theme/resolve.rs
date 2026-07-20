@@ -130,11 +130,13 @@ pub enum Provenance {
 }
 
 /// A fully resolved selector: its concrete [`Style`], any glyph(s) it carries,
-/// and the [`Provenance`] of the layer that last set its value.
+/// its border style (if any), and the [`Provenance`] of the layer that last set
+/// its value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Resolved {
     pub style: Style,
     pub glyph: Option<GlyphSet>,
+    pub border: Option<crate::render::paneframe::BorderStyle>,
     pub provenance: Provenance,
 }
 
@@ -207,6 +209,18 @@ fn apply_glyph(inherited: Option<GlyphSet>, d: &Delta) -> Option<GlyphSet> {
     }
 }
 
+/// Layer a [`Delta`]'s border-style onto the inherited one: a set preset name
+/// overrides (parsed via the paneframe grammar); otherwise it carries through.
+fn apply_border(
+    inherited: Option<crate::render::paneframe::BorderStyle>,
+    d: &Delta,
+) -> Option<crate::render::paneframe::BorderStyle> {
+    match d.border {
+        Some(name) => Some(crate::render::paneframe::parse_border_style(name)),
+        None => inherited,
+    }
+}
+
 /// Resolve one row against a known parent `Resolved` (or a bare parent style when
 /// the row has no parent): the registry default on the parent, then each explicit
 /// `layers` override in build order (lowest→highest). Each layer that carries a
@@ -216,16 +230,18 @@ fn resolve_row(row: &RegRow, parent: &Resolved, layers: &[(&Decls, Provenance)])
     // 1. registry default delta on the parent.
     let mut style = apply_style(parent.style, &row.default_delta);
     let mut glyph = apply_glyph(parent.glyph.clone(), &row.default_delta);
+    let mut border = apply_border(parent.border, &row.default_delta);
     // 2. each explicit layer, lowest→highest; the last to touch wins the stamp.
     let mut provenance = Provenance::Default;
     for (decls, prov) in layers {
         if let Some(over) = decls.get(row.name) {
             style = apply_style(style, over);
             glyph = apply_glyph(glyph, over);
+            border = apply_border(border, over);
             provenance = *prov;
         }
     }
-    Resolved { style, glyph, provenance }
+    Resolved { style, glyph, border, provenance }
 }
 
 /// Compute the flat theme map from the registry via single-level parent fallback.
@@ -249,10 +265,10 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
     for name in ROLE_NAMES {
         let style = roles.by_name(name).expect("ROLE_NAMES entry has a role style");
         // A role row may still carry an explicit override.
-        let base = Resolved { style, glyph: None, provenance: Provenance::Default };
+        let base = Resolved { style, glyph: None, border: None, provenance: Provenance::Default };
         let row = REGISTRY.iter().find(|r| r.name == name);
         let resolved = match row {
-            Some(r) => resolve_row(r, &Resolved { style, glyph: None, provenance: Provenance::Default }, &layers),
+            Some(r) => resolve_row(r, &Resolved { style, glyph: None, border: None, provenance: Provenance::Default }, &layers),
             None => base,
         };
         map.insert(name.to_string(), resolved);
@@ -268,7 +284,7 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
         let before = pending.len();
         pending.retain(|row| {
             let parent = match row.parent {
-                None => Resolved { style: Style::default(), glyph: None, provenance: Provenance::Default },
+                None => Resolved { style: Style::default(), glyph: None, border: None, provenance: Provenance::Default },
                 Some(p) => match map.get(p) {
                     Some(res) => res.clone(),
                     None => return true, // parent not resolved yet; keep pending.
@@ -286,7 +302,7 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
             // The registry test guarantees parents exist, so treat any remainder
             // as parentless roots rather than looping forever.
             for row in pending.drain(..) {
-                let parent = Resolved { style: Style::default(), glyph: None, provenance: Provenance::Default };
+                let parent = Resolved { style: Style::default(), glyph: None, border: None, provenance: Provenance::Default };
                 let resolved = resolve_row(row, &parent, &layers);
                 map.insert(row.name.to_string(), resolved);
             }
@@ -412,6 +428,7 @@ fn lower_decls(
             dim: raw.dim.unwrap_or(false),
             glyph: None, // Wave 5: glyph overrides not applied here.
             glyphs: &[], // Wave 5: glyph-slot overrides not applied here.
+            border: None, // Wave 5: border-style overrides not applied here.
         };
         decls.insert(name.clone(), delta);
         // Wave 5: raw.parent re-rooting not applied here.
@@ -488,6 +505,29 @@ mod tests {
         let roles = Roles::terminal_default();
         let theme = resolve_default(&roles);
         assert_eq!(theme.get("no.such.selector").style, roles.text);
+    }
+
+    #[test]
+    fn panel_border_resolves_single() {
+        let theme = resolve_default(&Roles::terminal_default());
+        assert_eq!(
+            theme.get("panel.border").border,
+            Some(crate::render::paneframe::BorderStyle::Single)
+        );
+    }
+
+    #[test]
+    fn panel_border_active_is_single_and_bold() {
+        let theme = resolve_default(&Roles::terminal_default());
+        let active = theme.get("panel.border:active");
+        assert_eq!(active.border, Some(crate::render::paneframe::BorderStyle::Single));
+        assert!(active.style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn non_border_selector_has_no_border() {
+        let theme = resolve_default(&Roles::terminal_default());
+        assert_eq!(theme.get("transcript").border, None);
     }
 
     // ── Task 0.3: layered decls + per-selector provenance ────────────────────

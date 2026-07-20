@@ -63,6 +63,7 @@ pub struct Delta {
     pub dim: bool,
     pub glyph: Option<&'static str>,
     pub glyphs: &'static [(&'static str, &'static str)],
+    pub border: Option<&'static str>,
 }
 
 impl Delta {
@@ -77,6 +78,7 @@ impl Delta {
         dim: false,
         glyph: None,
         glyphs: &[],
+        border: None,
     };
 }
 
@@ -128,6 +130,11 @@ const fn glyph(g: &'static str) -> Delta {
     Delta { glyph: Some(g), ..Delta::EMPTY }
 }
 
+/// A delta setting only the border style (colour/glyph inherited from parent).
+const fn border(name: &'static str) -> Delta {
+    Delta { border: Some(name), ..Delta::EMPTY }
+}
+
 pub const REGISTRY: &[RegRow] = &[
     // ── §1 roles ──────────────────────────────────────────────────────────────
     // Roots: colours come from the base scheme + `[roles]`, so no parent/delta.
@@ -161,10 +168,11 @@ pub const REGISTRY: &[RegRow] = &[
     row("transcript_crash", Section::Elements, Kind::Style, Some("alert"), mods(true, false, false, false)),
     // ── §2a/§2b panel.* (shared panel chrome) ────────────────────────────────
     row("panel.background", Section::Panel, Kind::Style, Some("chrome"), Delta::EMPTY),
-    // border rows: default border style = "single" (not captured by Delta; later
-    // tasks own the border grammar). `:active` = border + bold (today's cyan+bold).
-    row("panel.border", Section::Panel, Kind::BorderGlyphs, Some("border"), Delta::EMPTY),
-    row("panel.border:active", Section::Panel, Kind::BorderGlyphs, Some("border"), mods(true, false, false, false)),
+    // border rows: default border style = "single" (unified panel frame, §2a).
+    // `:active` = single + bold (today's cyan+bold).
+    row("panel.border", Section::Panel, Kind::BorderGlyphs, Some("border"), border("single")),
+    row("panel.border:active", Section::Panel, Kind::BorderGlyphs, Some("border"),
+        Delta { border: Some("single"), bold: true, ..Delta::EMPTY }),
     row("panel.title", Section::Panel, Kind::Style, Some("heading"), Delta::EMPTY),
     row("panel.tab", Section::Panel, Kind::Style, Some("muted"), Delta::EMPTY),
     row("panel.tab:active", Section::Panel, Kind::Style, Some("accent"), mods(true, false, false, false)),
