@@ -26,7 +26,7 @@ use zvm::io::Output;
 use zvm::memory::Memory;
 
 mod screen;
-mod aux; // implemented in Task 5; declared now so the module tree is stable
+mod auxiliary; // "aux" is a reserved filename on Windows — module renamed accordingly
 
 // ── sound ──────────────────────────────────────────────────────────────────────
 
@@ -504,7 +504,7 @@ fn aux_preload(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
         return;
     }
     if let Ok(bytes) = fs::read(aux_file) {
-        match aux::decode_aux(&bytes) {
+        match auxiliary::decode_aux(&bytes) {
             Ok(map) => {
                 machine.aux_data = map;
                 machine.aux_dirty = false;
@@ -522,7 +522,7 @@ fn aux_flush(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
     if let Some(dir) = aux_file.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    if let Err(e) = fs::write(aux_file, aux::encode_aux(&machine.aux_data)) {
+    if let Err(e) = fs::write(aux_file, auxiliary::encode_aux(&machine.aux_data)) {
         eprintln!("zvm: warning: aux save to {} failed: {}", aux_file.display(), e);
     }
     machine.aux_dirty = false;
@@ -810,7 +810,7 @@ fn main() {
     // `.save` suffix keeps the dir from colliding with the story file itself
     // when `base` is the story's own directory (SQ-0294).
     let game_dir = base.join(format!("{}.save", story_key(&story_path)));
-    let aux_file = aux::aux_path(&game_dir);
+    let aux_file = auxiliary::aux_path(&game_dir);
 
     let stdout_is_tty = io::stdout().is_terminal();
     let stdin_is_tty = io::stdin().is_terminal();
