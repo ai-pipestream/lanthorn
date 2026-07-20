@@ -263,6 +263,12 @@ impl std::ops::Deref for FrameRenderMap<'_> {
     }
 }
 
+/// The base panel border style from the theme — bold `:active` when the panel
+/// has input focus, plain `panel.border` otherwise (SQ-0309 §2a).
+fn panel_border(theme: &app::theme::resolve::Theme, focused: bool) -> Style {
+    theme.get(if focused { "panel.border:active" } else { "panel.border" }).style
+}
+
 /// Render one frame. Returns both pane inner-content rects so the event loop
 /// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
@@ -339,7 +345,7 @@ fn draw_frame(
 
         // Resolve the story-border color: a live sound pulse overrides the fg.
         let story_border_style = {
-            let base = state.colors.story_border;
+            let base = panel_border(&state.colors.theme, state.focus == Focus::Game);
             match &state.sound_pulse {
                 Some(p) => {
                     let beep_color = match p.kind {
@@ -424,7 +430,7 @@ fn draw_frame(
                     // both borders pick up the `focused_border` accent to show it's live.
                     let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
                     let story_border_color = if resize_split_hl { state.colors.focused_border } else { story_border_style };
-                    let map_border_color = if resize_split_hl { state.colors.focused_border } else { state.colors.map_border };
+                    let map_border_color = if resize_split_hl { state.colors.focused_border } else { panel_border(&state.colors.theme, state.focus == Focus::Map) };
                     let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
                     let c = story_fp.content;
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
@@ -3332,6 +3338,56 @@ mod tests {
             title_row.contains("ZORK I"),
             "top border row must contain the adventure title 'ZORK I'; got: {:?}",
             title_row
+        );
+    }
+
+    // ── Focus-aware panel border colour (SQ-0309 §2a) ──────────────────────────
+
+    /// The pane with input focus renders its border BOLD via the theme's
+    /// `panel.border:active`; the unfocused pane stays plain `panel.border`.
+    /// Previously bold only appeared transiently during split-resize
+    /// (`focused_border`) — this is now a persistent focus indicator.
+    #[test]
+    fn focused_pane_border_is_bold() {
+        // Resolve the default theme from DEFAULT_STYLE_TOML (same path as startup).
+        let doc = app::style::parse_style_toml(app::style::DEFAULT_STYLE_TOML)
+            .expect("DEFAULT_STYLE_TOML must parse");
+        let (cs, _set, _warnings) = app::style::resolve(&doc, std::path::Path::new("."));
+
+        let area = Rect::new(0, 0, 20, 10);
+
+        // Story focused: story border bold, map border (unfocused) not bold.
+        let mut story_buf = Buffer::empty(area);
+        let story_style = super::panel_border(&cs.theme, true);
+        draw_pane_frame(&mut story_buf, area, cs.story_border_style, &PaneGlyphs::default(), story_style);
+        assert!(
+            story_buf.cell((0, 0)).unwrap().modifier.contains(Modifier::BOLD),
+            "focused story border must be bold (panel.border:active)"
+        );
+
+        let mut map_buf = Buffer::empty(area);
+        let map_style = super::panel_border(&cs.theme, false);
+        draw_pane_frame(&mut map_buf, area, cs.map_border_style, &PaneGlyphs::default(), map_style);
+        assert!(
+            !map_buf.cell((0, 0)).unwrap().modifier.contains(Modifier::BOLD),
+            "unfocused map border must not be bold (panel.border)"
+        );
+
+        // Flip focus to the map: story loses bold, map gains it.
+        let mut story_buf2 = Buffer::empty(area);
+        let story_style2 = super::panel_border(&cs.theme, false);
+        draw_pane_frame(&mut story_buf2, area, cs.story_border_style, &PaneGlyphs::default(), story_style2);
+        assert!(
+            !story_buf2.cell((0, 0)).unwrap().modifier.contains(Modifier::BOLD),
+            "unfocused story border must not be bold (panel.border)"
+        );
+
+        let mut map_buf2 = Buffer::empty(area);
+        let map_style2 = super::panel_border(&cs.theme, true);
+        draw_pane_frame(&mut map_buf2, area, cs.map_border_style, &PaneGlyphs::default(), map_style2);
+        assert!(
+            map_buf2.cell((0, 0)).unwrap().modifier.contains(Modifier::BOLD),
+            "focused map border must be bold (panel.border:active)"
         );
     }
 
