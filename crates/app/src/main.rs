@@ -377,7 +377,7 @@ fn draw_frame(
             // already reserved a right-hand rect for this (`compute_pane_layout`
             // treats debug-active as `Layout::Split`).
             let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
-            let story_border_color = if resize_split_hl { state.colors.focused_border } else { story_border_style };
+            let story_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { story_border_style };
             let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
             let c = story_fp.content;
             let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
@@ -388,9 +388,9 @@ fn draw_frame(
             if let Some(hrect) = story_fp.header {
                 let segs = [InsetSegment { text: &state.title, active: false }];
                 if story_fp.header_bordered {
-                    draw_top_inset(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                    draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
                 } else {
-                    draw_header_plain(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                    draw_header_plain(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
                 }
             }
             story_area = story_fp.content;
@@ -416,9 +416,9 @@ fn draw_frame(
                     if let Some(hrect) = story_fp.header {
                         let segs = [InsetSegment { text: &state.title, active: false }];
                         if story_fp.header_bordered {
-                            draw_top_inset(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                            draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
                         } else {
-                            draw_header_plain(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                            draw_header_plain(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
                         }
                     }
                     story_area = story_fp.content;
@@ -429,8 +429,8 @@ fn draw_frame(
                     // In resize mode, the StoryMap target covers this whole split, so
                     // both borders pick up the `focused_border` accent to show it's live.
                     let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
-                    let story_border_color = if resize_split_hl { state.colors.focused_border } else { story_border_style };
-                    let map_border_color = if resize_split_hl { state.colors.focused_border } else { panel_border(&state.colors.theme, state.focus == Focus::Map) };
+                    let story_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { story_border_style };
+                    let map_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { panel_border(&state.colors.theme, state.focus == Focus::Map) };
                     let story_fp = draw_framed(buf, pane_layout.story, state.colors.story_border_sides, &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
                     let c = story_fp.content;
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
@@ -441,9 +441,9 @@ fn draw_frame(
                     if let Some(hrect) = story_fp.header {
                         let segs = [InsetSegment { text: &state.title, active: false }];
                         if story_fp.header_bordered {
-                            draw_top_inset(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                            draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
                         } else {
-                            draw_header_plain(buf, hrect, &segs, state.colors.story_title, state.colors.story_title);
+                            draw_header_plain(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
                         }
                     }
                     story_area = story_fp.content;
@@ -471,9 +471,9 @@ fn draw_frame(
                         let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
                         if let Some(hrect) = map_fp.header {
                             let tab_rects = if map_fp.header_bordered {
-                                draw_top_inset(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
+                                draw_top_inset(buf, hrect, &inset_segs, state.colors.theme.get("panel.tab").style, state.colors.theme.get("panel.tab:active").style)
                             } else {
-                                draw_header_plain(buf, hrect, &inset_segs, state.colors.map_layer_tab, state.colors.map_layer_tab_active)
+                                draw_header_plain(buf, hrect, &inset_segs, state.colors.theme.get("panel.tab").style, state.colors.theme.get("panel.tab:active").style)
                             };
                             layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
                         }
@@ -497,7 +497,7 @@ fn draw_frame(
                     // (SQ-0379). The inner content rect keeps it off the pulsing border.
                     if state.map_render_in_flight() {
                         let area = map_fp.content;
-                        let style = state.colors.map_layer_tab;
+                        let style = state.colors.theme.get("panel.tab").style;
                         for (i, step) in state.render_steps_snapshot().iter().enumerate() {
                             let y = area.y + i as u16;
                             if y >= area.bottom() { break; }
@@ -575,7 +575,7 @@ fn draw_frame(
         }
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
-        let help_style = state.colors.help_bar;
+        let help_style = state.colors.theme.get("help_bar").style;
         let help_text = if state.overlays.config_screen.is_some() {
             "\u{2191}\u{2193} move  \u{2190}\u{2192}/Space change  s save  Esc cancel".to_string()
         } else if state.overlays.verb_menu.is_some() {
@@ -3319,8 +3319,8 @@ mod tests {
             &mut buf,
             frame.top_inset,
             &[InsetSegment { text: "ZORK I", active: false }],
-            cs.story_title,
-            cs.story_title,
+            cs.theme.get("story_title").style,
+            cs.theme.get("story_title").style,
         );
 
         // DEFAULT_STYLE_TOML sets story_border to single; top-left outer corner must be ┌
