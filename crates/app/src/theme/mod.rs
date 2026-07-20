@@ -6,3 +6,4 @@
 //! and TOML schema that consume it.
 
 pub mod registry;
+pub mod resolve;
