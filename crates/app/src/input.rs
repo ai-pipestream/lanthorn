@@ -90,6 +90,8 @@ pub enum Action {
     Backspace,
     /// Toggle between Game and Map focus.
     ToggleFocus,
+    /// Reverse of `ToggleFocus`: cycle window focus one step backward (Shift-Tab).
+    CycleFocusBack,
     /// Toggle the map panel on/off (Split ↔ TranscriptFull).
     ToggleMap,
     /// Re-tidy the Auto layout: re-derive room positions (sort) then clean overlaps.
@@ -486,14 +488,17 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     }
 
     // 8b. Shift-Tab (BackTab): mid-word with suggestions in game focus →
-    //     AutocompletePrev (the reverse of step 8's Autocomplete). Otherwise fall
-    //     through to the normal keymap lookup (BackTab has no default binding).
+    //     AutocompletePrev (the reverse of step 8's Autocomplete). Otherwise it
+    //     reverses the per-window focus cycle (the mirror of step 8's ToggleFocus).
     if key.code == KeyCode::BackTab
         && state.focus == Focus::Game
         && !state.current_partial().is_empty()
         && !state.suggestions.is_empty()
     {
         return KeyResolve::Action(Action::AutocompletePrev);
+    }
+    if key.code == KeyCode::BackTab {
+        return KeyResolve::Action(Action::CycleFocusBack);
     }
 
     // 9. Ctrl modifier: Global KeyMap lookup, filtered by is_direct_name — same
@@ -1340,6 +1345,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::HistoryPrev => state.history_prev(),
         Action::HistoryNext => state.history_next(),
         Action::ToggleFocus => state.toggle_focus(),
+        Action::CycleFocusBack => state.cycle_focus(false),
         Action::ToggleMap => {
             state.toggle_map();
             // Persist the map panel's on/off state per-game so it's restored the
@@ -3641,28 +3647,28 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_is_none_with_no_suggestions() {
-        // Game focus, partial typed but no suggestions → Shift-Tab falls through, but
-        // there's no default Global BackTab binding to land on → None.
+    fn shift_tab_cycles_focus_back_without_suggestions() {
+        // Game focus, partial typed but no suggestions → no AutocompletePrev, so
+        // Shift-Tab reverses the per-window focus cycle.
         let mut s = AppState::default();
         s.input.set("nor", true);
-        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::CycleFocusBack));
     }
 
     #[test]
-    fn shift_tab_is_none_with_empty_input() {
+    fn shift_tab_cycles_focus_back_with_empty_input() {
         let s = AppState::default(); // Game focus, empty input, no suggestions
-        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::CycleFocusBack));
     }
 
     #[test]
-    fn shift_tab_is_none_in_map_focus_even_with_suggestions() {
-        // Not in Game focus, so the autocomplete intercept does not apply. Shift-Tab
-        // has no default Global binding to land on → None.
+    fn shift_tab_cycles_focus_back_in_map_focus() {
+        // Not in Game focus, so the autocomplete intercept does not apply; Shift-Tab
+        // reverses the window focus cycle.
         let mut s = AppState::default();
         s.focus = Focus::Map;
         s.suggestions = vec!["north".to_string()];
-        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::None));
+        assert!(matches!(key_to_action(&s, key(KeyCode::BackTab)), Action::CycleFocusBack));
     }
 
     #[test]

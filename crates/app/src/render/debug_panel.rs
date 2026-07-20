@@ -63,7 +63,9 @@ fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
 /// Draw one window: frame, tab strip, and the active section's content.
 fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelState, state: &AppState) {
     if area.width < 2 || area.height < 2 { return; }
-    let focused = panel.focus == window;
+    // Active border only on the one truly-focused window: the debug pane must
+    // hold focus (not the story pane) AND this be its focused window.
+    let focused = state.focus == crate::state::Focus::Map && panel.focus == window;
     // Frame colour mirrors the story/map panes: transparent cyan when idle,
     // cyan+bold when focused — never the chrome surface (which bakes a black
     // background into the border cells, clashing with the pane behind them).

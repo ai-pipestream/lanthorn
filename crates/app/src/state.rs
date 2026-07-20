@@ -2198,19 +2198,40 @@ impl AppState {
         self.render_steps.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
-    /// Toggle focus between the game and map/debug panes. The right-hand pane
-    /// is focusable when it's visible (`Split` layout) or the debug inspector
-    /// is tiled into that slot; otherwise focus stays on the game so Tab can't
-    /// land on a hidden pane (SQ-0333).
+    /// Advance keyboard focus one step (Tab). See [`cycle_focus`].
     pub fn toggle_focus(&mut self) {
-        if self.layout != Layout::Split && self.debug.is_none() {
-            self.focus = Focus::Game;
-            return;
-        }
-        self.focus = match self.focus {
-            Focus::Game => Focus::Map,
-            Focus::Map => Focus::Game,
+        self.cycle_focus(true);
+    }
+
+    /// Cycle keyboard focus one step forward (`forward = true`, Tab) or back
+    /// (Shift-Tab). The stops are **per window**, not per sub-tab: the story
+    /// pane, then — when the debug inspector is open — each of its windows in
+    /// turn (story → debug 0 → 1 → 2 → story). Without the inspector it toggles
+    /// story ↔ map when the map is visible, and stays on the story when the map
+    /// is hidden so Tab can't land on a hidden pane (SQ-0333).
+    pub fn cycle_focus(&mut self, forward: bool) {
+        // Focus stops after the story pane (position 0).
+        let extra = if self.debug.is_some() {
+            crate::debug_panel::WINDOW_TABS.len() // one stop per debug window
+        } else if self.layout == Layout::Split {
+            1 // the map pane
+        } else {
+            0 // map hidden, no debug → story only
         };
+        let total = extra + 1;
+        let cur = match self.focus {
+            Focus::Game => 0,
+            Focus::Map => 1 + self.debug.as_ref().map_or(0, |p| p.focus),
+        };
+        let next = if forward { (cur + 1) % total } else { (cur + total - 1) % total };
+        if next == 0 {
+            self.focus = Focus::Game;
+        } else {
+            self.focus = Focus::Map;
+            if let Some(p) = &mut self.debug {
+                p.focus = next - 1;
+            }
+        }
     }
 
     /// Toggle the map panel on (`Split`) / off (`TranscriptFull`). Hiding the
@@ -4029,8 +4050,33 @@ mod tests {
             matches!(s.focus, Focus::Map),
             "Tab reaches the debug region even though the map itself is hidden"
         );
+        // 4 focus stops (story + 3 debug windows): three more Tabs return to story.
+        s.toggle_focus();
+        s.toggle_focus();
         s.toggle_focus();
         assert!(matches!(s.focus, Focus::Game));
+    }
+
+    #[test]
+    fn cycle_focus_steps_per_window_including_the_story() {
+        let mut s = AppState::default();
+        s.layout = Layout::Split;
+        s.debug = Some(crate::debug_panel::DebugPanelState::new(0));
+        // Forward: story → debug win 0 → 1 → 2 → story.
+        assert!(matches!(s.focus, Focus::Game));
+        s.cycle_focus(true);
+        assert!(matches!(s.focus, Focus::Map));
+        assert_eq!(s.debug.as_ref().unwrap().focus, 0);
+        s.cycle_focus(true);
+        assert_eq!(s.debug.as_ref().unwrap().focus, 1);
+        s.cycle_focus(true);
+        assert_eq!(s.debug.as_ref().unwrap().focus, 2);
+        s.cycle_focus(true);
+        assert!(matches!(s.focus, Focus::Game), "wraps from the last window back to the story");
+        // Backward from the story lands on the last debug window.
+        s.cycle_focus(false);
+        assert!(matches!(s.focus, Focus::Map));
+        assert_eq!(s.debug.as_ref().unwrap().focus, 2);
     }
 
     #[test]

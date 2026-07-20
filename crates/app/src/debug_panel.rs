@@ -282,9 +282,10 @@ impl DebugPanelState {
                 return result;
             }
         }
+        // NB: Tab / Shift-Tab (window focus, including the story pane) are handled
+        // one level up by `AppState::cycle_focus`, not here — so a debug window is
+        // just one stop in the unified per-window cycle.
         match code {
-            KeyCode::Tab => self.focus = (self.focus + 1) % 3,
-            KeyCode::BackTab => self.focus = (self.focus + 2) % 3,
             KeyCode::Left => self.cycle_tab(-1),
             KeyCode::Right => self.cycle_tab(1),
             KeyCode::Char('g') => {
@@ -1204,19 +1205,8 @@ mod tests {
         assert_eq!(p.disasm_mode_label(), "raw");
     }
 
-    #[test]
-    fn tab_and_backtab_cycle_window_focus_with_wrap() {
-        let mut p = DebugPanelState::new(0x1000);
-        assert_eq!(p.focus, 0);
-        p.handle_key(KeyCode::Tab, &MockDbg);
-        assert_eq!(p.focus, 1);
-        p.handle_key(KeyCode::Tab, &MockDbg);
-        assert_eq!(p.focus, 2);
-        p.handle_key(KeyCode::Tab, &MockDbg); // wraps
-        assert_eq!(p.focus, 0);
-        p.handle_key(KeyCode::BackTab, &MockDbg); // wraps the other way
-        assert_eq!(p.focus, 2);
-    }
+    // Window focus (Tab / Shift-Tab, including the story pane) is handled by
+    // AppState::cycle_focus, not the panel — see state::tests::cycle_focus_*.
 
     #[test]
     fn left_right_cycle_focused_tab_with_wrap_and_reset_scroll() {

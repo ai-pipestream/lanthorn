@@ -607,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn backtab_keyevent_is_unbound_by_default() {
+    fn backtab_cycles_focus_back_by_default() {
         use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
         use crate::input::{key_to_action, Action};
         use crate::state::AppState;
@@ -621,21 +621,21 @@ mod tests {
             state: KeyEventState::NONE,
         };
 
-        // With no mid-word suggestions, the BackTab autocomplete intercept does not
-        // apply, and BackTab has no default Global binding to fall through to.
+        // With no mid-word suggestions the autocomplete intercept doesn't apply, so
+        // Shift-Tab reverses the per-window focus cycle (the mirror of Tab).
         state.focus = crate::state::Focus::Game;
         let action = key_to_action(&state, backtab);
         assert!(
-            matches!(action, Action::None),
-            "BackTab in Game focus should produce None, got {:?}",
+            matches!(action, Action::CycleFocusBack),
+            "BackTab in Game focus should reverse focus, got {:?}",
             action
         );
 
         state.focus = crate::state::Focus::Map;
         let action_map = key_to_action(&state, backtab);
         assert!(
-            matches!(action_map, Action::None),
-            "BackTab in Map focus should produce None, got {:?}",
+            matches!(action_map, Action::CycleFocusBack),
+            "BackTab in Map focus should reverse focus, got {:?}",
             action_map
         );
     }

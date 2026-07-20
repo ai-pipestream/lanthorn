@@ -1460,6 +1460,17 @@ fn main() {
                         state.focus = Focus::Game; // pop back to typing; keep the panel open
                         continue;
                     }
+                    // Tab / Shift-Tab drive the unified per-window focus cycle
+                    // (story pane + each debug window), not the panel — so from the
+                    // last debug window Tab returns to the story.
+                    if k.code == crossterm::event::KeyCode::Tab {
+                        state.cycle_focus(true);
+                        continue;
+                    }
+                    if k.code == crossterm::event::KeyCode::BackTab {
+                        state.cycle_focus(false);
+                        continue;
+                    }
                     // Focused-pane height for PageUp/PageDown paging, from the real
                     // debug-region rect (the map slot).
                     let vp = (last_panes.map.height.saturating_sub(2) / 2).max(1) as usize;
