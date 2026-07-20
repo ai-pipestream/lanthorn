@@ -209,103 +209,21 @@ impl GhosttyScheme {
 /// track connects `AppState.colors` to the render functions.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ColorScheme {
-    /// Normal (unvisited / unselected) room.
-    pub room_normal: Style,
-    /// The current room (player is here): rendered with REVERSED video.
-    pub room_current: Style,
-    /// The selected (cursor-highlighted) room.
-    pub room_selected: Style,
-    /// Normal connector line (non-distorted).
-    pub connector: Style,
-    /// Distorted / one-way connector line.
-    pub connector_distorted: Style,
-    /// Portal (Up/Down/In/Out) connector line.
-    pub portal_connector: Style,
-    /// A "shared path" connector — one that collapses several same-pair compass
-    /// directions into one line. Deliberately BRIGHTER than `connector`; its line,
-    /// arrowheads, and secondary markers all use this color.
-    pub shared_path: Style,
-    /// Status bar (top of transcript pane).
-    pub status_bar: Style,
-    /// Top-right notification toasts (SQ-0176).
-    pub notification: Style,
-    /// Transcript text (body of transcript pane).
+    /// Transcript text (body of transcript pane). SQ-0309: kept — unlike every
+    /// other single-`Style` colour field (all deleted; render now reads
+    /// `theme.get("<selector>").style`), this one still has a live production
+    /// reader with a real ordering hazard: `glk_backend::theme_style_colours`
+    /// is called in `startup.rs` to seed the engine's boot-time
+    /// `glk_style_measure` answer (Kerkerkruip's dark-background detection)
+    /// BEFORE `state.colors.theme` is rebuilt with the layered
+    /// global/garglk/per-game decls (that rebuild happens later, in
+    /// `reload_style`). A discovered `garglk.ini` overlay patches this field
+    /// directly (`GarglkOverlay::apply`) so the boot-time snapshot reflects it;
+    /// migrating to `theme.get("transcript")` at that call site would silently
+    /// lose the garglk-overlaid colour for the first-frame boot probe. Every
+    /// other read of `transcript` (e.g. `resolve_story_style`'s base) is safe
+    /// and stays on this field too, rather than mixing sources.
     pub transcript: Style,
-    /// Autocomplete suggestion line.
-    pub suggestion: Style,
-    /// Live input line: the typed command text (patched over the transcript style).
-    pub input_text: Style,
-    /// Live input line: the leading prompt character (e.g. `>`).
-    pub input_prompt: Style,
-    /// Transcript scrollbar (track + thumb).
-    pub scrollbar: Style,
-    /// The `[more]` pager prompt, shown at the story-pane bottom while a single
-    /// command's output is being paged one screen at a time (SQ-0404).
-    pub more_prompt: Style,
-    /// Progress bar shown in the map pane while the tidy animation builds off-thread.
-    pub tidy_progress: Style,
-    /// Gutter marker drawn beside META (app/slash) transcript output.
-    pub meta_marker: Style,
-    /// Glk hyperlink text (fg colour; an underline is layered on at render time).
-    pub hyperlink: Style,
-    /// Focused-pane border.
-    pub focused_border: Style,
-    /// Help bar (bottom row).
-    pub help_bar: Style,
-    /// Map pane border color.
-    pub map_border: Style,
-    /// Story pane border color.
-    pub story_border: Style,
-    /// Story pane title (centered in border).
-    pub story_title: Style,
-    /// Inventory dock panel: border + item-list text.
-    pub inventory_dock: Style,
-    /// Story-picker info panel body + border.
-    pub story_info: Style,
-    /// Story-picker info panel title (story name).
-    pub story_info_title: Style,
-    /// Story-picker info panel field labels.
-    pub story_info_label: Style,
-    /// Story-picker info panel field values.
-    pub story_info_value: Style,
-    /// Story-picker info panel blurb text (the fetched IFDB description).
-    pub story_info_blurb: Style,
-    pub story_info_link: Style,
-    /// Story-picker info panel cover-art letterbox fill (behind/around the
-    /// scaled frontispiece image).
-    pub story_info_cover: Style,
-    /// In-game Glulx graphics-window letterbox fill (behind/around the
-    /// fitted canvas image).
-    pub graphics: Style,
-    /// Inline-image band letterbox fill (behind/around images rendered
-    /// inline in text-buffer windows).
-    pub inline_image: Style,
-    /// Story-picker row badge cluster (type badge + artifact letters); fg + bg.
-    pub story_badge: Style,
-    /// Story-picker column header row (inactive sort column).
-    pub story_header: Style,
-    /// Story-picker column header row: the active sort column (shows its
-    /// direction arrow).
-    pub story_header_active: Style,
-    /// Story-picker row: author column text.
-    pub story_author: Style,
-    /// Story-picker row: year column text.
-    pub story_year: Style,
-    /// Story-picker row: "(no metadata yet)" placeholder shown in the author
-    /// column when a story has no fetched/embedded author.
-    pub story_no_metadata: Style,
-    /// Story-picker cover-gallery tile caption (title under an unselected cover).
-    pub story_tile: Style,
-    /// Story-picker cover-gallery tile caption for the selected cover.
-    pub story_tile_selected: Style,
-    /// Map layer tab (inactive).
-    pub map_layer_tab: Style,
-    /// Map layer tab (active).
-    pub map_layer_tab_active: Style,
-    /// Status header style.
-    pub status_header: Style,
-    /// Input line style.
-    pub input_line: Style,
     /// Resolved border style for the map pane.
     pub map_border_style: BorderStyle,
     /// Resolved border style for the story pane.
@@ -318,36 +236,6 @@ pub struct ColorScheme {
     pub suggestion_line_style: BorderStyle,
     /// Border style for notification toasts (default `Single`). (SQ-0176)
     pub notification_style: BorderStyle,
-    /// Dialog frame background/foreground style.
-    pub dialog: Style,
-    /// Dialog title text style.
-    pub dialog_title: Style,
-    /// Debug-inspector pane body (unfocused).
-    pub debug_pane: Style,
-    /// Debug-inspector pane body/border when focused.
-    pub debug_pane_focused: Style,
-    /// Debug-inspector pane title.
-    pub debug_title: Style,
-    /// Debug-inspector disassembly line at the current PC.
-    pub debug_disasm_pc: Style,
-    /// Debug-inspector tab label (inactive).
-    pub debug_tab: Style,
-    /// Debug-inspector tab label (active).
-    pub debug_tab_active: Style,
-    /// Debug-inspector execution-coverage gutter marker (`|`) beside disasm
-    /// lines that ran during the last command turn.
-    pub debug_exec_mark: Style,
-    /// Debug-inspector floating value tooltip shown when hovering a variable
-    /// operand (`gNN`/`localN`/`sp`) in the disassembly.
-    pub debug_tooltip: Style,
-    /// Leader-panel hotkey letter style.
-    pub hotkey_key: Style,
-    /// Dialog button (normal) style.
-    pub dialog_button: Style,
-    /// Dialog button (active/focused) style.
-    pub dialog_button_active: Style,
-    /// Dialog drop-shadow style.
-    pub dialog_shadow: Style,
     /// Resolved border style for the dialog box.
     pub dialog_box_style: BorderStyle,
     /// Whether the dialog drop-shadow is enabled.
@@ -356,14 +244,6 @@ pub struct ColorScheme {
     pub dialog_placement: DialogPlacement,
     /// Cells of gap from the anchored edge(s); ignored for `Center` (default `0`).
     pub dialog_margin: u16,
-    /// Upper (virtual) window content style.
-    /// Background/foreground for a split-screen room panel (the Scott top window),
-    /// distinct from `transcript` so the two regions read apart. Selector:
-    /// `room_panel`.
-    pub room_panel: Style,
-    pub upper_window: Style,
-    /// Upper (virtual) window border style.
-    pub upper_window_border: Style,
     /// Resolved border style for the upper (virtual) window frame.
     pub virtual_window_border: BorderStyle,
     /// Per-side border styles (default = all of the matching base `*_style`).
@@ -386,26 +266,18 @@ pub struct ColorScheme {
     /// Whether the story title / map layer-tab header strip is shown.
     pub story_header_on: bool,
     pub map_header_on: bool,
-    /// Border pulse color for the high-pitched bleep (sound_effect #1).
+    /// Border pulse color for the high-pitched bleep (sound_effect #1). SQ-0309:
+    /// kept — live production reader in `main.rs`'s border-pulse logic, and the
+    /// registry's `sound_beep_high` row (`alert`, no delta → plain Yellow) does
+    /// NOT reproduce this field's bespoke amber `Rgb(255, 180, 40)`; the design
+    /// spec (`docs/design/2026-07-14-styling-role-redesign.md`) doesn't call
+    /// out `sound_beep_*` at all, so the role default isn't confirmed
+    /// intentional. Migrating would silently change the pulse colour.
     pub sound_beep_high: Style,
-    /// Border pulse color for the low-pitched bleep (sound_effect #2).
+    /// Border pulse color for the low-pitched bleep (sound_effect #2). SQ-0309:
+    /// kept for the same reason as `sound_beep_high` — the registry's `accent`
+    /// default (Cyan) doesn't reproduce the bespoke `Rgb(60, 140, 220)`.
     pub sound_beep_low: Style,
-    /// Room-detection-method indicator (map corner).
-    pub loc_indicator: Style,
-    /// Player input echo text.
-    pub transcript_input: Style,
-    /// Meta (app/slash) text.
-    pub transcript_meta: Style,
-    /// VM warning text.
-    pub transcript_warning: Style,
-    /// VM crash / fault trace lines in the transcript.
-    pub transcript_crash: Style,
-    /// Built-in story rule: room-name / location header line.
-    pub transcript_location: Style,
-    /// Built-in story rule: bracketed system line.
-    pub transcript_system: Style,
-    /// Gutter marker style for warning lines.
-    pub warning_marker: Style,
     /// Compiled user story-styling rules, in evaluation order.
     pub transcript_rules: Vec<CompiledRule>,
     /// The status-bar segment layout (default reproduces today's bar).
@@ -452,61 +324,7 @@ impl ColorScheme {
     /// - `main.rs`: `focused_border` (`Cyan + BOLD`) and `help_style` (`REVERSED`).
     pub fn terminal_default() -> ColorScheme {
         ColorScheme {
-            room_normal: Style::new().fg(Color::White).bg(Color::Reset),
-            room_current: Style::new()
-                .add_modifier(Modifier::REVERSED)
-                .fg(Color::White)
-                .bg(Color::Reset),
-            room_selected: Style::new().fg(Color::Yellow).bg(Color::Reset),
-            connector: Style::new().fg(Color::Cyan),
-            connector_distorted: Style::new().fg(Color::Magenta),
-            portal_connector: Style::new().fg(Color::Cyan),
-            shared_path: Style::new().fg(Color::LightCyan),
-            status_bar: Style::new().add_modifier(Modifier::REVERSED),
-            notification: Style::new().fg(Color::Black).bg(Color::Cyan),
             transcript: Style::new().fg(Color::White),
-            suggestion: Style::new().fg(Color::DarkGray),
-            input_text: Style::new(),
-            input_prompt: Style::new(),
-            scrollbar: Style::new().fg(Color::DarkGray),
-            more_prompt: Style::new().add_modifier(Modifier::REVERSED),
-            tidy_progress: Style::new().fg(Color::Cyan),
-            meta_marker: Style::new().fg(Color::DarkGray),
-            hyperlink: Style::new().fg(Color::Cyan),
-            focused_border: Style::new()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-            help_bar: Style::new().add_modifier(Modifier::REVERSED),
-            map_border: Style::new().fg(Color::Cyan),
-            story_border: Style::new().fg(Color::Cyan),
-            story_title: Style::new().fg(Color::White),
-            inventory_dock: Style::new().fg(Color::Cyan),
-            story_info: Style::new().fg(Color::Cyan),
-            story_info_title: Style::new().fg(Color::White).add_modifier(Modifier::BOLD),
-            story_info_label: Style::new().fg(Color::DarkGray),
-            story_info_value: Style::new().fg(Color::White),
-            story_info_blurb: Style::new().fg(Color::Gray).add_modifier(Modifier::ITALIC),
-            story_info_link: Style::new().fg(Color::Blue).add_modifier(Modifier::UNDERLINED),
-            story_info_cover: Style::new().bg(Color::Black),
-            graphics: Style::new().bg(Color::Black),
-            inline_image: Style::new().bg(Color::Black),
-            story_badge: Style::new().fg(Color::Blue),
-            story_header: Style::new().fg(Color::DarkGray),
-            story_header_active: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            story_author: Style::new().fg(Color::White),
-            story_year: Style::new().fg(Color::White),
-            story_no_metadata: Style::new().fg(Color::DarkGray),
-            story_tile: Style::new().fg(Color::White),
-            story_tile_selected: Style::new()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-            // The shown layer reads brighter than the others: inactive tabs are
-            // dimmed, the active one is the bold accent colour. Both themeable.
-            map_layer_tab: Style::new().fg(Color::DarkGray),
-            map_layer_tab_active: Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            status_header: Style::new(),
-            input_line: Style::new(),
             // SQ-0309: previously injected by DEFAULT_STYLE_TOML's `[colors]`
             // "map_border"/"story_border" `style = "single"` (applied via the
             // now-removed `apply_color_decls`). That was the only path that ever
@@ -519,27 +337,10 @@ impl ColorScheme {
             input_line_style: BorderStyle::None,
             suggestion_line_style: BorderStyle::None,
             notification_style: BorderStyle::Single,
-            dialog: Style::new().fg(Color::White).bg(Color::Black),
-            dialog_title: Style::new().fg(Color::Cyan),
-            debug_pane: Style::default(),
-            debug_pane_focused: Style::default().add_modifier(Modifier::BOLD),
-            debug_title: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            debug_disasm_pc: Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
-            debug_tab: Style::default(),
-            debug_tab_active: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            debug_exec_mark: Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            debug_tooltip: Style::new().fg(Color::Black).bg(Color::Cyan),
-            hotkey_key: Style::new().fg(Color::Cyan),
-            dialog_button: Style::new().add_modifier(Modifier::REVERSED),
-            dialog_button_active: Style::new().fg(Color::Black).bg(Color::Cyan),
-            dialog_shadow: Style::new().bg(Color::DarkGray),
             dialog_box_style: BorderStyle::None,
             dialog_shadow_on: false,
             dialog_placement: DialogPlacement::Center,
             dialog_margin: 0,
-            room_panel: Style::new().fg(Color::White).bg(Color::Blue),
-            upper_window: Style::new(),
-            upper_window_border: Style::new().fg(Color::Cyan),
             virtual_window_border: BorderStyle::Single,
             map_border_sides: PaneSides::all(BorderStyle::Single),
             story_border_sides: PaneSides::all(BorderStyle::Single),
@@ -560,14 +361,6 @@ impl ColorScheme {
             map_header_on: true,
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
             sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
-            loc_indicator: Style::new().fg(Color::DarkGray),
-            transcript_input: Style::new().fg(Color::Cyan),
-            transcript_meta: Style::new().fg(Color::DarkGray),
-            transcript_warning: Style::new().fg(Color::Yellow),
-            transcript_crash: Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
-            transcript_location: Style::new().add_modifier(Modifier::BOLD),
-            transcript_system: Style::new().fg(Color::DarkGray),
-            warning_marker: Style::new().fg(Color::Yellow),
             transcript_rules: Vec::new(),
             statusbar_layout: StatusBarLayout::default(),
             palette: [
@@ -604,17 +397,7 @@ impl ColorScheme {
     ///
     /// | Element             | Ghostty role          |
     /// |---------------------|-----------------------|
-    /// | `room_normal`       | `foreground`          |
-    /// | `room_current`      | `reversed(fg, bg)`    |
-    /// | `room_selected`     | `palette[3]`          |
-    /// | `connector`         | `palette[6]`          |
-    /// | `connector_distorted` | `palette[5]`        |
-    /// | `portal_connector`  | `palette[6]`          |
-    /// | `status_bar`        | `reversed(fg, bg)`    |
     /// | `transcript`        | `foreground`          |
-    /// | `suggestion`        | `palette[8]`          |
-    /// | `focused_border`    | `palette[6] + bold`   |
-    /// | `help_bar`          | `reversed(fg, bg)`    |
     ///
     /// Overrides in `elements` map element names to color values (parsed by
     /// [`parse_color_value`]) and beat the default mapping.
@@ -623,7 +406,6 @@ impl ColorScheme {
         overrides: &BTreeMap<String, String>,
     ) -> ColorScheme {
         let fg = scheme.foreground;
-        let bg = scheme.background;
 
         // Helper: look up element override or fall back to the default color.
         let resolve_element = |name: &str, default: Color| -> Color {
@@ -633,137 +415,20 @@ impl ColorScheme {
                 .unwrap_or(default)
         };
 
-        let room_normal_fg = resolve_element("room_normal", fg);
-        let connector_fg = resolve_element("connector", scheme.palette[6]);
-        let room_selected_fg = resolve_element("room_selected", scheme.palette[3]);
-        let connector_distorted_fg =
-            resolve_element("connector_distorted", scheme.palette[5]);
-        let portal_connector_fg = resolve_element("portal_connector", scheme.palette[6]);
-        let shared_path_fg = resolve_element("shared_path", scheme.palette[14]); // bright cyan slot
         let transcript_fg = resolve_element("transcript", fg);
-        let suggestion_fg = resolve_element("suggestion", scheme.palette[8]);
-        let focused_border_fg = resolve_element("focused_border", scheme.palette[6]);
-
-        // REVERSED elements use fg/bg from the scheme; overrides on these elements
-        // replace the fg component of the reversed style.
-        let status_bar_fg = overrides
-            .get("status_bar")
-            .and_then(|v| parse_color_value(v, scheme));
-        let help_bar_fg = overrides
-            .get("help_bar")
-            .and_then(|v| parse_color_value(v, scheme));
-        let room_current_fg = overrides
-            .get("room_current")
-            .and_then(|v| parse_color_value(v, scheme));
-
-        let status_bar = if let Some(c) = status_bar_fg {
-            Style::new().fg(c).bg(bg).add_modifier(Modifier::REVERSED)
-        } else {
-            Style::new()
-                .fg(fg)
-                .bg(bg)
-                .add_modifier(Modifier::REVERSED)
-        };
-
-        let help_bar = if let Some(c) = help_bar_fg {
-            Style::new().fg(c).bg(bg).add_modifier(Modifier::REVERSED)
-        } else {
-            Style::new()
-                .fg(fg)
-                .bg(bg)
-                .add_modifier(Modifier::REVERSED)
-        };
-
-        let room_current = if let Some(c) = room_current_fg {
-            Style::new()
-                .fg(c)
-                .bg(bg)
-                .add_modifier(Modifier::REVERSED)
-        } else {
-            Style::new()
-                .fg(fg)
-                .bg(bg)
-                .add_modifier(Modifier::REVERSED)
-        };
 
         ColorScheme {
-            room_normal: Style::new().fg(room_normal_fg).bg(bg),
-            room_current,
-            room_selected: Style::new().fg(room_selected_fg).bg(bg),
-            connector: Style::new().fg(connector_fg),
-            connector_distorted: Style::new().fg(connector_distorted_fg),
-            portal_connector: Style::new().fg(portal_connector_fg),
-            shared_path: Style::new().fg(shared_path_fg),
-            status_bar,
-            notification: Style::new().fg(bg).bg(scheme.palette[6]),
             transcript: Style::new().fg(transcript_fg),
-            suggestion: Style::new().fg(suggestion_fg),
-            input_text: Style::new(),
-            input_prompt: Style::new(),
-            scrollbar: Style::new().fg(suggestion_fg),
-            more_prompt: Style::new().add_modifier(Modifier::REVERSED),
-            tidy_progress: Style::new().fg(scheme.palette[6]),
-            meta_marker: Style::new().fg(suggestion_fg),
-            hyperlink: Style::new().fg(scheme.palette[6]),
-            focused_border: Style::new()
-                .fg(focused_border_fg)
-                .add_modifier(Modifier::BOLD),
-            help_bar,
-            map_border: Style::new().fg(scheme.palette[6]),
-            story_border: Style::new().fg(scheme.palette[6]),
-            story_title: Style::new().fg(fg),
-            inventory_dock: Style::new().fg(scheme.palette[6]),
-            story_info: Style::new().fg(scheme.palette[6]),
-            story_info_title: Style::new().fg(fg).add_modifier(Modifier::BOLD),
-            story_info_label: Style::new().fg(fg).add_modifier(Modifier::DIM),
-            story_info_value: Style::new().fg(fg),
-            story_info_blurb: Style::new().fg(fg).add_modifier(Modifier::ITALIC),
-            story_info_link: Style::new().fg(fg).add_modifier(Modifier::UNDERLINED),
-            story_info_cover: Style::new().bg(bg),
-            graphics: Style::new().bg(bg),
-            inline_image: Style::new().bg(bg),
-            story_badge: Style::new().fg(scheme.palette[4]),
-            story_header: Style::new().fg(fg).add_modifier(Modifier::DIM),
-            story_header_active: Style::new().fg(scheme.palette[6]).add_modifier(Modifier::BOLD),
-            story_author: Style::new().fg(fg),
-            story_year: Style::new().fg(fg),
-            story_no_metadata: Style::new().fg(fg).add_modifier(Modifier::DIM),
-            story_tile: Style::new().fg(fg),
-            story_tile_selected: Style::new()
-                .fg(bg)
-                .bg(scheme.palette[6])
-                .add_modifier(Modifier::BOLD),
-            map_layer_tab: Style::new().fg(fg).add_modifier(Modifier::DIM),
-            map_layer_tab_active: Style::new().fg(scheme.palette[6]).add_modifier(Modifier::BOLD),
-            status_header: Style::new(),
-            input_line: Style::new(),
             map_border_style: BorderStyle::None,
             story_border_style: BorderStyle::None,
             status_header_style: BorderStyle::None,
             input_line_style: BorderStyle::None,
             suggestion_line_style: BorderStyle::None,
             notification_style: BorderStyle::Single,
-            dialog: Style::new().fg(fg).bg(bg),
-            dialog_title: Style::new().fg(scheme.palette[6]),
-            debug_pane: Style::default(),
-            debug_pane_focused: Style::default().add_modifier(Modifier::BOLD),
-            debug_title: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            debug_disasm_pc: Style::default().add_modifier(Modifier::REVERSED | Modifier::BOLD),
-            debug_tab: Style::default(),
-            debug_tab_active: Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            debug_exec_mark: Style::new().fg(scheme.palette[3]).add_modifier(Modifier::BOLD),
-            debug_tooltip: Style::new().fg(bg).bg(scheme.palette[6]),
-            hotkey_key: Style::new().fg(scheme.palette[6]),
-            dialog_button: Style::new().fg(fg).add_modifier(Modifier::REVERSED),
-            dialog_button_active: Style::new().fg(bg).bg(scheme.palette[6]),
-            dialog_shadow: Style::new().bg(scheme.palette[8]),
             dialog_box_style: BorderStyle::None,
             dialog_shadow_on: false,
             dialog_placement: DialogPlacement::Center,
             dialog_margin: 0,
-            room_panel: Style::new().fg(fg).bg(scheme.palette[4]),
-            upper_window: Style::new().fg(fg),
-            upper_window_border: Style::new().fg(scheme.palette[6]),
             virtual_window_border: BorderStyle::Single,
             map_border_sides: PaneSides::all(BorderStyle::None),
             story_border_sides: PaneSides::all(BorderStyle::None),
@@ -784,14 +449,6 @@ impl ColorScheme {
             map_header_on: true,
             sound_beep_high: Style::new().fg(Color::Rgb(255, 180, 40)),
             sound_beep_low: Style::new().fg(Color::Rgb(60, 140, 220)),
-            loc_indicator: Style::new().fg(scheme.palette[8]),
-            transcript_input: Style::new().fg(scheme.palette[6]),
-            transcript_meta: Style::new().fg(scheme.palette[8]),
-            transcript_warning: Style::new().fg(scheme.palette[3]),
-            transcript_crash: Style::new().fg(scheme.palette[1]).add_modifier(Modifier::BOLD),
-            transcript_location: Style::new().add_modifier(Modifier::BOLD),
-            transcript_system: Style::new().fg(scheme.palette[8]),
-            warning_marker: Style::new().fg(scheme.palette[3]),
             transcript_rules: Vec::new(),
             statusbar_layout: StatusBarLayout::default(),
             palette: scheme.palette,
@@ -812,12 +469,12 @@ impl ColorScheme {
         }
         if let Some(name) = room_name {
             if zvm::location::status_name_matches(line, name) {
-                return self.transcript.patch(self.transcript_location);
+                return self.transcript.patch(self.theme.get("transcript_location").style);
             }
         }
         let t = line.trim();
         if t.len() >= 2 && t.starts_with('[') && t.ends_with(']') {
-            return self.transcript.patch(self.transcript_system);
+            return self.transcript.patch(self.theme.get("transcript_system").style);
         }
         self.transcript
     }
@@ -1108,14 +765,19 @@ mod tests {
 
     #[test]
     fn terminal_default_transcript_category_styles() {
+        // SQ-0309: these categories are dead ColorScheme fields now; the values
+        // ride the theme (registry defaults per docs/design/2026-07-14-styling-
+        // role-redesign.md §2's element table).
         let cs = ColorScheme::terminal_default();
-        assert_eq!(cs.transcript_input.fg, Some(Color::Cyan));
-        assert_eq!(cs.transcript_meta.fg, Some(Color::DarkGray));
-        assert_eq!(cs.transcript_warning.fg, Some(Color::Yellow));
-        assert!(cs.transcript_location.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(cs.transcript_location.fg, None); // bold-only, inherits base fg
-        assert_eq!(cs.transcript_system.fg, Some(Color::DarkGray));
-        assert_eq!(cs.warning_marker.fg, Some(Color::Yellow));
+        assert_eq!(cs.theme.get("transcript_input").style.fg, Some(Color::Cyan));
+        assert_eq!(cs.theme.get("transcript_meta").style.fg, Some(Color::DarkGray));
+        assert_eq!(cs.theme.get("transcript_warning").style.fg, Some(Color::Yellow));
+        // transcript_location = accent (no bold) — a deliberate SQ-0309 redesign
+        // change from the old bold-only-white location header.
+        assert_eq!(cs.theme.get("transcript_location").style.fg, Some(Color::Cyan));
+        assert!(!cs.theme.get("transcript_location").style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(cs.theme.get("transcript_system").style.fg, Some(Color::DarkGray));
+        assert_eq!(cs.theme.get("warning_marker").style.fg, Some(Color::Yellow));
         assert!(cs.transcript_rules.is_empty());
     }
 
@@ -1135,13 +797,15 @@ mod tests {
         assert!(s.add_modifier.contains(Modifier::BOLD));
         assert_eq!(s.fg, Some(Color::White));
 
-        // 2. Built-in location: line equals room name → bold (transcript_location).
+        // 2. Built-in location: line equals room name → transcript_location's
+        // accent colour patched over the base (SQ-0309: accent, not bold).
         let loc = cs.resolve_story_style("West of House", Some("West of House"));
-        assert!(loc.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(loc.fg, Some(Color::Cyan));
+        assert!(!loc.add_modifier.contains(Modifier::BOLD));
 
         // 2b. Boundary guard: "Hall" line vs room "Hallway" must NOT match location.
         let no_loc = cs.resolve_story_style("Hall", Some("Hallway"));
-        assert!(!no_loc.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(no_loc.fg, Some(Color::White));
         assert_eq!(no_loc, cs.transcript); // falls through to base
 
         // 3. Built-in system: bracketed line → transcript_system (DarkGray).
@@ -1258,56 +922,11 @@ unknown-key = ignored
     #[test]
     fn terminal_default_carries_a_matching_theme() {
         let cs = ColorScheme::terminal_default();
-        // The attached registry theme reproduces the legacy fields it will replace.
+        // The attached registry theme reproduces the legacy fields it replaced.
         assert_eq!(cs.theme.get("transcript").style.fg, cs.transcript.fg);
-        assert_eq!(cs.theme.get("panel.border:active").style.fg, cs.focused_border.fg);
+        assert_eq!(cs.theme.get("panel.border:active").style.fg, Some(Color::Cyan));
         assert!(cs.theme.get("panel.border:active").style.add_modifier
             .contains(ratatui::style::Modifier::BOLD));
-    }
-
-    #[test]
-    fn terminal_default_connector_is_cyan() {
-        let cs = ColorScheme::terminal_default();
-        assert_eq!(cs.connector, Style::new().fg(Color::Cyan));
-    }
-
-    #[test]
-    fn terminal_default_distorted_is_magenta() {
-        let cs = ColorScheme::terminal_default();
-        assert_eq!(cs.connector_distorted, Style::new().fg(Color::Magenta));
-    }
-
-    #[test]
-    fn terminal_default_selected_is_yellow() {
-        let cs = ColorScheme::terminal_default();
-        assert_eq!(cs.room_selected, Style::new().fg(Color::Yellow).bg(Color::Reset));
-    }
-
-    #[test]
-    fn terminal_default_suggestion_is_darkgray() {
-        let cs = ColorScheme::terminal_default();
-        assert_eq!(cs.suggestion, Style::new().fg(Color::DarkGray));
-    }
-
-    #[test]
-    fn terminal_default_focused_border_is_cyan_bold() {
-        let cs = ColorScheme::terminal_default();
-        assert_eq!(
-            cs.focused_border,
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-        );
-    }
-
-    #[test]
-    fn terminal_default_status_bar_is_reversed() {
-        let cs = ColorScheme::terminal_default();
-        assert!(cs.status_bar.add_modifier.contains(Modifier::REVERSED));
-    }
-
-    #[test]
-    fn terminal_default_help_bar_is_reversed() {
-        let cs = ColorScheme::terminal_default();
-        assert!(cs.help_bar.add_modifier.contains(Modifier::REVERSED));
     }
 
     // ── ColorScheme::from_ghostty ─────────────────────────────────────────────
@@ -1316,54 +935,40 @@ unknown-key = ignored
         GhosttyScheme::parse(SAMPLE_THEME).unwrap()
     }
 
-    #[test]
-    fn from_ghostty_connector_maps_to_palette6() {
-        let gs = sample_scheme();
-        let cs = ColorScheme::from_ghostty(&gs, &BTreeMap::new());
-        assert_eq!(cs.connector, Style::new().fg(gs.palette[6]));
-    }
-
-    #[test]
-    fn from_ghostty_distorted_maps_to_palette5() {
-        let gs = sample_scheme();
-        let cs = ColorScheme::from_ghostty(&gs, &BTreeMap::new());
-        assert_eq!(cs.connector_distorted, Style::new().fg(gs.palette[5]));
-    }
-
-    #[test]
-    fn from_ghostty_selected_maps_to_palette3() {
-        let gs = sample_scheme();
-        let cs = ColorScheme::from_ghostty(&gs, &BTreeMap::new());
-        let expected_fg = gs.palette[3];
-        assert_eq!(cs.room_selected, Style::new().fg(expected_fg).bg(gs.background));
-    }
+    // SQ-0309: `room_selected`/`connector`/`connector_distorted`/`suggestion`/
+    // `focused_border`/`status_bar`/`help_bar` are dead ColorScheme fields now
+    // (render reads `theme.get("map.*")`/`theme.get("panel.border[:active]")`/
+    // etc. instead — see `render/map.rs`, `main.rs`'s `panel_border`). Their
+    // resolved-colour coverage lives in `theme::resolve`'s own tests
+    // (`resolve_theme_reproduces_terminal_defaults`); only the still-live
+    // `transcript` override mechanism is exercised here.
 
     #[test]
     fn element_override_hex_beats_mapping() {
         let gs = sample_scheme();
         let mut overrides = BTreeMap::new();
-        overrides.insert("room_selected".to_string(), "#ff0000".to_string());
+        overrides.insert("transcript".to_string(), "#ff0000".to_string());
         let cs = ColorScheme::from_ghostty(&gs, &overrides);
-        assert_eq!(cs.room_selected.fg, Some(Color::Rgb(0xff, 0, 0)));
+        assert_eq!(cs.transcript.fg, Some(Color::Rgb(0xff, 0, 0)));
     }
 
     #[test]
     fn element_override_palette_ref_beats_mapping() {
         let gs = sample_scheme();
         let mut overrides = BTreeMap::new();
-        // Override connector to use palette[1] instead of palette[6].
-        overrides.insert("connector".to_string(), "palette:1".to_string());
+        // Override transcript to use palette[1] instead of the scheme foreground.
+        overrides.insert("transcript".to_string(), "palette:1".to_string());
         let cs = ColorScheme::from_ghostty(&gs, &overrides);
-        assert_eq!(cs.connector, Style::new().fg(gs.palette[1]));
+        assert_eq!(cs.transcript, Style::new().fg(gs.palette[1]));
     }
 
     #[test]
     fn element_override_named_color_works() {
         let gs = sample_scheme();
         let mut overrides = BTreeMap::new();
-        overrides.insert("connector".to_string(), "cyan".to_string());
+        overrides.insert("transcript".to_string(), "cyan".to_string());
         let cs = ColorScheme::from_ghostty(&gs, &overrides);
-        assert_eq!(cs.connector, Style::new().fg(Color::Cyan));
+        assert_eq!(cs.transcript, Style::new().fg(Color::Cyan));
     }
 
     #[test]
@@ -1376,7 +981,7 @@ unknown-key = ignored
     #[test]
     fn loc_indicator_default_is_dim() {
         let cs = ColorScheme::terminal_default();
-        assert_eq!(cs.loc_indicator.fg, Some(Color::DarkGray));
+        assert_eq!(cs.theme.get("map.loc_indicator").style.fg, Some(Color::DarkGray));
     }
 
     #[test]

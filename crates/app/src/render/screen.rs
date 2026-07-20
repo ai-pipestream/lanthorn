@@ -121,7 +121,6 @@ fn grid_scheme<'a>(state: &'a AppState, model: &ScreenModel) -> std::borrow::Cow
     if !matches!(bg, ZColour::Default) {
         base = base.bg(crate::render::resolve_zcolour(bg, &state.colors));
     }
-    c.upper_window = base;
     // The border chrome is entirely our own presentation — Glk provides no border
     // styling — so paint the frame in the same page colours as the content, making
     // the whole status area (content + border) one coloured block on the recoloured
@@ -133,13 +132,12 @@ fn grid_scheme<'a>(state: &'a AppState, model: &ScreenModel) -> std::borrow::Cow
     if !matches!(bg, ZColour::Default) {
         border = border.bg(crate::render::resolve_zcolour(bg, &state.colors));
     }
-    c.upper_window_border = border;
-    // SQ-0309: `draw_grid`/`draw_window_separator` now read `upper_window` and
-    // `upper_window_border` through `c.theme`, not the legacy fields set above, so
-    // the override must also land in the theme those selectors derive from
-    // (their registry parents are the `chrome`/`border` roles with no delta of
-    // their own, so seeding just those two roles reproduces `base`/`border`
-    // exactly). Other role-derived selectors this Cow's theme could serve (e.g.
+    // SQ-0309: `draw_grid`/`draw_window_separator` read `upper_window` and
+    // `upper_window_border` through `c.theme` (the legacy fields are gone), so
+    // the override must land in the theme those selectors derive from (their
+    // registry parents are the `chrome`/`border` roles with no delta of their
+    // own, so seeding just those two roles reproduces `base`/`border` exactly).
+    // Other role-derived selectors this Cow's theme could serve (e.g.
     // `hyperlink`, off `accent`) fall back to the terminal-default role rather
     // than the user's real one — narrow, since only the grid/separator draw path
     // reads this Cow's theme, and only while a game page colour is honoured.
@@ -489,8 +487,8 @@ fn split_area_bordered(area: Rect, vertical: bool, fixed: u16, border: u16) -> (
 ///
 /// Glk provides no border styling, so this reuses the existing themeable
 /// window-border presentation rather than a dedicated selector: the rule is drawn
-/// in `colors.upper_window_border` (the same Style the status frame uses), and a
-/// user-set glyph override from `colors.upper_window_border_glyphs` — `.top` for a
+/// in `colors.theme.get("upper_window_border")` (the same style the status frame
+/// uses), and a user-set glyph override from `colors.upper_window_border_glyphs` — `.top` for a
 /// horizontal rule, `.left` for a vertical one — is honoured, else the box-drawing
 /// defaults. (A dedicated `window-border` selector can follow when the deferred
 /// style redesign lands — do NOT add a new selector here.)
@@ -650,8 +648,8 @@ mod tests {
         let model = model_with_page(ZColour::True24(0x00FF_FFFF), ZColour::True24(0));
         let gc = grid_scheme(&state, &model);
         assert!(matches!(gc, std::borrow::Cow::Owned(_)), "override clone when the game set a scheme");
-        assert_eq!(gc.upper_window.fg, Some(ratatui::style::Color::Rgb(0, 0, 0)));
-        assert_eq!(gc.upper_window.bg, Some(ratatui::style::Color::Rgb(255, 255, 255)));
+        assert_eq!(gc.theme.get("upper_window").style.fg, Some(ratatui::style::Color::Rgb(0, 0, 0)));
+        assert_eq!(gc.theme.get("upper_window").style.bg, Some(ratatui::style::Color::Rgb(255, 255, 255)));
     }
 
     #[test]
@@ -665,29 +663,10 @@ mod tests {
         state.config.honor_game_colours = true;
         let model = model_with_page(ZColour::True24(0x00FF_FFFF), ZColour::True24(0));
         let gc = grid_scheme(&state, &model);
-        assert_eq!(gc.upper_window_border.bg, Some(ratatui::style::Color::Rgb(255, 255, 255)),
+        assert_eq!(gc.theme.get("upper_window_border").style.bg, Some(ratatui::style::Color::Rgb(255, 255, 255)),
             "border background matches the game page background");
-        assert_eq!(gc.upper_window_border.fg, Some(ratatui::style::Color::Rgb(0, 0, 0)),
+        assert_eq!(gc.theme.get("upper_window_border").style.fg, Some(ratatui::style::Color::Rgb(0, 0, 0)),
             "border line drawn in the game page foreground ink");
-    }
-
-    /// SQ-0309: `draw_upper_window`/`draw_grid`/`draw_window_separator` read
-    /// `upper_window`/`upper_window_border` through `colors.theme`, not the legacy
-    /// fields grid_scheme also sets — so the override must be visible through
-    /// `.theme.get(...)` too, or the page-colour honouring (SQ-0262/SQ-0267) goes
-    /// dead even though the legacy-field assertions above still pass.
-    #[test]
-    fn grid_scheme_override_is_visible_through_the_theme() {
-        use zvm::screen::ZColour;
-        let mut state = AppState::default();
-        state.colors = crate::colors::ColorScheme::terminal_default();
-        state.config.honor_game_colours = true;
-        let model = model_with_page(ZColour::True24(0x00FF_FFFF), ZColour::True24(0));
-        let gc = grid_scheme(&state, &model);
-        assert_eq!(gc.theme.get("upper_window").style.fg, gc.upper_window.fg);
-        assert_eq!(gc.theme.get("upper_window").style.bg, gc.upper_window.bg);
-        assert_eq!(gc.theme.get("upper_window_border").style.fg, gc.upper_window_border.fg);
-        assert_eq!(gc.theme.get("upper_window_border").style.bg, gc.upper_window_border.bg);
     }
 
     /// End-to-end guard for the same fix: render the simple (Z-machine) path with
@@ -1601,7 +1580,7 @@ mod tests {
         // In the themed border colour.
         assert_eq!(
             buf.cell((10, 1)).unwrap().style().fg,
-            state.colors.upper_window_border.fg,
+            state.colors.theme.get("upper_window_border").style.fg,
             "separator carries the themed window-border colour"
         );
         // Grid content on row 0, buffer below the rule on row 2.
@@ -1642,7 +1621,7 @@ mod tests {
         }
         assert_eq!(
             buf.cell((6, 0)).unwrap().style().fg,
-            state.colors.upper_window_border.fg,
+            state.colors.theme.get("upper_window_border").style.fg,
             "separator carries the themed window-border colour"
         );
         // Grid content left of the rule (cols < 6) on row 0.

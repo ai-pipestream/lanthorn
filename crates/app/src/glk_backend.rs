@@ -101,6 +101,13 @@ pub type ThemePair = (Option<u32>, Option<u32>);
 /// from the `transcript` (story pane) and `status_bar` styles. Only concrete
 /// RGB colours are reported; a named/indexed ANSI colour or an unset channel
 /// renders however the terminal decides, so it is honestly `None` (no guess).
+///
+/// `transcript` reads the legacy field (SQ-0309: kept — see its doc comment on
+/// `ColorScheme`), not `colors.theme`: this is called from `startup.rs` before
+/// `colors.theme` is rebuilt with the layered global/garglk/per-game decls, so
+/// only the legacy field (which a discovered `garglk.ini` overlay patches
+/// directly) is current at that point. `status_bar` has no such hazard — it is
+/// read through the theme.
 pub fn theme_style_colours(colors: &crate::colors::ColorScheme) -> (ThemePair, ThemePair) {
     let rgb = |c: Option<ratatui::style::Color>| match c {
         Some(ratatui::style::Color::Rgb(r, g, b)) => {
@@ -110,7 +117,7 @@ pub fn theme_style_colours(colors: &crate::colors::ColorScheme) -> (ThemePair, T
     };
     (
         (rgb(colors.transcript.fg), rgb(colors.transcript.bg)),
-        (rgb(colors.status_bar.fg), rgb(colors.status_bar.bg)),
+        (rgb(colors.theme.get("status_bar").style.fg), rgb(colors.theme.get("status_bar").style.bg)),
     )
 }
 
@@ -1131,11 +1138,17 @@ mod tests {
     #[test]
     fn theme_style_colours_converts_only_concrete_rgb() {
         // Rgb channels convert to 0x00RRGGBB; a named ANSI colour or an unset
-        // channel is terminal-defined, so it honestly reports None.
+        // channel is terminal-defined, so it honestly reports None. `transcript`
+        // still rides the legacy field (SQ-0309: kept, see module docs above);
+        // `status_bar` now reads through the theme, which has no setter here, so
+        // the grid-half assertion instead relies on the terminal default's
+        // `status_bar` never carrying a concrete Rgb channel.
         use ratatui::style::{Color, Style};
         let mut cs = crate::colors::ColorScheme::default();
         cs.transcript = Style::new().fg(Color::Rgb(0xC5, 0xC8, 0xC6)).bg(Color::Rgb(0x1D, 0x1F, 0x21));
-        cs.status_bar = Style::new().fg(Color::Yellow); // named -> None; bg unset -> None
+        let sb = cs.theme.get("status_bar").style;
+        assert!(!matches!(sb.fg, Some(Color::Rgb(..))), "precondition: status_bar fg isn't concrete Rgb");
+        assert!(!matches!(sb.bg, Some(Color::Rgb(..))), "precondition: status_bar bg isn't concrete Rgb");
         let (buffer, grid) = theme_style_colours(&cs);
         assert_eq!(buffer, (Some(0x00C5C8C6), Some(0x001D1F21)));
         assert_eq!(grid, (None, None));

@@ -2977,7 +2977,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 20, 10);
         let mut buf = Buffer::empty(area);
-        let frame = draw_pane_frame(&mut buf, area, cs.map_border_style, &PaneGlyphs::default(), cs.map_border);
+        let frame = draw_pane_frame(&mut buf, area, cs.map_border_style, &PaneGlyphs::default(), cs.theme.get("panel.border").style);
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "┌", "default map border is single-line");
         assert_eq!(buf.cell((0, 3)).unwrap().symbol(), "│");
         // Content is everything inside that one border — two more rows and columns of map than
@@ -3001,7 +3001,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
 
         // Draw the story pane frame (same as draw_frame does).
-        let frame = draw_pane_frame(&mut buf, area, cs.story_border_style, &PaneGlyphs::default(), cs.story_border);
+        let frame = draw_pane_frame(&mut buf, area, cs.story_border_style, &PaneGlyphs::default(), cs.theme.get("panel.border").style);
 
         // Overlay the adventure title (single centered segment, not active).
         draw_top_inset(

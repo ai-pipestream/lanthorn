@@ -523,14 +523,13 @@ pub fn resolve(
         }
         cs.statusbar_layout = crate::colors::StatusBarLayout { segments };
     }
-    // The frame maps onto the existing status_header fields (reuses the boxing path).
+    // The frame maps onto the existing status_header_style field (reuses the
+    // boxing path). `border_fg` no longer has a legacy field to land on
+    // (SQ-0309: `status_header`'s colour is theme-only now — see
+    // `render/transcript.rs`'s `theme.get("status_header")`); it is parsed
+    // above only for `write_style`'s round-trip.
     if let Some(b) = &doc.status_bar.border {
         cs.status_header_style = paneframe::parse_border_style(b);
-    }
-    if let Some(c) = &doc.status_bar.border_fg {
-        if let Some(color) = colors::parse_color_value(c, &gs) {
-            cs.status_header = cs.status_header.fg(color);
-        }
     }
 
     // Step 4: resolve symbols.
@@ -915,169 +914,15 @@ pub fn write_style_full(
     // Build a StyleDoc with every selector populated.
     let mut doc = StyleDoc::default();
 
-    // Color selectors (inverse mapping of style_to_decl per field).
-    doc.colors.selectors.insert("room".to_string(),              style_to_decl(&cs.room_normal));
-    doc.colors.selectors.insert("room:current".to_string(),      style_to_decl(&cs.room_current));
-    doc.colors.selectors.insert("room:selected".to_string(),     style_to_decl(&cs.room_selected));
-    doc.colors.selectors.insert("connector".to_string(),         style_to_decl(&cs.connector));
-    doc.colors.selectors.insert("connector:distorted".to_string(), style_to_decl(&cs.connector_distorted));
-    doc.colors.selectors.insert("connector:portal".to_string(),  style_to_decl(&cs.portal_connector));
-    doc.colors.selectors.insert("shared_path".to_string(),       style_to_decl(&cs.shared_path));
-    doc.colors.selectors.insert("border:focused".to_string(),    style_to_decl(&cs.focused_border));
-    doc.colors.selectors.insert("statusbar".to_string(),         style_to_decl(&cs.status_bar));
-    {
-        let mut d = style_to_decl(&cs.notification);
-        if cs.notification_style != paneframe::BorderStyle::None {
-            d.style = Some(paneframe::border_style_name(cs.notification_style).to_string());
-        }
-        decorate_sides(&mut d, cs.notification_style, cs.notification_sides);
-        decorate_glyphs(&mut d, &cs.notification_glyphs);
-        doc.colors.selectors.insert("notification".to_string(), d);
-    }
-    doc.colors.selectors.insert("transcript".to_string(),        style_to_decl(&cs.transcript));
-    doc.colors.selectors.insert("transcript:input".to_string(),    style_to_decl(&cs.transcript_input));
-    doc.colors.selectors.insert("transcript:meta".to_string(),     style_to_decl(&cs.transcript_meta));
-    doc.colors.selectors.insert("transcript:warning".to_string(),  style_to_decl(&cs.transcript_warning));
-    doc.colors.selectors.insert("transcript:crash".to_string(),    style_to_decl(&cs.transcript_crash));
-    doc.colors.selectors.insert("transcript:location".to_string(), style_to_decl(&cs.transcript_location));
-    doc.colors.selectors.insert("transcript:system".to_string(),   style_to_decl(&cs.transcript_system));
-    doc.colors.selectors.insert("warning_marker".to_string(),      style_to_decl(&cs.warning_marker));
-    doc.colors.selectors.insert("suggestion".to_string(),        style_to_decl(&cs.suggestion));
-    {
-        // The suggestion popup box reuses the `suggestion` color (single source of
-        // truth); this selector carries ONLY its border style/sides/glyphs — no
-        // fg/bg — so it can't clobber a user's edit to the `suggestion` color.
-        let mut d = Decl::default();
-        if cs.suggestion_line_style != paneframe::BorderStyle::None {
-            d.style = Some(paneframe::border_style_name(cs.suggestion_line_style).to_string());
-        }
-        decorate_sides(&mut d, cs.suggestion_line_style, cs.suggestion_line_sides);
-        decorate_glyphs(&mut d, &cs.suggestion_line_glyphs);
-        doc.colors.selectors.insert("suggestion_line".to_string(), d);
-    }
-    doc.colors.selectors.insert("input:text".to_string(),        style_to_decl(&cs.input_text));
-    doc.colors.selectors.insert("input:prompt".to_string(),      style_to_decl(&cs.input_prompt));
-    doc.colors.selectors.insert("scrollbar".to_string(),         style_to_decl(&cs.scrollbar));
-    doc.colors.selectors.insert("more_prompt".to_string(),       style_to_decl(&cs.more_prompt));
-    doc.colors.selectors.insert("tidy_progress".to_string(),     style_to_decl(&cs.tidy_progress));
-    doc.colors.selectors.insert("meta_marker".to_string(),       style_to_decl(&cs.meta_marker));
-    doc.colors.selectors.insert("hyperlink".to_string(),         style_to_decl(&cs.hyperlink));
-    doc.colors.selectors.insert("helpbar".to_string(),           style_to_decl(&cs.help_bar));
-    // New pane border/title/tab/header/input selectors.
-    // Helper: set style_<side> on a Decl for any side that differs from `base`.
-    fn decorate_sides(d: &mut Decl, base: crate::render::paneframe::BorderStyle, sides: crate::render::paneframe::PaneSides) {
-        use crate::render::paneframe::border_style_name;
-        if sides.top != base    { d.style_top    = Some(border_style_name(sides.top).to_string()); }
-        if sides.bottom != base { d.style_bottom = Some(border_style_name(sides.bottom).to_string()); }
-        if sides.left != base   { d.style_left   = Some(border_style_name(sides.left).to_string()); }
-        if sides.right != base  { d.style_right  = Some(border_style_name(sides.right).to_string()); }
-    }
-    // Helper: copy all glyph overrides from a PaneGlyphs onto a Decl.
-    fn decorate_glyphs(d: &mut Decl, g: &crate::render::paneframe::PaneGlyphs) {
-        d.glyph_top    = g.top.clone();
-        d.glyph_bottom = g.bottom.clone();
-        d.glyph_left   = g.left.clone();
-        d.glyph_right  = g.right.clone();
-        d.glyph_tl     = g.tl.clone();
-        d.glyph_tr     = g.tr.clone();
-        d.glyph_bl     = g.bl.clone();
-        d.glyph_br     = g.br.clone();
-    }
-    {
-        let mut d = style_to_decl(&cs.map_border);
-        d.style = Some(paneframe::border_style_name(cs.map_border_style).to_string());
-        decorate_sides(&mut d, cs.map_border_style, cs.map_border_sides);
-        decorate_glyphs(&mut d, &cs.map_border_glyphs);
-        if !cs.map_header_on { d.header = Some(false); }
-        doc.colors.selectors.insert("map_border".to_string(), d);
-    }
-    {
-        let mut d = style_to_decl(&cs.story_border);
-        d.style = Some(paneframe::border_style_name(cs.story_border_style).to_string());
-        decorate_sides(&mut d, cs.story_border_style, cs.story_border_sides);
-        decorate_glyphs(&mut d, &cs.story_border_glyphs);
-        if !cs.story_header_on { d.header = Some(false); }
-        doc.colors.selectors.insert("story_border".to_string(), d);
-    }
-    doc.colors.selectors.insert("story_title".to_string(),        style_to_decl(&cs.story_title));
-    doc.colors.selectors.insert("inventory:dock".to_string(),     style_to_decl(&cs.inventory_dock));
-    doc.colors.selectors.insert("map_layer_tab".to_string(),      style_to_decl(&cs.map_layer_tab));
-    doc.colors.selectors.insert("map_layer_tab_active".to_string(), style_to_decl(&cs.map_layer_tab_active));
-    doc.colors.selectors.insert("story_info".to_string(),         style_to_decl(&cs.story_info));
-    doc.colors.selectors.insert("story_info:title".to_string(),   style_to_decl(&cs.story_info_title));
-    doc.colors.selectors.insert("story_info:label".to_string(),   style_to_decl(&cs.story_info_label));
-    doc.colors.selectors.insert("story_info:value".to_string(),   style_to_decl(&cs.story_info_value));
-    doc.colors.selectors.insert("story_info:blurb".to_string(),   style_to_decl(&cs.story_info_blurb));
-    doc.colors.selectors.insert("story_info:link".to_string(),    style_to_decl(&cs.story_info_link));
-    doc.colors.selectors.insert("story_info:cover".to_string(),   style_to_decl(&cs.story_info_cover));
-    doc.colors.selectors.insert("story_badge".to_string(),        style_to_decl(&cs.story_badge));
-    doc.colors.selectors.insert("story_header".to_string(),        style_to_decl(&cs.story_header));
-    doc.colors.selectors.insert("story_header:active".to_string(), style_to_decl(&cs.story_header_active));
-    doc.colors.selectors.insert("story_author".to_string(),        style_to_decl(&cs.story_author));
-    doc.colors.selectors.insert("story_year".to_string(),          style_to_decl(&cs.story_year));
-    doc.colors.selectors.insert("story_no_metadata".to_string(),   style_to_decl(&cs.story_no_metadata));
-    doc.colors.selectors.insert("story_tile".to_string(),          style_to_decl(&cs.story_tile));
-    doc.colors.selectors.insert("story_tile:selected".to_string(), style_to_decl(&cs.story_tile_selected));
-    doc.colors.selectors.insert("graphics".to_string(),           style_to_decl(&cs.graphics));
-    doc.colors.selectors.insert("inline_image".to_string(),       style_to_decl(&cs.inline_image));
-    {
-        let mut d = style_to_decl(&cs.status_header);
-        if cs.status_header_style != paneframe::BorderStyle::None {
-            d.style = Some(paneframe::border_style_name(cs.status_header_style).to_string());
-        }
-        decorate_sides(&mut d, cs.status_header_style, cs.status_header_sides);
-        decorate_glyphs(&mut d, &cs.status_header_glyphs);
-        doc.colors.selectors.insert("status_header".to_string(), d);
-    }
-    {
-        let mut d = style_to_decl(&cs.input_line);
-        if cs.input_line_style != paneframe::BorderStyle::None {
-            d.style = Some(paneframe::border_style_name(cs.input_line_style).to_string());
-        }
-        decorate_sides(&mut d, cs.input_line_style, cs.input_line_sides);
-        decorate_glyphs(&mut d, &cs.input_line_glyphs);
-        doc.colors.selectors.insert("input_line".to_string(), d);
-    }
-    {
-        let mut d = style_to_decl(&cs.dialog);
-        d.style = Some(paneframe::border_style_name(cs.dialog_box_style).to_string());
-        if cs.dialog_shadow_on {
-            d.shadow = Some(true);
-        }
-        if cs.dialog_placement != crate::render::dialog::DialogPlacement::Center {
-            d.placement = Some(cs.dialog_placement.as_token().to_string());
-        }
-        if cs.dialog_margin != 0 {
-            d.margin = Some(cs.dialog_margin);
-        }
-        decorate_glyphs(&mut d, &cs.dialog_glyphs);
-        doc.colors.selectors.insert("dialog".to_string(), d);
-    }
-    doc.colors.selectors.insert("dialog:title".to_string(),         style_to_decl(&cs.dialog_title));
-    doc.colors.selectors.insert("debug_pane".to_string(),           style_to_decl(&cs.debug_pane));
-    doc.colors.selectors.insert("debug_pane:focused".to_string(),   style_to_decl(&cs.debug_pane_focused));
-    doc.colors.selectors.insert("debug_title".to_string(),          style_to_decl(&cs.debug_title));
-    doc.colors.selectors.insert("debug_disasm_pc".to_string(),      style_to_decl(&cs.debug_disasm_pc));
-    doc.colors.selectors.insert("debug_tab".to_string(),            style_to_decl(&cs.debug_tab));
-    doc.colors.selectors.insert("debug_tab:active".to_string(),     style_to_decl(&cs.debug_tab_active));
-    doc.colors.selectors.insert("debug_exec_mark".to_string(),      style_to_decl(&cs.debug_exec_mark));
-    doc.colors.selectors.insert("debug_tooltip".to_string(),        style_to_decl(&cs.debug_tooltip));
-    doc.colors.selectors.insert("hotkey:key".to_string(),           style_to_decl(&cs.hotkey_key));
-    doc.colors.selectors.insert("dialog:button".to_string(),        style_to_decl(&cs.dialog_button));
-    doc.colors.selectors.insert("dialog:button:active".to_string(), style_to_decl(&cs.dialog_button_active));
-    doc.colors.selectors.insert("dialog:shadow".to_string(),        style_to_decl(&cs.dialog_shadow));
-    doc.colors.selectors.insert("room_panel".to_string(),           style_to_decl(&cs.room_panel));
-    doc.colors.selectors.insert("upper_window".to_string(),         style_to_decl(&cs.upper_window));
-    {
-        let mut d = style_to_decl(&cs.upper_window_border);
-        d.style = Some(paneframe::border_style_name(cs.virtual_window_border).to_string());
-        decorate_sides(&mut d, cs.virtual_window_border, cs.upper_window_border_sides);
-        decorate_glyphs(&mut d, &cs.upper_window_border_glyphs);
-        doc.colors.selectors.insert("upper_window_border".to_string(), d);
-    }
-    doc.colors.selectors.insert("sound_beep_high".to_string(), style_to_decl(&cs.sound_beep_high));
-    doc.colors.selectors.insert("sound_beep_low".to_string(),  style_to_decl(&cs.sound_beep_low));
-    doc.colors.selectors.insert("loc_indicator".to_string(), style_to_decl(&cs.loc_indicator));
+    // SQ-0309: the per-field `[colors]` selector export is gone — that
+    // schema no longer feeds ColorScheme/theme resolution at all (see
+    // `resolve()` above; `colors::resolve_base` always passes empty
+    // overrides to `from_ghostty`), so re-populating it here would just
+    // write dead data. The live look now round-trips through the
+    // registry-driven `[elements]`/`[panel]`/... schema instead
+    // (`theme::template::commented_template`), which this function does not
+    // (yet) emit uncommented; only the still-live symbols/transcript-rules/
+    // statusbar sections below are written.
 
     // Symbol slots: use default preset names, then override every slot explicitly.
     // This guarantees round-trip fidelity regardless of which preset produced the set.
@@ -1290,9 +1135,10 @@ align = "bogus"
         assert!(matches!(cs.statusbar_layout.segments[2].align, Align::Left));
         assert_eq!(cs.statusbar_layout.segments[0].style.fg, Some(ratatui::style::Color::Yellow));
         assert!(warnings.iter().any(|w| w.contains("align")), "unknown align warns: {warnings:?}");
-        // border maps onto the existing status_header machinery.
+        // border maps onto the existing status_header_style machinery. SQ-0309:
+        // `border_fg` no longer lands on a legacy field (status_header's colour
+        // is theme-only now) — parsing it still round-trips via `write_style`.
         assert!(matches!(cs.status_header_style, crate::render::paneframe::BorderStyle::Single));
-        assert_eq!(cs.status_header.fg, Some(ratatui::style::Color::Cyan));
     }
 
     #[test]

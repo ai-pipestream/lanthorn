@@ -539,7 +539,7 @@ fn apply_turn_events(state: &mut AppState, result: &TurnResult) {
         state.push_transcript_kind(line, app::state::TranscriptKind::Warning);
     }
     if let Some(lines) = &result.fault {
-        let crash = state.colors.transcript_crash;
+        let crash = state.colors.theme.get("transcript_crash").style;
         for line in lines {
             state.push_transcript_styled(line, app::state::TranscriptKind::Warning, crash);
         }

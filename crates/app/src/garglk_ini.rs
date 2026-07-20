@@ -181,9 +181,11 @@ impl GarglkOverlay {
         for (n, slot) in self.grid.iter().enumerate() {
             if let Some((fg, bg)) = *slot {
                 grid_count += 1;
-                if n == 0 {
-                    cs.upper_window = cs.upper_window.fg(fg).bg(bg);
-                } else {
+                // Slot 0 (Normal) folds into the grid element base
+                // (`upper_window`) — SQ-0309: that base is now theme-only
+                // (`color_decls` feeds it into the theme's garglk layer), so
+                // there is no legacy field left to write here.
+                if n != 0 {
                     cs.glk_styles[1][n] = ratatui::style::Style {
                         fg: Some(fg),
                         bg: Some(bg),
@@ -193,19 +195,13 @@ impl GarglkOverlay {
             }
         }
 
-        if let Some(c) = self.linkcolor {
-            cs.hyperlink = cs.hyperlink.fg(c);
-        }
-        if let Some(c) = self.bordercolor {
-            cs.upper_window_border = cs.upper_window_border.fg(c);
-        }
+        // `linkcolor`/`bordercolor`/the grid half of `windowcolor` are SQ-0309
+        // dead legacy-field writes: `hyperlink`/`upper_window_border`/
+        // `upper_window` reach the render path only through the theme now
+        // (`color_decls`, above), which already covers all three.
         if let Some(c) = self.windowcolor {
-            // Paint the buffer page background; also the grid page unless gcolor 0
-            // already set it.
+            // Paint the buffer page background (the grid half rides the theme).
             cs.transcript = cs.transcript.bg(c);
-            if self.grid[0].is_none() {
-                cs.upper_window = cs.upper_window.bg(c);
-            }
         }
 
         GarglkSummary {
@@ -529,13 +525,11 @@ stylehint 0
         assert_eq!(cs.transcript.fg, Some(Color::Rgb(255, 255, 255)));
         // windowcolor overrides the buffer background (applied after tcolor 0 bg).
         assert_eq!(cs.transcript.bg, Some(Color::Rgb(0x10, 0x10, 0x10)));
-        // gcolor 0 → upper_window element (grid slot 0 stays None).
+        // gcolor 0 → grid slot 0 stays None too (its colour now rides the theme
+        // only — see `color_decls_maps_non_glk_colours_to_theme_selectors`).
         assert_eq!(cs.glk_styles[1][0], ratatui::style::Style::default());
-        assert_eq!(cs.upper_window.fg, Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
-        assert_eq!(cs.upper_window.bg, Some(Color::Rgb(0x00, 0x11, 0x22)));
-        // linkcolor / bordercolor land on the element fields.
-        assert_eq!(cs.hyperlink.fg, Some(Color::Rgb(0, 255, 255)));
-        assert_eq!(cs.upper_window_border.fg, Some(Color::Rgb(0xff, 0x88, 0x00)));
+        // linkcolor / bordercolor are theme-only now (SQ-0309): no legacy
+        // `hyperlink`/`upper_window_border` field left to assert on here.
 
         assert_eq!(summary.buffer_count, 2);
         assert_eq!(summary.grid_count, 1);
@@ -561,13 +555,14 @@ stylehint 0
     }
 
     #[test]
-    fn windowcolor_leaves_grid_bg_when_gcolor0_set() {
-        // gcolor 0 sets the grid background explicitly → windowcolor must not
-        // clobber it (but still paints the buffer background).
+    fn windowcolor_paints_buffer_background() {
+        // SQ-0309: `apply()` no longer touches the grid background at all (that
+        // now rides `color_decls` into the theme exclusively — see
+        // `color_decls_maps_non_glk_colours_to_theme_selectors`); it still
+        // paints the buffer (`transcript`) background directly.
         let ov = resolve("gcolor 0 ffffff 010203\nwindowcolor 0a0b0c\n", "a.z5");
         let mut cs = ColorScheme::terminal_default();
         ov.apply(&mut cs);
-        assert_eq!(cs.upper_window.bg, Some(Color::Rgb(1, 2, 3)));
         assert_eq!(cs.transcript.bg, Some(Color::Rgb(0x0a, 0x0b, 0x0c)));
     }
 

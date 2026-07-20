@@ -2837,7 +2837,7 @@ mod tests {
         use ratatui::style::Color;
         let machine = minimal_machine();
         let mut state = AppState::default();
-        let crash_style = state.colors.transcript_crash;
+        let crash_style = state.colors.theme.get("transcript_crash").style;
         state.push_transcript_styled("*** VM FAULT ***", TranscriptKind::Warning, crash_style);
         state.focus = Focus::Game;
 
@@ -2849,10 +2849,15 @@ mod tests {
         let y = (1u16..9)
             .find(|&y| buf.cell((0, y)).map(|c| c.symbol()) == Some("!"))
             .expect("crash line gutter '!' must appear in column 0");
-        // The crash TEXT (past the 2-col gutter) must carry the crash style's fg (Red),
-        // NOT the default Warning yellow — proving the explicit style override applied.
+        // The crash TEXT (past the 2-col gutter) must carry the crash style's fg
+        // AND bold — proving the explicit style override applied. SQ-0309:
+        // `transcript_crash` derives from the `alert` role same as the default
+        // Warning yellow now (docs/design/2026-07-14-styling-role-redesign.md
+        // §2), so BOLD is what distinguishes a crash line, not colour.
         assert_eq!(buf.cell((2, y)).unwrap().style().fg, crash_style.fg);
-        assert_eq!(crash_style.fg, Some(Color::Red));
+        assert_eq!(crash_style.fg, Some(Color::Yellow));
+        assert!(crash_style.add_modifier.contains(ratatui::style::Modifier::BOLD));
+        assert!(buf.cell((2, y)).unwrap().style().add_modifier.contains(ratatui::style::Modifier::BOLD));
     }
 
     #[test]
@@ -2889,8 +2894,10 @@ mod tests {
     }
 
     #[test]
-    fn render_story_location_line_is_bold() {
-        use ratatui::style::Modifier;
+    fn render_story_location_line_is_accent_coloured() {
+        // SQ-0309: `transcript_location` derives from the `accent` role, not
+        // bold-only-white (docs/design/2026-07-14-styling-role-redesign.md §2).
+        use ratatui::style::Color;
         let machine = minimal_machine();
         let mut state = AppState::default();
         state.current_room_name = Some("West of House".to_string());
@@ -2905,7 +2912,11 @@ mod tests {
             let row: String = (0..40u16).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect();
             row.starts_with("West of House")
         }).expect("location line must render");
-        assert!(buf.cell((0, y)).unwrap().modifier.contains(Modifier::BOLD), "location header must be bold");
+        assert_eq!(
+            buf.cell((0, y)).unwrap().style().fg,
+            Some(Color::Cyan),
+            "location header must carry the accent colour"
+        );
     }
 
     #[test]

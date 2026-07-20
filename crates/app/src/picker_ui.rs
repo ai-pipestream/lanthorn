@@ -2329,13 +2329,16 @@ mod tests {
         let row1 = row_text(&buf, 3, area);
         assert!(row1.contains("(no metadata yet)"), "reads as 'nothing fetched yet': {row1:?}");
 
-        // Styled via cs.story_no_metadata, not cs.story_author — terminal_default
-        // gives them distinct fg colors (DarkGray vs White), so this checks the
-        // right field was actually applied, not just that text is present.
+        // Styled via theme.get("story_no_metadata"), not "story_author" —
+        // terminal_default gives them distinct fg colors (DarkGray vs White), so
+        // this checks the right selector was actually applied, not just that
+        // text is present.
+        let no_metadata_fg = cs.theme.get("story_no_metadata").style.fg;
+        let author_fg = cs.theme.get("story_author").style.fg;
         let x = char_pos(&row1, "(no metadata yet)") as u16;
         let cell = buf.cell((area.left() + x, 3)).unwrap();
-        assert_eq!(cell.fg, cs.story_no_metadata.fg.unwrap(), "placeholder must use story_no_metadata's color");
-        assert_ne!(cs.story_no_metadata.fg, cs.story_author.fg, "sanity: the two styles must actually differ");
+        assert_eq!(cell.fg, no_metadata_fg.unwrap(), "placeholder must use story_no_metadata's color");
+        assert_ne!(no_metadata_fg, author_fg, "sanity: the two styles must actually differ");
     }
 
     #[test]
@@ -3191,13 +3194,14 @@ mod tests {
                 c.set_symbol("#");
             }
         }
-        super::draw_progress_line(&mut buf, area, "Fetching 7/23 — Zork I", cs.story_header_active);
+        let story_header_active = cs.theme.get("story_header_active").style;
+        super::draw_progress_line(&mut buf, area, "Fetching 7/23 — Zork I", story_header_active);
         let row = row_text(&buf, area.bottom() - 1, area);
         assert!(row.contains("Fetching 7/23 — Zork I"), "{row:?}");
         assert!(!row.contains('#'), "the overlay must clear the whole row, not just prefix it: {row:?}");
         let cell = buf.cell((area.left(), area.bottom() - 1)).unwrap();
         assert_eq!(
-            Some(cell.fg), cs.story_header_active.fg,
+            Some(cell.fg), story_header_active.fg,
             "progress line must use a themed style, not a hard-coded color"
         );
     }
