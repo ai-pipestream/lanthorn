@@ -167,13 +167,13 @@ impl DialogStyle {
     /// animation) live in one place instead of being duplicated per modal.
     pub fn from_colors(cs: &crate::colors::ColorScheme) -> DialogStyle {
         DialogStyle {
-            frame: cs.dialog,
+            frame: cs.theme.get("dialog").style,
             box_style: cs.dialog_box_style,
             glyphs: cs.dialog_glyphs.clone(),
-            title: cs.dialog_title,
-            button: cs.dialog_button,
-            button_active: cs.dialog_button_active,
-            shadow: cs.dialog_shadow,
+            title: cs.theme.get("dialog_title").style,
+            button: cs.theme.get("dialog_button").style,
+            button_active: cs.theme.get("dialog_button_active").style,
+            shadow: cs.theme.get("dialog_shadow").style,
             shadow_on: cs.dialog_shadow_on,
             placement: cs.dialog_placement,
             margin: cs.dialog_margin,
@@ -490,17 +490,18 @@ mod tests {
 
     #[test]
     fn from_colors_matches_inline_build() {
-        // Guard: DialogStyle::from_colors must reproduce the previous per-modal
-        // inline `DialogStyle { frame: cs.dialog, ... }` build byte-for-byte.
+        // Guard: DialogStyle::from_colors must reproduce the themed per-modal
+        // build byte-for-byte (SQ-0309: colour fields now read `cs.theme.get(...)`
+        // rather than the legacy `ColorScheme` fields directly).
         let cs = crate::colors::ColorScheme::terminal_default();
         let ds = DialogStyle::from_colors(&cs);
-        assert_eq!(ds.frame, cs.dialog);
+        assert_eq!(ds.frame, cs.theme.get("dialog").style);
         assert_eq!(ds.box_style, cs.dialog_box_style);
         assert_eq!(ds.glyphs, cs.dialog_glyphs);
-        assert_eq!(ds.title, cs.dialog_title);
-        assert_eq!(ds.button, cs.dialog_button);
-        assert_eq!(ds.button_active, cs.dialog_button_active);
-        assert_eq!(ds.shadow, cs.dialog_shadow);
+        assert_eq!(ds.title, cs.theme.get("dialog_title").style);
+        assert_eq!(ds.button, cs.theme.get("dialog_button").style);
+        assert_eq!(ds.button_active, cs.theme.get("dialog_button_active").style);
+        assert_eq!(ds.shadow, cs.theme.get("dialog_shadow").style);
         assert_eq!(ds.shadow_on, cs.dialog_shadow_on);
     }
 
