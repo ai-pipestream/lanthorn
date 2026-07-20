@@ -566,11 +566,12 @@ pub(crate) fn run_story_picker(
             }
             // The manual IFDB-entry prompt (SQ-0371) takes the footer row while
             // active; otherwise a fetch's status line, otherwise the hints.
+            let story_header_active = cs.theme.get("story_header_active").style;
             if let Some(field) = &manual_ifdb {
                 let prompt = format!("IFDB URL or id (Enter to fetch, Esc to cancel): {}▏", field.as_str());
-                draw_progress_line(buf, list_area, &prompt, cs.story_header_active);
+                draw_progress_line(buf, list_area, &prompt, story_header_active);
             } else if let Some(msg) = &progress_line {
-                draw_progress_line(buf, list_area, msg, cs.story_header_active);
+                draw_progress_line(buf, list_area, msg, story_header_active);
             }
             if preview.is_none() && panel_area.width > 0 {
                 if let Some(entry) = stories.get(list.selected) {
@@ -1114,11 +1115,22 @@ fn draw_story_picker(
     let mut row_rects: Vec<(usize, Rect)> = Vec::new();
     let mut header_rects: Vec<(SortKey, Rect)> = Vec::new();
 
+    let dialog = cs.theme.get("dialog").style;
+    let dialog_title = cs.theme.get("dialog_title").style;
+    let story_header = cs.theme.get("story_header").style;
+    let story_header_active = cs.theme.get("story_header_active").style;
+    let dialog_button_active = cs.theme.get("dialog_button_active").style;
+    let story_author = cs.theme.get("story_author").style;
+    let story_no_metadata = cs.theme.get("story_no_metadata").style;
+    let story_year = cs.theme.get("story_year").style;
+    let story_badge = cs.theme.get("story_badge").style;
+    let scrollbar = cs.theme.get("scrollbar").style;
+
     // Background fill.
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             if let Some(c) = buf.cell_mut((x, y)) {
-                c.set_symbol(" ").set_style(cs.dialog);
+                c.set_symbol(" ").set_style(dialog);
             }
         }
     }
@@ -1129,7 +1141,7 @@ fn draw_story_picker(
         stories.len(),
         dir.display()
     );
-    draw_str_clipped(buf, area.x, area.y, &header, cs.dialog_title, area);
+    draw_str_clipped(buf, area.x, area.y, &header, dialog_title, area);
 
     // List region (title bar + column-header row at top, footer at bottom).
     let list_top = area.y + 2;
@@ -1178,18 +1190,18 @@ fn draw_story_picker(
     // its direction arrow.
     let header_y = area.y + 1;
     let (title_label, title_active) = header_label("TITLE", SortKey::Title, sort);
-    let title_hstyle = if title_active { cs.story_header_active } else { cs.story_header };
+    let title_hstyle = if title_active { story_header_active } else { story_header };
     draw_str_clipped(buf, title_x, header_y, &title_label, title_hstyle, area);
     header_rects.push((SortKey::Title, Rect::new(title_x, header_y, cols.title_w, 1)));
     if cols.author_w > 0 {
         let (author_label, author_active) = header_label("AUTHOR", SortKey::Author, sort);
-        let author_hstyle = if author_active { cs.story_header_active } else { cs.story_header };
+        let author_hstyle = if author_active { story_header_active } else { story_header };
         draw_str_clipped(buf, author_x, header_y, &author_label, author_hstyle, area);
         header_rects.push((SortKey::Author, Rect::new(author_x, header_y, cols.author_w, 1)));
     }
     if cols.year_w > 0 {
         let (year_label, year_active) = header_label("YEAR", SortKey::Year, sort);
-        let year_hstyle = if year_active { cs.story_header_active } else { cs.story_header };
+        let year_hstyle = if year_active { story_header_active } else { story_header };
         draw_str_clipped(buf, year_x, header_y, &year_label, year_hstyle, area);
         header_rects.push((SortKey::Year, Rect::new(year_x, header_y, cols.year_w, 1)));
     }
@@ -1199,7 +1211,7 @@ fn draw_story_picker(
     if badges_shown {
         let interp_hx = area.left() + row_w - 1 - cluster_w - COL_GAP - INTERP_COL_W;
         let (type_label, type_active) = header_label("TYPE", SortKey::Type, sort);
-        let type_hstyle = if type_active { cs.story_header_active } else { cs.story_header };
+        let type_hstyle = if type_active { story_header_active } else { story_header };
         draw_str_clipped(buf, interp_hx, header_y, &type_label, type_hstyle, area);
         header_rects.push((SortKey::Type, Rect::new(interp_hx, header_y, INTERP_COL_W, 1)));
     }
@@ -1209,7 +1221,7 @@ fn draw_story_picker(
         let row_rect = Rect::new(area.x, y, row_w, 1);
         row_rects.push((i, row_rect));
         let sel = i == selected;
-        let style = if sel { cs.dialog_button_active } else { cs.dialog };
+        let style = if sel { dialog_button_active } else { dialog };
         for x in area.left()..area.left() + row_w {
             if let Some(c) = buf.cell_mut((x, y)) {
                 c.set_symbol(" ").set_style(style);
@@ -1224,11 +1236,11 @@ fn draw_story_picker(
         if cols.author_w > 0 {
             let (author_txt, author_style) = match entry.meta.author.as_deref() {
                 Some(a) if !a.is_empty() => {
-                    (truncate_to_width(a, cols.author_w as usize), cs.story_author)
+                    (truncate_to_width(a, cols.author_w as usize), story_author)
                 }
                 _ => (
                     truncate_to_width("(no metadata yet)", cols.author_w as usize),
-                    cs.story_no_metadata,
+                    story_no_metadata,
                 ),
             };
             // Selection highlight wins over the column's own color, same as
@@ -1240,7 +1252,7 @@ fn draw_story_picker(
         if cols.year_w > 0 {
             if let Some(yr) = entry.meta.year.as_deref().filter(|s| !s.is_empty()) {
                 let year_txt = truncate_to_width(yr, cols.year_w as usize);
-                let year_style = if sel { style } else { cs.story_year };
+                let year_style = if sel { style } else { story_year };
                 draw_str_clipped(buf, year_x, y, &year_txt, year_style, row_rect);
             }
         }
@@ -1257,7 +1269,7 @@ fn draw_story_picker(
             let interp_x = bx - COL_GAP - INTERP_COL_W;
             let interp_txt =
                 truncate_to_width(&interp_label(&entry.meta, b.blorb), INTERP_COL_W as usize);
-            let interp_style = if sel { style } else { cs.story_badge };
+            let interp_style = if sel { style } else { story_badge };
             draw_str_clipped(buf, interp_x, y, &interp_txt, interp_style, row_rect);
             // On the selection bar the plain badge fg (e.g. green) is low-contrast
             // against the highlight, so reverse it into a block: the badge colour
@@ -1267,10 +1279,10 @@ fn draw_story_picker(
             // not a green block.
             let badge_style = if sel {
                 Style::new()
-                    .fg(cs.dialog_button_active.fg.unwrap_or(Color::Reset))
-                    .bg(cs.story_badge.fg.unwrap_or(Color::Reset))
+                    .fg(dialog_button_active.fg.unwrap_or(Color::Reset))
+                    .bg(story_badge.fg.unwrap_or(Color::Reset))
             } else {
-                cs.story_badge
+                story_badge
             };
             if b.save {
                 draw_str_clipped(buf, bx, y, glyphs.save, badge_style, row_rect);
@@ -1283,12 +1295,12 @@ fn draw_story_picker(
 
     if scrollbar_visible {
         let sb_area = Rect::new(area.right().saturating_sub(1), list_top, 1, rows as u16);
-        app::render::scroll::draw_scrollbar(buf, sb_area, total, rows, list.target_offset(), cs.scrollbar);
+        app::render::scroll::draw_scrollbar(buf, sb_area, total, rows, list.target_offset(), scrollbar);
     }
 
     // Footer hint.
     let footer = build_footer(area.width);
-    let fstyle = Style::new().fg(Color::DarkGray).patch(cs.dialog);
+    let fstyle = Style::new().fg(Color::DarkGray).patch(dialog);
     draw_str_clipped(buf, area.x, list_bottom, &footer, fstyle, area);
 
     (row_rects, rows, header_rects)
@@ -1317,11 +1329,18 @@ fn draw_story_gallery(
     use app::cover_gallery as g;
     let mut tile_rects: Vec<(usize, Rect)> = Vec::new();
 
+    let dialog = cs.theme.get("dialog").style;
+    let dialog_title = cs.theme.get("dialog_title").style;
+    let story_tile_selected = cs.theme.get("story_tile_selected").style;
+    let story_info_cover = cs.theme.get("story_info_cover").style;
+    let story_tile = cs.theme.get("story_tile").style;
+    let scrollbar = cs.theme.get("scrollbar").style;
+
     // Background fill.
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             if let Some(c) = buf.cell_mut((x, y)) {
-                c.set_symbol(" ").set_style(cs.dialog);
+                c.set_symbol(" ").set_style(dialog);
             }
         }
     }
@@ -1332,7 +1351,7 @@ fn draw_story_gallery(
         stories.len(),
         dir.display()
     );
-    draw_str_clipped(buf, area.x, area.y, &header, cs.dialog_title, area);
+    draw_str_clipped(buf, area.x, area.y, &header, dialog_title, area);
 
     // Grid region: below the header, above the footer row.
     let grid_top = area.y + 2;
@@ -1368,7 +1387,7 @@ fn draw_story_gallery(
             // Letterbox fill. When selected, fill the whole tile background with the
             // selection style so the bands around a centred (letterboxed) cover are
             // highlighted too — not only the gutter frame.
-            let bg_style = if sel { cs.story_tile_selected } else { cs.story_info_cover };
+            let bg_style = if sel { story_tile_selected } else { story_info_cover };
             for y in cover_rect.top()..cover_rect.bottom() {
                 for x in cover_rect.left()..cover_rect.right() {
                     if let Some(c) = buf.cell_mut((x, y)) {
@@ -1397,7 +1416,7 @@ fn draw_story_gallery(
                 // No cover art: draw a simple placeholder — a border around the tile
                 // with the wrapped title centred inside it. Selected tiles keep the
                 // selection background (filled above) so it sits on the highlight.
-                let title_style = if sel { cs.story_tile_selected } else { cs.story_tile };
+                let title_style = if sel { story_tile_selected } else { story_tile };
                 if !sel {
                     for y in cover_rect.top()..cover_rect.bottom() {
                         for x in cover_rect.left()..cover_rect.right() {
@@ -1441,7 +1460,7 @@ fn draw_story_gallery(
             // Clipped to the grid, so a tile against an edge frames only on the
             // sides that have a gutter.
             if sel {
-                let sfx = cs.story_tile_selected;
+                let sfx = story_tile_selected;
                 let left = tile.x as i32 - 1;
                 let right = tile.x as i32 + g::TILE_W as i32;
                 let top = tile.y as i32 - 1;
@@ -1472,14 +1491,14 @@ fn draw_story_gallery(
     // Scrollbar in the spare width to the grid's right when the grid overflows.
     if total_rows > vis {
         let sb_area = Rect::new(area.right().saturating_sub(1), grid.y, 1, grid.height);
-        app::render::scroll::draw_scrollbar(buf, sb_area, total_rows, vis, *first_row, cs.scrollbar);
+        app::render::scroll::draw_scrollbar(buf, sb_area, total_rows, vis, *first_row, scrollbar);
     }
 
     // Footer hint.
     let footer = " ←/→/↑/↓: move   Enter / 2×click: open   i/Tab: info   g: list   q / Esc: quit";
     let fstyle = ratatui::style::Style::new()
         .fg(ratatui::style::Color::DarkGray)
-        .patch(cs.dialog);
+        .patch(dialog);
     let footer_txt = truncate_to_width(footer, area.width as usize);
     draw_str_clipped(buf, area.x, grid_bottom, &footer_txt, fstyle, area);
 
@@ -1548,11 +1567,19 @@ fn draw_info_panel(
     if area.width < 2 || area.height < 2 {
         return 0;
     }
+    let story_info = cs.theme.get("story_info").style;
+    let story_info_title = cs.theme.get("story_info_title").style;
+    let story_info_value = cs.theme.get("story_info_value").style;
+    let story_info_label = cs.theme.get("story_info_label").style;
+    let story_info_blurb = cs.theme.get("story_info_blurb").style;
+    let story_info_link = cs.theme.get("story_info_link").style;
+    let story_info_cover = cs.theme.get("story_info_cover").style;
+    let scrollbar = cs.theme.get("scrollbar").style;
     // Background fill.
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             if let Some(c) = buf.cell_mut((x, y)) {
-                c.set_symbol(" ").set_style(cs.story_info);
+                c.set_symbol(" ").set_style(story_info);
             }
         }
     }
@@ -1563,9 +1590,9 @@ fn draw_info_panel(
         area,
         app::render::paneframe::BorderStyle::Single,
         &app::render::paneframe::PaneGlyphs::default(),
-        cs.story_info,
+        story_info,
     );
-    draw_str_clipped(buf, area.x + 2, area.y, " Info ", cs.story_info_title, area);
+    draw_str_clipped(buf, area.x + 2, area.y, " Info ", story_info_title, area);
 
     let mut inner = frame.content;
 
@@ -1591,7 +1618,7 @@ fn draw_info_panel(
                     for y in fill_area.top()..fill_area.bottom() {
                         for x in fill_area.left()..fill_area.right() {
                             if let Some(c) = buf.cell_mut((x, y)) {
-                                c.set_symbol(" ").set_style(cs.story_info_cover);
+                                c.set_symbol(" ").set_style(story_info_cover);
                             }
                         }
                     }
@@ -1624,13 +1651,13 @@ fn draw_info_panel(
     let mut resource_refs: Vec<(usize, ResourceRef)> = Vec::new();
 
     // Title.
-    lines.push((title.to_string(), cs.story_info_title));
+    lines.push((title.to_string(), story_info_title));
     // filename · size · modified.
     let mut fs_line = format!("{} · {}", filename, human_size(meta.size_bytes));
     if let Some(m) = &meta.modified {
         fs_line.push_str(&format!(" · {m}"));
     }
-    lines.push((fs_line, cs.story_info_value));
+    lines.push((fs_line, story_info_value));
     // format + version · release.
     let mut fmt_line = meta.format.clone();
     if let Some(v) = &meta.version {
@@ -1644,20 +1671,20 @@ fn draw_info_panel(
     if let Some(r) = meta.release {
         fmt_line.push_str(&format!(" · Release {r}"));
     }
-    lines.push((fmt_line, cs.story_info_value));
+    lines.push((fmt_line, story_info_value));
     // serial (Z only).
     if let Some(s) = &meta.serial {
-        lines.push((format!("Serial {s}"), cs.story_info_value));
+        lines.push((format!("Serial {s}"), story_info_value));
     }
     // ifid.
-    lines.push((format!("IFID {}", meta.ifid), cs.story_info_value));
+    lines.push((format!("IFID {}", meta.ifid), story_info_value));
     // Associated resource blorb (SQ-0372): a resource .blorb stored beside the
     // story (e.g. Lurking.blb, beyondzork.blb). Named here, up-front, so it is
     // visible without scrolling to the Resources section below. Only the sidecar
     // case — a self-contained blorb's resources live in the story file itself.
     if let Some((src, _)) = aux.and_then(|a| a.assoc_blorb.as_ref()) {
         if let Some(name) = src.file_name().and_then(|n| n.to_str()) {
-            lines.push((format!("Resource blorb: {name}"), cs.story_info_value));
+            lines.push((format!("Resource blorb: {name}"), story_info_value));
         }
     }
     // author · year · genre (SQ-0348): one line, present parts only — a story
@@ -1669,7 +1696,7 @@ fn draw_info_panel(
         .filter(|s| !s.is_empty())
         .collect();
     if !meta_bits.is_empty() {
-        lines.push((meta_bits.join(" · "), cs.story_info_value));
+        lines.push((meta_bits.join(" · "), story_info_value));
     }
     // blurb (SQ-0348): word-wrapped to the panel's content width, each
     // wrapped row pushed as its own entry so it rides the same
@@ -1685,10 +1712,10 @@ fn draw_info_panel(
     if let Some(desc) = meta.description.as_deref().filter(|s| !s.is_empty()) {
         for para in desc.lines() {
             if para.trim().is_empty() {
-                lines.push((String::new(), cs.story_info_blurb));
+                lines.push((String::new(), story_info_blurb));
             } else {
                 for row in wrap_to_width(para, wrap_w) {
-                    lines.push((row, cs.story_info_blurb));
+                    lines.push((row, story_info_blurb));
                 }
             }
         }
@@ -1697,19 +1724,19 @@ fn draw_info_panel(
     // text is clickable even when the URL truncates; only present once fetched.
     if let Some(link) = meta.ifdb_link.as_deref().filter(|s| !s.is_empty()) {
         link_urls.push((lines.len(), link.to_string()));
-        lines.push((format!("IFDB: {link}"), cs.story_info_link));
+        lines.push((format!("IFDB: {link}"), story_info_link));
     } else if meta.fetch_not_found {
         // A fetch ran but IFDB had no record for this IFID (common for Infocom
         // releases IFDB indexes under a different IFID). Offer a manual search
         // by title so the user isn't at a dead end (SQ-0371).
         let url = app::ifdb::search_url(title);
         link_urls.push((lines.len(), url.clone()));
-        lines.push((format!("IFDB search: {url}"), cs.story_info_link));
+        lines.push((format!("IFDB search: {url}"), story_info_link));
     }
     // features line (present badges only).
     let feats = feature_words(&meta.features, aux);
     if !feats.is_empty() {
-        lines.push((format!("Features: {}", feats.join(" ")), cs.story_info_value));
+        lines.push((format!("Features: {}", feats.join(" ")), story_info_value));
     }
 
     // Saves + sidecars (SQ-0285). Rendered above Resources so the user's own
@@ -1718,10 +1745,10 @@ fn draw_info_panel(
         let has_any = !a.saves.is_empty() || !a.qzl_saves.is_empty()
             || !a.auto_saves.is_empty() || !a.sidecars.is_empty();
         if has_any {
-            lines.push((String::new(), cs.story_info_value));
+            lines.push((String::new(), story_info_value));
             // Header: "Saves · <dir>" with $HOME abbreviated to ~.
             let dir = abbreviate_home(&a.game_dir);
-            lines.push((format!("Saves · {dir}"), cs.story_info_label));
+            lines.push((format!("Saves · {dir}"), story_info_label));
             for s in &a.saves {
                 let when = save_when(&s.saved_at);
                 let fname = s.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -1734,23 +1761,23 @@ fn draw_info_panel(
                 if let Some(score) = s.score {
                     summary.push_str(&format!(" · score {score}"));
                 }
-                lines.push((format!(" {}  turn {} · {}  {}", summary, s.turns, when, fname), cs.story_info_value));
+                lines.push((format!(" {}  turn {} · {}  {}", summary, s.turns, when, fname), story_info_value));
             }
             for q in &a.qzl_saves {
                 let when = save_when(&q.saved_at);
                 let fname = q.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                lines.push((format!(" {}  {}  {}", q.name, when, fname), cs.story_info_value));
+                lines.push((format!(" {}  {}  {}", q.name, when, fname), story_info_value));
             }
             if !a.auto_saves.is_empty() {
-                lines.push(("Automatic:".to_string(), cs.story_info_label));
+                lines.push(("Automatic:".to_string(), story_info_label));
                 for q in &a.auto_saves {
                     let when = save_when(&q.saved_at);
                     let fname = q.path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    lines.push((format!(" (auto) {}  {}  {}", q.name, when, fname), cs.story_info_value));
+                    lines.push((format!(" (auto) {}  {}  {}", q.name, when, fname), story_info_value));
                 }
             }
             if !a.sidecars.is_empty() {
-                lines.push((format!("Sidecars: {}", a.sidecars.join(" · ")), cs.story_info_value));
+                lines.push((format!("Sidecars: {}", a.sidecars.join(" · ")), story_info_value));
             }
         }
     }
@@ -1768,8 +1795,8 @@ fn draw_info_panel(
             (None, &[], None)
         };
     if let Some(h) = res_header {
-        lines.push((String::new(), cs.story_info_value));
-        lines.push((h, cs.story_info_label));
+        lines.push((String::new(), story_info_value));
+        lines.push((h, story_info_label));
         for c in chunks {
             let base = format!(
                 " #{}  {} — {}",
@@ -1800,9 +1827,9 @@ fn draw_info_panel(
                             label: format!("{} #{}", resource_usage_label(&c.usage), c.number),
                         },
                     ));
-                    lines.push((line, cs.story_info_link));
+                    lines.push((line, story_info_link));
                 }
-                _ => lines.push((line, cs.story_info_value)),
+                _ => lines.push((line, story_info_value)),
             }
         }
     }
@@ -1854,7 +1881,7 @@ fn draw_info_panel(
     }
     if overflow {
         let sb_area = Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        app::render::scroll::draw_scrollbar(buf, sb_area, lines.len(), inner.height as usize, eff, cs.scrollbar);
+        app::render::scroll::draw_scrollbar(buf, sb_area, lines.len(), inner.height as usize, eff, scrollbar);
     }
     max_scroll
 }
@@ -1977,7 +2004,7 @@ fn draw_resource_preview(
             let text = truncate_to_width(status, content.width as usize);
             let tx = content.x + (content.width.saturating_sub(UnicodeWidthStr::width(text.as_str()) as u16)) / 2;
             let ty = content.y + content.height / 2;
-            draw_str_clipped(buf, tx, ty, &text, cs.story_info_value, content);
+            draw_str_clipped(buf, tx, ty, &text, cs.theme.get("story_info_value").style, content);
         }
     }
     rects
@@ -3269,7 +3296,7 @@ mod tests {
 
     #[test]
     fn gallery_centers_titles_for_missing_covers_and_frames_selection() {
-        use ratatui::{buffer::Buffer, layout::Rect};
+        use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
         let cs = app::colors::ColorScheme::terminal_default();
         let stories = vec![
             story_with_meta("Zork", None, None),
@@ -3298,18 +3325,28 @@ mod tests {
 
         // The selected tile (index 1) is highlighted across its whole background
         // AND framed in the surrounding gutter; an unselected tile is neither.
+        // SQ-0309: `story_tile_selected` now resolves through the theme (accent
+        // role + reversed/bold) layered over the pane's dialog-chrome background
+        // via `Cell::set_style`'s patch semantics (unset fields — here `bg` — are
+        // left as whatever was painted underneath), so the highlight shows up as
+        // REVERSED video rather than as an explicit `bg` colour; check for that
+        // instead of comparing the raw `.bg` (or the whole `Style`, which would
+        // also fold in whatever the cell happened to have underneath it).
+        let sel_style = cs.theme.get("story_tile_selected").style;
+        assert!(sel_style.add_modifier.contains(Modifier::REVERSED), "sanity: selected style is reversed video");
         let sel_tile = rects.iter().find(|(i, _)| *i == 1).unwrap().1;
         let interior = buf.cell((sel_tile.x, sel_tile.y)).unwrap();
-        assert_eq!(interior.style().bg, cs.story_tile_selected.bg, "selected tile background is highlighted");
+        assert!(interior.style().add_modifier.contains(Modifier::REVERSED), "selected tile background is highlighted");
+        assert_eq!(interior.fg, sel_style.fg.unwrap(), "selected tile uses the accent colour");
         assert_eq!(interior.symbol(), "┌", "missing-cover placeholder has a border");
         let frame_above = buf.cell((sel_tile.x, sel_tile.y - 1)).unwrap();
-        assert_eq!(frame_above.style().bg, cs.story_tile_selected.bg, "selection frame sits in the gutter");
+        assert!(frame_above.style().add_modifier.contains(Modifier::REVERSED), "selection frame sits in the gutter");
         // An unselected tile (index 0): neither its background nor its gutter is tinted.
         let unsel_tile = rects.iter().find(|(i, _)| *i == 0).unwrap().1;
         let unsel_interior = buf.cell((unsel_tile.x, unsel_tile.y)).unwrap();
-        assert_ne!(unsel_interior.style().bg, cs.story_tile_selected.bg, "unselected tile is not highlighted");
+        assert!(!unsel_interior.style().add_modifier.contains(Modifier::REVERSED), "unselected tile is not highlighted");
         let unsel_above = buf.cell((unsel_tile.x, unsel_tile.y - 1)).unwrap();
-        assert_ne!(unsel_above.style().bg, cs.story_tile_selected.bg, "unselected tile has no frame");
+        assert!(!unsel_above.style().add_modifier.contains(Modifier::REVERSED), "unselected tile has no frame");
     }
 
     /// A 2×2 red PNG, encoded via the `image` crate (mirrors cover.rs fixtures).
