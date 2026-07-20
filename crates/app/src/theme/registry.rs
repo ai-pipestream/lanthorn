@@ -230,6 +230,42 @@ pub const REGISTRY: &[RegRow] = &[
     row("debug.disasm_rd", Section::Debug, Kind::Style, Some("text"), glyph(" ")),
     row("debug.disasm_soft", Section::Debug, Kind::Style, Some("muted"), glyph(" ")),
     row("debug.disasm_data", Section::Debug, Kind::Style, Some("muted"), Delta { italic: true, glyph: Some(" "), ..Delta::EMPTY }),
+    // ── §2 elements (expansion, Task 5.0): every remaining ColorScheme field ──
+    row("more_prompt", Section::Elements, Kind::Style, Some("chrome"), mods(false, false, false, true)),
+    row("tidy_progress", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("meta_marker", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("inventory_dock", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("story_info_title", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
+    row("story_info_value", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("story_info_blurb", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
+    row("story_info_link", Section::Elements, Kind::Style, Some("accent"), mods(false, false, true, false)),
+    row("story_info_cover", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
+    row("graphics", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
+    row("inline_image", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
+    row("story_header", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("story_header_active", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
+    row("story_author", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("story_year", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("story_no_metadata", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("story_tile", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("story_tile_selected", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, true)),
+    row("notification", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    row("dialog", Section::Elements, Kind::Style, Some("chrome"), Delta::EMPTY),
+    row("dialog_title", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("dialog_button", Section::Elements, Kind::Style, Some("chrome"), mods(false, false, false, true)),
+    row("dialog_button_active", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    // dialog_shadow: the one explicit-colour row — keeps a distinctive dark-gray bg.
+    row("dialog_shadow", Section::Elements, Kind::Style, Some("muted"), Delta { bg: Some(Color::DarkGray), ..Delta::EMPTY }),
+    row("hotkey_key", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("sound_beep_high", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
+    row("sound_beep_low", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("transcript_input", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("transcript_system", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("warning_marker", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
+    row("input_text", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("input_prompt", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("upper_window_border", Section::Elements, Kind::Style, Some("border"), Delta::EMPTY),
+    row("room_panel", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
 ];
 
 #[cfg(test)]
@@ -324,7 +360,66 @@ mod tests {
         "debug.disasm_rd",
         "debug.disasm_soft",
         "debug.disasm_data",
+        // §2 elements (expansion, Task 5.0)
+        "more_prompt",
+        "tidy_progress",
+        "meta_marker",
+        "inventory_dock",
+        "story_info_title",
+        "story_info_value",
+        "story_info_blurb",
+        "story_info_link",
+        "story_info_cover",
+        "graphics",
+        "inline_image",
+        "story_header",
+        "story_header_active",
+        "story_author",
+        "story_year",
+        "story_no_metadata",
+        "story_tile",
+        "story_tile_selected",
+        "notification",
+        "dialog",
+        "dialog_title",
+        "dialog_button",
+        "dialog_button_active",
+        "dialog_shadow",
+        "hotkey_key",
+        "sound_beep_high",
+        "sound_beep_low",
+        "transcript_input",
+        "transcript_system",
+        "warning_marker",
+        "input_text",
+        "input_prompt",
+        "upper_window_border",
+        "room_panel",
     ];
+
+    #[test]
+    fn expanded_elements_resolve_from_roles() {
+        use crate::theme::resolve::{resolve, Decls, Roles};
+        use ratatui::style::Modifier;
+
+        let roles = Roles::terminal_default();
+        let theme = resolve(&roles, &Decls::new(), &Decls::new(), &Decls::new());
+
+        // story_info_blurb: muted + italic — fg snaps to muted, ITALIC preserved.
+        let blurb = theme.get("story_info_blurb").style;
+        assert_eq!(blurb.fg, roles.muted.fg);
+        assert!(blurb.add_modifier.contains(Modifier::ITALIC));
+
+        // sound_beep_high: plain alert derivation (orange -> yellow accepted).
+        assert_eq!(theme.get("sound_beep_high").style.fg, theme.get("alert").style.fg);
+
+        // dialog_shadow: the one explicit-colour row — keeps an explicit dark-gray bg.
+        assert_eq!(theme.get("dialog_shadow").style.bg, Some(Color::DarkGray));
+
+        // story_tile_selected: accent + reversed + bold.
+        let tile_selected = theme.get("story_tile_selected").style;
+        assert!(tile_selected.add_modifier.contains(Modifier::REVERSED | Modifier::BOLD));
+    }
 
     #[test]
     fn registry_is_complete_and_unique() {
