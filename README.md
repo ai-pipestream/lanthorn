@@ -13,7 +13,7 @@
 
 babelmap is a terminal interactive-fiction interpreter with a built-in *automapper*.
 Load a story — the Infocom catalog and Z-machine classics like *Zork*, modern
-Inform 7 / Glulx games, or an illustrated Scott Adams adventure — play it in a
+Inform 7 / Glulx games, or a classic Scott Adams text adventure — play it in a
 clean TUI, and watch a room-and-connection map assemble itself from your
 movements. No graph paper, no manual annotation: every room you enter and every
 exit you take is placed, routed, and de-overlapped automatically, then
@@ -40,10 +40,12 @@ Glulxe, no C bindings, zero runtime dependencies:
 - **Glulx** — modern Inform 7 games, with an accelerated Inform veneer, full
   float opcodes, and a complete **Glk 0.7.6** layer verified against the standard
   Glulx/Glk test suites.
-- **Scott Adams** (ScottFree `.dat` / SAGA) — the illustrated 8-bit classics,
-  vector line-art graphics and all.
+- **Scott Adams** (ScottFree `.dat`) — the classic 8-bit text adventures. When a
+  game is packaged as a **Blorb with PNG artwork**, its illustrations render too
+  (via the image pipeline below); babelmap plays the `.dat` text engine and shows
+  the bundled images — it doesn't decode the original SAGA line-draw format.
 
-![A Scott Adams SAGA adventure with vector graphics, playing beside its live map](docs/scott-adams-graphics.png)
+![A Scott Adams text adventure with its Blorb-bundled PNG artwork, playing beside its live map](docs/scott-adams-graphics.png)
 
 ### Live automapping
 
@@ -147,7 +149,7 @@ interactive-fiction standards babelmap implements (Z-Machine, Glulx, Glk, Quetza
 Treaty of Babel), see **[`docs/standards.md`](docs/standards.md)**.
 
 **Supported story formats:** Z-machine v3, v4, v5, v7, and v8; Glulx; and Scott
-Adams (ScottFree `.dat` / SAGA). (Z-machine v6 is graphical and unsupported;
+Adams (ScottFree `.dat`). (Z-machine v6 is graphical and unsupported;
 v1/v2 are not supported.) Story files load raw, from a `.zip`, or from a **Blorb**
 container (`.zblorb`/`.blorb`/`.gblorb`).
 
@@ -164,7 +166,7 @@ underlying engine.
 |-------|----------------|
 | `zvm` | A from-scratch Z-machine virtual machine — executes story files, standard Quetzal save/restore. Zero-dependency. |
 | `gvm` | A Glulx virtual machine (Glk I/O) for modern Inform 7 games — accelerated Inform veneer, full float opcodes. Zero-dependency. |
-| `scott` | A Scott Adams (ScottFree `.dat`) virtual machine for the classic illustrated adventures. Zero-dependency. |
+| `scott` | A Scott Adams (ScottFree `.dat`) virtual machine for the classic text adventures. Zero-dependency. |
 | `mapper` | A VM-agnostic map model: rooms, connections, layered 2-D layout, overlap removal, edge routing. Serializable. |
 | `app` | The `babelmap` TUI binary (ratatui + crossterm): play loop, live map rendering, debug inspector, all interactive features. |
 | `zvm-cli` / `gvm-cli` / `scott-cli` | Standalone DOS-style command-line players (no map): save/restore, single-key input, terminal-bell bleeps — and, piped, a clean deterministic harness for testing/scripting. |

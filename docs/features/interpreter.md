@@ -7,9 +7,11 @@ babelmap runs three from-scratch, zero-dependency virtual machines: a Z-machine
 The format is auto-detected from the file, and all three feed the same host
 features below.
 
-- **Scott Adams (ScottFree `.dat` / SAGA)** — the classic illustrated 8-bit
-  adventures (*Adventureland*, *Pirate Adventure*, …), including their vector
-  line-art room graphics, played through the same TUI and live automap.
+- **Scott Adams (ScottFree `.dat`)** — the classic 8-bit text adventures
+  (*Adventureland*, *Pirate Adventure*, …), played through the same TUI and live
+  automap. Room illustrations render when the game is packaged as a Blorb with
+  PNG artwork (shown via the graphics pipeline); babelmap does not decode the
+  original SAGA line-draw graphics format.
 
 - Full play of v3/v4/v5/v7/v8 Z-machine story files.
 - Standard **Quetzal** save/restore — interchangeable with other interpreters.
