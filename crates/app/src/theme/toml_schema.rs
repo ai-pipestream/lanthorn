@@ -61,10 +61,20 @@ pub struct RawStatusBar {
     pub segments: Vec<RawSegment>,
 }
 
+/// Current `style.toml` schema version. Bump when a change to the style schema
+/// (new/renamed selectors, changed defaults, structural moves) means an older
+/// hand-written file may no longer produce the intended look. The generated
+/// template stamps this as `version = N`; a future babelmap can compare a file's
+/// `version` against this to flag an out-of-date style file.
+pub const STYLE_SCHEMA_VERSION: u32 = 1;
+
 /// The whole parsed style document, all raw. `decls` is keyed by FULL registry
 /// selector name (see prefixing rule below); `roles` is keyed by bare role name.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ParsedStyle {
+    /// Top-level `version = N` schema stamp (see [`STYLE_SCHEMA_VERSION`]).
+    /// `None` for a legacy file written before versioning.
+    pub version: Option<u32>,
     pub scheme: Option<String>,            // top-level `scheme = "..."`
     pub roles: BTreeMap<String, RawDelta>, // [roles]: keys "text","accent",...
     pub decls: BTreeMap<String, RawDelta>, // elements+panel+glk.*+map+debug, FULL selector names
@@ -83,6 +93,7 @@ pub fn parse(text: &str) -> Result<ParsedStyle, Vec<String>> {
         .ok_or_else(|| vec!["style.toml: expected a table at the document root".to_string()])?;
 
     let mut parsed = ParsedStyle {
+        version: root.get("version").and_then(toml::Value::as_integer).map(|v| v as u32),
         scheme: root.get("scheme").and_then(toml::Value::as_str).map(String::from),
         ..ParsedStyle::default()
     };
@@ -272,7 +283,7 @@ suggestion_line      = { parent = "border" }        # add style = "single" to bo
 dialog               = { bg = "black", shadow = true }   # frame = panel.border:active (modal); shadow/title/buttons are dialog-specific
 scrollbar            = { parent = "border" }
 transcript_location  = { parent = "accent" }
-story_badge          = { parent = "accent", reversed = true }
+story_badge          = { parent = "text" }
 hyperlink            = { parent = "accent", underline = true }
 # NB: panel frames (story/map/verb/debug/dialog) come from [panel] (§2a); the
 # upper-window frame is a WINDOW border (game domain), not set here; map/debug

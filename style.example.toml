@@ -1,27 +1,30 @@
-# babelmap style.toml — auto-seeded, every line commented out.
-# This file is a no-op until you uncomment lines: every commented value here
-# is already the built-in default, reconstructed straight from the style
-# registry. Edit, uncomment, save, then run /reload in-app to apply changes
-# live (or turn on config.toml's watch_style to auto-reload on save).
+# babelmap style.toml — auto-seeded. The section headers below are active,
+# but every value line is commented out, so the file stays a no-op until you
+# uncomment lines: each commented value already equals the built-in default,
+# reconstructed straight from the style registry. Edit, uncomment, save, then
+# run reload-style in-app to apply changes live (or turn on config.toml's
+# watch_style to auto-reload on save).
 #
 # Color values accept: a named color (cyan, dark-gray, light-blue, …),
 # palette:N (0-15 from the active scheme), #rrggbb hex, a 256-index ("17"),
 # or background / foreground (the scheme's bg/fg).
 
+version = 1   # style schema version — do not remove; lets babelmap flag an out-of-date file
+
 # scheme = "tomorrow-night"   # optional base: built-in name or a Ghostty theme path; omit for terminal colours
 
 # ── Roles: the 7 roots everything else derives from.
-# [roles]
-# text = {}
-# chrome = {}
-# border = {}
-# accent = {}
-# muted = {}
-# alert = {}
-# heading = {}
+[roles]
+# text    = { fg = "foreground" }                     # body ink on the page (scheme foreground)
+# chrome  = { fg = "foreground", bg = "background" }  # ink on a UI surface: bars, panels, upper window
+# border  = { fg = "palette:6" }                      # lines and frames (scheme cyan slot)
+# accent  = { fg = "palette:6" }                      # highlights: links, selection, current room, badges
+# muted   = { fg = "palette:8" }                      # dim / secondary text (scheme bright-black slot)
+# alert   = { fg = "palette:3" }                      # warnings and errors (scheme yellow slot)
+# heading = { fg = "foreground", bold = true }        # titles and headers (bold)
 
 # ── Elements: app chrome/text. Every line already equals its default.
-# [elements]
+[elements]
 # transcript = { parent = "text" }
 # status_bar = { parent = "chrome", reversed = true }
 # help_bar = { parent = "chrome", reversed = true }
@@ -33,7 +36,7 @@
 # suggestion_line = { parent = "border" }
 # scrollbar = { parent = "border" }
 # transcript_location = { parent = "accent" }
-# story_badge = { parent = "accent", reversed = true }
+# story_badge = { parent = "text" }
 # hyperlink = { parent = "accent", underline = true }
 # story_info_label = { parent = "muted" }
 # suggestion = { parent = "muted" }
@@ -77,10 +80,10 @@
 
 # ── Panel: shared chrome for every panel (border/title/tabs). Story/Glk
 # windows use [glk.*] instead, not this section.
-# [panel]
-# background = { parent = "chrome" }
-# border = { parent = "border", style = "single" }
-# "border:active" = { parent = "border", bold = true, style = "single" }
+[panel]
+# background = {}
+# border = { parent = "border", style = "single" }   # style: none | single | double | thick | rounded
+# "border:active" = { parent = "border", bold = true, style = "single" }   # style: none | single | double | thick | rounded
 # title = { parent = "heading" }
 # tab = { parent = "muted" }
 # "tab:active" = { parent = "accent", bold = true }
@@ -89,7 +92,7 @@
 # terminator_right = { parent = "border", glyph = "├" }
 
 # ── The 11 Glk styles for text-buffer windows (base: text).
-# [glk.buffer]
+[glk.buffer]
 # normal = { parent = "text" }
 # emphasized = { parent = "text", italic = true }
 # preformatted = { parent = "text" }
@@ -103,7 +106,7 @@
 # user2 = { parent = "text" }
 
 # ── The 11 Glk styles for text-grid windows (base: chrome).
-# [glk.grid]
+[glk.grid]
 # normal = { parent = "chrome" }
 # emphasized = { parent = "chrome", italic = true }
 # preformatted = { parent = "chrome" }
@@ -117,7 +120,7 @@
 # user2 = { parent = "chrome" }
 
 # ── Map colours + glyph-set presets.
-# [map]
+[map]
 # background = {}
 # room = { parent = "text" }
 # room_current = { parent = "accent" }
@@ -128,14 +131,14 @@
 # shared_path = { fg = "light-cyan" }
 # loc_indicator = { parent = "muted" }
 # layer_cycle = ["cyan", "green", "magenta", "yellow", "blue"]
-# box_style = "rounded"
-# arrow_set = "filled"
-# portal_icons = "ascii"
-# path_style = "light"
-# portal_path_style = "dotted"
+# box_style = "rounded"   # rounded | thick | double | solid | super-thick | ascii | borderless
+# arrow_set = "filled"   # filled | line | nerdfont | nf-bold | nf-box | nf-circle | nf-outline
+# portal_icons = "ascii"   # ascii | nerdfont | nerdfont-stairs
+# path_style = "light"   # light | heavy | dotted
+# portal_path_style = "dotted"   # light | heavy | dotted
 
 # ── Debug inspector disassembly selectors.
-# [debug]
+[debug]
 # pc = { parent = "accent", reversed = true }
 # tooltip = { parent = "chrome" }
 # disasm_executed = { parent = "accent", glyph = "|" }

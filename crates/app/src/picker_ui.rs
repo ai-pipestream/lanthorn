@@ -1271,19 +1271,9 @@ fn draw_story_picker(
                 truncate_to_width(&interp_label(&entry.meta, b.blorb), INTERP_COL_W as usize);
             let interp_style = if sel { style } else { story_badge };
             draw_str_clipped(buf, interp_x, y, &interp_txt, interp_style, row_rect);
-            // On the selection bar the plain badge fg (e.g. green) is low-contrast
-            // against the highlight, so reverse it into a block: the badge colour
-            // becomes the background and the selection bar's text colour the glyph
-            // — readable and still distinct. Unselected rows keep plain letters.
-            // Blank slots are left untouched so they show the plain selection bar,
-            // not a green block.
-            let badge_style = if sel {
-                Style::new()
-                    .fg(dialog_button_active.fg.unwrap_or(Color::Reset))
-                    .bg(story_badge.fg.unwrap_or(Color::Reset))
-            } else {
-                story_badge
-            };
+            // Flags render as regular text like the other columns; the selection
+            // bar wins over their own colour, same as title/author/year.
+            let badge_style = if sel { style } else { story_badge };
             if b.save {
                 draw_str_clipped(buf, bx, y, glyphs.save, badge_style, row_rect);
             }

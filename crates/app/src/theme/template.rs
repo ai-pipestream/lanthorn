@@ -48,17 +48,24 @@ pub fn commented_template() -> String {
     let mut out = String::new();
 
     out.push_str(
-        "# babelmap style.toml — auto-seeded, every line commented out.\n\
-         # This file is a no-op until you uncomment lines: every commented value here\n\
-         # is already the built-in default, reconstructed straight from the style\n\
-         # registry. Edit, uncomment, save, then run /reload in-app to apply changes\n\
-         # live (or turn on config.toml's watch_style to auto-reload on save).\n\
+        "# babelmap style.toml — auto-seeded. The section headers below are active,\n\
+         # but every value line is commented out, so the file stays a no-op until you\n\
+         # uncomment lines: each commented value already equals the built-in default,\n\
+         # reconstructed straight from the style registry. Edit, uncomment, save, then\n\
+         # run reload-style in-app to apply changes live (or turn on config.toml's\n\
+         # watch_style to auto-reload on save).\n\
          #\n\
          # Color values accept: a named color (cyan, dark-gray, light-blue, …),\n\
          # palette:N (0-15 from the active scheme), #rrggbb hex, a 256-index (\"17\"),\n\
          # or background / foreground (the scheme's bg/fg).\n\
-         \n\
-         # scheme = \"tomorrow-night\"   # optional base: built-in name or a Ghostty theme path; omit for terminal colours\n\
+         \n",
+    );
+    out.push_str(&format!(
+        "version = {}   # style schema version — do not remove; lets babelmap flag an out-of-date file\n\n",
+        super::toml_schema::STYLE_SCHEMA_VERSION
+    ));
+    out.push_str(
+        "# scheme = \"tomorrow-night\"   # optional base: built-in name or a Ghostty theme path; omit for terminal colours\n\
          \n",
     );
 
@@ -66,7 +73,6 @@ pub fn commented_template() -> String {
         out.push_str("# ── ");
         out.push_str(blurb);
         out.push('\n');
-        out.push_str("# ");
         out.push_str(header);
         out.push('\n');
         for row in REGISTRY.iter().filter(|r| r.section == *section) {
@@ -83,6 +89,13 @@ pub fn commented_template() -> String {
 
 /// Reconstruct one registry row as a single commented TOML line.
 fn row_line(section: Section, row: &RegRow) -> String {
+    // Roles carry no registry delta (their concrete values live in
+    // `Roles::from_scheme`), so emit each one's actual scheme-relative default
+    // plus a one-line description of what it's for.
+    if section == Section::Roles {
+        return role_line(row.name);
+    }
+
     if row.name == "map.layer_cycle" {
         let list =
             LAYER_CYCLE_DEFAULT.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
@@ -93,14 +106,47 @@ fn row_line(section: Section, row: &RegRow) -> String {
 
     if row.kind == Kind::Placement {
         let preset = row.default_delta.glyph.unwrap_or_default();
-        return format!("# {key} = \"{preset}\"");
+        return format!("# {key} = \"{preset}\"{}", enum_hint(row));
     }
 
     let fields = row_fields(row);
-    if fields.is_empty() {
+    let line = if fields.is_empty() {
         format!("# {key} = {{}}")
     } else {
         format!("# {key} = {{ {} }}", fields.join(", "))
+    };
+    format!("{line}{}", enum_hint(row))
+}
+
+/// One commented `[roles]` line: the role's scheme-relative default (matching
+/// `Roles::from_scheme`) plus a one-line description of its purpose. Kept in
+/// sync with the resolver by `uncommented_template_resolves_to_registry_defaults`.
+fn role_line(name: &str) -> String {
+    let (value, desc) = match name {
+        "text" => ("{ fg = \"foreground\" }", "body ink on the page (scheme foreground)"),
+        "chrome" => ("{ fg = \"foreground\", bg = \"background\" }", "ink on a UI surface: bars, panels, upper window"),
+        "border" => ("{ fg = \"palette:6\" }", "lines and frames (scheme cyan slot)"),
+        "accent" => ("{ fg = \"palette:6\" }", "highlights: links, selection, current room, badges"),
+        "muted" => ("{ fg = \"palette:8\" }", "dim / secondary text (scheme bright-black slot)"),
+        "alert" => ("{ fg = \"palette:3\" }", "warnings and errors (scheme yellow slot)"),
+        "heading" => ("{ fg = \"foreground\", bold = true }", "titles and headers (bold)"),
+        _ => return String::new(),
+    };
+    format!("# {name:<7} = {value:<40}  # {desc}")
+}
+
+/// The `# a | b | c` enumeration hint appended to an enumerated row's line
+/// (a map glyph-set preset, or a border `style`), or `""` for a non-enumerated
+/// row. Value lists are verified against `symbols.rs`'s preset tables and
+/// `paneframe::parse_border_style`.
+fn enum_hint(row: &RegRow) -> &'static str {
+    match row.name {
+        "map.box_style" => "   # rounded | thick | double | solid | super-thick | ascii | borderless",
+        "map.arrow_set" => "   # filled | line | nerdfont | nf-bold | nf-box | nf-circle | nf-outline",
+        "map.portal_icons" => "   # ascii | nerdfont | nerdfont-stairs",
+        "map.path_style" | "map.portal_path_style" => "   # light | heavy | dotted",
+        _ if row.default_delta.border.is_some() => "   # style: none | single | double | thick | rounded",
+        _ => "",
     }
 }
 
@@ -272,8 +318,11 @@ mod tests {
         let seeded = resolve_theme(&scheme, &parsed);
         let default = resolve_theme(&scheme, &ParsedStyle::default());
 
-        // roles
-        assert_eq!(seeded.get("accent").style, default.get("accent").style);
+        // roles: every one's template default must resolve back to the registry
+        // default, so the hand-written [roles] block can't drift from the resolver.
+        for role in ["text", "chrome", "border", "accent", "muted", "alert", "heading"] {
+            assert_eq!(seeded.get(role).style, default.get(role).style, "role {role} drifted");
+        }
         // an element
         assert_eq!(seeded.get("transcript_meta").style, default.get("transcript_meta").style);
         assert_eq!(seeded.get("transcript_meta").glyph, default.get("transcript_meta").glyph);

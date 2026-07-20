@@ -359,10 +359,20 @@ impl Default for AnimationConfig {
     }
 }
 
+/// Current `config.toml` schema version. Bump when a config change means an
+/// older hand-written file may behave unexpectedly. `write_config` stamps this
+/// as `version = N`; a future babelmap can compare a file's `version` against
+/// this to flag an out-of-date config. A file with no `version` reads as 0.
+pub const CONFIG_SCHEMA_VERSION: u32 = 1;
+
 /// User preferences loaded from TOML.  Every field has a default so a missing
 /// config file (or a file with only some fields) is always valid.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
+    /// Schema stamp (see [`CONFIG_SCHEMA_VERSION`]). A file written before
+    /// versioning has no `version` key and reads as 0.
+    #[serde(default)]
+    pub version: u32,
     /// Root directory for babelmap data (maps, saves, exports).
     /// Sub-directories: maps/ — where per-story map files live.
     #[serde(default = "default_user_dir")]
@@ -506,6 +516,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            version: CONFIG_SCHEMA_VERSION,
             user_dir: default_user_dir(),
             auto_load: true,
             auto_save: false,
@@ -582,6 +593,9 @@ pub fn resolve(cli: &Cli) -> Config {
     // Layer in the config file if it exists.
     if let Ok(text) = std::fs::read_to_string(&config_path) {
         if let Ok(from_file) = toml::from_str::<Config>(&text) {
+            // Carry the file's own version stamp (0 if the file predates
+            // versioning) so a future check can flag an out-of-date config.
+            cfg.version = from_file.version;
             cfg.user_dir = from_file.user_dir;
             cfg.auto_load = from_file.auto_load;
             cfg.auto_save = from_file.auto_save;
@@ -652,7 +666,9 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = existing.parse().unwrap_or_default();
 
-    // Top-level scalar fields.
+    // Top-level scalar fields. Always stamp the current schema version — writing
+    // the file brings it up to the format this build produces.
+    doc["version"] = toml_edit::value(CONFIG_SCHEMA_VERSION as i64);
     doc["user_dir"] = toml_edit::value(cfg.user_dir.to_string_lossy().as_ref());
     doc["auto_load"] = toml_edit::value(cfg.auto_load);
     doc["auto_save"] = toml_edit::value(cfg.auto_save);
@@ -977,6 +993,7 @@ use_defaults = false
         std::fs::write(dir.join("config.toml"), initial).unwrap();
 
         let cfg = Config {
+            version: CONFIG_SCHEMA_VERSION,
             user_dir: dir.clone(),
             auto_load: false,
             auto_save: true,

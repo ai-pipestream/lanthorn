@@ -158,7 +158,7 @@ pub const REGISTRY: &[RegRow] = &[
     row("suggestion_line", Section::Elements, Kind::Style, Some("border"), Delta::EMPTY),
     row("scrollbar", Section::Elements, Kind::Style, Some("border"), Delta::EMPTY),
     row("transcript_location", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
-    row("story_badge", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    row("story_badge", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("hyperlink", Section::Elements, Kind::Style, Some("accent"), mods(false, false, true, false)),
     row("story_info_label", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     row("suggestion", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
@@ -167,7 +167,9 @@ pub const REGISTRY: &[RegRow] = &[
     row("transcript_warning", Section::Elements, Kind::Style, Some("alert"), glyph("!")),
     row("transcript_crash", Section::Elements, Kind::Style, Some("alert"), mods(true, false, false, false)),
     // ── §2a/§2b panel.* (shared panel chrome) ────────────────────────────────
-    row("panel.background", Section::Panel, Kind::Style, Some("chrome"), Delta::EMPTY),
+    // Transparent by default (no parent/bg) so panels show the terminal
+    // background out of the box; set a bg here to give panels a solid surface.
+    row("panel.background", Section::Panel, Kind::Style, None, Delta::EMPTY),
     // border rows: default border style = "single" (unified panel frame, §2a).
     // `:active` = single + bold (today's cyan+bold).
     row("panel.border", Section::Panel, Kind::BorderGlyphs, Some("border"), border("single")),

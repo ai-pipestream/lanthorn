@@ -73,7 +73,7 @@ them):
 
 | selector | parent | delta | used when |
 |---|---|---|---|
-| `panel.background` | chrome | — | the panel interior fill (body bg/fg) |
+| `panel.background` | — (transparent) | — | the panel interior fill; transparent by default so panels show the terminal background, set a `bg` to give panels a solid surface |
 | `panel.border` | border | `style = "single"` | panel is unfocused (inactive) |
 | `panel.border:active` | border | `style = "single"`, bold | panel has focus (active) |
 

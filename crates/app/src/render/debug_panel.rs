@@ -64,8 +64,14 @@ fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
 fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelState, state: &AppState) {
     if area.width < 2 || area.height < 2 { return; }
     let focused = panel.focus == window;
-    let panel_background = state.colors.theme.get("panel.background").style;
-    let border = if focused { state.colors.theme.get("panel.border:active").style } else { panel_background };
+    // Frame colour mirrors the story/map panes: transparent cyan when idle,
+    // cyan+bold when focused — never the chrome surface (which bakes a black
+    // background into the border cells, clashing with the pane behind them).
+    let border = if focused {
+        state.colors.theme.get("panel.border:active").style
+    } else {
+        state.colors.theme.get("panel.border").style
+    };
     // Tabs are drawn on the top border row; guarantee a border row exists even
     // when the dialog box style resolves to None, or content row 0 would overwrite
     // (hide) the tabs — which are now the primary navigation affordance.
@@ -94,7 +100,9 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
     let section = panel.active_section(window);
     let lines = panel.snapshot.section(section);
     let content = frame.content;
-    let body = panel_background;
+    // Body text is the plain text role (foreground only), so the pane's own
+    // background shows through instead of a chrome-black block behind every glyph.
+    let body = state.colors.theme.get("text").style;
 
     if section == Section::Disasm {
         draw_disasm(buf, content, panel, state, body);
@@ -253,6 +261,18 @@ fn draw_tooltip(buf: &mut Buffer, area: Rect, tip: &HoverTip, state: &AppState) 
 
 pub fn draw_debug_panel(state: &AppState, area: Rect, buf: &mut Buffer) {
     let Some(panel) = &state.debug else { return };
+    // Interior fill: the standard panel surface (§2a). Transparent by default so
+    // the terminal background shows through; a themed `panel.background` bg paints
+    // the whole pane as a solid surface, with borders/text composing on top (their
+    // transparent-bg styles patch the cell, preserving this fill).
+    let surface = state.colors.theme.get("panel.background").style;
+    for yy in area.top()..area.bottom() {
+        for xx in area.left()..area.right() {
+            if let Some(c) = buf.cell_mut((xx, yy)) {
+                c.set_symbol(" ").set_style(surface);
+            }
+        }
+    }
     let windows = debug_panel::window_rects(area);
     for (i, w) in windows.iter().enumerate() {
         draw_window(buf, *w, i, panel, state);
