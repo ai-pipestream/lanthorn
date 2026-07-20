@@ -327,7 +327,8 @@ fn parse_args(argv: &[String]) -> Args {
             "--no-timed-input" => a.no_timed_input = true,
             "--no-sound" => a.no_sound = true,
             "--volume" => i += 1, // also skip the following value token
-            "--no-game-colours" => {}
+            // NB: --no-game-colours is handled separately by parse_game_colours;
+            // it falls through here (a `--flag` is never taken as the story arg).
             "-I" | "--interpreter" => i += 1, // also skip the following value token
             "--data-dir" => { i += 1; if i < argv.len() { a.data_dir = Some(argv[i].clone()); } }
             s if !s.starts_with("--") && a.story.is_none() => a.story = Some(s.to_string()),
@@ -754,6 +755,7 @@ Options:
       --no-aux          Don't read or write v5 auxiliary (VFS) sidecar files
       --no-more         Disable [MORE] paging on long output (alias: --no-page)
       --no-timed-input  Ignore timed-input interrupts
+      --no-game-colours Ignore the game's set_colour / true-colour output
       --no-sound        Disable sound (bleeps + sampled audio)
       --volume <0-100>  Set the master volume
   -I, --interpreter <n> Set the Z-machine interpreter number
@@ -774,10 +776,7 @@ fn main() {
     }
     let args = parse_args(&argv);
     let Some(story_arg) = args.story.clone() else {
-        eprintln!(
-            "Usage: {} [--no-status] [--no-aux] [--no-more] [--no-timed-input] [--no-game-colours] [--no-sound] [--volume <0-100>] <story-file>",
-            argv[0]
-        );
+        eprintln!("{}: no story file given. Run `zvm-cli --help` for usage.", env!("CARGO_PKG_NAME"));
         std::process::exit(1);
     };
     let story_path = std::path::PathBuf::from(&story_arg);
