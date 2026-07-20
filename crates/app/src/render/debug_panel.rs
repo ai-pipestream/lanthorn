@@ -28,6 +28,9 @@ fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
     let disasm = &panel.snapshot.disasm;
     let rows = debug_panel::disasm_rows(disasm, panel.pc, content.height as usize);
     let text_rect = Rect::new(content.x + 1, content.y, content.width.saturating_sub(1), content.height);
+    // Bound once: the loop below reads these per row.
+    let pc_style = state.colors.theme.get("debug.pc").style;
+    let exec_style = state.colors.theme.get("debug.disasm_executed").style;
     for (r, row_entry) in rows.iter().enumerate() {
         let y = content.y + r as u16;
         if row_entry.divider {
@@ -40,7 +43,7 @@ fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
                 s.push_str(&"─".repeat(width - core.chars().count()));
                 s
             };
-            draw_str_clipped(buf, content.x + 1, y, &text, state.colors.debug_disasm_pc, content);
+            draw_str_clipped(buf, content.x + 1, y, &text, pc_style, content);
             continue;
         }
         let Some(line) = disasm.get(row_entry.line_idx) else { continue };
@@ -51,7 +54,7 @@ fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
             .and_then(|a| u32::from_str_radix(a, 16).ok())
             .is_some_and(|addr| panel.snapshot.executed.contains(&addr));
         let marker = if marked { "|" } else { " " };
-        draw_str_clipped(buf, content.x, y, marker, state.colors.debug_exec_mark, content);
+        draw_str_clipped(buf, content.x, y, marker, exec_style, content);
         draw_str_clipped(buf, content.x + 1, y, line, body, text_rect);
         underline_clickables(buf, content.x + 1, y, line, body, Section::Disasm, text_rect);
     }
@@ -61,7 +64,8 @@ fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
 fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelState, state: &AppState) {
     if area.width < 2 || area.height < 2 { return; }
     let focused = panel.focus == window;
-    let border = if focused { state.colors.debug_pane_focused } else { state.colors.debug_pane };
+    let panel_background = state.colors.theme.get("panel.background").style;
+    let border = if focused { state.colors.theme.get("panel.border:active").style } else { panel_background };
     // Tabs are drawn on the top border row; guarantee a border row exists even
     // when the dialog box style resolves to None, or content row 0 would overwrite
     // (hide) the tabs — which are now the primary navigation affordance.
@@ -77,10 +81,12 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
     // so a click always lands on the tab actually drawn here.
     let sections = WINDOW_TABS[window];
     let tab_rects = debug_panel::tab_hit_rects(area, sections);
+    let tab_active = state.colors.theme.get("panel.tab:active").style;
+    let tab = state.colors.theme.get("panel.tab").style;
     for (i, (section, rect)) in sections.iter().zip(tab_rects.iter()).enumerate() {
         if rect.width == 0 { continue; }
         let label = format!(" {} ", section.label());
-        let style = if i == panel.tab[window] { state.colors.debug_tab_active } else { state.colors.debug_tab };
+        let style = if i == panel.tab[window] { tab_active } else { tab };
         draw_str_clipped(buf, rect.x, rect.y, &label, style, *rect);
     }
 
@@ -88,7 +94,7 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
     let section = panel.active_section(window);
     let lines = panel.snapshot.section(section);
     let content = frame.content;
-    let body = state.colors.debug_pane;
+    let body = panel_background;
 
     if section == Section::Disasm {
         draw_disasm(buf, content, panel, state, body);
@@ -197,7 +203,7 @@ fn draw_callstack(buf: &mut Buffer, content: Rect, window: usize, panel: &DebugP
 /// offset.
 fn draw_memory(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: &AppState, body: Style) {
     let (line, style) = match &panel.mem_input {
-        Some(input) => (format!("jump: {input}_"), state.colors.debug_pane_focused),
+        Some(input) => (format!("jump: {input}_"), state.colors.theme.get("panel.border:active").style),
         None => (format!("addr: 0x{:06x}  (: jump — hex, gNN, localN, sp)", panel.mem_addr), body),
     };
     draw_str_clipped(buf, content.x, content.y, &line, style, content);
@@ -226,7 +232,7 @@ fn draw_tooltip(buf: &mut Buffer, area: Rect, tip: &HoverTip, state: &AppState) 
     y = y.max(area.y);
 
     let box_rect = Rect::new(x, y, w, h);
-    let style = state.colors.debug_tooltip;
+    let style = state.colors.theme.get("debug.tooltip").style;
     // Reset every cell the box covers before drawing: draw_char_clipped PATCHES
     // cell styles, so a modifier already on the disasm underneath (e.g. the
     // UNDERLINED on a clickable operand) would otherwise bleed through the
@@ -373,7 +379,7 @@ mod tests {
         // Compare modifiers only: `Cell::style()` always reports concrete
         // Reset colors for unset fg/bg, so it never equals a Style::default()
         // built with `.add_modifier(...)` alone.
-        assert_eq!(divider_modifier, state.colors.debug_disasm_pc.add_modifier);
+        assert_eq!(divider_modifier, state.colors.theme.get("debug.pc").style.add_modifier);
 
         let text = buf_text(&buf);
         assert!(text.contains("add"), "PC line still rendered below the divider");
