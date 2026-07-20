@@ -23,7 +23,7 @@ fn cell_style(cell: zvm::screen::Cell, glk_style: u8, scheme: &ColorScheme, hono
     // blank-fill path in draw_grid, and with how transcript.rs draws styled runs).
     // A per-window background override (Glulx window colour, SQ-0328) replaces the
     // theme bg here so a Default-bg game cell shows the window's own colour.
-    let mut base = scheme.upper_window;
+    let mut base = scheme.theme.get("upper_window").style;
     if let Some(rgb) = bg_override {
         base = base.bg(crate::render::resolve_zcolour(ZColour::True24(rgb), scheme));
     }
@@ -129,9 +129,10 @@ pub fn draw_grid(
     // carries its own `bg`, the content fill and each cell's default background use
     // it instead of the theme's `upper_window` bg. `None` (Z-machine simple path,
     // default) leaves the behaviour byte-identical.
+    let uw = colors.theme.get("upper_window").style;
     let mut content_style = match upper.bg {
-        Some(rgb) => colors.upper_window.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), colors)),
-        None => colors.upper_window,
+        Some(rgb) => uw.bg(crate::render::resolve_zcolour(zvm::screen::ZColour::True24(rgb), colors)),
+        None => uw,
     };
     // If the game reversed the grid's Normal style with no explicit colours
     // (Counterfeit Monkey's menu sets ReverseColor on every grid style), the empty
@@ -140,7 +141,7 @@ pub fn draw_grid(
     if upper.reverse {
         content_style = content_style.add_modifier(ratatui::style::Modifier::REVERSED);
     }
-    let border_color = colors.upper_window_border;
+    let border_color = colors.theme.get("upper_window_border").style;
 
     // Resolve which sides to frame. The game controls border PRESENCE (SQ-0286);
     // the theme controls only the glyph + colour (see `resolved_grid_sides`).
@@ -229,7 +230,7 @@ pub fn draw_grid(
                 // Mirrors the transcript path in `draw_str_runs`. (SQ-0258)
                 if cell.link != 0 {
                     if honor_game_colours {
-                        style = style.patch(colors.hyperlink);
+                        style = style.patch(colors.theme.get("hyperlink").style);
                     }
                     style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
                     links.push(((bx, by), cell.link));
@@ -360,7 +361,7 @@ mod tests {
             Cell { ch: 'x', style: 0, fg: ZColour::Default, bg: ZColour::Default },
             0, &scheme, false, None,
         );
-        assert_eq!(n.fg, scheme.upper_window.fg, "grid Normal → upper_window element base");
+        assert_eq!(n.fg, scheme.theme.get("upper_window").style.fg, "grid Normal → upper_window element base");
     }
 
     /// Alert (glk_style 5) in a grid window renders bold — the registry theme's
