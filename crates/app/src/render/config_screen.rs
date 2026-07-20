@@ -8,22 +8,32 @@ use crate::config::BackgroundTidy;
 use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use crate::state::AppState;
 
-/// Row definitions: (display name, type tag).
-pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind)] = &[
-    ("user_dir",             ConfigRowKind::Path),
-    ("auto_load",            ConfigRowKind::Bool),
-    ("auto_save",            ConfigRowKind::Bool),
-    ("prompt_save_on_quit",  ConfigRowKind::Bool),
-    ("prompt_load_on_launch",ConfigRowKind::Bool),
-    ("show_room_numbers",    ConfigRowKind::Bool),
-    ("background_tidy",      ConfigRowKind::Enum),
-    ("aux_storage",          ConfigRowKind::Enum),
-    ("honor_game_colours",   ConfigRowKind::Bool),
-    ("honor_timed_input",    ConfigRowKind::Bool),
-    ("enable_sound",         ConfigRowKind::Bool),
-    ("volume",               ConfigRowKind::Num),
-    ("mouse",                ConfigRowKind::Bool),
-    ("command_bar",          ConfigRowKind::Bool),
+/// Row definitions: (display name, type tag, one-line description shown as a
+/// tooltip under the list). Rows are addressed by index in the edit helpers
+/// (`config_toggle_or_edit` / `config_cycle` in `input.rs`) and in
+/// `config_row_value` below — APPEND new rows, never reorder.
+pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
+    ("user_dir",             ConfigRowKind::Path, "Where babelmap keeps saves, maps, and settings (default ~/.babelmap)."),
+    ("auto_load",            ConfigRowKind::Bool, "Resume your last session automatically on launch."),
+    ("auto_save",            ConfigRowKind::Bool, "Save the archive after every turn, not just on quit or Ctrl+S."),
+    ("prompt_save_on_quit",  ConfigRowKind::Bool, "Ask to save when you quit (only matters when auto_save is off)."),
+    ("prompt_load_on_launch",ConfigRowKind::Bool, "Offer to resume a found save on launch (only when auto_load is off)."),
+    ("show_room_numbers",    ConfigRowKind::Bool, "Print each room's internal #id inside its map box."),
+    ("background_tidy",      ConfigRowKind::Enum, "When to re-tidy the map as rooms appear: off / every_room / on_overlap / debounced."),
+    ("aux_storage",          ConfigRowKind::Enum, "Where Z-machine v5 auxiliary save data lives: ask / archive / global."),
+    ("honor_game_colours",   ConfigRowKind::Bool, "Let games pick their own colours; off = your theme owns every colour."),
+    ("honor_timed_input",    ConfigRowKind::Bool, "Let real-time games run timed-input interrupts (clocks, countdowns, the bomb in Border Zone)."),
+    ("enable_sound",         ConfigRowKind::Bool, "Play sound effects and music."),
+    ("volume",               ConfigRowKind::Num,  "Master volume, 0-100. Use ← / → to adjust."),
+    ("mouse",                ConfigRowKind::Bool, "Capture the mouse for clicks, wheel scrolling, and in-game mouse input."),
+    ("command_bar",          ConfigRowKind::Bool, "Type into a pinned bottom command bar instead of the inline > prompt."),
+    ("mouse_wheel_invert",   ConfigRowKind::Bool, "Reverse the mouse-wheel scroll direction (for terminals with 'natural' scrolling)."),
+    ("show_loc_method",      ConfigRowKind::Bool, "Show how the mapper worked out your location (status variable, player object, name match, …)."),
+    ("show_status_bar",      ConfigRowKind::Bool, "Show the top status bar (location, score, moves, time)."),
+    ("watch_style",          ConfigRowKind::Bool, "Live-reload style.toml automatically whenever the file changes on disk."),
+    ("record_turn_history",  ConfigRowKind::Bool, "Record a per-turn rewind/replay history — enables Rewind, but grows the archive and holds per-turn blobs in memory."),
+    ("undo_levels",          ConfigRowKind::Num,  "How many in-memory undo snapshots to keep (0 disables undo). Use ← / → to adjust."),
+    ("interpreter_number",   ConfigRowKind::Num,  "Z-machine interpreter number (header byte 1Eh); changes colour behaviour on some Infocom games (e.g. Beyond Zork). ← / → to adjust."),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -46,8 +56,8 @@ pub fn draw_config_screen(
     let Some(cs) = &state.overlays.config_screen else { return None };
 
     let modal_w = 64u16.min(area.width.saturating_sub(4));
-    // +4: title row (inside border) + header + button row + border overhead
-    let modal_h = (CONFIG_ROWS.len() as u16 + 6).min(area.height.saturating_sub(2));
+    // Chrome overhead + a 2-line tooltip footer for the focused row's description.
+    let modal_h = (CONFIG_ROWS.len() as u16 + 8).min(area.height.saturating_sub(2));
     if modal_w < 20 || modal_h < 4 {
         return None;
     }
@@ -91,9 +101,14 @@ pub fn draw_config_screen(
         .bg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
 
-    // Content rows start after the header line
+    // Reserve the bottom lines for the focused row's tooltip when there's room
+    // (header line on top + at least one row + the tooltip footer).
+    const TOOLTIP_H: u16 = 2;
+    let tooltip_h = if content.height >= 2 + TOOLTIP_H { TOOLTIP_H } else { 0 };
+
+    // Content rows start after the header line and stop above the tooltip footer.
     let rows_area = if content.height > 1 {
-        Rect::new(content.x, content.y + 1, content.width, content.height - 1)
+        Rect::new(content.x, content.y + 1, content.width, content.height - 1 - tooltip_h)
     } else {
         Rect::new(content.x, content.y, content.width, 0)
     };
@@ -114,7 +129,7 @@ pub fn draw_config_screen(
         if i >= total {
             break;
         }
-        let (name, _kind) = CONFIG_ROWS[i];
+        let (name, _kind, _desc) = CONFIG_ROWS[i];
         let row_y = rows_area.y + row as u16;
 
         let is_selected = i == cs.scroll.selected;
@@ -148,7 +163,40 @@ pub fn draw_config_screen(
         );
     }
 
+    // Focused row's description, word-wrapped into the reserved footer, dimmed.
+    if tooltip_h > 0 && total > 0 {
+        let (_n, _k, desc) = CONFIG_ROWS[cs.scroll.selected.min(total - 1)];
+        let tip_y = content.y + content.height - tooltip_h;
+        let tip_style = normal.add_modifier(Modifier::DIM);
+        for (li, line) in wrap_desc(desc, content.width as usize)
+            .into_iter()
+            .take(tooltip_h as usize)
+            .enumerate()
+        {
+            crate::render::draw_str_clipped(buf, content.x, tip_y + li as u16, &line, tip_style, content);
+        }
+    }
+
     Some(rects)
+}
+
+/// Word-wrap `s` to at most `width` display columns per line.
+fn wrap_desc(s: &str, width: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    for word in s.split_whitespace() {
+        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > width {
+            lines.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push(' ');
+        }
+        cur.push_str(word);
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    lines
 }
 
 /// Build the display value string for row `i` from the working config.
@@ -177,6 +225,13 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         11 => cfg.volume.to_string(),
         12 => bool_str(cfg.mouse),
         13 => bool_str(cfg.command_bar),
+        14 => bool_str(cfg.mouse_wheel_invert),
+        15 => bool_str(cfg.show_loc_method),
+        16 => bool_str(cfg.show_status_bar),
+        17 => bool_str(cfg.watch_style),
+        18 => bool_str(cfg.record_turn_history),
+        19 => cfg.undo_levels.to_string(),
+        20 => cfg.interpreter_number.map(|n| n.to_string()).unwrap_or_else(|| "default".to_string()),
         _ => String::new(),
     }
 }
@@ -215,6 +270,43 @@ mod tests {
         assert!(content.contains("auto_save"), "auto_save row should be visible");
         assert!(content.contains("background_tidy"), "background_tidy row should be visible");
         assert!(content.contains("mouse"), "mouse row should be visible");
+    }
+
+    #[test]
+    fn newly_added_rows_toggle_and_adjust_through_their_index() {
+        use crate::input::{apply_action, Action};
+        use mapper::mapper::Mapper;
+        let mut m = Mapper::default();
+
+        // A bool row (record_turn_history) flips via ConfigToggle at its index.
+        let mut state = state_with_config_screen();
+        let idx = CONFIG_ROWS.iter().position(|(n, _, _)| *n == "record_turn_history").unwrap();
+        state.overlays.config_screen.as_mut().unwrap().scroll.selected = idx;
+        let before = state.overlays.config_screen.as_ref().unwrap().working.record_turn_history;
+        apply_action(Action::ConfigToggle, &mut state, &mut m);
+        let after = state.overlays.config_screen.as_ref().unwrap().working.record_turn_history;
+        assert_ne!(before, after, "record_turn_history row must toggle at its CONFIG_ROWS index");
+
+        // A number row (undo_levels) steps via ConfigCycle at its index.
+        let uidx = CONFIG_ROWS.iter().position(|(n, _, _)| *n == "undo_levels").unwrap();
+        state.overlays.config_screen.as_mut().unwrap().scroll.selected = uidx;
+        state.overlays.config_screen.as_mut().unwrap().working.undo_levels = 4;
+        apply_action(Action::ConfigCycle(1), &mut state, &mut m);
+        assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.undo_levels, 5);
+    }
+
+    #[test]
+    fn focused_row_tooltip_is_rendered() {
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut state = state_with_config_screen();
+        // Focus the record_turn_history row; its description should appear.
+        let idx = CONFIG_ROWS.iter().position(|(n, _, _)| *n == "record_turn_history").unwrap();
+        state.overlays.config_screen.as_mut().unwrap().scroll.selected = idx;
+        terminal.draw(|f| { draw_config_screen(&state, f.area(), f.buffer_mut(), &mut 0); }).unwrap();
+        let content: String = terminal.backend().buffer().content().iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' ')).collect();
+        assert!(content.contains("rewind"), "the focused row's tooltip text should render");
     }
 
     #[test]

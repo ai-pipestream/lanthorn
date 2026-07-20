@@ -2699,6 +2699,11 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         10 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.enable_sound = !cs.working.enable_sound; } }
         12 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.mouse = !cs.working.mouse; } }
         13 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.command_bar = !cs.working.command_bar; } }
+        14 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.mouse_wheel_invert = !cs.working.mouse_wheel_invert; } }
+        15 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.show_loc_method = !cs.working.show_loc_method; } }
+        16 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.show_status_bar = !cs.working.show_status_bar; } }
+        17 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.watch_style = !cs.working.watch_style; } }
+        18 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.record_turn_history = !cs.working.record_turn_history; } }
         _ => {}
     }
 }
@@ -2737,6 +2742,14 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         11 => working.volume = (working.volume as i32 + delta * 5).clamp(0, 100) as u8,
         12 => working.mouse = !working.mouse,
         13 => working.command_bar = !working.command_bar,
+        14 => working.mouse_wheel_invert = !working.mouse_wheel_invert,
+        15 => working.show_loc_method = !working.show_loc_method,
+        16 => working.show_status_bar = !working.show_status_bar,
+        17 => working.watch_style = !working.watch_style,
+        18 => working.record_turn_history = !working.record_turn_history,
+        19 => working.undo_levels = (working.undo_levels as i32 + delta).clamp(0, 256) as usize,
+        // None (babelmap's default) is treated as 1 when adjusting; ± sets an explicit 1..=10.
+        20 => working.interpreter_number = Some((working.interpreter_number.unwrap_or(1) as i32 + delta).clamp(1, 10) as u8),
         _ => {}
     }
 }
