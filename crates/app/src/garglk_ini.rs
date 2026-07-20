@@ -114,6 +114,46 @@ impl GarglkSummary {
 }
 
 impl GarglkOverlay {
+    /// Build the theme's garglk [`Decls`](crate::theme::resolve::Decls) layer from
+    /// this overlay's non-glk colours (SQ-0309): `tcolor 0`→`transcript`,
+    /// `gcolor 0`→`upper_window`, `linkcolor`→`hyperlink`, `bordercolor`→
+    /// `upper_window_border`, and `windowcolor`→the page background on
+    /// `transcript`/`upper_window`. The per-style glk slots (`buffer[1..]`/
+    /// `grid[1..]`) still ride the `glk_styles` override array via [`Self::apply`]
+    /// (the render glk path reads that array for colours), so they are NOT
+    /// duplicated here. Fed to `resolve_theme_layered` as the garglk layer so these
+    /// colours survive the render migration off the legacy `ColorScheme` fields.
+    pub fn color_decls(&self) -> crate::theme::resolve::Decls {
+        use crate::theme::registry::Delta;
+        let mut d = crate::theme::resolve::Decls::new();
+        let mut set = |name: &str, fg: Option<Color>, bg: Option<Color>| {
+            let e = d.entry(name.to_string()).or_insert(Delta::EMPTY);
+            if fg.is_some() {
+                e.fg = fg;
+            }
+            if bg.is_some() {
+                e.bg = bg;
+            }
+        };
+        if let Some((fg, bg)) = self.buffer[0] {
+            set("transcript", Some(fg), Some(bg));
+        }
+        if let Some((fg, bg)) = self.grid[0] {
+            set("upper_window", Some(fg), Some(bg));
+        }
+        if let Some(c) = self.linkcolor {
+            set("hyperlink", Some(c), None);
+        }
+        if let Some(c) = self.bordercolor {
+            set("upper_window_border", Some(c), None);
+        }
+        if let Some(c) = self.windowcolor {
+            set("transcript", None, Some(c));
+            set("upper_window", None, Some(c));
+        }
+        d
+    }
+
     /// Overlay the resolved keys onto `cs`, returning a summary of what changed.
     /// Starts from the already-resolved theme and only touches what the ini sets.
     /// `honor_game_colours` is NOT applied here (it lives on `config`, set by the
@@ -501,6 +541,23 @@ stylehint 0
         assert_eq!(summary.grid_count, 1);
         assert!(summary.link_set && summary.border_set && summary.window_set);
         assert_eq!(summary.honor, Some(false));
+    }
+
+    #[test]
+    fn color_decls_maps_non_glk_colours_to_theme_selectors() {
+        // The same overlay's non-glk colours must reach the theme layer (SQ-0309),
+        // since the render sites now read those from the theme, not the fields.
+        let ov = resolve(
+            "tcolor 0 ffffff 000000\ngcolor 0 aabbcc 001122\nlinkcolor 00ffff\nbordercolor ff8800\nwindowcolor 101010\n",
+            "a.z5",
+        );
+        let d = ov.color_decls();
+        assert_eq!(d["transcript"].fg, Some(Color::Rgb(0xff, 0xff, 0xff)));
+        // windowcolor overrides the buffer bg (applied after tcolor 0 bg).
+        assert_eq!(d["transcript"].bg, Some(Color::Rgb(0x10, 0x10, 0x10)));
+        assert_eq!(d["upper_window"].fg, Some(Color::Rgb(0xaa, 0xbb, 0xcc)));
+        assert_eq!(d["hyperlink"].fg, Some(Color::Rgb(0, 0xff, 0xff)));
+        assert_eq!(d["upper_window_border"].fg, Some(Color::Rgb(0xff, 0x88, 0)));
     }
 
     #[test]

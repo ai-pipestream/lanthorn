@@ -108,7 +108,12 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
             parse_file(Some(crate::styles::per_game_style_path(&state.game_dir)))
         };
         let (_, gs, _) = crate::colors::resolve_base(global.scheme.as_deref(), &user_dir);
-        state.colors.theme = resolve_theme_layered(&gs, &global, &per_game);
+        // SQ-0309: a discovered garglk.ini's colours ride the theme's garglk layer
+        // (between global and per-game) so they survive the migration off the legacy
+        // ColorScheme fields (`ov.apply` still seeds the glk override array, which the
+        // render glk path reads for per-style colours).
+        let garglk_decls = state.garglk_overlay.as_ref().map(|o| o.color_decls()).unwrap_or_default();
+        state.colors.theme = resolve_theme_layered(&gs, &global, &garglk_decls, &per_game);
     }
 
     ReloadOutcome::Reloaded { warnings }

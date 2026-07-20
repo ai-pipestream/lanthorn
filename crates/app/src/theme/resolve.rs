@@ -332,7 +332,7 @@ pub fn resolve_theme(
     scheme: &crate::colors::GhosttyScheme,
     parsed: &super::toml_schema::ParsedStyle,
 ) -> Theme {
-    resolve_theme_layered(scheme, parsed, &super::toml_schema::ParsedStyle::default())
+    resolve_theme_layered(scheme, parsed, &Decls::new(), &super::toml_schema::ParsedStyle::default())
 }
 
 /// Build the flat [`Theme`] from a base `scheme` and TWO parsed layers: the global
@@ -340,13 +340,15 @@ pub fn resolve_theme(
 /// [`Roles::from_scheme`], then global `[roles]` fg/bg overrides, then per-game
 /// `[roles]` overrides. Each layer's `decls` lower to its own [`Decls`] (fg/bg +
 /// modifiers) so [`resolve`] stamps [`Provenance`] per selector (GlobalUser / PerGame).
-/// The garglk layer is empty here (it rides the legacy field path until Wave 5).
+/// The `garglk` [`Decls`] layer (a discovered garglk.ini's colour overlay, built by
+/// `garglk_ini::garglk_color_decls`) sits between global and per-game (§5 order).
 ///
 /// DEFERRED (unchanged from Wave 1, marked `// Wave 5:`): decl `parent` re-rooting,
 /// decl `glyph`/`glyphs` overrides, role modifiers, modifier-clearing.
 pub fn resolve_theme_layered(
     scheme: &crate::colors::GhosttyScheme,
     global: &super::toml_schema::ParsedStyle,
+    garglk: &Decls,
     per_game: &super::toml_schema::ParsedStyle,
 ) -> Theme {
     // 1. base roles from scheme, then [roles] fg/bg overrides (global, then per-game).
@@ -365,7 +367,7 @@ pub fn resolve_theme_layered(
     let mut per_game_decls = lower_decls(&per_game.decls, scheme);
     per_game_decls.extend(per_game_role_decls);
 
-    resolve(&roles, &global_decls, &Decls::new(), &per_game_decls)
+    resolve(&roles, &global_decls, garglk, &per_game_decls)
 }
 
 /// Apply a layer's already-lowered `[roles]` fg/bg [`Decls`] onto `roles` in
@@ -672,13 +674,13 @@ mod tests {
             "transcript".to_string(),
             RawDelta { fg: Some("red".to_string()), ..RawDelta::default() },
         );
-        let theme = resolve_theme_layered(&scheme, &global, &per_game);
+        let theme = resolve_theme_layered(&scheme, &global, &Decls::new(), &per_game);
         let r = theme.get("transcript");
         assert_eq!(r.style.fg, Some(Color::Red));
         assert_eq!(r.provenance, Provenance::PerGame);
 
         // With per_game default (no override), global wins.
-        let theme = resolve_theme_layered(&scheme, &global, &ParsedStyle::default());
+        let theme = resolve_theme_layered(&scheme, &global, &Decls::new(), &ParsedStyle::default());
         let r = theme.get("transcript");
         assert_eq!(r.style.fg, Some(Color::Green));
         assert_eq!(r.provenance, Provenance::GlobalUser);
@@ -694,7 +696,7 @@ mod tests {
             "accent".to_string(),
             RawDelta { fg: Some("green".to_string()), ..RawDelta::default() },
         );
-        let theme = resolve_theme_layered(&scheme, &global, &ParsedStyle::default());
+        let theme = resolve_theme_layered(&scheme, &global, &Decls::new(), &ParsedStyle::default());
         assert_eq!(theme.get("accent").style.fg, Some(Color::Green));
 
         // A per-game [roles] override wins over the global one.
@@ -703,7 +705,7 @@ mod tests {
             "accent".to_string(),
             RawDelta { fg: Some("red".to_string()), ..RawDelta::default() },
         );
-        let theme = resolve_theme_layered(&scheme, &global, &per_game);
+        let theme = resolve_theme_layered(&scheme, &global, &Decls::new(), &per_game);
         assert_eq!(theme.get("accent").style.fg, Some(Color::Red));
     }
 }
