@@ -84,6 +84,14 @@ impl Roles {
     /// `ColorScheme::from_ghostty` element→scheme mapping so the derived theme
     /// reproduces the current look.
     pub fn from_scheme(scheme: &crate::colors::GhosttyScheme) -> Roles {
+        // No configured scheme: `resolve_base(None)` hands back a
+        // `GhosttyScheme::default()` whose fg/bg/palette are all `Color::Reset`.
+        // Deriving roles from that would paint every element terminal-default
+        // monochrome (losing cyan borders/accents etc.). Fall back to the concrete
+        // terminal-default role palette so the out-of-box look keeps its colours.
+        if scheme.foreground == Color::Reset {
+            return Roles::terminal_default();
+        }
         let fg = scheme.foreground;
         let bg = scheme.background;
         Roles {
@@ -603,6 +611,21 @@ mod tests {
         scheme.palette[6] = Color::Cyan; // border/accent slot (focused_border/connector)
         scheme.palette[8] = Color::DarkGray; // muted slot (suggestion)
         scheme
+    }
+
+    #[test]
+    fn no_scheme_falls_back_to_concrete_terminal_default_roles() {
+        // Runtime regression guard: the startup `reload_style` builds the theme from
+        // `resolve_base(None)` → `GhosttyScheme::default()`, whose fg/bg/palette are
+        // all `Color::Reset`. Without the fallback, every role (hence every selector)
+        // would resolve to `Reset` and the out-of-box look would go monochrome.
+        let gs = crate::colors::GhosttyScheme::default();
+        assert_eq!(gs.foreground, Color::Reset, "no-scheme base is all-Reset");
+        assert_eq!(Roles::from_scheme(&gs), Roles::terminal_default());
+        let theme = resolve_theme(&gs, &ParsedStyle::default());
+        assert_eq!(theme.get("map.connector").style.fg, Some(Color::Cyan));
+        assert_eq!(theme.get("panel.border").style.fg, Some(Color::Cyan));
+        assert_eq!(theme.get("transcript").style.fg, Some(Color::White));
     }
 
     #[test]
