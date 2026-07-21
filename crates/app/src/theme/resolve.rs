@@ -204,11 +204,11 @@ fn apply_style(base: Style, d: &Delta) -> Style {
 /// or glyph-slot list overrides the inherited one; otherwise it carries through.
 fn apply_glyph(inherited: Option<GlyphSet>, d: &Delta) -> Option<GlyphSet> {
     let mut g = inherited.unwrap_or_default();
-    if let Some(single) = d.glyph {
-        g.single = Some(single.to_string());
+    if let Some(single) = &d.glyph {
+        g.single = Some(single.clone());
     }
     if !d.glyphs.is_empty() {
-        g.slots = d.glyphs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        g.slots = d.glyphs.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     }
     if g.is_empty() {
         None
@@ -223,10 +223,7 @@ fn apply_border(
     inherited: Option<crate::render::paneframe::BorderStyle>,
     d: &Delta,
 ) -> Option<crate::render::paneframe::BorderStyle> {
-    match d.border {
-        Some(name) => Some(crate::render::paneframe::parse_border_style(name)),
-        None => inherited,
-    }
+    d.border.or(inherited)
 }
 
 /// Resolve one row against a known parent `Resolved` (or a bare parent style when
@@ -250,6 +247,20 @@ fn resolve_row(row: &RegRow, parent: &Resolved, layers: &[(&Decls, Provenance)])
         }
     }
     Resolved { style, glyph, border, provenance }
+}
+
+/// The effective parent selector for a row: a user layer's `parent` override
+/// (SQ-0440) wins over the registry default, taking the highest layer that sets
+/// one. `None` means a bare root (no inheritance). Returns an owned name because a
+/// user override is runtime-owned while the registry default is `&'static`.
+fn effective_parent(row: &RegRow, layers: &[(&Decls, Provenance)]) -> Option<String> {
+    let mut parent = row.parent.map(str::to_string);
+    for (decls, _) in layers {
+        if let Some(p) = decls.get(row.name).and_then(|d| d.parent.as_ref()) {
+            parent = Some(p.clone());
+        }
+    }
+    parent
 }
 
 /// Compute the flat theme map from the registry via single-level parent fallback.
@@ -291,9 +302,9 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
     loop {
         let before = pending.len();
         pending.retain(|row| {
-            let parent = match row.parent {
+            let parent = match effective_parent(row, &layers) {
                 None => Resolved { style: Style::default(), glyph: None, border: None, provenance: Provenance::Default },
-                Some(p) => match map.get(p) {
+                Some(p) => match map.get(&p) {
                     Some(res) => res.clone(),
                     None => return true, // parent not resolved yet; keep pending.
                 },
@@ -327,15 +338,12 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
 /// Roles start from [`Roles::from_scheme`] and are overridden by `parsed.roles`
 /// (fg/bg only — roles carry no user modifiers today, aside from `heading`'s
 /// already-baked-in bold). `parsed.decls` lower to a single GLOBAL [`Decls`]
-/// layer (fg/bg + modifier flags). Colour strings resolve against `scheme` via
-/// [`crate::colors::parse_color_value`].
+/// layer via [`lower_decls`], which now carries fg/bg/modifiers plus the border
+/// `style`, `glyph`/`glyphs`, and `parent` re-root (SQ-0440). Colour strings
+/// resolve against `scheme` via [`crate::colors::parse_color_value`].
 ///
-/// DEFERRED (later waves): a decl's `parent` re-rooting and a decl's
-/// `glyph`/`glyphs` overrides are NOT applied here — the registry [`Delta`]'s
-/// glyph fields are `&'static`, and per-decl parent override needs resolver
-/// support (Wave 5). Only fg/bg/modifiers flow now. Modifiers are additive only
-/// (an unset/`false` flag is a no-op, matching [`apply_style`]) — a user cannot
-/// yet CLEAR a default modifier.
+/// Still deferred: role modifiers and modifier-clearing (an unset/`false` flag is
+/// a no-op, matching [`apply_style`], so a user cannot yet CLEAR a default modifier).
 pub fn resolve_theme(
     scheme: &crate::colors::GhosttyScheme,
     parsed: &super::toml_schema::ParsedStyle,
@@ -351,8 +359,8 @@ pub fn resolve_theme(
 /// The `garglk` [`Decls`] layer (a discovered garglk.ini's colour overlay, built by
 /// `garglk_ini::garglk_color_decls`) sits between global and per-game (§5 order).
 ///
-/// DEFERRED (unchanged from Wave 1, marked `// Wave 5:`): decl `parent` re-rooting,
-/// decl `glyph`/`glyphs` overrides, role modifiers, modifier-clearing.
+/// Decl `parent` re-rooting and `glyph`/`glyphs`/border overrides now all flow
+/// through (SQ-0440). Still deferred: role modifiers and modifier-clearing.
 pub fn resolve_theme_layered(
     scheme: &crate::colors::GhosttyScheme,
     global: &super::toml_schema::ParsedStyle,
@@ -410,16 +418,13 @@ fn lower_role_decls(
     decls
 }
 
-/// Lower a layer's raw `decls` (fg/bg strings + modifier flags) to a [`Decls`]
-/// map of resolved [`Delta`]s. Colour strings resolve against `scheme` via
-/// [`crate::colors::parse_color_value`].
+/// Lower a layer's raw `decls` to a [`Decls`] map of resolved [`Delta`]s. Colour
+/// strings resolve against `scheme` via [`crate::colors::parse_color_value`].
 ///
-/// DEFERRED (later waves): a decl's `parent` re-rooting and a decl's
-/// `glyph`/`glyphs` overrides are NOT applied here — the registry [`Delta`]'s
-/// glyph fields are `&'static`, and per-decl parent override needs resolver
-/// support (Wave 5). Only fg/bg/modifiers flow now. Modifiers are additive only
-/// (an unset/`false` flag is a no-op, matching [`apply_style`]) — a user cannot
-/// yet CLEAR a default modifier.
+/// All override channels flow through (SQ-0440): fg/bg/modifiers, the border
+/// `style`, `glyph`/`glyphs`, and a `parent` re-root (applied in [`resolve`] via
+/// [`effective_parent`]). Modifiers are additive only (an unset/`false` flag is a
+/// no-op, matching [`apply_style`]) — a user cannot yet CLEAR a default modifier.
 fn lower_decls(
     raw_decls: &std::collections::BTreeMap<String, super::toml_schema::RawDelta>,
     scheme: &crate::colors::GhosttyScheme,
@@ -436,12 +441,14 @@ fn lower_decls(
             underline: raw.underline.unwrap_or(false),
             reversed: raw.reversed.unwrap_or(false),
             dim: raw.dim.unwrap_or(false),
-            glyph: None, // Wave 5: glyph overrides not applied here.
-            glyphs: &[], // Wave 5: glyph-slot overrides not applied here.
-            border: None, // Wave 5: border-style overrides not applied here.
+            // SQ-0440: glyph / glyph-slot / border-style / parent overrides now flow
+            // through (the registry `Delta` owns these channels).
+            glyph: raw.glyph.clone(),
+            glyphs: raw.glyphs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            border: raw.style.as_deref().map(crate::render::paneframe::parse_border_style),
+            parent: raw.parent.clone(),
         };
         decls.insert(name.clone(), delta);
-        // Wave 5: raw.parent re-rooting not applied here.
     }
     decls
 }
@@ -538,6 +545,47 @@ mod tests {
     fn non_border_selector_has_no_border() {
         let theme = resolve_default(&Roles::terminal_default());
         assert_eq!(theme.get("transcript").border, None);
+    }
+
+    // ── SQ-0440: user border / glyph / parent overrides flow through lower_decls ──
+
+    #[test]
+    fn user_border_style_override_resolves() {
+        // The reported bug: `[panel] border = { style = "double" }` was parsed but
+        // dropped, so panels always rendered single. It must now resolve to Double.
+        let scheme = terminal_default_scheme();
+        let parsed = super::super::toml_schema::parse("[panel]\nborder = { style = \"double\" }\n").unwrap();
+        let theme = resolve_theme(&scheme, &parsed);
+        assert_eq!(
+            theme.get("panel.border").border,
+            Some(crate::render::paneframe::BorderStyle::Double),
+        );
+    }
+
+    #[test]
+    fn user_glyph_override_resolves() {
+        // A user glyph override on a selector that carries a default glyph replaces it.
+        let scheme = terminal_default_scheme();
+        let parsed = super::super::toml_schema::parse("[panel]\ntab_divider = { glyph = \"┃\" }\n").unwrap();
+        let theme = resolve_theme(&scheme, &parsed);
+        assert_eq!(
+            theme.get("panel.tab_divider").glyph.and_then(|g| g.single),
+            Some("┃".to_string()),
+        );
+    }
+
+    #[test]
+    fn user_parent_reroot_override_resolves() {
+        // Re-rooting a selector onto a different parent makes it inherit that parent's
+        // colour instead of its registry default (panel.title normally parents heading).
+        let scheme = terminal_default_scheme();
+        let parsed = super::super::toml_schema::parse("[panel]\ntitle = { parent = \"accent\" }\n").unwrap();
+        let theme = resolve_theme(&scheme, &parsed);
+        assert_eq!(
+            theme.get("panel.title").style.fg,
+            theme.get("accent").style.fg,
+            "panel.title re-rooted onto accent must inherit the accent colour",
+        );
     }
 
     // ── Task 0.3: layered decls + per-selector provenance ────────────────────

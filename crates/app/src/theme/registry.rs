@@ -56,7 +56,13 @@ pub enum Kind {
 ///   terminator caps) or, for a [`Kind::Placement`] preset row, the preset name.
 /// - `glyphs` is a small named-glyph slot list for selectors that own a set
 ///   (e.g. box/arrow slots on `map.room`/`map.connector`). Empty for the defaults.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// Owns its string/glyph channels (not `&'static`) so a runtime user override —
+/// parsed from `style.toml` and lowered into a layer `Delta` — uses the same type
+/// as the registry defaults (SQ-0440). `border` carries a resolved
+/// [`BorderStyle`]; `parent` re-roots this selector's inheritance when a user sets
+/// it (the registry default parent lives on [`RegRow`]).
+#[derive(Debug, Clone, PartialEq)]
 pub struct Delta {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
@@ -65,13 +71,15 @@ pub struct Delta {
     pub underline: bool,
     pub reversed: bool,
     pub dim: bool,
-    pub glyph: Option<&'static str>,
-    pub glyphs: &'static [(&'static str, &'static str)],
-    pub border: Option<&'static str>,
+    pub glyph: Option<String>,
+    pub glyphs: Vec<(String, String)>,
+    pub border: Option<crate::render::paneframe::BorderStyle>,
+    pub parent: Option<String>,
 }
 
 impl Delta {
-    /// The zero delta: same as the parent, no glyph.
+    /// The zero delta: same as the parent, no glyph. `Vec::new()` is a const fn, so
+    /// this stays a `const` even though `Delta` is no longer `Copy`.
     pub const EMPTY: Delta = Delta {
         fg: None,
         bg: None,
@@ -81,13 +89,14 @@ impl Delta {
         reversed: false,
         dim: false,
         glyph: None,
-        glyphs: &[],
+        glyphs: Vec::new(),
         border: None,
+        parent: None,
     };
 }
 
 /// One registry row: a themeable selector and how it derives from its parent.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct RegRow {
     pub name: &'static str,
     pub section: Section,
@@ -108,7 +117,7 @@ pub const ROLE_NAMES: [&str; 7] =
 pub const LAYER_CYCLE_DEFAULT: [&str; 5] = ["cyan", "green", "magenta", "yellow", "blue"];
 
 /// Build a row concisely.
-const fn row(
+fn row(
     name: &'static str,
     section: Section,
     kind: Kind,
@@ -119,27 +128,29 @@ const fn row(
 }
 
 /// A delta carrying only modifier flags (colours/glyph inherited from parent).
-const fn mods(bold: bool, italic: bool, underline: bool, reversed: bool) -> Delta {
+fn mods(bold: bool, italic: bool, underline: bool, reversed: bool) -> Delta {
     Delta { bold, italic, underline, reversed, ..Delta::EMPTY }
 }
 
 /// A delta setting only a foreground colour.
-const fn fg(c: Color) -> Delta {
+fn fg(c: Color) -> Delta {
     Delta { fg: Some(c), ..Delta::EMPTY }
 }
 
 /// A delta carrying only a single glyph (e.g. gutter mark, tab divider, or a
 /// [`Kind::Placement`] preset name).
-const fn glyph(g: &'static str) -> Delta {
-    Delta { glyph: Some(g), ..Delta::EMPTY }
+fn glyph(g: &str) -> Delta {
+    Delta { glyph: Some(g.to_string()), ..Delta::EMPTY }
 }
 
 /// A delta setting only the border style (colour/glyph inherited from parent).
-const fn border(name: &'static str) -> Delta {
-    Delta { border: Some(name), ..Delta::EMPTY }
+fn border(name: &str) -> Delta {
+    Delta { border: Some(crate::render::paneframe::parse_border_style(name)), ..Delta::EMPTY }
 }
 
-pub const REGISTRY: &[RegRow] = &[
+/// The registry table. Built once at first use: `Delta` now owns its glyph/border
+/// channels (SQ-0440), so the rows can no longer be a compile-time `const`.
+pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new(|| vec![
     // ── §1 roles ──────────────────────────────────────────────────────────────
     // Roots: colours come from the base scheme + `[roles]`, so no parent/delta.
     row("text", Section::Roles, Kind::Style, None, Delta::EMPTY),
@@ -178,7 +189,7 @@ pub const REGISTRY: &[RegRow] = &[
     // `:active` = single + bold (today's cyan+bold).
     row("panel.border", Section::Panel, Kind::BorderGlyphs, Some("line"), border("single")),
     row("panel.border:active", Section::Panel, Kind::BorderGlyphs, Some("line"),
-        Delta { border: Some("single"), bold: true, ..Delta::EMPTY }),
+        Delta { border: Some(crate::render::paneframe::BorderStyle::Single), bold: true, ..Delta::EMPTY }),
     row("panel.title", Section::Panel, Kind::Style, Some("heading"), Delta::EMPTY),
     row("panel.tab", Section::Panel, Kind::Style, Some("muted"), Delta::EMPTY),
     row("panel.tab:active", Section::Panel, Kind::Style, Some("accent"), mods(true, false, false, false)),
@@ -238,12 +249,12 @@ pub const REGISTRY: &[RegRow] = &[
     row("debug.disasm_executed", Section::Debug, Kind::Style, Some("accent"), glyph("|")),
     row("debug.disasm_rd", Section::Debug, Kind::Style, Some("text"), glyph(" ")),
     row("debug.disasm_soft", Section::Debug, Kind::Style, Some("muted"), glyph(" ")),
-    row("debug.disasm_data", Section::Debug, Kind::Style, Some("muted"), Delta { italic: true, glyph: Some(" "), ..Delta::EMPTY }),
+    row("debug.disasm_data", Section::Debug, Kind::Style, Some("muted"), Delta { italic: true, glyph: Some(" ".to_string()), ..Delta::EMPTY }),
     // ── §2c dialog.* (modal surface: background + own frame + title/buttons/shadow) ──
     row("dialog.background", Section::Dialog, Kind::Style, Some("chrome"), Delta::EMPTY),
     // Modal frame: its own border (was panel.border:active); modals are always
     // "active", so single + bold reproduces today's cyan+bold dialog frame.
-    row("dialog.border", Section::Dialog, Kind::BorderGlyphs, Some("line"), Delta { border: Some("single"), bold: true, ..Delta::EMPTY }),
+    row("dialog.border", Section::Dialog, Kind::BorderGlyphs, Some("line"), Delta { border: Some(crate::render::paneframe::BorderStyle::Single), bold: true, ..Delta::EMPTY }),
     row("dialog.title", Section::Dialog, Kind::Style, Some("accent"), Delta::EMPTY),
     row("dialog.button", Section::Dialog, Kind::Style, Some("chrome"), mods(false, false, false, true)),
     row("dialog.button:active", Section::Dialog, Kind::Style, Some("accent"), mods(false, false, false, true)),
@@ -285,7 +296,7 @@ pub const REGISTRY: &[RegRow] = &[
     row("input_prompt", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("upper_window_border", Section::Elements, Kind::Style, Some("line"), Delta::EMPTY),
     row("room_panel", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
-];
+]);
 
 #[cfg(test)]
 mod tests {
@@ -447,7 +458,7 @@ mod tests {
     fn registry_is_complete_and_unique() {
         // (b) names are unique
         let mut seen = HashSet::new();
-        for r in REGISTRY {
+        for r in REGISTRY.iter() {
             assert!(seen.insert(r.name), "duplicate registry name: {}", r.name);
         }
 
@@ -462,7 +473,7 @@ mod tests {
 
         // (c) every non-None parent names a role or another registry row
         let roles: HashSet<&str> = ROLE_NAMES.iter().copied().collect();
-        for r in REGISTRY {
+        for r in REGISTRY.iter() {
             if let Some(p) = r.parent {
                 assert!(
                     roles.contains(p) || seen.contains(p),

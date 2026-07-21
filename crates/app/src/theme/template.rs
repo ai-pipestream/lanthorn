@@ -136,7 +136,7 @@ fn row_line(section: Section, row: &RegRow) -> String {
     let key = toml_key(&strip_section_prefix(section, row.name));
 
     if row.kind == Kind::Placement {
-        let preset = row.default_delta.glyph.unwrap_or_default();
+        let preset = row.default_delta.glyph.as_deref().unwrap_or_default();
         return format!("# {key} = \"{preset}\"{}", enum_hint(row));
     }
 
@@ -211,9 +211,9 @@ fn row_fields(row: &RegRow) -> Vec<String> {
         fields.push("dim = true".to_string());
     }
     if let Some(border) = d.border {
-        fields.push(format!("style = \"{border}\""));
+        fields.push(format!("style = \"{}\"", crate::render::paneframe::border_style_name(border)));
     }
-    if let Some(glyph) = d.glyph {
+    if let Some(glyph) = &d.glyph {
         fields.push(format!("glyph = \"{glyph}\""));
     }
     fields
