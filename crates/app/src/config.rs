@@ -1063,6 +1063,24 @@ use_defaults = false
     }
 
     #[test]
+    fn write_config_creates_file_and_dir_when_missing() {
+        // Settings-save must create config.toml (and its parent) from scratch.
+        let dir = std::env::temp_dir()
+            .join(format!("babelmap_write_config_new_{}", std::process::id()))
+            .join("nested");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!dir.exists());
+        let mut cfg = Config::default();
+        cfg.user_dir = dir.clone();
+        write_config(&dir, &cfg).unwrap();
+        assert!(dir.join("config.toml").exists(), "config.toml must be created when missing");
+        let content = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(!content.contains("[colors]"), "config.toml must not carry style sections");
+        assert!(!content.contains("[symbols]"));
+        let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
     fn config_reads_style_pointer() {
         let cfg: Config = toml::from_str("style = \"neon\"\n").unwrap();
         assert_eq!(cfg.style.as_deref(), Some("neon"));
