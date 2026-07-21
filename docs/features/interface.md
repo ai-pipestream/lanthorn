@@ -148,6 +148,13 @@ cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
   you point it at an IFDB page by hand. Results are cached in a per-game sidecar,
   so a repeat `r` makes no network requests, and a blorb's own `IFmd`/`Fspc`
   metadata always wins over anything fetched.
+- **Download hints.** For a highlighted game with no local hint file but a known
+  *InvisiClues* release, press `H` to download one beside the story — the live
+  IF Archive SLAG collection is preferred, with the Internet Archive's copy of
+  the waitingforgo set as a fallback for games SLAG doesn't cover (together
+  ~50 Infocom and other titles). The download runs in the background, the file
+  is validated as a real Z-machine story before it lands, and the **Hint** badge
+  lights the moment it finishes.
 - **Cover art in the picker.** A blorb game with a frontispiece shows its cover
   right in the info panel, drawn with the terminal's best graphics protocol
   (Kitty / iTerm2 / Sixel) and a universal half-block fallback everywhere else.
