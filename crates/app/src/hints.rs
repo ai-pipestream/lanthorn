@@ -128,7 +128,9 @@ const IZM_HINTS: &[(&str, &str)] = &[
     ("zork1izm", "zork1"),
     ("zork2izm", "zork2"),
     ("zork3izm", "zork3"),
-    ("bzorkizm", "beyond"),
+    // Compound-word keys use the full concatenated game name, so a stray word
+    // in an unrelated title (e.g. "Brain Guzzlers from Beyond") can't match.
+    ("bzorkizm", "beyondzork"),
     ("zork0izm", "zork0"),
     ("zuuizm", "ztuu"),
     ("wishbizm", "wishbringer"),
@@ -154,14 +156,26 @@ const IZM_HINTS: &[(&str, &str)] = &[
     ("shognizm", "shogun"),
     ("leathizm", "leather"),
     ("bureaizm", "bureaucracy"),
-    ("nordizm", "nord"),
+    ("nordizm", "nordandbert"),
     ("lurkizm", "lurking"),
-    ("plundizm", "plundered"),
-    ("bordrizm", "border"),
+    ("plundizm", "plunderedhearts"),
+    ("bordrizm", "borderzone"),
     ("sherlizm", "sherlock"),
     ("journizm", "journey"),
     ("arthrizm", "arthur"),
 ];
+
+/// Lowercase a string keeping only ASCII alphanumerics — so `"Beyond Zork"`,
+/// `"beyond_zork"`, and `"beyondzork"` all normalise to `"beyondzork"`. Matching
+/// game keys against the normalised form lets a multi-word canonical name match
+/// while a stray word inside an unrelated title/filename (e.g. the "Beyond" in
+/// "Brain Guzzlers from Beyond") cannot.
+fn normalize_ident(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
+}
 
 /// The curated game-key for a hint-file `stem`, consulting both the SLAG and the
 /// izm tables (SLAG first). `None` when neither table names the stem.
@@ -212,7 +226,10 @@ pub fn hint_game_key(file_name: &str) -> Option<String> {
 /// `story_stem_or_title` contains.
 pub fn hint_matches_story(hint_file_name: &str, story_stem_or_title: &str) -> bool {
     match hint_game_key(hint_file_name) {
-        Some(key) if key.len() >= 3 => story_stem_or_title.to_ascii_lowercase().contains(&key),
+        Some(key) if key.len() >= 3 => {
+            let k = normalize_ident(&key);
+            !k.is_empty() && normalize_ident(story_stem_or_title).contains(&k)
+        }
         _ => false,
     }
 }
@@ -245,9 +262,12 @@ fn izm_url(stem: &str) -> String {
 /// fallback for games SLAG doesn't cover. Returns `None` when no catalog entry
 /// matches. A key must be ≥3 chars to match (guards against spurious hits).
 pub fn hint_download_for(game_stem: &str, game_title: &str) -> Option<HintDownload> {
-    let stem = game_stem.to_ascii_lowercase();
-    let title = game_title.to_ascii_lowercase();
-    let matches = |key: &str| key.len() >= 3 && (stem.contains(key) || title.contains(key));
+    let stem = normalize_ident(game_stem);
+    let title = normalize_ident(game_title);
+    let matches = |key: &str| {
+        let k = normalize_ident(key);
+        k.len() >= 3 && (stem.contains(&k) || title.contains(&k))
+    };
     if let Some((s, _)) = SLAG_HINTS.iter().find(|(_, k)| matches(k)) {
         return Some(HintDownload { filename: format!("{s}.z5"), url: slag_url(s) });
     }
@@ -757,7 +777,7 @@ mod tests {
         assert!(is_hint_sidecar("deadlizm.z5"));
         assert_eq!(hint_game_key("deadlizm.z5").as_deref(), Some("deadline"));
         assert_eq!(hint_game_key("witnizm.z5").as_deref(), Some("witness"));
-        assert_eq!(hint_game_key("bzorkizm.z5").as_deref(), Some("beyond"));
+        assert_eq!(hint_game_key("bzorkizm.z5").as_deref(), Some("beyondzork"));
         assert!(hint_matches_story("witnizm.z5", "The Witness"));
         // A bare `izm` suffix that isn't in the table is NOT a hint file.
         assert!(!is_invisiclues_name("mechanizm.z5"));
@@ -789,7 +809,19 @@ mod tests {
     fn hint_download_zork_variants_dont_collide() {
         assert_eq!(hint_download_for("zork1", "Zork I").unwrap().filename, "zork1inv.z5");
         assert_eq!(hint_download_for("beyondzork", "Beyond Zork").unwrap().filename, "bzorkizm.z5");
+        // Canonical multi-word/underscored names still match via normalisation.
+        assert_eq!(hint_download_for("beyond_zork", "").unwrap().filename, "bzorkizm.z5");
+        assert_eq!(hint_download_for("", "Beyond Zork").unwrap().filename, "bzorkizm.z5");
         assert_eq!(hint_download_for("zork0", "Zork Zero").unwrap().filename, "zork0izm.z5");
+    }
+
+    /// Regression: a stray common word in a title must not match a compound-word
+    /// game key. "Brain Guzzlers from Beyond" contains "beyond" but is not
+    /// Beyond Zork, so it gets no hint (badge stays dark).
+    #[test]
+    fn hint_download_rejects_stray_word_match() {
+        assert!(hint_download_for("Brain_Guzzlers_from_Beyond!.gblorb", "Brain Guzzlers from Beyond!").is_none());
+        assert!(!hint_matches_story("bzorkizm.z5", "Brain Guzzlers from Beyond!"));
     }
 
     #[test]

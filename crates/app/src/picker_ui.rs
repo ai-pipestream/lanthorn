@@ -845,7 +845,10 @@ pub(crate) fn run_story_picker(
                         Char(c) => field.insert(c),
                         _ => {}
                     }
-                } else if slide.open && shift {
+                } else if slide.open && shift && matches!(k.code, Up | Down | PageUp | PageDown) {
+                    // Shift + a scroll key drives the open info panel. Only these
+                    // keys are intercepted — any other shift combo (e.g. `H` to
+                    // download hints) must still fall through to normal handling.
                     let page = (last_panel_area.height.saturating_sub(2)).max(1) as usize;
                     match k.code {
                         Up => panel_scroll = panel_scroll.saturating_sub(1),
