@@ -424,6 +424,12 @@ pub struct Config {
     /// the archive and keeps per-turn blobs in memory).
     #[serde(default)]
     pub record_turn_history: bool,
+    /// When true (default), auto-skip the InvisiClues "your screen is only N
+    /// characters wide…" banner that izm hint files print at startup, landing the
+    /// player straight on the topic menu. Set false to see the banner and dismiss
+    /// it yourself.
+    #[serde(default = "default_true")]
+    pub hint_skip_screen_warning: bool,
     /// Controls automatic background re-tidy when new rooms are discovered.
     /// Default: EveryRoom (re-tidy on each turn that finds a new room).
     #[serde(default)]
@@ -537,6 +543,7 @@ impl Default for Config {
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
             record_turn_history: false,
+            hint_skip_screen_warning: true,
             background_tidy: BackgroundTidy::EveryRoom,
             aux_storage: AuxStorage::Ask,
             keymap: KeymapConfig::default(),
@@ -1014,6 +1021,7 @@ use_defaults = false
             prompt_save_on_quit: true,
             prompt_load_on_launch: true,
             record_turn_history: false,
+            hint_skip_screen_warning: true,
             background_tidy: BackgroundTidy::OnOverlap,
             aux_storage: AuxStorage::Ask,
             keymap: KeymapConfig::default(),

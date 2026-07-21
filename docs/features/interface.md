@@ -82,7 +82,10 @@ built-in debugger that follows the running story instruction by instruction.
   inside a sibling
   `.zip`), matched to *that* game by name so a multi-game folder never crosses
   wires, and remembered per game; if the story ships its own `HINT` command, the
-  panel points you at that too.
+  panel points you at that too. The downloaded *InvisiClues* files open on a
+  "your screen is only N characters wide" banner (their menu names can be very
+  long); babelmap skips it for you and drops you straight on the topic menu —
+  turn `hint_skip_screen_warning = false` in the settings if you'd rather see it.
 - **Reset** — restart the story from the top via a confirmation dialog with an
   opt-in "also clear the map" checkbox (the map is kept by default).
 - **Slash commands** — type a leading prefix (default `/`, configurable) to run

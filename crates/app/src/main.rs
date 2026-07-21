@@ -2663,9 +2663,13 @@ fn is_slash(input: &str, prefix: char) -> bool {
 /// player lands straight on the menu; the keypress erases the banner. If the
 /// output isn't the banner (or the file isn't waiting for a key), fall back to
 /// the raw opening — no harm, the banner just shows as before.
-fn hint_opening(vm: &mut app::session::GameSession) -> String {
+///
+/// Gated on `skip_warning` (the `hint_skip_screen_warning` config, default on);
+/// when off, the banner is left in place for the player to dismiss.
+fn hint_opening(vm: &mut app::session::GameSession, skip_warning: bool) -> String {
     let opening = vm.take_transcript();
-    if hints::is_narrow_screen_warning(&opening)
+    if skip_warning
+        && hints::is_narrow_screen_warning(&opening)
         && matches!(vm.pending_input(), app::session::InputKind::Char)
     {
         return vm.submit_char(b' ').transcript;
@@ -2705,7 +2709,7 @@ fn open_hints(
                     match app::session::GameSession::new(bytes, state.config.honor_game_colours, false, state.config.interpreter_number) {
                         Ok(mut vm) => {
                             vm.machine.undo_cap = state.config.undo_levels;
-                            let opening = hint_opening(&mut vm);
+                            let opening = hint_opening(&mut vm, state.config.hint_skip_screen_warning);
                             let transcript: Vec<String> =
                                 opening.split('\n').map(|l| l.to_owned()).collect();
                             let label = p
@@ -2741,7 +2745,7 @@ fn open_hints(
                     match app::session::GameSession::new(bytes, state.config.honor_game_colours, false, state.config.interpreter_number) {
                         Ok(mut vm) => {
                             vm.machine.undo_cap = state.config.undo_levels;
-                            let opening = hint_opening(&mut vm);
+                            let opening = hint_opening(&mut vm, state.config.hint_skip_screen_warning);
                             let transcript: Vec<String> =
                                 opening.split('\n').map(|l| l.to_owned()).collect();
                             let label = entry.rsplit('/').next().unwrap_or(&entry).to_owned();

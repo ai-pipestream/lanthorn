@@ -34,6 +34,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("record_turn_history",  ConfigRowKind::Bool, "Record a per-turn rewind/replay history — enables Rewind, but grows the archive and holds per-turn blobs in memory."),
     ("undo_levels",          ConfigRowKind::Num,  "How many in-memory undo snapshots to keep (0 disables undo). Use ← / → to adjust."),
     ("interpreter_number",   ConfigRowKind::Num,  "Z-machine interpreter number (header byte 1Eh); changes colour behaviour on some Infocom games (e.g. Beyond Zork). ← / → to adjust."),
+    ("hint_skip_screen_warning", ConfigRowKind::Bool, "Auto-skip the InvisiClues 'your screen is only N characters wide' banner when opening izm hints, landing straight on the topic menu."),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -232,6 +233,7 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         18 => bool_str(cfg.record_turn_history),
         19 => cfg.undo_levels.to_string(),
         20 => cfg.interpreter_number.map(|n| n.to_string()).unwrap_or_else(|| "default".to_string()),
+        21 => bool_str(cfg.hint_skip_screen_warning),
         _ => String::new(),
     }
 }
