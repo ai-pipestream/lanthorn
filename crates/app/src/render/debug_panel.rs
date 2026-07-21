@@ -72,10 +72,13 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
     // selector drives both the border colour and its style.
     let focused = state.focus == crate::state::Focus::Map && panel.focus == window;
     let border_selector = if focused { "panel.border:active" } else { "panel.border" };
-    // Tabs are drawn on the top border row; coerce a None border to Single so the
-    // strip always has a border row to sit in (preserves the old
-    // dialog_box_style None→Single coercion intent).
-    let border_style = Some(theme.get(border_selector).border.unwrap_or(BorderStyle::Single));
+    // Tabs are drawn on the top border row; coerce a None border (missing OR an
+    // explicit `style = "none"`) to Single so the strip always has a border row to
+    // sit in (preserves the old dialog_box_style None→Single coercion intent).
+    let border_style = Some(match theme.get(border_selector).border {
+        None | Some(BorderStyle::None) => BorderStyle::Single,
+        Some(s) => s,
+    });
 
     // Tab strip: one bracketed segment per section, active = the window's tab.
     let sections = WINDOW_TABS[window];
