@@ -14,7 +14,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use super::paneframe::{draw_pane_frame, draw_top_inset, BorderStyle, InsetCaps, InsetSegment, PaneGlyphs};
+use super::paneframe::{InsetSegment, PaneGlyphs};
+use crate::render::panel::{draw_panel, PanelSpec, PanelStrip};
 use crate::state::{AppState, VerbMenuPane};
 
 // ── Curated lists ─────────────────────────────────────────────────────────────
@@ -142,13 +143,25 @@ pub fn draw_verb_menu(
 
     // The verb dock is not an interactive resize target (the verb menu is a
     // keyboard-modal, so resize mode and the menu can never be open at once;
-    // see SQ-0238), so its border never picks up the resize highlight.
-    let frame = draw_pane_frame(buf, area, BorderStyle::Single, &PaneGlyphs::default(), base);
-
-    // Title strip on the top border row, via the shared header helper (bracketed
-    // ┫ Verbs ┣, matching the map/story panes and every modal). No-ops when the
-    // band is too short for a border row.
-    draw_top_inset(buf, frame.top_inset, &[InsetSegment { text: "Verbs", active: false }], base, base, &InsetCaps::for_border(BorderStyle::Thick));
+    // see SQ-0238), so its border never picks up the resize highlight and always
+    // uses the plain `panel.border` selector. The border style now follows
+    // `panel.border` (so a user's `border = { style = "double" }` reaches the
+    // dock) with the caps tracking it; the dialog-background colour and the
+    // "Verbs" strip are preserved exactly.
+    let spec = PanelSpec {
+        area,
+        border_selector: "panel.border",
+        border_color: Some(base),
+        glyphs: &PaneGlyphs::default(),
+        header_on: true,
+        strip: Some(PanelStrip {
+            segments: &[InsetSegment { text: "Verbs", active: false }],
+            base,
+            active: base,
+        }),
+        body_fill: None,
+    };
+    let frame = draw_panel(buf, &spec, &state.colors.theme);
 
     let content = frame.content;
     if content.height < 4 || content.width < 4 {
@@ -360,14 +373,34 @@ mod tests {
 
     #[test]
     fn verb_menu_title_uses_shared_bracketed_header() {
-        // The dock's title now comes from the shared `draw_top_inset` helper, so
-        // the top border row reads "┫ Verbs ┣" (bracketed), matching the map/story
-        // panes and every modal instead of the old plain centered title.
+        // The dock's title comes from the shared panel header. With the default
+        // single `panel.border`, the caps now track that style: "┤ Verbs ├"
+        // (single), not the old hardcoded thick "┫ … ┣".
         let mut buf = Buffer::empty(DOCK_AREA);
         let state = make_state_with_verb_menu();
         draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0, &mut VerbMenuHits::default());
         let top: String = (0..DOCK_AREA.width).map(|x| buf.cell((x, 0)).unwrap().symbol().to_owned()).collect();
-        assert!(top.contains("┫ Verbs ┣"), "bracketed title strip, got {top:?}");
+        assert!(top.contains("┤ Verbs ├"), "single-cap title strip, got {top:?}");
+    }
+
+    #[test]
+    fn verb_menu_follows_panel_border_style() {
+        // A user's `[panel] border = { style = "double" }` must now reach the
+        // dock: the top-left corner is the double corner ╔ and the title-strip
+        // left cap tracks it (╡), proving the dock renders `panel.border` (not the
+        // old hardcoded Single) and the caps follow that style.
+        let scheme = crate::colors::GhosttyScheme::default();
+        let parsed =
+            crate::theme::toml_schema::parse("[panel]\nborder = { style = \"double\" }\n").unwrap();
+        let mut state = make_state_with_verb_menu();
+        state.colors.theme = crate::theme::resolve::resolve_theme(&scheme, &parsed);
+
+        let mut buf = Buffer::empty(DOCK_AREA);
+        draw_verb_menu(&state, DOCK_AREA, &mut buf, &mut 0, &mut VerbMenuHits::default());
+
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "╔", "double top-left corner");
+        let top: String = (0..DOCK_AREA.width).map(|x| buf.cell((x, 0)).unwrap().symbol().to_owned()).collect();
+        assert!(top.contains("╡ Verbs ╞"), "double-cap title strip, got {top:?}");
     }
 
     #[test]
