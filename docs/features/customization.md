@@ -34,8 +34,13 @@ still reach in and override any single selector by name.
   today's cyan+bold focus highlight), `panel.background` for the body fill, and
   `panel.title` / `panel.tab` / `panel.tab:active` / `panel.tab_divider` /
   `panel.terminator_left` / `panel.terminator_right` for the title/tab strip
-  inset in the top border (the debug inspector's window tabs and the map's
-  layer tabs render through these same selectors). The map additionally sets
+  inset in the top border (every framed pane — story, map, dialogs, the verb
+  and inventory docks, the debug inspector's window tabs, the story-list info
+  panel — renders through this one shared panel component and these same
+  selectors). The strip's bracket caps and divider track the pane's border
+  style by default (`┤ … ├` on single, `┫ … ┣` on thick, `╡ … ╞` on double);
+  set `panel.terminator_left` / `panel.terminator_right` / `panel.tab_divider`
+  to a `glyph` to override any of them. The map additionally sets
   its own canvas fill, `map.background`, since it isn't a Glk window.
 - **The 11 standard Glk styles** — Normal, Emphasized, Preformatted, Header,
   Subheader, Alert, Note, BlockQuote, Input, User1, User2 — are first-class,
