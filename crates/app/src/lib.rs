@@ -9,6 +9,7 @@ pub mod clipboard;
 pub mod export;
 pub mod history;
 pub mod hints;
+pub mod hint_download;
 pub mod slash;
 pub mod colors;
 pub mod complete;
