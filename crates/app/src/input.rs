@@ -2750,8 +2750,12 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         17 => working.watch_style = !working.watch_style,
         18 => working.record_turn_history = !working.record_turn_history,
         19 => working.undo_levels = (working.undo_levels as i32 + delta).clamp(0, 256) as usize,
-        // None (babelmap's default) is treated as 1 when adjusting; ± sets an explicit 1..=10.
-        20 => working.interpreter_number = Some((working.interpreter_number.unwrap_or(1) as i32 + delta).clamp(1, 10) as u8),
+        // Position 0 == None (babelmap's default); 1..=10 are explicit interpreter numbers.
+        // ← from 1 returns to "default"; → from "default" goes to 1.
+        20 => {
+            let pos = (working.interpreter_number.map(|n| n as i32).unwrap_or(0) + delta).clamp(0, 10);
+            working.interpreter_number = if pos == 0 { None } else { Some(pos as u8) };
+        }
         _ => {}
     }
 }
@@ -6438,6 +6442,22 @@ mod tests {
             crate::render::config_screen::CONFIG_ROWS.len(),
             "CONFIG_ROW_COUNT must equal CONFIG_ROWS.len(); update CONFIG_ROW_COUNT when adding/removing rows"
         );
+    }
+
+    #[test]
+    fn config_cycle_interpreter_number_reaches_default() {
+        let mut c = crate::config::Config::default();
+        c.interpreter_number = None;
+        config_cycle(&mut c, 20, 1); // default → 1
+        assert_eq!(c.interpreter_number, Some(1));
+        config_cycle(&mut c, 20, -1); // 1 → default
+        assert_eq!(c.interpreter_number, None);
+        config_cycle(&mut c, 20, -1); // default clamps, stays default
+        assert_eq!(c.interpreter_number, None);
+        for _ in 0..20 {
+            config_cycle(&mut c, 20, 1); // climbs then clamps at 10
+        }
+        assert_eq!(c.interpreter_number, Some(10));
     }
 
     #[test]
