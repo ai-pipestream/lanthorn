@@ -165,22 +165,6 @@ fn saves_dir(user_dir: &std::path::Path) -> std::path::PathBuf {
     user_dir.join("saves")
 }
 
-/// Persist the live look (`state.colors`/`state.symbols`) to the user's personal
-/// style file and repoint `config.toml`'s `style` key at it, then re-resolve so the
-/// live look matches the self-contained file just written.
-fn save_style_and_repoint(state: &mut AppState, user_dir: &std::path::Path) {
-    let style_path = app::style::personal_style_path(user_dir);
-    let _ = app::style::write_style_full(&style_path, &state.colors, &state.symbols);
-    state.config.style = Some(style_path.to_string_lossy().into_owned());
-    let _ = app::config::write_config(user_dir, &state.config);
-
-    // Re-resolve from the now-self-contained style file (style.toml is the single source).
-    let (base, _w1) = app::style::load_style(state.config.style.as_deref(), user_dir);
-    let (cs, set, _w2) = app::style::resolve(&base, user_dir);
-    state.colors = cs;
-    state.symbols = set;
-}
-
 // ── Draw helper ───────────────────────────────────────────────────────────────
 
 /// Both pane inner-content rects returned by `draw_frame`.
@@ -2428,11 +2412,13 @@ fn main() {
         // calls placed right before its `continue`s above.
         lifecycle::flush_pending_config_write(&mut state);
 
-        // After apply_action: if config screen was just saved, write the resolved look
-        // to the personal style file and repoint config.toml at it.
+        // After apply_action: if config screen was just saved, persist config.toml
+        // (created if missing). The settings screen edits no colours/symbols, and the
+        // live look was already re-resolved FROM style.toml in apply_action, so we do
+        // NOT touch style.toml here — writing it would clobber the seeded template.
         if let Some(cfg_to_write) = config_to_save {
             let user_dir = cfg_to_write.user_dir.clone();
-            save_style_and_repoint(&mut state, &user_dir);
+            let _ = app::config::write_config(&user_dir, &state.config);
             // Apply a mouse-capture change live so the setting takes effect without a
             // restart (matching how audio/colours apply live on save).
             if cfg_to_write.mouse != mouse_before_save {
