@@ -1080,47 +1080,6 @@ pub fn debug_point_clamped(region: Rect, win: usize, col: u16, row: u16) -> crat
     }
 }
 
-/// The on-screen rect of each tab label in `window_rect`'s header (its top
-/// border row), one per entry in `sections`, in order. A tab that doesn't fit
-/// the available header width gets a zero-width `Rect` (not clickable, and
-/// the renderer draws nothing there either — both derive from this same
-/// left-to-right walk, so a click on a visible label always resolves to the
-/// right tab).
-pub fn tab_hit_rects(window_rect: Rect, sections: &[Section]) -> Vec<Rect> {
-    if window_rect.width < 3 {
-        return sections.iter().map(|_| Rect::default()).collect();
-    }
-    let row = window_rect.y;
-    let right = window_rect.right().saturating_sub(1); // leave room for the corner glyph
-    let mut x = window_rect.x + 1; // just inside the left corner glyph
-    let mut rects = Vec::with_capacity(sections.len());
-    for s in sections {
-        if x >= right {
-            rects.push(Rect::default());
-            continue;
-        }
-        let label_w = 1 + s.label().chars().count() as u16 + 1; // " Label "
-        let w = label_w.min(right - x);
-        rects.push(Rect::new(x, row, w, 1));
-        x += label_w;
-    }
-    rects
-}
-
-/// Hit-test a click at `(col, row)` (absolute buffer coordinates) against the
-/// tab strips of all three windows in `region`. Returns `(window, tab)`.
-pub fn tab_at(region: Rect, _panel: &DebugPanelState, col: u16, row: u16) -> Option<(usize, usize)> {
-    for (w, window_rect) in window_rects(region).iter().enumerate() {
-        let sections = WINDOW_TABS[w];
-        for (t, rect) in tab_hit_rects(*window_rect, sections).iter().enumerate() {
-            if rect.width > 0 && col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom() {
-                return Some((w, t));
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1316,16 +1275,6 @@ mod tests {
         assert_eq!(left.width + top.width, region.width);
         assert_eq!(left.x, region.x);
         assert_eq!(top.x, left.x + left.width);
-    }
-
-    #[test]
-    fn tab_at_resolves_a_click_on_a_visible_tab_label() {
-        let region = Rect::new(0, 0, 61, 40);
-        let p = DebugPanelState::new(0x1000);
-        let [left, ..] = window_rects(region);
-        // The first tab label starts at left.x + 1 (just inside the left border).
-        let hit = tab_at(region, &p, left.x + 2, left.y);
-        assert_eq!(hit, Some((0, 0)));
     }
 
     // ── disasm_rows (Feature B: shared row model) ──────────────────────────────

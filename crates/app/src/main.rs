@@ -180,6 +180,9 @@ struct PaneRects {
     /// Hit-rects for each layer tab, paired with the layer id; the mouse
     /// handler hit-tests these to switch the viewed layer on click.
     layer_tabs: Vec<(LayerId, Rect)>,
+    /// Hit-rects for each debug window's tab, as `(window, tab, rect)`; the mouse
+    /// handler hit-tests these to activate a debug tab on click.
+    debug_tabs: Vec<(usize, usize, Rect)>,
     /// Active dialog chrome rects (when a dialog is open).
     pub dialog: Option<DialogRects>,
     /// Hit-rects for the aux-storage prompt (when open).
@@ -261,6 +264,7 @@ fn draw_frame(
     let mut story_area = Rect::default();
     let mut room_rects_out: Vec<(RoomId, Rect)> = Vec::new();
     let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
+    let mut debug_tabs_out: Vec<(usize, usize, Rect)> = Vec::new();
     let mut dialog_rects_out: Option<DialogRects> = None;
     let mut overlay_rects: Option<overlays::OverlayRects> = None;
     let mut verb_hits = app::render::verbmenu::VerbMenuHits::default();
@@ -383,7 +387,7 @@ fn draw_frame(
             transcript_links_out = m.links;
             story_area = story_fp.content;
 
-            app::render::debug_panel::draw_debug_panel(state, pane_layout.map, buf);
+            debug_tabs_out = app::render::debug_panel::draw_debug_panel(state, pane_layout.map, buf);
             map_area = pane_layout.map;
 
             // Story pane dims when the debug region has focus (mirrors the map's
@@ -665,7 +669,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, verb_menu: verb_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, verb_menu: verb_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -806,7 +810,7 @@ fn main() {
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, verb_menu: Default::default(), transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_total_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, verb_menu: Default::default(), transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_total_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1589,8 +1593,10 @@ fn main() {
                                 }
                                 continue;
                             }
-                            if let Some((w, t)) = state.debug.as_ref()
-                                .and_then(|p| app::debug_panel::tab_at(region, p, m.column, m.row)) {
+                            if let Some(&(w, t, _)) = last_panes.debug_tabs.iter().find(|(_, _, r)| {
+                                r.width > 0 && m.column >= r.x && m.column < r.right()
+                                    && m.row >= r.y && m.row < r.bottom()
+                            }) {
                                 if let Some(p) = state.debug.as_mut() { p.activate_tab(w, t); }
                                 state.focus = Focus::Map;
                             } else if let Some((win, pt)) = app::debug_panel::debug_point_at(region, m.column, m.row) {
