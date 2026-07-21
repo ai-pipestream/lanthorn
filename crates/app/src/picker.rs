@@ -76,6 +76,10 @@ pub struct StoryEntry {
     /// The bare filename (e.g. `zork1.z5`), shown beside the title.
     pub filename: String,
     pub meta: StoryMeta,
+    /// An InvisiClues/hint sidecar detected beside this game and associated with
+    /// it during the scan (SQ-0443). The sidecar entry is hidden from the list;
+    /// its presence lights the hint badge and names the file in the info panel.
+    pub hint_sidecar: Option<std::path::PathBuf>,
 }
 
 /// Candidate story-file extensions (matched case-insensitively). `.zblorb` /
@@ -629,8 +633,54 @@ pub fn scan_stories(dir: &Path, data_base: &Path) -> Vec<StoryEntry> {
             out.push(entry);
         }
     }
+    associate_hint_sidecars(&mut out);
     sort_stories(&mut out, Sort { key: SortKey::Title, desc: false });
     out
+}
+
+/// Second pass over a freshly-scanned list: attach each detected InvisiClues/
+/// hint sidecar to the game it belongs to and hide the sidecar's own row.
+///
+/// A sidecar ([`hints::is_hint_sidecar`]) is matched to a game when its
+/// curated/derived game key is contained in the game's filename stem OR its
+/// title. Every game keeps at most one sidecar (first after a stable filename
+/// sort). Sidecars matched to some present game are removed from `out`; a lone
+/// sidecar with no matching game stays listed. O(games × sidecars) — the list
+/// is small and built once.
+fn associate_hint_sidecars(out: &mut Vec<StoryEntry>) {
+    // Split into sidecar and game indices.
+    let mut sidecar_idxs: Vec<usize> = Vec::new();
+    let mut game_idxs: Vec<usize> = Vec::new();
+    for (i, e) in out.iter().enumerate() {
+        if hints::is_hint_sidecar(&e.filename) {
+            sidecar_idxs.push(i);
+        } else {
+            game_idxs.push(i);
+        }
+    }
+    // Stable candidate order (by filename) so association is deterministic.
+    sidecar_idxs.sort_by(|&a, &b| out[a].filename.cmp(&out[b].filename));
+
+    let mut matched: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for &g in &game_idxs {
+        let stem = out[g]
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let title = out[g].title.clone();
+        let chosen = sidecar_idxs.iter().copied().find(|&s| {
+            hints::hint_matches_story(&out[s].filename, &stem)
+                || hints::hint_matches_story(&out[s].filename, &title)
+        });
+        if let Some(s) = chosen {
+            out[g].hint_sidecar = Some(out[s].path.clone());
+            matched.insert(out[s].path.clone());
+        }
+    }
+    // Hide the sidecars that were associated with some present game.
+    out.retain(|e| !matched.contains(&e.path));
 }
 
 /// Resolve one story file into a [`StoryEntry`], re-reading its bytes and its
@@ -767,7 +817,7 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
         ifdb_link: resolved.ifdb_link,
         fetch_not_found: resolved.fetch_not_found,
     };
-    Some(StoryEntry { path: path.to_path_buf(), title, filename, meta })
+    Some(StoryEntry { path: path.to_path_buf(), title, filename, meta, hint_sidecar: None })
 }
 
 /// Column a story list can be sorted by.
@@ -947,7 +997,7 @@ pub fn compute_row_badges(
     RowBadges {
         blorb: entry.meta.self_blorb.is_some() || sibling_blorb_exists(&entry.path),
         save: game_dir_has_save(&game_dir),
-        hint: hint_index.get(ifid).is_some(),
+        hint: hint_index.get(ifid).is_some() || entry.hint_sidecar.is_some(),
     }
 }
 
@@ -1079,6 +1129,7 @@ mod tests {
                 language: None,
                 description: None, ifdb_link: None, fetch_not_found: false,
             },
+            hint_sidecar: None,
         }
     }
 
@@ -1529,7 +1580,70 @@ mod tests {
                 features: Features::default(), self_blorb,
                 author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
             },
+            hint_sidecar: None,
         }
+    }
+
+    #[test]
+    fn scan_associates_and_hides_hint_sidecar() {
+        let dir = temp_dir("hint-sidecar");
+        std::fs::write(dir.join("zork1.z3"), minimal_v3_story()).unwrap();
+        std::fs::write(dir.join("zork1_hints.z5"), minimal_v3_story()).unwrap();
+
+        let stories = scan_stories(&dir, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // (a) the game is listed; (b) the sidecar is NOT listed.
+        assert_eq!(stories.len(), 1, "only the game is listed, sidecar hidden");
+        assert_eq!(stories[0].filename, "zork1.z3");
+        // (c) the game entry points at the hidden sidecar file.
+        assert_eq!(
+            stories[0].hint_sidecar.as_deref(),
+            Some(dir.join("zork1_hints.z5").as_path())
+        );
+    }
+
+    #[test]
+    fn scan_keeps_a_lone_hint_sidecar_listed() {
+        // A hint sidecar with no matching game is not orphaned — it stays listed.
+        let dir = temp_dir("lone-sidecar");
+        std::fs::write(dir.join("deadlineinv.z5"), minimal_v3_story()).unwrap();
+
+        let stories = scan_stories(&dir, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(stories.len(), 1, "lone sidecar stays listed");
+        assert_eq!(stories[0].filename, "deadlineinv.z5");
+        assert!(stories[0].hint_sidecar.is_none());
+    }
+
+    #[test]
+    fn scan_does_not_hide_a_solid_gold_game() {
+        // A Solid Gold `*-invclues-rNN-sNNN.z5` carries a release/serial, so it is
+        // NOT a hint sidecar and must stay listed as a normal game.
+        let dir = temp_dir("solid-gold");
+        std::fs::write(dir.join("zork1-invclues-r52-s871125.z5"), minimal_v3_story()).unwrap();
+
+        let stories = scan_stories(&dir, &dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(stories.len(), 1, "Solid Gold game is not dropped");
+        assert_eq!(stories[0].filename, "zork1-invclues-r52-s871125.z5");
+        assert!(stories[0].hint_sidecar.is_none());
+    }
+
+    #[test]
+    fn compute_row_badges_lights_hint_from_sidecar() {
+        // With an empty index, a detected sidecar alone lights the hint badge.
+        let dir = temp_dir("badge-sidecar");
+        let mut e = entry_with("IFID-H", dir.join("zork1.z3"), None);
+        e.hint_sidecar = Some(dir.join("zork1_hints.z5"));
+        let base = dir.join("data");
+        let hi = hints::load_hint_index(&dir); // empty index
+
+        let b = compute_row_badges(&e, &base, &hi);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(b.hint, "sidecar presence lights the hint badge with an empty index");
     }
 
     #[test]
