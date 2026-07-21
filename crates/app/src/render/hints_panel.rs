@@ -215,6 +215,7 @@ mod tests {
             source: crate::state::HintSource::Zcode(session),
             transcript: vec!["pick a topic".to_string()],
             scroll: 0,
+            clear_anchor: None,
             scroll_anim: None,
             input: "3".to_string(),
             label: "Hints: X".to_string(),

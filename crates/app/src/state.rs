@@ -32,6 +32,10 @@ pub struct HintSession {
     pub transcript: Vec<String>,
     /// Scroll offset within the hint transcript (logical target).
     pub scroll: u16,
+    /// Transcript index to truncate back to when the companion clears its
+    /// screen for a menu redraw (menu-reprint collapse anchor). `None` until
+    /// the first screen clear establishes an anchor.
+    pub clear_anchor: Option<usize>,
     /// Smooth-scroll animation easing the *displayed* offset toward `scroll`.
     /// `None` when settled or animation is disabled (the instant path).
     pub scroll_anim: Option<ScrollAnim>,
@@ -80,6 +84,23 @@ impl HintSession {
     /// True while the displayed scroll offset is still easing.
     pub fn has_active_animation(&self) -> bool {
         self.scroll_anim.as_ref().is_some_and(|a| !a.done())
+    }
+
+    /// Fold one companion-VM turn's output into the panel transcript, mirroring the
+    /// main session's game-driven handling: on a screen clear (menu redraw), collapse
+    /// the previous reprint by truncating back to the anchor, then re-anchor; then
+    /// append this turn's lines. Resets scroll to the newest content.
+    pub fn apply_turn(&mut self, result: &crate::session::TurnResult) {
+        if result.erase_lower {
+            let anchor = self.clear_anchor.unwrap_or(self.transcript.len());
+            self.transcript.truncate(anchor);
+            self.clear_anchor = Some(self.transcript.len());
+        }
+        for line in result.transcript.split('\n') {
+            self.transcript.push(line.to_owned());
+        }
+        self.scroll = 0;
+        self.scroll_anim = None;
     }
 }
 
@@ -4661,6 +4682,7 @@ mod tests {
             source: HintSource::Zcode(session),
             transcript: vec![],
             scroll: 0,
+            clear_anchor: None,
             scroll_anim: None,
             input: String::new(),
             label: "Hints: Test".to_string(),
@@ -4684,6 +4706,7 @@ mod tests {
             source: HintSource::Zcode(session),
             transcript: vec![],
             scroll: 0,
+            clear_anchor: None,
             scroll_anim: None,
             input: String::new(),
             label: "Hints: Test".to_string(),
@@ -4702,6 +4725,92 @@ mod tests {
         assert_eq!(hs.scroll, 5, "scroll clamps to max");
         // A max of 0 (nothing to scroll) pins scroll at 0.
         hs.scroll_by(4, 0, &anim);
+        assert_eq!(hs.scroll, 0);
+    }
+
+    /// Build a minimal `HintSession` off the minizork fixture (its transcript
+    /// starts empty so `apply_turn` math is easy to assert), or `None` if the
+    /// fixture is absent (caller skips).
+    fn make_hint_session() -> Option<HintSession> {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/minizork.z3");
+        if !fixture_path.exists() {
+            return None;
+        }
+        let story_bytes = std::fs::read(&fixture_path).expect("read minizork.z3");
+        let session = crate::session::GameSession::new(story_bytes, true, false, None)
+            .expect("GameSession::new");
+        Some(HintSession {
+            source: HintSource::Zcode(session),
+            transcript: vec![],
+            scroll: 0,
+            clear_anchor: None,
+            scroll_anim: None,
+            input: String::new(),
+            label: "Hints: Test".to_string(),
+            builtin_hint: false,
+        })
+    }
+
+    /// A `TurnResult` carrying just the fields `apply_turn` reads; everything
+    /// else is empty/default.
+    fn turn_result(transcript: &str, erase_lower: bool) -> crate::session::TurnResult {
+        crate::session::TurnResult {
+            transcript: transcript.to_string(),
+            transcript_runs: vec![],
+            location: None,
+            quit: false,
+            erase_lower,
+            info: None,
+            sounds: vec![],
+            glulx_sound_ops: vec![],
+            diagnostics: vec![],
+            location_method: None,
+            pending_io: None,
+            timed_out: false,
+            fault: None,
+            transcript_elems: vec![],
+        }
+    }
+
+    #[test]
+    fn apply_turn_collapses_successive_menu_reprints() {
+        let Some(mut hs) = make_hint_session() else { return };
+        hs.transcript.clear(); // fixture opening irrelevant; start clean
+
+        // First menu redraw (screen clear): anchors at 0, appends its 3 lines.
+        hs.apply_turn(&turn_result("m1a\nm1b\nm1c", true));
+        assert_eq!(hs.transcript.len(), 3);
+        assert_eq!(hs.clear_anchor, Some(0));
+
+        // Second menu redraw: must collapse the first reprint, not stack on it.
+        hs.apply_turn(&turn_result("m2a\nm2b", true));
+        assert_eq!(
+            hs.transcript.len(),
+            2,
+            "second erase_lower collapses the prior reprint back to the anchor"
+        );
+        assert_eq!(hs.transcript, vec!["m2a".to_string(), "m2b".to_string()]);
+        assert_eq!(hs.scroll, 0);
+    }
+
+    #[test]
+    fn apply_turn_normal_turn_appends() {
+        let Some(mut hs) = make_hint_session() else { return };
+        hs.transcript.clear();
+        hs.transcript.push("existing".to_string());
+
+        // A normal (non-clearing) turn appends its lines and leaves the anchor unset.
+        hs.apply_turn(&turn_result("clue line 1\nclue line 2", false));
+        assert_eq!(
+            hs.transcript,
+            vec![
+                "existing".to_string(),
+                "clue line 1".to_string(),
+                "clue line 2".to_string()
+            ]
+        );
+        assert_eq!(hs.clear_anchor, None, "no screen clear => no anchor");
         assert_eq!(hs.scroll, 0);
     }
 
