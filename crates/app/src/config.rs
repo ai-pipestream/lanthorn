@@ -181,8 +181,9 @@ impl Default for SearchConfig {
     help_template = "{before-help}{name} {version}\n{about-with-newline}\n{usage-heading} {usage}\n\n{all-args}{after-help}"
 )]
 pub struct Cli {
-    /// Path to the story file (.z3/.z5/.z8 etc.)
-    pub story: PathBuf,
+    /// Path to a story file (.z3/.z5/.z8 etc.) or a directory to browse. When
+    /// omitted, falls back to the `default_story_dir` config setting.
+    pub story: Option<PathBuf>,
 
     /// Override the babelmap home directory (default: ~/.babelmap)
     #[arg(long, value_name = "PATH")]
@@ -407,6 +408,10 @@ pub struct Config {
     /// Sub-directories: maps/ — where per-story map files live.
     #[serde(default = "default_user_dir")]
     pub user_dir: PathBuf,
+    /// Directory (or story file) opened when babelmap is launched with no path
+    /// argument. `None` (default) means a path is required on the command line.
+    #[serde(default)]
+    pub default_story_dir: Option<PathBuf>,
     /// When true (default), restore the game state from the archive on startup so
     /// play resumes where it left off. Set false to start a fresh playthrough while
     /// retaining the accumulated map.
@@ -563,6 +568,7 @@ impl Default for Config {
         Self {
             version: CONFIG_SCHEMA_VERSION,
             user_dir: default_user_dir(),
+            default_story_dir: None,
             auto_load: true,
             auto_save: false,
             mouse_wheel_invert: false,
@@ -648,6 +654,7 @@ pub fn resolve(cli: &Cli) -> Config {
             // versioning) so a future check can flag an out-of-date config.
             cfg.version = from_file.version;
             cfg.user_dir = from_file.user_dir;
+            cfg.default_story_dir = from_file.default_story_dir;
             cfg.auto_load = from_file.auto_load;
             cfg.auto_save = from_file.auto_save;
             cfg.mouse_wheel_invert = from_file.mouse_wheel_invert;
@@ -734,6 +741,10 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     // the file brings it up to the format this build produces.
     doc["version"] = toml_edit::value(CONFIG_SCHEMA_VERSION as i64);
     doc["user_dir"] = toml_edit::value(cfg.user_dir.to_string_lossy().as_ref());
+    match &cfg.default_story_dir {
+        Some(p) => { doc["default_story_dir"] = toml_edit::value(p.to_string_lossy().as_ref()); }
+        None => { doc.remove("default_story_dir"); }
+    }
     doc["auto_load"] = toml_edit::value(cfg.auto_load);
     doc["auto_save"] = toml_edit::value(cfg.auto_save);
     doc["mouse_wheel_invert"] = toml_edit::value(cfg.mouse_wheel_invert);
@@ -917,11 +928,37 @@ mod tests {
     }
 
     #[test]
+    fn default_story_dir_defaults_none_parses_and_round_trips() {
+        // Absent by default.
+        assert!(Config::default().default_story_dir.is_none());
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(empty.default_story_dir.is_none());
+        // Parsed from the file when present.
+        let cfg: Config = toml::from_str(r#"default_story_dir = "/tmp/stories""#).unwrap();
+        assert_eq!(cfg.default_story_dir, Some(PathBuf::from("/tmp/stories")));
+        // write_config persists it, and a Some value survives the round trip.
+        let dir = std::env::temp_dir().join("babelmap-dsd-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        write_config(&dir, &cfg).unwrap();
+        let written = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let back: Config = toml::from_str(&written).unwrap();
+        assert_eq!(back.default_story_dir, Some(PathBuf::from("/tmp/stories")));
+        // None removes the key rather than writing an empty value.
+        let mut none_cfg = cfg.clone();
+        none_cfg.default_story_dir = None;
+        write_config(&dir, &none_cfg).unwrap();
+        let doc: toml_edit::DocumentMut =
+            std::fs::read_to_string(dir.join("config.toml")).unwrap().parse().unwrap();
+        assert!(doc.get("default_story_dir").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn cli_override_beats_file() {
         let cfg_path = write_temp_config("cli_override", r#"user_dir = "/tmp/from-file""#);
 
         let cli = Cli {
-            story: PathBuf::from("foo.z5"),
+            story: Some(PathBuf::from("foo.z5")),
             user_dir: Some(PathBuf::from("/tmp/from-cli")),
             data_dir: None,
             config: Some(cfg_path),
@@ -939,7 +976,7 @@ mod tests {
     #[test]
     fn missing_config_file_resolves_to_defaults() {
         let cli = Cli {
-            story: PathBuf::from("foo.z5"),
+            story: Some(PathBuf::from("foo.z5")),
             user_dir: None,
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
@@ -958,7 +995,7 @@ mod tests {
         let cfg_path = write_temp_config("file_beats_default", r#"user_dir = "/tmp/from-file""#);
 
         let cli = Cli {
-            story: PathBuf::from("foo.z5"),
+            story: Some(PathBuf::from("foo.z5")),
             user_dir: None,
             data_dir: None,
             config: Some(cfg_path),
@@ -1068,6 +1105,7 @@ use_defaults = false
         let cfg = Config {
             version: CONFIG_SCHEMA_VERSION,
             user_dir: dir.clone(),
+            default_story_dir: None,
             auto_load: false,
             auto_save: true,
             mouse_wheel_invert: false,
@@ -1337,7 +1375,7 @@ use_defaults = false
         assert!(Config::default().acceleration);
 
         let cli = Cli {
-            story: PathBuf::from("foo.z5"),
+            story: Some(PathBuf::from("foo.z5")),
             user_dir: None,
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
@@ -1354,7 +1392,7 @@ use_defaults = false
     #[test]
     fn no_sound_flag_disables_enable_sound() {
         let base = Cli {
-            story: PathBuf::from("foo.z5"),
+            story: Some(PathBuf::from("foo.z5")),
             user_dir: None,
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
@@ -1374,7 +1412,7 @@ use_defaults = false
     #[test]
     fn resolve_parses_trace_flag() {
         let mut cli = Cli {
-            story: PathBuf::from("foo.z5"),
+            story: Some(PathBuf::from("foo.z5")),
             user_dir: None,
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
@@ -1394,7 +1432,7 @@ use_defaults = false
         assert!(Config::default().images);
 
         let cli = Cli {
-            story: PathBuf::from("foo.z5"),
+            story: Some(PathBuf::from("foo.z5")),
             user_dir: None,
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),

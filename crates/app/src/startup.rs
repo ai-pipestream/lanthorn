@@ -19,7 +19,7 @@ use ratatui::Terminal;
 use clap::Parser;
 
 use app::archive::load_archive;
-use app::config::{resolve, Cli};
+use app::config::{config_path, resolve, write_config, Cli};
 use app::engine::Engine;
 use app::glulx_session::GlulxSession;
 use app::hints;
@@ -71,7 +71,40 @@ pub(crate) fn boot() -> BootResult {
     // must not crash startup).
     app::theme::template::auto_seed(&cfg.user_dir);
 
-    let story_path = cli.story.clone();
+    // A path may be omitted; fall back to the configured default story dir.
+    // With neither, there's nothing to open — tell the user how to fix it.
+    let story_path = match cli.story.clone().or_else(|| cfg.default_story_dir.clone()) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "babelmap: no story given. Pass a story file or directory, or set \
+                 `default_story_dir` in {}.",
+                config_path(&cli).display(),
+            );
+            std::process::exit(2);
+        }
+    };
+
+    // First time a directory is passed on the command line with no default set,
+    // offer to remember it as the default story directory (persisted to config).
+    if cfg.default_story_dir.is_none()
+        && cli.story.as_deref().map(|p| p.is_dir()).unwrap_or(false)
+        && prompt_yes_no(&format!(
+            "Set {} as your default story directory?",
+            story_path.display()
+        ))
+    {
+        // Store an absolute path so a later bare `babelmap` resolves the same
+        // directory regardless of the working dir it's launched from. The dir
+        // exists (is_dir passed), so canonicalize should succeed; fall back to
+        // the supplied path if it somehow doesn't.
+        let to_store = std::fs::canonicalize(&story_path).unwrap_or_else(|_| story_path.clone());
+        cfg.default_story_dir = Some(to_store.clone());
+        match write_config(&cfg.user_dir, &cfg) {
+            Ok(()) => eprintln!("babelmap: saved default story directory ({}).", to_store.display()),
+            Err(e) => eprintln!("babelmap: could not save config: {e}"),
+        }
+    }
 
     // Storage base for saves/sidecars (SQ-0284): `--data-dir` overrides the
     // default `<user_dir>/saves`. Each story gets `<data_base>/<story-key>/`.
@@ -605,5 +638,18 @@ pub(crate) fn boot() -> BootResult {
         story_bytes,
         story_path,
         data_base,
+    }
+}
+
+/// Cooked-mode y/N prompt on the normal terminal (before the alt-screen is
+/// entered). A non-interactive stdin (piped or EOF) reads as "no".
+fn prompt_yes_no(question: &str) -> bool {
+    use std::io::Write as _;
+    print!("{question} [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(0) | Err(_) => false,
+        Ok(_) => matches!(line.trim().chars().next(), Some('y') | Some('Y')),
     }
 }

@@ -204,6 +204,12 @@ re-seed the new template, or hand-write the new shape from
 ## Configuration
 - TOML config at `~/.babelmap/config.toml` plus command-line flags
   (`--user-dir`, `--config`); CLI overrides the file, which overrides defaults.
+- **Default story directory** — `default_story_dir` is opened when babelmap is
+  launched with no path argument. The first time you point babelmap at a
+  directory on the command line without one set, it offers to remember that
+  directory as the default (writing it to the config file); after that, a bare
+  `babelmap` opens the story picker there. With no argument and no default set,
+  babelmap prints how to fix it and exits.
 - **Virtual screen size** — `virtual_screen_cols` / `virtual_screen_rows`
   (default 80 × 24) set the fixed screen dimensions reported to the game; v4+
   cursor-addressed games (forms, status displays) want a roomy story pane.
