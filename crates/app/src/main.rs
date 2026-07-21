@@ -23,7 +23,7 @@ use app::input::{apply_action, apply_text_entry, key_to_command, mouse_to_action
 use app::tidy::should_bg_tidy;
 use app::persist_files::{list_saves, restore_game};
 use app::render::dialog::{DialogRects, DialogStyle};
-use app::render::hints_panel::{hint_key_routes, HintKeyKind, HintsPanelRects};
+use app::render::hints_panel::{hint_input_action, hint_key_routes, HintInputAct, HintKeyKind, HintsPanelRects};
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
@@ -1342,36 +1342,57 @@ fn main() {
         if state.overlays.hints.is_some() {
             match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => {
-                    use crossterm::event::KeyCode;
                     match hint_key_routes(k.code) {
                         HintKeyKind::Close => {
                             state.overlays.hints = None;
                         }
                         HintKeyKind::ToSession => {
-                            match k.code {
-                                KeyCode::Enter => {
-                                    if let Some(ref mut hs) = state.overlays.hints {
+                            if let Some(ref mut hs) = state.overlays.hints {
+                                // The companion VM's pending input mode decides routing:
+                                // a `read_char` (InvisiClues menu) forwards the keypress
+                                // to the VM; a line read edits the local input buffer.
+                                let kind = {
+                                    let app::state::HintSource::Zcode(ref vm) = hs.source;
+                                    vm.pending_input()
+                                };
+                                // Owned result of whichever submit ran (None when the key
+                                // was buffered or ignored), folded in after the VM borrow
+                                // ends so the borrow checker allows `hs.apply_turn`.
+                                let result: Option<TurnResult> = match hint_input_action(kind, k.code) {
+                                    HintInputAct::ForwardKey => {
+                                        // Menu navigation: map the crossterm key with the
+                                        // SAME converter the main event loop uses (arrows,
+                                        // Enter, letters map identically), then drive the VM.
+                                        // Do not buffer into `hs.input`. (Esc is handled by
+                                        // the separate Close arm and never reaches here.)
+                                        app::engine::key_event_to_input(*k).and_then(|ki| {
+                                            let app::state::HintSource::Zcode(ref mut vm) = hs.source;
+                                            vm.submit_key(ki)
+                                        })
+                                    }
+                                    HintInputAct::SubmitLine => {
                                         let line = std::mem::take(&mut hs.input);
                                         let app::state::HintSource::Zcode(ref mut vm) = hs.source;
-                                        let result = vm.submit(&line);
-                                        for l in result.transcript.split('\n') {
-                                            hs.transcript.push(l.to_owned());
-                                        }
-                                        hs.scroll = 0;
-                                        hs.scroll_anim = None;
+                                        Some(vm.submit(&line))
                                     }
-                                }
-                                KeyCode::Backspace => {
-                                    if let Some(ref mut hs) = state.overlays.hints {
+                                    HintInputAct::BufferPop => {
                                         hs.input.pop();
+                                        None
                                     }
-                                }
-                                KeyCode::Char(c) => {
-                                    if let Some(ref mut hs) = state.overlays.hints {
+                                    HintInputAct::BufferPush(c) => {
                                         hs.input.push(c);
+                                        None
+                                    }
+                                    HintInputAct::Ignore => None,
+                                };
+                                if let Some(result) = result {
+                                    let quit = result.quit;
+                                    hs.apply_turn(&result);
+                                    // An InvisiClues file can @quit — close the panel.
+                                    if quit {
+                                        state.overlays.hints = None;
                                     }
                                 }
-                                _ => {}
                             }
                         }
                     }

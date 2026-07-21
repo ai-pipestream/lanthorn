@@ -228,6 +228,42 @@ pub fn hint_key_routes(code: crossterm::event::KeyCode) -> HintKeyKind {
     }
 }
 
+/// What a `ToSession` key should do, decided by the companion VM's pending input
+/// mode. In `Char` mode (an InvisiClues `read_char` menu) every key is forwarded
+/// to the VM; in `Line` mode the key edits the local input buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintInputAct {
+    /// Char mode: forward the keypress to the companion VM (menu navigation).
+    ForwardKey,
+    /// Line mode Enter: submit the accumulated input line to the VM.
+    SubmitLine,
+    /// Line mode Backspace: drop the last input char.
+    BufferPop,
+    /// Line mode printable key: push it into the input buffer.
+    BufferPush(char),
+    /// No effect (e.g. an arrow/function key during a line read).
+    Ignore,
+}
+
+/// Decide what a `ToSession` keypress does given the companion VM's pending
+/// input `kind`. Char mode forwards every key; line mode edits the buffer.
+/// (Esc never reaches here — it routes to [`HintKeyKind::Close`].)
+pub fn hint_input_action(
+    kind: crate::session::InputKind,
+    code: crossterm::event::KeyCode,
+) -> HintInputAct {
+    use crossterm::event::KeyCode;
+    if kind == crate::session::InputKind::Char {
+        return HintInputAct::ForwardKey;
+    }
+    match code {
+        KeyCode::Enter => HintInputAct::SubmitLine,
+        KeyCode::Backspace => HintInputAct::BufferPop,
+        KeyCode::Char(c) => HintInputAct::BufferPush(c),
+        _ => HintInputAct::Ignore,
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -389,4 +425,59 @@ mod tests {
             "Enter must be routed to the hint session input (ToSession), not Close"
         );
     }
+
+    // ── hint_input_action (char/line routing) ─────────────────────────────────
+
+    /// In Char mode (an InvisiClues `read_char` menu) every keypress is forwarded
+    /// to the companion VM — arrows, Enter, letters, Backspace alike — never buffered.
+    #[test]
+    fn hint_input_action_char_mode_forwards_every_key() {
+        use crossterm::event::KeyCode;
+        use crate::session::InputKind::Char;
+        for code in [
+            KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right,
+            KeyCode::Enter, KeyCode::Backspace, KeyCode::Char('n'), KeyCode::F(1),
+        ] {
+            assert_eq!(
+                hint_input_action(Char, code),
+                HintInputAct::ForwardKey,
+                "char mode must forward {code:?} to the VM (menu nav), not buffer it"
+            );
+        }
+    }
+
+    /// In Line mode (a plain text hint prompt) the key edits the local buffer:
+    /// Enter submits, Backspace pops, a printable pushes, other keys are ignored.
+    #[test]
+    fn hint_input_action_line_mode_edits_buffer() {
+        use crossterm::event::KeyCode;
+        use crate::session::InputKind::Line;
+        assert_eq!(hint_input_action(Line, KeyCode::Enter), HintInputAct::SubmitLine);
+        assert_eq!(hint_input_action(Line, KeyCode::Backspace), HintInputAct::BufferPop);
+        assert_eq!(hint_input_action(Line, KeyCode::Char('x')), HintInputAct::BufferPush('x'));
+        assert_eq!(hint_input_action(Line, KeyCode::Up), HintInputAct::Ignore);
+    }
+
+    /// End-to-end on a booted companion (which boots to `Line` mode): a printable
+    /// key routes to `BufferPush`, and applying it grows `hs.input` — i.e. a line
+    /// hint still buffers rather than driving the VM.
+    #[test]
+    fn hint_line_mode_char_buffers_into_input() {
+        use crossterm::event::KeyCode;
+        let Some(mut hs) = make_hint_session() else {
+            eprintln!("SKIP: minizork.z3 fixture absent");
+            return;
+        };
+        hs.input.clear();
+        let crate::state::HintSource::Zcode(vm) = &hs.source;
+        assert_eq!(vm.pending_input(), crate::session::InputKind::Line, "companion boots to a line read");
+
+        // Route a printable key as the event loop would, then apply the action.
+        match hint_input_action(vm.pending_input(), KeyCode::Char('q')) {
+            HintInputAct::BufferPush(c) => hs.input.push(c),
+            other => panic!("line-mode printable must buffer, got {other:?}"),
+        }
+        assert_eq!(hs.input, "q", "line-mode key buffers into hs.input");
+    }
 }
+
