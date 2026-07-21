@@ -89,18 +89,31 @@ impl HintSession {
     /// Fold one companion-VM turn's output into the panel transcript, mirroring the
     /// main session's game-driven handling: on a screen clear (menu redraw), collapse
     /// the previous reprint by truncating back to the anchor, then re-anchor; then
-    /// append this turn's lines. Resets scroll to the newest content.
+    /// append this turn's lines.
+    ///
+    /// A turn with no lower-window output (e.g. an upper-window menu keystroke that
+    /// only moves the highlight) adds NOTHING — `"".split('\n')` yields one empty
+    /// string, so a naive push would drop a blank line into the clue window on every
+    /// keypress. Scroll only snaps to the newest content when something actually
+    /// changed, so paging up to reread clues survives menu navigation.
     pub fn apply_turn(&mut self, result: &crate::session::TurnResult) {
+        let mut changed = false;
         if result.erase_lower {
             let anchor = self.clear_anchor.unwrap_or(self.transcript.len());
             self.transcript.truncate(anchor);
             self.clear_anchor = Some(self.transcript.len());
+            changed = true;
         }
-        for line in result.transcript.split('\n') {
-            self.transcript.push(line.to_owned());
+        if !result.transcript.is_empty() {
+            for line in result.transcript.split('\n') {
+                self.transcript.push(line.to_owned());
+            }
+            changed = true;
         }
-        self.scroll = 0;
-        self.scroll_anim = None;
+        if changed {
+            self.scroll = 0;
+            self.scroll_anim = None;
+        }
     }
 }
 
@@ -4812,6 +4825,26 @@ mod tests {
         );
         assert_eq!(hs.clear_anchor, None, "no screen clear => no anchor");
         assert_eq!(hs.scroll, 0);
+    }
+
+    #[test]
+    fn apply_turn_empty_turn_adds_no_blank_line_and_keeps_scroll() {
+        let Some(mut hs) = make_hint_session() else { return };
+        hs.transcript.clear();
+        hs.transcript.push("clue A".to_string());
+        hs.transcript.push("clue B".to_string());
+        hs.scroll = 1; // user paged up to reread
+
+        // A menu keystroke that only moves the upper-window highlight produces no
+        // lower-window text: it must NOT append a blank line, and must NOT yank the
+        // scroll back to the bottom.
+        hs.apply_turn(&turn_result("", false));
+        assert_eq!(
+            hs.transcript,
+            vec!["clue A".to_string(), "clue B".to_string()],
+            "an empty turn must not append a blank line to the clue window"
+        );
+        assert_eq!(hs.scroll, 1, "an empty turn must not reset the scroll position");
     }
 
     #[test]

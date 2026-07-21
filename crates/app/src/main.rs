@@ -1346,6 +1346,15 @@ fn main() {
                         HintKeyKind::Close => {
                             state.overlays.hints = None;
                         }
+                        HintKeyKind::Scroll(delta) => {
+                            // PageUp/PageDown scroll the clue window (mirrors the
+                            // wheel below); other keys reach the companion VM.
+                            let max = last_panes.hints_panel.as_ref().map_or(0, |hp| hp.max_scroll);
+                            let anim = state.config.animation.clone();
+                            if let Some(hs) = &mut state.overlays.hints {
+                                hs.scroll_by(delta, max, &anim);
+                            }
+                        }
                         HintKeyKind::ToSession => {
                             if let Some(ref mut hs) = state.overlays.hints {
                                 // The companion VM's pending input mode decides routing:

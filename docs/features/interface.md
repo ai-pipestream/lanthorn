@@ -73,9 +73,12 @@ built-in debugger that follows the running story instruction by instruction.
 - **In-game hints** — `/open-hints` opens a modal that runs a companion
   *Invisiclues* `.z5` in a second Z-machine session while the main game pauses.
   The panel renders the file's full split screen — its topic menu in the upper
-  window with the clue text below — and forwards keystrokes to it, so you drive
-  the menu with the arrow keys and `Enter` exactly as the original did; `Esc`
-  closes. The hint file is auto-detected beside the story (or inside a sibling
+  window with the clue text below — and forwards your keystrokes to it, so you
+  drive the menu exactly as the file intends (arrows to move the highlight, plus
+  whatever letters it prompts for, e.g. to pick a topic and reveal successive
+  hints). `PageUp`/`PageDown` scroll back through the revealed clues in the lower
+  window, and `Esc` closes. The hint file is auto-detected beside the story (or
+  inside a sibling
   `.zip`), matched to *that* game by name so a multi-game folder never crosses
   wires, and remembered per game; if the story ships its own `HINT` command, the
   panel points you at that too.

@@ -214,9 +214,18 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
 pub enum HintKeyKind {
     /// Close the hints panel (Esc).
     Close,
+    /// Scroll the hint transcript by this many lines (positive = toward older
+    /// content), instead of forwarding the key to the companion VM. Reserves the
+    /// navigation keys for the panel so an InvisiClues `read_char` prompt (which
+    /// only wants its own letter keys, e.g. H/Q) never sees a stray arrow and
+    /// reprints with a spurious line-feed.
+    Scroll(i32),
     /// Route the key to the hint sub-session.
     ToSession,
 }
+
+/// Lines scrolled per PageUp/PageDown in the hints panel.
+const HINT_PAGE_LINES: i32 = 10;
 
 /// Map a key code to a HintKeyKind.
 /// Esc → Close; everything else → ToSession.
@@ -224,6 +233,12 @@ pub fn hint_key_routes(code: crossterm::event::KeyCode) -> HintKeyKind {
     use crossterm::event::KeyCode;
     match code {
         KeyCode::Esc => HintKeyKind::Close,
+        // Only PageUp/PageDown scroll the clue (lower) window; the arrow keys and
+        // everything else are forwarded to the companion VM so its upper-window
+        // menu stays navigable. (A no-output menu keystroke no longer drops a blank
+        // line into the clue window — see HintSession::apply_turn.)
+        KeyCode::PageUp => HintKeyKind::Scroll(HINT_PAGE_LINES),
+        KeyCode::PageDown => HintKeyKind::Scroll(-HINT_PAGE_LINES),
         _ => HintKeyKind::ToSession,
     }
 }
@@ -428,15 +443,32 @@ mod tests {
 
     // ── hint_input_action (char/line routing) ─────────────────────────────────
 
-    /// In Char mode (an InvisiClues `read_char` menu) every keypress is forwarded
-    /// to the companion VM — arrows, Enter, letters, Backspace alike — never buffered.
+    /// Only PageUp/PageDown scroll the clue window; the arrow keys (and everything
+    /// else) route to the companion VM so its upper-window menu stays navigable.
     #[test]
-    fn hint_input_action_char_mode_forwards_every_key() {
+    fn hint_key_routes_pagekeys_scroll_arrows_go_to_session() {
+        use crossterm::event::KeyCode;
+        assert!(matches!(hint_key_routes(KeyCode::PageUp), HintKeyKind::Scroll(d) if d > 0));
+        assert!(matches!(hint_key_routes(KeyCode::PageDown), HintKeyKind::Scroll(d) if d < 0));
+        // Arrows drive the companion's menu — forwarded, not scrolled.
+        for code in [KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right,
+                     KeyCode::Home, KeyCode::End, KeyCode::Char('h'), KeyCode::Enter] {
+            assert!(matches!(hint_key_routes(code), HintKeyKind::ToSession),
+                "{code:?} must reach the companion VM");
+        }
+        assert!(matches!(hint_key_routes(KeyCode::Esc), HintKeyKind::Close));
+    }
+
+    /// In Char mode (an InvisiClues `read_char` menu) every key that reaches the
+    /// session is forwarded to the companion VM — arrows drive the menu, letters/
+    /// Enter/Backspace act — never buffered. (PageUp/PageDown are handled upstream.)
+    #[test]
+    fn hint_input_action_char_mode_forwards_keys() {
         use crossterm::event::KeyCode;
         use crate::session::InputKind::Char;
         for code in [
             KeyCode::Up, KeyCode::Down, KeyCode::Left, KeyCode::Right,
-            KeyCode::Enter, KeyCode::Backspace, KeyCode::Char('n'), KeyCode::F(1),
+            KeyCode::Enter, KeyCode::Backspace, KeyCode::Char('h'), KeyCode::F(1),
         ] {
             assert_eq!(
                 hint_input_action(Char, code),
@@ -447,7 +479,7 @@ mod tests {
     }
 
     /// In Line mode (a plain text hint prompt) the key edits the local buffer:
-    /// Enter submits, Backspace pops, a printable pushes, other keys are ignored.
+    /// Enter submits, Backspace pops, a printable pushes.
     #[test]
     fn hint_input_action_line_mode_edits_buffer() {
         use crossterm::event::KeyCode;
@@ -455,7 +487,6 @@ mod tests {
         assert_eq!(hint_input_action(Line, KeyCode::Enter), HintInputAct::SubmitLine);
         assert_eq!(hint_input_action(Line, KeyCode::Backspace), HintInputAct::BufferPop);
         assert_eq!(hint_input_action(Line, KeyCode::Char('x')), HintInputAct::BufferPush('x'));
-        assert_eq!(hint_input_action(Line, KeyCode::Up), HintInputAct::Ignore);
     }
 
     /// End-to-end on a booted companion (which boots to `Line` mode): a printable
