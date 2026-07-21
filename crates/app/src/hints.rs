@@ -43,8 +43,21 @@ fn hint_stem(file_name: &str) -> String {
 ///
 /// So story `zork1` matches `zork1_hints.z5`, `zork1.hints.z5`, and
 /// `zork1-invisiclues.z5`, but not `zork2_hints.z5`.
+///
+/// A bare `starts_with` would let story `zork` match `zork2_hints.z5`, so the
+/// prefix must be followed by end-of-stem or a separator (not another
+/// alphanumeric): the hint name is the story name plus a hint suffix, never a
+/// longer word that merely begins the same way.
 fn stem_matches_story(story_stem: &str, candidate_name: &str) -> bool {
-    hint_stem(candidate_name).starts_with(&story_stem.to_ascii_lowercase())
+    if story_stem.is_empty() {
+        return false;
+    }
+    let story = story_stem.to_ascii_lowercase();
+    let cand = hint_stem(candidate_name);
+    match cand.strip_prefix(&story) {
+        Some(rest) => rest.chars().next().is_none_or(|c| !c.is_ascii_alphanumeric()),
+        None => false,
+    }
 }
 
 /// Rank hint candidate names by story-stem preference and return the chosen one.
@@ -723,5 +736,18 @@ mod tests {
         assert!(stem_matches_story("zork1", "Zork1.hints.z5"));
         assert!(stem_matches_story("zork1", "ZORK1-invisiclues.z5"));
         assert!(!stem_matches_story("zork1", "zork2_hints.z5"));
+    }
+
+    #[test]
+    fn stem_matches_story_requires_a_word_boundary() {
+        // A bare prefix must not cross-wire: story `zork` ≠ `zork2_hints`.
+        assert!(!stem_matches_story("zork", "zork2_hints.z5"));
+        assert!(!stem_matches_story("zork1", "zork10_hints.z5"));
+        // Exact stem, or prefix + separator, does match.
+        assert!(stem_matches_story("zork", "zork_hints.z5"));
+        assert!(stem_matches_story("zork", "zork.hints.z5"));
+        assert!(stem_matches_story("zork", "zork-invisiclues.z5"));
+        // An empty story stem never matches (pathological path).
+        assert!(!stem_matches_story("", "invisiclues.z5"));
     }
 }
