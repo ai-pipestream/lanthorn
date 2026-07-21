@@ -201,6 +201,11 @@ pub struct Cli {
     #[arg(long)]
     pub no_accel: bool,
 
+    /// Disable sound for this run (bleeps + sampled audio); the border still
+    /// flashes as the accessibility cue. Overrides the config's `enable_sound`.
+    #[arg(long)]
+    pub no_sound: bool,
+
     /// Force the terminal image protocol for cover art (default: auto-detect).
     #[arg(long, value_enum, default_value_t = ImageProtocol::Auto)]
     pub image_protocol: ImageProtocol,
@@ -388,6 +393,7 @@ pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 ///      value in the file is ignored (default always wins on load);
 ///   4. `write_config`'s `doc["…"] = …` — MISS THIS and a settings-panel edit
 ///      is never written, so it reverts to the default on the next launch.
+///
 /// Steps 3 and 4 fail SILENTLY (they still compile); the round-trip test
 /// `write_config_persists_panel_editable_scalars_round_trip` guards the class.
 /// Runtime-only fields (`#[serde(skip)]`, e.g. `acceleration`) skip 3 and 4.
@@ -689,6 +695,11 @@ pub fn resolve(cli: &Cli) -> Config {
     cfg.acceleration = !cli.no_accel;
     cfg.image_protocol = cli.image_protocol;
     cfg.images = !cli.no_images;
+    // One-way override: `--no-sound` forces sound off for this run, but its
+    // absence must not turn on a config that persisted `enable_sound = false`.
+    if cli.no_sound {
+        cfg.enable_sound = false;
+    }
 
     if let Some(list) = &cli.trace {
         let (sections, unknown) = crate::trace::TraceSections::parse(list);
@@ -915,6 +926,7 @@ mod tests {
             data_dir: None,
             config: Some(cfg_path),
             no_accel: false,
+            no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             trace: None,
@@ -932,6 +944,7 @@ mod tests {
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
             no_accel: false,
+            no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             trace: None,
@@ -950,6 +963,7 @@ mod tests {
             data_dir: None,
             config: Some(cfg_path),
             no_accel: false,
+            no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             trace: None,
@@ -1328,12 +1342,33 @@ use_defaults = false
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
             no_accel: true,
+            no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             trace: None,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.acceleration);
+    }
+
+    #[test]
+    fn no_sound_flag_disables_enable_sound() {
+        let base = Cli {
+            story: PathBuf::from("foo.z5"),
+            user_dir: None,
+            data_dir: None,
+            config: Some(PathBuf::from("/nonexistent/path/config.toml")),
+            no_accel: false,
+            no_sound: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: false,
+            trace: None,
+        };
+        // Absent flag: sound stays on (config default).
+        assert!(resolve(&base).enable_sound);
+        // Flag present: sound forced off for this run.
+        let muted = Cli { no_sound: true, ..base };
+        assert!(!resolve(&muted).enable_sound);
     }
 
     #[test]
@@ -1344,6 +1379,7 @@ use_defaults = false
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
             no_accel: false,
+            no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             trace: None,
@@ -1363,6 +1399,7 @@ use_defaults = false
             data_dir: None,
             config: Some(PathBuf::from("/nonexistent/path/config.toml")),
             no_accel: false,
+            no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: true,
             trace: None,

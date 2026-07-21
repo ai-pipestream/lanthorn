@@ -93,8 +93,9 @@ playing.
   Controlled by `enable_sound` (default on) and `volume` (0–100, default 100);
   toggle it with `/toggle-sound` or the `F2` settings row, adjust it with
   `/volume <0-100>`, and use `/play-sound <resource-id>` to fire a Blorb `Snd `
-  resource on demand for verifying the audio path. `zvm-cli` takes `--no-sound` and
-  `--volume <0-100>`.
+  resource on demand for verifying the audio path. Both the `app` and `zvm-cli`
+  take `--no-sound` to start muted for a single run (leaving `enable_sound`
+  untouched); `zvm-cli` also takes `--volume <0-100>`.
 - **Glulx** — Glk sound channels (`glk_schannel_*`) play a Blorb's AIFF/Ogg/MOD
   `Snd ` resources with per-channel volume (including gradual volume ramps) and
   sound-finished notify events, so music and effects behave the way the author
