@@ -79,22 +79,60 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
         });
     }
 
+    // Pull the companion VM's screen model once for this frame (immutable read):
+    // its upper (grid) window is the InvisiClues split-screen menu we draw above
+    // the clue text, and whether it awaits a keypress decides the input prompt.
+    let crate::state::HintSource::Zcode(vm) = &session.source;
+    let char_mode = matches!(vm.pending_input(), crate::session::InputKind::Char);
+    let honor = state.config.honor_game_colours;
+    let companion = crate::session::screen_model_from_machine(&vm.machine);
+
     // The last row of content is always the input row.
     // Everything above it is the transcript area (possibly preceded by the
-    // built-in-HINT suggestion line).
+    // built-in-HINT suggestion line, and topped by the companion menu window).
     let input_y = content.bottom().saturating_sub(1);
     let input_rect = Rect::new(content.x, input_y, content.width, 1);
 
-    // Draw "> <input>" on the input row.
-    let input_line = format!("> {}", session.input);
+    // Draw the input row. In char mode the companion navigates by single
+    // keypresses, so show a dim nav hint; in line mode keep the "> <input>" caret.
     let input_style = state.colors.theme.get("dialog.background").style;
-    crate::render::draw_str_clipped(buf, content.x, input_y, &input_line, input_style, content);
+    if char_mode {
+        let muted = input_style.patch(state.colors.theme.get("muted").style);
+        let prompt = "(press a key \u{00b7} \u{2191}/\u{2193}/Enter navigate \u{00b7} Esc close)";
+        crate::render::draw_str_clipped(buf, content.x, input_y, prompt, muted, content);
+    } else {
+        let input_line = format!("> {}", session.input);
+        crate::render::draw_str_clipped(buf, content.x, input_y, &input_line, input_style, content);
+    }
 
     // The transcript display area: content rows above the input row.
     if content.height < 2 {
         return Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect, max_scroll: 0 });
     }
-    let transcript_area = Rect::new(content.x, content.y, content.width, content.height - 1);
+    let mut transcript_area = Rect::new(content.x, content.y, content.width, content.height - 1);
+
+    // Companion upper (grid) menu window: draw it at the top of the content,
+    // above the lower clue text, and shrink the transcript body by the rows it
+    // consumes. Text-only hint files have no grid → skipped, leaving the panel
+    // rendering exactly as before. Cap the menu height so the input row plus at
+    // least two transcript rows always survive a tall menu.
+    if let Some(grid) = companion.grid() {
+        if grid.active_rows > 0 && transcript_area.height > 2 {
+            let upper_cap = transcript_area.height - 2;
+            let upper_rect =
+                Rect::new(transcript_area.x, transcript_area.y, transcript_area.width, upper_cap);
+            let mut links: Vec<((u16, u16), u32)> = Vec::new();
+            let used = crate::render::upper_window::draw_upper_window(
+                grid, char_mode, &state.colors, upper_rect, buf, honor, &mut links,
+            );
+            transcript_area = Rect::new(
+                transcript_area.x,
+                transcript_area.y + used,
+                transcript_area.width,
+                transcript_area.height - used,
+            );
+        }
+    }
 
     // Draw the content, bottom-up from the input row:
     //   (a) builtin_hint suggestion line (if set) — topmost reserved row.
@@ -253,6 +291,51 @@ mod tests {
         assert!(all.contains("pick a topic"), "transcript text must appear in the buffer");
         assert!(all.contains("HINT"), "built-in hint suggestion ('type HINT') must appear");
         assert!(all.contains("3"), "input '3' must appear in the buffer");
+    }
+
+    /// The companion VM's upper (grid) window — the InvisiClues split-screen
+    /// menu — must render above the lower clue transcript. We paint a known
+    /// 2-cell menu ("ZQ") into the companion's upper window and assert it
+    /// appears on a row strictly above the transcript text.
+    #[test]
+    fn hints_panel_draws_companion_upper_window_above_transcript() {
+        let Some(mut hint_session) = make_hint_session() else {
+            eprintln!("SKIP: minizork.z3 fixture absent");
+            return;
+        };
+
+        // Paint a known 2-row upper window into the companion session.
+        let crate::state::HintSource::Zcode(vm) = &mut hint_session.source;
+        vm.machine.screen.upper.resize(2, 8);
+        vm.machine.screen.upper.put(1, 1, 'Z', 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default);
+        vm.machine.screen.upper.put(1, 2, 'Q', 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default);
+        vm.machine.screen.upper_window_rows = 2;
+
+        let mut state = crate::state::AppState::default();
+        state.overlays.hints = Some(hint_session);
+
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            draw_hints_panel(&state, f.area(), f.buffer_mut());
+        }).unwrap();
+
+        // Reconstruct per-row strings from the rendered buffer.
+        let buf = terminal.backend().buffer();
+        let w = buf.area.width as usize;
+        let mut rows: Vec<String> = vec![String::new(); buf.area.height as usize];
+        for (i, cell) in buf.content().iter().enumerate() {
+            rows[i / w].push_str(cell.symbol());
+        }
+
+        let upper_row = rows.iter().position(|r| r.contains("ZQ"))
+            .expect("companion upper-window menu 'ZQ' must render in the panel");
+        let text_row = rows.iter().position(|r| r.contains("pick a topic"))
+            .expect("transcript text must still render");
+        assert!(
+            upper_row < text_row,
+            "upper-window menu (row {upper_row}) must be above the transcript (row {text_row})"
+        );
     }
 
     #[test]
