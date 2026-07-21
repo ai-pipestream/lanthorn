@@ -16,6 +16,8 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use app::anim::PanelSlide;
 use app::render::draw_str_clipped;
+use app::render::panel::{draw_panel, PanelSpec, PanelStrip};
+use app::render::paneframe::{InsetSegment, PaneGlyphs};
 
 use crate::{abbreviate_home, exit_if_terminated, restore_terminal};
 
@@ -1574,15 +1576,26 @@ fn draw_info_panel(
         }
     }
 
-    // Single-line border box titled " Info ".
-    let frame = app::render::paneframe::draw_pane_frame(
+    // Framed box with a centered, bracketed "Info" title (chrome via draw_panel).
+    let info_segs = [InsetSegment { text: "Info", active: false }];
+    let frame = draw_panel(
         buf,
-        area,
-        app::render::paneframe::BorderStyle::Single,
-        &app::render::paneframe::PaneGlyphs::default(),
-        story_info,
+        &PanelSpec {
+            area,
+            border_selector: "panel.border",
+            border_color: Some(story_info),
+            border_style: None,
+            glyphs: &PaneGlyphs::default(),
+            header_on: true,
+            strip: Some(PanelStrip {
+                segments: &info_segs,
+                base: story_info_title,
+                active: story_info_title,
+            }),
+            body_fill: None,
+        },
+        &cs.theme,
     );
-    draw_str_clipped(buf, area.x + 2, area.y, " Info ", story_info_title, area);
 
     let mut inner = frame.content;
 
@@ -2509,6 +2522,37 @@ mod tests {
         assert_eq!(super::save_when("2026-07-19T13:05:42Z"), "2026-07-19 13:05");
         assert_eq!(super::save_when("2026-07-19"), "2026-07-19");
         assert_eq!(super::save_when(""), "");
+    }
+
+    /// SQ-0441: the info panel now draws its chrome through `draw_panel`, so it
+    /// gets the default single-border frame and a centered, bracketed `Info`
+    /// title on the top row (was a hardcoded frame + left-aligned " Info ").
+    #[test]
+    fn info_panel_frame_is_single_bordered_with_bracketed_title() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let meta = app::picker::StoryMeta {
+            size_bytes: 0, modified: None, engine: app::picker::Engine::ZCode,
+            format: "Z-code".into(), version: Some("3".into()), serial: None, release: None,
+            ifid: "ZCODE-88-840726".into(), features: app::picker::Features::default(),
+            self_blorb: None, author: None, year: None, genre: None, language: None,
+            description: None, ifdb_link: None, fetch_not_found: false,
+        };
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        let mut cover = app::cover::CoverState::default();
+        let entry_path = std::path::Path::new("zork1.z3");
+        super::draw_info_panel(
+            "Zork I", "zork1.z3", &meta, None, 0, area, None, &mut cover, entry_path, false, &cs, &mut buf, &mut Vec::new(), &mut Vec::new(),
+        );
+        // Single-border top-left corner (BorderStyle::Single default).
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "┌");
+        // Top row carries the centered, bracket-capped title.
+        let mut top = String::new();
+        for x in area.left()..area.right() {
+            top.push_str(buf.cell((x, 0)).unwrap().symbol());
+        }
+        assert!(top.contains("┤ Info ├"), "bracketed title on top row: {top:?}");
     }
 
     #[test]

@@ -35,6 +35,28 @@ pub fn border_style_name(style: BorderStyle) -> &'static str {
     }
 }
 
+// ── InsetCaps ─────────────────────────────────────────────────────────────────
+
+/// The title-strip terminator/divider glyphs derived from a pane's border style:
+/// the left bracket, the right bracket, and the divider drawn between segments.
+pub struct InsetCaps {
+    pub left: String,
+    pub right: String,
+    pub divider: String,
+}
+
+impl InsetCaps {
+    /// Terminator/divider caps for a border style (see the design's glyph table).
+    pub fn for_border(b: BorderStyle) -> InsetCaps {
+        let (l, r, d) = match b {
+            BorderStyle::Thick => ("┫", "┣", "┃"),
+            BorderStyle::Double => ("╡", "╞", "┃"), // divider is thick ┃ by design
+            BorderStyle::Single | BorderStyle::Rounded | BorderStyle::None => ("┤", "├", "│"),
+        };
+        InsetCaps { left: l.into(), right: r.into(), divider: d.into() }
+    }
+}
+
 // ── PaneFrame ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
@@ -310,6 +332,7 @@ pub fn draw_top_inset(
     segments: &[InsetSegment],
     base: Style,
     active: Style,
+    caps: &InsetCaps,
 ) -> Vec<Rect> {
     if segments.is_empty() || top_inset.width == 0 || top_inset.height == 0 {
         return segments.iter().map(|_| Rect::default()).collect();
@@ -330,10 +353,10 @@ pub fn draw_top_inset(
         // It fits: render centered
         let leading = (avail - full_width) / 2;
         let start_x = top_inset.x + leading as u16;
-        render_segments(buf, top_inset.y, start_x, segments, base, active)
+        render_segments(buf, top_inset.y, start_x, segments, base, active, caps)
     } else {
         // Overflow: show active segment ± neighbors with ‹…› markers
-        render_overflow(buf, top_inset, segments, base, active, active_idx)
+        render_overflow(buf, top_inset, segments, base, active, active_idx, caps)
     }
 }
 
@@ -358,21 +381,22 @@ fn render_segments(
     segments: &[InsetSegment],
     base: Style,
     active: Style,
+    caps: &InsetCaps,
 ) -> Vec<Rect> {
     let mut rects = vec![Rect::default(); segments.len()];
     let mut cx = start_x;
 
-    // ┫ bracket
+    // left bracket
     if let Some(c) = buf.cell_mut((cx, row)) {
-        c.set_symbol("┫").set_style(base);
+        c.set_symbol(caps.left.as_str()).set_style(base);
     }
     cx += 1;
 
     for (i, seg) in segments.iter().enumerate() {
         if i > 0 {
-            // separator ┃
+            // divider
             if let Some(c) = buf.cell_mut((cx, row)) {
-                c.set_symbol("┃").set_style(base);
+                c.set_symbol(caps.divider.as_str()).set_style(base);
             }
             cx += 1;
         }
@@ -405,9 +429,9 @@ fn render_segments(
         rects[i] = Rect::new(seg_start_x, row, seg_end_x - seg_start_x, 1);
     }
 
-    // ┣ bracket
+    // right bracket
     if let Some(c) = buf.cell_mut((cx, row)) {
-        c.set_symbol("┣").set_style(base);
+        c.set_symbol(caps.right.as_str()).set_style(base);
     }
 
     rects
@@ -421,6 +445,7 @@ fn render_overflow(
     base: Style,
     active: Style,
     active_idx: Option<usize>,
+    caps: &InsetCaps,
 ) -> Vec<Rect> {
     let n = segments.len();
     let avail = top_inset.width as usize;
@@ -528,9 +553,9 @@ fn render_overflow(
         cx += 1;
     }
 
-    // ┫ bracket
+    // left bracket
     if let Some(c) = buf.cell_mut((cx, row)) {
-        c.set_symbol("┫").set_style(base);
+        c.set_symbol(caps.left.as_str()).set_style(base);
     }
     cx += 1;
 
@@ -538,9 +563,9 @@ fn render_overflow(
     for (wi, si) in (lo..=hi).enumerate() {
         let seg = &segments[si];
         if wi > 0 {
-            // separator ┃
+            // divider
             if let Some(c) = buf.cell_mut((cx, row)) {
-                c.set_symbol("┃").set_style(base);
+                c.set_symbol(caps.divider.as_str()).set_style(base);
             }
             cx += 1;
         }
@@ -573,9 +598,9 @@ fn render_overflow(
         rects[si] = Rect::new(seg_start_x, row, seg_end_x - seg_start_x, 1);
     }
 
-    // ┣ bracket
+    // right bracket
     if let Some(c) = buf.cell_mut((cx, row)) {
-        c.set_symbol("┣").set_style(base);
+        c.set_symbol(caps.right.as_str()).set_style(base);
     }
     cx += 1;
 
@@ -738,7 +763,7 @@ mod tests {
         use ratatui::{buffer::Buffer, layout::Rect, style::Style};
         let strip = Rect::new(0,0,20,1);
         let mut buf = Buffer::empty(Rect::new(0,0,20,1));
-        let rects = draw_top_inset(&mut buf, strip, &[InsetSegment{text:"ZORK I", active:false}], Style::default(), Style::default());
+        let rects = draw_top_inset(&mut buf, strip, &[InsetSegment{text:"ZORK I", active:false}], Style::default(), Style::default(), &InsetCaps::for_border(BorderStyle::Thick));
         let row: String = (0..20).map(|x| buf.cell((x,0)).unwrap().symbol().to_string()).collect();
         assert!(row.contains("ZORK I"));
         // centered: leading filler before the bracket
@@ -766,7 +791,7 @@ mod tests {
         let strip = Rect::new(0,0,9,1);
         let mut buf = Buffer::empty(Rect::new(0,0,9,1));
         let segs = [InsetSegment{text:"0",active:false},InsetSegment{text:"1",active:true},InsetSegment{text:"2",active:false},InsetSegment{text:"3",active:false}];
-        let _ = draw_top_inset(&mut buf, strip, &segs, Style::default(), Style::default());
+        let _ = draw_top_inset(&mut buf, strip, &segs, Style::default(), Style::default(), &InsetCaps::for_border(BorderStyle::Thick));
         let row: String = (0..9).map(|x| buf.cell((x,0)).unwrap().symbol().to_string()).collect();
         assert!(row.contains("1"));      // active shown
         assert!(row.contains("‹") || row.contains("…")); // overflow marker present
@@ -871,6 +896,39 @@ mod tests {
         assert_eq!(glyphs_for(BorderStyle::Rounded).tl, "╭");
         assert_eq!(glyphs_for(BorderStyle::Rounded).br, "╯");
         assert_eq!(parse_border_style("rounded"), BorderStyle::Rounded);
+    }
+
+    #[test]
+    fn inset_caps_track_border_style() {
+        let d = InsetCaps::for_border(BorderStyle::Double);
+        assert_eq!((d.left.as_str(), d.right.as_str(), d.divider.as_str()), ("╡", "╞", "┃"));
+        let t = InsetCaps::for_border(BorderStyle::Thick);
+        assert_eq!((t.left.as_str(), t.right.as_str(), t.divider.as_str()), ("┫", "┣", "┃"));
+        for b in [BorderStyle::Single, BorderStyle::Rounded, BorderStyle::None] {
+            let c = InsetCaps::for_border(b);
+            assert_eq!((c.left.as_str(), c.right.as_str(), c.divider.as_str()), ("┤", "├", "│"), "{b:?}");
+        }
+    }
+
+    #[test]
+    fn top_inset_single_caps_use_thin_brackets() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        let strip = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 1));
+        let rects = draw_top_inset(
+            &mut buf,
+            strip,
+            &[InsetSegment { text: "ZORK I", active: false }],
+            Style::default(),
+            Style::default(),
+            &InsetCaps::for_border(BorderStyle::Single),
+        );
+        // Single-border caps: left ┤ and right ├, never the thick ┫/┣.
+        let r = rects[0];
+        let left = r.x - 1;
+        let right = r.x + r.width;
+        assert_eq!(buf.cell((left, 0)).unwrap().symbol(), "┤");
+        assert_eq!(buf.cell((right, 0)).unwrap().symbol(), "├");
     }
 
 }

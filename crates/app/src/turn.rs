@@ -849,7 +849,7 @@ mod tests {
         let mut mapper = mapper::mapper::Mapper::default();
         let panes = crate::PaneRects {
             map: ratatui::layout::Rect::default(), story: ratatui::layout::Rect::default(),
-            room_rects: Vec::new(), layer_tabs: Vec::new(), dialog: None, aux_dialog: None,
+            room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None,
             reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
             verb_menu: Default::default(),
             transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0,

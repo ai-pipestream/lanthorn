@@ -8,7 +8,8 @@ use ratatui::style::{Modifier, Style};
 
 use crate::debug_panel::{self, DebugPanelState, HoverTip, Section, WINDOW_TABS};
 use crate::render::draw_str_clipped;
-use crate::render::paneframe::{draw_pane_frame, BorderStyle, PaneGlyphs};
+use crate::render::panel::{draw_panel, PanelSpec, PanelStrip};
+use crate::render::paneframe::{draw_pane_frame, BorderStyle, InsetSegment, PaneGlyphs};
 use crate::state::AppState;
 
 /// Redraw the char ranges `clickable_spans` reports within `line` with the
@@ -61,42 +62,43 @@ fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
 }
 
 /// Draw one window: frame, tab strip, and the active section's content.
-fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelState, state: &AppState) {
-    if area.width < 2 || area.height < 2 { return; }
+/// Returns the strip's per-tab hit-rects (absolute screen coords), so the click
+/// handler reads the RENDERED tabs rather than recomputing their geometry.
+fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelState, state: &AppState) -> Vec<Rect> {
+    if area.width < 2 || area.height < 2 { return Vec::new(); }
+    let theme = &state.colors.theme;
     // Active border only on the one truly-focused window: the debug pane must
-    // hold focus (not the story pane) AND this be its focused window.
+    // hold focus (not the story pane) AND this be its focused window. The
+    // selector drives both the border colour and its style.
     let focused = state.focus == crate::state::Focus::Map && panel.focus == window;
-    // Frame colour mirrors the story/map panes: transparent cyan when idle,
-    // cyan+bold when focused — never the chrome surface (which bakes a black
-    // background into the border cells, clashing with the pane behind them).
-    let border = if focused {
-        state.colors.theme.get("panel.border:active").style
-    } else {
-        state.colors.theme.get("panel.border").style
-    };
-    // Tabs are drawn on the top border row; guarantee a border row exists even
-    // when the dialog box style resolves to None, or content row 0 would overwrite
-    // (hide) the tabs — which are now the primary navigation affordance.
-    let box_style = if matches!(state.colors.dialog_box_style, crate::render::paneframe::BorderStyle::None) {
-        crate::render::paneframe::BorderStyle::Single
-    } else {
-        state.colors.dialog_box_style
-    };
-    let frame = draw_pane_frame(buf, area, box_style, &state.colors.dialog_glyphs, border);
+    let border_selector = if focused { "panel.border:active" } else { "panel.border" };
+    // Tabs are drawn on the top border row; coerce a None border (missing OR an
+    // explicit `style = "none"`) to Single so the strip always has a border row to
+    // sit in (preserves the old dialog_box_style None→Single coercion intent).
+    let border_style = Some(match theme.get(border_selector).border {
+        None | Some(BorderStyle::None) => BorderStyle::Single,
+        Some(s) => s,
+    });
 
-    // Tab strip: embedded in the window's top border row. `tab_hit_rects` is
-    // the SAME geometry the mouse click handler uses (crate::debug_panel::tab_at),
-    // so a click always lands on the tab actually drawn here.
+    // Tab strip: one bracketed segment per section, active = the window's tab.
     let sections = WINDOW_TABS[window];
-    let tab_rects = debug_panel::tab_hit_rects(area, sections);
-    let tab_active = state.colors.theme.get("panel.tab:active").style;
-    let tab = state.colors.theme.get("panel.tab").style;
-    for (i, (section, rect)) in sections.iter().zip(tab_rects.iter()).enumerate() {
-        if rect.width == 0 { continue; }
-        let label = format!(" {} ", section.label());
-        let style = if i == panel.tab[window] { tab_active } else { tab };
-        draw_str_clipped(buf, rect.x, rect.y, &label, style, *rect);
-    }
+    let segs: Vec<InsetSegment> = sections.iter().enumerate()
+        .map(|(i, s)| InsetSegment { text: s.label(), active: i == panel.tab[window] })
+        .collect();
+    let frame = draw_panel(buf, &PanelSpec {
+        area,
+        border_selector,
+        border_color: None,
+        border_style,
+        glyphs: &state.colors.dialog_glyphs,
+        header_on: true,
+        strip: Some(PanelStrip {
+            segments: &segs,
+            base: theme.get("panel.tab").style,
+            active: theme.get("panel.tab:active").style,
+        }),
+        body_fill: None,
+    }, theme);
 
     // Active section content, clipped to the frame's content rect.
     let section = panel.active_section(window);
@@ -104,26 +106,26 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
     let content = frame.content;
     // Body text is the plain text role (foreground only), so the pane's own
     // background shows through instead of a chrome-black block behind every glyph.
-    let body = state.colors.theme.get("text").style;
+    let body = theme.get("text").style;
 
     if section == Section::Disasm {
         draw_disasm(buf, content, panel, state, body);
-        return;
+        return frame.tab_rects;
     }
 
     if section == Section::Objects {
         draw_objects(buf, content, window, panel, body);
-        return;
+        return frame.tab_rects;
     }
 
     if section == Section::CallStack {
         draw_callstack(buf, content, window, panel, body);
-        return;
+        return frame.tab_rects;
     }
 
     if section == Section::Memory {
         draw_memory(buf, content, panel, state, body);
-        return;
+        return frame.tab_rects;
     }
 
     // List sections apply their per-window scroll offset.
@@ -132,6 +134,7 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
         let y = content.y + row as u16;
         draw_str_clipped(buf, content.x, y, line, body, content);
     }
+    frame.tab_rects
 }
 
 /// Draw the Objects section: `objects_rows` interleaves each tree line with
@@ -280,8 +283,11 @@ fn draw_tooltip(buf: &mut Buffer, area: Rect, tip: &HoverTip, state: &AppState) 
     }
 }
 
-pub fn draw_debug_panel(state: &AppState, area: Rect, buf: &mut Buffer) {
-    let Some(panel) = &state.debug else { return };
+/// Draw the debug pane and return its window tab hit-rects as
+/// `(window, tab, rect)` in absolute screen coords, so the mouse handler can
+/// resolve a tab click against the exact rects rendered here.
+pub fn draw_debug_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Vec<(usize, usize, Rect)> {
+    let Some(panel) = &state.debug else { return Vec::new() };
     // Interior fill: the standard panel surface (§2a). Transparent by default so
     // the terminal background shows through; a themed `panel.background` bg paints
     // the whole pane as a solid surface, with borders/text composing on top (their
@@ -295,8 +301,11 @@ pub fn draw_debug_panel(state: &AppState, area: Rect, buf: &mut Buffer) {
         }
     }
     let windows = debug_panel::window_rects(area);
+    let mut tab_rects: Vec<(usize, usize, Rect)> = Vec::new();
     for (i, w) in windows.iter().enumerate() {
-        draw_window(buf, *w, i, panel, state);
+        for (t, rect) in draw_window(buf, *w, i, panel, state).into_iter().enumerate() {
+            tab_rects.push((i, t, rect));
+        }
     }
     // Mouse selection (SQ-0420): reverse-video the selected cells and publish the
     // copy text read back from the drawn buffer, so a mouse-release can emit it via
@@ -325,6 +334,7 @@ pub fn draw_debug_panel(state: &AppState, area: Rect, buf: &mut Buffer) {
     }
     // Tooltip paints on top of the windows.
     if let Some(tip) = &panel.hover { draw_tooltip(buf, area, tip, state); }
+    tab_rects
 }
 
 #[cfg(test)]
@@ -392,6 +402,41 @@ mod tests {
         assert!(text.contains("Disassembly"));
         assert!(text.contains("Locals"));
         assert!(text.contains("Stack"));
+    }
+
+    #[test]
+    fn returns_a_tab_rect_per_window_tab_and_a_click_resolves_it() {
+        // The renderer returns (window, tab, rect) for every window tab, and a
+        // click inside a returned rect resolves to that exact (window, tab) —
+        // mirrors the mouse handler's `debug_tabs` lookup (replaces the removed
+        // `tab_at` recompute).
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        state.debug = Some(crate::debug_panel::DebugPanelState::new(0x1000));
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let tabs = draw_debug_panel(&state, area, &mut buf);
+
+        // One entry per tab across the three windows (1 + 4 + 3). A tab whose
+        // label doesn't fit the (possibly overflowing) strip gets a zero-width
+        // rect — still returned, just not clickable.
+        let expected: usize = crate::debug_panel::WINDOW_TABS.iter().map(|w| w.len()).sum();
+        assert_eq!(tabs.len(), expected);
+
+        // Every DRAWABLE rect resolves to its own (window, tab) when clicked at
+        // its centre — the same width>0 containment test the mouse handler uses.
+        let drawable: Vec<_> = tabs.iter().filter(|(_, _, r)| r.width > 0).collect();
+        assert!(!drawable.is_empty(), "at least the active/fitting tabs are drawable");
+        for (w, t, rect) in &drawable {
+            let col = rect.x + rect.width / 2;
+            let row = rect.y;
+            let hit = tabs.iter().find(|(_, _, r)| {
+                r.width > 0 && col >= r.x && col < r.right() && row >= r.y && row < r.bottom()
+            });
+            assert_eq!(hit.map(|(hw, ht, _)| (*hw, *ht)), Some((*w, *t)),
+                "click at the centre of tab ({w},{t}) resolves to it");
+        }
     }
 
     #[test]

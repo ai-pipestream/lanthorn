@@ -207,9 +207,12 @@ mod tests {
     use crate::render::dialog::{DialogPlacement, DialogStyle};
     use crate::render::paneframe::BorderStyle;
 
-    fn make_dialog_style() -> DialogStyle {
+    fn make_dialog_style() -> DialogStyle<'static> {
         use crate::render::paneframe::PaneGlyphs;
+        static TEST_THEME: std::sync::LazyLock<crate::theme::resolve::Theme> =
+            std::sync::LazyLock::new(|| crate::colors::ColorScheme::terminal_default().theme);
         DialogStyle {
+            theme: &TEST_THEME,
             frame: Style::default().bg(Color::Black),
             border: Style::default(), box_style: BorderStyle::Single,
             glyphs: PaneGlyphs::default(),

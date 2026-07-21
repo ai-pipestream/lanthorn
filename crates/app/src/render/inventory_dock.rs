@@ -10,8 +10,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use super::draw_str_clipped;
-use super::paneframe::{draw_pane_frame, draw_top_inset, BorderStyle, InsetSegment, PaneGlyphs};
+use super::paneframe::{InsetSegment, PaneGlyphs};
 use crate::colors::ColorScheme;
+use crate::render::panel::{draw_panel, PanelSpec, PanelStrip};
 
 /// Compute the dock's fully-open target height in rows: one row per item
 /// (minimum 1, for the "(empty)" line) plus 2 border rows, capped at
@@ -43,6 +44,9 @@ pub fn draw_inventory_dock(items: &[String], area: Rect, colors: &ColorScheme, h
         return;
     }
     let style = colors.theme.get("inventory_dock").style;
+    // Focus drives the border STYLE selector; the resize accent (or the dock's
+    // own style) is preserved as the border COLOUR via `border_color`.
+    let border_selector = if highlighted { "panel.border:active" } else { "panel.border" };
     let border_color = if highlighted { colors.theme.get("panel.border:active").style } else { style };
 
     // Fill the band's background first so panes behind it never show through
@@ -55,13 +59,25 @@ pub fn draw_inventory_dock(items: &[String], area: Rect, colors: &ColorScheme, h
         }
     }
 
-    let frame = draw_pane_frame(buf, area, BorderStyle::Single, &PaneGlyphs::default(), border_color);
-
-    // Title strip on the top border row via the shared header helper (bracketed
-    // ┫ Inventory ┣, matching the framed panes and modals). Drawn in the dock's
-    // own `inventory_dock` style, independent of the border accent. No-ops when
-    // the band is too short for a border row.
-    draw_top_inset(buf, frame.top_inset, &[InsetSegment { text: "Inventory", active: false }], style, style);
+    // Frame + title strip via the shared themed panel. The border style now
+    // follows `panel.border` (so `[panel] border = { style = "double" }` reaches
+    // the dock) and the title caps track that style; the border colour and the
+    // "Inventory" strip (drawn in the dock's own style) are preserved exactly.
+    let spec = PanelSpec {
+        area,
+        border_selector,
+        border_color: Some(border_color),
+        border_style: None,
+        glyphs: &PaneGlyphs::default(),
+        header_on: true,
+        strip: Some(PanelStrip {
+            segments: &[InsetSegment { text: "Inventory", active: false }],
+            base: style,
+            active: style,
+        }),
+        body_fill: None,
+    };
+    let frame = draw_panel(buf, &spec, &colors.theme);
 
     let content = frame.content;
     if content.height == 0 || content.width == 0 {
@@ -130,15 +146,37 @@ mod tests {
 
     #[test]
     fn draw_inventory_dock_title_uses_shared_bracketed_header() {
-        // The title now comes from the shared `draw_top_inset` helper, so the top
-        // border row reads "┫ Inventory ┣" (bracketed), matching the framed panes
-        // and modals rather than the old plain centered title.
+        // The title comes from the shared panel header, so the top border row is
+        // bracketed. With the default single `panel.border`, the caps now track
+        // that style: "┤ Inventory ├" (single), not the old hardcoded thick
+        // "┫ … ┣".
         let area = Rect::new(0, 0, 24, 5);
         let mut buf = Buffer::empty(area);
         let colors = ColorScheme::default();
         draw_inventory_dock(&["lamp".to_string()], area, &colors, false, &mut buf);
         let top: String = (0..area.width).map(|x| buf.cell((x, 0)).unwrap().symbol().to_owned()).collect();
-        assert!(top.contains("┫ Inventory ┣"), "bracketed title strip, got {top:?}");
+        assert!(top.contains("┤ Inventory ├"), "single-cap title strip, got {top:?}");
+    }
+
+    #[test]
+    fn draw_inventory_dock_follows_panel_border_style() {
+        // A user's `[panel] border = { style = "double" }` must now reach the
+        // dock: the top-left corner is the double corner ╔ and the title-strip
+        // left cap tracks it (╡), proving the dock renders `panel.border` (not the
+        // old hardcoded Single) and the caps follow that style.
+        let scheme = crate::colors::GhosttyScheme::default();
+        let parsed =
+            crate::theme::toml_schema::parse("[panel]\nborder = { style = \"double\" }\n").unwrap();
+        let mut colors = ColorScheme::default();
+        colors.theme = crate::theme::resolve::resolve_theme(&scheme, &parsed);
+
+        let area = Rect::new(0, 0, 24, 5);
+        let mut buf = Buffer::empty(area);
+        draw_inventory_dock(&["lamp".to_string()], area, &colors, false, &mut buf);
+
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "╔", "double top-left corner");
+        let top: String = (0..area.width).map(|x| buf.cell((x, 0)).unwrap().symbol().to_owned()).collect();
+        assert!(top.contains("╡ Inventory ╞"), "double-cap title strip, got {top:?}");
     }
 
     #[test]
