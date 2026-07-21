@@ -248,12 +248,15 @@ fn panel_border(theme: &app::theme::resolve::Theme, focused: bool) -> Style {
     theme.get(if focused { "panel.border:active" } else { "panel.border" }).style
 }
 
-/// The panel border box style from the theme (SQ-0309 §2a): all sides use
-/// `panel.border`'s resolved `BorderStyle` (single-line by default). Replaces the
-/// legacy per-panel `*_border_sides` so the unified frame is theme-driven.
-fn panel_border_sides(theme: &app::theme::resolve::Theme) -> app::render::paneframe::PaneSides {
+/// The panel border box style from the theme (SQ-0309 §2a): all sides use the
+/// resolved `BorderStyle` (single-line by default). Focus-aware, mirroring
+/// [`panel_border`]'s colour path — a focused pane's frame line style comes from
+/// `panel.border:active`, an unfocused pane's from `panel.border` (SQ-0440), so a
+/// user's `:active` border style is honored, not just its colour.
+fn panel_border_sides(theme: &app::theme::resolve::Theme, focused: bool) -> app::render::paneframe::PaneSides {
+    let selector = if focused { "panel.border:active" } else { "panel.border" };
     app::render::paneframe::PaneSides::all(
-        theme.get("panel.border").border.unwrap_or(app::render::paneframe::BorderStyle::None),
+        theme.get(selector).border.unwrap_or(app::render::paneframe::BorderStyle::None),
     )
 }
 
@@ -370,7 +373,7 @@ fn draw_frame(
             // treats debug-active as `Layout::Split`).
             let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
             let story_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { story_border_style };
-            let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme), &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
+            let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme, resize_split_hl || state.focus == Focus::Game), &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
             let c = story_fp.content;
             let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
             transcript_max_scroll = m.max_scroll;
@@ -398,7 +401,7 @@ fn draw_frame(
         } else {
             match state.layout {
                 Layout::TranscriptFull => {
-                    let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme), &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
+                    let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme, state.focus == Focus::Game), &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
                     let c = story_fp.content;
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                     transcript_max_scroll = m.max_scroll;
@@ -423,7 +426,7 @@ fn draw_frame(
                     let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
                     let story_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { story_border_style };
                     let map_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { panel_border(&state.colors.theme, state.focus == Focus::Map) };
-                    let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme), &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
+                    let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme, resize_split_hl || state.focus == Focus::Game), &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
                     let c = story_fp.content;
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                     transcript_max_scroll = m.max_scroll;
@@ -440,7 +443,7 @@ fn draw_frame(
                     }
                     story_area = story_fp.content;
 
-                    let map_fp = draw_framed(buf, pane_layout.map, panel_border_sides(&state.colors.theme), &state.colors.map_border_glyphs, map_border_color, state.colors.map_header_on);
+                    let map_fp = draw_framed(buf, pane_layout.map, panel_border_sides(&state.colors.theme, resize_split_hl || state.focus == Focus::Map), &state.colors.map_border_glyphs, map_border_color, state.colors.map_header_on);
                     render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                     if let Some(anim) = &state.tidy_anim {
                         let tidy_ds = make_dialog_style(state);
@@ -3050,6 +3053,30 @@ mod tests {
     }
 
     // ── Focus-aware panel border colour (SQ-0309 §2a) ──────────────────────────
+
+    /// SQ-0440: the focused pane's border LINE STYLE (not just its colour) comes
+    /// from `panel.border:active`; the unfocused pane's from `panel.border`. A
+    /// regression here silently ignores a user's `:active` border style.
+    #[test]
+    fn panel_border_sides_picks_active_style_when_focused() {
+        use app::render::paneframe::BorderStyle;
+        let scheme = app::colors::GhosttyScheme::default();
+        let parsed = app::theme::toml_schema::parse(
+            "[panel]\nborder = { style = \"single\" }\n\"border:active\" = { style = \"double\" }\n",
+        )
+        .expect("parse");
+        let theme = app::theme::resolve::resolve_theme(&scheme, &parsed);
+        assert_eq!(
+            super::panel_border_sides(&theme, true).top,
+            BorderStyle::Double,
+            "focused pane must use panel.border:active's style",
+        );
+        assert_eq!(
+            super::panel_border_sides(&theme, false).top,
+            BorderStyle::Single,
+            "unfocused pane must use panel.border's style",
+        );
+    }
 
     /// The pane with input focus renders its border BOLD via the theme's
     /// `panel.border:active`; the unfocused pane stays plain `panel.border`.
