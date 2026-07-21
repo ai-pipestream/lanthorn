@@ -23,6 +23,135 @@ pub fn hint_name_matches(file_name: &str) -> bool {
     stem.contains("hint") || stem.contains("clue") || stem.contains("invisiclues")
 }
 
+/// Returns true if `name` (case-insensitive) contains an Infocom Solid Gold
+/// release/serial marker of the form `-r<digits>-s<digits>` (e.g.
+/// `-r52-s871125`). Hand-parsed (no regex): find `-r`, require ≥1 ascii digit,
+/// then `-s`, then ≥1 ascii digit. Returns true on the first such occurrence.
+pub fn has_release_serial(name: &str) -> bool {
+    let b = name.to_ascii_lowercase().into_bytes();
+    let n = b.len();
+    let mut i = 0;
+    while i + 1 < n {
+        if b[i] == b'-' && b[i + 1] == b'r' {
+            let mut j = i + 2;
+            let rstart = j;
+            while j < n && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > rstart && j + 1 < n && b[j] == b'-' && b[j + 1] == b's' {
+                let mut k = j + 2;
+                let sstart = k;
+                while k < n && b[k].is_ascii_digit() {
+                    k += 1;
+                }
+                if k > sstart {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Returns true if `file_name` looks like an InvisiClues / hint image by name.
+///
+/// It must have a `.z3/.z5/.z8` extension AND its stem (lowercased, extension
+/// stripped like [`hint_stem`]) either contains one of `hint`, `clue`,
+/// `invisiclues`, or ends with the SLAG suffix `inv`, or ends with
+/// `_hints`/`-hints`.
+///
+/// Unlike [`hint_name_matches`], this also recognises the IF-Archive SLAG
+/// naming (`deadlineinv.z5`, `stuga_hints.z5`) which carries no keyword.
+pub fn is_invisiclues_name(file_name: &str) -> bool {
+    let lower = file_name.to_ascii_lowercase();
+    let has_ext = lower.ends_with(".z3") || lower.ends_with(".z5") || lower.ends_with(".z8");
+    if !has_ext {
+        return false;
+    }
+    let stem = hint_stem(file_name);
+    stem.contains("hint")
+        || stem.contains("clue")
+        || stem.contains("invisiclues")
+        || stem.ends_with("inv")
+        || stem.ends_with("_hints")
+        || stem.ends_with("-hints")
+}
+
+/// Returns true if `file_name` is a hint *sidecar* — an InvisiClues/hint image
+/// that is NOT itself a full Solid Gold game.
+///
+/// Infocom Solid Gold releases like `zork1-invclues-r52-s871125.z5` carry a
+/// `-r<digits>-s<digits>` marker and are full games (with built-in clues), not
+/// standalone hint files, so they are excluded here.
+pub fn is_hint_sidecar(file_name: &str) -> bool {
+    is_invisiclues_name(file_name) && !has_release_serial(file_name)
+}
+
+/// Curated `(hint-stem, game-key)` table for the IF-Archive SLAG InvisiClues
+/// collection, whose abbreviated names don't stem-match their games.
+///
+/// The hint-stem is the lowercased file stem without extension; the game-key is
+/// a lowercased keyword present in the game's title/filename.
+const SLAG_HINTS: &[(&str, &str)] = &[
+    ("deadlineinv", "deadline"),
+    ("enchaninv", "enchanter"),
+    ("hhgginv", "hitchhiker"),
+    ("hollywoodinv", "hollywood"),
+    ("lgopinv", "leather"),
+    ("lurkinginv", "lurking"),
+    ("planetinv", "planetfall"),
+    ("sorcinv", "sorcerer"),
+    ("spellbinv", "spellbreaker"),
+    ("starcrossinv", "starcross"),
+    ("stationinv", "stationfall"),
+    ("stuga_hints", "stuga"),
+];
+
+/// The lowercased game keyword a hint file belongs to, or `None`.
+///
+/// First consults the curated [`SLAG_HINTS`] table by exact stem (so
+/// `enchaninv` → `enchanter`, which a naïve strip would get wrong); else derives
+/// the base by stripping a trailing hint marker (longest first), returning it
+/// when it is ≥3 chars (so `zork1_hints` → `zork1`).
+pub fn hint_game_key(file_name: &str) -> Option<String> {
+    let stem = hint_stem(file_name);
+    if let Some((_, key)) = SLAG_HINTS.iter().find(|(s, _)| *s == stem) {
+        return Some((*key).to_string());
+    }
+    // Longest markers first so `-invisiclues` isn't shortened to `inv` etc.
+    const MARKERS: &[&str] = &[
+        "-invisiclues",
+        "-hints",
+        "_hints",
+        "-clues",
+        "-hint",
+        "_hint",
+        "-clue",
+        "-inv",
+        "_inv",
+        "inv",
+    ];
+    for m in MARKERS {
+        if let Some(base) = stem.strip_suffix(m) {
+            return (base.len() >= 3).then(|| base.to_string());
+        }
+    }
+    None
+}
+
+/// Returns true if the hint file `hint_file_name` is associated with the story
+/// identified by `story_stem_or_title` (a filename stem OR a title).
+///
+/// True when [`hint_game_key`] yields a key of length ≥3 that the lowercased
+/// `story_stem_or_title` contains.
+pub fn hint_matches_story(hint_file_name: &str, story_stem_or_title: &str) -> bool {
+    match hint_game_key(hint_file_name) {
+        Some(key) if key.len() >= 3 => story_stem_or_title.to_ascii_lowercase().contains(&key),
+        _ => false,
+    }
+}
+
 /// The stem of a hint file's name, i.e. the raw file name minus a trailing
 /// `.z3/.z5/.z8` extension, lowercased.
 ///
@@ -63,8 +192,10 @@ fn stem_matches_story(story_stem: &str, candidate_name: &str) -> bool {
 /// Rank hint candidate names by story-stem preference and return the chosen one.
 ///
 /// Tiers:
-/// 1. any candidate whose stem starts with `story_stem` → the first such after a
-///    stable name sort (deterministic regardless of readdir order);
+/// 1. any candidate the story owns — its stem starts with `story_stem`
+///    ([`stem_matches_story`]) or its curated/derived game key matches the story
+///    ([`hint_matches_story`]) → the first such after a stable name sort
+///    (deterministic regardless of readdir order);
 /// 2. else if exactly one candidate exists → that lone (generic) candidate;
 /// 3. else (multiple candidates, none story-specific) → `None` (ambiguous).
 ///
@@ -75,7 +206,10 @@ fn pick_hint_candidate(story_stem: &str, mut names: Vec<String>) -> Option<Strin
         return None;
     }
     names.sort();
-    if let Some(m) = names.iter().find(|n| stem_matches_story(story_stem, n)) {
+    if let Some(m) = names
+        .iter()
+        .find(|n| stem_matches_story(story_stem, n) || hint_matches_story(n, story_stem))
+    {
         return Some(m.clone());
     }
     if names.len() == 1 {
@@ -178,11 +312,13 @@ pub enum HintResolution {
 ///
 /// Discovery order:
 /// 1. Remembered: the per-IFID association from `index`.
-/// 2. Sibling files: any `.z3/.z5/.z8` whose name matches `hint_name_matches`
-///    in the same directory as `story_path`.
-/// 3. Sibling ZIP: any `.zip` in the same directory that contains an entry
-///    whose name matches `hint_name_matches`; returns `ZipEntry` so the caller
-///    can extract the bytes with `read_zip_entry`.
+/// 2. Sibling files: any `.z3/.z5/.z8` whose name is a hint sidecar
+///    ([`is_hint_sidecar`]) in the same directory as `story_path` — this finds
+///    SLAG files like `deadlineinv.z5` while skipping full Solid Gold games
+///    like `zork1-invclues-r52-s871125.z5`.
+/// 3. Sibling ZIP: any `.zip` in the same directory that contains a hint-sidecar
+///    entry; returns `ZipEntry` so the caller can extract the bytes with
+///    `read_zip_entry`.
 /// 4. Else: `AskUser` (caller should open the file browser).
 pub fn resolve_hint_source(story_path: &Path, ifid: &str, index: &HintIndex) -> HintResolution {
     // Step 1: remembered association.
@@ -213,8 +349,9 @@ pub fn resolve_hint_source(story_path: &Path, ifid: &str, index: &HintIndex) -> 
                     Some(n) => n,
                     None => continue,
                 };
-                // Step 2: collect plain hint files (ranked below).
-                if hint_name_matches(name) {
+                // Step 2: collect hint sidecars (ranked below); skips full
+                // Solid Gold games that carry a release/serial marker.
+                if is_hint_sidecar(name) {
                     hint_files.push(path.clone());
                 }
                 // Collect ZIPs for step 3.
@@ -256,8 +393,8 @@ pub fn resolve_hint_source(story_path: &Path, ifid: &str, index: &HintIndex) -> 
     HintResolution::AskUser
 }
 
-/// Return the best-ranked entry in `zip_path` matching `hint_name_matches`,
-/// preferring an entry whose stem starts with `story_stem`.
+/// Return the best-ranked hint-sidecar entry in `zip_path`, preferring an entry
+/// the story owns (stem prefix or game-key match).
 ///
 /// Applies the same tiers as [`pick_hint_candidate`]: a story-stem match wins;
 /// a lone generic entry is used; multiple generics with no story match are
@@ -274,7 +411,7 @@ fn find_hint_entry_in_zip(zip_path: &Path, story_stem: &str) -> io::Result<Optio
         let name = entry.name().to_string();
         // Only the bare filename portion needs to match the pattern.
         let basename = name.rsplit('/').next().unwrap_or(&name);
-        if hint_name_matches(basename) {
+        if is_hint_sidecar(basename) {
             matches.push(name);
         }
     }
@@ -444,6 +581,50 @@ mod tests {
         assert!(hint_name_matches("clues.z3"));
         assert!(!hint_name_matches("zork1.z5"));     // the story itself
         assert!(!hint_name_matches("hints.txt"));    // wrong extension
+    }
+
+    #[test]
+    fn has_release_serial_detects_solid_gold_marker() {
+        assert!(has_release_serial("zork1-invclues-r52-s871125.z5"));
+        assert!(has_release_serial("deadline-r27-s851006.z3"));
+        assert!(!has_release_serial("deadlineinv.z5"));
+        assert!(!has_release_serial("zork1_hints.z5"));
+    }
+
+    #[test]
+    fn is_hint_sidecar_recognizes_slag_and_excludes_solid_gold() {
+        // SLAG + user hint files are sidecars.
+        assert!(is_hint_sidecar("deadlineinv.z5"));
+        assert!(is_hint_sidecar("stuga_hints.z5"));
+        assert!(is_hint_sidecar("zork1-invisiclues.z5"));
+        assert!(is_hint_sidecar("zork1_hints.z5"));
+        // The story itself is not a sidecar.
+        assert!(!is_hint_sidecar("zork1.z5"));
+        // Solid Gold full games (with release/serial) are not sidecars.
+        assert!(!is_hint_sidecar("zork1-invclues-r52-s871125.z5"));
+        assert!(!is_hint_sidecar("enchanter-r29-s860820.z3"));
+    }
+
+    #[test]
+    fn hint_game_key_curated_and_derived() {
+        assert_eq!(hint_game_key("deadlineinv.z5").as_deref(), Some("deadline"));
+        assert_eq!(hint_game_key("hhgginv.z5").as_deref(), Some("hitchhiker"));
+        assert_eq!(hint_game_key("lgopinv.z5").as_deref(), Some("leather"));
+        // Curated must beat the (wrong) derived `enchan`.
+        assert_eq!(hint_game_key("enchaninv.z5").as_deref(), Some("enchanter"));
+        assert_eq!(hint_game_key("zork1_hints.z5").as_deref(), Some("zork1"));
+        assert_eq!(hint_game_key("stuga_hints.z5").as_deref(), Some("stuga"));
+    }
+
+    #[test]
+    fn hint_matches_story_associates_by_key() {
+        assert!(hint_matches_story(
+            "hhgginv.z5",
+            "The Hitchhiker's Guide to the Galaxy"
+        ));
+        assert!(hint_matches_story("hhgginv.z5", "hitchhiker-r59-s851108"));
+        assert!(hint_matches_story("deadlineinv.z5", "deadline-r27-s851006"));
+        assert!(!hint_matches_story("deadlineinv.z5", "zork1-r88-s840726"));
     }
 
     #[test]
@@ -726,6 +907,37 @@ mod tests {
             let r = resolve_hint_source(&dir.join("zork1.z5"), "IFID-1", &empty);
             assert_eq!(r, expected);
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_slag_hint_via_game_key() {
+        // Curated SLAG hint (no keyword, no stem prefix) resolves via game key.
+        let dir = scratch_dir(
+            "resolve-slag",
+            &["deadline-r27-s851006.z3", "deadlineinv.z5"],
+        );
+        let empty = HintIndex { map: HashMap::new() };
+
+        let r = resolve_hint_source(&dir.join("deadline-r27-s851006.z3"), "IFID", &empty);
+        assert_eq!(r, HintResolution::File(dir.join("deadlineinv.z5")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_skips_solid_gold_sibling() {
+        // A Solid Gold full game (with -rNN-sNNNNNN) is not a hint sidecar, so
+        // it is never offered as another story's hints.
+        let dir = scratch_dir(
+            "resolve-solidgold",
+            &["story.z5", "zork1-invclues-r52-s871125.z5"],
+        );
+        let empty = HintIndex { map: HashMap::new() };
+
+        let r = resolve_hint_source(&dir.join("story.z5"), "IFID", &empty);
+        assert_eq!(r, HintResolution::AskUser);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
