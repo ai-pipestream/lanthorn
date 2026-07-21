@@ -2757,6 +2757,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
             let pos = (working.interpreter_number.map(|n| n as i32).unwrap_or(0) + delta).clamp(0, 10);
             working.interpreter_number = if pos == 0 { None } else { Some(pos as u8) };
         }
+        21 => working.hint_skip_screen_warning = !working.hint_skip_screen_warning,
         _ => {}
     }
 }

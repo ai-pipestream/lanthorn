@@ -295,6 +295,19 @@ mod tests {
         state.overlays.config_screen.as_mut().unwrap().working.undo_levels = 4;
         apply_action(Action::ConfigCycle(1), &mut state, &mut m);
         assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.undo_levels, 5);
+
+        // A bool row must flip via BOTH ConfigToggle (Space) and ConfigCycle
+        // (←/→) — the two handlers are parallel index matches, so exercise both
+        // for the last-added bool row so neither can silently miss it.
+        let hidx = CONFIG_ROWS.iter().position(|(n, _, _)| *n == "hint_skip_screen_warning").unwrap();
+        state.overlays.config_screen.as_mut().unwrap().scroll.selected = hidx;
+        let b0 = state.overlays.config_screen.as_ref().unwrap().working.hint_skip_screen_warning;
+        apply_action(Action::ConfigToggle, &mut state, &mut m);
+        let b1 = state.overlays.config_screen.as_ref().unwrap().working.hint_skip_screen_warning;
+        assert_ne!(b0, b1, "hint_skip_screen_warning must toggle via Space");
+        apply_action(Action::ConfigCycle(1), &mut state, &mut m);
+        let b2 = state.overlays.config_screen.as_ref().unwrap().working.hint_skip_screen_warning;
+        assert_ne!(b1, b2, "hint_skip_screen_warning must flip via ←/→ too");
     }
 
     #[test]
