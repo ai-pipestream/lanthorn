@@ -132,7 +132,10 @@ tell the three engines apart at a glance (`Z5`, `Scott`, `G3.1.2`).
   topic menu and forwarding your keystrokes so you drive it exactly as intended,
   revealing clues one line at a time. The hint file is auto-detected beside the
   story, matched to *that* game by name, hidden from the picker, and flagged with
-  a Hint badge. → [interface](docs/features/interface.md)
+  a Hint badge. Don't have one? A lowercase badge marks the ~50 Infocom titles
+  whose *InvisiClues* babelmap can fetch on demand — press `H` in the picker to
+  download one from the IF Archive (or the Internet Archive) right next to the
+  story. → [interface](docs/features/interface.md)
 - **Saves & persistence** — self-contained `.babelmap` Save States (map + VM
   state + metadata), named slots, Quetzal import/export, auto-save/auto-load, and
   Glulx games' external file storage (Glk file streams) auto-persisting across
