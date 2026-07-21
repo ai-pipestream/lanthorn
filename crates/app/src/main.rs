@@ -27,7 +27,8 @@ use app::render::hints_panel::{hint_key_routes, HintKeyKind, HintsPanelRects};
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
-use app::render::paneframe::{build_layer_segments, draw_framed, draw_header_plain, draw_top_inset, BorderStyle, InsetCaps, InsetSegment};
+use app::render::paneframe::{build_layer_segments, InsetSegment};
+use app::render::panel::{draw_panel, PanelSpec, PanelStrip};
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
 use mapper::layer::LayerId;
@@ -248,18 +249,6 @@ fn panel_border(theme: &app::theme::resolve::Theme, focused: bool) -> Style {
     theme.get(if focused { "panel.border:active" } else { "panel.border" }).style
 }
 
-/// The panel border box style from the theme (SQ-0309 §2a): all sides use the
-/// resolved `BorderStyle` (single-line by default). Focus-aware, mirroring
-/// [`panel_border`]'s colour path — a focused pane's frame line style comes from
-/// `panel.border:active`, an unfocused pane's from `panel.border` (SQ-0440), so a
-/// user's `:active` border style is honored, not just its colour.
-fn panel_border_sides(theme: &app::theme::resolve::Theme, focused: bool) -> app::render::paneframe::PaneSides {
-    let selector = if focused { "panel.border:active" } else { "panel.border" };
-    app::render::paneframe::PaneSides::all(
-        theme.get(selector).border.unwrap_or(app::render::paneframe::BorderStyle::None),
-    )
-}
-
 /// Render one frame. Returns both pane inner-content rects so the event loop
 /// can route mouse events and make accurate `recenter_on` calls.
 fn draw_frame(
@@ -373,21 +362,24 @@ fn draw_frame(
             // treats debug-active as `Layout::Split`).
             let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
             let story_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { story_border_style };
-            let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme, resize_split_hl || state.focus == Focus::Game), &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
+            let story_focused = resize_split_hl || state.focus == Focus::Game;
+            let story_title_style = state.colors.theme.get("story_title").style;
+            let story_segs = [InsetSegment { text: &state.title, active: false }];
+            let story_fp = draw_panel(buf, &PanelSpec {
+                area: pane_layout.story,
+                border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
+                border_color: Some(story_border_color),
+                glyphs: &state.colors.story_border_glyphs,
+                header_on: state.colors.story_header_on,
+                strip: Some(PanelStrip { segments: &story_segs, base: story_title_style, active: story_title_style }),
+                body_fill: None,
+            }, &state.colors.theme);
             let c = story_fp.content;
             let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
             transcript_max_scroll = m.max_scroll;
             transcript_viewport_rows = m.viewport_rows;
             transcript_total_rows = m.total_rows;
             transcript_links_out = m.links;
-            if let Some(hrect) = story_fp.header {
-                let segs = [InsetSegment { text: &state.title, active: false }];
-                if story_fp.header_bordered {
-                    draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style, &InsetCaps::for_border(BorderStyle::Thick));
-                } else {
-                    draw_header_plain(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
-                }
-            }
             story_area = story_fp.content;
 
             app::render::debug_panel::draw_debug_panel(state, pane_layout.map, buf);
@@ -401,21 +393,24 @@ fn draw_frame(
         } else {
             match state.layout {
                 Layout::TranscriptFull => {
-                    let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme, state.focus == Focus::Game), &state.colors.story_border_glyphs, story_border_style, state.colors.story_header_on);
+                    let story_focused = state.focus == Focus::Game;
+                    let story_title_style = state.colors.theme.get("story_title").style;
+                    let story_segs = [InsetSegment { text: &state.title, active: false }];
+                    let story_fp = draw_panel(buf, &PanelSpec {
+                        area: pane_layout.story,
+                        border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
+                        border_color: Some(story_border_style),
+                        glyphs: &state.colors.story_border_glyphs,
+                        header_on: state.colors.story_header_on,
+                        strip: Some(PanelStrip { segments: &story_segs, base: story_title_style, active: story_title_style }),
+                        body_fill: None,
+                    }, &state.colors.theme);
                     let c = story_fp.content;
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                     transcript_max_scroll = m.max_scroll;
                     transcript_viewport_rows = m.viewport_rows;
                     transcript_total_rows = m.total_rows;
                     transcript_links_out = m.links;
-                    if let Some(hrect) = story_fp.header {
-                        let segs = [InsetSegment { text: &state.title, active: false }];
-                        if story_fp.header_bordered {
-                            draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style, &InsetCaps::for_border(BorderStyle::Thick));
-                        } else {
-                            draw_header_plain(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
-                        }
-                    }
                     story_area = story_fp.content;
                     map_area = Rect::default();
                 }
@@ -426,24 +421,54 @@ fn draw_frame(
                     let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
                     let story_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { story_border_style };
                     let map_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { panel_border(&state.colors.theme, state.focus == Focus::Map) };
-                    let story_fp = draw_framed(buf, pane_layout.story, panel_border_sides(&state.colors.theme, resize_split_hl || state.focus == Focus::Game), &state.colors.story_border_glyphs, story_border_color, state.colors.story_header_on);
+                    let story_focused = resize_split_hl || state.focus == Focus::Game;
+                    let story_title_style = state.colors.theme.get("story_title").style;
+                    let story_segs = [InsetSegment { text: &state.title, active: false }];
+                    let story_fp = draw_panel(buf, &PanelSpec {
+                        area: pane_layout.story,
+                        border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
+                        border_color: Some(story_border_color),
+                        glyphs: &state.colors.story_border_glyphs,
+                        header_on: state.colors.story_header_on,
+                        strip: Some(PanelStrip { segments: &story_segs, base: story_title_style, active: story_title_style }),
+                        body_fill: None,
+                    }, &state.colors.theme);
                     let c = story_fp.content;
                     let m = render_story_pane(&screen_model, state.char_mode, engine.introspect(), state, c, buf);
                     transcript_max_scroll = m.max_scroll;
                     transcript_viewport_rows = m.viewport_rows;
                     transcript_total_rows = m.total_rows;
                     transcript_links_out = m.links;
-                    if let Some(hrect) = story_fp.header {
-                        let segs = [InsetSegment { text: &state.title, active: false }];
-                        if story_fp.header_bordered {
-                            draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style, &InsetCaps::for_border(BorderStyle::Thick));
-                        } else {
-                            draw_header_plain(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
-                        }
-                    }
                     story_area = story_fp.content;
 
-                    let map_fp = draw_framed(buf, pane_layout.map, panel_border_sides(&state.colors.theme, resize_split_hl || state.focus == Focus::Map), &state.colors.map_border_glyphs, map_border_color, state.colors.map_header_on);
+                    // The tab strip names every layer, so it reads the LIVE graph — never an
+                    // animation frame. A frame is a `layer_subgraph`, whose `layers()` is always
+                    // main-only, so asking it made the tidied layer's own tab vanish mid-animation
+                    // (SQ-0359). `layer` (from `frame_layer`) marks the active tab. Build the
+                    // segments before drawing — `draw_panel` renders the strip and returns the
+                    // per-tab hit-rects.
+                    let map_focused = resize_split_hl || state.focus == Focus::Map;
+                    let graph = if let Some(g) = &replay_graph { g } else { &mapper.graph };
+                    let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
+                    let active_layer = layer;
+                    let owned_segs = build_layer_segments(&layer_ids, active_layer,
+                        |id| format!("{}({})", graph.layer_name(id), graph.rooms_in_layer(id).len()));
+                    let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
+                    let map_fp = draw_panel(buf, &PanelSpec {
+                        area: pane_layout.map,
+                        border_selector: if map_focused { "panel.border:active" } else { "panel.border" },
+                        border_color: Some(map_border_color),
+                        glyphs: &state.colors.map_border_glyphs,
+                        header_on: state.colors.map_header_on,
+                        strip: Some(PanelStrip {
+                            segments: &inset_segs,
+                            base: state.colors.theme.get("panel.tab").style,
+                            active: state.colors.theme.get("panel.tab:active").style,
+                        }),
+                        body_fill: None,
+                    }, &state.colors.theme);
+                    layer_tabs_out = layer_ids.into_iter().zip(map_fp.tab_rects).collect();
+
                     render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
                     if let Some(anim) = &state.tidy_anim {
                         let tidy_ds = make_dialog_style(state);
@@ -452,27 +477,6 @@ fn draw_frame(
                         }
                     }
                     map_area = map_fp.content;
-                    // Overlay layer tabs
-                    {
-                        // The tab strip names every layer, so it reads the LIVE graph — never an
-                        // animation frame. A frame is a `layer_subgraph`, whose `layers()` is always
-                        // main-only, so asking it made the tidied layer's own tab vanish mid-animation
-                        // (SQ-0359). `layer` (from `frame_layer`) marks the active tab.
-                        let graph = if let Some(g) = &replay_graph { g } else { &mapper.graph };
-                        let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
-                        let active_layer = layer;
-                        let owned_segs = build_layer_segments(&layer_ids, active_layer,
-                        |id| format!("{}({})", graph.layer_name(id), graph.rooms_in_layer(id).len()));
-                        let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
-                        if let Some(hrect) = map_fp.header {
-                            let tab_rects = if map_fp.header_bordered {
-                                draw_top_inset(buf, hrect, &inset_segs, state.colors.theme.get("panel.tab").style, state.colors.theme.get("panel.tab:active").style, &InsetCaps::for_border(BorderStyle::Thick))
-                            } else {
-                                draw_header_plain(buf, hrect, &inset_segs, state.colors.theme.get("panel.tab").style, state.colors.theme.get("panel.tab:active").style)
-                            };
-                            layer_tabs_out = layer_ids.into_iter().zip(tab_rects).collect();
-                        }
-                    }
                     // Apply pulsing border color overlay when a tidy job is in flight
                     if let Some(pulse_color) = map_border_override {
                         let pulse_style = Style::default().fg(pulse_color);
@@ -3055,27 +3059,49 @@ mod tests {
 
     // ── Focus-aware panel border colour (SQ-0309 §2a) ──────────────────────────
 
-    /// SQ-0440: the focused pane's border LINE STYLE (not just its colour) comes
-    /// from `panel.border:active`; the unfocused pane's from `panel.border`. A
-    /// regression here silently ignores a user's `:active` border style.
+    /// SQ-0441: the story title's terminator caps now track the pane's border
+    /// style. At the default single border the left cap is `┤` (not the temporary
+    /// thick `┫` from Task 1), proving `draw_panel` derives the caps from
+    /// `panel.border` rather than hardcoding a style.
     #[test]
-    fn panel_border_sides_picks_active_style_when_focused() {
-        use app::render::paneframe::BorderStyle;
-        let scheme = app::colors::GhosttyScheme::default();
-        let parsed = app::theme::toml_schema::parse(
-            "[panel]\nborder = { style = \"single\" }\n\"border:active\" = { style = \"double\" }\n",
-        )
-        .expect("parse");
-        let theme = app::theme::resolve::resolve_theme(&scheme, &parsed);
-        assert_eq!(
-            super::panel_border_sides(&theme, true).top,
-            BorderStyle::Double,
-            "focused pane must use panel.border:active's style",
+    fn story_title_left_cap_tracks_single_border() {
+        use app::render::panel::{draw_panel, PanelSpec, PanelStrip};
+        let doc = app::style::parse_style_toml(app::style::DEFAULT_STYLE_TOML)
+            .expect("DEFAULT_STYLE_TOML must parse");
+        let (cs, _set, _warnings) = app::style::resolve(&doc, std::path::Path::new("."));
+
+        let area = Rect::new(0, 0, 40, 15);
+        let mut buf = Buffer::empty(area);
+        let segs = [InsetSegment { text: "ZORK I", active: false }];
+        let title_style = cs.theme.get("story_title").style;
+        let frame = draw_panel(
+            &mut buf,
+            &PanelSpec {
+                area,
+                border_selector: "panel.border",
+                border_color: None,
+                glyphs: &PaneGlyphs::default(),
+                header_on: true,
+                strip: Some(PanelStrip { segments: &segs, base: title_style, active: title_style }),
+                body_fill: None,
+            },
+            &cs.theme,
         );
+        // The left cap sits immediately left of the first segment on the top row.
+        let r = frame.tab_rects[0];
         assert_eq!(
-            super::panel_border_sides(&theme, false).top,
-            BorderStyle::Single,
-            "unfocused pane must use panel.border's style",
+            buf.cell((r.x - 1, 0)).unwrap().symbol(),
+            "┤",
+            "single-border title left cap must be ┤, not the thick ┫",
+        );
+        // The thick cap must not appear anywhere on the title row.
+        let title_row: String = (0..40u16)
+            .map(|x| buf.cell((x, 0)).unwrap().symbol().to_string())
+            .collect();
+        assert!(
+            !title_row.contains("┫"),
+            "no thick cap at a single border; got: {:?}",
+            title_row
         );
     }
 
