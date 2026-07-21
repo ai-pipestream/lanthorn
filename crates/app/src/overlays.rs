@@ -63,6 +63,8 @@ pub(crate) struct OverlayRects {
 
 /// Draw the z-ordered modal/overlay ladder over the current frame.
 ///
+/// `story_pane` is the story panel's outer rect (border included); the hints
+/// panel is laid over it so it visually replaces the story panel.
 /// `dialog_seed` carries the `dialog` rect already set by `draw_frame`'s
 /// pre-ladder map/story draws (tidy panel, room info, inspector); the ladder's
 /// higher-z-order dialogs overwrite it when open. `modal_list_viewport` is the
@@ -72,6 +74,7 @@ pub(crate) fn draw_all(
     state: &AppState,
     screen_model: &ScreenModel,
     story_area: Rect,
+    story_pane: Rect,
     full: Rect,
     buf: &mut Buffer,
     dialog_seed: Option<DialogRects>,
@@ -141,8 +144,11 @@ pub(crate) fn draw_all(
     }
 
     // ── Hints panel overlay — drawn after the common dialogs ───────────────
+    // Laid over the story pane's full rect (not the centered dialog area), so it
+    // reads as the story panel temporarily replaced by the hint session and
+    // resizes with it.
     if state.overlays.hints.is_some() {
-        out.hints_panel = draw_hints_panel(state, dialog_area, buf);
+        out.hints_panel = draw_hints_panel(state, story_pane, buf);
     }
 
     out

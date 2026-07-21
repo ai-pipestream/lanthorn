@@ -17,10 +17,6 @@ use crate::state::AppState;
 const MIN_W: u16 = 40;
 const MIN_H: u16 = 10;
 
-// Dialog dimensions (capped by terminal size at render time).
-const DIALOG_W: u16 = 70;
-const DIALOG_H: u16 = 24;
-
 // ── HintsPanelRects ───────────────────────────────────────────────────────────
 
 /// Hit-rects returned by `draw_hints_panel` for mouse event routing.
@@ -29,6 +25,8 @@ pub struct HintsPanelRects {
     pub area: Rect,
     /// The `[X]` close button, if rendered.
     pub close: Option<Rect>,
+    /// The bottom `[Close]` dialog button, if rendered.
+    pub close_button: Option<Rect>,
     /// The input row inside the dialog content area.
     pub input: Rect,
     /// Maximum transcript scroll offset for this render (wrapped lines minus the
@@ -38,7 +36,10 @@ pub struct HintsPanelRects {
 
 // ── draw_hints_panel ──────────────────────────────────────────────────────────
 
-/// Draw the Hints panel modal centered over `area`.
+/// Draw the Hints panel so it fills `area` exactly (experiment: the panel is
+/// laid over the story pane, taking its whole rect rather than floating as a
+/// centered modal). Because `area` is the live story-pane rect recomputed each
+/// frame, the panel tracks terminal resizes automatically.
 ///
 /// Returns `None` when `state.overlays.hints` is `None` or the area is too small.
 /// Returns `Some(HintsPanelRects)` with hit-rects for the close button and
@@ -46,10 +47,7 @@ pub struct HintsPanelRects {
 pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Option<HintsPanelRects> {
     let session = state.overlays.hints.as_ref()?;
 
-    let modal_w = DIALOG_W.min(area.width.saturating_sub(4));
-    let modal_h = DIALOG_H.min(area.height.saturating_sub(2));
-
-    if modal_w < MIN_W || modal_h < MIN_H {
+    if area.width < MIN_W || area.height < MIN_H {
         return None;
     }
 
@@ -59,7 +57,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
     let buttons = &[DialogButton { id: ButtonId::Close, label: "Close" }];
     let spec = DialogSpec {
         title: &session.label,
-        placement: Placement::Centered { w: modal_w, h: modal_h },
+        placement: Placement::Positioned(area),
         buttons,
         show_close: true,
         default: Some(ButtonId::Close),
@@ -69,11 +67,17 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
 
     let rects = draw_dialog(buf, area, &spec, &st);
     let content = rects.content;
+    let close_button = rects
+        .buttons
+        .iter()
+        .find(|(id, _)| *id == ButtonId::Close)
+        .map(|(_, r)| *r);
 
     if content.height == 0 || content.width == 0 {
         return Some(HintsPanelRects {
             area: rects.area,
             close: rects.close,
+            close_button,
             input: Rect::new(content.x, content.y, content.width, 0),
             max_scroll: 0,
         });
@@ -107,7 +111,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
 
     // The transcript display area: content rows above the input row.
     if content.height < 2 {
-        return Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect, max_scroll: 0 });
+        return Some(HintsPanelRects { area: rects.area, close: rects.close, close_button, input: input_rect, max_scroll: 0 });
     }
     let mut transcript_area = Rect::new(content.x, content.y, content.width, content.height - 1);
 
@@ -160,7 +164,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
 
     // Transcript body area: below the hint suggestion line.
     if transcript_area.height <= hint_row_count {
-        return Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect, max_scroll: 0 });
+        return Some(HintsPanelRects { area: rects.area, close: rects.close, close_button, input: input_rect, max_scroll: 0 });
     }
     let body_top = transcript_area.y + hint_row_count;
     let body_h = transcript_area.bottom() - body_top;
@@ -205,7 +209,7 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
         crate::render::scroll::draw_scrollbar(buf, sb_area, n, rows, start, state.colors.theme.get("scrollbar").style);
     }
 
-    Some(HintsPanelRects { area: rects.area, close: rects.close, input: input_rect, max_scroll })
+    Some(HintsPanelRects { area: rects.area, close: rects.close, close_button, input: input_rect, max_scroll })
 }
 
 // ── Hints panel keyboard routing ──────────────────────────────────────────────

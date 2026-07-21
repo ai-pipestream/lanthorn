@@ -649,6 +649,7 @@ fn draw_frame(
             state,
             &screen_model,
             story_area,
+            pane_layout.story,
             full,
             buf,
             dialog_rects_out.take(),
@@ -1411,7 +1412,8 @@ fn main() {
                     if m.kind == MouseEventKind::Down(MouseButton::Left) {
                         let pt = ratatui::layout::Position { x: m.column, y: m.row };
                         if let Some(hp) = &last_panes.hints_panel {
-                            let in_close = hp.close.is_some_and(|r| r.contains(pt));
+                            let in_close = hp.close.is_some_and(|r| r.contains(pt))
+                                || hp.close_button.is_some_and(|r| r.contains(pt));
                             if in_close {
                                 state.overlays.hints = None;
                             }
