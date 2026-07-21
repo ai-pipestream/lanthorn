@@ -182,6 +182,18 @@ to have your theme own every color regardless of what the game requests — see
 [interpreter](interpreter.md) for the game-colour toggle itself. An explicit
 per-game slot always wins over the game, even with game colours honored.
 
+**garglk.ini import**: if a `garglk.ini` (or `<story>.ini`) sits beside the
+story, babelmap reads the section matching that game and imports what a terminal
+can honor — its `tcolor`/`gcolor`/`linkcolor`/`bordercolor`/`windowcolor`
+palette, `stylehint` (→ `honor_game_colours`), the text-window margins
+(`tmarginx`/`tmarginy`, converted from pixels to character cells with a nominal
+8×16 cell), and the inter-window border width (`wborderx`/`wbordery` → the
+borderless-windows toggle: `0` → borderless). Colours layer per the resolution
+order above. The text margin and border toggle are applied at runtime — nothing
+is written back to any sidecar — and, consistent with `honor_game_colours`, an
+explicit per-game `config.toml` value always wins over the garglk.ini (the text
+margin has no per-game key today, so garglk overrides only your global default).
+
 **Schema note (pre-release, breaking):** the `style.toml` schema described
 above is new. An old-schema file (with top-level `[colors]` / `[symbols]`
 sections) is left untouched — it is not auto-migrated or overwritten — but its
@@ -197,6 +209,12 @@ re-seed the new template, or hand-write the new shape from
   cursor-addressed games (forms, status displays) want a roomy story pane.
 - `undo_levels` (default 16) — how many in-memory undo states the Z-machine
   keeps for the game's own UNDO command (0 disables undo).
+- **Story text margins** — `text_margin_x` / `text_margin_y` (default 0) reserve
+  blank columns on each side / rows top and bottom *inside* the story text pane,
+  for a little breathing room around the transcript. The margin applies to the
+  text buffer only — the upper-window status line stays flush — and adjusts in
+  the settings screen with `←` / `→`. A game's imported `garglk.ini` margin (below)
+  overrides this default while that story is open.
 - **In-app config screen** — pop the leader panel (default `Ctrl+K`) and press
   the `open-config` key for a settings modal covering the common options, with an
   explicit Save (writes the config file, comments and layout preserved) and

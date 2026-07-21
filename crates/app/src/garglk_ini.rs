@@ -52,8 +52,27 @@ pub struct GarglkOverlay {
     pub windowcolor: Option<Color>,
     /// `stylehint 0|1` → `honor_game_colours` (false/true).
     pub honor_game_colours: Option<bool>,
-    /// Count of ignored font/size/margin keys (for the summary line only).
+    /// `tmarginx` (px) → text-buffer inner margin in columns (SQ-0344), converted
+    /// via [`px_to_cells`]. `None` = no `tmarginx`, so the config default stands.
+    pub margin_x: Option<u16>,
+    /// `tmarginy` (px) → text-buffer inner margin in rows (SQ-0344).
+    pub margin_y: Option<u16>,
+    /// `wborderx`/`wbordery` (px inter-window border width) → borderless toggle
+    /// (SQ-0344): width `0` → `Some(true)` (no separator), `>0` → `Some(false)`.
+    /// `None` = the ini set no border width, so the per-game/default choice stands.
+    pub borderless: Option<bool>,
+    /// Count of ignored font/size keys (for the summary line only).
     pub ignored_font_keys: usize,
+}
+
+/// Convert a garglk pixel margin to terminal cells (SQ-0344) using a nominal cell
+/// size — 8px wide, 16px tall — rounded to the nearest cell and capped at 8 so a
+/// large pixel margin can't swallow the pane. garglk's defaults (`tmargin` 7px)
+/// land at ≈1 column / 0 rows.
+const CELL_W_PX: u16 = 8;
+const CELL_H_PX: u16 = 16;
+fn px_to_cells(px: u16, cell_px: u16) -> u16 {
+    ((px + cell_px / 2) / cell_px).min(8)
 }
 
 /// What [`GarglkOverlay::apply`] changed, for the one-line startup summary.
@@ -66,6 +85,8 @@ pub struct GarglkSummary {
     pub border_set: bool,
     pub window_set: bool,
     pub honor: Option<bool>,
+    pub margin: Option<(u16, u16)>,
+    pub borderless: Option<bool>,
     pub ignored_font_keys: usize,
 }
 
@@ -97,6 +118,12 @@ impl GarglkSummary {
         }
         if let Some(h) = self.honor {
             parts.push(format!("honor_game_colours={h}"));
+        }
+        if let Some((mx, my)) = self.margin {
+            parts.push(format!("text margin {mx}×{my} cells"));
+        }
+        if let Some(b) = self.borderless {
+            parts.push(format!("borders {}", if b { "off" } else { "on" }));
         }
         let tail = if self.ignored_font_keys > 0 {
             format!(" ({} font/size keys ignored)", self.ignored_font_keys)
@@ -220,6 +247,11 @@ impl GarglkOverlay {
             border_set: self.bordercolor.is_some(),
             window_set: self.windowcolor.is_some(),
             honor: self.honor_game_colours,
+            margin: match (self.margin_x, self.margin_y) {
+                (None, None) => None,
+                (mx, my) => Some((mx.unwrap_or(0), my.unwrap_or(0))),
+            },
+            borderless: self.borderless,
             ignored_font_keys: self.ignored_font_keys,
         }
     }
@@ -380,11 +412,30 @@ fn apply_key(ov: &mut GarglkOverlay, key: &str, args: &[String]) {
                 _ => {}
             }
         }
-        // Fonts / sizes / margins have no terminal meaning — ignore but count.
+        // Text-window inner margin (SQ-0344): garglk pixels → terminal cells.
+        "tmarginx" => {
+            if let Some(px) = args.first().and_then(|a| a.parse::<u16>().ok()) {
+                ov.margin_x = Some(px_to_cells(px, CELL_W_PX));
+            }
+        }
+        "tmarginy" => {
+            if let Some(px) = args.first().and_then(|a| a.parse::<u16>().ok()) {
+                ov.margin_y = Some(px_to_cells(px, CELL_H_PX));
+            }
+        }
+        // Inter-window border width (SQ-0344): 0 → borderless, >0 → bordered.
+        "wborderx" | "wbordery" => {
+            if let Some(px) = args.first().and_then(|a| a.parse::<u16>().ok()) {
+                ov.borderless = Some(px == 0);
+            }
+        }
+        // Remaining font / size / outer-frame keys have no terminal meaning —
+        // ignore but count. (`wmarginx/y` is the outer-frame margin, a different
+        // concept from the text-window `tmargin` handled above; out of scope.)
         "tfont" | "gfont" | "monofont" | "propfont" | "monor" | "monob" | "monoi" | "monoz"
         | "propr" | "propb" | "propi" | "propz" | "monosize" | "propsize" | "monoaspect"
         | "propaspect" | "leading" | "baseline" | "lcd" | "lcdfilter" | "lcdweights"
-        | "wmarginx" | "wmarginy" | "tmarginx" | "tmarginy" | "gutterx" | "guttery"
+        | "wmarginx" | "wmarginy" | "gutterx" | "guttery"
         | "cols" | "rows" | "cellw" | "cellh" => {
             ov.ignored_font_keys += 1;
         }
@@ -586,6 +637,8 @@ stylehint 0
             border_set: true,
             window_set: true,
             honor: Some(false),
+            margin: None,
+            borderless: None,
             ignored_font_keys: 3,
         };
         assert_eq!(
@@ -594,6 +647,32 @@ stylehint 0
              4 buffer + 2 grid style colours, link/border/window set, \
              honor_game_colours=false (3 font/size keys ignored)"
         );
+    }
+
+    #[test]
+    fn tmargin_pixels_convert_to_cells_and_report() {
+        // garglk defaults (tmargin 7px) → ≈1 column / 0 rows with the nominal cell.
+        let ov = resolve("tmarginx 7\ntmarginy 7\n", "a.z5");
+        assert_eq!(ov.margin_x, Some(1), "7px / 8px-cell rounds to 1 column");
+        assert_eq!(ov.margin_y, Some(0), "7px / 16px-cell rounds to 0 rows");
+        assert_eq!(ov.ignored_font_keys, 0, "tmargin keys are handled, not ignored");
+
+        // A large margin scales up and is capped at 8 cells.
+        let big = resolve("tmarginx 40\ntmarginy 200\n", "a.z5");
+        assert_eq!(big.margin_x, Some(5), "40px / 8 = 5 columns");
+        assert_eq!(big.margin_y, Some(8), "200px / 16 = 12 → capped at 8 rows");
+
+        let mut cs = ColorScheme::terminal_default();
+        let s = ov.apply(&mut cs);
+        assert_eq!(s.margin, Some((1, 0)));
+    }
+
+    #[test]
+    fn wborder_maps_to_borderless_toggle() {
+        // width 0 → borderless; > 0 → bordered. Only explicit keys act.
+        assert_eq!(resolve("wborderx 0\n", "a.z5").borderless, Some(true));
+        assert_eq!(resolve("wborderx 2\n", "a.z5").borderless, Some(false));
+        assert_eq!(resolve("linkcolor 00ff00\n", "a.z5").borderless, None, "no wborder key → no opinion");
     }
 
     #[test]

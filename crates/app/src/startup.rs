@@ -189,7 +189,12 @@ pub(crate) fn boot() -> BootResult {
     }
     // SQ-0341: per-game borderless-windows override (default off → honor the Glk
     // border hint). Applies to Glulx layout from the first relayout at boot.
-    let borderless = app::styles::read_per_game_borderless(&game_dir).unwrap_or(false);
+    // SQ-0344: precedence mirrors honor_game_colours — an explicit per-game
+    // `config.toml` value wins, else a discovered garglk.ini's `wborderx`/
+    // `wbordery` (0 → borderless), else off.
+    let borderless = app::styles::read_per_game_borderless(&game_dir)
+        .or_else(|| garglk_overlay.as_ref().and_then(|o| o.borderless))
+        .unwrap_or(false);
     // SQ-0304: per-game map-panel visibility. `Some(false)` → start with the map
     // hidden (captured here before `cfg` is moved into the engine build below).
     let start_map_hidden = app::styles::read_per_game_show_map(&game_dir) == Some(false);

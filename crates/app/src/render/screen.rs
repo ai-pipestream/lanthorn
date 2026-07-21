@@ -259,8 +259,14 @@ fn margin_style(model: &ScreenModel, state: &AppState) -> ratatui::style::Style 
 /// `render_transcript` publishes its geometry from the rect it receives, insetting
 /// here also keeps mouse selection and the copy path aligned (SQ-0197/SQ-0420).
 fn reserve_text_margin(area: Rect, state: &AppState, fill: ratatui::style::Style, buf: &mut Buffer) -> Rect {
-    let mx = state.config.text_margin_x.min(area.width.saturating_sub(1) / 2);
-    let my = state.config.text_margin_y.min(area.height.saturating_sub(1) / 2);
+    // Effective margin: a discovered garglk.ini's tmarginx/tmarginy wins (highest
+    // precedence, runtime-only — never persisted), else the global config default
+    // (SQ-0344).
+    let ov = state.garglk_overlay.as_ref();
+    let want_x = ov.and_then(|o| o.margin_x).unwrap_or(state.config.text_margin_x);
+    let want_y = ov.and_then(|o| o.margin_y).unwrap_or(state.config.text_margin_y);
+    let mx = want_x.min(area.width.saturating_sub(1) / 2);
+    let my = want_y.min(area.height.saturating_sub(1) / 2);
     if mx == 0 && my == 0 {
         return area;
     }
@@ -696,6 +702,23 @@ mod tests {
         assert_eq!(inset.y, base.y + 2, "top margin reserved");
         assert_eq!(inset.width, base.width - 6, "both horizontal margins reserved");
         assert_eq!(inset.height, base.height - 4, "top+bottom margins reserved");
+    }
+
+    #[test]
+    fn garglk_margin_overrides_config_default() {
+        // A discovered garglk.ini's tmargin wins over the global config margin
+        // (SQ-0344, highest precedence).
+        let mut state = crate::state::AppState::default();
+        state.config.text_margin_x = 0;
+        state.config.text_margin_y = 0;
+        state.garglk_overlay = Some(crate::garglk_ini::GarglkOverlay {
+            margin_x: Some(3),
+            margin_y: Some(1),
+            ..Default::default()
+        });
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
+        let got = reserve_text_margin(Rect::new(0, 0, 20, 10), &state, ratatui::style::Style::default(), &mut buf);
+        assert_eq!(got, Rect::new(3, 1, 14, 8), "garglk tmargin applied over the zero config default");
     }
 
     fn grid_with(text: &str) -> GridWindow {
