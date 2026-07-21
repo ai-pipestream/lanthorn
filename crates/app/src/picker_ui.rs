@@ -240,8 +240,8 @@ fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) 
 /// core hints; the rest are dropped — `PgUp/PgDn` goes first since it's a
 /// standard convention nobody needs told, `f`/`r` survive narrowest since
 /// they name behavior no key convention predicts.
-const FOOTER_OPTIONAL: [&str; 7] =
-    ["g: covers", "f: fetch", "r: refresh", "u: IFDB url", "s: sort", "d: reverse", "PgUp/PgDn"];
+const FOOTER_OPTIONAL: [&str; 8] =
+    ["g: covers", "f: fetch", "r: refresh", "u: IFDB url", "H: get hints", "s: sort", "d: reverse", "PgUp/PgDn"];
 
 fn build_footer(width: u16) -> String {
     const CORE_LEFT: &str = " ↑/↓ or j/k: move";
@@ -447,6 +447,11 @@ pub(crate) fn run_story_picker(
         data_base.to_path_buf(),
         Duration::from_millis(500),
     );
+    // On-demand InvisiClues downloader (SQ-0445): `H` fetches a matching hint
+    // file for the selected story when it has none locally. Shares the picker's
+    // non-blocking drain-per-frame model with the IFDB fetcher.
+    let mut hint_dl = app::hint_download::HintDownloader::new();
+
     // The footer-row status line while a fetch is in flight (or just finished);
     // `None` shows the normal footer hints instead.
     let mut progress_line: Option<String> = None;
@@ -725,11 +730,33 @@ pub(crate) fn run_story_picker(
             );
         }
 
+        // Drain hint downloads (SQ-0445): a completed one wrote a sidecar beside
+        // the story, so mark that entry as now having a hint and relight its
+        // badge in place. The file isn't a list row (it was never scanned), so
+        // there's nothing to hide this session — a later relaunch's `scan_stories`
+        // hides + associates it like any other sidecar.
+        let mut hint_arrived = false;
+        for r in hint_dl.drain() {
+            hint_arrived = true;
+            match r.outcome {
+                app::hint_download::HintDlOutcome::Done => {
+                    if let Some(idx) = stories.iter().position(|e| e.path == r.story) {
+                        stories[idx].hint_sidecar = Some(r.dest);
+                        row_badges[idx] = app::picker::compute_row_badges(&stories[idx], data_base, &hint_index);
+                    }
+                    progress_line = Some(format!("Downloaded hints for {}", r.title));
+                }
+                app::hint_download::HintDlOutcome::Failed(msg) => {
+                    progress_line = Some(format!("Hint download failed: {msg}"));
+                }
+            }
+        }
+
         // A decode just landed: loop back to redraw so the cover paints now. The
         // draw is at the top of the loop, and once the result is cached
         // `cover_busy` goes false — without this the loop would block on `read()`
         // and the new cover wouldn't appear until the next input event.
-        if cover_arrived || fetch_arrived {
+        if cover_arrived || fetch_arrived || hint_arrived {
             list.finalize_if_done();
             continue;
         }
@@ -745,7 +772,7 @@ pub(crate) fn run_story_picker(
         // grid fills in without needing a keypress.
         let gallery_busy = matches!(view, PickerView::Gallery) && !requested.is_empty();
         let cover_busy = panel_busy || gallery_busy;
-        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy())
+        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy() || hint_dl.busy())
             && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
         {
             list.finalize_if_done();
@@ -972,6 +999,32 @@ pub(crate) fn run_story_picker(
                         Char('u') if !fetcher.busy() => {
                             manual_ifdb = Some(app::text_field::TextField::new(""));
                             progress_line = None;
+                        }
+                        // `H`: download a matching InvisiClues hint file for the
+                        // selected story (SQ-0445) when it has none locally — SLAG
+                        // (IF Archive) preferred, else the Internet Archive izm set.
+                        // Saved beside the story; ignored while one is downloading.
+                        Char('H') if !hint_dl.busy() => {
+                            if let Some(entry) = stories.get(list.selected) {
+                                if entry.hint_sidecar.is_some() {
+                                    progress_line = Some(format!("{} already has a hint file", entry.title));
+                                } else {
+                                    let stem =
+                                        entry.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                                    match app::hints::hint_download_for(stem, &entry.title) {
+                                        Some(dl) => {
+                                            let dest = entry.path.with_file_name(&dl.filename);
+                                            progress_line =
+                                                Some(format!("Downloading hints for {}…", entry.title));
+                                            hint_dl.start(dl.url, dest, entry.path.clone(), entry.title.clone());
+                                        }
+                                        None => {
+                                            progress_line =
+                                                Some(format!("No InvisiClues found for {}", entry.title));
+                                        }
+                                    }
+                                }
+                            }
                         }
                         // `s`: cycle the sort column, keeping direction. `d`:
                         // toggle direction, keeping the column. Both preserve

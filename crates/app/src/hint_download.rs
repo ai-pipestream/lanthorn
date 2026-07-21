@@ -34,6 +34,8 @@ pub enum HintDlOutcome {
 /// One completed download, drained by the picker loop.
 #[derive(Debug, Clone)]
 pub struct HintDlResult {
+    /// The story the hint belongs to — how the picker finds the row to badge.
+    pub story: PathBuf,
     /// Where the file was (or would have been) saved, beside the story.
     pub dest: PathBuf,
     /// The story's display title, for the status line.
@@ -60,9 +62,10 @@ impl HintDownloader {
         Self { tx, rx, inflight: 0 }
     }
 
-    /// Begin downloading `url` to `dest` (named after the story `title`). Returns
-    /// immediately; the result arrives via [`drain`](Self::drain).
-    pub fn start(&mut self, url: String, dest: PathBuf, title: String) {
+    /// Begin downloading `url` to `dest` (the hint file for `story`, named after
+    /// the story `title`). Returns immediately; the result arrives via
+    /// [`drain`](Self::drain).
+    pub fn start(&mut self, url: String, dest: PathBuf, story: PathBuf, title: String) {
         self.inflight += 1;
         let tx = self.tx.clone();
         thread::spawn(move || {
@@ -70,7 +73,7 @@ impl HintDownloader {
                 Ok(bytes) => finalize_download(&bytes, &dest),
                 Err(e) => HintDlOutcome::Failed(e),
             };
-            let _ = tx.send(HintDlResult { dest, title, outcome });
+            let _ = tx.send(HintDlResult { story, dest, title, outcome });
         });
     }
 
