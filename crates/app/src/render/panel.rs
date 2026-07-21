@@ -52,6 +52,8 @@ pub struct PanelSpec<'a> {
     pub border_selector: &'a str,
     /// Override the frame colour (pulse/resize); `None` uses the selector's style.
     pub border_color: Option<Style>,
+    /// explicit border style; when None, resolved from `border_selector`.
+    pub border_style: Option<crate::render::paneframe::BorderStyle>,
     pub glyphs: &'a PaneGlyphs,
     pub header_on: bool,
     /// The title/tab strip, or `None` for no strip.
@@ -74,7 +76,7 @@ pub struct PanelFrame {
 /// strip's per-segment hit-rects.
 pub fn draw_panel(buf: &mut Buffer, spec: &PanelSpec, theme: &Theme) -> PanelFrame {
     let r = theme.get(spec.border_selector);
-    let border_style = r.border.unwrap_or(BorderStyle::None);
+    let border_style = spec.border_style.or(r.border).unwrap_or(BorderStyle::None);
     let color = spec.border_color.unwrap_or(r.style);
 
     let framed = draw_framed(
@@ -134,6 +136,7 @@ mod tests {
             area,
             border_selector: "panel.border",
             border_color: None,
+            border_style: None,
             glyphs: &PaneGlyphs::default(),
             header_on: true,
             strip: Some(PanelStrip {
@@ -160,6 +163,7 @@ mod tests {
             area,
             border_selector: "panel.border:active",
             border_color: None,
+            border_style: None,
             glyphs: &PaneGlyphs::default(),
             header_on: false,
             strip: None,
@@ -199,6 +203,7 @@ mod tests {
             area,
             border_selector: "panel.border",
             border_color: None,
+            border_style: None,
             glyphs: &PaneGlyphs::default(),
             header_on: false,
             strip: None,
@@ -224,6 +229,7 @@ mod tests {
             area,
             border_selector: "panel.border",
             border_color: None,
+            border_style: None,
             glyphs: &PaneGlyphs::default(),
             header_on: true,
             strip: None,

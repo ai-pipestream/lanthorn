@@ -67,6 +67,7 @@ pub fn draw_inventory_dock(items: &[String], area: Rect, colors: &ColorScheme, h
         area,
         border_selector,
         border_color: Some(border_color),
+        border_style: None,
         glyphs: &PaneGlyphs::default(),
         header_on: true,
         strip: Some(PanelStrip {

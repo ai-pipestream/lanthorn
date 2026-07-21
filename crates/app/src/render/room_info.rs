@@ -229,9 +229,12 @@ mod tests {
         assert!(list_room_objects(&mem, synth).is_empty());
     }
 
-    fn make_dialog_style() -> DialogStyle {
+    fn make_dialog_style() -> DialogStyle<'static> {
         use crate::render::paneframe::PaneGlyphs;
+        static TEST_THEME: std::sync::LazyLock<crate::theme::resolve::Theme> =
+            std::sync::LazyLock::new(|| crate::colors::ColorScheme::terminal_default().theme);
         DialogStyle {
+            theme: &TEST_THEME,
             frame: Style::default().bg(Color::Black),
             border: Style::default(), box_style: BorderStyle::Single,
             glyphs: PaneGlyphs::default(),

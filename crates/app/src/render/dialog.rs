@@ -2,7 +2,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use super::paneframe::{BorderStyle, InsetCaps, InsetSegment, PaneGlyphs, draw_pane_frame, draw_top_inset};
+use super::paneframe::{BorderStyle, InsetSegment, PaneGlyphs};
+use super::panel::{draw_panel, PanelSpec, PanelStrip};
+use crate::theme::resolve::Theme;
 
 // ── centered_rect ─────────────────────────────────────────────────────────────
 
@@ -146,7 +148,10 @@ pub struct DialogButton {
 
 // ── DialogStyle ───────────────────────────────────────────────────────────────
 
-pub struct DialogStyle {
+pub struct DialogStyle<'a> {
+    /// The resolved theme, so `draw_dialog` can drive the shared `draw_panel`
+    /// (which resolves terminator caps and border overrides from it).
+    pub theme: &'a Theme,
     pub frame: Style,
     /// Border colour for the modal frame (from `dialog.border`), drawn over the
     /// `frame` fill. Distinct from `frame` so the border can differ from the body.
@@ -164,12 +169,13 @@ pub struct DialogStyle {
     pub margin: u16,
 }
 
-impl DialogStyle {
+impl DialogStyle<'_> {
     /// Build the dialog chrome from a `ColorScheme`. This is the single seam that
     /// every modal uses, so cross-cutting dialog concerns (placement, later
     /// animation) live in one place instead of being duplicated per modal.
-    pub fn from_colors(cs: &crate::colors::ColorScheme) -> DialogStyle {
+    pub fn from_colors(cs: &crate::colors::ColorScheme) -> DialogStyle<'_> {
         DialogStyle {
+            theme: &cs.theme,
             frame: cs.theme.get("dialog.background").style,
             // The modal frame is dialog's own border (§2c), single + bold by
             // default; its colour and glyph style both come from `dialog.border`.
@@ -301,12 +307,20 @@ pub fn draw_dialog(buf: &mut Buffer, bounds: Rect, spec: &DialogSpec, st: &Dialo
         }
     }
 
-    // (4) draw_pane_frame for the border, in dialog.border's colour
-    let pane = draw_pane_frame(buf, area, box_style, &st.glyphs, st.border);
-
-    // (5) Overlay the centered title via draw_top_inset
+    // (4+5) Frame (in dialog.border's colour) + centered title strip via the
+    // shared themed panel. `box_style` preserves the None→Single modal coercion
+    // above; the title caps now track that border style (via the theme).
     let title_seg = InsetSegment { text: spec.title, active: false };
-    draw_top_inset(buf, pane.top_inset, &[title_seg], st.title, st.title, &InsetCaps::for_border(BorderStyle::Thick));
+    let pane = draw_panel(buf, &PanelSpec {
+        area,
+        border_selector: "dialog.border",
+        border_color: Some(st.border),
+        border_style: Some(box_style),
+        glyphs: &st.glyphs,
+        header_on: true,
+        strip: Some(PanelStrip { segments: &[title_seg], base: st.title, active: st.title }),
+        body_fill: None,
+    }, st.theme);
 
     // (6) If show_close, draw ✕ just inside the top-right border
     let close = if spec.show_close && area.width >= 3 && area.height >= 1 {
@@ -432,6 +446,9 @@ mod tests {
     use super::*;
     use super::super::paneframe::PaneGlyphs;
 
+    static TEST_THEME: std::sync::LazyLock<crate::theme::resolve::Theme> =
+        std::sync::LazyLock::new(|| crate::colors::ColorScheme::terminal_default().theme);
+
     #[test]
     fn dialog_opaque_bg_covers_underlying_and_records_rects() {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Style, Modifier, Color}};
@@ -439,7 +456,7 @@ mod tests {
         let mut buf = Buffer::empty(full);
         // pre-fill a REVERSED cell where the dialog will sit
         buf.cell_mut((20,6)).unwrap().set_symbol("X").set_style(Style::new().add_modifier(Modifier::REVERSED));
-        let st = DialogStyle{ frame: Style::new().bg(Color::Black), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title: Style::default(), button: Style::default(), button_active: Style::default(), shadow: Style::default(), shadow_on:false , placement: DialogPlacement::Center, margin: 0 };
+        let st = DialogStyle{ theme: &TEST_THEME, frame: Style::new().bg(Color::Black), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title: Style::default(), button: Style::default(), button_active: Style::default(), shadow: Style::default(), shadow_on:false , placement: DialogPlacement::Center, margin: 0 };
         let spec = DialogSpec{ title:"Settings", placement: Placement::Centered{w:20,h:8}, buttons: &[DialogButton{id:ButtonId::Save,label:"Save"},DialogButton{id:ButtonId::Cancel,label:"Cancel"}], show_close:true, default: None, focus: None, field: None };
         let r = draw_dialog(&mut buf, full, &spec, &st);
         // opaque: the covered cell no longer REVERSED
@@ -457,6 +474,7 @@ mod tests {
         let mut buf = Buffer::empty(Rect::new(0, 0, 40, 12));
         let bounds = Rect::new(20, 0, 20, 12);
         let st = DialogStyle {
+            theme: &TEST_THEME,
             frame: Style::default(), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
             title: Style::default(), button: Style::default(), button_active: Style::default(),
             shadow: Style::default(), shadow_on: false, placement: DialogPlacement::Center, margin: 0,
@@ -577,7 +595,7 @@ mod tests {
     fn dialog_shadow_paints_offset_cells_when_on() {
         use ratatui::{buffer::Buffer, layout::Rect, style::{Style,Color}};
         let mut buf = Buffer::empty(Rect::new(0,0,40,12));
-        let st = DialogStyle{ frame: Style::new().bg(Color::Black), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title:Style::default(), button:Style::default(), button_active:Style::default(), shadow: Style::new().bg(Color::DarkGray), shadow_on:true , placement: DialogPlacement::Center, margin: 0 };
+        let st = DialogStyle{ theme: &TEST_THEME, frame: Style::new().bg(Color::Black), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(), title:Style::default(), button:Style::default(), button_active:Style::default(), shadow: Style::new().bg(Color::DarkGray), shadow_on:true , placement: DialogPlacement::Center, margin: 0 };
         let spec = DialogSpec{ title:"T", placement: Placement::Centered{w:10,h:5}, buttons:&[], show_close:false, default: None, focus: None, field: None };
         let r = draw_dialog(&mut buf, Rect::new(0,0,40,12), &spec, &st);
         // a cell just below-right of the frame carries the shadow bg
@@ -591,6 +609,7 @@ mod tests {
         let full = Rect::new(0, 0, 40, 8);
         let mut buf = Buffer::empty(full);
         let st = DialogStyle {
+            theme: &TEST_THEME,
             frame: Style::default(), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
             title: Style::default(), button: Style::default(), button_active: Style::default(),
             shadow: Style::default(), shadow_on: false, placement: DialogPlacement::Center, margin: 0,
@@ -626,6 +645,7 @@ mod tests {
         let full = Rect::new(0, 0, 40, 8);
         let mut buf = Buffer::empty(full);
         let st = DialogStyle {
+            theme: &TEST_THEME,
             frame: Style::default(), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
             title: Style::default(), button: Style::default(), button_active: Style::default(),
             shadow: Style::default(), shadow_on: false, placement: DialogPlacement::Center, margin: 0,
@@ -644,6 +664,7 @@ mod tests {
         let full = Rect::new(0, 0, 40, 8);
         let mut buf = Buffer::empty(full);
         let st = DialogStyle {
+            theme: &TEST_THEME,
             frame: Style::default(),
             border: Style::default(), box_style: BorderStyle::Single,
             glyphs: PaneGlyphs::default(),
@@ -686,6 +707,7 @@ mod tests {
         let full = Rect::new(0, 0, 40, 8);
         let mut buf = Buffer::empty(full);
         let st = DialogStyle {
+            theme: &TEST_THEME,
             frame: Style::default(),
             border: Style::default(), box_style: BorderStyle::Single,
             glyphs: PaneGlyphs::default(),
@@ -726,5 +748,60 @@ mod tests {
             "chip (including its pad space) is reversed");
         assert!(!buf.cell((sep_x, save.y)).unwrap().style().add_modifier.contains(Modifier::REVERSED),
             "separator space is not reversed");
+    }
+
+    #[test]
+    fn dialog_default_theme_uses_single_title_cap() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        let full = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(full);
+        let st = DialogStyle {
+            theme: &TEST_THEME,
+            frame: Style::default(), border: Style::default(), box_style: BorderStyle::Single,
+            glyphs: PaneGlyphs::default(), title: Style::default(), button: Style::default(),
+            button_active: Style::default(), shadow: Style::default(), shadow_on: false,
+            placement: DialogPlacement::Center, margin: 0,
+        };
+        let spec = DialogSpec {
+            title: "Settings", placement: Placement::Centered { w: 24, h: 6 },
+            buttons: &[], show_close: false, default: None, focus: None, field: None,
+        };
+        let r = draw_dialog(&mut buf, full, &spec, &st);
+        // The title-strip caps now track the border style: a single border yields
+        // the single terminator ┤ (not the old always-thick ┫).
+        let top: String = (r.area.x..r.area.right())
+            .map(|x| buf.cell((x, r.area.y)).unwrap().symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(top.contains('┤'), "single border → left cap ┤, got {top:?}");
+        assert!(!top.contains('┫'), "no thick cap on a single-border dialog: {top:?}");
+    }
+
+    #[test]
+    fn dialog_double_border_frame_and_cap() {
+        use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+        use crate::theme::resolve::resolve_theme;
+        let scheme = crate::colors::GhosttyScheme::default();
+        let parsed = crate::theme::toml_schema::parse("[dialog]\nborder = { style = \"double\" }\n").unwrap();
+        let theme = resolve_theme(&scheme, &parsed);
+        let full = Rect::new(0, 0, 40, 8);
+        let mut buf = Buffer::empty(full);
+        let st = DialogStyle {
+            theme: &theme,
+            frame: Style::default(), border: Style::default(), box_style: BorderStyle::Double,
+            glyphs: PaneGlyphs::default(), title: Style::default(), button: Style::default(),
+            button_active: Style::default(), shadow: Style::default(), shadow_on: false,
+            placement: DialogPlacement::Center, margin: 0,
+        };
+        let spec = DialogSpec {
+            title: "Save", placement: Placement::Centered { w: 24, h: 6 },
+            buttons: &[], show_close: false, default: None, focus: None, field: None,
+        };
+        let r = draw_dialog(&mut buf, full, &spec, &st);
+        // Double border → double corner and double terminator cap on the title.
+        assert_eq!(buf.cell((r.area.x, r.area.y)).unwrap().symbol(), "╔");
+        let top: String = (r.area.x..r.area.right())
+            .map(|x| buf.cell((x, r.area.y)).unwrap().symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(top.contains('╡'), "double border → left cap ╡, got {top:?}");
     }
 }

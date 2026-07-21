@@ -369,6 +369,7 @@ fn draw_frame(
                 area: pane_layout.story,
                 border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
                 border_color: Some(story_border_color),
+                border_style: None,
                 glyphs: &state.colors.story_border_glyphs,
                 header_on: state.colors.story_header_on,
                 strip: Some(PanelStrip { segments: &story_segs, base: story_title_style, active: story_title_style }),
@@ -400,6 +401,7 @@ fn draw_frame(
                         area: pane_layout.story,
                         border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
                         border_color: Some(story_border_style),
+                        border_style: None,
                         glyphs: &state.colors.story_border_glyphs,
                         header_on: state.colors.story_header_on,
                         strip: Some(PanelStrip { segments: &story_segs, base: story_title_style, active: story_title_style }),
@@ -428,6 +430,7 @@ fn draw_frame(
                         area: pane_layout.story,
                         border_selector: if story_focused { "panel.border:active" } else { "panel.border" },
                         border_color: Some(story_border_color),
+                        border_style: None,
                         glyphs: &state.colors.story_border_glyphs,
                         header_on: state.colors.story_header_on,
                         strip: Some(PanelStrip { segments: &story_segs, base: story_title_style, active: story_title_style }),
@@ -458,6 +461,7 @@ fn draw_frame(
                         area: pane_layout.map,
                         border_selector: if map_focused { "panel.border:active" } else { "panel.border" },
                         border_color: Some(map_border_color),
+                        border_style: None,
                         glyphs: &state.colors.map_border_glyphs,
                         header_on: state.colors.map_header_on,
                         strip: Some(PanelStrip {
@@ -2585,7 +2589,7 @@ fn reobserve_location(
 
 /// Build a `DialogStyle` from the current app colors.
 /// Note: `BorderStyle::None` is coerced to `Single` inside `draw_dialog`.
-fn make_dialog_style(state: &AppState) -> DialogStyle {
+fn make_dialog_style(state: &AppState) -> DialogStyle<'_> {
     DialogStyle::from_colors(&state.colors)
 }
 
@@ -3080,6 +3084,7 @@ mod tests {
                 area,
                 border_selector: "panel.border",
                 border_color: None,
+                border_style: None,
                 glyphs: &PaneGlyphs::default(),
                 header_on: true,
                 strip: Some(PanelStrip { segments: &segs, base: title_style, active: title_style }),

@@ -152,6 +152,7 @@ pub fn draw_verb_menu(
         area,
         border_selector: "panel.border",
         border_color: Some(base),
+        border_style: None,
         glyphs: &PaneGlyphs::default(),
         header_on: true,
         strip: Some(PanelStrip {
