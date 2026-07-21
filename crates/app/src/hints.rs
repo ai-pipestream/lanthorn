@@ -76,6 +76,10 @@ pub fn is_invisiclues_name(file_name: &str) -> bool {
         || stem.ends_with("inv")
         || stem.ends_with("_hints")
         || stem.ends_with("-hints")
+        // waitingforgo `<abbrev>izm.z5` carries no keyword and no `inv` suffix;
+        // recognise it only by the curated table (not a bare `izm` suffix, which
+        // could false-positive on an unrelated filename).
+        || curated_hint_key(&stem).is_some()
 }
 
 /// Returns true if `file_name` is a hint *sidecar* — an InvisiClues/hint image
@@ -106,18 +110,79 @@ const SLAG_HINTS: &[(&str, &str)] = &[
     ("starcrossinv", "starcross"),
     ("stationinv", "stationfall"),
     ("stuga_hints", "stuga"),
+    ("suspendedinv", "suspended"),
+    ("trininv", "trinity"),
+    ("wishbrinv", "wishbringer"),
+    ("zork1inv", "zork1"),
+    ("zork2inv", "zork2"),
+    ("zork3inv", "zork3"),
+    ("ztuuinv", "ztuu"),
 ];
+
+/// Curated `(hint-stem, game-key)` table for the waitingforgo *InvisiClues* set
+/// (the `<abbrev>izm.z5` naming). The site is defunct, so downloads come from
+/// the Internet Archive; the table also lets a locally-present `*izm.z5` file be
+/// detected/hidden/badged like a SLAG sidecar. Multi-game "Collection" images
+/// (fant1izm, scifizm, …) are intentionally excluded — they map to no one game.
+const IZM_HINTS: &[(&str, &str)] = &[
+    ("zork1izm", "zork1"),
+    ("zork2izm", "zork2"),
+    ("zork3izm", "zork3"),
+    ("bzorkizm", "beyond"),
+    ("zork0izm", "zork0"),
+    ("zuuizm", "ztuu"),
+    ("wishbizm", "wishbringer"),
+    ("enchizm", "enchanter"),
+    ("sorcrizm", "sorcerer"),
+    ("spellizm", "spellbreaker"),
+    ("trntyizm", "trinity"),
+    ("starcizm", "starcross"),
+    ("spendizm", "suspended"),
+    ("plntfizm", "planetfall"),
+    ("hitchizm", "hitchhiker"),
+    ("amfvizm", "amfv"),
+    ("statnizm", "stationfall"),
+    ("deadlizm", "deadline"),
+    ("witnizm", "witness"),
+    ("spectizm", "suspect"),
+    ("ballyizm", "ballyhoo"),
+    ("moonmizm", "moonmist"),
+    ("infdlizm", "infidel"),
+    ("seastizm", "seastalker"),
+    ("cutthizm", "cutthroats"),
+    ("hollyizm", "hollywood"),
+    ("shognizm", "shogun"),
+    ("leathizm", "leather"),
+    ("bureaizm", "bureaucracy"),
+    ("nordizm", "nord"),
+    ("lurkizm", "lurking"),
+    ("plundizm", "plundered"),
+    ("bordrizm", "border"),
+    ("sherlizm", "sherlock"),
+    ("journizm", "journey"),
+    ("arthrizm", "arthur"),
+];
+
+/// The curated game-key for a hint-file `stem`, consulting both the SLAG and the
+/// izm tables (SLAG first). `None` when neither table names the stem.
+fn curated_hint_key(stem: &str) -> Option<&'static str> {
+    SLAG_HINTS
+        .iter()
+        .chain(IZM_HINTS.iter())
+        .find(|(s, _)| *s == stem)
+        .map(|(_, key)| *key)
+}
 
 /// The lowercased game keyword a hint file belongs to, or `None`.
 ///
-/// First consults the curated [`SLAG_HINTS`] table by exact stem (so
-/// `enchaninv` → `enchanter`, which a naïve strip would get wrong); else derives
+/// First consults the curated tables ([`SLAG_HINTS`] / [`IZM_HINTS`]) by exact
+/// stem (so `enchaninv` → `enchanter`, which a naïve strip would get wrong); else derives
 /// the base by stripping a trailing hint marker (longest first), returning it
 /// when it is ≥3 chars (so `zork1_hints` → `zork1`).
 pub fn hint_game_key(file_name: &str) -> Option<String> {
     let stem = hint_stem(file_name);
-    if let Some((_, key)) = SLAG_HINTS.iter().find(|(s, _)| *s == stem) {
-        return Some((*key).to_string());
+    if let Some(key) = curated_hint_key(&stem) {
+        return Some(key.to_string());
     }
     // Longest markers first so `-invisiclues` isn't shortened to `inv` etc.
     const MARKERS: &[&str] = &[
@@ -150,6 +215,46 @@ pub fn hint_matches_story(hint_file_name: &str, story_stem_or_title: &str) -> bo
         Some(key) if key.len() >= 3 => story_stem_or_title.to_ascii_lowercase().contains(&key),
         _ => false,
     }
+}
+
+/// A downloadable InvisiClues hint file for a story: where to fetch it and what
+/// to name the file saved next to the story.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HintDownload {
+    /// Filename to save beside the story, e.g. `deadlineinv.z5`.
+    pub filename: String,
+    /// Fully-qualified download URL.
+    pub url: String,
+}
+
+fn slag_url(stem: &str) -> String {
+    format!("https://ifarchive.org/if-archive/solutions/slag/{stem}.z5")
+}
+
+/// The waitingforgo site is defunct, so izm files come from a fixed Internet
+/// Archive snapshot. The `id_` suffix serves the raw bytes (no archive chrome);
+/// the request 302-redirects to the nearest capture, which ureq follows.
+fn izm_url(stem: &str) -> String {
+    format!("https://web.archive.org/web/20161027165356id_/http://www.waitingforgo.com/invisiclues/{stem}.z5")
+}
+
+/// Find a downloadable InvisiClues hint file for a story, matched by the game
+/// key appearing in the story's filename stem or title.
+///
+/// SLAG (live IF Archive) is preferred; the izm set (Internet Archive) is the
+/// fallback for games SLAG doesn't cover. Returns `None` when no catalog entry
+/// matches. A key must be ≥3 chars to match (guards against spurious hits).
+pub fn hint_download_for(game_stem: &str, game_title: &str) -> Option<HintDownload> {
+    let stem = game_stem.to_ascii_lowercase();
+    let title = game_title.to_ascii_lowercase();
+    let matches = |key: &str| key.len() >= 3 && (stem.contains(key) || title.contains(key));
+    if let Some((s, _)) = SLAG_HINTS.iter().find(|(_, k)| matches(k)) {
+        return Some(HintDownload { filename: format!("{s}.z5"), url: slag_url(s) });
+    }
+    if let Some((s, _)) = IZM_HINTS.iter().find(|(_, k)| matches(k)) {
+        return Some(HintDownload { filename: format!("{s}.z5"), url: izm_url(s) });
+    }
+    None
 }
 
 /// The stem of a hint file's name, i.e. the raw file name minus a trailing
@@ -625,6 +730,66 @@ mod tests {
         assert!(hint_matches_story("hhgginv.z5", "hitchhiker-r59-s851108"));
         assert!(hint_matches_story("deadlineinv.z5", "deadline-r27-s851006"));
         assert!(!hint_matches_story("deadlineinv.z5", "zork1-r88-s840726"));
+    }
+
+    /// The seven SLAG games added beyond the Phase-1 table must resolve.
+    #[test]
+    fn slag_new_entries_resolve() {
+        for (file, key) in [
+            ("suspendedinv.z5", "suspended"),
+            ("trininv.z5", "trinity"),
+            ("wishbrinv.z5", "wishbringer"),
+            ("zork1inv.z5", "zork1"),
+            ("zork2inv.z5", "zork2"),
+            ("zork3inv.z5", "zork3"),
+            ("ztuuinv.z5", "ztuu"),
+        ] {
+            assert_eq!(hint_game_key(file).as_deref(), Some(key), "{file}");
+            assert!(is_hint_sidecar(file), "{file} must be a sidecar");
+        }
+    }
+
+    /// A locally-present `*izm.z5` file (no `inv` suffix, no keyword) is only
+    /// recognised via the curated izm table — and then hides/associates like SLAG.
+    #[test]
+    fn izm_local_files_are_detected_and_keyed() {
+        assert!(is_invisiclues_name("deadlizm.z5"));
+        assert!(is_hint_sidecar("deadlizm.z5"));
+        assert_eq!(hint_game_key("deadlizm.z5").as_deref(), Some("deadline"));
+        assert_eq!(hint_game_key("witnizm.z5").as_deref(), Some("witness"));
+        assert_eq!(hint_game_key("bzorkizm.z5").as_deref(), Some("beyond"));
+        assert!(hint_matches_story("witnizm.z5", "The Witness"));
+        // A bare `izm` suffix that isn't in the table is NOT a hint file.
+        assert!(!is_invisiclues_name("mechanizm.z5"));
+    }
+
+    #[test]
+    fn hint_download_prefers_slag_then_izm() {
+        // A SLAG-covered game: prefer the live IF Archive file.
+        let d = hint_download_for("deadline", "Deadline").expect("deadline has a hint");
+        assert_eq!(d.filename, "deadlineinv.z5");
+        assert!(d.url.contains("ifarchive.org/if-archive/solutions/slag/deadlineinv.z5"), "{}", d.url);
+
+        // A game only the izm set covers: fall back to the Internet Archive.
+        let w = hint_download_for("witness", "The Witness").expect("witness has an izm hint");
+        assert_eq!(w.filename, "witnizm.z5");
+        assert!(w.url.contains("web.archive.org"), "{}", w.url);
+        assert!(w.url.ends_with("witnizm.z5"), "{}", w.url);
+
+        // Match on title when the stem is opaque.
+        assert!(hint_download_for("hhgg", "The Hitchhiker's Guide to the Galaxy").is_some());
+
+        // A game with no hint anywhere.
+        assert!(hint_download_for("adventure", "Colossal Cave").is_none());
+    }
+
+    /// Beyond Zork keys on "beyond", never bare "zork", so it must not collide
+    /// with zork1/2/3 (and vice-versa).
+    #[test]
+    fn hint_download_zork_variants_dont_collide() {
+        assert_eq!(hint_download_for("zork1", "Zork I").unwrap().filename, "zork1inv.z5");
+        assert_eq!(hint_download_for("beyondzork", "Beyond Zork").unwrap().filename, "bzorkizm.z5");
+        assert_eq!(hint_download_for("zork0", "Zork Zero").unwrap().filename, "zork0izm.z5");
     }
 
     #[test]
