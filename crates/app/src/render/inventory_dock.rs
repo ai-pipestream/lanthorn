@@ -10,7 +10,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use super::draw_str_clipped;
-use super::paneframe::{draw_pane_frame, draw_top_inset, BorderStyle, InsetSegment, PaneGlyphs};
+use super::paneframe::{draw_pane_frame, draw_top_inset, BorderStyle, InsetCaps, InsetSegment, PaneGlyphs};
 use crate::colors::ColorScheme;
 
 /// Compute the dock's fully-open target height in rows: one row per item
@@ -61,7 +61,7 @@ pub fn draw_inventory_dock(items: &[String], area: Rect, colors: &ColorScheme, h
     // ┫ Inventory ┣, matching the framed panes and modals). Drawn in the dock's
     // own `inventory_dock` style, independent of the border accent. No-ops when
     // the band is too short for a border row.
-    draw_top_inset(buf, frame.top_inset, &[InsetSegment { text: "Inventory", active: false }], style, style);
+    draw_top_inset(buf, frame.top_inset, &[InsetSegment { text: "Inventory", active: false }], style, style, &InsetCaps::for_border(BorderStyle::Thick));
 
     let content = frame.content;
     if content.height == 0 || content.width == 0 {

@@ -27,7 +27,7 @@ use app::render::hints_panel::{hint_key_routes, HintKeyKind, HintsPanelRects};
 use app::render::verbmenu::draw_verb_menu;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
-use app::render::paneframe::{build_layer_segments, draw_framed, draw_header_plain, draw_top_inset, InsetSegment};
+use app::render::paneframe::{build_layer_segments, draw_framed, draw_header_plain, draw_top_inset, BorderStyle, InsetCaps, InsetSegment};
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
 use mapper::layer::LayerId;
@@ -383,7 +383,7 @@ fn draw_frame(
             if let Some(hrect) = story_fp.header {
                 let segs = [InsetSegment { text: &state.title, active: false }];
                 if story_fp.header_bordered {
-                    draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
+                    draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style, &InsetCaps::for_border(BorderStyle::Thick));
                 } else {
                     draw_header_plain(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
                 }
@@ -411,7 +411,7 @@ fn draw_frame(
                     if let Some(hrect) = story_fp.header {
                         let segs = [InsetSegment { text: &state.title, active: false }];
                         if story_fp.header_bordered {
-                            draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
+                            draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style, &InsetCaps::for_border(BorderStyle::Thick));
                         } else {
                             draw_header_plain(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
                         }
@@ -436,7 +436,7 @@ fn draw_frame(
                     if let Some(hrect) = story_fp.header {
                         let segs = [InsetSegment { text: &state.title, active: false }];
                         if story_fp.header_bordered {
-                            draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
+                            draw_top_inset(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style, &InsetCaps::for_border(BorderStyle::Thick));
                         } else {
                             draw_header_plain(buf, hrect, &segs, state.colors.theme.get("story_title").style, state.colors.theme.get("story_title").style);
                         }
@@ -466,7 +466,7 @@ fn draw_frame(
                         let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
                         if let Some(hrect) = map_fp.header {
                             let tab_rects = if map_fp.header_bordered {
-                                draw_top_inset(buf, hrect, &inset_segs, state.colors.theme.get("panel.tab").style, state.colors.theme.get("panel.tab:active").style)
+                                draw_top_inset(buf, hrect, &inset_segs, state.colors.theme.get("panel.tab").style, state.colors.theme.get("panel.tab:active").style, &InsetCaps::for_border(BorderStyle::Thick))
                             } else {
                                 draw_header_plain(buf, hrect, &inset_segs, state.colors.theme.get("panel.tab").style, state.colors.theme.get("panel.tab:active").style)
                             };
@@ -2758,7 +2758,7 @@ mod tests {
     use ratatui::style::Modifier;
 
     use super::{dim_area, is_slash, scroll_for_match, should_prompt_save_on_quit};
-    use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetSegment, PaneGlyphs};
+    use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetCaps, InsetSegment, PaneGlyphs};
 
     // ── SQ-0297: map-export slash commands must actually write the file ────────
 
@@ -3032,6 +3032,7 @@ mod tests {
             &[InsetSegment { text: "ZORK I", active: false }],
             cs.theme.get("story_title").style,
             cs.theme.get("story_title").style,
+            &InsetCaps::for_border(app::render::paneframe::BorderStyle::Thick),
         );
 
         // DEFAULT_STYLE_TOML sets story_border to single; top-left outer corner must be ┌

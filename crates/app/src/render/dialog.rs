@@ -2,7 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use super::paneframe::{BorderStyle, InsetSegment, PaneGlyphs, draw_pane_frame, draw_top_inset};
+use super::paneframe::{BorderStyle, InsetCaps, InsetSegment, PaneGlyphs, draw_pane_frame, draw_top_inset};
 
 // ── centered_rect ─────────────────────────────────────────────────────────────
 
@@ -306,7 +306,7 @@ pub fn draw_dialog(buf: &mut Buffer, bounds: Rect, spec: &DialogSpec, st: &Dialo
 
     // (5) Overlay the centered title via draw_top_inset
     let title_seg = InsetSegment { text: spec.title, active: false };
-    draw_top_inset(buf, pane.top_inset, &[title_seg], st.title, st.title);
+    draw_top_inset(buf, pane.top_inset, &[title_seg], st.title, st.title, &InsetCaps::for_border(BorderStyle::Thick));
 
     // (6) If show_close, draw ✕ just inside the top-right border
     let close = if spec.show_close && area.width >= 3 && area.height >= 1 {

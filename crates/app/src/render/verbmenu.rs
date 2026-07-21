@@ -14,7 +14,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
-use super::paneframe::{draw_pane_frame, draw_top_inset, BorderStyle, InsetSegment, PaneGlyphs};
+use super::paneframe::{draw_pane_frame, draw_top_inset, BorderStyle, InsetCaps, InsetSegment, PaneGlyphs};
 use crate::state::{AppState, VerbMenuPane};
 
 // ── Curated lists ─────────────────────────────────────────────────────────────
@@ -148,7 +148,7 @@ pub fn draw_verb_menu(
     // Title strip on the top border row, via the shared header helper (bracketed
     // ┫ Verbs ┣, matching the map/story panes and every modal). No-ops when the
     // band is too short for a border row.
-    draw_top_inset(buf, frame.top_inset, &[InsetSegment { text: "Verbs", active: false }], base, base);
+    draw_top_inset(buf, frame.top_inset, &[InsetSegment { text: "Verbs", active: false }], base, base, &InsetCaps::for_border(BorderStyle::Thick));
 
     let content = frame.content;
     if content.height < 4 || content.width < 4 {
