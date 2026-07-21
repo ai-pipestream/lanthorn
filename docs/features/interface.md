@@ -70,9 +70,10 @@ built-in debugger that follows the running story instruction by instruction.
   after a few seconds, so a "map exported" or "style reloaded" note never
   interrupts the transcript. `/dump-notifications` replays the recent ones into
   the transcript if you missed a slide-by.
-- **In-game hints** — `/open-hints` opens a modal that runs a companion
-  *Invisiclues* `.z5` in a second Z-machine session while the main game pauses.
-  The panel renders the file's full split screen — its topic menu in the upper
+- **In-game hints** — `/open-hints` lays a hint panel over the story pane (the
+  story pauses beneath it) that runs a companion *Invisiclues* `.z5` in a second
+  Z-machine session, resizing with the pane. The panel renders the file's full
+  split screen — its topic menu in the upper
   window with the clue text below — and forwards your keystrokes to it, so you
   drive the menu exactly as the file intends (arrows to move the highlight, plus
   whatever letters it prompts for, e.g. to pick a topic and reveal successive

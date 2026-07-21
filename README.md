@@ -124,9 +124,15 @@ tell the three engines apart at a glance (`Z5`, `Scott`, `G3.1.2`).
 - **Rewind & replay** — step back through a recorded per-turn history with the map
   reconstructed at each moment, and resume from any earlier turn. → [saves](docs/features/saves.md)
 - **A full TUI** — mouse support, select-and-copy, verb/noun menu, dictionary
-  autocomplete, inventory strip, command history, in-game Invisiclues hints,
+  autocomplete, inventory strip, command history,
   animated top-right notification toasts (with a `dump-notifications` recall), and
   transcript search / filter / export. → [interface](docs/features/interface.md)
+- **In-game hints** — open a matching *InvisiClues* hint file and babelmap boots
+  it in a second Z-machine right over the story pane, rendering its split-screen
+  topic menu and forwarding your keystrokes so you drive it exactly as intended,
+  revealing clues one line at a time. The hint file is auto-detected beside the
+  story, matched to *that* game by name, hidden from the picker, and flagged with
+  a Hint badge. → [interface](docs/features/interface.md)
 - **Saves & persistence** — self-contained `.babelmap` Save States (map + VM
   state + metadata), named slots, Quetzal import/export, auto-save/auto-load, and
   Glulx games' external file storage (Glk file streams) auto-persisting across
