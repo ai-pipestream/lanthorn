@@ -6,6 +6,7 @@ pub mod dialog;
 pub mod dump_harness;
 pub mod game_over_dialog;
 pub mod paneframe;
+pub mod panel;
 pub mod filebrowser;
 pub mod graphics;
 pub mod hintbar;
