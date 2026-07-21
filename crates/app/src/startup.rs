@@ -1,11 +1,14 @@
 //! Startup / boot sequence: parse args, load config, resolve and load the story,
 //! build the engine, load the mapper/archive, seed the initial UI state, and set
 //! up the terminal. Extracted verbatim from `main.rs` (SQ-0306) as `main()`'s
-//! linear setup phase (originally "steps 1-4"). Pure move — no behavior change.
-//! `main()` calls [`boot`] then runs the event loop over the returned
-//! [`BootResult`]; helper fns it relies on stay in `main.rs` (referenced via
-//! `crate::`) because they are shared with the loop or exercised by `main.rs`
-//! tests.
+//! linear setup phase (originally "steps 1-4"). Split for SQ-0435 into
+//! [`resolve_launch`] (the one-time arg/config resolution, run once by `main`)
+//! and [`boot_story`] (the per-story build, run for each chosen story), so a
+//! directory launch can replay the build across the picker→play loop. `main`
+//! calls `resolve_launch`, then per story `boot_story` and the event loop over
+//! the returned [`BootResult`]; helper fns they rely on stay in `main.rs`
+//! (referenced via `crate::`) because they are shared with the loop or exercised
+//! by `main.rs` tests.
 
 use std::io::{stdout, Stdout};
 
@@ -19,7 +22,7 @@ use ratatui::Terminal;
 use clap::Parser;
 
 use app::archive::load_archive;
-use app::config::{config_path, resolve, write_config, Cli};
+use app::config::{config_path, resolve, write_config, Cli, Config};
 use app::engine::Engine;
 use app::glulx_session::GlulxSession;
 use app::hints;
@@ -30,8 +33,7 @@ use app::storage::{default_state_path, game_dir as story_game_dir, story_key};
 
 use crate::engine_helpers::{restore_error_msg, zvm_session_opt_mut};
 use crate::{
-    install_panic_hook, install_termination_handlers, loading_line, picker_ui, resolve_pict_blorb,
-    restore_terminal, saves_dir,
+    install_panic_hook, loading_line, picker_ui, resolve_pict_blorb, restore_terminal, saves_dir,
 };
 
 /// Everything [`boot`] produces that `main()`'s event loop then owns: the boxed
@@ -50,16 +52,30 @@ pub(crate) struct BootResult {
     pub data_base: std::path::PathBuf,
 }
 
-/// Run `main()`'s linear setup phase and hand back the values the event loop
-/// owns. May `std::process::exit` on an unrecoverable setup error (bad args,
-/// unreadable/invalid story, terminal init failure) exactly as before.
-pub(crate) fn boot() -> BootResult {
-    // ── 1. Parse args + load config ───────────────────────────────────────────
+/// The one-time launch context resolved before the picker→play loop: parsed
+/// args, config, the saves/sidecar base dir, and whether babelmap was launched
+/// against a directory (a story library) or a single file. `resolve_launch`
+/// builds this ONCE; `boot_story` consumes it (by reference) per story so a
+/// library launch can replay the build for each chosen story. (SQ-0435)
+pub(crate) struct LaunchCtx {
+    pub cli: Cli,
+    pub cfg: Config,
+    pub data_base: std::path::PathBuf,
+    /// The story directory when launched from a library (the picker source),
+    /// else `None`.
+    pub library_dir: Option<std::path::PathBuf>,
+    /// The single story file when launched with a file argument, else `None`.
+    pub single_file: Option<std::path::PathBuf>,
+}
 
-    // Register termination-signal handlers before entering raw mode so an
-    // early kill/SIGHUP still restores the terminal (both interactive loops poll
-    // the flag via `exit_if_terminated`).
-    install_termination_handlers();
+/// Resolve the one-time launch context: parse args + config, seed the style
+/// template, apply the `default_story_dir` fallback (plus the first-use prompt,
+/// which runs exactly ONCE), compute the data base, and classify the launch as a
+/// story library (a directory) or a single file. May `std::process::exit(2)`
+/// when there's nothing to open. Signal-handler registration lives in `main`
+/// (before the loop); the per-story build lives in [`boot_story`]. (SQ-0435)
+pub(crate) fn resolve_launch() -> LaunchCtx {
+    // ── 1. Parse args + load config ───────────────────────────────────────────
 
     let cli = Cli::parse();
     let mut cfg = resolve(&cli);
@@ -110,16 +126,30 @@ pub(crate) fn boot() -> BootResult {
     // default `<user_dir>/saves`. Each story gets `<data_base>/<story-key>/`.
     let data_base = cli.data_dir.clone().unwrap_or_else(|| saves_dir(&cfg.user_dir));
 
-    // If a directory was passed instead of a story file, run the pre-game story
-    // picker and continue with the chosen file (or exit if the user quits).
-    let story_path = if story_path.is_dir() {
-        match picker_ui::run_story_picker(&story_path, &cfg, &data_base) {
-            Some(p) => p,
-            None => std::process::exit(0),
-        }
+    // A directory launches the pre-game picker (a library); a file plays directly.
+    let (library_dir, single_file) = if story_path.is_dir() {
+        (Some(story_path), None)
     } else {
-        story_path
+        (None, Some(story_path))
     };
+
+    LaunchCtx { cli, cfg, data_base, library_dir, single_file }
+}
+
+/// Build the per-story engine + mapper + UI state + terminal for `story_path`,
+/// using the one-time [`LaunchCtx`]. This is the per-story half of the old
+/// `boot()` (load the story, build the engine, load the mapper/archive, seed the
+/// state, and enter the alternate screen); a library launch calls it once per
+/// chosen story. May `std::process::exit` on an unrecoverable per-story error
+/// (unreadable/invalid story, terminal init failure) exactly as before.
+///
+/// `cfg` is cloned from `ctx` per story because the per-game overlays (garglk.ini
+/// colours, per-game honor/borderless) mutate it — each story must start from the
+/// pristine launch config. (SQ-0435)
+pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> BootResult {
+    let cli = &ctx.cli;
+    let mut cfg = ctx.cfg.clone();
+    let data_base = ctx.data_base.clone();
 
     let loaded = match hints::load_story(&story_path) {
         Ok(l) => l,
@@ -501,7 +531,7 @@ pub(crate) fn boot() -> BootResult {
     }
 
     // One-time notice: config.toml no longer carries style — those moved to style.toml.
-    if let Ok(raw_cfg) = std::fs::read_to_string(app::config::config_path(&cli)) {
+    if let Ok(raw_cfg) = std::fs::read_to_string(app::config::config_path(cli)) {
         if app::config::config_has_style_sections(&raw_cfg) {
             state.push_transcript_internal(
                 "config.toml [colors]/[symbols] are no longer used — move them into style.toml",

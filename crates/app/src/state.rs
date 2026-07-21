@@ -1019,6 +1019,18 @@ pub enum ResizeTarget {
     InvDock,
 }
 
+/// Where the event loop should go when the current story ends. `Exit` leaves
+/// babelmap entirely (the classic quit); `Library` exits the story but returns
+/// to the story picker (only meaningful when launched from a directory). Set by
+/// the quit / `/quit-to-library` dispatch and read at the loop's break sites, where
+/// the binary maps it to its own `RunOutcome`. (SQ-0435)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExitTarget {
+    #[default]
+    Exit,
+    Library,
+}
+
 /// Percentage-based pane sizes, seeded from `Config` at startup and mirrored
 /// here for the layout code to consume. `config` stays the persisted source
 /// of truth; this is the runtime-facing copy.
@@ -1492,6 +1504,16 @@ pub struct AppState {
     /// cleared by a Save State save, a restore/load, and restart.
     pub unsaved_progress: bool,
 
+    /// Where the event loop should resume once this story ends: `Exit` (quit
+    /// babelmap) or `Library` (return to the story picker). Set by the quit /
+    /// `/quit-to-library` dispatch; read at the loop's break sites. (SQ-0435)
+    pub exit_target: ExitTarget,
+
+    /// True when babelmap was launched against a directory (a story library),
+    /// so a picker exists to return to. Set once at startup; gates
+    /// `/quit-to-library`. (SQ-0435)
+    pub launched_from_library: bool,
+
     /// Per-turn rewind/replay history. Filled when `config.record_turn_history`
     /// is on; persisted into the `.babelmap` archive. Empty otherwise.
     pub history: Vec<crate::history::TurnRecord>,
@@ -1738,6 +1760,8 @@ impl Default for AppState {
             resize_target: ResizeTarget::StoryMap,
             turns: 0,
             unsaved_progress: false,
+            exit_target: ExitTarget::Exit,
+            launched_from_library: false,
             history: Vec::new(),
             pending_filename: None,
             filename_submitted: None,

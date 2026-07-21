@@ -10,7 +10,7 @@ use app::export::export_transcript;
 use app::input::{apply_action, Action};
 use app::persist_files::{load_map, save_named};
 use app::slash::{self, SlashOutcome, TranscriptFilterArg};
-use app::state::{AppState, Focus, SavesState, TranscriptFilter, TranscriptKind};
+use app::state::{AppState, ExitTarget, Focus, SavesState, TranscriptFilter, TranscriptKind};
 use mapper::mapper::Mapper;
 use ratatui::layout::Rect;
 
@@ -249,11 +249,32 @@ pub(crate) fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::Quit => {
+            // A plain quit resolves the loop to Exit. Set it explicitly so a
+            // prior `/quit-to-library` that opened (then was superseded by) this
+            // path can't leave the target pointing at the library. (SQ-0435)
+            state.exit_target = ExitTarget::Exit;
             if should_prompt_save_on_quit(state) {
                 state.overlays.quit_dialog = true;
                 state.overlays.dialog_focus = 0;
             } else {
                 return true;
+            }
+        }
+        SlashOutcome::QuitToLibrary => {
+            // Only meaningful when launched from a directory (a picker exists).
+            if !state.launched_from_library {
+                state.set_status("No story library — launched with a single file");
+            } else {
+                // Return-to-library mirrors Quit's save handling, but resolves
+                // the loop to the library instead of exiting. The break sites
+                // read `state.exit_target`. (SQ-0435)
+                state.exit_target = ExitTarget::Library;
+                if should_prompt_save_on_quit(state) {
+                    state.overlays.quit_dialog = true;
+                    state.overlays.dialog_focus = 0;
+                } else {
+                    return true;
+                }
             }
         }
         SlashOutcome::Search(q_opt) => {
@@ -515,5 +536,72 @@ mod debug_dispatch_tests {
         toggle_debug(&mut state, &mut engine);
         assert!(state.debug.is_none());
         assert!(state.transcript.iter().any(|l| l.contains("debugger not available")));
+    }
+
+    /// Drive `dispatch_slash_outcome` for a quit-like outcome against a minimal
+    /// environment (the `QuitToLibrary`/`Quit` paths touch only `state`), and
+    /// return the "should break" signal. (SQ-0435)
+    fn dispatch_quit_like(state: &mut AppState, outcome: SlashOutcome) -> bool {
+        let mut mapper = Mapper::default();
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut style_watcher: Option<app::watch::StyleWatcher> = None;
+        let dir = std::path::Path::new("/tmp/babelmap-sq0435-test");
+        dispatch_slash_outcome(
+            outcome, state, &mut mapper, &mut engine, &mut style_watcher,
+            dir, "IFIDTEST", dir, &[], dir,
+            Rect::default(), Rect::default(), false,
+        )
+    }
+
+    #[test]
+    fn quit_to_library_without_library_sets_status_and_does_not_break() {
+        let mut state = AppState::default();
+        state.launched_from_library = false;
+        let should_break = dispatch_quit_like(&mut state, SlashOutcome::QuitToLibrary);
+        assert!(!should_break, "no library → the loop must not break");
+        assert_eq!(state.exit_target, ExitTarget::Exit, "target must stay Exit");
+        assert!(!state.overlays.quit_dialog, "no save prompt should open");
+        assert!(
+            state.notifications.history().iter().any(|m| m.contains("No story library")),
+            "a status explaining the missing library should be shown"
+        );
+    }
+
+    #[test]
+    fn quit_to_library_with_library_and_no_unsaved_progress_breaks_to_library() {
+        let mut state = AppState::default();
+        state.launched_from_library = true;
+        // Default config: auto_save off, no unsaved progress → no save prompt.
+        state.unsaved_progress = false;
+        let should_break = dispatch_quit_like(&mut state, SlashOutcome::QuitToLibrary);
+        assert!(should_break, "no unsaved progress → break straight to the library");
+        assert_eq!(state.exit_target, ExitTarget::Library, "target must be Library");
+        assert!(!state.overlays.quit_dialog, "no save prompt with no unsaved progress");
+    }
+
+    #[test]
+    fn quit_to_library_with_unsaved_progress_opens_prompt_targeting_library() {
+        let mut state = AppState::default();
+        state.launched_from_library = true;
+        // Force the save prompt: prompt_save_on_quit defaults on; add progress.
+        state.config.auto_save = false;
+        state.config.prompt_save_on_quit = true;
+        state.unsaved_progress = true;
+        let should_break = dispatch_quit_like(&mut state, SlashOutcome::QuitToLibrary);
+        assert!(!should_break, "opening the save prompt does not break yet");
+        assert!(state.overlays.quit_dialog, "the save prompt should open");
+        assert_eq!(state.exit_target, ExitTarget::Library, "prompt resolution must target Library");
+    }
+
+    #[test]
+    fn quit_sets_exit_target_to_exit() {
+        let mut state = AppState::default();
+        // Even after a prior quit-to-library set the target, a plain Quit resets it.
+        state.launched_from_library = true;
+        state.exit_target = ExitTarget::Library;
+        state.unsaved_progress = false;
+        let should_break = dispatch_quit_like(&mut state, SlashOutcome::Quit);
+        assert!(should_break, "no unsaved progress → quit breaks immediately");
+        assert_eq!(state.exit_target, ExitTarget::Exit, "quit must resolve to Exit");
     }
 }

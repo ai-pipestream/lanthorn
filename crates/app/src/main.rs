@@ -65,6 +65,26 @@ use crate::engine_helpers::{
     zvm_session_mut, zvm_session_opt, zvm_session_opt_mut, RestoreOutcome,
 };
 
+// ── Run outcome ─────────────────────────────────────────────────────────────
+
+/// How the event loop ended: exit babelmap entirely, or return to the story
+/// picker (a library launch replays the picker; a single-file launch treats it
+/// as an exit). Mapped from `AppState.exit_target` at the loop's break sites. (SQ-0435)
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum RunOutcome {
+    Exit,
+    ToLibrary,
+}
+
+impl From<app::state::ExitTarget> for RunOutcome {
+    fn from(t: app::state::ExitTarget) -> Self {
+        match t {
+            app::state::ExitTarget::Exit => RunOutcome::Exit,
+            app::state::ExitTarget::Library => RunOutcome::ToLibrary,
+        }
+    }
+}
+
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
 /// Restore the terminal to cooked mode and leave the alternate screen.
@@ -791,9 +811,55 @@ fn loading_line(name: &str, bytes: usize, frame: char) -> String {
 }
 
 fn main() {
-    // Run the linear setup phase (arg/config parse, story load, engine + mapper
-    // build, initial state seeding, terminal setup) in `startup::boot`; `main()`
-    // owns the event loop below over the returned handles (SQ-0306).
+    // ── ONE-TIME setup ────────────────────────────────────────────────────────
+    // Register termination-signal handlers before any raw-mode entry (the picker
+    // or the game loop) so an early kill/SIGHUP still restores the terminal; both
+    // interactive loops poll the flag via `exit_if_terminated`. (SQ-0435: moved
+    // out of `boot` so it registers once across the picker→play loop.)
+    install_termination_handlers();
+
+    // Resolve the launch context once: args/config, style-seed, data base, and
+    // whether we launched from a directory (a story library) or a single file.
+    // The first-use `default_story_dir` prompt lives here and runs exactly once.
+    let ctx = startup::resolve_launch();
+    let launched_from_library = ctx.library_dir.is_some();
+
+    // ── Picker → play loop ────────────────────────────────────────────────────
+    loop {
+        // Obtain the next story to play.
+        let story_path = if let Some(dir) = &ctx.library_dir {
+            // Library launch: run the picker on the normal screen (the previous
+            // game left its alt-screen). Quitting the picker (None) exits.
+            match picker_ui::run_story_picker(dir, &ctx.cfg, &ctx.data_base) {
+                Some(p) => p,
+                None => break,
+            }
+        } else {
+            // Single-file launch: play the one file; after it returns we exit.
+            ctx.single_file
+                .clone()
+                .expect("resolve_launch sets single_file for a non-library launch")
+        };
+
+        // Per-story build (enters the game alt-screen fresh), then run the loop.
+        let boot = startup::boot_story(&ctx, story_path);
+        match run_event_loop(boot, launched_from_library) {
+            RunOutcome::Exit => break,
+            // Return-to-library only loops when a library exists; a single-file
+            // launch can't reach ToLibrary (the command is gated off), but guard
+            // it anyway so the loop always terminates.
+            RunOutcome::ToLibrary if launched_from_library => continue,
+            RunOutcome::ToLibrary => break,
+        }
+    }
+}
+
+/// Run the interactive event loop over one story's `BootResult`, returning how it
+/// ended ([`RunOutcome`]). Mechanically extracted from `main()` (SQ-0435): all
+/// loop-local state lives here; the labeled loop yields the outcome; the terminal
+/// is restored and the exit auto-save runs before returning. `launched_from_library`
+/// is stashed on the state so `/quit-to-library` can gate on whether a picker exists.
+fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> RunOutcome {
     let startup::BootResult {
         mut session,
         mut mapper,
@@ -805,7 +871,11 @@ fn main() {
         story_bytes,
         story_path,
         data_base,
-    } = startup::boot();
+    } = boot;
+
+    // Whether a story library exists to return to; gates `/quit-to-library`. Set
+    // once here from the launch context. (SQ-0435)
+    state.launched_from_library = launched_from_library;
 
     // ── 5. Event loop ─────────────────────────────────────────────────────────
 
@@ -864,7 +934,7 @@ fn main() {
     // draw, not the tick.
     let mut needs_redraw = true;
 
-    'event_loop: loop {
+    let outcome: RunOutcome = 'event_loop: loop {
         // Restore the terminal + exit if an external termination signal arrived
         // (SIGTERM/SIGHUP/out-of-band SIGINT); the poll below wakes at least every
         // ~50ms, so this is checked promptly.
@@ -1030,7 +1100,7 @@ fn main() {
                         if turn::apply_game_driven_result(
                             &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                         ) {
-                            break;
+                            break 'event_loop state.exit_target.into();
                         }
                     }
                 }
@@ -1048,7 +1118,7 @@ fn main() {
                         if turn::apply_game_driven_result(
                             &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                         ) {
-                            break;
+                            break 'event_loop state.exit_target.into();
                         }
                     }
                 }
@@ -1069,7 +1139,7 @@ fn main() {
                             if turn::apply_game_driven_result(
                                 &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                             ) {
-                                break 'event_loop;
+                                break 'event_loop state.exit_target.into();
                             }
                         }
                     }
@@ -1082,7 +1152,7 @@ fn main() {
                         if turn::apply_game_driven_result(
                             &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                         ) {
-                            break 'event_loop;
+                            break 'event_loop state.exit_target.into();
                         }
                     }
                 }
@@ -1111,7 +1181,7 @@ fn main() {
                     if turn::apply_game_driven_result(
                         &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                     ) {
-                        break 'event_loop;
+                        break 'event_loop state.exit_target.into();
                     }
                 }
             }
@@ -1249,7 +1319,7 @@ fn main() {
                         state.overlays.dialog_focus = 0;
                     }
                     OverlayAct::GameOverQuit => {
-                        break 'event_loop;
+                        break 'event_loop state.exit_target.into();
                     }
                     OverlayAct::SaveNameSubmit => {
                         // Empty names are rejected (dialog stays open); valid names
@@ -1271,7 +1341,7 @@ fn main() {
                                 || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
                             turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
                             turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
-                            if quit { break; }
+                            if quit { break 'event_loop state.exit_target.into(); }
                         }
                     }
                     OverlayAct::SaveNameCancel => {
@@ -1280,7 +1350,7 @@ fn main() {
                             || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
                         turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
                         turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
-                        if quit { break; }
+                        if quit { break 'event_loop state.exit_target.into(); }
                     }
                     OverlayAct::TextEntrySubmit => {
                         // A CreateFile submit hops through filename_submitted → resume
@@ -1292,7 +1362,7 @@ fn main() {
                             || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
                         turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
                         turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
-                        if quit { break; }
+                        if quit { break 'event_loop state.exit_target.into(); }
                     }
                     OverlayAct::TextEntryCancel => {
                         // A cancelled CreateFile leaves pending_filename set with no
@@ -1302,7 +1372,7 @@ fn main() {
                             || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
                         turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
                         turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
-                        if quit { break; }
+                        if quit { break 'event_loop state.exit_target.into(); }
                     }
                     OverlayAct::ConfirmDelete(confirmed) => {
                         if let Some(path) = state.overlays.confirm_delete_save.take() {
@@ -1312,15 +1382,22 @@ fn main() {
                         state.overlays.dialog_focus = 0;
                     }
                     OverlayAct::QuitSave => {
+                        // Same save/archive whether quitting or returning to the
+                        // library; the target (Exit vs Library) was set when the
+                        // dialog opened. (SQ-0435)
                         state.overlays.quit_dialog = false;
                         lifecycle::quit_dialog_save(&*session, &mapper, &state, &ifid, &arc_file);
-                        break;
+                        break 'event_loop state.exit_target.into();
                     }
                     OverlayAct::QuitQuit => {
-                        break;
+                        break 'event_loop state.exit_target.into();
                     }
                     OverlayAct::QuitCancel => {
+                        // Cancelling the dialog abandons the pending intent, so
+                        // reset the target to Exit — a later plain quit through the
+                        // same dialog must not inherit a stale Library. (SQ-0435)
                         state.overlays.quit_dialog = false;
+                        state.exit_target = app::state::ExitTarget::Exit;
                     }
                     OverlayAct::LaunchResume => {
                         if let Some((save, lines, kinds, screen)) = state.pending_resume.take() {
@@ -1773,7 +1850,7 @@ fn main() {
                             if turn::apply_game_driven_result(
                                 &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                             ) {
-                                break;
+                                break 'event_loop state.exit_target.into();
                             }
                         }
                         continue;
@@ -1815,7 +1892,7 @@ fn main() {
                                 &cmd, result, &mut state, &mut mapper, &mut *session,
                                 &game_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
                             ) {
-                                break;
+                                break 'event_loop state.exit_target.into();
                             }
                             continue 'event_loop;
                         }
@@ -1842,7 +1919,7 @@ fn main() {
                         }
                         lifecycle::flush_pending_config_write(&mut state);
                         if should_break {
-                            break;
+                            break 'event_loop state.exit_target.into();
                         }
                         continue 'event_loop;
                     }
@@ -1883,7 +1960,7 @@ fn main() {
                                         if turn::apply_game_driven_result(
                                             &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                                         ) {
-                                            break 'event_loop;
+                                            break 'event_loop state.exit_target.into();
                                         }
                                         continue 'event_loop;
                                     }
@@ -1909,7 +1986,7 @@ fn main() {
                                 if turn::apply_game_driven_result(
                                     &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
                                 ) {
-                                    break 'event_loop;
+                                    break 'event_loop state.exit_target.into();
                                 }
                                 continue 'event_loop;
                             }
@@ -1984,11 +2061,15 @@ fn main() {
             // ── Caller-handled actions ─────────────────────────────────────────
 
             Action::Quit => {
+                // A key-driven quit resolves the loop to Exit (never the library).
+                // Set it explicitly so a superseded `/quit-to-library` can't leave
+                // the target pointing at the library. (SQ-0435)
+                state.exit_target = app::state::ExitTarget::Exit;
                 if should_prompt_save_on_quit(&state) {
                     state.overlays.quit_dialog = true;
                     state.overlays.dialog_focus = 0;
                 } else {
-                    break;
+                    break 'event_loop state.exit_target.into();
                 }
             }
 
@@ -2054,7 +2135,7 @@ fn main() {
                         );
                         lifecycle::flush_pending_config_write(&mut state);
                         if should_break {
-                            break;
+                            break 'event_loop state.exit_target.into();
                         }
                         continue;
                     }
@@ -2071,7 +2152,7 @@ fn main() {
                     &cmd, result, &mut state, &mut mapper, &mut *session,
                     &game_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
                 ) {
-                    break;
+                    break 'event_loop state.exit_target.into();
                 }
             }
 
@@ -2258,7 +2339,7 @@ fn main() {
                     if let Some(io) = state.ingame_io {
                         open_ingame_saves(io, &game_dir, &mut state);
                     }
-                    if quit { break; }
+                    if quit { break 'event_loop state.exit_target.into(); }
                     continue;
                 }
 
@@ -2315,7 +2396,7 @@ fn main() {
                                 if let Some(io) = state.ingame_io {
                                     open_ingame_saves(io, &game_dir, &mut state);
                                 }
-                                if quit { break; }
+                                if quit { break 'event_loop state.exit_target.into(); }
                                 continue;
                             }
                         }
@@ -2452,7 +2533,7 @@ fn main() {
         turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
         turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
         if quit {
-            break;
+            break 'event_loop state.exit_target.into();
         }
 
         // After apply_action: if resize mode was just exited or reset, persist the
@@ -2485,13 +2566,18 @@ fn main() {
             }
         }
 
-    }
+    };
 
     // ── 6. Exit: restore terminal + (optional) autosave ───────────────────────
+    // Runs for BOTH outcomes: a return-to-library exits this story exactly like a
+    // quit (same terminal restore + exit auto-save), then the caller reopens the
+    // picker. The exit auto-save keeps progress on either path. (SQ-0435)
 
     restore_terminal();
 
     lifecycle::exit_auto_save(&*session, &mapper, &state, &ifid, &arc_file);
+
+    outcome
 }
 
 // ── Reset helper ──────────────────────────────────────────────────────────────

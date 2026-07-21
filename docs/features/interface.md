@@ -125,6 +125,12 @@ none is local but a matching *InvisiClues* can be downloaded with `H` (see below
 (Blorb-wrapped stories advertise that with the `(blorb)` suffix on the type
 label rather than a separate badge.)
 
+When you launch from a directory this way, `/quit-to-library` drops the current
+story and returns you to the picker to choose another (honouring the usual
+save-on-quit prompt) — `/quit` still exits babelmap outright. Launched against a
+single story file, there's no library to return to, so `/quit-to-library` just
+says so.
+
 The list sorts by **title**, **author**, **year**, or **type** — click a column
 header, press `s` to cycle the column, or `d` to flip the direction. `i` or
 `Tab` slides in a themeable **info panel** for the highlighted story:

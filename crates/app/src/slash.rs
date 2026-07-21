@@ -47,6 +47,11 @@ pub enum SlashOutcome {
     Reset { map: bool, data: bool },
     /// Quit the application.
     Quit,
+    /// Exit the current story and return to the story picker (only meaningful
+    /// when babelmap was launched from a directory). Handled in
+    /// `slash_dispatch`: it mirrors `Quit`'s save-prompt path but resolves the
+    /// loop to the library instead of exiting. (SQ-0435)
+    QuitToLibrary,
     /// Search the transcript; `None` repeats the last search.
     Search(Option<String>),
     /// Filter the transcript by category.
@@ -175,6 +180,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "quit", category: Category::Game, context: Context::Global,
         usage: "quit", description: "exit babelmap",
         dispatch: |_| SlashOutcome::Quit },
+    CommandSpec { name: "quit-to-library", category: Category::Game, context: Context::Global,
+        usage: "quit-to-library", description: "exit the current story and return to the story library",
+        dispatch: |_| SlashOutcome::QuitToLibrary },
     CommandSpec { name: "open-hints", category: Category::Game, context: Context::Global,
         usage: "open-hints", description: "open the hints panel",
         dispatch: |_| SlashOutcome::OpenHints },
@@ -644,6 +652,12 @@ mod tests {
     }
 
     #[test]
+    fn quit_to_library_parses_to_quit_to_library() {
+        assert!(matches!(parse("quit-to-library", '/'), SlashOutcome::QuitToLibrary));
+        assert_eq!(find_command("quit-to-library").expect("quit-to-library").category, Category::Game);
+    }
+
+    #[test]
     fn slash_hint_parses_to_open_hints() {
         assert!(matches!(crate::slash::parse("open-hints", '/'), crate::slash::SlashOutcome::OpenHints));
         // old short names no longer resolve (clean break):
@@ -729,13 +743,14 @@ mod tests {
         assert_eq!(by("save-state").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (Game 11, Map 20, View 6,
+        // Total count matches the spec table (Game 12, Map 20, View 6,
         // Transcript 3, Style 6, Export 3, Animation 4, Help 3). `open-saves`
         // was removed — `restore-state` (bare) opens the saves dialog instead.
         // `debug` (SQ-0169) opens the Z-machine debug inspector. `open-gallery`
         // and `open-style-editor` were removed (SQ-0309): the interactive
         // gallery/style-editor UIs are gone; `reload-style` remains.
-        assert_eq!(COMMANDS.len(), 58, "registry must match the spec's Full command table");
+        // `quit-to-library` (SQ-0435) exits to the story picker.
+        assert_eq!(COMMANDS.len(), 59, "registry must match the spec's Full command table");
     }
 
     #[test]
