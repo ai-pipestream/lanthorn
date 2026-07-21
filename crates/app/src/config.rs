@@ -378,6 +378,19 @@ pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
 /// User preferences loaded from TOML.  Every field has a default so a missing
 /// config file (or a file with only some fields) is always valid.
+///
+/// ADDING A PERSISTED FIELD — touch ALL of these or it silently half-works:
+///   1. this struct (with a `#[serde(default …)]`);
+///   2. `impl Default for Config` AND the test-builder `Config { … }` literal
+///      further down (both are full literals — a new field must be listed in
+///      each or the crate won't compile, which is the good case);
+///   3. `resolve`'s field-by-field merge from `from_file` — MISS THIS and a
+///      value in the file is ignored (default always wins on load);
+///   4. `write_config`'s `doc["…"] = …` — MISS THIS and a settings-panel edit
+///      is never written, so it reverts to the default on the next launch.
+/// Steps 3 and 4 fail SILENTLY (they still compile); the round-trip test
+/// `write_config_persists_panel_editable_scalars_round_trip` guards the class.
+/// Runtime-only fields (`#[serde(skip)]`, e.g. `acceleration`) skip 3 and 4.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     /// Schema stamp (see [`CONFIG_SCHEMA_VERSION`]). A file written before
@@ -622,6 +635,9 @@ pub fn resolve(cli: &Cli) -> Config {
     // Layer in the config file if it exists.
     if let Ok(text) = std::fs::read_to_string(&config_path) {
         if let Ok(from_file) = toml::from_str::<Config>(&text) {
+            // NOTE: this is a field-by-field merge — every persisted field must
+            // be copied here or the file's value is ignored on load. See the
+            // checklist on `struct Config`. (Also mirror it in `write_config`.)
             // Carry the file's own version stamp (0 if the file predates
             // versioning) so a future check can flag an out-of-date config.
             cfg.version = from_file.version;
@@ -634,6 +650,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.prompt_save_on_quit = from_file.prompt_save_on_quit;
             cfg.prompt_load_on_launch = from_file.prompt_load_on_launch;
             cfg.record_turn_history = from_file.record_turn_history;
+            cfg.hint_skip_screen_warning = from_file.hint_skip_screen_warning;
             cfg.background_tidy = from_file.background_tidy;
             cfg.aux_storage = from_file.aux_storage;
             cfg.keymap = from_file.keymap;
@@ -690,6 +707,11 @@ pub fn resolve(cli: &Cli) -> Config {
 /// using toml_edit (format-preserving). Creates the file and parent directory if absent.
 /// Does NOT emit `[colors]`/`[symbols]` — those now live in the style file.
 /// Preserves all other content (comments, `[keymap]`, `[hotkeys]`, any visual sections, etc.).
+///
+/// NOTE: every persisted field needs a `doc["…"] = …` line below — a field
+/// that's missing here is never written, so a settings-panel edit silently
+/// reverts on the next launch. See the checklist on `struct Config` (and mirror
+/// any new field in `resolve`).
 pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let config_path = dir.join("config.toml");
@@ -724,10 +746,14 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["show_room_numbers"] = toml_edit::value(cfg.show_room_numbers);
     doc["show_loc_method"] = toml_edit::value(cfg.show_loc_method);
     doc["show_status_bar"] = toml_edit::value(cfg.show_status_bar);
+    doc["hint_skip_screen_warning"] = toml_edit::value(cfg.hint_skip_screen_warning);
+    doc["watch_style"] = toml_edit::value(cfg.watch_style);
+    doc["record_turn_history"] = toml_edit::value(cfg.record_turn_history);
     doc["honor_game_colours"] = toml_edit::value(cfg.honor_game_colours);
     doc["honor_timed_input"] = toml_edit::value(cfg.honor_timed_input);
     doc["enable_sound"] = toml_edit::value(cfg.enable_sound);
     doc["volume"] = toml_edit::value(cfg.volume as i64);
+    doc["undo_levels"] = toml_edit::value(cfg.undo_levels as i64);
     if let Some(n) = cfg.interpreter_number {
         doc["interpreter_number"] = toml_edit::value(n as i64);
     }
@@ -1108,6 +1134,33 @@ use_defaults = false
         assert!(!content.contains("[colors]"), "config.toml must not carry style sections");
         assert!(!content.contains("[symbols]"));
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    #[test]
+    fn write_config_persists_panel_editable_scalars_round_trip() {
+        // Regression: undo_levels / watch_style / record_turn_history /
+        // hint_skip_screen_warning are settings-panel-editable but were absent
+        // from write_config, so a saved edit reverted to the default on restart.
+        // Round-trip NON-default values through the writer and a fresh parse.
+        let dir = std::env::temp_dir().join(format!("babelmap-cfg-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.undo_levels = 3; // default 16
+        cfg.watch_style = true; // default false
+        cfg.record_turn_history = true; // default false
+        cfg.hint_skip_screen_warning = false; // default true
+        write_config(&dir, &cfg).unwrap();
+
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let parsed: Config = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.undo_levels, 3, "undo_levels must survive save→load");
+        assert!(parsed.watch_style, "watch_style must survive save→load");
+        assert!(parsed.record_turn_history, "record_turn_history must survive save→load");
+        assert!(!parsed.hint_skip_screen_warning, "hint_skip_screen_warning must survive save→load");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
