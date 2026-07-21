@@ -35,6 +35,8 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("undo_levels",          ConfigRowKind::Num,  "How many in-memory undo snapshots to keep (0 disables undo). Use ← / → to adjust."),
     ("interpreter_number",   ConfigRowKind::Num,  "Z-machine interpreter number (header byte 1Eh); changes colour behaviour on some Infocom games (e.g. Beyond Zork). ← / → to adjust."),
     ("hint_skip_screen_warning", ConfigRowKind::Bool, "Auto-skip the InvisiClues 'your screen is only N characters wide' banner when opening izm hints, landing straight on the topic menu."),
+    ("text_margin_x",        ConfigRowKind::Num,  "Blank columns reserved on each side inside the story text pane. Imported from garglk tmarginx. Use ← / → to adjust."),
+    ("text_margin_y",        ConfigRowKind::Num,  "Blank rows reserved above and below the story text. Imported from garglk tmarginy. Use ← / → to adjust."),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -234,6 +236,8 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         19 => cfg.undo_levels.to_string(),
         20 => cfg.interpreter_number.map(|n| n.to_string()).unwrap_or_else(|| "default".to_string()),
         21 => bool_str(cfg.hint_skip_screen_warning),
+        22 => cfg.text_margin_x.to_string(),
+        23 => cfg.text_margin_y.to_string(),
         _ => String::new(),
     }
 }
@@ -308,6 +312,18 @@ mod tests {
         apply_action(Action::ConfigCycle(1), &mut state, &mut m);
         let b2 = state.overlays.config_screen.as_ref().unwrap().working.hint_skip_screen_warning;
         assert_ne!(b1, b2, "hint_skip_screen_warning must flip via ←/→ too");
+
+        // The text-margin Num rows (SQ-0345) step via ConfigCycle, clamp at 0,
+        // and ignore Space (Num rows only respond to ←/→).
+        let midx = CONFIG_ROWS.iter().position(|(n, _, _)| *n == "text_margin_x").unwrap();
+        state.overlays.config_screen.as_mut().unwrap().scroll.selected = midx;
+        state.overlays.config_screen.as_mut().unwrap().working.text_margin_x = 1;
+        apply_action(Action::ConfigCycle(1), &mut state, &mut m);
+        assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.text_margin_x, 2, "text_margin_x steps up via ←/→");
+        apply_action(Action::ConfigToggle, &mut state, &mut m);
+        assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.text_margin_x, 2, "Space is a no-op for the Num margin row");
+        for _ in 0..3 { apply_action(Action::ConfigCycle(-1), &mut state, &mut m); }
+        assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.text_margin_x, 0, "text_margin_x clamps at 0");
     }
 
     #[test]

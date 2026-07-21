@@ -490,6 +490,15 @@ pub struct Config {
     /// ≈ the old fixed 1/3 cap).
     #[serde(default = "default_inv_dock_pct")]
     pub inv_dock_pct: u16,
+    /// Inner margin reserved inside the text-buffer (transcript) window, in
+    /// character cells: `text_margin_x` blank columns on each side,
+    /// `text_margin_y` blank rows top and bottom. Default 0. Populated from
+    /// garglk `tmarginx`/`tmarginy` (converted px→cells) when a garglk config
+    /// is imported (SQ-0344).
+    #[serde(default)]
+    pub text_margin_x: u16,
+    #[serde(default)]
+    pub text_margin_y: u16,
     /// Animation engine settings: enable switch, easing curve, scroll duration.
     #[serde(default)]
     pub animation: AnimationConfig,
@@ -561,6 +570,8 @@ impl Default for Config {
             split_ratio: default_split_ratio(),
             verb_dock_pct: default_verb_dock_pct(),
             inv_dock_pct: default_inv_dock_pct(),
+            text_margin_x: 0,
+            text_margin_y: 0,
             animation: AnimationConfig::default(),
             honor_game_colours: default_honor_game_colours(),
             honor_timed_input: default_honor_timed_input(),
@@ -645,6 +656,8 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.split_ratio = from_file.split_ratio;
             cfg.verb_dock_pct = from_file.verb_dock_pct;
             cfg.inv_dock_pct = from_file.inv_dock_pct;
+            cfg.text_margin_x = from_file.text_margin_x;
+            cfg.text_margin_y = from_file.text_margin_y;
             cfg.animation = from_file.animation;
         }
         // If the file exists but is malformed, silently keep defaults.
@@ -723,6 +736,8 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["split_ratio"] = toml_edit::value(i64::from(cfg.split_ratio));
     doc["verb_dock_pct"] = toml_edit::value(i64::from(cfg.verb_dock_pct));
     doc["inv_dock_pct"] = toml_edit::value(i64::from(cfg.inv_dock_pct));
+    doc["text_margin_x"] = toml_edit::value(i64::from(cfg.text_margin_x));
+    doc["text_margin_y"] = toml_edit::value(i64::from(cfg.text_margin_y));
 
     // style pointer — the only visual key written to config.toml. The actual
     // colors/symbols live in the style file ([colors]/[symbols] are no longer
@@ -1044,6 +1059,8 @@ use_defaults = false
             split_ratio: 70,
             verb_dock_pct: 40,
             inv_dock_pct: 25,
+            text_margin_x: 0,
+            text_margin_y: 0,
             animation: AnimationConfig::default(),
             acceleration: true,
             image_protocol: ImageProtocol::Auto,

@@ -187,6 +187,7 @@ pub fn render_story_pane(
             None => 0,
         };
         let tarea = Rect::new(area.x, area.y + used, area.width, area.height.saturating_sub(used));
+        let tarea = reserve_text_margin(tarea, state, margin_style(model, state), buf);
         let (scrollbar, max_scroll, total_rows, mut tlinks) = render_transcript(&model.status, introspect, state, tarea, buf, gi);
         links.append(&mut tlinks);
         return StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: tarea.height, total_rows, links };
@@ -246,6 +247,31 @@ fn margin_style(model: &ScreenModel, state: &AppState) -> ratatui::style::Style 
         }
     }
     state.colors.theme.get("transcript").style
+}
+
+/// Reserve the configured text-window inner margin (SQ-0345) inside a
+/// text-buffer rect: paint the whole rect with `fill` so the reserved band reads
+/// as clean padding, then return the inset rect the transcript draws into.
+/// `text_margin_x` blank columns are reserved on each side and `text_margin_y`
+/// blank rows top and bottom; a margin wider/taller than the rect is capped so at
+/// least one cell of text survives. Applies to the text buffer only — the
+/// text-grid/upper window is never inset (its cells are game-positioned). Because
+/// `render_transcript` publishes its geometry from the rect it receives, insetting
+/// here also keeps mouse selection and the copy path aligned (SQ-0197/SQ-0420).
+fn reserve_text_margin(area: Rect, state: &AppState, fill: ratatui::style::Style, buf: &mut Buffer) -> Rect {
+    let mx = state.config.text_margin_x.min(area.width.saturating_sub(1) / 2);
+    let my = state.config.text_margin_y.min(area.height.saturating_sub(1) / 2);
+    if mx == 0 && my == 0 {
+        return area;
+    }
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(" ").set_style(fill);
+            }
+        }
+    }
+    Rect::new(area.x + mx, area.y + my, area.width - 2 * mx, area.height - 2 * my)
 }
 
 /// Blank gvm's snap-margin — the L-shaped region of `area` outside `inner` (the
@@ -322,6 +348,7 @@ fn render_node(
         }
         WinNode::Buffer(b) => {
             if b.primary {
+                let area = reserve_text_margin(area, state, state.colors.theme.get("transcript").style, buf);
                 let (scrollbar, max_scroll, total_rows, links) =
                     render_transcript(status, introspect, state, area, buf, game_input);
                 Some(StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: area.height, total_rows, links })
@@ -614,6 +641,61 @@ mod tests {
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
         )
+    }
+
+    #[test]
+    fn reserve_text_margin_insets_caps_and_noops_at_zero() {
+        let mut state = crate::state::AppState::default();
+        let fill = ratatui::style::Style::default();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 20, 10));
+        let area = Rect::new(0, 0, 20, 10);
+
+        // Zero margin returns the rect untouched.
+        state.config.text_margin_x = 0;
+        state.config.text_margin_y = 0;
+        assert_eq!(reserve_text_margin(area, &state, fill, &mut buf), area);
+
+        // (2,1) reserves 2 columns each side and 1 row top+bottom.
+        state.config.text_margin_x = 2;
+        state.config.text_margin_y = 1;
+        assert_eq!(reserve_text_margin(area, &state, fill, &mut buf), Rect::new(2, 1, 16, 8));
+
+        // An over-large margin is capped so at least one cell of text survives.
+        state.config.text_margin_x = 100;
+        state.config.text_margin_y = 100;
+        let got = reserve_text_margin(area, &state, fill, &mut buf);
+        assert!(got.width >= 1 && got.height >= 1, "capped margin keeps >=1 cell: {got:?}");
+    }
+
+    #[test]
+    fn simple_path_transcript_geometry_is_inset_by_text_margin() {
+        // The rect render_transcript publishes as `transcript_geom` (what mouse
+        // selection maps through) must shrink by exactly the configured margin, so
+        // the inset stays consistent with clicks and the copy path (SQ-0345).
+        let published = |mx: u16, my: u16| {
+            let mut state = AppState::default();
+            state.colors = crate::colors::ColorScheme::terminal_default();
+            state.config.text_margin_x = mx;
+            state.config.text_margin_y = my;
+            for k in 0..5 { state.push_transcript(&format!("line {k}")); }
+            let model = ScreenModel {
+                root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+                status: StatusModel::HostManaged,
+                bg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+                fg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+                content_size: (0, 0),
+            };
+            let area = Rect::new(0, 0, 40, 10);
+            let mut buf = Buffer::empty(area);
+            render_story_pane(&model, false, None, &state, area, &mut buf);
+            state.transcript_geom.get().expect("transcript geom published").area
+        };
+        let base = published(0, 0);
+        let inset = published(3, 2);
+        assert_eq!(inset.x, base.x + 3, "left margin reserved");
+        assert_eq!(inset.y, base.y + 2, "top margin reserved");
+        assert_eq!(inset.width, base.width - 6, "both horizontal margins reserved");
+        assert_eq!(inset.height, base.height - 4, "top+bottom margins reserved");
     }
 
     fn grid_with(text: &str) -> GridWindow {

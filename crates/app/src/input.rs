@@ -2758,6 +2758,8 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
             working.interpreter_number = if pos == 0 { None } else { Some(pos as u8) };
         }
         21 => working.hint_skip_screen_warning = !working.hint_skip_screen_warning,
+        22 => working.text_margin_x = (working.text_margin_x as i32 + delta).clamp(0, 8) as u16,
+        23 => working.text_margin_y = (working.text_margin_y as i32 + delta).clamp(0, 8) as u16,
         _ => {}
     }
 }
