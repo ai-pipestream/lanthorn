@@ -116,7 +116,9 @@ Point babelmap at a directory instead of a story file
 row shows the title (or filename), and a right-hand **TYPE** column names the
 engine and version at a glance — `Z5`, `Z5 (blorb)`, `G3.1.2`, `Scott`, or
 `Scott (blorb)` — so all three engines are told apart on sight. Two artifact
-badges ride beside it: an existing **Save** and an available **Hint** file.
+badges ride beside it: an existing **Save** and a **Hint** file — the hint badge
+is uppercase (`H`) when a hint file is present locally and lowercase (`h`) when
+none is local but a matching *InvisiClues* can be downloaded with `H` (see below).
 (Blorb-wrapped stories advertise that with the `(blorb)` suffix on the type
 label rather than a separate badge.)
 
@@ -133,8 +135,8 @@ scroll resets whenever the highlighted story changes.
 
 `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End navigate, `Enter` or a click opens the story,
 `q`/`Esc` quits back to the shell. The badge glyphs are configurable under
-`[symbols]` (`badge_save`/`badge_hint`, plus `badge_zcode`/`badge_glulx`/
-`badge_blorb`), and the badge cluster, sortable headers, and info panel are all
+`[symbols]` (`badge_save`/`badge_hint`/`badge_hint_available`, plus `badge_zcode`/
+`badge_glulx`/`badge_blorb`), and the badge cluster, sortable headers, and info panel are all
 themeable through the `story_badge`, `story_header`/`story_header:active` (the
 active sort column), `story_author`, `story_year`, `story_no_metadata` (the
 "(no metadata yet)" placeholder), `story_tile`/`story_tile:selected` (the

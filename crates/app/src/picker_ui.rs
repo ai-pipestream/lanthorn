@@ -1220,7 +1220,9 @@ fn draw_story_picker(
     // blorb indicator moved into the TYPE column (SQ-0369: "Z5 (blorb)"), so
     // the cluster is now just [save][hint].
     let save_w = glyphs.save.chars().count() as u16;
-    let hint_w = glyphs.hint.chars().count() as u16;
+    // Reserve the wider of the present/available hint glyphs so the cluster width
+    // is stable regardless of which one a row shows.
+    let hint_w = glyphs.hint.chars().count().max(glyphs.hint_available.chars().count()) as u16;
     let cluster_w = save_w + hint_w;
     // The TYPE column rides in the same right-hand zone as the badges, one gap
     // to their left; both are shown together or dropped together.
@@ -1333,8 +1335,13 @@ fn draw_story_picker(
             if b.save {
                 draw_str_clipped(buf, bx, y, glyphs.save, badge_style, row_rect);
             }
-            if b.hint {
-                draw_str_clipped(buf, bx + save_w, y, glyphs.hint, badge_style, row_rect);
+            let hint_glyph = match b.hint {
+                app::picker::HintBadge::Present => Some(glyphs.hint),
+                app::picker::HintBadge::Available => Some(glyphs.hint_available),
+                app::picker::HintBadge::None => None,
+            };
+            if let Some(g) = hint_glyph {
+                draw_str_clipped(buf, bx + save_w, y, g, badge_style, row_rect);
             }
         }
     }
@@ -1747,9 +1754,18 @@ fn draw_info_panel(
     }
     // Associated hint sidecar (SQ-0443): an InvisiClues/hint image detected
     // beside the story and hidden from the list. Named here so the player sees
-    // hints are available and which file supplies them.
+    // hints are available and which file supplies them. With no local file, note
+    // when a matching InvisiClues can be downloaded with `H` (SQ-0445).
     if let Some(name) = hint_sidecar.and_then(|p| p.file_name()).and_then(|s| s.to_str()) {
         lines.push((format!("Hints: {name}"), story_info_value));
+    } else {
+        let stem = std::path::Path::new(filename)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if app::hints::hint_download_for(stem, title).is_some() {
+            lines.push(("Hints: available to download (press H)".to_string(), story_info_value));
+        }
     }
     // author · year · genre (SQ-0348): one line, present parts only — a story
     // with none of the three renders no line at all, so a no-metadata panel
@@ -2228,8 +2244,8 @@ mod tests {
         // One Z-code story with all three artifacts, one Glulx story with only a save.
         let stories = make_two_test_stories();
         let badges = vec![
-            app::picker::RowBadges { blorb: true, save: true, hint: true },
-            app::picker::RowBadges { blorb: false, save: true, hint: false },
+            app::picker::RowBadges { blorb: true, save: true, hint: app::picker::HintBadge::Present },
+            app::picker::RowBadges { blorb: false, save: true, hint: app::picker::HintBadge::None },
         ];
         let mut list = app::list_scroll::ListScroll::new();
         list.len(stories.len());
@@ -2261,6 +2277,31 @@ mod tests {
         assert_eq!(save_x0, save_x1, "save glyph column must be fixed across rows");
     }
 
+    /// An `Available` hint renders the lowercase glyph, distinct from a present
+    /// hint's uppercase `H`.
+    #[test]
+    fn row_renders_lowercase_glyph_for_available_hint() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+
+        let stories = make_two_test_stories();
+        let badges = vec![
+            app::picker::RowBadges { blorb: true, save: false, hint: app::picker::HintBadge::Available },
+            app::picker::RowBadges::default(),
+        ];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(stories.len());
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        super::draw_story_picker(&stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+                          &cs, app::picker::Sort::default(), area, &mut buf);
+        let row0 = row_text(&buf, 2, area);
+        assert!(row0.contains('h'), "available hint shows lowercase glyph: {row0:?}");
+        assert!(!row0.contains('H'), "available hint is NOT the uppercase present glyph: {row0:?}");
+    }
+
     #[test]
     fn row_uses_configured_badge_glyphs() {
         use ratatui::{buffer::Buffer, layout::Rect};
@@ -2273,7 +2314,7 @@ mod tests {
 
         let stories = make_two_test_stories();
         let badges = vec![
-            app::picker::RowBadges { blorb: true, save: true, hint: false },
+            app::picker::RowBadges { blorb: true, save: true, hint: app::picker::HintBadge::None },
             app::picker::RowBadges::default(),
         ];
         let mut list = app::list_scroll::ListScroll::new();

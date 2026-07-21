@@ -966,12 +966,26 @@ pub fn resort_preserving_selection(stories: &mut [StoryEntry], selected: usize, 
     keep.and_then(|p| stories.iter().position(|e| e.path == p)).unwrap_or(0)
 }
 
+/// A row's hint state, driving which (if any) hint glyph the row shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HintBadge {
+    /// No hint locally and none available to download.
+    #[default]
+    None,
+    /// No local hint, but a matching InvisiClues can be downloaded (`H`) —
+    /// shown as the lowercase available-hint glyph.
+    Available,
+    /// A hint file is present locally (a sidecar or a remembered association) —
+    /// shown as the uppercase hint glyph.
+    Present,
+}
+
 /// Cheap existence flags shown on every list row (panel-independent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RowBadges {
     pub blorb: bool,
     pub save: bool,
-    pub hint: bool,
+    pub hint: HintBadge,
 }
 
 /// True if `path` has an associated resource blorb — an exact same-stem
@@ -994,10 +1008,21 @@ pub fn compute_row_badges(
 ) -> RowBadges {
     let ifid = &entry.meta.ifid;
     let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(&entry.path));
+    let hint = if hint_index.get(ifid).is_some() || entry.hint_sidecar.is_some() {
+        HintBadge::Present
+    } else {
+        // No local hint — light the lowercase glyph if one is downloadable.
+        let stem = entry.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if hints::hint_download_for(stem, &entry.title).is_some() {
+            HintBadge::Available
+        } else {
+            HintBadge::None
+        }
+    };
     RowBadges {
         blorb: entry.meta.self_blorb.is_some() || sibling_blorb_exists(&entry.path),
         save: game_dir_has_save(&game_dir),
-        hint: hint_index.get(ifid).is_some() || entry.hint_sidecar.is_some(),
+        hint,
     }
 }
 
@@ -1021,6 +1046,7 @@ pub struct BadgeGlyphs<'a> {
     pub blorb: &'a str,
     pub save: &'a str,
     pub hint: &'a str,
+    pub hint_available: &'a str,
 }
 
 impl<'a> BadgeGlyphs<'a> {
@@ -1031,6 +1057,7 @@ impl<'a> BadgeGlyphs<'a> {
             blorb: &s.badge_blorb,
             save: &s.badge_save,
             hint: &s.badge_hint,
+            hint_available: &s.badge_hint_available,
         }
     }
 }
@@ -1643,7 +1670,7 @@ mod tests {
 
         let b = compute_row_badges(&e, &base, &hi);
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(b.hint, "sidecar presence lights the hint badge with an empty index");
+        assert_eq!(b.hint, HintBadge::Present, "sidecar presence lights the present-hint badge with an empty index");
     }
 
     #[test]
@@ -1676,9 +1703,28 @@ mod tests {
         let c = compute_row_badges(&e_bare, &base, &hi);
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert_eq!((a.blorb, a.save, a.hint), (true, true, false));
-        assert_eq!((b.blorb, b.save, b.hint), (true, true, false));
-        assert_eq!((c.blorb, c.save, c.hint), (false, false, false));
+        assert_eq!((a.blorb, a.save, a.hint), (true, true, HintBadge::None));
+        assert_eq!((b.blorb, b.save, b.hint), (true, true, HintBadge::None));
+        assert_eq!((c.blorb, c.save, c.hint), (false, false, HintBadge::None));
+    }
+
+    /// A game with no local hint but a matching downloadable InvisiClues lights
+    /// the lowercase available-hint badge; a game with neither stays None.
+    #[test]
+    fn compute_row_badges_marks_downloadable_hint_available() {
+        let dir = temp_dir("badge-available");
+        let base = dir.join("data");
+        let hi = hints::load_hint_index(&dir); // empty index
+
+        // "deadline" matches the SLAG catalog → Available (no local file).
+        let e_dl = entry_with("IFID-DL", dir.join("deadline.z3"), None);
+        assert_eq!(compute_row_badges(&e_dl, &base, &hi).hint, HintBadge::Available);
+
+        // A game no catalog covers stays None.
+        let e_none = entry_with("IFID-N", dir.join("colossal.z5"), None);
+        assert_eq!(compute_row_badges(&e_none, &base, &hi).hint, HintBadge::None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // Minimal blorb with one Snd resource so resolve_resource_blorb accepts a sibling.

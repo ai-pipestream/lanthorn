@@ -132,6 +132,7 @@ pub struct StyleSymbols {
     pub badge_blorb: Option<String>,
     pub badge_save: Option<String>,
     pub badge_hint: Option<String>,
+    pub badge_hint_available: Option<String>,
     /// Draw diagonal stubs out of room corners for ne/nw/se/sw exits (SQ-0314).
     /// `None` → the config default (on). Set false for a font without Unicode 13
     /// Legacy Computing coverage.
@@ -157,6 +158,7 @@ pub fn finalize_symbols(s: &StyleSymbols) -> crate::config::SymbolConfig {
         badge_blorb: s.badge_blorb.clone().unwrap_or_else(crate::config::default_badge_blorb),
         badge_save: s.badge_save.clone().unwrap_or_else(crate::config::default_badge_save),
         badge_hint: s.badge_hint.clone().unwrap_or_else(crate::config::default_badge_hint),
+        badge_hint_available: s.badge_hint_available.clone().unwrap_or_else(crate::config::default_badge_hint_available),
         diagonal_corners: s.diagonal_corners.unwrap_or_else(crate::config::default_diagonal_corners),
         overrides: s.overrides.clone(),
     }
@@ -286,6 +288,7 @@ pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc {
         badge_blorb: over.symbols.badge_blorb.clone().or(base.symbols.badge_blorb.clone()),
         badge_save: over.symbols.badge_save.clone().or(base.symbols.badge_save.clone()),
         badge_hint: over.symbols.badge_hint.clone().or(base.symbols.badge_hint.clone()),
+        badge_hint_available: over.symbols.badge_hint_available.clone().or(base.symbols.badge_hint_available.clone()),
         diagonal_corners: over.symbols.diagonal_corners.or(base.symbols.diagonal_corners),
         overrides: {
             let mut ov = base.symbols.overrides.clone();

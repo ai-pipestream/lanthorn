@@ -430,6 +430,7 @@ impl SymbolSet {
             badge_blorb: crate::config::default_badge_blorb(),
             badge_save: crate::config::default_badge_save(),
             badge_hint: crate::config::default_badge_hint(),
+            badge_hint_available: crate::config::default_badge_hint_available(),
             diagonal_corners: crate::config::default_diagonal_corners(),
             overrides: std::collections::BTreeMap::new(),
         };
@@ -684,6 +685,7 @@ mod tests {
             badge_blorb: crate::config::default_badge_blorb(),
             badge_save: crate::config::default_badge_save(),
             badge_hint: crate::config::default_badge_hint(),
+            badge_hint_available: crate::config::default_badge_hint_available(),
             diagonal_corners: crate::config::default_diagonal_corners(),
             overrides: std::collections::BTreeMap::new(),
         };

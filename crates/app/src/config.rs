@@ -54,6 +54,7 @@ pub(crate) fn default_badge_glulx() -> String { "G".into() }
 pub(crate) fn default_badge_blorb() -> String { "B".into() }
 pub(crate) fn default_badge_save() -> String { "S".into() }
 pub(crate) fn default_badge_hint() -> String { "H".into() }
+pub(crate) fn default_badge_hint_available() -> String { "h".into() }
 pub(crate) fn default_diagonal_corners() -> bool { true }
 
 /// The `[symbols]` section of config.toml.  All fields default to the preset
@@ -87,6 +88,9 @@ pub struct SymbolConfig {
     /// Row "a hint file exists" artifact badge glyph (default "H").
     #[serde(default = "default_badge_hint")]
     pub badge_hint: String,
+    /// Row "a hint is available to download" artifact badge glyph (default "h").
+    #[serde(default = "default_badge_hint_available")]
+    pub badge_hint_available: String,
     /// Draw a diagonal stub out of a room corner for ne/nw/se/sw exits (SQ-0314).
     /// Default true. Set false for a terminal/font without Unicode 13 Legacy
     /// Computing coverage: the map falls back to the corner arrow plus a purely
@@ -110,6 +114,7 @@ impl Default for SymbolConfig {
             badge_blorb: default_badge_blorb(),
             badge_save: default_badge_save(),
             badge_hint: default_badge_hint(),
+            badge_hint_available: default_badge_hint_available(),
             diagonal_corners: default_diagonal_corners(),
             overrides: BTreeMap::new(),
         }
