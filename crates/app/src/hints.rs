@@ -277,6 +277,16 @@ pub fn hint_download_for(game_stem: &str, game_title: &str) -> Option<HintDownlo
     None
 }
 
+/// True if `text` is the InvisiClues narrow-screen boot banner. The izm hint
+/// files print it when the advertised screen width (a single header byte, so
+/// ≤255) is below their longest menu-item name, which can reach 512 chars — so
+/// it fires for any real terminal. Matched on the stable phrase (not the width
+/// number) so the hint boot can auto-skip it. See `hint_opening` in main.rs.
+pub fn is_narrow_screen_warning(text: &str) -> bool {
+    let t = text.to_ascii_lowercase();
+    t.contains("your screen is only") && t.contains("characters wide")
+}
+
 /// The stem of a hint file's name, i.e. the raw file name minus a trailing
 /// `.z3/.z5/.z8` extension, lowercased.
 ///
@@ -822,6 +832,18 @@ mod tests {
     fn hint_download_rejects_stray_word_match() {
         assert!(hint_download_for("Brain_Guzzlers_from_Beyond!.gblorb", "Brain Guzzlers from Beyond!").is_none());
         assert!(!hint_matches_story("bzorkizm.z5", "Brain Guzzlers from Beyond!"));
+    }
+
+    #[test]
+    fn narrow_screen_warning_matches_any_width() {
+        // The real banner, at two different advertised widths.
+        assert!(is_narrow_screen_warning(
+            "WARNING: Your screen is only 80 characters wide. The names of some menu items contain up to 512 characters"
+        ));
+        assert!(is_narrow_screen_warning("your screen is only 255 characters wide."));
+        // Ordinary clue/menu text must not match.
+        assert!(!is_narrow_screen_warning("Type the number of the topic you want a hint for."));
+        assert!(!is_narrow_screen_warning(""));
     }
 
     #[test]

@@ -2654,6 +2654,25 @@ fn is_slash(input: &str, prefix: char) -> bool {
 
 // ── Hints open helper ─────────────────────────────────────────────────────────
 
+/// The opening transcript for a freshly-booted hint companion, with the
+/// InvisiClues narrow-screen warning auto-skipped.
+///
+/// The izm hint files open on a "your screen is only N characters wide…" banner
+/// and wait for a keypress before showing the topic menu (the menu lives in the
+/// upper window). When the boot output is that banner, press one key here so the
+/// player lands straight on the menu; the keypress erases the banner. If the
+/// output isn't the banner (or the file isn't waiting for a key), fall back to
+/// the raw opening — no harm, the banner just shows as before.
+fn hint_opening(vm: &mut app::session::GameSession) -> String {
+    let opening = vm.take_transcript();
+    if hints::is_narrow_screen_warning(&opening)
+        && matches!(vm.pending_input(), app::session::InputKind::Char)
+    {
+        return vm.submit_char(b' ').transcript;
+    }
+    opening
+}
+
 /// Open the hints panel for the current story, resolving the hint source.
 ///
 /// If a panel is already open this is a no-op.  Discovery order:
@@ -2686,7 +2705,7 @@ fn open_hints(
                     match app::session::GameSession::new(bytes, state.config.honor_game_colours, false, state.config.interpreter_number) {
                         Ok(mut vm) => {
                             vm.machine.undo_cap = state.config.undo_levels;
-                            let opening = vm.take_transcript();
+                            let opening = hint_opening(&mut vm);
                             let transcript: Vec<String> =
                                 opening.split('\n').map(|l| l.to_owned()).collect();
                             let label = p
@@ -2722,7 +2741,7 @@ fn open_hints(
                     match app::session::GameSession::new(bytes, state.config.honor_game_colours, false, state.config.interpreter_number) {
                         Ok(mut vm) => {
                             vm.machine.undo_cap = state.config.undo_levels;
-                            let opening = vm.take_transcript();
+                            let opening = hint_opening(&mut vm);
                             let transcript: Vec<String> =
                                 opening.split('\n').map(|l| l.to_owned()).collect();
                             let label = entry.rsplit('/').next().unwrap_or(&entry).to_owned();
