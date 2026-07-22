@@ -153,6 +153,106 @@ pub fn build_chrome_canvas(
     canvas
 }
 
+/// A uniform (aspect-preserving) letterbox scale from native game pixels to
+/// pane device pixels, plus the device-pixel offset of the letterboxed area.
+pub struct Scale {
+    pub s: f32,
+    pub off_x: u32,
+    pub off_y: u32,
+}
+
+/// Compute the uniform letterbox scale that fits `native` game-pixel
+/// dimensions into `pane_dev` device-pixel dimensions, centering the result.
+pub fn uniform_scale(native: (u16, u16), pane_dev: (u32, u32)) -> Scale {
+    let nw = if native.0 == 0 { 1 } else { native.0 as u32 } as f32;
+    let nh = if native.1 == 0 { 1 } else { native.1 as u32 } as f32;
+    let s = (pane_dev.0 as f32 / nw).min(pane_dev.1 as f32 / nh);
+    let scaled_w = nw * s;
+    let scaled_h = nh * s;
+    let off_x = ((pane_dev.0 as f32 - scaled_w) / 2.0).max(0.0) as u32;
+    let off_y = ((pane_dev.1 as f32 - scaled_h) / 2.0).max(0.0) as u32;
+    Scale { s, off_x, off_y }
+}
+
+/// The cell rect (relative to the pane's top-left cell) where story text
+/// goes: the largest cell-aligned rect inside the story window's device rect
+/// that touches no opaque chrome pixel. Falls back to the full pane when
+/// there is no story window.
+pub fn story_viewport(
+    story: Option<&PositionedWindow>,
+    chrome_canvas: &image::RgbaImage,
+    scale: &Scale,
+    pane_cells: (u16, u16),
+    cell_px: (u16, u16),
+) -> ratatui::layout::Rect {
+    let Some(story) = story else {
+        return ratatui::layout::Rect { x: 0, y: 0, width: pane_cells.0, height: pane_cells.1 };
+    };
+
+    let (cw, ch) = chrome_canvas.dimensions();
+    let opaque = |x: u32, y: u32| -> bool { x < cw && y < ch && chrome_canvas.get_pixel(x, y)[3] >= 128 };
+
+    let mut left = story.x_px as u32;
+    let mut top = story.y_px as u32;
+    let mut right = (story.x_px as u32 + story.w_px as u32).min(cw);
+    let mut bottom = (story.y_px as u32 + story.h_px as u32).min(ch);
+
+    // Inset one native pixel at a time per edge, banner first then columns,
+    // but *interleaved* round by round (rather than each edge run to
+    // completion before the next starts): a story window can overlap chrome
+    // on both axes at once (e.g. a banner AND side columns), and letting the
+    // top/bottom scan run to completion against the still-full width would
+    // never see a "clear" row while side-band columns persist down the whole
+    // height. Shrinking left/right a step at a time alongside top/bottom lets
+    // each edge's scan range narrow in lockstep, converging on the true
+    // clear interior.
+    loop {
+        let mut changed = false;
+        if top < bottom && (left..right).any(|x| opaque(x, top)) {
+            top += 1;
+            changed = true;
+        }
+        if bottom > top && (left..right).any(|x| opaque(x, bottom - 1)) {
+            bottom -= 1;
+            changed = true;
+        }
+        if left < right && (top..bottom).any(|y| opaque(left, y)) {
+            left += 1;
+            changed = true;
+        }
+        if right > left && (top..bottom).any(|y| opaque(right - 1, y)) {
+            right -= 1;
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let dev_left = scale.off_x as f32 + left as f32 * scale.s;
+    let dev_top = scale.off_y as f32 + top as f32 * scale.s;
+    let dev_right = scale.off_x as f32 + right as f32 * scale.s;
+    let dev_bottom = scale.off_y as f32 + bottom as f32 * scale.s;
+
+    let cw_px = if cell_px.0 == 0 { 1 } else { cell_px.0 } as f32;
+    let ch_px = if cell_px.1 == 0 { 1 } else { cell_px.1 } as f32;
+
+    let cell_left = (dev_left / cw_px).ceil() as u16;
+    let cell_top = (dev_top / ch_px).ceil() as u16;
+    let cell_right = (dev_right / cw_px).floor() as u16;
+    let cell_bottom = (dev_bottom / ch_px).floor() as u16;
+
+    let width = cell_right.saturating_sub(cell_left).max(1);
+    let height = cell_bottom.saturating_sub(cell_top).max(1);
+
+    let cell_left = cell_left.min(pane_cells.0.saturating_sub(1).max(0));
+    let cell_top = cell_top.min(pane_cells.1.saturating_sub(1).max(0));
+    let width = width.min(pane_cells.0.saturating_sub(cell_left));
+    let height = height.min(pane_cells.1.saturating_sub(cell_top));
+
+    ratatui::layout::Rect { x: cell_left, y: cell_top, width, height }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,5 +381,49 @@ mod tests {
             (26..34).any(|x| (12..20).any(|y| *c.get_pixel(x, y) == fg)),
             "glyph fg pixels appear within the status cell's native box"
         );
+    }
+
+    #[test]
+    fn uniform_scale_letterboxes() {
+        let scale = uniform_scale((320, 200), (640, 480));
+        assert_eq!(scale.s, 2.0);
+        assert_eq!(scale.off_x, 0);
+        assert_eq!(scale.off_y, 40);
+    }
+
+    #[test]
+    fn story_viewport_clears_the_chrome_ring() {
+        // 40x40 native canvas: opaque top band rows 0..8, opaque left cols
+        // 0..8 and right cols 32..40 across all rows; interior transparent.
+        let mut canvas = image::RgbaImage::new(40, 40);
+        let opaque = Rgba([255, 255, 255, 255]);
+        for y in 0..40u32 {
+            for x in 0..40u32 {
+                let in_band = y < 8;
+                let in_side = x < 8 || x >= 32;
+                if in_band || in_side {
+                    canvas.put_pixel(x, y, opaque);
+                }
+            }
+        }
+        let story = buffer_item(0, true);
+        // buffer_item defaults x_px/y_px to 0 and w_px/h_px to 8; override via
+        // a fresh PositionedWindow spanning the whole native area.
+        let story = PositionedWindow { x_px: 0, y_px: 0, w_px: 40, h_px: 40, ..story };
+        let scale = uniform_scale((40, 40), (40, 40));
+        let rect = story_viewport(Some(&story), &canvas, &scale, (40, 40), (1, 1));
+        assert!(rect.x >= 8, "left edge clears the left band: x={}", rect.x);
+        assert!(rect.y >= 8, "top edge clears the top band: y={}", rect.y);
+        assert!(rect.x + rect.width <= 32, "right edge clears the right band: x+w={}", rect.x + rect.width);
+        assert!(rect.width >= 1);
+        assert!(rect.height >= 1);
+    }
+
+    #[test]
+    fn story_viewport_no_story_is_full_pane() {
+        let canvas = image::RgbaImage::new(40, 40);
+        let scale = uniform_scale((40, 40), (40, 40));
+        let rect = story_viewport(None, &canvas, &scale, (40, 40), (1, 1));
+        assert_eq!(rect, ratatui::layout::Rect { x: 0, y: 0, width: 40, height: 40 });
     }
 }
