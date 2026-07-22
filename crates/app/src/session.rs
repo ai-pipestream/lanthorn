@@ -609,22 +609,39 @@ impl GameSession {
         // exceeds any real v6 screen (~640 px) yet bounds worst-case storage to
         // ~64 MB — mirroring the grid-cell cap on the engine side (Phase 1a).
         const CANVAS_PX_CAP: u32 = 4096;
+        // A v6 window's picture canvas must be large enough to hold every picture
+        // drawn into it: a game can draw a picture taller/wider than the window's
+        // nominal pixel size (Zork0 draws its 45x40 compass into a 320x5 banner
+        // window), and clamping the canvas to the window size would clip it away.
+        // Size the canvas to the max of the window size and the drawn picture's
+        // extent at its draw offset. (SQ-0186)
+        let dims = self.pict_source.as_mut().and_then(|s| s.dims(ev.number as u32));
+        let (iw, ih) = dims.unwrap_or((0, 0));
+        let need_w = (ev.x as u32).saturating_add(iw);
+        let need_h = (ev.y as u32).saturating_add(ih);
+        // Grow-only: the canvas must accommodate the window size AND every picture
+        // ever drawn into it. Never shrink between draws — `Canvas::resize` clears
+        // on any dimension change, so a smaller follow-up picture would wipe the
+        // earlier ones (e.g. Zork0 stacks 8 compass overlays, then a smaller mark).
+        let (cur_w, cur_h) = self.pictures_canvas.get(&ev.window)
+            .map(|c| { let a = c.arc(); (a.width(), a.height()) })
+            .unwrap_or((0, 0));
         let (pw, ph) = (
-            (w.x_size.max(1) as u32).min(CANVAS_PX_CAP),
-            (w.y_size.max(1) as u32).min(CANVAS_PX_CAP),
+            (w.x_size.max(1) as u32).max(need_w).max(cur_w).min(CANVAS_PX_CAP),
+            (w.y_size.max(1) as u32).max(need_h).max(cur_h).min(CANVAS_PX_CAP),
         );
         if ev.erase {
-            let dims = self.pict_source.as_mut().and_then(|s| s.dims(ev.number as u32));
             let canvas = self.pictures_canvas.entry(ev.window)
                 .or_insert_with(|| crate::graphics::Canvas::new(pw, ph));
-            canvas.resize(pw, ph);
+            canvas.grow_to(pw, ph);
             let (ew, eh) = dims.unwrap_or((pw, ph));
             canvas.erase_rect(ev.x as i32, ev.y as i32, ew, eh);
         } else if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
             let canvas = self.pictures_canvas.entry(ev.window)
                 .or_insert_with(|| crate::graphics::Canvas::new(pw, ph));
-            canvas.resize(pw, ph);
+            canvas.grow_to(pw, ph);
             canvas.draw_image(&img, ev.x as i32, ev.y as i32, None);
+            canvas.z_seq = crate::graphics::next_draw_seq();
         }
     }
 
@@ -654,7 +671,11 @@ impl GameSession {
         // text, never over it. Within each band, ascending window number
         // (window 1+ overlays paint after window 0). The pixel compositor and the
         // Phase 1b cell fallback both honour this order.
-        let mut graphics_entries = Vec::new();
+        // Graphics carry their global draw-order stamp so the composite can be
+        // sorted by DRAW ORDER (later draw on top), not window number — the frame
+        // background (drawn first) sits behind the overlays the game paints after
+        // it (compass, room illustration). (SQ-0186)
+        let mut graphics_entries: Vec<(u64, PositionedWindow)> = Vec::new();
         let mut text_entries = Vec::new();
         for (i, win) in v6.windows.iter().enumerate() {
             if win.x_size == 0 || win.y_size == 0 {
@@ -665,7 +686,7 @@ impl GameSession {
             let (cols, rows) = (win.grid.cols, win.grid.rows);
 
             if let Some(canvas) = self.pictures_canvas.get(&(i as u8)) {
-                graphics_entries.push(PositionedWindow {
+                graphics_entries.push((canvas.z_seq, PositionedWindow {
                     x,
                     y,
                     w: cols,
@@ -682,7 +703,7 @@ impl GameSession {
                         version: canvas.version,
                         upscale: false,
                     }),
-                });
+                }));
             }
 
             let node = if i == 0 {
@@ -727,6 +748,12 @@ impl GameSession {
                 node,
             });
         }
+
+        // Sort graphics by draw order (stable: equal stamps keep window order),
+        // then drop the stamps — later-drawn windows now composite on top.
+        graphics_entries.sort_by_key(|(seq, _)| *seq);
+        let mut graphics_entries: Vec<PositionedWindow> =
+            graphics_entries.into_iter().map(|(_, pw)| pw).collect();
 
         // content_size: the max right/bottom cell extent actually covered by a
         // window, or (when no window survived the size-0 skip) the header's

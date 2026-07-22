@@ -17,11 +17,27 @@ fn rgb(color: u32) -> Rgba<u8> {
 /// cheap reference-count bump, not a full-bitmap deep copy. Mutations go through
 /// `Arc::make_mut`, which copies-on-write only when a previously-handed-out clone
 /// is still alive, so a static canvas is never copied. (SQ-0343)
+/// Process-global draw sequence: every v6 picture draw stamps the target
+/// canvas with the next value, so the renderer can z-order overlapping v6
+/// windows by DRAW ORDER (later draw = on top) instead of window number — the
+/// order the game actually painted them (e.g. Zork0 draws its banner, then the
+/// compass overlays, then the room illustration on top). (SQ-0186)
+static DRAW_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The next global draw-sequence stamp.
+pub fn next_draw_seq() -> u64 {
+    DRAW_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct Canvas {
     pub img: Arc<RgbaImage>,
     bg: Rgba<u8>,
     /// Bumped on every draw so the renderer can cache the built protocol.
     pub version: u64,
+    /// Global draw-order stamp of this canvas's most recent picture draw
+    /// (0 = never drawn). The v6 compositor sorts overlapping windows by this,
+    /// so later-drawn windows paint on top. Set only on the v6 picture path.
+    pub z_seq: u64,
 }
 
 impl Canvas {
@@ -31,7 +47,7 @@ impl Canvas {
         // by a resize before the game's Arrange redraw lands) must show the pane
         // underneath, never a solid black block. Games that want an opaque
         // background set it via glk_window_set_background_color. (SQ-0332)
-        Canvas { img: Arc::new(RgbaImage::new(w.max(1), h.max(1))), bg: Rgba([0, 0, 0, 0x00]), version: 1 }
+        Canvas { img: Arc::new(RgbaImage::new(w.max(1), h.max(1))), bg: Rgba([0, 0, 0, 0x00]), version: 1, z_seq: 0 }
     }
 
     /// Resize (preserving nothing — Glk redraws) if the pixel dims changed. Cleared
@@ -42,6 +58,23 @@ impl Canvas {
             self.img = Arc::new(RgbaImage::from_pixel(w.max(1), h.max(1), self.bg));
             self.version += 1;
         }
+    }
+
+    /// Grow the canvas to at least `w × h`, PRESERVING existing content (a v6
+    /// window can receive several stacked pictures, and a picture may extend past
+    /// the window's nominal pixel size — e.g. Zork0's 45×40 compass into a 320×5
+    /// banner). Never shrinks; a no-op when already big enough. Unlike `resize`,
+    /// this keeps what was already drawn. (SQ-0186)
+    pub fn grow_to(&mut self, w: u32, h: u32) {
+        let (cw, ch) = (self.img.width(), self.img.height());
+        let (nw, nh) = (cw.max(w.max(1)), ch.max(h.max(1)));
+        if (nw, nh) == (cw, ch) {
+            return;
+        }
+        let mut grown = RgbaImage::from_pixel(nw, nh, self.bg);
+        image::imageops::replace(&mut grown, &*self.img, 0, 0);
+        self.img = Arc::new(grown);
+        self.version += 1;
     }
 
     pub fn set_background(&mut self, color: u32) { self.bg = rgb(color); }
