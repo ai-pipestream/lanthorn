@@ -152,6 +152,10 @@ pub struct Machine {
     pub(crate) warned_ext_opcodes: std::collections::HashSet<u8>,
     /// Sound events recorded by `sound_effect` since the host last drained them.
     pub pending_sounds: Vec<SoundEvent>,
+    /// Injected picture-dimension table for v6 `picture_data`: `(picture_number,
+    /// width_px, height_px)`. Populated by the host (Task 9) before the boot run
+    /// from the self-blorb's `Pict` resources; empty for non-v6 stories.
+    pub picture_dims: Vec<(u16, u16, u16)>,
     /// Host-facing diagnostic lines (e.g. unimplemented opcodes, sampled sounds)
     /// recorded since the host last drained them. The engine never prints.
     pub diagnostics: Vec<String>,
@@ -254,6 +258,7 @@ impl Machine {
             warned_var_opcodes: std::collections::HashSet::new(),
             warned_ext_opcodes: std::collections::HashSet::new(),
             pending_sounds: Vec::new(),
+            picture_dims: Vec::new(),
             diagnostics: Vec::new(),
             aux_data: std::collections::BTreeMap::new(),
             aux_dirty: false,
@@ -300,6 +305,13 @@ impl Machine {
     pub fn set_sound_available(&mut self, on: bool) {
         self.sound_available = on;
         advertise_sound(&mut self.mem, on);
+    }
+
+    /// Inject the v6 picture-dimension table `picture_data` answers from:
+    /// `(picture_number, width_px, height_px)` triples. The host builds this
+    /// from the self-blorb's `Pict` resources before the boot run (Task 9).
+    pub fn set_picture_dims(&mut self, t: Vec<(u16, u16, u16)>) {
+        self.picture_dims = t;
     }
 
     /// Set the interpreter number to advertise (header 0x1E). `None` restores the
@@ -1668,7 +1680,34 @@ impl Machine {
                 StepResult::Continue
             }
             0x1D => { self.do_store(store, 0); StepResult::Continue } // buffer_screen → prev mode 0
-            0x06 => { self.do_branch(branch, false); StepResult::Continue } // picture_data → no data
+            // EXT:0x06 picture_data(picture-number, array) [branch] — ZMSD §15:
+            // picture-number 0 asks for "number of pictures available" (word 0)
+            // and "release number of the picture file" (word 1), branching if any
+            // pictures are available. Otherwise: if `picture-number` is in the
+            // injected table, write height (word 0) then width (word 1) in
+            // pixels and branch true; else leave the array untouched and don't
+            // branch.
+            0x06 => {
+                let number = ops.first().copied().unwrap_or(0);
+                let array = ops.get(1).copied().unwrap_or(0) as u32;
+                if number == 0 {
+                    let count = self.picture_dims.len() as u16;
+                    // No real picture-file metadata is available yet (Task 9 wires
+                    // the self-blorb); the story's own header release number is a
+                    // harmless placeholder until then.
+                    let release = self.mem.read_word(0x02);
+                    self.mem.write_word(array, count);
+                    self.mem.write_word(array.wrapping_add(2), release);
+                    self.do_branch(branch, count > 0);
+                } else if let Some(&(_, w, h)) = self.picture_dims.iter().find(|&&(n, _, _)| n == number) {
+                    self.mem.write_word(array, h);
+                    self.mem.write_word(array.wrapping_add(2), w);
+                    self.do_branch(branch, true);
+                } else {
+                    self.do_branch(branch, false);
+                }
+                StepResult::Continue
+            }
             0x1B => { self.do_branch(branch, false); StepResult::Continue } // make_menu → failed
             0x18 => { // push_stack value [dest] — default (game) stack; branch on success
                 let val = ops.first().copied().unwrap_or(0);
@@ -6560,6 +6599,49 @@ pub(crate) mod tests {
                 "op {op:#04x} no-op → Continue");
         }
         assert!(m.state.eval_stack.is_empty(), "no-op graphics ops must not touch the stack");
+    }
+
+    // ── Task 7: picture_data from the injected dimension table ──────────────
+
+    #[test]
+    fn v6_picture_data_reports_injected_dims() {
+        let mut m = v6_exec_machine();
+        m.set_picture_dims(vec![(5, 100, 60)]); // picture 5 = 100w x 60h
+        let array = 0x0060u16; // 2-word array in dynamic memory
+        let pc_before = m.state.pc;
+        let branch = Branch { on_true: true, offset: 10, len: 1 };
+        let result = m.exec_ext(0x06, &[5, array], None, Some(branch));
+        assert!(matches!(result, StepResult::Continue));
+        assert_eq!(m.mem.read_word(array as u32), 60, "word 0 = height");
+        assert_eq!(m.mem.read_word(array as u32 + 2), 100, "word 1 = width");
+        assert_eq!(m.state.pc, pc_before + 10 - 2, "picture found → branch taken");
+    }
+
+    #[test]
+    fn v6_picture_data_unknown_picture_does_not_branch() {
+        let mut m = v6_exec_machine();
+        m.set_picture_dims(vec![(5, 100, 60)]);
+        let array = 0x0060u16;
+        m.mem.write_word(array as u32, 0xDEAD);
+        m.mem.write_word(array as u32 + 2, 0xBEEF);
+        let pc_before = m.state.pc;
+        let branch = Branch { on_true: true, offset: 10, len: 1 };
+        m.exec_ext(0x06, &[99, array], None, Some(branch));
+        assert_eq!(m.state.pc, pc_before, "picture not found → branch not taken");
+        assert_eq!(m.mem.read_word(array as u32), 0xDEAD, "array left untouched");
+        assert_eq!(m.mem.read_word(array as u32 + 2), 0xBEEF, "array left untouched");
+    }
+
+    #[test]
+    fn v6_picture_data_number_zero_reports_count_and_branches() {
+        let mut m = v6_exec_machine();
+        m.set_picture_dims(vec![(5, 100, 60), (9, 20, 30)]);
+        let array = 0x0060u16;
+        let pc_before = m.state.pc;
+        let branch = Branch { on_true: true, offset: 10, len: 1 };
+        m.exec_ext(0x06, &[0, array], None, Some(branch));
+        assert_eq!(m.mem.read_word(array as u32), 2, "word 0 = number of pictures available");
+        assert_eq!(m.state.pc, pc_before + 10 - 2, "pictures available → branch taken");
     }
 
     // ── Task 4: move_window / window_size / window_style bodies ─────────────
