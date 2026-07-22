@@ -613,8 +613,8 @@ fn resolve(
 
 /// Scan `dir` (top level, non-recursive) for **launchable** Z-machine stories,
 /// resolving a display title for each. Files that don't load or don't parse as
-/// a supported story (incl. v6) are silently skipped. Sorted by title
-/// (case-insensitive), then filename.
+/// a supported story are silently skipped (v6 is supported since SQ-0186).
+/// Sorted by title (case-insensitive), then filename.
 ///
 /// `data_base` is the storage base (as passed to `ensure_aux`/`compute_row_badges`),
 /// used to locate each story's per-game `info.json` sidecar (SQ-0348's fetched
@@ -1106,19 +1106,23 @@ mod tests {
     }
 
     #[test]
-    fn scan_skips_v6_and_unsupported_versions() {
+    fn scan_lists_v6_but_skips_unsupported_versions() {
         let dir = temp_dir("v6");
+        // v6 is supported since SQ-0186 (it boots) — a v6 story in a recognised
+        // extension IS now listed.
         let mut v6 = minimal_v3_story();
-        v6[0x00] = 6; // graphical v6 — unsupported
-        std::fs::write(dir.join("graphic.z6"), &v6).unwrap();
-        // .z6 isn't even in STORY_EXTS, and the header would be rejected anyway.
-        let mut v6b = minimal_v3_story();
-        v6b[0x00] = 6;
-        std::fs::write(dir.join("graphic.z5"), &v6b).unwrap(); // v6 bytes, .z5 ext
+        v6[0x00] = 6;
+        std::fs::write(dir.join("graphic.z5"), &v6).unwrap();
+        // v1/v2 remain unsupported (parse_header rejects them) → skipped.
+        let mut v1 = minimal_v3_story();
+        v1[0x00] = 1;
+        std::fs::write(dir.join("old.z5"), &v1).unwrap();
 
         let stories = scan_stories(&dir, &dir);
+        let names: Vec<String> = stories.iter().map(|s| s.filename.clone()).collect();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(stories.is_empty(), "v6 stories are not listed (can't launch)");
+        assert!(names.iter().any(|n| n == "graphic.z5"), "v6 story is listed (supported): {names:?}");
+        assert!(!names.iter().any(|n| n == "old.z5"), "v1 remains unsupported → skipped: {names:?}");
     }
 
     #[test]
