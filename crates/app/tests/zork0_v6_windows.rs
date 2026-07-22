@@ -241,16 +241,27 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
     };
     assert!(!items.is_empty(), "v6 model has positioned windows");
 
-    let bg = image::Rgba([0, 0, 0, 255]);
-    let main = app::render::v6_canvas::MainText::default();
     let colors = app::colors::ColorScheme::default();
-    let canvas = app::render::v6_canvas::build_v6_canvas(
-        items, bg, image::Rgba([255; 4]), &main, &colors,
-    );
-    // Canvas is the game's native pixel extent (max window bottom-right) — near
-    // Zork0's 320×200 screen (a thin top window pokes 1px past the right edge,
-    // harmless after scale-to-fit). It is NOT the terminal's device size.
-    let (cw, ch) = canvas.dimensions();
-    assert!((320..=322).contains(&cw) && ch == 200, "canvas ~= native 320x200, got {cw}x{ch}");
-    assert!(canvas.pixels().any(|p| *p != bg), "v6 pixel canvas has painted content, not a flat background");
+    use app::render::v6_layout as v6;
+    let native = v6::native_extent(items);
+    let layout = v6::classify_windows(items);
+    let default_fg = image::Rgba([220, 220, 220, 255]);
+    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, &colors);
+    // A visible story line of 'X's; assert none of its glyph pixels land on an opaque chrome
+    // pixel of the frame (they sit in the clear interior).
+    let main = v6::MainText { lines: vec!["X".repeat(30)], input: String::new(), cursor_col: 0, awaiting: false };
+    let chrome_only = canvas.clone(); // snapshot BEFORE story text, to know which pixels are chrome
+    if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
+        let (cols, rows) = ((sw / 8).max(1) as u16, (sh / 8).max(1) as u16);
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
+    }
+    // non-empty
+    assert!(canvas.pixels().any(|p| p[3] > 0), "composited canvas has content");
+    // Every pixel that CHANGED from chrome_only (a story glyph pixel) must NOT be an opaque
+    // chrome pixel in the snapshot (story text lands in the clear interior, not on the frame).
+    for (x, y, p) in canvas.enumerate_pixels() {
+        if *p != *chrome_only.get_pixel(x, y) {
+            assert!(chrome_only.get_pixel(x, y)[3] < 128, "story glyph at ({x},{y}) overlaps opaque chrome");
+        }
+    }
 }

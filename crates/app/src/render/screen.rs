@@ -396,12 +396,20 @@ fn render_node(
             // pane. Without a picker, fall through to the Phase 1b cell composite.
             if let Some(picker) = state.game_picker.as_ref() {
                 let theme_bg = state.colors.theme.get("transcript").style;
-                let bg = style_bg_rgba(theme_bg, image::Rgba([0, 0, 0, 255]));
                 let default_fg = style_fg_rgba(theme_bg, image::Rgba([220, 220, 220, 255]));
-                let main = build_main_text(state, items, area);
-                let canvas = crate::render::v6_canvas::build_v6_canvas(
-                    items, bg, default_fg, &main, &state.colors,
-                );
+                use crate::render::v6_layout as v6;
+                let native = v6::native_extent(items);
+                let layout = v6::classify_windows(items);
+                let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, &state.colors);
+                // Raster mode (and, until Phase B, Hybrid): rasterize the story text into the
+                // clear interior of the native canvas, then draw the whole thing scaled.
+                // Phase B will branch on `state.config.v6_render` here for the Hybrid terminal path.
+                if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
+                    let cols = (sw / 8).max(1) as u16;
+                    let rows = (sh / 8).max(1) as u16;
+                    let main = build_main_text(state, cols, rows);
+                    v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
+                }
                 state.graphics_render.borrow_mut().draw_v6_canvas(picker, &canvas, area, buf);
                 return None; // v6 main-window scroll metrics are a follow-up (SQ-0450)
             }
@@ -725,12 +733,6 @@ fn fill_style(area: Rect, buf: &mut Buffer, style: ratatui::style::Style) {
 }
 
 /// Resolve a themed style's colour to an opaque RGBA for the pixel canvas.
-fn style_bg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> image::Rgba<u8> {
-    match style.bg {
-        Some(ratatui::style::Color::Rgb(r, g, b)) => image::Rgba([r, g, b, 255]),
-        _ => fallback,
-    }
-}
 fn style_fg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> image::Rgba<u8> {
     match style.fg {
         Some(ratatui::style::Color::Rgb(r, g, b)) => image::Rgba([r, g, b, 255]),
@@ -741,23 +743,8 @@ fn style_fg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> ima
 /// Build the main-window text block for the pixel composite: the newest visible
 /// wrapped transcript lines that fit the primary window's rows, plus the live
 /// input line and caret column.
-fn build_main_text(state: &AppState, items: &[PositionedWindow], _area: Rect) -> crate::render::v6_canvas::MainText {
+fn build_main_text(state: &AppState, cols: u16, rows: u16) -> crate::render::v6_layout::MainText {
     use crate::render::transcript::wrap_line;
-    // Primary window's native pixel size drives wrapping + row budget, in the
-    // game's 8px font cell — MINUS the set_margins inset, so wrapped text fills
-    // exactly the framed area the canvas rasterizes it into.
-    let prim = items.iter().find(|it| matches!(&it.node, WinNode::Buffer(b) if b.primary));
-    let (cols, rows) = prim
-        .map(|it| {
-            // Text is inset by left_margin on the left; the right inset mirrors it
-            // (v6 decorative frames are symmetric and the window is centred — the
-            // game sets only left_margin, leaving right_margin 0). Respect an
-            // explicit larger right_margin if the game set one.
-            let right = (it.right_margin).max(it.left_margin) as u32;
-            let eff_w = (it.w_px as u32).saturating_sub(it.left_margin as u32 + right);
-            ((eff_w / 8).max(1) as u16, (it.h_px as u32 / 8).max(1) as u16)
-        })
-        .unwrap_or((1, 1));
     // Wrap all transcript lines to the window width, keep the newest `rows-1`
     // wrapped rows (leave one row for the input line).
     let mut wrapped: Vec<String> = Vec::new();
@@ -768,11 +755,11 @@ fn build_main_text(state: &AppState, items: &[PositionedWindow], _area: Rect) ->
     let start = wrapped.len().saturating_sub(budget);
     let lines = wrapped[start..].to_vec();
     let input = state.input.value.clone();
-    let cursor_col = input.chars().count().min(cols as usize - 1) as u16;
+    let cursor_col = input.chars().count().min(cols.saturating_sub(1) as usize) as u16;
     // Show the input line + caret only when the game has host focus (awaiting a
     // typed command) — matches when the transcript path draws its live caret.
     let awaiting = matches!(state.focus, crate::state::Focus::Game);
-    crate::render::v6_canvas::MainText { lines, input, cursor_col, awaiting }
+    crate::render::v6_layout::MainText { lines, input, cursor_col, awaiting }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────

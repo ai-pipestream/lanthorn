@@ -66,6 +66,28 @@ pub(crate) fn blit_scaled(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy: u32
 /// The v6 font cell size in game pixels — matches `zvm::screen::V6_FONT_WIDTH`.
 const FONT: u32 = 8;
 
+/// The story (primary) window's rasterizable content: visible wrapped lines
+/// (oldest-first), the live input line, and the caret column. `awaiting` gates
+/// the input line + block cursor (drawn only when the game has host focus).
+#[derive(Debug, Default, Clone)]
+pub struct MainText {
+    pub lines: Vec<String>,
+    pub input: String,
+    pub cursor_col: u16,
+    pub awaiting: bool,
+}
+
+/// The native screen extent (max window bottom-right) in game pixels; min 1×1.
+pub fn native_extent(items: &[PositionedWindow]) -> (u16, u16) {
+    let mut w = 1u16;
+    let mut h = 1u16;
+    for it in items {
+        w = w.max(it.x_px.saturating_add(it.w_px));
+        h = h.max(it.y_px.saturating_add(it.h_px));
+    }
+    (w, h)
+}
+
 /// The v6 window list split into the one story window and the rest (chrome),
 /// in input order.
 pub struct V6Layout<'a> {
@@ -174,38 +196,29 @@ pub fn uniform_scale(native: (u16, u16), pane_dev: (u32, u32)) -> Scale {
     Scale { s, off_x, off_y }
 }
 
-/// The cell rect (relative to the pane's top-left cell) where story text
-/// goes: the largest cell-aligned rect inside the story window's device rect
-/// that touches no opaque chrome pixel. Falls back to the full pane when
-/// there is no story window.
-pub fn story_viewport(
+/// The story window's clear-interior rect in NATIVE game pixels: its native rect
+/// inset (interleaved per-edge) until no edge overlaps an opaque chrome pixel.
+/// `None` when there is no story window. May be zero-size if fully occluded.
+///
+/// Inset one native pixel at a time per edge, banner first then columns, but
+/// *interleaved* round by round (rather than each edge run to completion before
+/// the next starts): a story window can overlap chrome on both axes at once
+/// (e.g. a banner AND side columns), and letting the top/bottom scan run to
+/// completion against the still-full width would never see a "clear" row while
+/// side-band columns persist down the whole height. Shrinking left/right a step
+/// at a time alongside top/bottom lets each edge's scan range narrow in
+/// lockstep, converging on the true clear interior.
+pub fn story_clear_native(
     story: Option<&PositionedWindow>,
-    chrome_canvas: &image::RgbaImage,
-    scale: &Scale,
-    pane_cells: (u16, u16),
-    cell_px: (u16, u16),
-) -> ratatui::layout::Rect {
-    let Some(story) = story else {
-        return ratatui::layout::Rect { x: 0, y: 0, width: pane_cells.0, height: pane_cells.1 };
-    };
-
+    chrome_canvas: &RgbaImage,
+) -> Option<(u32, u32, u32, u32)> {
+    let story = story?;
     let (cw, ch) = chrome_canvas.dimensions();
     let opaque = |x: u32, y: u32| -> bool { x < cw && y < ch && chrome_canvas.get_pixel(x, y)[3] >= 128 };
-
     let mut left = story.x_px as u32;
     let mut top = story.y_px as u32;
     let mut right = (story.x_px as u32 + story.w_px as u32).min(cw);
     let mut bottom = (story.y_px as u32 + story.h_px as u32).min(ch);
-
-    // Inset one native pixel at a time per edge, banner first then columns,
-    // but *interleaved* round by round (rather than each edge run to
-    // completion before the next starts): a story window can overlap chrome
-    // on both axes at once (e.g. a banner AND side columns), and letting the
-    // top/bottom scan run to completion against the still-full width would
-    // never see a "clear" row while side-band columns persist down the whole
-    // height. Shrinking left/right a step at a time alongside top/bottom lets
-    // each edge's scan range narrow in lockstep, converging on the true
-    // clear interior.
     loop {
         let mut changed = false;
         if top < bottom && (left..right).any(|x| opaque(x, top)) {
@@ -228,6 +241,24 @@ pub fn story_viewport(
             break;
         }
     }
+    Some((left, top, right.saturating_sub(left), bottom.saturating_sub(top)))
+}
+
+/// The cell rect (relative to the pane's top-left cell) where story text
+/// goes: the largest cell-aligned rect inside the story window's device rect
+/// that touches no opaque chrome pixel. Falls back to the full pane when
+/// there is no story window.
+pub fn story_viewport(
+    story: Option<&PositionedWindow>,
+    chrome_canvas: &image::RgbaImage,
+    scale: &Scale,
+    pane_cells: (u16, u16),
+    cell_px: (u16, u16),
+) -> ratatui::layout::Rect {
+    let Some((left, top, w, h)) = story_clear_native(story, chrome_canvas) else {
+        return ratatui::layout::Rect { x: 0, y: 0, width: pane_cells.0, height: pane_cells.1 };
+    };
+    let (right, bottom) = (left + w, top + h);
 
     let dev_left = scale.off_x as f32 + left as f32 * scale.s;
     let dev_top = scale.off_y as f32 + top as f32 * scale.s;
@@ -251,6 +282,29 @@ pub fn story_viewport(
     let height = height.min(pane_cells.1.saturating_sub(cell_top));
 
     ratatui::layout::Rect { x: cell_left, y: cell_top, width, height }
+}
+
+/// Rasterize `main`'s wrapped lines (then the input line + block cursor when
+/// `main.awaiting`) into `canvas` starting at native px `(ox, oy)`, one glyph per
+/// FONT×FONT cell, transparent glyph bg (draws over chrome/background art).
+/// Clipped to `rows` lines and `cols` columns.
+pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32, cols: u16, rows: u16, fg: Rgba<u8>) {
+    let mut row = 0u32;
+    for line in &main.lines {
+        if row >= rows as u32 {
+            return;
+        }
+        for (col, glyph) in line.chars().take(cols as usize).enumerate() {
+            crate::render::bitfont::blit_glyph(canvas, glyph, ox + col as u32 * FONT, oy + row * FONT, FONT, FONT, fg, None);
+        }
+        row += 1;
+    }
+    if main.awaiting && row < rows as u32 {
+        for (col, glyph) in main.input.chars().take(cols as usize).enumerate() {
+            crate::render::bitfont::blit_glyph(canvas, glyph, ox + col as u32 * FONT, oy + row * FONT, FONT, FONT, fg, None);
+        }
+        fill_cell(canvas, ox + (main.cursor_col as u32).min(cols.saturating_sub(1) as u32) * FONT, oy + row * FONT, FONT, FONT, fg);
+    }
 }
 
 #[cfg(test)]
