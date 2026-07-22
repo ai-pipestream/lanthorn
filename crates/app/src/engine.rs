@@ -144,6 +144,25 @@ pub struct GridWindow {
     /// styles with no explicit colours (Counterfeit Monkey's menu), the empty-cell
     /// fill is drawn reversed too, so the whole window matches. (SQ-0403)
     pub reverse: bool,
+    /// Pixel-positioned text runs (v6 only; empty for Glulx/cell grids). Each is
+    /// the exact 1-based window-relative pixel start the game printed at, so the
+    /// pixel raster draws status text where the game placed it (Zork Zero puts
+    /// its banner text at rows 6/14, ON the ribbon art) instead of snapping to
+    /// the char grid. The `cells` grid remains the cell-mode fallback.
+    pub px_texts: Vec<PxText>,
+}
+
+/// One pixel-positioned text run in a v6 grid window (see `GridWindow::px_texts`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PxText {
+    pub y: u16,
+    pub x: u16,
+    pub text: String,
+    /// Z-machine style bits (1=reverse, 2=bold, 4=italic, 8=fixed).
+    pub style: u8,
+    /// Packed ZColour (`state::pack_zcolour`); 0 = default.
+    pub fg: u32,
+    pub bg: u32,
 }
 
 impl GridWindow {

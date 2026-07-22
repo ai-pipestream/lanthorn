@@ -34,35 +34,6 @@ pub(crate) fn packed_to_rgba(packed: u32, fallback: Rgba<u8>, colors: &ColorSche
     }
 }
 
-/// Blit a game-pixel source canvas into `dst` at device rect
-/// `(dx, dy, dw, dh)`, nearest-neighbour, honouring source alpha (transparent
-/// source px leave `dst`). Clipped to `dst` bounds.
-pub(crate) fn blit_scaled(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy: u32, dw: u32, dh: u32) {
-    let (sw, sh) = (src.width(), src.height());
-    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
-        return;
-    }
-    let (dstw, dsth) = (dst.width(), dst.height());
-    for oy in 0..dh {
-        let ty = dy + oy;
-        if ty >= dsth {
-            break;
-        }
-        let sy = (oy * sh / dh).min(sh - 1);
-        for ox in 0..dw {
-            let tx = dx + ox;
-            if tx >= dstw {
-                break;
-            }
-            let sx = (ox * sw / dw).min(sw - 1);
-            let p = *src.get_pixel(sx, sy);
-            if p[3] >= 128 {
-                dst.put_pixel(tx, ty, Rgba([p[0], p[1], p[2], 255]));
-            }
-        }
-    }
-}
-
 /// 1:1 opaque-over blit of `src` into `dst` at `(dx, dy)`, clipped to the
 /// `max_w × max_h` box anchored at `(dx, dy)` (a v6 window's pixel box).
 pub(crate) fn blit_clipped(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy: u32, max_w: u32, max_h: u32) {
@@ -87,25 +58,57 @@ pub(crate) fn blit_clipped(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy: u3
     }
 }
 
+/// Like [`blit_clipped`], but starts reading `src` at row `src_y` — for a
+/// margin float partially scrolled off the top of the story view.
+pub(crate) fn blit_clipped_src(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy: u32, src_y: u32, max_w: u32, max_h: u32) {
+    let w = src.width().min(max_w);
+    let h = src.height().saturating_sub(src_y).min(max_h);
+    let (dstw, dsth) = (dst.width(), dst.height());
+    for oy in 0..h {
+        let ty = dy + oy;
+        if ty >= dsth {
+            break;
+        }
+        for ox in 0..w {
+            let tx = dx + ox;
+            if tx >= dstw {
+                break;
+            }
+            let p = *src.get_pixel(ox, src_y + oy);
+            if p[3] >= 128 {
+                dst.put_pixel(tx, ty, Rgba([p[0], p[1], p[2], 255]));
+            }
+        }
+    }
+}
+
 /// The v6 font cell size in game pixels — matches `zvm::screen::V6_FONT_WIDTH`.
 const FONT: u32 = 8;
+
+/// A window-0 inline picture (drop-cap, room icon) floated at the left margin
+/// of the story text: anchored to a wrapped display row, indenting the rows
+/// beside it. `row` is relative to the visible window and may be negative when
+/// the float has partially scrolled off the top.
+#[derive(Debug, Clone)]
+pub struct RasterFloat {
+    pub row: i32,
+    pub rows: u16,
+    pub indent_cols: u16,
+    pub img: std::sync::Arc<RgbaImage>,
+}
 
 /// The story (primary) window's rasterizable content: visible wrapped lines
 /// (oldest-first), the live input line, and the caret column. `awaiting` gates
 /// the input line + block cursor (drawn only when the game has host focus).
-///
-/// `gutter_cols`/`band_rows` describe a drop-cap gutter: the first `band_rows`
-/// rows are shifted right by `gutter_cols` columns so text flows beside a
-/// story-window picture (e.g. Zork Zero's illuminated initial) sitting at the
-/// top-left; rows past the band start flush left. Both default to 0 (no gutter).
+/// `floats` carries the window-0 inline pictures anchored within the visible
+/// rows — blitted at the left margin with text indented beside them.
 #[derive(Debug, Default, Clone)]
 pub struct MainText {
     pub lines: Vec<String>,
     pub input: String,
     pub cursor_col: u16,
     pub awaiting: bool,
-    pub gutter_cols: u16,
-    pub band_rows: u16,
+    pub floats: Vec<RasterFloat>,
 }
 
 /// The native screen extent (max window bottom-right) in game pixels; min 1×1.
@@ -191,11 +194,27 @@ pub fn build_chrome_canvas(
         }
     }
 
-    // Pass 2 — Grid (status) entries, in list order.
+    // Pass 2 — Grid (status) entries, in list order. A v6 grid with
+    // pixel-positioned runs draws those at their EXACT game pixel positions
+    // (Zork Zero's banner text sits at rows 6/14, on the ribbon art — cell
+    // quantization would snap it to the banner's top edge); the cell grid is
+    // the fallback for grids without them.
     for it in chrome {
         if let WinNode::Grid(g) = &it.node {
             let ox = it.x_px as u32;
             let oy = it.y_px as u32;
+            if !g.px_texts.is_empty() {
+                for t in &g.px_texts {
+                    let fg = packed_to_rgba(t.fg, default_fg, colors);
+                    let bg = (t.bg != 0).then(|| packed_to_rgba(t.bg, Rgba([0, 0, 0, 255]), colors));
+                    let py = oy + (t.y.max(1) as u32 - 1);
+                    for (i, ch) in t.text.chars().enumerate() {
+                        let px = ox + (t.x.max(1) as u32 - 1) + i as u32 * FONT;
+                        crate::render::bitfont::blit_glyph(&mut canvas, ch, px, py, FONT, FONT, fg, bg);
+                    }
+                }
+                continue;
+            }
             for row in 0..g.rows {
                 for col in 0..g.cols {
                     let idx = row as usize * g.cols as usize + col as usize;
@@ -334,14 +353,33 @@ pub fn story_viewport(
 /// FONT×FONT cell, transparent glyph bg (draws over chrome/background art).
 /// Clipped to `rows` lines and `cols` columns.
 pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32, cols: u16, rows: u16, fg: Rgba<u8>) {
+    let region_h = rows as u32 * FONT;
+    // Floats first (text draws over/beside them). A float that has partially
+    // scrolled off the top (row < 0) is drawn cropped from its own top.
+    for f in &main.floats {
+        let src = &*f.img;
+        let crop_top = if f.row < 0 { (-f.row) as u32 * FONT } else { 0 };
+        if crop_top >= src.height() {
+            continue;
+        }
+        let dy = oy + (f.row.max(0) as u32) * FONT;
+        let max_h = region_h.saturating_sub(dy - oy);
+        blit_clipped_src(canvas, src, ox, dy, crop_top, cols as u32 * FONT, max_h);
+    }
+    let indent_at = |row: u32| -> u32 {
+        main.floats
+            .iter()
+            .filter(|f| f.row <= row as i32 && (row as i32) < f.row + f.rows as i32)
+            .map(|f| f.indent_cols as u32)
+            .max()
+            .unwrap_or(0)
+    };
     let mut row = 0u32;
     for line in &main.lines {
         if row >= rows as u32 {
             return;
         }
-        // Drop-cap gutter: shift the first `band_rows` rows right by `gutter_cols`
-        // so text flows beside a top-left story picture.
-        let indent = if row < main.band_rows as u32 { main.gutter_cols as u32 } else { 0 };
+        let indent = indent_at(row);
         let avail = (cols as u32).saturating_sub(indent);
         for (col, glyph) in line.chars().take(avail as usize).enumerate() {
             crate::render::bitfont::blit_glyph(canvas, glyph, ox + (indent + col as u32) * FONT, oy + row * FONT, FONT, FONT, fg, None);
@@ -356,47 +394,6 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
     }
 }
 
-/// The drop-cap gutter a story-window picture reserves: text in the first
-/// `band_rows` rows is inset by `gutter_cols` columns so it flows to the right of
-/// the picture (Zork Zero's illuminated initial), rather than starting below it.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct StoryGfx {
-    pub gutter_cols: u16,
-    pub band_rows: u16,
-}
-
-/// The drop-cap gutter a story-window picture reserves, from its opaque extent:
-/// `ceil(w/FONT)+1` cols wide over `ceil(h/FONT)` rows. Zero when there is no
-/// opaque content. Measures only — the caller decides whether the picture's
-/// paragraph is on-screen before blitting it (`blit_story_gfx`).
-pub fn measure_story_gfx(story_gfx: &PositionedWindow) -> StoryGfx {
-    let WinNode::Graphics(g) = &story_gfx.node else { return StoryGfx::default() };
-    let (mut right, mut bottom, mut any) = (0u32, 0u32, false);
-    for (x, y, p) in g.canvas.enumerate_pixels() {
-        if p[3] >= 128 {
-            right = right.max(x);
-            bottom = bottom.max(y);
-            any = true;
-        }
-    }
-    if !any {
-        return StoryGfx::default();
-    }
-    StoryGfx {
-        gutter_cols: ((right + 1).div_ceil(FONT) + 1) as u16,
-        band_rows: (bottom + 1).div_ceil(FONT) as u16,
-    }
-}
-
-/// Blit the story window's own picture at the top-left of the story region
-/// `(sx, sy)` — 1:1 in native pixels. Call only when its paragraph is on-screen
-/// (the drop-cap gutter is active); otherwise the picture would pin to the top
-/// over unrelated scrolled text.
-pub fn blit_story_gfx(canvas: &mut RgbaImage, story_gfx: &PositionedWindow, sx: u32, sy: u32) {
-    let WinNode::Graphics(g) = &story_gfx.node else { return };
-    blit_scaled(canvas, &g.canvas, sx, sy, g.canvas.width(), g.canvas.height());
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +406,7 @@ mod tests {
             node: WinNode::Grid(GridWindow {
                 cols: 1, rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
+                px_texts: Vec::new(),
             }),
         }
     }
@@ -474,24 +472,49 @@ mod tests {
     }
 
     #[test]
-    fn story_text_wraps_right_of_dropcap() {
-        // First `band_rows` rows are inset by `gutter_cols`; later rows flush left.
+    fn story_text_wraps_right_of_float_and_blits_it() {
+        // Rows covered by a float are inset by its indent (text flows beside the
+        // picture); rows past it are flush left; the float's pixels are blitted
+        // at its anchored row.
         let cell_has_ink = |c: &RgbaImage, col: u32, row: u32| -> bool {
             (0..FONT).any(|dy| (0..FONT).any(|dx| c.get_pixel(col * FONT + dx, row * FONT + dy)[3] > 0))
         };
+        // A 16x16 opaque red image → float of 2 rows.
+        let img = RgbaImage::from_pixel(16, 16, Rgba([200, 20, 20, 255]));
         let main = MainText {
             lines: vec!["AAAA".into(), "BBBB".into(), "CCCC".into()],
             input: String::new(), cursor_col: 0, awaiting: false,
-            gutter_cols: 3, band_rows: 2,
+            floats: vec![RasterFloat { row: 0, rows: 2, indent_cols: 3, img: Arc::new(img) }],
         };
         let mut canvas = RgbaImage::new(10 * FONT, 5 * FONT);
         draw_story_text(&mut canvas, &main, 0, 0, 10, 5, Rgba([255, 255, 255, 255]));
-        // Row 0 (in band): ink starts at column 3, the first three cells are blank.
-        assert!(!cell_has_ink(&canvas, 0, 0), "row 0 col 0 blank (behind drop-cap)");
-        assert!(!cell_has_ink(&canvas, 2, 0), "row 0 col 2 blank (behind drop-cap)");
-        assert!(cell_has_ink(&canvas, 3, 0), "row 0 col 3 inked (text flows right of drop-cap)");
-        // Row 2 (past the band): ink flush left.
-        assert!(cell_has_ink(&canvas, 0, 2), "row 2 col 0 inked (flush left below drop-cap)");
+        // Rows 0-1 (beside float): glyph ink starts at column 3.
+        assert!(cell_has_ink(&canvas, 0, 0), "float pixels occupy row 0 col 0");
+        assert_eq!(*canvas.get_pixel(4, 4), Rgba([200, 20, 20, 255]), "float blitted at its row");
+        assert!(cell_has_ink(&canvas, 3, 0), "row 0 col 3 inked (text beside the float)");
+        assert!(cell_has_ink(&canvas, 3, 1), "row 1 col 3 inked (text beside the float)");
+        // Row 2 (past the float): ink flush left.
+        assert!(cell_has_ink(&canvas, 0, 2), "row 2 col 0 inked (flush left below float)");
+    }
+
+    #[test]
+    fn story_text_scrolled_float_is_cropped_not_pinned() {
+        // A float whose anchor scrolled above the view (row = -1) draws only its
+        // remaining rows, cropped from its own top.
+        let mut img = RgbaImage::new(8, 16);
+        for y in 0..16 {
+            // Top half green, bottom half blue — the visible part must be blue.
+            let c = if y < 8 { Rgba([0, 200, 0, 255]) } else { Rgba([0, 0, 200, 255]) };
+            for x in 0..8 { img.put_pixel(x, y, c); }
+        }
+        let main = MainText {
+            lines: vec!["XXXX".into()],
+            input: String::new(), cursor_col: 0, awaiting: false,
+            floats: vec![RasterFloat { row: -1, rows: 2, indent_cols: 2, img: Arc::new(img) }],
+        };
+        let mut canvas = RgbaImage::new(10 * FONT, 3 * FONT);
+        draw_story_text(&mut canvas, &main, 0, 0, 10, 3, Rgba([255, 255, 255, 255]));
+        assert_eq!(*canvas.get_pixel(4, 4), Rgba([0, 0, 200, 255]), "visible slice is the float's BOTTOM half");
     }
 
     #[test]
@@ -589,6 +612,7 @@ mod tests {
             node: WinNode::Grid(GridWindow {
                 cols: 3, rows: 2, cells, active_rows: 2, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
+                px_texts: Vec::new(),
             }),
         };
         let chrome: Vec<&PositionedWindow> = vec![&win];

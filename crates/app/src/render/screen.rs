@@ -405,20 +405,13 @@ fn render_node(
                 // clear interior of the native canvas, then draw the whole thing scaled.
                 // Phase B will branch on `state.config.v6_render` here for the Hybrid terminal path.
                 if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
-                    // The story window's own picture (e.g. Zork Zero's illuminated
-                    // drop-cap) is story content sitting at the top-left of its
-                    // paragraph. Measure the gutter it reserves, wrap text beside it,
-                    // and blit it ONLY when that paragraph is still on-screen (the
-                    // gutter survives — build_main_text zeroes it once scrolled off).
+                    // Window-0 inline pictures (drop-caps, room icons) arrive as
+                    // transcript-anchored floats (`transcript_images` sidecar):
+                    // build_main_text wraps text beside them and draw_story_text
+                    // blits each at its anchored row — they scroll with the text.
                     let cols = (sw / 8).max(1) as u16;
                     let rows = (sh / 8).max(1) as u16;
-                    let gfx = layout.story_gfx.map(v6::measure_story_gfx).unwrap_or_default();
-                    let main = build_main_text(state, cols, rows, gfx.gutter_cols, gfx.band_rows.min(rows));
-                    if main.band_rows > 0 {
-                        if let Some(g) = layout.story_gfx {
-                            v6::blit_story_gfx(&mut canvas, g, sx, sy);
-                        }
-                    }
+                    let main = build_main_text(state, cols, rows);
                     v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
                 }
                 state.graphics_render.borrow_mut().draw_v6_canvas(picker, &canvas, area, buf);
@@ -754,61 +747,88 @@ fn style_fg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> ima
 /// Build the main-window text block for the pixel composite: the newest visible
 /// wrapped transcript lines that fit the primary window's rows, plus the live
 /// input line and caret column.
-fn build_main_text(state: &AppState, cols: u16, rows: u16, gutter_cols: u16, band_rows: u16) -> crate::render::v6_layout::MainText {
-    use crate::render::transcript::wrap_line;
-    // Wrap all transcript lines to the window width. With a drop-cap gutter the
-    // FIRST `band_rows` display rows wrap at `cols - gutter_cols` so leading text
-    // flows beside a top-left story picture; the rest wrap at full width. Keep the
-    // newest `rows-1` wrapped rows (leave one row for the input line).
-    let mut wrapped: Vec<String> = Vec::new();
-    if band_rows == 0 || gutter_cols == 0 {
-        for line in &state.transcript {
-            wrapped.extend(wrap_line(line, cols));
-        }
-    } else {
-        let narrow = cols.saturating_sub(gutter_cols).max(1);
-        wrapped = wrap_lines_banded(&state.transcript, cols, narrow, band_rows);
+/// Build the v6 raster story text: wrap the transcript to the window width,
+/// float window-0 inline pictures (the `transcript_images` sidecar) at the left
+/// margin — each occupies no text row, anchors at the next wrapped row, and
+/// indents the `pic_height/8` rows beside it (Zork Zero's drop-cap idiom; the
+/// indent comes from the game's own `set_margins` when it was captured). Keeps
+/// the newest `rows-1` wrapped rows (one row is left for the input line).
+pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> crate::render::v6_layout::MainText {
+    const FONT: u32 = 8;
+    struct AbsFloat {
+        row: usize,
+        rows: u16,
+        indent: u16,
+        img: std::sync::Arc<image::RgbaImage>,
     }
-    let budget = rows.saturating_sub(1) as usize;
-    let start = wrapped.len().saturating_sub(budget);
-    let lines = wrapped[start..].to_vec();
-    // The gutter applies only while the leading band is still on screen (i.e. the
-    // drop-cap paragraph hasn't scrolled off the top).
-    let (eff_gutter, eff_band) = if start == 0 { (gutter_cols, band_rows) } else { (0, 0) };
-    let input = state.input.value.clone();
-    let cursor_col = input.chars().count().min(cols.saturating_sub(1) as usize) as u16;
-    // Show the input line + caret only when the game has host focus (awaiting a
-    // typed command) — matches when the transcript path draws its live caret.
-    let awaiting = matches!(state.focus, crate::state::Focus::Game);
-    crate::render::v6_layout::MainText { lines, input, cursor_col, awaiting, gutter_cols: eff_gutter, band_rows: eff_band }
-}
-
-/// Word-wrap `lines` where the first `band_rows` produced rows use `narrow`
-/// width and every row after uses `cols` — so text flows beside a drop-cap for
-/// the band, then reflows full-width beneath it. Width is chosen per emitted row
-/// from the running row count, so a paragraph that crosses the band boundary
-/// widens mid-paragraph.
-fn wrap_lines_banded(lines: &[String], cols: u16, narrow: u16, band_rows: u16) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for logical in lines {
-        if logical.is_empty() {
-            out.push(String::new());
+    let indent_at = |floats: &[AbsFloat], row: usize| -> u16 {
+        floats
+            .iter()
+            .filter(|f| f.row <= row && row < f.row + f.rows as usize)
+            .map(|f| f.indent)
+            .max()
+            .unwrap_or(0)
+    };
+    let mut wrapped: Vec<String> = Vec::new();
+    let mut floats: Vec<AbsFloat> = Vec::new();
+    for (i, line) in state.transcript.iter().enumerate() {
+        if let Some(Some(img)) = state.transcript_images.get(i) {
+            // An image line is a float, not a text row.
+            let px = &img.pixels;
+            let indent_px = img.margin_px.unwrap_or(px.width() + FONT);
+            floats.push(AbsFloat {
+                row: wrapped.len(),
+                // Rows beside the picture: ceil(h/FONT), so a picture whose
+                // height isn't a cell multiple never has the next full-width
+                // line drawn across its bottom pixels. (Infocom's own countdown
+                // used floor and let the overlap happen; with our whole-cell
+                // glyphs the ceil reads far cleaner.)
+                rows: (px.height().div_ceil(FONT) as u16).max(1),
+                indent: indent_px.div_ceil(FONT) as u16,
+                img: std::sync::Arc::clone(px),
+            });
             continue;
         }
+        if line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+        // Word-wrap with per-row width: rows beside an active float are narrower.
         let mut cur = String::new();
-        for word in logical.split(' ') {
-            let width = if (out.len() as u16) < band_rows { narrow } else { cols } as usize;
+        for word in line.split(' ') {
+            let width = cols.saturating_sub(indent_at(&floats, wrapped.len())).max(1) as usize;
             if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > width {
-                out.push(std::mem::take(&mut cur));
+                wrapped.push(std::mem::take(&mut cur));
             }
             if !cur.is_empty() {
                 cur.push(' ');
             }
             cur.push_str(word);
         }
-        out.push(cur);
+        wrapped.push(cur);
     }
-    out
+    let budget = rows.saturating_sub(1) as usize;
+    let start = wrapped.len().saturating_sub(budget);
+    let lines = wrapped[start..].to_vec();
+    // Shift floats into the visible window; keep those still (partially) visible.
+    let floats: Vec<crate::render::v6_layout::RasterFloat> = floats
+        .into_iter()
+        .filter_map(|f| {
+            let rel = f.row as i64 - start as i64;
+            (rel + f.rows as i64 > 0 && rel < budget as i64).then_some(crate::render::v6_layout::RasterFloat {
+                row: rel as i32,
+                rows: f.rows,
+                indent_cols: f.indent,
+                img: f.img,
+            })
+        })
+        .collect();
+    let input = state.input.value.clone();
+    let cursor_col = input.chars().count().min(cols.saturating_sub(1) as usize) as u16;
+    // Show the input line + caret only when the game has host focus (awaiting a
+    // typed command) — matches when the transcript path draws its live caret.
+    let awaiting = matches!(state.focus, crate::state::Focus::Game);
+    crate::render::v6_layout::MainText { lines, input, cursor_col, awaiting, floats }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -821,22 +841,35 @@ mod tests {
     use ratatui::layout::Rect;
 
     #[test]
-    fn wrap_lines_banded_narrows_leading_band_then_widens() {
-        // One long paragraph; the first 4 rows wrap at the narrow width, later
-        // rows at full width (text reflows full-width below the drop-cap).
-        let para = "word ".repeat(60);
-        let lines = vec![para.trim_end().to_string()];
-        let rows = wrap_lines_banded(&lines, 40, 33, 4);
-        for (i, row) in rows.iter().enumerate() {
+    fn build_main_text_floats_inline_image_and_narrows_beside_it() {
+        // A transcript-anchored inline image (32x32 → 4 rows, margin 40px → 5
+        // cols) becomes a float: it occupies no text row, the 4 rows beside it
+        // wrap narrower, and rows past it wrap at full width.
+        let mut state = crate::state::AppState::default();
+        state.push_transcript_kind("before", crate::state::TranscriptKind::Story);
+        state.push_transcript_image(crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(32, 32, image::Rgba([9, 9, 9, 255]))),
+            align: crate::inline_image::ImageAlign::MarginLeft,
+            scaled: None,
+            margin_px: Some(40),
+        });
+        let para = "word ".repeat(40);
+        state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
+        let main = build_main_text(&state, 40, 30);
+        assert_eq!(main.floats.len(), 1, "the image line became a float, not a text row");
+        let f = &main.floats[0];
+        assert_eq!((f.row, f.rows, f.indent_cols), (1, 4, 5), "anchored after 'before', 32px/8 = 4 rows, 40px/8 = 5 cols");
+        assert_eq!(main.lines[0], "before");
+        // Rows 1..5 (beside the float) wrap at 40-5=35 cols; later rows full width.
+        for (i, row) in main.lines.iter().enumerate().skip(1) {
             let w = row.chars().count();
-            if i < 4 {
-                assert!(w <= 33, "band row {i} width {w} must be <= narrow (33)");
+            if (1..5).contains(&i) {
+                assert!(w <= 35, "row {i} beside the float is narrow, got {w}");
             } else {
-                assert!(w <= 40, "row {i} width {w} must be <= cols (40)");
+                assert!(w <= 40, "row {i} is full width, got {w}");
             }
         }
-        // The band widened: at least one row past the band exceeds the narrow width.
-        assert!(rows.iter().skip(4).any(|r| r.chars().count() > 33), "rows past the band use full width");
+        assert!(main.lines[5..].iter().any(|r| r.chars().count() > 35), "rows past the float use full width");
     }
 
     /// Build a `Theme` with the given selectors' bg overridden (like a
@@ -1662,7 +1695,7 @@ mod tests {
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None,
+            scaled: None, margin_px: None ,
         };
         let b = BufferWindow {
             lines: vec!["a".to_string(), String::new(), "b".to_string()],

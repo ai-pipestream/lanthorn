@@ -69,6 +69,16 @@ pub struct PictureEvent {
     pub x: u16,
     pub y: u16,
     pub erase: bool,
+    /// Total chars printed to window 0 (the main scrolling window) before this
+    /// event — anchors a window-0 inline picture (drop-cap, room icon) to its
+    /// exact position in the text stream, so the host can float it beside the
+    /// paragraph it belongs to. Meaningless for windows 1–7.
+    pub out_chars: u64,
+    /// The `left` value of a `set_margins` issued on the same window directly
+    /// after this draw, if any — v6 games (Zork Zero's PICINF idiom) set the
+    /// text margin right after drawing an inline picture to make text flow
+    /// beside it. `None` when no such call followed.
+    pub margin_after: Option<u16>,
 }
 
 /// Result of executing one instruction.
@@ -178,6 +188,10 @@ pub struct Machine {
     /// 1b) decodes the Blorb `Pict` resource and renders it — mirrors
     /// `pending_sounds`.
     pub pending_pictures: Vec<PictureEvent>,
+    /// Running count of chars printed to v6 window 0 (the main scrolling
+    /// window) — stamps `PictureEvent::out_chars` so window-0 inline pictures
+    /// anchor to their position in the text stream. Monotonic, never reset.
+    pub v6_win0_out_chars: u64,
     /// Host-facing diagnostic lines (e.g. unimplemented opcodes, sampled sounds)
     /// recorded since the host last drained them. The engine never prints.
     pub diagnostics: Vec<String>,
@@ -292,6 +306,7 @@ impl Machine {
             pending_sounds: Vec::new(),
             picture_dims: Vec::new(),
             pending_pictures: Vec::new(),
+            v6_win0_out_chars: 0,
             diagnostics: Vec::new(),
             aux_data: std::collections::BTreeMap::new(),
             aux_dirty: false,
@@ -1226,6 +1241,7 @@ impl Machine {
                         -1 | -2 => {
                             for w in v6.windows.iter_mut() {
                                 w.grid.clear();
+                                w.texts.clear();
                                 w.y_cursor = 1;
                                 w.x_cursor = 1;
                             }
@@ -1233,6 +1249,7 @@ impl Machine {
                         n if (0..8).contains(&n) => {
                             let w = &mut v6.windows[n as usize];
                             w.grid.clear();
+                            w.texts.clear();
                             w.y_cursor = 1;
                             w.x_cursor = 1;
                         }
@@ -1277,17 +1294,13 @@ impl Machine {
                     if (row as i16) >= 0 {
                         if let Some(w) = v6.windows.get_mut(win as usize) {
                             // ZMSD §15 set_cursor: v6 coordinates are in UNITS
-                            // (pixels), 1-based, relative to the window's (1,1).
-                            // A position outside the margins moves the cursor to
-                            // the left margin (§15) — model that as a clamp to 1
-                            // for any zero/negative operand. Convert to the
-                            // 1-based char cell the grid model stores.
-                            let fw = crate::screen::V6_FONT_WIDTH;
-                            let fh = crate::screen::V6_FONT_HEIGHT;
-                            let row1 = if (row as i16) < 1 { 1 } else { row };
-                            let col1 = if (col as i16) < 1 { 1 } else { col };
-                            w.y_cursor = (row1 - 1) / fh + 1;
-                            w.x_cursor = (col1 - 1) / fw + 1;
+                            // (pixels), 1-based, relative to the window's (1,1) —
+                            // stored VERBATIM (window props 4/5 are read back in
+                            // units). A position outside the margins moves the
+                            // cursor to the left margin (§15) — model that as a
+                            // clamp to 1 for any zero/negative operand.
+                            w.y_cursor = if (row as i16) < 1 { 1 } else { row };
+                            w.x_cursor = if (col as i16) < 1 { 1 } else { col };
                         }
                     }
                 } else {
@@ -1885,16 +1898,12 @@ impl Machine {
                     let window = v6.current;
                     let number = ops.first().copied().unwrap_or(0);
                     // ZMSD §15: (y,x) are each optional — a value of zero means
-                    // "the cursor y or x coordinate in the current window".
-                    // Resolve here so hosts always see concrete 1-based window-
-                    // relative pixel coords (cell cursor → pixel: (cell-1)*font+1).
+                    // "the cursor y or x coordinate in the current window" (the
+                    // cursor is already stored in 1-based pixels).
                     let (cy, cx) = v6
                         .windows
                         .get(window as usize)
-                        .map(|w| {
-                            (w.y_cursor.max(1).saturating_sub(1) * V6_FONT_HEIGHT + 1,
-                             w.x_cursor.max(1).saturating_sub(1) * V6_FONT_WIDTH + 1)
-                        })
+                        .map(|w| (w.y_cursor.max(1), w.x_cursor.max(1)))
                         .unwrap_or((1, 1));
                     let y = match ops.get(1).copied().unwrap_or(0) { 0 => cy, v => v };
                     let x = match ops.get(2).copied().unwrap_or(0) { 0 => cx, v => v };
@@ -1903,7 +1912,8 @@ impl Machine {
                             "@draw_picture(number={number}, window={window}, y={y}, x={x})"
                         ));
                     }
-                    self.pending_pictures.push(PictureEvent { number, window, x, y, erase: false });
+                    let out_chars = self.v6_win0_out_chars;
+                    self.pending_pictures.push(PictureEvent { number, window, x, y, erase: false, out_chars, margin_after: None });
                 }
                 StepResult::Continue
             }
@@ -1917,14 +1927,12 @@ impl Machine {
                 if let Some(v6) = self.screen.v6.as_ref() {
                     let window = v6.current;
                     let number = ops.first().copied().unwrap_or(0);
-                    // Zero y/x defaults to the window cursor, as for draw_picture.
+                    // Zero y/x defaults to the window's pixel cursor, as for
+                    // draw_picture.
                     let (cy, cx) = v6
                         .windows
                         .get(window as usize)
-                        .map(|w| {
-                            (w.y_cursor.max(1).saturating_sub(1) * V6_FONT_HEIGHT + 1,
-                             w.x_cursor.max(1).saturating_sub(1) * V6_FONT_WIDTH + 1)
-                        })
+                        .map(|w| (w.y_cursor.max(1), w.x_cursor.max(1)))
                         .unwrap_or((1, 1));
                     let y = match ops.get(1).copied().unwrap_or(0) { 0 => cy, v => v };
                     let x = match ops.get(2).copied().unwrap_or(0) { 0 => cx, v => v };
@@ -1933,7 +1941,8 @@ impl Machine {
                             "@erase_picture(number={number}, window={window}, y={y}, x={x})"
                         ));
                     }
-                    self.pending_pictures.push(PictureEvent { number, window, x, y, erase: true });
+                    let out_chars = self.v6_win0_out_chars;
+                    self.pending_pictures.push(PictureEvent { number, window, x, y, erase: true, out_chars, margin_after: None });
                 }
                 StepResult::Continue
             }
@@ -1957,13 +1966,20 @@ impl Machine {
                         w.left_margin = left;
                         w.right_margin = right;
                         // ZMSD §15: if the cursor now lies outside the margins,
-                        // move it back to the left margin of the current line.
-                        // The stored cursor is a 1-based char cell; compare in
-                        // pixels ((cell-1)*font+1) against the pixel margin.
-                        let cursor_px = w.x_cursor.max(1).saturating_sub(1) * V6_FONT_WIDTH + 1;
-                        if cursor_px <= left {
-                            w.x_cursor = left / V6_FONT_WIDTH + 1;
+                        // move it back to the left margin of the current line
+                        // (cursor and margin are both in pixels).
+                        if w.x_cursor <= left {
+                            w.x_cursor = left + 1;
                         }
+                    }
+                }
+                // A set_margins directly after a draw_picture on the same window
+                // is the v6 inline-picture idiom (text flows beside the art):
+                // attach the margin to that event so the host can lay the float
+                // out with the game's own computed text-start.
+                if let Some(ev) = self.pending_pictures.last_mut() {
+                    if ev.window as u16 == win && ev.margin_after.is_none() && !ev.erase {
+                        ev.margin_after = Some(left);
                     }
                 }
                 StepResult::Continue
@@ -2314,27 +2330,52 @@ impl Machine {
                 // v1-5 upper-window grow bound below.
                 let screen_h = self.mem.read_byte(0x20) as u16;
                 if let Some(w) = self.screen.v6.as_mut().and_then(|v6| v6.windows.get_mut(idx)) {
+                    let fw = crate::screen::V6_FONT_WIDTH;
+                    let fh = crate::screen::V6_FONT_HEIGHT;
                     let cols = w.grid.cols.max(1);
                     let (fg, bg) = (w.fg, w.bg);
-                    let bound = screen_h.max(w.grid.rows);
+                    let bound = screen_h.max(w.grid.rows) * fh; // px bound
+                    // The cursor is in 1-based PIXELS; the cell it maps to is
+                    // `(px-1)/font + 1`. Each printed run is also recorded at
+                    // its exact pixel start (`texts`) for pixel-faithful rasters.
+                    let mut run: Option<crate::screen::V6Text> = None;
                     for ch in s.chars() {
                         if ch == '\n' {
-                            w.y_cursor += 1;
-                            w.x_cursor = 1;
+                            if let Some(r) = run.take() {
+                                w.texts.push(r);
+                            }
+                            w.y_cursor += fh;
+                            w.x_cursor = w.left_margin + 1;
                             continue;
                         }
                         let out_ch = if font3 { font3_translate(ch) } else { ch };
-                        let (r, c) = (w.y_cursor, w.x_cursor);
-                        if r > w.grid.rows && r <= bound {
+                        let (r, c) = ((w.y_cursor.max(1) - 1) / fh + 1, (w.x_cursor.max(1) - 1) / fw + 1);
+                        if r > w.grid.rows && w.y_cursor <= bound {
                             w.grid.grow_rows(r);
                         }
                         w.grid.put(r, c, out_ch, style, fg, bg);
-                        if w.x_cursor >= cols {
-                            w.y_cursor += 1;
-                            w.x_cursor = 1;
+                        run.get_or_insert_with(|| crate::screen::V6Text {
+                            y: w.y_cursor,
+                            x: w.x_cursor,
+                            text: String::new(),
+                            style,
+                            fg,
+                            bg,
+                        })
+                        .text
+                        .push(out_ch);
+                        if c >= cols {
+                            if let Some(r) = run.take() {
+                                w.texts.push(r);
+                            }
+                            w.y_cursor += fh;
+                            w.x_cursor = w.left_margin + 1;
                         } else {
-                            w.x_cursor += 1;
+                            w.x_cursor += fw;
                         }
+                    }
+                    if let Some(r) = run.take() {
+                        w.texts.push(r);
                     }
                 }
                 return;
@@ -2375,6 +2416,12 @@ impl Machine {
         }
         // Stream 3 is inactive; streams 1/2/4 apply.
         if self.streams.stream1 {
+            // v6: this is window 0's (the main scrolling window's) output.
+            // Count its chars so window-0 inline pictures can anchor to their
+            // exact position in the text stream (PictureEvent::out_chars).
+            if self.screen.v6.is_some() {
+                self.v6_win0_out_chars += s.chars().count() as u64;
+            }
             let attrs = crate::io::TextAttrs {
                 style: self.screen.text_style,
                 fg: self.screen.current_fg,
@@ -6772,16 +6819,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn v6_draw_picture_stamps_out_chars_and_attaches_following_margin() {
+        // The event records how many chars had been printed to window 0 (its
+        // anchor in the text stream), and a set_margins directly after the draw
+        // on the same window attaches its left value (the inline-picture idiom).
+        let mut m = v6_exec_machine();
+        m.print_text("hello\n"); // 6 chars to window 0
+        m.exec_ext(0x05, &[7, 3, 3], None, None); // draw_picture(7, y=3, x=3)
+        m.exec_ext(0x08, &[56, 0, 0], None, None); // set_margins(left=56, right=0, win=0)
+        {
+            let ev = m.pending_pictures.last().unwrap();
+            assert_eq!(ev.out_chars, 6, "event anchored after the 6 printed chars");
+            assert_eq!(ev.margin_after, Some(56), "following set_margins attached");
+        }
+        // A LATER set_margins must not overwrite the attached value.
+        m.exec_ext(0x08, &[32, 0, 0], None, None);
+        assert_eq!(m.pending_pictures.last().unwrap().margin_after, Some(56));
+    }
+
+    #[test]
+    fn v6_draw_picture_zero_coords_resolve_to_window_cursor() {
+        // ZMSD §15: zero y/x means the cursor coordinate in the current window
+        // (the cursor is stored in 1-based pixels and used verbatim).
+        let mut m = v6_exec_machine();
+        m.screen.v6.as_mut().unwrap().windows[0].y_cursor = 9;
+        m.screen.v6.as_mut().unwrap().windows[0].x_cursor = 17;
+        m.exec_ext(0x05, &[7, 0, 0], None, None);
+        let ev = m.pending_pictures.last().unwrap();
+        assert_eq!((ev.y, ev.x), (9, 17));
+    }
+
+    #[test]
     fn v6_set_margins_stores_and_snaps_cursor() {
         let mut m = v6_exec_machine();
-        // Cursor sits at cell col 2 (pixel 9), inside the new 20px left margin.
-        m.screen.v6.as_mut().unwrap().windows[1].x_cursor = 2;
+        // Cursor sits at pixel 9, inside the new 20px left margin.
+        m.screen.v6.as_mut().unwrap().windows[1].x_cursor = 9;
         m.exec_ext(0x08, &[20, 8, 1], None, None); // set_margins(left, right, window)
         let w = &m.screen.v6.as_ref().unwrap().windows[1];
         assert_eq!(w.left_margin, 20, "left margin stored (prop 6)");
         assert_eq!(w.right_margin, 8, "right margin stored (prop 7)");
-        // 20px margin → first cell at/after it: 20/8 + 1 = cell col 3.
-        assert_eq!(w.x_cursor, 3, "cursor snapped forward to the new left margin");
+        assert_eq!(w.x_cursor, 21, "cursor snapped forward to the new left margin (px)");
     }
 
     #[test]
@@ -6833,7 +6910,7 @@ pub(crate) mod tests {
         let r = m.exec_ext(0x05, &[5, 1, 1], None, None); // draw_picture(5, y=1, x=1)
         assert!(matches!(r, StepResult::Continue));
         assert_eq!(m.pending_pictures, vec![
-            PictureEvent { number: 5, window: 7, x: 1, y: 1, erase: false }
+            PictureEvent { number: 5, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None }
         ]);
     }
 
@@ -6844,7 +6921,7 @@ pub(crate) mod tests {
         let r = m.exec_ext(0x07, &[5, 2, 4], None, None); // erase_picture(5, y=2, x=4)
         assert!(matches!(r, StepResult::Continue));
         assert_eq!(m.pending_pictures, vec![
-            PictureEvent { number: 5, window: 3, x: 4, y: 2, erase: true }
+            PictureEvent { number: 5, window: 3, x: 4, y: 2, erase: true, out_chars: 0, margin_after: None }
         ]);
     }
 
@@ -6965,7 +7042,12 @@ pub(crate) mod tests {
         let v6 = m.screen.v6.as_ref().unwrap();
         assert_eq!(v6.windows[1].grid.cell(1, 1).ch, 'H', "first char lands at (1,1)");
         assert_eq!(v6.windows[1].grid.cell(1, 2).ch, 'I', "second char lands at (1,2)");
-        assert_eq!(v6.windows[1].x_cursor, 3, "cursor advanced past the printed text");
+        // Cursor is in PIXELS: two 8px glyphs from px 1 → px 17.
+        assert_eq!(v6.windows[1].x_cursor, 17, "pixel cursor advanced past the printed text");
+        // The run is also recorded at its exact pixel start for the raster.
+        assert_eq!(v6.windows[1].texts.len(), 1);
+        let t = &v6.windows[1].texts[0];
+        assert_eq!((t.y, t.x, t.text.as_str()), (1, 1, "HI"));
     }
 
     #[test]
@@ -7026,14 +7108,13 @@ pub(crate) mod tests {
     #[test]
     fn v6_set_cursor_targets_current_window_by_default() {
         // v6 set_cursor coords are 1-based PIXELS (ZMSD §8.8.1: (1,1) is top-
-        // left); the grid stores 1-based char cells (font 8px): pixel row 16 is
-        // in cell row 2 ((16-1)/8+1), pixel col 24 in cell col 3.
+        // left) and are stored verbatim — window props 4/5 read back in units.
         let mut m = v6_exec_machine();
         m.exec_var(0x0B, &[2], None, None); // set_window(2)
         m.exec_var(0x0F, &[16, 24], None, None); // set_cursor(y=16px, x=24px)
         let v6 = m.screen.v6.as_ref().unwrap();
-        assert_eq!(v6.windows[2].y_cursor, 2);
-        assert_eq!(v6.windows[2].x_cursor, 3);
+        assert_eq!(v6.windows[2].y_cursor, 16);
+        assert_eq!(v6.windows[2].x_cursor, 24);
     }
 
     #[test]
@@ -7042,8 +7123,8 @@ pub(crate) mod tests {
         m.exec_var(0x0B, &[2], None, None); // current = 2
         m.exec_var(0x0F, &[33, 41, 4], None, None); // set_cursor(y=33px, x=41px, window=4)
         let v6 = m.screen.v6.as_ref().unwrap();
-        assert_eq!(v6.windows[4].y_cursor, 5, "(33-1)/8 + 1 = row 5");
-        assert_eq!(v6.windows[4].x_cursor, 6, "(41-1)/8 + 1 = col 6");
+        assert_eq!(v6.windows[4].y_cursor, 33, "pixel row stored verbatim");
+        assert_eq!(v6.windows[4].x_cursor, 41, "pixel col stored verbatim");
         assert_eq!(v6.windows[2].y_cursor, 1, "current window (2) untouched");
     }
 
@@ -7058,12 +7139,12 @@ pub(crate) mod tests {
         m.exec_var(0x0F, &[9, 17], None, None); // set_cursor(y=9px, x=17px)
         {
             let w = &m.screen.v6.as_ref().unwrap().windows[1];
-            assert_eq!(w.y_cursor, 2, "(9-1)/8 + 1 = row 2");
-            assert_eq!(w.x_cursor, 3, "(17-1)/8 + 1 = col 3");
+            assert_eq!(w.y_cursor, 9, "pixel row stored verbatim");
+            assert_eq!(w.x_cursor, 17, "pixel col stored verbatim");
         }
         m.exec_var(0x0F, &[9, (-16i16) as u16], None, None); // negative x → clamp
         let w = &m.screen.v6.as_ref().unwrap().windows[1];
-        assert_eq!(w.x_cursor, 1, "negative x clamps to column 1, not the right edge");
+        assert_eq!(w.x_cursor, 1, "negative x clamps to pixel 1, not the right edge");
     }
 
     #[test]
@@ -7072,11 +7153,11 @@ pub(crate) mod tests {
         // are not literal positions and must not be written through.
         let mut m = v6_exec_machine();
         m.exec_var(0x0B, &[1], None, None); // current = 1
-        m.exec_var(0x0F, &[17, 25], None, None); // baseline (17px,25px) → cell (3,4)
+        m.exec_var(0x0F, &[17, 25], None, None); // baseline (17px, 25px)
         m.exec_var(0x0F, &[(-1i16) as u16, 0], None, None); // cursor off
         let v6 = m.screen.v6.as_ref().unwrap();
-        assert_eq!(v6.windows[1].y_cursor, 3, "negative row leaves prior position");
-        assert_eq!(v6.windows[1].x_cursor, 4, "negative row leaves prior position");
+        assert_eq!(v6.windows[1].y_cursor, 17, "negative row leaves prior position");
+        assert_eq!(v6.windows[1].x_cursor, 25, "negative row leaves prior position");
     }
 
     #[test]

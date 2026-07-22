@@ -144,8 +144,11 @@ pub struct ZWindow {
     pub x_coord: u16,          // prop 1
     pub y_size: u16,           // prop 2  (height, pixels)
     pub x_size: u16,           // prop 3  (width, pixels)
-    pub y_cursor: u16,         // prop 4
-    pub x_cursor: u16,         // prop 5
+    /// Cursor in UNITS (pixels), 1-based within the window (ZMSD §8.8.3.2 —
+    /// window props are measured in units, so `get_wind_prop` 4/5 read these
+    /// verbatim). The char-cell the grid writes at derives as `(px-1)/font + 1`.
+    pub y_cursor: u16,         // prop 4  (pixels)
+    pub x_cursor: u16,         // prop 5  (pixels)
     pub left_margin: u16,      // prop 6
     pub right_margin: u16,     // prop 7
     pub interrupt_routine: u16,// prop 8
@@ -159,6 +162,24 @@ pub struct ZWindow {
     /// Character grid for this window (grid windows 1–7). Window 0 scrolls (buffered),
     /// its text goes to the transcript stream, not a grid.
     pub grid: UpperWindow,
+    pub fg: ZColour,
+    pub bg: ZColour,
+    /// Pixel-positioned text runs (grid windows 1–7): each print records the
+    /// exact 1-based pixel cursor it started at, so a pixel-faithful raster can
+    /// draw text where the game put it (e.g. Zork Zero's status text at rows
+    /// 6/14, ON the banner ribbons) instead of snapping to the char grid. The
+    /// char grid above remains the cell-mode fallback. Cleared with the grid.
+    pub texts: Vec<V6Text>,
+}
+
+/// One pixel-positioned text run in a v6 grid window: `(y, x)` are the 1-based
+/// window-relative pixel coords of the run's first glyph's top-left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V6Text {
+    pub y: u16,
+    pub x: u16,
+    pub text: String,
+    pub style: u8,
     pub fg: ZColour,
     pub bg: ZColour,
 }

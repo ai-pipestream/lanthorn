@@ -253,7 +253,7 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
     let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, &colors);
     // A visible story line of 'X's; assert none of its glyph pixels land on an opaque chrome
     // pixel of the frame (they sit in the clear interior).
-    let main = v6::MainText { lines: vec!["X".repeat(30)], input: String::new(), cursor_col: 0, awaiting: false, gutter_cols: 0, band_rows: 0 };
+    let main = v6::MainText { lines: vec!["X".repeat(30)], input: String::new(), cursor_col: 0, awaiting: false, floats: Vec::new() };
     let chrome_only = canvas.clone(); // snapshot BEFORE story text, to know which pixels are chrome
     if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
         let (cols, rows) = ((sw / 8).max(1) as u16, (sh / 8).max(1) as u16);

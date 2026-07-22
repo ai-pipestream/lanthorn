@@ -673,6 +673,7 @@ impl AppGlk {
             bg: None,
             fg: None,
             reverse: false,
+            px_texts: Vec::new(),
         }
     }
 
@@ -950,7 +951,7 @@ impl GlkBackend for AppGlk {
             let img = crate::inline_image::InlineImage {
                 pixels: std::sync::Arc::new(src.to_rgba8()),
                 align: crate::inline_image::ImageAlign::from_glk(x as u32),
-                scaled: scale,
+                scaled: scale, margin_px: None ,
             };
             if let Some(buf) = self.buffers.get_mut(&win) {
                 buf.log.push(BufElem::Image(img));
@@ -1165,7 +1166,7 @@ mod tests {
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(3, 3)),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None,
+            scaled: None, margin_px: None ,
         };
         let log = &mut glk.buffers.get_mut(&2).unwrap().log;
         log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, para: crate::state::ParaFmt::default(), glk_style: 0, text: "a\n".into() });
@@ -1676,7 +1677,7 @@ mod tests {
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(3, 3)),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None,
+            scaled: None, margin_px: None ,
         };
         let log = &mut glk.buffers.get_mut(&pid).unwrap().log;
         log.push(BufElem::Text { bits: 0, fg: 0, bg: 0, link: 0, para: crate::state::ParaFmt::default(), glk_style: 0, text: "foo".into() });

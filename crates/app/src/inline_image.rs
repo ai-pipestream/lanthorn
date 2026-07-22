@@ -36,6 +36,10 @@ pub struct InlineImage {
     pub pixels: Arc<image::RgbaImage>,
     pub align: ImageAlign,
     pub scaled: Option<(u32, u32)>,
+    /// For a margin float: the pixel x where text should start beside the image
+    /// (the v6 game's own `set_margins` value when it followed the draw). `None`
+    /// = derive from the image width. Ignored for inline (non-margin) aligns.
+    pub margin_px: Option<u32>,
 }
 
 impl InlineImage {
@@ -69,7 +73,7 @@ mod tests {
     use std::sync::Arc;
 
     fn img(w: u32, h: u32) -> InlineImage {
-        InlineImage { pixels: Arc::new(image::RgbaImage::new(w, h)), align: ImageAlign::InlineUp, scaled: None }
+        InlineImage { pixels: Arc::new(image::RgbaImage::new(w, h)), align: ImageAlign::InlineUp, scaled: None , margin_px: None }
     }
 
     #[test]

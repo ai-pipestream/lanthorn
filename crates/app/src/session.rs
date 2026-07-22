@@ -134,6 +134,95 @@ pub(crate) fn clamp_runs(
     out
 }
 
+/// Interleave v6 window-0 inline pictures into a turn's styled text as ordered
+/// [`TranscriptElem`]s. Each picture carries the absolute win0 output-char
+/// offset it was drawn at (`PictureEvent::out_chars`); `base` is the count at
+/// the start of this turn's text, so `abs - base` is the picture's position
+/// within `text`. Offsets snap DOWN to the start of their line (v6 games draw
+/// inline art at the text cursor, i.e. at line starts — snapping keeps a
+/// mid-line offset from splitting a paragraph in two, since
+/// `push_transcript_runs` starts a new transcript line per `Text` element).
+/// The line separator consumed by a split is dropped from the emitted text
+/// (the element boundary itself is the break) and its style-chunk char is
+/// consumed in lockstep.
+fn interleave_story_pics(
+    text: &str,
+    runs: &[(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)],
+    pics: Vec<(u64, crate::inline_image::InlineImage)>,
+    base: u64,
+) -> Vec<TranscriptElem> {
+    let chars: Vec<char> = text.chars().collect();
+    let total = chars.len();
+    // Clamp into this turn's text, then snap to the owning line's start.
+    let mut inserts: Vec<(usize, crate::inline_image::InlineImage)> = pics
+        .into_iter()
+        .map(|(abs, img)| {
+            let mut off = (abs.saturating_sub(base) as usize).min(total);
+            while off > 0 && chars[off - 1] != '\n' {
+                off -= 1;
+            }
+            (off, img)
+        })
+        .collect();
+    inserts.sort_by_key(|(o, _)| *o); // stable: equal offsets keep draw order
+
+    // Lockstep style-chunk consumption: `take(n)` returns the chunks covering
+    // the next `n` chars, splitting the boundary chunk as needed.
+    let mut run_iter = runs.iter().copied();
+    let mut pending: Option<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)> = run_iter.next();
+    let mut take = |n: usize| -> Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)> {
+        let mut out = Vec::new();
+        let mut left = n;
+        while left > 0 {
+            match pending {
+                Some(mut r) => {
+                    if r.0 <= left {
+                        left -= r.0;
+                        out.push(r);
+                        pending = run_iter.next();
+                    } else {
+                        let mut head = r;
+                        head.0 = left;
+                        out.push(head);
+                        r.0 -= left;
+                        left = 0;
+                        pending = Some(r);
+                    }
+                }
+                None => break,
+            }
+        }
+        out
+    };
+
+    let mut elems = Vec::new();
+    let mut pos = 0usize;
+    for (off, img) in inserts {
+        if off > pos {
+            // Text up to the split, excluding the '\n' the split lands after —
+            // the element boundary IS the line break.
+            let end = off - 1; // chars[off-1] == '\n' (or off == total edge below)
+            let (chunk_end, drop_sep) = if chars[off - 1] == '\n' { (end, true) } else { (off, false) };
+            if chunk_end > pos {
+                let chunk: String = chars[pos..chunk_end].iter().collect();
+                let chunk_runs = take(chunk_end - pos);
+                elems.push(TranscriptElem::Text { text: chunk, runs: chunk_runs });
+            }
+            if drop_sep {
+                let _ = take(1); // consume the dropped separator's style char
+            }
+            pos = off;
+        }
+        elems.push(TranscriptElem::Image(img));
+    }
+    if pos < total {
+        let tail: String = chars[pos..].iter().collect();
+        let tail_runs = take(total - pos);
+        elems.push(TranscriptElem::Text { text: tail, runs: tail_runs });
+    }
+    elems
+}
+
 // ── Public types ──────────────────────────────────────────────────────────────
 
 /// One ordered piece of a turn's buffer output: a text run (with its style
@@ -292,6 +381,14 @@ pub struct GameSession {
     /// `drain_turn` from `Machine::pending_pictures`; read by the Task 4
     /// screen adapter to build the layered composite.
     pub pictures_canvas: std::collections::HashMap<u8, crate::graphics::Canvas>,
+    /// v6 window-0 inline pictures (drop-caps, room icons) awaiting transcript
+    /// interleaving: the absolute win0 output-char offset each was drawn at
+    /// (`PictureEvent::out_chars`), plus the prepared float image. Drained into
+    /// ordered `TranscriptElem`s so each picture anchors to its paragraph.
+    story_pics: Vec<(u64, crate::inline_image::InlineImage)>,
+    /// `Machine::v6_win0_out_chars` at the last transcript drain — an event's
+    /// offset within the current turn's text is `out_chars - this`.
+    v6_win0_chars_seen: u64,
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
@@ -364,6 +461,8 @@ impl GameSession {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
         })
     }
 
@@ -389,6 +488,9 @@ impl GameSession {
     /// Drain the transcript accumulated since the last drain (intro or last turn).
     pub fn take_transcript(&mut self) -> String {
         let raw = sink_mut(&mut self.machine).take_text();
+        // Keep the win0 char-offset base in sync with the drained sink, so any
+        // later inline-picture interleave measures against the right origin.
+        self.v6_win0_chars_seen = self.machine.v6_win0_out_chars;
         if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw }
     }
 
@@ -538,7 +640,9 @@ impl GameSession {
         pending_io: Option<PendingIo>,
         timed_out: bool,
     ) -> TurnResult {
+        let win0_base = self.v6_win0_chars_seen;
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
+        self.v6_win0_chars_seen = self.machine.v6_win0_out_chars;
         let transcript = if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw };
         let transcript_runs = clamp_runs(raw_runs, transcript.chars().count());
         let detected = detect_location(&self.machine);
@@ -550,6 +654,14 @@ impl GameSession {
         let sounds = std::mem::take(&mut self.machine.pending_sounds);
         let erase_lower = std::mem::take(&mut self.machine.screen.erase_lower_requested);
         let pictures = self.drain_pictures();
+        // Window-0 inline pictures interleave into this turn's text as ordered
+        // elements; empty for turns without them (the app then uses the flat
+        // transcript path unchanged).
+        let transcript_elems = if self.story_pics.is_empty() {
+            Vec::new()
+        } else {
+            interleave_story_pics(&transcript, &transcript_runs, std::mem::take(&mut self.story_pics), win0_base)
+        };
 
         TurnResult {
             transcript,
@@ -566,7 +678,7 @@ impl GameSession {
             pending_io,
             timed_out,
             pictures,
-            transcript_elems: Vec::new(),
+            transcript_elems,
         }
     }
 
@@ -601,6 +713,27 @@ impl GameSession {
     fn apply_picture_event(&mut self, ev: &PictureEvent) {
         let Some(v6) = self.machine.screen.v6.as_ref() else { return };
         let Some(w) = v6.windows.get(ev.window as usize) else { return };
+        // Window 0 is the main scrolling text window: its pictures are INLINE
+        // story content (Zork Zero's drop-caps and room icons, drawn at the
+        // text cursor with a margin set for the text to flow beside them).
+        // They anchor to the transcript at their output-char position rather
+        // than painting a window canvas — the raster/hybrid renderers float
+        // them beside the text they belong to, and they scroll with it.
+        if ev.window == 0 {
+            if ev.erase {
+                return; // no canvas to erase; a win0 erase_picture is a no-op here
+            }
+            if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
+                let float = crate::inline_image::InlineImage {
+                    pixels: std::sync::Arc::new(img.to_rgba8()),
+                    align: crate::inline_image::ImageAlign::MarginLeft,
+                    scaled: None,
+                    margin_px: ev.margin_after.map(|m| m as u32),
+                };
+                self.story_pics.push((ev.out_chars, float));
+            }
+            return;
+        }
         // Clamp the pixel-canvas backing store so a hostile / buggy story that
         // sets window_size(w, 0xFFFF, 0xFFFF) then draws/erases can't force a
         // ~17 GB RgbaImage allocation (an OOM abort). CANVAS_PX_CAP (4096) far
@@ -718,12 +851,31 @@ impl GameSession {
                         })
                         .collect(),
                     active_rows: rows,
-                    cursor: (win.y_cursor, win.x_cursor),
+                    // The v6 window cursor is stored in 1-based PIXELS (ZMSD
+                    // §8.8.3.2); the cell renderer wants 1-based cells.
+                    cursor: (
+                        (win.y_cursor.max(1) - 1) / V6_FONT_HEIGHT + 1,
+                        (win.x_cursor.max(1) - 1) / V6_FONT_WIDTH + 1,
+                    ),
                     cursor_active: v6.current == i as u8,
                     border: BorderPref::Unspecified,
                     bg: (win.bg != ZColour::Default).then(|| crate::state::pack_zcolour(win.bg)),
                     fg: (win.fg != ZColour::Default).then(|| crate::state::pack_zcolour(win.fg)),
                     reverse: false,
+                    // Exact pixel-positioned runs for the pixel raster (the
+                    // cells above stay the cell-mode fallback).
+                    px_texts: win
+                        .texts
+                        .iter()
+                        .map(|t| crate::engine::PxText {
+                            y: t.y,
+                            x: t.x,
+                            text: t.text.clone(),
+                            style: t.style,
+                            fg: crate::state::pack_zcolour(t.fg),
+                            bg: crate::state::pack_zcolour(t.bg),
+                        })
+                        .collect(),
                 })
             };
             text_entries.push(PositionedWindow {
@@ -1244,6 +1396,7 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
         // Z-machine grid reverse is per-cell (style bits), not a window-level Glk
         // ReverseColor, so no window-level reverse fill here. (SQ-0403)
         reverse: false,
+        px_texts: Vec::new(),
     };
     ScreenModel {
         root: WinNode::Pair {
@@ -1308,6 +1461,21 @@ impl Engine for GameSession {
 
     fn take_transcript(&mut self) -> String {
         self.take_transcript()
+    }
+
+    fn take_transcript_elems(&mut self) -> Vec<TranscriptElem> {
+        // Non-empty only when v6 window-0 inline pictures are pending (Zork
+        // Zero's boot drop-cap): interleave them into the sink text as ordered
+        // elements. Every other story returns empty → the flat path is used.
+        if self.story_pics.is_empty() {
+            return Vec::new();
+        }
+        let base = self.v6_win0_chars_seen;
+        let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
+        self.v6_win0_chars_seen = self.machine.v6_win0_out_chars;
+        let transcript = if self.strip_prompt { strip_read_prompt(&raw).to_owned() } else { raw };
+        let runs = clamp_runs(raw_runs, transcript.chars().count());
+        interleave_story_pics(&transcript, &runs, std::mem::take(&mut self.story_pics), base)
     }
 
     fn set_strip_prompt(&mut self, on: bool) {
@@ -1855,6 +2023,46 @@ mod tests {
     }
 
     #[test]
+    fn interleave_story_pics_splits_at_line_starts_and_keeps_runs_synced() {
+        use crate::inline_image::{ImageAlign, InlineImage};
+        let img = InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::new(8, 8)),
+            align: ImageAlign::MarginLeft,
+            scaled: None,
+            margin_px: Some(56),
+        };
+        let text = "first line\nsecond line";
+        // One style chunk covering everything (bold), to verify run splitting.
+        let runs = vec![(text.chars().count(), 2u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0u8)];
+        // Drawn at abs offset base+15 — mid-"second line" — must SNAP to that
+        // line's start (offset 11), splitting cleanly at the line boundary.
+        let elems = interleave_story_pics(text, &runs, vec![(115, img)], 100);
+        assert_eq!(elems.len(), 3, "Text, Image, Text");
+        let TranscriptElem::Text { text: t0, runs: r0 } = &elems[0] else { panic!("elem 0 is Text") };
+        assert_eq!(t0, "first line", "separator dropped — element boundary is the break");
+        assert_eq!(r0.iter().map(|r| r.0).sum::<usize>(), 10, "runs cover exactly the chunk");
+        assert!(matches!(&elems[1], TranscriptElem::Image(i) if i.margin_px == Some(56)));
+        let TranscriptElem::Text { text: t2, runs: r2 } = &elems[2] else { panic!("elem 2 is Text") };
+        assert_eq!(t2, "second line");
+        assert_eq!(r2.iter().map(|r| r.0).sum::<usize>(), 11, "tail runs cover the tail (separator char consumed)");
+    }
+
+    #[test]
+    fn interleave_story_pics_at_start_needs_no_split() {
+        use crate::inline_image::{ImageAlign, InlineImage};
+        let img = InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::new(8, 8)),
+            align: ImageAlign::MarginLeft,
+            scaled: None,
+            margin_px: None,
+        };
+        let elems = interleave_story_pics("story text", &[], vec![(0, img)], 0);
+        assert_eq!(elems.len(), 2, "Image then Text");
+        assert!(matches!(&elems[0], TranscriptElem::Image(_)));
+        assert!(matches!(&elems[1], TranscriptElem::Text { text, .. } if text == "story text"));
+    }
+
+    #[test]
     fn clamp_runs_trims_to_char_len() {
         use zvm::screen::ZColour;
         // strip_read_prompt removed 3 trailing chars ("\n> " etc.) → clamp.
@@ -1872,7 +2080,7 @@ mod tests {
         crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(2, 2)),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None,
+            scaled: None, margin_px: None ,
         }
     }
 
@@ -2851,7 +3059,7 @@ mod tests {
         let mut windows: [ZWindow; 8] = Default::default();
         windows[7] = ZWindow { x_size: 64, y_size: 48, ..Default::default() };
         machine.screen.v6 = Some(V6Windows { windows, current: 7 });
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false });
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None });
 
         // Construct the session directly (bypassing the constructor's boot
         // loop, which this synthetic story can't usefully run) with a Pict
@@ -2863,13 +3071,15 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
         assert!(sess.pictures_canvas.is_empty(), "no canvas before the turn is drained");
         let result = sess.drain_turn(false, None, false);
 
-        assert_eq!(result.pictures, vec![PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false }],
+        assert_eq!(result.pictures, vec![PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None }],
             "the drained event is carried on TurnResult (mirrors pending_sounds)");
         assert!(sess.machine.pending_pictures.is_empty(), "the VM queue is drained after the turn");
 
@@ -2892,8 +3102,8 @@ mod tests {
         machine.screen.v6 = Some(V6Windows { windows, current: 7 });
         // Draw, then erase the same picture — the erase must clear back to
         // transparent over the picture's own footprint (2x2, ZMSD §15).
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false });
-        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: true });
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false, out_chars: 0, margin_after: None });
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: true, out_chars: 0, margin_after: None });
 
         let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
         let mut sess = GameSession {
@@ -2902,6 +3112,8 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -2940,6 +3152,8 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
         };
         // Window 7 has a rendered picture (a canvas sized to its pixel dims).
         sess.pictures_canvas.insert(7, crate::graphics::Canvas::new(64, 48));
@@ -3002,9 +3216,11 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
         };
         // The erase path allocates the canvas even without a resolved image.
-        sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 0, y: 0, erase: true });
+        sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 0, y: 0, erase: true, out_chars: 0, margin_after: None });
         let c = sess.pictures_canvas.get(&7).expect("erase allocated a canvas");
         assert!(c.img.width() <= 4096 && c.img.height() <= 4096,
             "canvas clamped, got {}x{}", c.img.width(), c.img.height());

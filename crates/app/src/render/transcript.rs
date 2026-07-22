@@ -1849,7 +1849,7 @@ mod tests {
     // ── Inline-image band wrapping ────────────────────────────────────────────
 
     fn dummy_img(w: u32, h: u32, align: crate::inline_image::ImageAlign) -> crate::inline_image::InlineImage {
-        crate::inline_image::InlineImage { pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)), align, scaled: None }
+        crate::inline_image::InlineImage { pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)), align, scaled: None , margin_px: None }
     }
 
     #[test]
