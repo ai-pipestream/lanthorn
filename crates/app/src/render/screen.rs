@@ -380,7 +380,7 @@ fn render_node(
             // bars, backgrounds) render directly as cell backgrounds — exact,
             // grid-aligned, and legible even without an image protocol. A detailed
             // canvas falls through to the image protocol (or a plain fill). (SQ-0332)
-            if crate::render::graphics::render_graphics_as_cells(gw, area, buf) {
+            if crate::render::graphics::render_graphics_as_cells(gw, area, buf, false) {
                 // painted as cells
             } else if let Some(picker) = state.game_picker.as_ref() {
                 state.graphics_render.borrow_mut().render(picker, gw, area, state.colors.theme.get("graphics").style, buf);
@@ -401,11 +401,47 @@ fn render_node(
                 if sub.width == 0 || sub.height == 0 {
                     continue;
                 }
-                if let WinNode::Grid(g) = &item.node {
-                    draw_grid_transparent(g, sub, buf, state.config.honor_game_colours, grid_colors, links);
-                } else {
-                    let m = render_node(&item.node, status, char_mode, introspect, state, sub, buf, game_input, links, grid_colors);
-                    result = result.or(m);
+                match &item.node {
+                    WinNode::Grid(g) => {
+                        draw_grid_transparent(g, sub, buf, state.config.honor_game_colours, grid_colors, links);
+                    }
+                    WinNode::Buffer(_) => {
+                        // Transparent composite (cell-text-wins for the buffer, like
+                        // draw_grid_transparent for grids): render the transcript into
+                        // a scratch buffer, then copy only cells with a visible glyph
+                        // onto `buf`, so an earlier graphics layer (a full-screen v6
+                        // background window) shows through the empty text areas rather
+                        // than being painted over by the buffer's opaque bg fill.
+                        let mut scratch = Buffer::empty(sub);
+                        let m = render_node(&item.node, status, char_mode, introspect, state, sub, &mut scratch, game_input, links, grid_colors);
+                        result = result.or(m);
+                        for yy in sub.top()..sub.bottom() {
+                            for xx in sub.left()..sub.right() {
+                                let visible = scratch
+                                    .cell((xx, yy))
+                                    .map(|c| { let s = c.symbol(); !s.is_empty() && s != " " })
+                                    .unwrap_or(false);
+                                if visible {
+                                    if let Some(src) = scratch.cell((xx, yy)).cloned() {
+                                        if let Some(dst) = buf.cell_mut((xx, yy)) {
+                                            *dst = src;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    WinNode::Graphics(gw) => {
+                        // v6 background/overlay window: composite per-cell with
+                        // transparency (no grey letterbox, empty canvas paints
+                        // nothing) so overlapping v6 windows and the text beneath
+                        // stay visible.
+                        crate::render::graphics::render_graphics_as_cells(gw, sub, buf, true);
+                    }
+                    _ => {
+                        let m = render_node(&item.node, status, char_mode, introspect, state, sub, buf, game_input, links, grid_colors);
+                        result = result.or(m);
+                    }
                 }
             }
             result

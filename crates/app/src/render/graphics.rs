@@ -26,7 +26,13 @@ fn close(a: image::Rgba<u8>, b: image::Rgba<u8>) -> bool {
 /// and clobbers adjacent text. Sampling the canvas into cell backgrounds is exact,
 /// grid-aligned, cheap, and needs no image-capable terminal. A detailed (non-thin,
 /// non-uniform) canvas returns `false` so the caller falls back to the protocol.
-pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffer) -> bool {
+/// `force` (v6 layered composite): skip the thin/uniform gate and always paint
+/// every cell as the average of its opaque pixels (transparent cells left
+/// untouched). This gives a low-res but grid-aligned, letterbox-free composite
+/// for overlapping v6 background windows — the image-protocol path would paint a
+/// solid grey letterbox over each mostly-empty canvas and clobber the layers
+/// beneath. Non-v6 (Glulx) callers pass `false` to keep the detailed-image path.
+pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffer, force: bool) -> bool {
     if area.width == 0 || area.height == 0 {
         return false;
     }
@@ -74,7 +80,7 @@ pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffe
     let first = cell_color(0, 0);
     let uniform = first.is_some()
         && (0..area.height).all(|cy| (0..area.width).all(|cx| cell_color(cx, cy).is_some_and(|c| close(c, first.unwrap()))));
-    if !(thin || uniform) {
+    if !(force || thin || uniform) {
         return false;
     }
     // A window ≤2 cells in one dimension IS a rule/divider (Kerkerkruip's panel
@@ -217,7 +223,7 @@ mod tests {
         let gw = solid(1, 9, 57, [156, 31, 0, 255]);
         let area = Rect::new(2, 0, 1, 3);
         let mut buf = Buffer::empty(Rect::new(0, 0, 4, 3));
-        assert!(render_graphics_as_cells(&gw, area, &mut buf), "thin → cells");
+        assert!(render_graphics_as_cells(&gw, area, &mut buf, false), "thin → cells");
         for cy in 0..3 {
             assert_eq!(buf.cell((2, cy)).unwrap().symbol(), "\u{2502}", "cell (2,{cy}) is a │ rule");
             assert_eq!(buf.cell((2, cy)).unwrap().style().fg, Some(Color::Rgb(156, 31, 0)), "rule colour on fg");
@@ -238,7 +244,7 @@ mod tests {
         let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
-        assert!(render_graphics_as_cells(&gw, area, &mut buf), "thin strip → cells");
+        assert!(render_graphics_as_cells(&gw, area, &mut buf, false), "thin strip → cells");
         let cell = buf.cell((5, 0)).unwrap();
         assert_eq!(cell.symbol(), "\u{2500}", "sparse horizontal rule → ─ glyph");
         assert_eq!(cell.style().fg, Some(Color::Rgb(200, 40, 60)), "rule colour on the glyph fg");
@@ -255,7 +261,7 @@ mod tests {
         let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
         let area = Rect::new(0, 0, 1, 3);
         let mut buf = Buffer::empty(area);
-        assert!(render_graphics_as_cells(&gw, area, &mut buf));
+        assert!(render_graphics_as_cells(&gw, area, &mut buf, false));
         assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "\u{2502}", "sparse vertical rule → │ glyph");
     }
 
@@ -267,7 +273,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 1);
         let mut buf = Buffer::empty(area);
         buf.cell_mut((5, 0)).unwrap().set_style(Style::default().bg(Color::Rgb(1, 2, 3)));
-        assert!(render_graphics_as_cells(&gw, area, &mut buf), "thin → handled");
+        assert!(render_graphics_as_cells(&gw, area, &mut buf, false), "thin → handled");
         assert_eq!(buf.cell((5, 0)).unwrap().style().bg, Some(Color::Rgb(1, 2, 3)), "transparent → underlying kept");
     }
 
@@ -277,7 +283,7 @@ mod tests {
         let gw = solid(1, 90, 190, [10, 20, 30, 255]);
         let area = Rect::new(0, 0, 10, 10);
         let mut buf = Buffer::empty(area);
-        assert!(render_graphics_as_cells(&gw, area, &mut buf), "uniform → cells");
+        assert!(render_graphics_as_cells(&gw, area, &mut buf, false), "uniform → cells");
         assert_eq!(buf.cell((5, 5)).unwrap().style().bg, Some(Color::Rgb(10, 20, 30)));
     }
 
@@ -292,7 +298,7 @@ mod tests {
         let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
         let area = Rect::new(0, 0, 10, 10);
         let mut buf = Buffer::empty(area);
-        assert!(!render_graphics_as_cells(&gw, area, &mut buf), "detailed image → protocol, not cells");
+        assert!(!render_graphics_as_cells(&gw, area, &mut buf, false), "detailed image → protocol, not cells");
     }
 
     #[test]
@@ -307,7 +313,7 @@ mod tests {
         let area = Rect::new(0, 0, 10, 10);
         let mut buf = Buffer::empty(area);
         buf.cell_mut((5, 5)).unwrap().set_style(Style::default().bg(Color::Rgb(1, 2, 3)));
-        assert!(render_graphics_as_cells(&gw, area, &mut buf), "blank window → handled, not protocol");
+        assert!(render_graphics_as_cells(&gw, area, &mut buf, false), "blank window → handled, not protocol");
         assert_eq!(buf.cell((5, 5)).unwrap().style().bg, Some(Color::Rgb(1, 2, 3)), "blank → underlying kept");
     }
 
