@@ -141,18 +141,6 @@ impl HoverTip {
     pub fn for_lines(lines: Vec<String>, col: u16, row: u16) -> Self {
         HoverTip { col, row, lines }
     }
-
-    /// Build the tooltip explaining a disassembly branch operand: `?` branches
-    /// when the test is TRUE, `?~` when it is FALSE (`inverted`). `col`/`row`
-    /// anchor it.
-    pub fn for_branch(inverted: bool, col: u16, row: u16) -> Self {
-        let lines = if inverted {
-            vec!["?~ branch if test is FALSE (inverted)".to_string()]
-        } else {
-            vec!["?  branch if test is TRUE".to_string()]
-        };
-        HoverTip { col, row, lines }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -771,30 +759,6 @@ fn classify_disasm_tokens(line: &str) -> Vec<(core::ops::Range<usize>, ClickTarg
     out
 }
 
-/// If `off` lands on a branch operand token (a `?…`/`?~…` branch target — the
-/// disassembler's [`fmt_branch`] sigil), return `(token_start, inverted)` where
-/// `inverted` is true for the `?~` (branch-on-false) form. Tokenises exactly
-/// like [`classify_disasm_tokens`] so the hover offset lines up with what the
-/// span classifier sees.
-fn branch_operand_at(line: &str, off: usize) -> Option<(usize, bool)> {
-    let bytes = line.as_bytes();
-    let is_sep = |b: u8| b == b',' || b.is_ascii_whitespace();
-    let mut i = 0;
-    while i < bytes.len() {
-        while i < bytes.len() && is_sep(bytes[i]) { i += 1; }
-        if i >= bytes.len() { break; }
-        let start = i;
-        while i < bytes.len() && !is_sep(bytes[i]) { i += 1; }
-        if (start..i).contains(&off) {
-            let token = &line[start..i];
-            // A branch operand is the only `?`-prefixed token the disassembler
-            // emits (`?0x……`/`?rtrue` etc., inverted as `?~…`).
-            return token.strip_prefix('?').map(|rest| (start, rest.starts_with('~')));
-        }
-    }
-    None
-}
-
 /// Classify one whole token to a `ClickTarget`, returning the sub-range within
 /// the token that its underline/hit-test span should cover (the whole token,
 /// except the code case which drops a leading `?`/`~` branch prefix). Order
@@ -1064,42 +1028,6 @@ pub fn hover_help_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) 
             return None;
         }
         return Some((addr, content.x + 1 + 8, row));
-    }
-    None
-}
-
-/// If `(col, row)` lands on a branch operand (`?0x……` / `?~0x……`) of a
-/// Disassembly instruction, return `(inverted, tooltip_col, row)` for the
-/// branch-sense tooltip: `inverted` is true for the `?~` (branch-on-false)
-/// form. Mirrors [`hover_help_at`]'s geometry; `None` off a branch operand or
-/// outside the Disassembly window.
-pub fn hover_branch_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -> Option<(bool, u16, u16)> {
-    let windows = window_rects(region);
-    for (w, window_rect) in windows.iter().enumerate() {
-        if col < window_rect.x || col >= window_rect.right()
-            || row < window_rect.y || row >= window_rect.bottom() {
-            continue;
-        }
-        let content = Rect::new(
-            window_rect.x + 1, window_rect.y + 1,
-            window_rect.width.saturating_sub(2), window_rect.height.saturating_sub(2),
-        );
-        if col < content.x || col >= content.right() || row < content.y || row >= content.bottom() {
-            return None;
-        }
-        if w != 0 || panel.active_section(0) != Section::Disasm {
-            return None;
-        }
-        let r = (row - content.y) as usize;
-        let rows = disasm_rows(&panel.snapshot.disasm, panel.pc, content.height as usize);
-        let row_entry = rows.get(r)?;
-        if row_entry.divider {
-            return None;
-        }
-        let line = panel.snapshot.disasm.get(row_entry.line_idx)?;
-        let off = (col.checked_sub(content.x + 1))? as usize;
-        let (start, inverted) = branch_operand_at(line, off)?;
-        return Some((inverted, content.x + 1 + start as u16, row));
     }
     None
 }
@@ -1641,47 +1569,6 @@ mod tests {
         // The plain list path draws at the content's left edge (no marker).
         let col = content.x + p.snapshot.dict[0].find("@0x").unwrap() as u16;
         assert_eq!(clickable_at(region, &p, col, content.y), Some(ClickTarget::Memory(0xabc)));
-    }
-
-    // ── Branch-operand hover tip ────────────────────────────────────────────
-
-    #[test]
-    fn hover_tip_for_branch_distinguishes_true_and_inverted() {
-        assert_eq!(HoverTip::for_branch(false, 3, 4).lines, vec!["?  branch if test is TRUE".to_string()]);
-        assert_eq!(HoverTip::for_branch(true, 3, 4).lines, vec!["?~ branch if test is FALSE (inverted)".to_string()]);
-        assert_eq!((HoverTip::for_branch(false, 3, 4).col, HoverTip::for_branch(false, 3, 4).row), (3, 4));
-    }
-
-    #[test]
-    fn hover_branch_at_reports_the_branch_sense_under_the_cursor() {
-        // `?0x…` = branch-on-true; `?~0x…` = branch-on-false (inverted).
-        let line = "001000  je local0, #01 ?0x001234";
-        let (p, region, content, row_y) = hover_panel(line);
-        let col = content.x + 1 + line.find("?0x").unwrap() as u16;
-        assert_eq!(hover_branch_at(region, &p, col, row_y), Some((false, col, row_y)));
-
-        let inv = "001000  je local0, #01 ?~0x001234";
-        let (p, region, content, row_y) = hover_panel(inv);
-        let col = content.x + 1 + inv.find("?~0x").unwrap() as u16;
-        assert_eq!(hover_branch_at(region, &p, col, row_y), Some((true, col, row_y)));
-
-        // `?rtrue`/`?~rfalse` short forms are branch operands too.
-        let short = "001000  jz local0 ?rtrue";
-        let (p, region, content, row_y) = hover_panel(short);
-        let col = content.x + 1 + short.find("?rtrue").unwrap() as u16;
-        assert_eq!(hover_branch_at(region, &p, col, row_y), Some((false, col, row_y)));
-    }
-
-    #[test]
-    fn hover_branch_at_is_none_off_a_branch_operand() {
-        let line = "001000  je local0, #01 ?0x001234";
-        let (p, region, content, row_y) = hover_panel(line);
-        // Over the mnemonic — not a branch operand.
-        let m_col = content.x + 1 + 8;
-        assert_eq!(hover_branch_at(region, &p, m_col, row_y), None);
-        // Over the store/operand region — not a branch operand.
-        let op_col = content.x + 1 + line.find("local0").unwrap() as u16;
-        assert_eq!(hover_branch_at(region, &p, op_col, row_y), None);
     }
 
     #[test]

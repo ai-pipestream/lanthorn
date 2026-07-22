@@ -1737,16 +1737,8 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                 }
                                 continue;
                             }
-                            // Hovering a branch operand (`?…`/`?~…`) explains its sense.
-                            let hb = state.debug.as_ref()
-                                .and_then(|p| app::debug_panel::hover_branch_at(region, p, m.column, m.row));
-                            if let Some((inverted, acol, arow)) = hb {
-                                if let Some(p) = state.debug.as_mut() {
-                                    p.hover = Some(app::debug_panel::HoverTip::for_branch(inverted, acol, arow));
-                                }
-                                continue;
-                            }
-                            // Otherwise, hovering an opcode mnemonic shows its help.
+                            // Hovering an opcode mnemonic shows its help (the help
+                            // itself explains an inverted `?~` branch — see disasm).
                             let hh = state.debug.as_ref()
                                 .and_then(|p| app::debug_panel::hover_help_at(region, p, m.column, m.row));
                             match hh {

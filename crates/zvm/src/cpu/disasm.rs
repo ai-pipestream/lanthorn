@@ -209,12 +209,14 @@ pub fn describe_instruction(instr: &Instr, version: u8, unpack: &Unpack) -> Vec<
         }
     }
     if let Some(b) = &instr.branch {
-        let kw = if b.on_true { "if" } else { "unless" };
+        // A `~` in the disassembly's `?~` branch sigil inverts the sense, so an
+        // inverted branch reads "unless" (not "if"); the note names the cause.
+        let (kw, note) = if b.on_true { ("if", "") } else { ("unless", " (the ~ inverts the branch)") };
         match help.as_ref().and_then(|h| h.branch) {
-            Some(c) => lines.push(format!("  → branches {} {}", kw, c)),
+            Some(c) => lines.push(format!("  → branches {kw} {c}{note}")),
             None => {
                 let sense = if b.on_true { "true" } else { "false" };
-                lines.push(format!("  → branches when the test is {sense}"));
+                lines.push(format!("  → branches when the test is {sense}{note}"));
             }
         }
     }
@@ -734,6 +736,20 @@ mod tests {
         assert!(lines[0].starts_with("je — "), "got {:?}", lines[0]);
         assert!(lines.iter().any(|l| l.starts_with("  → branches if ")),
             "missing branch line: {lines:?}");
+
+        // je … ?~ : an inverted branch reads "unless …" and names the `~` as the
+        // cause, so the opcode help alone explains the `?~` sigil.
+        let je_inv = Instr {
+            opcode: 0x01, form: Form::Long, operand_count: OperandCount::Two,
+            operands: vec![Operand::Small(1), Operand::Small(2)],
+            store: None, branch: Some(Branch { on_true: false, offset: 4, len: 1 }),
+            text: None, next_pc: 0x1000,
+        };
+        let lines = describe_instruction(&je_inv, 5, &Unpack::plain(5));
+        assert!(
+            lines.iter().any(|l| l.starts_with("  → branches unless ") && l.contains("(the ~ inverts the branch)")),
+            "inverted branch should read 'unless …' and name the ~: {lines:?}"
+        );
 
         // store #10, #01 : VarRef operand 0 names the target variable.
         let store = Instr {
