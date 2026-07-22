@@ -337,6 +337,31 @@ pub trait Introspect {
 
 // ── Debugger capability ──────────────────────────────────────────────────────
 
+/// Static confidence provenance of a disassembled line (SQ-0428): where the
+/// disassembler's classification of those bytes came from. Engine-neutral mirror
+/// of the zvm cache's provenance; the render layer combines it with the runtime
+/// executed-PC overlay (`executed_pcs`) to pick a final colour tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisasmProvenance {
+    /// Hard: RD-discovered / initial-PC / execution-confirmed code.
+    Rd,
+    /// Soft: an unverified linear-scan guess.
+    Soft,
+    /// Not code: an opaque `.byte` run.
+    Data,
+}
+
+impl From<zvm::cpu::disasm_cache::Provenance> for DisasmProvenance {
+    fn from(p: zvm::cpu::disasm_cache::Provenance) -> Self {
+        use zvm::cpu::disasm_cache::Provenance as P;
+        match p {
+            P::Rd => DisasmProvenance::Rd,
+            P::Soft => DisasmProvenance::Soft,
+            P::Data => DisasmProvenance::Data,
+        }
+    }
+}
+
 /// Read-only debug inspection of a running engine. All methods return
 /// pre-formatted lines so the app render code stays engine-neutral (mirrors
 /// `Engine::window_dump`). Z-machine implements this; other engines return
@@ -347,6 +372,18 @@ pub trait Debugger {
     fn pc(&self) -> u32;
     /// Disassemble `lines` instructions starting at `addr`, one string per line.
     fn disassemble(&self, addr: u32, lines: usize) -> Vec<String>;
+    /// Disassemble like [`disassemble`](Self::disassemble), but tag each line
+    /// with its static confidence [`DisasmProvenance`] (SQ-0428). The default
+    /// returns the `disassemble` text with every line tagged `Rd` — engines with
+    /// no provenance model surface a single, uniform tier. The provenance is
+    /// display-format-independent, so callers can pair it with the `basic`/`raw`
+    /// text (whose lines match one-for-one).
+    fn disassemble_tiered(&self, addr: u32, lines: usize) -> Vec<(String, DisasmProvenance)> {
+        self.disassemble(addr, lines)
+            .into_iter()
+            .map(|s| (s, DisasmProvenance::Rd))
+            .collect()
+    }
     /// Raw disassembly: instruction bytes + decoded structure with NO lookups
     /// (no mnemonic name, operand-role sigils, variable naming, or packed-address
     /// unpacking) — a diagnostic view to catch bugs in the translation layer.

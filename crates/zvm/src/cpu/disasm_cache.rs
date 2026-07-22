@@ -9,14 +9,29 @@ use crate::cpu::disasm::{format_instr, format_instr_basic, format_instr_raw, mne
 use crate::memory::Memory;
 use std::collections::{BTreeSet, HashSet};
 
+/// Static confidence provenance of a code unit (SQ-0428): where the
+/// disassembler's classification of these bytes came from. `Data` bytes are
+/// never code; a code unit is `Rd` when its routine entry is hard (recursive
+/// descent from a constant call target, the initial PC, or execution-confirmed)
+/// and `Soft` when it came only from the linear scan (an unverified guess).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Provenance {
+    /// Hard: RD-discovered / initial-PC / execution-confirmed code.
+    Rd,
+    /// Soft: a linear-scan guess, not yet verified by execution.
+    Soft,
+    /// Not code: an opaque `.byte` run (`Unit::Data`).
+    Data,
+}
+
 /// A single displayable unit within the disassembled code region.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Unit {
     /// A decoded instruction spanning `[addr, next)`.
-    Instr { addr: u32, next: u32 },
+    Instr { addr: u32, next: u32, prov: Provenance },
     /// A routine header spanning `[addr, first_instr)` (ZMSD §5.2: one byte of
     /// local count, then `nlocals` initial-value words in v1-4).
-    RoutineHeader { addr: u32, nlocals: u8, first_instr: u32 },
+    RoutineHeader { addr: u32, nlocals: u8, first_instr: u32, prov: Provenance },
     /// An opaque data run spanning `[addr, addr+len)` (not decoded as code).
     Data { addr: u32, len: u32 },
 }
@@ -38,6 +53,16 @@ impl Unit {
             Unit::Instr { next, .. } => next,
             Unit::RoutineHeader { first_instr, .. } => first_instr,
             Unit::Data { addr, len } => addr + len,
+        }
+    }
+
+    /// This unit's static confidence [`Provenance`]. `Data` units are always
+    /// `Provenance::Data`; code units carry the tag set at build/confirm time.
+    pub fn provenance(&self) -> Provenance {
+        match *self {
+            Unit::Instr { prov, .. } => prov,
+            Unit::RoutineHeader { prov, .. } => prov,
+            Unit::Data { .. } => Provenance::Data,
         }
     }
 }
@@ -134,10 +159,14 @@ impl DisasmCache {
             // cur == next_start == a code start. Routine entries carry a
             // header; the main context (initial_pc) does not.
             let start = cur;
+            // This run's provenance: HARD (RD entry / initial-PC main context)
+            // is `Rd`, a linear-scan-only (`extra`) entry is `Soft`. The header
+            // and every instruction of the run share the run's provenance.
+            let run_prov = if hard.contains(&start) { Provenance::Rd } else { Provenance::Soft };
             if routines.contains(&start) {
                 let nlocals = mem.read_byte(start);
                 let first_instr = routine_first_instr(mem, start, version).min(rend);
-                units.push(Unit::RoutineHeader { addr: start, nlocals, first_instr });
+                units.push(Unit::RoutineHeader { addr: start, nlocals, first_instr, prov: run_prov });
                 cur = first_instr;
             }
 
@@ -160,7 +189,7 @@ impl DisasmCache {
                 if next > hard_limit {
                     next = hard_limit;
                 }
-                units.push(Unit::Instr { addr: cur, next });
+                units.push(Unit::Instr { addr: cur, next, prov: run_prov });
                 cur = next;
                 // Stop at an aligned soft boundary so its header is emitted next —
                 // but ONLY when the instruction that reached it is a block
@@ -253,12 +282,30 @@ impl DisasmCache {
     /// counting as one line (so a large run can fill the window and stop
     /// mid-run).
     pub fn disassemble(&self, mem: &Memory, addr: u32, lines: usize, fmt: CacheFmt) -> Vec<String> {
+        self.disassemble_tiered(mem, addr, lines, fmt)
+            .into_iter()
+            .map(|(row, _prov)| row)
+            .collect()
+    }
+
+    /// Like [`disassemble`](Self::disassemble), but tags each display row with
+    /// the [`Provenance`] of the unit it came from (SQ-0428). The row strings are
+    /// byte-identical to [`disassemble`]; `Unit::Data`'s multiple `.byte` rows
+    /// each carry `Provenance::Data`.
+    pub fn disassemble_tiered(
+        &self,
+        mem: &Memory,
+        addr: u32,
+        lines: usize,
+        fmt: CacheFmt,
+    ) -> Vec<(String, Provenance)> {
         let mut out = Vec::with_capacity(lines);
         if self.units.is_empty() || lines == 0 {
             return out;
         }
         let mut i = self.unit_index_at(addr);
         while i < self.units.len() && out.len() < lines {
+            let prov = self.units[i].provenance();
             match self.units[i] {
                 Unit::Instr { addr, .. } => {
                     let instr = decode(mem, addr, self.version);
@@ -277,9 +324,9 @@ impl DisasmCache {
                             format!("{:06x}: {}", addr, format_instr_raw(&instr, &bytes, truncated))
                         }
                     };
-                    out.push(row);
+                    out.push((row, prov));
                 }
-                Unit::RoutineHeader { addr, nlocals, first_instr } => match fmt {
+                Unit::RoutineHeader { addr, nlocals, first_instr, .. } => match fmt {
                     // Raw mode shows the untranslated header bytes (no `;` comment
                     // or decoded local count), matching the raw-instruction style.
                     CacheFmt::Raw => {
@@ -291,11 +338,11 @@ impl DisasmCache {
                         if first_instr.saturating_sub(addr) > 12 {
                             hex.push_str(" …");
                         }
-                        out.push(format!("{:06x}: {}   routine", addr, hex));
+                        out.push((format!("{:06x}: {}   routine", addr, hex), prov));
                     }
                     CacheFmt::Full | CacheFmt::Basic => {
                         let plural = if nlocals == 1 { "local" } else { "locals" };
-                        out.push(format!("{:06x}  ; routine, {} {}", addr, nlocals, plural));
+                        out.push((format!("{:06x}  ; routine, {} {}", addr, nlocals, plural), prov));
                     }
                 },
                 Unit::Data { addr, len } => {
@@ -307,7 +354,7 @@ impl DisasmCache {
                             .map(|a| format!("{:02x}", mem.read_byte(a)))
                             .collect::<Vec<_>>()
                             .join(" ");
-                        out.push(format!("{:06x}  .byte {}", row_addr, hexbytes));
+                        out.push((format!("{:06x}  .byte {}", row_addr, hexbytes), prov));
                         row_addr += 16;
                     }
                 }
@@ -352,7 +399,8 @@ impl DisasmCache {
             let instr = decode(mem, cur, self.version);
             let next = if instr.next_pc > cur { instr.next_pc } else { cur + 1 };
             let next = next.min(self.region_end);
-            new_instrs.push(Unit::Instr { addr: cur, next });
+            // Execution-confirmed bytes are ground truth → hard `Rd` provenance.
+            new_instrs.push(Unit::Instr { addr: cur, next, prov: Provenance::Rd });
             cur = next;
             // Re-synced: past the original unit end and landed on an existing
             // boundary, so the tiling is already consistent from here on.
@@ -408,8 +456,9 @@ impl DisasmCache {
             new_units.push(Unit::Data { addr: lo, len: entry - lo });
         }
         let nlocals = mem.read_byte(entry);
-        new_units.push(Unit::RoutineHeader { addr: entry, nlocals, first_instr: first });
-        new_units.extend(self.decode_instrs(mem, first, hi));
+        // A confirmed routine entry is a call-stack `func_addr` — hard `Rd`.
+        new_units.push(Unit::RoutineHeader { addr: entry, nlocals, first_instr: first, prov: Provenance::Rd });
+        new_units.extend(self.decode_instrs(mem, first, hi, Provenance::Rd));
 
         // Idempotent: nothing to do if the span already tiles exactly this way.
         if self.units[i..=end_i] == new_units[..] {
@@ -424,7 +473,7 @@ impl DisasmCache {
     /// Linear decode of `Instr` units over `[from, hi)`, boundary-wins at `hi`
     /// exactly like `build`: each instruction's extent is truncated so it never
     /// crosses `hi`, and a non-advancing decode is forced forward one byte.
-    fn decode_instrs(&self, mem: &Memory, from: u32, hi: u32) -> Vec<Unit> {
+    fn decode_instrs(&self, mem: &Memory, from: u32, hi: u32, prov: Provenance) -> Vec<Unit> {
         let mut out = Vec::new();
         let mut cur = from;
         while cur < hi {
@@ -433,7 +482,7 @@ impl DisasmCache {
             if next > hi {
                 next = hi;
             }
-            out.push(Unit::Instr { addr: cur, next });
+            out.push(Unit::Instr { addr: cur, next, prov });
             cur = next;
         }
         out
@@ -741,14 +790,14 @@ mod tests {
 
     #[test]
     fn unit_addr_and_end_for_instr() {
-        let u = Unit::Instr { addr: 10, next: 14 };
+        let u = Unit::Instr { addr: 10, next: 14, prov: Provenance::Rd };
         assert_eq!(u.addr(), 10);
         assert_eq!(u.end(), 14);
     }
 
     #[test]
     fn unit_addr_and_end_for_routine_header() {
-        let u = Unit::RoutineHeader { addr: 20, nlocals: 3, first_instr: 27 };
+        let u = Unit::RoutineHeader { addr: 20, nlocals: 3, first_instr: 27, prov: Provenance::Rd };
         assert_eq!(u.addr(), 20);
         assert_eq!(u.end(), 27);
     }
@@ -1082,7 +1131,7 @@ mod tests {
             hard.insert(initial_pc);
         }
         for u in cache.units() {
-            if let Unit::Instr { addr, next } = *u {
+            if let Unit::Instr { addr, next, .. } = *u {
                 let natural = decode(&mem, addr, version).next_pc;
                 assert!(
                     next == natural
@@ -1391,9 +1440,9 @@ mod tests {
         // Stale tiling: [base,base+2) ate the read's 0xe4; [base+2,base+5); quit.
         let mut cache = DisasmCache {
             units: vec![
-                Unit::Instr { addr: base, next: base + 2 },
-                Unit::Instr { addr: base + 2, next: base + 5 },
-                Unit::Instr { addr: base + 5, next: base + 6 },
+                Unit::Instr { addr: base, next: base + 2, prov: Provenance::Soft },
+                Unit::Instr { addr: base + 2, next: base + 5, prov: Provenance::Soft },
+                Unit::Instr { addr: base + 5, next: base + 6, prov: Provenance::Soft },
             ],
             routines: Default::default(),
             region_start: base,
@@ -1524,5 +1573,136 @@ mod tests {
         // Idempotent.
         assert!(!cache.confirm_routine(&mem, e), "second confirm_routine is a no-op");
         assert_tiling(&cache);
+    }
+
+    // ── SQ-0428: per-line provenance tiers ───────────────────────────────────
+
+    #[test]
+    fn data_units_are_provenance_data() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let cache = DisasmCache::build(&mem);
+        let Some(data) = cache.units().iter().find(|u| matches!(u, Unit::Data { .. })) else {
+            eprintln!("skipping: no Data unit in minizork.z3");
+            return;
+        };
+        assert_eq!(data.provenance(), Provenance::Data);
+        // The tiered accessor tags the `.byte` row(s) as Data.
+        let rows = cache.disassemble_tiered(&mem, data.addr(), 1, CacheFmt::Full);
+        assert_eq!(rows[0].1, Provenance::Data, "data row: {:?}", rows[0].0);
+        assert!(rows[0].0.contains(".byte "), "got {:?}", rows[0].0);
+    }
+
+    #[test]
+    fn rd_routine_lines_are_provenance_rd() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let version = mem.version();
+        let unpack = Unpack::from_mem(&mem);
+        let region = code_region(&mem);
+        let rd = discover_rd(&mem, version, &unpack, region);
+        let cache = DisasmCache::build(&mem);
+        // A RoutineHeader whose entry is an RD (hard) routine is tagged Rd, and
+        // its first-instruction row is Rd too.
+        let Some(&entry) = rd.iter().find(|&&e| {
+            cache.units().iter().any(|u| matches!(u, Unit::RoutineHeader { addr, .. } if *addr == e))
+        }) else {
+            eprintln!("skipping: no RD routine surfaced as a header in minizork.z3");
+            return;
+        };
+        let rows = cache.disassemble_tiered(&mem, entry, 2, CacheFmt::Full);
+        assert_eq!(rows[0].1, Provenance::Rd, "RD header should be Rd: {:?}", rows[0].0);
+        assert!(rows.iter().all(|(_, p)| *p == Provenance::Rd), "RD run must be all Rd");
+    }
+
+    #[test]
+    fn linear_only_routine_lines_are_provenance_soft() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let version = mem.version();
+        let unpack = Unpack::from_mem(&mem);
+        let region = code_region(&mem);
+        let rd = discover_rd(&mem, version, &unpack, region);
+        let extra = discover_linear(&mem, version, region, &rd);
+        let cache = DisasmCache::build(&mem);
+        // A RoutineHeader whose entry came ONLY from the linear scan is Soft.
+        let Some(&entry) = extra.iter().find(|&&e| {
+            cache.units().iter().any(|u| matches!(u, Unit::RoutineHeader { addr, .. } if *addr == e))
+        }) else {
+            eprintln!("skipping: no linear-only routine surfaced as a header in minizork.z3");
+            return;
+        };
+        assert!(!rd.contains(&entry), "entry must be linear-only");
+        let rows = cache.disassemble_tiered(&mem, entry, 1, CacheFmt::Full);
+        assert_eq!(rows[0].1, Provenance::Soft, "linear-only header should be Soft: {:?}", rows[0].0);
+    }
+
+    #[test]
+    fn confirm_pc_upgrades_soft_bytes_to_rd() {
+        // A soft region proven real by execution (confirm_pc) re-decodes to Rd.
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let mut cache = DisasmCache::build(&mem);
+        // Pick a byte strictly inside a Data unit (classified as data, i.e. not
+        // even Soft code) and confirm the VM executed there.
+        let Some(&Unit::Data { addr, .. }) = cache
+            .units()
+            .iter()
+            .find(|u| matches!(u, Unit::Data { len, .. } if *len >= 6))
+        else {
+            eprintln!("skipping: no Data unit with len >= 6 in minizork.z3");
+            return;
+        };
+        let pc = addr + 2;
+        assert_eq!(
+            cache.disassemble_tiered(&mem, pc, 1, CacheFmt::Full)[0].1,
+            Provenance::Data,
+            "pre-confirm the byte is classified as data"
+        );
+        assert!(cache.confirm_pc(&mem, pc), "confirm_pc heals the region");
+        let rows = cache.disassemble_tiered(&mem, pc, 1, CacheFmt::Full);
+        assert_eq!(rows[0].1, Provenance::Rd, "execution-confirmed bytes must be Rd: {:?}", rows[0].0);
+    }
+
+    #[test]
+    fn confirm_routine_tags_the_reanchored_region_rd() {
+        let Some(bytes) = crate::fixtures::load("minizork.z3") else {
+            eprintln!("skipping: minizork.z3 fixture not present");
+            return;
+        };
+        let mem = Memory::new(bytes).unwrap();
+        let version = mem.version();
+        let mut cache = DisasmCache::build(&mem);
+        let (_rstart, rend) = cache.region();
+        // A promotable entry inside a Data unit (mirrors confirm_routine_promotes_an_entry).
+        let candidate = cache.units().iter().find_map(|u| {
+            let Unit::Data { addr, len } = *u else { return None };
+            (0..len).map(|k| addr + k).find(|&a| {
+                mem.read_byte(a) <= 15
+                    && routine_first_instr(&mem, a, version) < rend
+                    && !cache.routines().contains(&a)
+            })
+        });
+        let Some(e) = candidate else {
+            eprintln!("skipping: no promotable entry candidate in minizork.z3");
+            return;
+        };
+        assert!(cache.confirm_routine(&mem, e), "confirm_routine re-anchors the entry");
+        // The header AND its first instruction are hard (Rd).
+        let rows = cache.disassemble_tiered(&mem, e, 2, CacheFmt::Full);
+        assert_eq!(rows[0].1, Provenance::Rd, "confirmed header should be Rd: {:?}", rows[0].0);
+        assert_eq!(rows[1].1, Provenance::Rd, "confirmed first instr should be Rd: {:?}", rows[1].0);
     }
 }

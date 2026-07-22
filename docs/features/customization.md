@@ -64,11 +64,21 @@ still reach in and override any single selector by name.
   `map.room` for box corners, `glyphs = { north = "^" }` on `map.connector` for
   arrows — there is no separate override table.
 - **`[debug]`** holds only the disassembly-specific selectors for the debug
-  inspector: `pc` and the confidence tiers `disasm_executed` / `disasm_rd`
-  / `disasm_soft` / `disasm_data` that shade how sure the disassembler is that a
-  byte is really code. Each tier carries both a line style and a gutter
-  **`glyph`** (e.g. `disasm_executed`'s `|` mark), so the colour and the mark are
-  both themeable. The panel's frame/body/tabs come from the shared `[panel]`
+  inspector: `pc` and the four confidence tiers that shade how sure the
+  disassembler is that a byte is really code, brightest (most certain) to dimmest:
+  - **`disasm_executed`** — the line's address actually ran this turn. Ground
+    truth; it wins over any static guess. Its `|` gutter mark is the execution-
+    coverage bar (formerly hardcoded).
+  - **`disasm_rd`** — hard-discovered code: reached by recursive descent from a
+    constant call target or the initial PC, or later confirmed by execution.
+  - **`disasm_soft`** — a linear-scan guess that hasn't been verified yet — the
+    "don't fully trust this" tier.
+  - **`disasm_data`** — bytes shown as `.byte`, not decoded as code at all.
+
+  Each tier carries both a line style and a gutter **`glyph`** (e.g.
+  `disasm_executed`'s `|` mark; the others default to a blank space — set
+  `disasm_soft = { glyph = "?" }` to flag guesses), so the colour and the mark
+  are both themeable. The panel's frame/body/tabs come from the shared `[panel]`
   chrome above, and its opcode hover tooltip from the shared `[tooltip]` surface
   (below), not from `[debug]`.
 - **Surfaces beyond `[panel]`.** Dialogs and tooltips are their own **surface**

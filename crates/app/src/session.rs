@@ -737,8 +737,9 @@ pub fn resolve_title(
 // mirrors the Z-machine screen into the neutral `ScreenModel`.
 
 use crate::engine::{
-    BorderPref, BufferWindow, Debugger, Engine, EngineError, EngineSave, GridCell, GridWindow,
-    Introspect, KeyInput, LocationInfo, ScreenModel, Split, StatusField, StatusModel, WinNode,
+    BorderPref, BufferWindow, Debugger, DisasmProvenance, Engine, EngineError, EngineSave, GridCell,
+    GridWindow, Introspect, KeyInput, LocationInfo, ScreenModel, Split, StatusField, StatusModel,
+    WinNode,
 };
 
 /// The engine tag recorded in an `EngineSave` produced by the Z-machine adapter.
@@ -1190,6 +1191,22 @@ impl Debugger for GameSession {
         // discarding is safe.
         self.machine.mem.take_mem_fault();
         out
+    }
+
+    fn disassemble_tiered(&self, addr: u32, lines: usize) -> Vec<(String, DisasmProvenance)> {
+        use zvm::cpu::disasm_cache::CacheFmt;
+        // Full-form rows carry the same `[obj#N]`/`[word]` annotations as
+        // `disassemble`; provenance is display-format-independent, so a caller in
+        // basic/raw mode pairs these provenance tags with its own text lines.
+        let mut out =
+            self.with_disasm_cache(|c| c.disassemble_tiered(&self.machine.mem, addr, lines, CacheFmt::Full));
+        let objs = self.object_addr_map();
+        let dict = self.dict_addr_map();
+        for (line, _prov) in &mut out {
+            *line = self.annotate_refs(line, &objs, &dict);
+        }
+        self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
+        out.into_iter().map(|(s, p)| (s, p.into())).collect()
     }
 
     fn disassemble_raw(&self, addr: u32, lines: usize) -> Vec<String> {

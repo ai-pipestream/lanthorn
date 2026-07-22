@@ -9,7 +9,7 @@
 
 use ratatui::layout::Rect;
 
-use crate::engine::Debugger;
+use crate::engine::{Debugger, DisasmProvenance};
 use crossterm::event::KeyCode;
 
 /// How many instructions / memory rows to pre-render for the address-windowed
@@ -75,6 +75,10 @@ pub fn locate_section(section: Section) -> (usize, usize) {
 #[derive(Debug, Default, Clone)]
 pub struct DebugSnapshot {
     pub disasm: Vec<String>,
+    /// Static confidence tier per `disasm` line (SQ-0428), aligned 1:1. The
+    /// render layer combines this with `executed` to pick each line's colour
+    /// tier. A short/empty vec falls back to the `Rd` (plain) tier per line.
+    pub disasm_prov: Vec<DisasmProvenance>,
     pub globals: Vec<String>,
     pub locals: Vec<String>,
     pub objects: Vec<String>,
@@ -226,7 +230,7 @@ impl DebugPanelState {
         self.sel = None;
         self.pc = dbg.pc();
         self.disasm_addr = self.pc;
-        self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
+        self.reload_disasm(dbg);
         self.snapshot.globals = dbg.globals_lines();
         self.snapshot.locals = dbg.locals_lines();
         self.snapshot.objects = dbg.object_tree_lines();
@@ -248,12 +252,38 @@ impl DebugPanelState {
 
     /// Build the disassembly for `addr` honoring the current view mode, so every
     /// site that (re)builds `snapshot.disasm` picks up the raw/translated toggle.
-    fn load_disasm(&self, dbg: &dyn Debugger, addr: u32) -> Vec<String> {
+    /// Returns the display text plus the per-line confidence tier (SQ-0428).
+    /// Provenance is display-format-independent (the tiered accessor's lines
+    /// match the basic/raw lines one-for-one), so basic/raw pair their own text
+    /// with the tiered provenance.
+    fn load_disasm(&self, dbg: &dyn Debugger, addr: u32) -> (Vec<String>, Vec<DisasmProvenance>) {
         match self.disasm_mode {
-            DisasmMode::Full => dbg.disassemble(addr, DISASM_WINDOW),
-            DisasmMode::Basic => dbg.disassemble_basic(addr, DISASM_WINDOW),
-            DisasmMode::Raw => dbg.disassemble_raw(addr, DISASM_WINDOW),
+            DisasmMode::Full => {
+                let tiered = dbg.disassemble_tiered(addr, DISASM_WINDOW);
+                let prov = tiered.iter().map(|(_, p)| *p).collect();
+                let text = tiered.into_iter().map(|(s, _)| s).collect();
+                (text, prov)
+            }
+            DisasmMode::Basic => {
+                let text = dbg.disassemble_basic(addr, DISASM_WINDOW);
+                let prov = dbg.disassemble_tiered(addr, DISASM_WINDOW).into_iter().map(|(_, p)| p).collect();
+                (text, prov)
+            }
+            DisasmMode::Raw => {
+                let text = dbg.disassemble_raw(addr, DISASM_WINDOW);
+                let prov = dbg.disassemble_tiered(addr, DISASM_WINDOW).into_iter().map(|(_, p)| p).collect();
+                (text, prov)
+            }
         }
+    }
+
+    /// Re-anchor `snapshot.disasm` (and its provenance) to `self.disasm_addr`
+    /// under the current view mode. One helper so every nav/refresh site keeps
+    /// the text and tier vectors in lockstep.
+    fn reload_disasm(&mut self, dbg: &dyn Debugger) {
+        let (text, prov) = self.load_disasm(dbg, self.disasm_addr);
+        self.snapshot.disasm = text;
+        self.snapshot.disasm_prov = prov;
     }
 
     /// Label for the live disassembly mode (for the hint bar `r:` entry).
@@ -290,7 +320,7 @@ impl DebugPanelState {
             KeyCode::Right => self.cycle_tab(1),
             KeyCode::Char('g') => {
                 self.disasm_addr = self.pc;
-                self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
+                self.reload_disasm(dbg);
             }
             // Only in the Disasm tab, so it doesn't shadow keys in other sections.
             KeyCode::Char('r') if self.active_section(self.focus) == Section::Disasm => {
@@ -299,7 +329,7 @@ impl DebugPanelState {
                     DisasmMode::Basic => DisasmMode::Raw,
                     DisasmMode::Raw => DisasmMode::Full,
                 };
-                self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
+                self.reload_disasm(dbg);
             }
             KeyCode::Down | KeyCode::Up | KeyCode::PageDown | KeyCode::PageUp
             | KeyCode::Home | KeyCode::End => {
@@ -381,7 +411,7 @@ impl DebugPanelState {
         } else {
             self.disasm_addr = dbg.prev_instr(self.disasm_addr);
         }
-        self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
+        self.reload_disasm(dbg);
     }
 
     fn step_memory(&mut self, down: bool, dbg: &dyn Debugger) {
@@ -453,7 +483,7 @@ impl DebugPanelState {
     pub fn goto(&mut self, addr: u32, dbg: &dyn Debugger) {
         self.disasm_addr = addr;
         self.show_section(Section::Disasm);
-        self.snapshot.disasm = self.load_disasm(dbg, self.disasm_addr);
+        self.reload_disasm(dbg);
     }
 
     /// Mouse: toggle object `n`'s expansion in the Objects tree (collapse if

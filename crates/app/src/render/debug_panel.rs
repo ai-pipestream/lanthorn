@@ -7,6 +7,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use crate::debug_panel::{self, DebugPanelState, HoverTip, Section, WINDOW_TABS};
+use crate::engine::DisasmProvenance;
 use crate::render::draw_str_clipped;
 use crate::render::panel::{draw_panel, PanelSpec, PanelStrip};
 use crate::render::paneframe::{draw_pane_frame, BorderStyle, InsetSegment, PaneGlyphs};
@@ -25,13 +26,18 @@ fn underline_clickables(buf: &mut Buffer, x_base: u16, y: u16, line: &str, style
 /// Draw the Disassembly section: `disasm_rows` inserts a PC-divider row
 /// directly above the instruction at `pc`, so render and the click hit-test
 /// (`clickable_at`) always agree on which screen row is which disasm line.
-fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: &AppState, body: Style) {
+fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: &AppState) {
     let disasm = &panel.snapshot.disasm;
     let rows = debug_panel::disasm_rows(disasm, panel.pc, content.height as usize);
     let text_rect = Rect::new(content.x + 1, content.y, content.width.saturating_sub(1), content.height);
-    // Bound once: the loop below reads these per row.
-    let pc_style = state.colors.theme.get("debug.pc").style;
-    let exec_style = state.colors.theme.get("debug.disasm_executed").style;
+    // Bound the confidence-tier selectors (SQ-0428) once: each row picks one and
+    // reads both its line style and its gutter-mark glyph.
+    let theme = &state.colors.theme;
+    let pc_style = theme.get("debug.pc").style;
+    let executed = theme.get("debug.disasm_executed");
+    let rd = theme.get("debug.disasm_rd");
+    let soft = theme.get("debug.disasm_soft");
+    let data = theme.get("debug.disasm_data");
     for (r, row_entry) in rows.iter().enumerate() {
         let y = content.y + r as u16;
         if row_entry.divider {
@@ -48,16 +54,29 @@ fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
             continue;
         }
         let Some(line) = disasm.get(row_entry.line_idx) else { continue };
-        // 1-column execution-coverage gutter: `|` when this line's leading
-        // address ran during the last command turn, else blank. Text is
-        // drawn one column in so the gutter never overlaps it.
-        let marked = line.get(0..6)
+        // Final confidence tier: a Data line is always `data`; else runtime
+        // execution (this line's leading address ran last turn — ground truth)
+        // wins over the static provenance; else the static Rd/Soft tag. A missing
+        // provenance entry falls back to the plain `rd` tier.
+        let ran = line.get(0..6)
             .and_then(|a| u32::from_str_radix(a, 16).ok())
             .is_some_and(|addr| panel.snapshot.executed.contains(&addr));
-        let marker = if marked { "|" } else { " " };
-        draw_str_clipped(buf, content.x, y, marker, exec_style, content);
-        draw_str_clipped(buf, content.x + 1, y, line, body, text_rect);
-        underline_clickables(buf, content.x + 1, y, line, body, Section::Disasm, text_rect);
+        let prov = panel.snapshot.disasm_prov.get(row_entry.line_idx).copied().unwrap_or(DisasmProvenance::Rd);
+        let tier = match prov {
+            DisasmProvenance::Data => &data,
+            _ if ran => &executed,
+            DisasmProvenance::Soft => &soft,
+            DisasmProvenance::Rd => &rd,
+        };
+        let tier_style = tier.style;
+        // 1-column gutter mark from the tier selector's glyph (the executed tier's
+        // `|` replaces the old hardcoded exec mark; rd/soft/data default to a
+        // space, so they show nothing unless themed). Text is drawn one column in
+        // so the gutter never overlaps it, and it carries the tier's line style.
+        let mark = tier.glyph.as_ref().and_then(|g| g.single.as_deref()).unwrap_or(" ");
+        draw_str_clipped(buf, content.x, y, mark, tier_style, content);
+        draw_str_clipped(buf, content.x + 1, y, line, tier_style, text_rect);
+        underline_clickables(buf, content.x + 1, y, line, tier_style, Section::Disasm, text_rect);
     }
 }
 
@@ -109,7 +128,7 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
     let body = theme.get("text").style;
 
     if section == Section::Disasm {
-        draw_disasm(buf, content, panel, state, body);
+        draw_disasm(buf, content, panel, state);
         return frame.tab_rects;
     }
 
@@ -496,6 +515,66 @@ mod tests {
         assert_eq!(buf.cell((left.x + 1, content_y)).unwrap().symbol(), "|");
         // Not-executed line (0x1004): gutter column is blank.
         assert_eq!(buf.cell((left.x + 1, content_y + 1)).unwrap().symbol(), " ");
+    }
+
+    #[test]
+    fn colours_disasm_lines_by_confidence_tier_with_executed_winning() {
+        // SQ-0428: each line takes its confidence tier's style + gutter glyph,
+        // and the runtime executed overlay wins over the static Soft provenance.
+        use ratatui::style::Modifier;
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        panel.pc = 0x1000;
+        panel.snapshot.disasm = vec![
+            "001000  add".into(), // Soft + executed → executed tier wins
+            "001004  sub".into(), // Soft, not executed → soft tier
+            "001008  .byte 00".into(), // Data → data tier (even if executed)
+            "00100c  mul".into(), // Rd, not executed → rd tier
+        ];
+        panel.snapshot.disasm_prov = vec![
+            DisasmProvenance::Soft,
+            DisasmProvenance::Soft,
+            DisasmProvenance::Data,
+            DisasmProvenance::Rd,
+        ];
+        // 0x1000 ran last turn; 0x1008 is also in the set but Data must still win.
+        panel.snapshot.executed = std::collections::HashSet::from([0x1000, 0x1008]);
+        state.debug = Some(panel);
+
+        let exec = state.colors.theme.get("debug.disasm_executed");
+        let soft = state.colors.theme.get("debug.disasm_soft").style;
+        let data = state.colors.theme.get("debug.disasm_data").style;
+        let rd = state.colors.theme.get("debug.disasm_rd").style;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        draw_debug_panel(&state, area, &mut buf);
+
+        let [left, ..] = crate::debug_panel::window_rects(area);
+        // Row 0 is the PC divider (above the pc line); rows 1..=4 are the lines.
+        // Gutter col = left.x + 1 (content.x); text col = left.x + 2.
+        let (gx, tx) = (left.x + 1, left.x + 2);
+        let y = left.y + 1; // first content row (the divider)
+
+        // Executed line (0x1000, row 1): executed tier — `|` gutter + accent fg,
+        // NOT the soft fg (overlay beats static provenance).
+        assert_eq!(buf.cell((gx, y + 1)).unwrap().symbol(), "|");
+        assert_eq!(buf.cell((tx, y + 1)).unwrap().style().fg, exec.style.fg);
+        assert_ne!(exec.style.fg, soft.fg, "executed tier must differ from soft");
+
+        // Soft line (0x1004, row 2): soft fg, blank gutter.
+        assert_eq!(buf.cell((gx, y + 2)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((tx, y + 2)).unwrap().style().fg, soft.fg);
+
+        // Data line (0x1008, row 3): data tier (italic) even though it is in the
+        // executed set — Data outranks executed.
+        assert_eq!(buf.cell((tx, y + 3)).unwrap().style().fg, data.fg);
+        assert!(buf.cell((tx, y + 3)).unwrap().style().add_modifier.contains(Modifier::ITALIC),
+            "data tier is italic");
+
+        // Rd line (0x100c, row 4): plain rd fg.
+        assert_eq!(buf.cell((tx, y + 4)).unwrap().style().fg, rd.fg);
     }
 
     #[test]
