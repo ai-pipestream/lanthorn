@@ -225,10 +225,20 @@ fn ext_op_sig(opcode: u8) -> (bool, bool, bool) {
         0x02 => (true, false, false),  // log_shift (stores)
         0x03 => (true, false, false),  // art_shift (stores)
         0x04 => (true, false, false),  // set_font (stores)
+        0x06 => (false, true, false),  // picture_data (branches) — v6
         0x09 => (true, false, false),  // save_undo (stores)
         0x0A => (true, false, false),  // restore_undo (stores)
         0x0B => (false, false, false), // print_unicode (v5+)
         0x0C => (true, false, false),  // check_unicode (v5+, stores)
+        0x13 => (true, false, false),  // get_wind_prop (stores) — v6
+        0x18 => (false, true, false),  // push_stack (branches) — v6
+        0x1B => (false, true, false),  // make_menu (branches) — v6
+        0x1D => (true, false, false),  // buffer_screen (stores) — v6
+        // v6 no-store/no-branch: draw_picture 0x05, erase_picture 0x07,
+        // set_margins 0x08, move_window 0x10, window_size 0x11,
+        // window_style 0x12, scroll_window 0x14, pop_stack 0x15,
+        // read_mouse 0x16, mouse_window 0x17, put_wind_prop 0x19,
+        // print_form 0x1A, picture_table 0x1C
         _ => (false, false, false),
     }
 }
@@ -733,5 +743,34 @@ mod tests {
         assert!(!b2.on_true);
         assert_eq!(b2.offset, -1);
         assert_eq!(b2.len, 2, "long-form branch is 2 bytes");
+    }
+
+    #[test]
+    fn v6_ext_signatures_consume_correct_bytes() {
+        use crate::header::tests_support::sample_story;
+        // (opcode, stores, branches) — from the ZMSD-verified table (Task 4 Step 1)
+        let cases: [(u8, bool, bool); 18] = [
+            (0x05, false, false), (0x06, false, true),  (0x07, false, false),
+            (0x08, false, false), (0x10, false, false), (0x11, false, false),
+            (0x12, false, false), (0x13, true,  false), (0x14, false, false),
+            (0x15, false, false), (0x16, false, false), (0x17, false, false),
+            (0x18, false, true),  (0x19, false, false), (0x1A, false, false),
+            (0x1B, false, true),  (0x1C, false, false), (0x1D, true,  false),
+        ];
+        for (op, stores, branches) in cases {
+            let mut buf = sample_story(6);
+            let at = 0x0040usize;
+            buf[at] = 0xBE;      // EXT prefix
+            buf[at + 1] = op;    // ext opcode
+            buf[at + 2] = 0xFF;  // VAR types byte: all omitted (0 operands)
+            let mut n = at + 3;
+            if stores   { buf[n] = 0x05; n += 1; }         // store into var 0x05
+            if branches { buf[n] = 0xC1; n += 1; }         // 1-byte branch, on-true, offset 1
+            let m = Memory::new(buf).unwrap();
+            let instr = decode(&m, at as u32, 6);
+            assert_eq!(instr.store.is_some(), stores,   "op {op:#04x} store");
+            assert_eq!(instr.branch.is_some(), branches, "op {op:#04x} branch");
+            assert_eq!(instr.next_pc, n as u32,          "op {op:#04x} next_pc");
+        }
     }
 }
