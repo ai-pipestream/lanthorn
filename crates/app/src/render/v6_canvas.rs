@@ -11,6 +11,7 @@ use image::{Rgba, RgbaImage};
 use crate::colors::ColorScheme;
 use crate::engine::{PositionedWindow, WinNode};
 use crate::render::bitfont::blit_glyph;
+use crate::render::v6_layout::{blit_scaled, packed_to_rgba};
 
 /// Window-0 (main scrolling window) content the compositor rasterizes: the
 /// visible wrapped lines (oldest-first, top-to-bottom), the live input line, and
@@ -24,61 +25,6 @@ pub struct MainText {
     /// game). Only then is the input line + block cursor rasterized — otherwise
     /// a title/keypress screen would show a stray caret block.
     pub awaiting: bool,
-}
-
-/// Resolve a packed z-colour (see `crate::state::pack_zcolour`) to an opaque
-/// RGBA. `0` (Default) → `fallback`. True24 → its RGB. Palette/standard colours
-/// resolve through the theme; anything that doesn't reduce to a concrete RGB
-/// falls back (v1 — richer palette handling is SQ-0450).
-fn packed_to_rgba(packed: u32, fallback: Rgba<u8>, colors: &ColorScheme) -> Rgba<u8> {
-    if packed == 0 {
-        return fallback;
-    }
-    let tag = packed >> 24;
-    if tag == 3 {
-        let v = packed & 0x00FF_FFFF;
-        return Rgba([(v >> 16) as u8, (v >> 8) as u8, v as u8, 255]);
-    }
-    // Standard(n)=tag 1, True(v)=tag 2 → reconstruct the ZColour and resolve via
-    // the scheme; use the concrete RGB when the theme yields one, else fallback.
-    let z = match tag {
-        1 => zvm::screen::ZColour::Standard((packed & 0xFF) as u8),
-        2 => zvm::screen::ZColour::True((packed & 0xFFFF) as u16),
-        _ => return fallback,
-    };
-    match crate::render::resolve_zcolour(z, colors) {
-        ratatui::style::Color::Rgb(r, g, b) => Rgba([r, g, b, 255]),
-        _ => fallback,
-    }
-}
-
-/// Blit a game-pixel source canvas into `dst` at device rect
-/// `(dx, dy, dw, dh)`, nearest-neighbour, honouring source alpha (transparent
-/// source px leave `dst`). Clipped to `dst` bounds.
-fn blit_scaled(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy: u32, dw: u32, dh: u32) {
-    let (sw, sh) = (src.width(), src.height());
-    if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
-        return;
-    }
-    let (dstw, dsth) = (dst.width(), dst.height());
-    for oy in 0..dh {
-        let ty = dy + oy;
-        if ty >= dsth {
-            break;
-        }
-        let sy = (oy * sh / dh).min(sh - 1);
-        for ox in 0..dw {
-            let tx = dx + ox;
-            if tx >= dstw {
-                break;
-            }
-            let sx = (ox * sw / dw).min(sw - 1);
-            let p = *src.get_pixel(sx, sy);
-            if p[3] >= 128 {
-                dst.put_pixel(tx, ty, Rgba([p[0], p[1], p[2], 255]));
-            }
-        }
-    }
 }
 
 /// The v6 font cell size in game pixels — matches `zvm::screen::V6_FONT_WIDTH`/
