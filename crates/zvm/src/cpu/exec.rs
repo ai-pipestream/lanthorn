@@ -1100,18 +1100,37 @@ impl Machine {
             0x0A => {
                 let rows = ops.first().copied().unwrap_or(0);
                 if self.trace_screen { self.screen_trace.push(format!("@split_window({rows})")); }
-                self.screen.upper_window_rows = rows;
-                let cols = self.mem.read_byte(0x21) as u16;
-                self.screen.upper.resize(rows, cols.max(1));
-                self.screen.cursor_row = 1;
-                self.screen.cursor_col = 1;
+                if self.screen.v6.is_some() {
+                    // v6: split_window is a v3–5 legacy opcode. v6 games manage
+                    // window geometry via move_window/window_size instead — the
+                    // captured Zork0 trace never calls split_window once in v6
+                    // mode. Rather than guess an unverified ZMSD v6 meaning and
+                    // risk corrupting the 8-window table, treat it as a no-op.
+                } else {
+                    self.screen.upper_window_rows = rows;
+                    let cols = self.mem.read_byte(0x21) as u16;
+                    self.screen.upper.resize(rows, cols.max(1));
+                    self.screen.cursor_row = 1;
+                    self.screen.cursor_col = 1;
+                }
                 StepResult::Continue
             }
-            // 0x0B set_window — select window 0 (lower) or 1 (upper) (v3+)
+            // 0x0B set_window — select window 0 (lower) or 1 (upper) (v3+).
+            // v6: selects one of the 8 windows and resets its grid cursor to
+            // the top-left cell (ZMSD §8.4).
             0x0B => {
                 let win = ops.first().copied().unwrap_or(0) as u8;
                 if self.trace_screen { self.screen_trace.push(format!("@set_window({})", zscreen_window_name(win as u16))); }
-                self.screen.current_window = win;
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    let w = win as usize;
+                    if w < v6.windows.len() {
+                        v6.current = win;
+                        v6.windows[w].y_cursor = 1;
+                        v6.windows[w].x_cursor = 1;
+                    }
+                } else {
+                    self.screen.current_window = win;
+                }
                 StepResult::Continue
             }
             // 0x0D erase_window — clear window (state-tracking only; no render).
@@ -1119,26 +1138,50 @@ impl Machine {
             // unsplitting, 0 = lower window, 1 = upper window. The lower window's
             // scrolling contents live in the host, so we flag the request for it
             // to drain (erase_lower_requested), mirroring show_status_requested.
+            //
+            // v6: the 8-window table has no "split" concept to undo (all 8
+            // windows always exist), so -1 and -2 both clear every window's
+            // grid and reset its cursor; a window number 0–7 clears just that
+            // window's grid + cursor.
             0x0D => {
                 let win = ops.first().copied().unwrap_or(0) as i16;
                 if self.trace_screen { self.screen_trace.push(format!("@erase_window({})", zscreen_window_name(win as u16))); }
-                match win {
-                    -1 => {
-                        self.screen.upper_window_rows = 0;
-                        self.screen.upper.resize(0, self.screen.upper.cols);
-                        self.screen.erase_lower_requested = true;
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    match win {
+                        -1 | -2 => {
+                            for w in v6.windows.iter_mut() {
+                                w.grid.clear();
+                                w.y_cursor = 1;
+                                w.x_cursor = 1;
+                            }
+                        }
+                        n if (0..8).contains(&n) => {
+                            let w = &mut v6.windows[n as usize];
+                            w.grid.clear();
+                            w.y_cursor = 1;
+                            w.x_cursor = 1;
+                        }
+                        _ => {}
                     }
-                    -2 => {
-                        self.screen.upper.clear();
-                        self.screen.erase_lower_requested = true;
+                } else {
+                    match win {
+                        -1 => {
+                            self.screen.upper_window_rows = 0;
+                            self.screen.upper.resize(0, self.screen.upper.cols);
+                            self.screen.erase_lower_requested = true;
+                        }
+                        -2 => {
+                            self.screen.upper.clear();
+                            self.screen.erase_lower_requested = true;
+                        }
+                        0 => {
+                            self.screen.erase_lower_requested = true;
+                        }
+                        1 => {
+                            self.screen.upper.clear();
+                        }
+                        _ => {}
                     }
-                    0 => {
-                        self.screen.erase_lower_requested = true;
-                    }
-                    1 => {
-                        self.screen.upper.clear();
-                    }
-                    _ => {}
                 }
                 StepResult::Continue
             }
@@ -6289,5 +6332,44 @@ pub(crate) mod tests {
                 "op {op:#04x} no-op → Continue");
         }
         assert!(m.state.eval_stack.is_empty(), "no-op graphics ops must not touch the stack");
+    }
+
+    // ── Task 3: v6 split/set/erase_window over the window table ─────────────
+
+    #[test]
+    fn v6_set_window_selects_current_window() {
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[7], None, None); // set_window(7)
+        let v6 = m.screen.v6.as_ref().expect("v6 story has a window table");
+        assert_eq!(v6.current, 7, "set_window(7) selects window 7");
+        assert_eq!(v6.windows[7].y_cursor, 1, "cursor reset to top-left row");
+        assert_eq!(v6.windows[7].x_cursor, 1, "cursor reset to top-left col");
+    }
+
+    #[test]
+    fn v6_erase_window_clears_target_window_grid() {
+        let mut m = v6_exec_machine();
+        {
+            let v6 = m.screen.v6.as_mut().unwrap();
+            v6.windows[3].grid.resize(2, 2);
+            v6.windows[3].grid.put(1, 1, 'X', 0, ZColour::Default, ZColour::Default);
+            v6.windows[3].y_cursor = 5;
+            v6.windows[3].x_cursor = 5;
+        }
+        m.exec_var(0x0D, &[3], None, None); // erase_window(3)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[3].grid.cell(1, 1).ch, ' ', "window 3's grid cleared");
+        assert_eq!(v6.windows[3].y_cursor, 1, "cursor reset to top-left row");
+        assert_eq!(v6.windows[3].x_cursor, 1, "cursor reset to top-left col");
+    }
+
+    #[test]
+    fn v6_set_window_leaves_v5_classic_path_untouched() {
+        // Regression: a v5 (non-v6) machine must still route set_window through
+        // the classic ScreenState.current_window field, not the window table.
+        let mut m = build_test_machine(&[]);
+        assert!(m.screen.v6.is_none(), "v5 keeps the classic 2-window model");
+        m.exec_var(0x0B, &[1], None, None); // set_window(1)
+        assert_eq!(m.screen.current_window, 1, "v5 set_window still sets current_window");
     }
 }
