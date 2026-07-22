@@ -1366,6 +1366,13 @@ pub struct AppState {
     pub audio: Option<audio::AudioBackend>,
     /// The Blorb holding this story's `Snd ` resources, resolved at launch.
     pub sound_blorb: Option<blorb::Blorb>,
+    /// The v6 Z-machine's `Pict` resource source, resolved at launch the same
+    /// way as `sound_blorb` (self-blorb/sidecar/dir-scan). `None` for non-Z-code
+    /// engines (Glulx/Scott own their `PictSource` inside their own backend) or
+    /// when no resource Blorb was found. Retained for Plan 1b's draw-time
+    /// picture decode; Plan 1a only populates the dimension table injected into
+    /// the VM at boot (`Machine::picture_dims`).
+    pub zcode_pict_source: Option<crate::graphics::PictSource>,
     /// Playing sampled sounds keyed by Z-machine sound number (for `effect` 3 stop).
     pub sound_ids: std::collections::HashMap<u16, audio::SoundId>,
     /// Finish-routines to fire when a sampled sound ends, keyed by its SoundId.
@@ -1737,6 +1744,7 @@ impl Default for AppState {
             sound_pulse: None,
             audio: None,
             sound_blorb: None,
+            zcode_pict_source: None,
             sound_ids: std::collections::HashMap::new(),
             sound_routines: std::collections::HashMap::new(),
             glulx_channels: std::collections::HashMap::new(),

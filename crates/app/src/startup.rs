@@ -263,14 +263,33 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     let start_map_hidden = app::styles::read_per_game_show_map(&game_dir) == Some(false);
     let theme_colours = app::glk_backend::theme_style_colours(&cs);
 
+    // v6 Pict source, retained for Plan 1b's draw-time decode (mirrors
+    // `state.sound_blorb` below). Populated only for a Z-code story, in its
+    // `match loaded` arm.
+    let mut zcode_pict_source: Option<app::graphics::PictSource> = None;
+
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
     // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
     // setup (screen dims, undo cap) runs in its arm before boxing.
     let mut session: Box<dyn Engine> = match loaded {
         app::hints::LoadedStory::ZCode(bytes) => {
+            // v6 Pict dimension table (Plan 1a, SQ-0186): resolve the story's
+            // resource Blorb the same way sound resources are resolved below —
+            // a self-blorb, a same-stem sidecar, or (Zork0's actual release
+            // layout: `zork0-r393-s890714.z6` beside `Zork0.blb`, a resources-
+            // only Blorb with no `Exec` of its own) a dir-scan stem-prefix match
+            // — and header-sniff every Pict's size (no full decode). This MUST
+            // run before `new_with_trace`: `picture_data` is called during boot,
+            // which happens inside `new_with_trace` itself (Phase 0 lesson).
+            let mut picts = app::graphics::PictSource::new(
+                if cfg.images { blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b) } else { None }
+            );
+            let picture_dims = picts.all_pict_dims();
+            zcode_pict_source = Some(picts);
+
             // `--debug` (SQ-0449): trace from the first boot instruction so the
             // game's initialisation code is captured (a later `/debug` can't).
-            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number, cli.debug) {
+            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number, cli.debug, picture_dims) {
                 Ok(s) => s,
                 Err(e) => {
                     use zvm::error::ZError;
@@ -463,6 +482,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     state.show_loc_method = cfg.show_loc_method;
     state.show_status_bar = cfg.show_status_bar;
     state.game_picker = game_picker;
+    state.zcode_pict_source = zcode_pict_source;
     state.pane_sizes = app::state::PaneSizes {
         split_ratio: cfg.split_ratio,
         verb_dock_pct: cfg.verb_dock_pct,

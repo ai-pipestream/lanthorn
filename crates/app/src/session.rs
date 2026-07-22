@@ -283,19 +283,27 @@ impl GameSession {
     /// game's opening text into the sink.  The sink is NOT drained here; the
     /// caller can call `take_transcript` to retrieve the banner/intro text.
     pub fn new(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>) -> Result<GameSession, ZError> {
-        Self::new_with_trace(story, honor_game_colours, sound_available, interpreter_number, false)
+        Self::new_with_trace(story, honor_game_colours, sound_available, interpreter_number, false, Vec::new())
     }
 
     /// Like [`new`](Self::new) but enables execution tracing BEFORE the VM runs to
     /// its first input prompt, so the boot/initialisation code — the whole reason
     /// `--debug` exists (a mid-game `/debug` can never see it) — is captured into
     /// the cumulative coverage set. (SQ-0449)
-    pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool) -> Result<GameSession, ZError> {
+    ///
+    /// `picture_dims` is the v6 Pict dimension table (`(number, width, height)`),
+    /// resolved app-side from a self-blorb/sidecar Blorb — empty for non-v6
+    /// stories. It MUST be injected before the boot run below: `picture_data` is
+    /// called during boot, which happens inside this very function (Phase 0
+    /// boot-tracing lesson), so `set_picture_dims` runs right after
+    /// `set_sound_available`, before `init_caps()`/the boot loop.
+    pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
         let sink = Box::new(CaptureSink::new());
         let mut machine = Machine::with_output(mem, sink);
         machine.set_honor_game_colours(honor_game_colours);
         machine.set_sound_available(sound_available);
+        machine.set_picture_dims(picture_dims);
         machine.set_interpreter_number(interpreter_number);
         machine.init_caps();
         // Trace from the very first instruction when requested, so the opening
@@ -2031,7 +2039,7 @@ mod tests {
         // cumulative set is non-empty even before any player turn — capturing the
         // boot/init code a mid-game /debug can never see.
         let story = read_char_story_v5();
-        let traced = GameSession::new_with_trace(story.clone(), false, false, None, true)
+        let traced = GameSession::new_with_trace(story.clone(), false, false, None, true, Vec::new())
             .expect("traced session");
         assert!(!traced.machine.ever_exec_pcs.is_empty(),
             "boot PCs must be captured when tracing from boot");
@@ -2039,6 +2047,43 @@ mod tests {
         let untraced = GameSession::new(story, false, false, None).expect("untraced session");
         assert!(untraced.machine.ever_exec_pcs.is_empty(),
             "no capture without --debug");
+    }
+
+    /// Build a minimal v6 story whose "main" routine (header 0x06/0x07, a packed
+    /// routine address per ZMSD §5.5) is `quit` with 0 locals. Just enough for
+    /// `Machine::with_output`'s v6 arm (which calls `main` via `call_routine`
+    /// before the boot loop runs) to construct without faulting.
+    fn v6_boot_stub_story() -> Vec<u8> {
+        let mut buf = vec![0u8; 0x0800];
+        buf[0x00] = 6; // version
+        buf[0x04] = 0x04; buf[0x05] = 0x00; // high_mem_base = 0x0400
+        // header 0x06/0x07 = main's packed address. routines_offset (0x28/0x29)
+        // is 0, so unpack_routine(p) = 4*p; routine at 0x0100 -> packed 0x0040.
+        buf[0x06] = 0x00; buf[0x07] = 0x40;
+        // dictionary = 0x0080 (empty: word-sep=0, entry-size=4, entry-count=0)
+        buf[0x08] = 0x00; buf[0x09] = 0x80;
+        buf[0x0080] = 0; buf[0x0081] = 4; buf[0x0082] = 0; buf[0x0083] = 0;
+        buf[0x0A] = 0x01; buf[0x0B] = 0x00; // object_table = 0x0100 (unused by this stub)
+        buf[0x0C] = 0x03; buf[0x0D] = 0x00; // global_vars = 0x0300
+        buf[0x0E] = 0x04; buf[0x0F] = 0x00; // static_mem_base = 0x0400
+        buf[0x18] = 0x00; buf[0x19] = 0x60; // abbrev_table = 0x0060
+        // main routine at 0x0100: 0 locals, then `quit` (0OP:0x0A, opcode byte 0xBA).
+        buf[0x0100] = 0; // local count
+        buf[0x0101] = 0xBA; // quit
+        buf
+    }
+
+    #[test]
+    fn v6_session_injects_picture_dims_before_boot() {
+        // The v6 picture-dimension table must be set on `Machine` BEFORE the
+        // boot run (picture_data is called during boot, which happens inside
+        // new_with_trace itself — the Phase 0 boot-tracing lesson), so it must
+        // be visible on the constructed session even for a story that quits
+        // immediately in its main routine.
+        let dims = vec![(5u16, 100u16, 60u16), (9u16, 20u16, 30u16)];
+        let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone())
+            .expect("v6 session");
+        assert_eq!(session.machine.picture_dims, dims);
     }
 
     /// Variant of `read_char_story_v5`: after the read_char completes, instead

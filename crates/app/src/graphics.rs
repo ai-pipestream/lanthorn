@@ -98,6 +98,7 @@ impl Canvas {
 }
 
 /// Resolves + caches decoded images by Blorb `Pict` resource number.
+#[derive(Debug)]
 pub struct PictSource {
     blorb: Option<blorb::Blorb>,
     cache: HashMap<u32, Option<Arc<DynamicImage>>>,
@@ -138,6 +139,32 @@ impl PictSource {
     pub fn data_resource(&self, resnum: u32) -> Option<(Vec<u8>, bool)> {
         let (ty, bytes) = self.blorb.as_ref()?.resource(b"Data", resnum)?;
         Some((bytes.to_vec(), ty == b"TEXT"))
+    }
+
+    /// `(width, height)` of Pict `resnum`, sniffed from the image header only —
+    /// no full decode. Used by the v6 Z-machine `picture_data` dimension table
+    /// (Plan 1a), where only the size is needed at boot, not the pixels.
+    pub fn dims(&mut self, resnum: u32) -> Option<(u32, u32)> {
+        let (_ty, bytes) = self.blorb.as_ref()?.resource(b"Pict", resnum)?;
+        image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .ok()?
+            .into_dimensions()
+            .ok()
+    }
+
+    /// `(number, width, height)` for every `Pict` resource in the Blorb, header-
+    /// sniffed via [`PictSource::dims`]. Feeds the v6 `Machine::set_picture_dims`
+    /// injection at session construction (Plan 1a). Empty when there is no Blorb.
+    pub fn all_pict_dims(&mut self) -> Vec<(u16, u16, u16)> {
+        let numbers: Vec<u32> = match &self.blorb {
+            Some(b) => b.resources().iter().filter(|r| &r.usage == b"Pict").map(|r| r.number).collect(),
+            None => Vec::new(),
+        };
+        numbers
+            .into_iter()
+            .filter_map(|n| self.dims(n).map(|(w, h)| (n as u16, w as u16, h as u16)))
+            .collect()
     }
 }
 
@@ -309,6 +336,18 @@ mod tests {
         assert_eq!(bin.data_resource(1), Some((vec![1, 2, 3], false)));
 
         assert_eq!(PictSource::new(None).data_resource(1), None, "no blorb → None");
+    }
+
+    #[test]
+    fn dims_and_all_pict_dims_header_sniff_without_full_decode() {
+        // A tiny in-memory Blorb with one Pict (a 2x2 PNG) at resource number 5.
+        let blorb = test_blorb_with_pict(5, &png_bytes());
+        let mut src = PictSource::new(Some(blorb));
+        assert_eq!(src.dims(5), Some((2, 2)));
+        assert_eq!(src.dims(99), None, "no such resource");
+        assert_eq!(src.all_pict_dims(), vec![(5u16, 2u16, 2u16)]);
+
+        assert_eq!(PictSource::new(None).all_pict_dims(), Vec::<(u16, u16, u16)>::new());
     }
 
     #[test]
