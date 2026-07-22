@@ -34,9 +34,9 @@ pub fn blit_glyph(
             if ox >= cwidth {
                 break;
             }
-            let col = (dx * 8 / cw) as u32; // nearest source col
+            let col = dx * 8 / cw; // nearest source col
             // font8x8 packs each row LSB = leftmost column.
-            let on = bits.map_or(false, |g| g[row] & (1 << col) != 0);
+            let on = bits.is_some_and(|g| g[row] & (1 << col) != 0);
             if on {
                 canvas.put_pixel(ox, oy, fg);
             } else if let Some(b) = bg {

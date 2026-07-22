@@ -20,6 +20,10 @@ pub struct MainText {
     pub lines: Vec<String>,
     pub input: String,
     pub cursor_col: u16,
+    /// True when the game is awaiting a typed command (host focus is on the
+    /// game). Only then is the input line + block cursor rasterized — otherwise
+    /// a title/keypress screen would show a stray caret block.
+    pub awaiting: bool,
 }
 
 /// Resolve a packed z-colour (see `crate::state::pack_zcolour`) to an opaque
@@ -137,7 +141,7 @@ pub fn build_v6_canvas(
                 let ox = gx(it.x_px);
                 let oy = gy(it.y_px);
                 let win_rows = it.h_px as u32 / 8; // rows spanned = pixel height / 8
-                draw_text_block(&mut canvas, &main.lines, &main.input, main.cursor_col, ox, oy, cw, ch, win_rows, default_fg);
+                draw_text_block(&mut canvas, &main.lines, &main.input, main.cursor_col, main.awaiting, ox, oy, cw, ch, win_rows, default_fg);
             }
             _ => {}
         }
@@ -162,6 +166,7 @@ fn draw_text_block(
     lines: &[String],
     input: &str,
     cursor_col: u16,
+    awaiting: bool,
     ox: u32,
     oy: u32,
     cw: u32,
@@ -179,12 +184,12 @@ fn draw_text_block(
         }
         row += 1;
     }
-    if row < max_rows {
-        // Input line on the next row.
+    // Draw the input line + block cursor only while the game is awaiting a typed
+    // command — otherwise a title/keypress screen shows a stray caret block.
+    if awaiting && row < max_rows {
         for (col, glyph) in input.chars().enumerate() {
             blit_glyph(canvas, glyph, ox + col as u32 * cw, oy + row * ch, cw, ch, fg, None);
         }
-        // Block cursor at the caret column.
         fill_cell(canvas, ox + cursor_col as u32 * cw, oy + row * ch, cw, ch, fg);
     }
 }
@@ -255,7 +260,7 @@ mod tests {
             x: 0, y: 0, w: 6, h: 3, x_px: 0, y_px: 0, w_px: 48, h_px: 24,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
         };
-        let main = MainText { lines: vec!["hi".into()], input: "go".into(), cursor_col: 2 };
+        let main = MainText { lines: vec!["hi".into()], input: "go".into(), cursor_col: 2, awaiting: true };
         let fg = Rgba([255, 255, 0, 255]);
         let c = build_v6_canvas(&[item], (6, 3), (8, 8), Rgba([0, 0, 0, 255]), fg, &main, &colors());
         // Line 0 has glyph pixels; the cursor block sits on row 1 at col 2.

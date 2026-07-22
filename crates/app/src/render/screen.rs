@@ -760,7 +760,10 @@ fn build_main_text(state: &AppState, items: &[PositionedWindow], _area: Rect) ->
     let lines = wrapped[start..].to_vec();
     let input = state.input.value.clone();
     let cursor_col = input.chars().count().min(cols as usize - 1) as u16;
-    crate::render::v6_canvas::MainText { lines, input, cursor_col }
+    // Show the input line + caret only when the game has host focus (awaiting a
+    // typed command) — matches when the transcript path draws its live caret.
+    let awaiting = matches!(state.focus, crate::state::Focus::Game);
+    crate::render::v6_canvas::MainText { lines, input, cursor_col, awaiting }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
