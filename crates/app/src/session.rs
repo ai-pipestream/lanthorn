@@ -590,6 +590,112 @@ impl GameSession {
             canvas.draw_image(&img, ev.x as i32, ev.y as i32, None);
         }
     }
+
+    /// Build the v6 z-ordered layered [`ScreenModel`] from `screen.v6`'s 8-window
+    /// table plus `pictures_canvas` (Plan 1b Task 2). Called from `Engine::screen`
+    /// when the story has v6 window state; the v1–5 `screen_model_from_machine`
+    /// path is untouched and stays byte-identical for non-v6 stories.
+    ///
+    /// Per window 0..8, skipped when `x_size == 0 || y_size == 0`: absolute cell
+    /// rect = `(x_coord/FW, y_coord/FH, grid.cols, grid.rows)` — the grid was
+    /// already cell-sized at `window_size` time (Phase 1a), so only the position
+    /// needs dividing by the font cell size. Window 0 is the scrolling main
+    /// window (`Buffer{primary:true}`, drawn from `state.transcript`); windows
+    /// 1–7 become `Grid` leaves built from their own char grid (mirrors
+    /// `screen_model_from_machine`'s `UpperWindow`→`GridWindow` mapping). Any
+    /// window with an entry in `pictures_canvas` ALSO gets a `Graphics` leaf at
+    /// the same rect. z-order (list order): graphics entries first (background),
+    /// then text windows by ascending window number — `render_node`'s `Layered`
+    /// arm (Task 3) paints text over graphics, cell-text-wins.
+    fn v6_screen_model(&self) -> ScreenModel {
+        use zvm::screen::{V6_FONT_HEIGHT, V6_FONT_WIDTH};
+        let screen = &self.machine.screen;
+        let v6 = screen.v6.as_ref().expect("caller checked screen.v6.is_some()");
+
+        let mut graphics_entries = Vec::new();
+        let mut text_entries = Vec::new();
+        for (i, win) in v6.windows.iter().enumerate() {
+            if win.x_size == 0 || win.y_size == 0 {
+                continue;
+            }
+            let x = win.x_coord / V6_FONT_WIDTH;
+            let y = win.y_coord / V6_FONT_HEIGHT;
+            let (cols, rows) = (win.grid.cols, win.grid.rows);
+
+            if let Some(canvas) = self.pictures_canvas.get(&(i as u8)) {
+                graphics_entries.push(PositionedWindow {
+                    x,
+                    y,
+                    w: cols,
+                    h: rows,
+                    node: WinNode::Graphics(GraphicsWindow {
+                        win: i as u32,
+                        canvas: canvas.arc(),
+                        version: canvas.version,
+                        upscale: false,
+                    }),
+                });
+            }
+
+            let node = if i == 0 {
+                WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })
+            } else {
+                WinNode::Grid(GridWindow {
+                    cols,
+                    rows,
+                    cells: win
+                        .grid
+                        .cells
+                        .iter()
+                        .map(|c| GridCell {
+                            ch: c.ch,
+                            style: c.style,
+                            fg: crate::state::pack_zcolour(c.fg),
+                            bg: crate::state::pack_zcolour(c.bg),
+                            link: 0, // Z-machine grid cells carry no Glk hyperlink
+                            glk_style: 0, // Z-machine is always Normal
+                        })
+                        .collect(),
+                    active_rows: rows,
+                    cursor: (win.y_cursor, win.x_cursor),
+                    cursor_active: v6.current == i as u8,
+                    border: BorderPref::Unspecified,
+                    bg: (win.bg != ZColour::Default).then(|| crate::state::pack_zcolour(win.bg)),
+                    fg: (win.fg != ZColour::Default).then(|| crate::state::pack_zcolour(win.fg)),
+                    reverse: false,
+                })
+            };
+            text_entries.push(PositionedWindow { x, y, w: cols, h: rows, node });
+        }
+
+        // content_size: the max right/bottom cell extent actually covered by a
+        // window, or (when no window survived the size-0 skip) the header's
+        // whole-screen char dims (0x21 cols / 0x20 rows) — either way nonzero,
+        // so the v6 model always leaves the simple/degenerate render path.
+        let mut max_x = 0u16;
+        let mut max_y = 0u16;
+        for pw in graphics_entries.iter().chain(text_entries.iter()) {
+            max_x = max_x.max(pw.x + pw.w);
+            max_y = max_y.max(pw.y + pw.h);
+        }
+        let content_size = if max_x == 0 || max_y == 0 {
+            (
+                self.machine.mem.read_byte(0x21) as u16,
+                self.machine.mem.read_byte(0x20) as u16,
+            )
+        } else {
+            (max_x, max_y)
+        };
+
+        graphics_entries.extend(text_entries);
+        ScreenModel {
+            root: WinNode::Layered(graphics_entries),
+            status: status_model_from_machine(&self.machine),
+            bg: crate::state::pack_zcolour(screen.current_bg),
+            fg: crate::state::pack_zcolour(screen.current_fg),
+            content_size,
+        }
+    }
 }
 
 /// Convert a detected `Location` into the `ObjectSnapshot` used as a room id.
@@ -841,9 +947,9 @@ pub fn resolve_title(
 // mirrors the Z-machine screen into the neutral `ScreenModel`.
 
 use crate::engine::{
-    BorderPref, BufferWindow, Debugger, DisasmProvenance, Engine, EngineError, EngineSave, GridCell,
-    GridWindow, Introspect, KeyInput, LocationInfo, ScreenModel, Split, StatusField, StatusModel,
-    WinNode,
+    BorderPref, BufferWindow, Debugger, DisasmProvenance, Engine, EngineError, EngineSave, GraphicsWindow,
+    GridCell, GridWindow, Introspect, KeyInput, LocationInfo, PositionedWindow, ScreenModel, Split,
+    StatusField, StatusModel, WinNode,
 };
 
 /// The engine tag recorded in an `EngineSave` produced by the Z-machine adapter.
@@ -1146,7 +1252,11 @@ impl Engine for GameSession {
     }
 
     fn screen(&self) -> ScreenModel {
-        screen_model_from_machine(&self.machine)
+        if self.machine.screen.v6.is_some() {
+            self.v6_screen_model()
+        } else {
+            screen_model_from_machine(&self.machine)
+        }
     }
 
     fn save_state(&self) -> EngineSave {
@@ -2720,6 +2830,80 @@ mod tests {
         assert_eq!(result.pictures.len(), 2);
         let canvas = sess.pictures_canvas.get(&7).expect("a canvas was created for window 7");
         assert_eq!(canvas.img.get_pixel(2, 3).0, [0, 0, 0, 0], "erased back to transparent");
+    }
+
+    // ── Plan 1b Task 4: v6 layered screen-model adapter ───────────────────────
+
+    #[test]
+    fn v6_screen_returns_layered_model_graphics_first_then_text_by_window_number() {
+        use crate::engine::GraphicsWindow;
+        use zvm::screen::{V6Windows, ZWindow};
+
+        let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+
+        let mut windows: [ZWindow; 8] = Default::default();
+        // Window 0: the main scrolling window, at (0, 1) cell, 80x20 cells.
+        windows[0] = ZWindow { x_coord: 0, y_coord: 8, x_size: 640, y_size: 160, ..Default::default() };
+        windows[0].grid.resize(20, 80);
+        // Window 1: a one-row status strip along the top, at (0, 0) cell, 80x1 cells.
+        windows[1] = ZWindow { x_coord: 0, y_coord: 0, x_size: 640, y_size: 8, ..Default::default() };
+        windows[1].grid.resize(1, 80);
+        // Window 7: a small picture window at (2, 1) cell, 8x6 cells.
+        windows[7] = ZWindow { x_coord: 16, y_coord: 8, x_size: 64, y_size: 48, ..Default::default() };
+        windows[7].grid.resize(6, 8);
+        machine.screen.v6 = Some(V6Windows { windows, current: 1 });
+
+        let mut sess = GameSession {
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            disasm_cache: std::cell::RefCell::new(None),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+        };
+        // Window 7 has a rendered picture (a canvas sized to its pixel dims).
+        sess.pictures_canvas.insert(7, crate::graphics::Canvas::new(64, 48));
+
+        let model = sess.screen();
+        assert_ne!(model.content_size, (0, 0), "v6 always reports a nonzero content size");
+        assert_eq!(model.content_size, (80, 21), "max right/bottom cell extent across the windows");
+
+        let items = match model.root {
+            WinNode::Layered(items) => items,
+            other => panic!("expected WinNode::Layered, got {other:?}"),
+        };
+
+        // z-order: graphics entries first (window 7's picture), then text
+        // windows by ascending window number (0, then 1, then 7's own grid).
+        assert_eq!(items.len(), 4, "graphics(7) + buffer(0) + grid(1) + grid(7)");
+
+        let g7 = &items[0];
+        assert_eq!((g7.x, g7.y, g7.w, g7.h), (2, 1, 8, 6), "window 7's absolute cell rect (pixel / 8)");
+        match &g7.node {
+            WinNode::Graphics(GraphicsWindow { win, .. }) => assert_eq!(*win, 7),
+            other => panic!("expected window 7's Graphics leaf first (background), got {other:?}"),
+        }
+
+        let w0 = &items[1];
+        assert_eq!((w0.x, w0.y, w0.w, w0.h), (0, 1, 80, 20), "window 0's absolute cell rect (pixel / 8)");
+        match &w0.node {
+            WinNode::Buffer(b) => assert!(b.primary, "window 0 is the primary scrolling buffer"),
+            other => panic!("expected window 0's Buffer leaf, got {other:?}"),
+        }
+
+        let w1 = &items[2];
+        assert_eq!((w1.x, w1.y, w1.w, w1.h), (0, 0, 80, 1), "window 1's absolute cell rect (pixel / 8)");
+        match &w1.node {
+            WinNode::Grid(g) => assert_eq!((g.cols, g.rows), (80, 1)),
+            other => panic!("expected window 1's Grid leaf, got {other:?}"),
+        }
+
+        let w7 = &items[3];
+        assert_eq!((w7.x, w7.y, w7.w, w7.h), (2, 1, 8, 6), "window 7's own (blank) text grid, same rect as its Graphics leaf");
+        match &w7.node {
+            WinNode::Grid(g) => assert_eq!((g.cols, g.rows), (8, 6)),
+            other => panic!("expected window 7's Grid leaf, got {other:?}"),
+        }
     }
 
     // Fixture-gated: in-game SAVE then RESTORE on Bureaucracy (v4) must leave the
