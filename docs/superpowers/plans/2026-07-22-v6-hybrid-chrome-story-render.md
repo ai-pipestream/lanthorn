@@ -172,6 +172,8 @@ The KEY change vs the checkpoint: story text is rasterized into the **viewport**
 
 **Files:** Modify `crates/app/src/session.rs` (`v6_screen_model`) and/or the drain path so pictures drawn into the **story window** surface as inline transcript images (existing `inline_image` mechanism), while chrome-window pictures continue into the chrome canvas.
 
+**Prereq — baseline the raster behaviour first.** The Phase A diagnostic covered boot state only (title + opening room); nobody has traced a *mid-game* story picture (an examined-object illustration, a scene change) through the raster composite. Before implementing, boot Zork0 to a point that draws a story-area picture and record what raster does today: does window 0's Graphics entry land in the chrome canvas at its native spot, does the clear-interior scan inset text away from it (opaque) or overpaint it, and is the picture even a *separate* Graphics window vs. baked into window 0's canvas? This tells us what B3 must re-route (a distinct story-window picture → inline band) vs. what already renders acceptably in raster. Capture the finding as a one-paragraph note in the report; if raster mishandles it, that's a bug to log (SQ), not necessarily fixed here.
+
 - [ ] **Step 1:** Test: a picture drawn into window 0 appears as an inline transcript image; a picture drawn into a chrome window does not. (Pixel-precise positioning of story pictures is out of scope — SQ-0450.)
 - [ ] **Step 2–5:** Implement, `cargo test -p app`, commit.
 
