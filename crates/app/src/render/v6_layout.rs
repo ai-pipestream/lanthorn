@@ -276,8 +276,8 @@ pub fn story_viewport(
     let width = cell_right.saturating_sub(cell_left).max(1);
     let height = cell_bottom.saturating_sub(cell_top).max(1);
 
-    let cell_left = cell_left.min(pane_cells.0.saturating_sub(1).max(0));
-    let cell_top = cell_top.min(pane_cells.1.saturating_sub(1).max(0));
+    let cell_left = cell_left.min(pane_cells.0.saturating_sub(1));
+    let cell_top = cell_top.min(pane_cells.1.saturating_sub(1));
     let width = width.min(pane_cells.0.saturating_sub(cell_left));
     let height = height.min(pane_cells.1.saturating_sub(cell_top));
 

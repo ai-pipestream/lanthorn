@@ -265,3 +265,63 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
         }
     }
 }
+
+/// Phase A (Task A6) end-to-end acceptance gate: boots Zork0 the same way the
+/// other tests in this file do, then asserts `classify_windows` correctly
+/// separates the primary story `Buffer` from the frame/status chrome, and
+/// that `story_clear_native`'s clear interior lands below the banner and
+/// inside the story window's own rect — the top-margin + status-overlap fix
+/// this task exists to lock in. Asserts invariants (sizes/relationships), not
+/// exact pixels, since the art could be re-authored — except the story
+/// window's own rect (6,6,310,192), which is Zork0's stable window geometry.
+#[test]
+fn zork0_v6_story_classified_and_clear_interior_inside_frame() {
+    let story_path = stories_dir().join("zork0-r393-s890714.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+            .expect("Zork0 (v6) should load and boot without a ZError");
+    assert!(!session.quit, "Zork0 quit during boot");
+    assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
+
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+
+    let initial_screen = session.screen();
+    let WinNode::Layered(items) = &initial_screen.root else {
+        panic!("v6 story's screen() root must be WinNode::Layered, got {:?}", initial_screen.root);
+    };
+
+    use app::render::v6_layout as v6;
+    let native = v6::native_extent(items);
+    let layout = v6::classify_windows(items);
+
+    // Story is the primary buffer window (Zork0's window 0), inside the 320×200 frame.
+    let story = layout.story.expect("Zork0 boot has a primary story buffer");
+    assert!(matches!(&story.node, WinNode::Buffer(b) if b.primary));
+    assert_eq!((story.x_px, story.y_px, story.w_px, story.h_px), (6, 6, 310, 192));
+
+    // Chrome carries the frame graphics + status grids (the full-screen bg + banner + grids).
+    assert!(layout.chrome.iter().any(|w| matches!(&w.node, WinNode::Graphics(_))), "chrome has frame graphics");
+    assert!(layout.chrome.iter().any(|w| matches!(&w.node, WinNode::Grid(_))), "chrome has a status grid");
+
+    // The clear-interior story viewport lands below the banner and inside the frame — the
+    // top-margin + status-overlap fix. (Values are ~ (46,47) 238×125 for r393; assert the
+    // invariants, not exact pixels, so a rebuild of the art can't make this brittle.)
+    let colors = app::colors::ColorScheme::default();
+    let default_fg = image::Rgba([220, 220, 220, 255]);
+    let chrome = v6::build_chrome_canvas(&layout.chrome, native, default_fg, &colors);
+    let (sx, sy, sw, sh) = v6::story_clear_native(layout.story, &chrome).expect("story has a clear interior");
+    assert!(sw > 100 && sh > 60, "clear interior is a real story region, got {sw}x{sh}");
+    assert!(sy >= story.y_px as u32, "story text starts at/below the window top (banner cleared)");
+    assert!(sx >= story.x_px as u32, "story text starts at/right-of the window left (frame cleared)");
+    assert!(sx + sw <= (story.x_px + story.w_px) as u32, "clear interior stays inside the story window");
+    assert!(sy + sh <= (story.y_px + story.h_px) as u32, "clear interior stays inside the story window");
+}

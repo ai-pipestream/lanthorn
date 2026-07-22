@@ -60,11 +60,14 @@ playing.
   instead of Font 3.
 - **v6 graphical stories** — babelmap boots and plays graphical v6 titles
   (*Zork Zero*, *Shogun*, *Journey*, and other Infocom v6 releases). On an
-  image-capable terminal (Kitty / iTerm2 / Sixel) the whole story pane —
-  pictures at their exact pixel position plus all text, rasterized through an
-  embedded bitmap font — composites into one device-resolution image; without
-  an image protocol it falls back to a character-cell rendering. (v6's menu and
-  mouse opcodes are not yet wired up.)
+  image-capable terminal (Kitty / iTerm2 / Sixel) the game's chrome — the
+  decorative frame and status line — renders as one scaled, **pixel-aspect-accurate**
+  image (uniform scaling, letterboxed, never stretched), and the story text is
+  drawn into the clear interior *inside* that frame — below the banner and between
+  the border columns — so nothing overpaints the artwork. The `v6_render` setting
+  (see Customization) picks how the story text is drawn: `raster` bakes it into the
+  pixel image as a bitmap font. Without an image protocol, v6 falls back to a
+  character-cell rendering. (v6's menu and mouse opcodes are not yet wired up.)
 
 ## Glulx
 
