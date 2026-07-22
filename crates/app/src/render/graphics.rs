@@ -175,12 +175,15 @@ impl GraphicsRender {
         self.cache.retain(|win, _| live.contains(win));
     }
 
-    /// Draw a pre-composited v6 canvas as ONE terminal image filling `area`
-    /// (canvas is sized to the pane's device pixels, so it fits at native size —
-    /// no letterbox). Cached on a content hash so identical frames don't
-    /// re-encode/upload.
+    /// Draw a pre-composited v6 canvas as ONE terminal image, upscaled to fill
+    /// `area`. The canvas is in the game's native pixel space (e.g. 320×200); we
+    /// explicitly upscale it (Nearest → crisp pixel art) to the pane's device
+    /// pixels, preserving aspect, then hand it to the image protocol at native
+    /// size. (Relying on the protocol's own `Resize::Scale` left it at native
+    /// size — small in a large pane.) Cached on a content hash + area so
+    /// identical frames don't re-encode/upload.
     pub fn draw_v6_canvas(&mut self, picker: &Picker, canvas: &image::RgbaImage, area: Rect, buf: &mut Buffer) {
-        if area.width == 0 || area.height == 0 {
+        if area.width == 0 || area.height == 0 || canvas.width() == 0 || canvas.height() == 0 {
             return;
         }
         use std::hash::{Hash, Hasher};
@@ -189,7 +192,16 @@ impl GraphicsRender {
         let hash = h.finish();
         let fresh = matches!(&self.v6, Some((v, w, ht, _)) if *v == hash && *w == area.width && *ht == area.height);
         if !fresh {
-            let img = image::DynamicImage::ImageRgba8(canvas.clone());
+            // Target device-pixel box for the pane, then the largest integer-ish
+            // uniform upscale that fits it (aspect preserved).
+            let fs = picker.font_size();
+            let box_w = area.width as u32 * fs.width.max(1) as u32;
+            let box_h = area.height as u32 * fs.height.max(1) as u32;
+            let (cw, ch) = (canvas.width(), canvas.height());
+            let scale = ((box_w as f64 / cw as f64).min(box_h as f64 / ch as f64)).max(1.0);
+            let (tw, th) = ((cw as f64 * scale) as u32, (ch as f64 * scale) as u32);
+            let scaled = image::imageops::resize(canvas, tw.max(cw), th.max(ch), image::imageops::FilterType::Nearest);
+            let img = image::DynamicImage::ImageRgba8(scaled);
             match picker.new_protocol(img, Size::new(area.width, area.height), Resize::Fit(None)) {
                 Ok(p) => self.v6 = Some((hash, area.width, area.height, p)),
                 Err(_) => return,

@@ -304,7 +304,7 @@ impl GameSession {
     /// game's opening text into the sink.  The sink is NOT drained here; the
     /// caller can call `take_transcript` to retrieve the banner/intro text.
     pub fn new(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>) -> Result<GameSession, ZError> {
-        Self::new_with_trace(story, honor_game_colours, sound_available, interpreter_number, false, Vec::new())
+        Self::new_with_trace(story, honor_game_colours, sound_available, interpreter_number, false, Vec::new(), None)
     }
 
     /// Like [`new`](Self::new) but enables execution tracing BEFORE the VM runs to
@@ -318,7 +318,7 @@ impl GameSession {
     /// called during boot, which happens inside this very function (Phase 0
     /// boot-tracing lesson), so `set_picture_dims` runs right after
     /// `set_sound_available`, before `init_caps()`/the boot loop.
-    pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>) -> Result<GameSession, ZError> {
+    pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
         let sink = Box::new(CaptureSink::new());
         let mut machine = Machine::with_output(mem, sink);
@@ -327,9 +327,25 @@ impl GameSession {
         machine.set_picture_dims(picture_dims);
         machine.set_interpreter_number(interpreter_number);
         machine.init_caps();
+        // v6: advertise the game's NATIVE picture resolution (the Blorb `Reso`
+        // standard window, default 320×200) as the screen size BEFORE the boot
+        // loop below. A v6 game lays out its windows AND its hardcoded pixel art
+        // during boot against the reported screen dims; reporting the terminal's
+        // cell×8 size instead made the windows stretch while the art stayed at
+        // its native coords (SQ-0186). init_caps seeded the v1–5 default; this
+        // overrides it for v6 only, before the game can read it.
+        if machine.mem.version() == 6 {
+            let (w, h) = v6_screen_px.unwrap_or((320, 200));
+            let cols = (w / zvm::screen::V6_FONT_WIDTH).clamp(1, 255) as u8;
+            let rows = (h / zvm::screen::V6_FONT_HEIGHT).clamp(1, 255) as u8;
+            zvm::screen::write_screen_dims(&mut machine.mem, rows, cols);
+        }
         // Trace from the very first instruction when requested, so the opening
-        // run below records boot PCs into `ever_exec_pcs`.
+        // run below records boot PCs into `ever_exec_pcs`. Also capture screen
+        // opcodes from boot — a v6 game does its whole window/margin/picture
+        // layout during boot, so `--trace screen` would otherwise miss it.
         machine.trace_exec = trace_from_boot;
+        machine.trace_screen = trace_from_boot;
 
         let mut quit = false;
         let pending = loop {
@@ -633,6 +649,11 @@ impl GameSession {
         let screen = &self.machine.screen;
         let v6 = screen.v6.as_ref().expect("caller checked screen.v6.is_some()");
 
+        // Z-order: ALL graphics first (background), then ALL text on top — the
+        // v6 decorative frame (Zork0's window 7 border) sits BEHIND the page
+        // text, never over it. Within each band, ascending window number
+        // (window 1+ overlays paint after window 0). The pixel compositor and the
+        // Phase 1b cell fallback both honour this order.
         let mut graphics_entries = Vec::new();
         let mut text_entries = Vec::new();
         for (i, win) in v6.windows.iter().enumerate() {
@@ -653,6 +674,8 @@ impl GameSession {
                     y_px: win.y_coord,
                     w_px: win.x_size,
                     h_px: win.y_size,
+                    left_margin: win.left_margin,
+                    right_margin: win.right_margin,
                     node: WinNode::Graphics(GraphicsWindow {
                         win: i as u32,
                         canvas: canvas.arc(),
@@ -699,6 +722,8 @@ impl GameSession {
                 y_px: win.y_coord,
                 w_px: win.x_size,
                 h_px: win.y_size,
+                left_margin: win.left_margin,
+                right_margin: win.right_margin,
                 node,
             });
         }
@@ -2277,7 +2302,7 @@ mod tests {
         // cumulative set is non-empty even before any player turn — capturing the
         // boot/init code a mid-game /debug can never see.
         let story = read_char_story_v5();
-        let traced = GameSession::new_with_trace(story.clone(), false, false, None, true, Vec::new())
+        let traced = GameSession::new_with_trace(story.clone(), false, false, None, true, Vec::new(), None)
             .expect("traced session");
         assert!(!traced.machine.ever_exec_pcs.is_empty(),
             "boot PCs must be captured when tracing from boot");
@@ -2319,7 +2344,7 @@ mod tests {
         // be visible on the constructed session even for a story that quits
         // immediately in its main routine.
         let dims = vec![(5u16, 100u16, 60u16), (9u16, 20u16, 30u16)];
-        let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone())
+        let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone(), None)
             .expect("v6 session");
         assert_eq!(session.machine.picture_dims, dims);
     }

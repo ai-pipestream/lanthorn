@@ -1885,9 +1885,37 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            0x08 | 0x14 | 0x16 | 0x17 | 0x1A | 0x1C => {
-                // set_margins, scroll_window, read_mouse, mouse_window,
-                // print_form, picture_table — no-op in Phase 0.
+            // EXT:0x08 set_margins(left, right, window) — ZMSD §15: set the
+            // left/right text margins (pixels) of the window. The main text
+            // window (0) uses this to keep its text inside a graphical border
+            // frame (e.g. Zork0 insets past its ~36px side columns). Window
+            // defaults to the current window when omitted.
+            0x08 => {
+                let left = ops.first().copied().unwrap_or(0);
+                let right = ops.get(1).copied().unwrap_or(0);
+                let win = match ops.get(2).copied() {
+                    Some(w) => w,
+                    None => self.screen.v6.as_ref().map_or(0, |v| v.current as u16),
+                };
+                if self.trace_screen {
+                    self.screen_trace.push(format!("@set_margins(left={left}, right={right}, win={win})"));
+                }
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    if let Some(w) = v6.windows.get_mut(win as usize) {
+                        w.left_margin = left;
+                        w.right_margin = right;
+                        // ZMSD §15: if the cursor now sits left of the new left
+                        // margin, snap it to the margin.
+                        if w.x_cursor < left {
+                            w.x_cursor = left;
+                        }
+                    }
+                }
+                StepResult::Continue
+            }
+            0x14 | 0x16 | 0x17 | 0x1A | 0x1C => {
+                // scroll_window, read_mouse, mouse_window, print_form,
+                // picture_table — no-op in Phase 0.
                 StepResult::Continue
             }
             // Unknown / unimplemented EXT opcode: record once, then ignore
@@ -6686,6 +6714,27 @@ pub(crate) mod tests {
         crate::cpu::state::write_var(&mut m.state, &mut m.mem, 0x01, 0xBEEF);
         m.exec_ext(0x13, &[8, 2], Some(0x01), None); // window 8 out of range
         assert_eq!(crate::cpu::state::read_var(&mut m.state, &m.mem, 0x01), 0);
+    }
+
+    #[test]
+    fn v6_set_margins_stores_and_snaps_cursor() {
+        let mut m = v6_exec_machine();
+        // Cursor sits at x=5, inside the new left margin of 20 px.
+        m.screen.v6.as_mut().unwrap().windows[1].x_cursor = 5;
+        m.exec_ext(0x08, &[20, 8, 1], None, None); // set_margins(left, right, window)
+        let w = &m.screen.v6.as_ref().unwrap().windows[1];
+        assert_eq!(w.left_margin, 20, "left margin stored (prop 6)");
+        assert_eq!(w.right_margin, 8, "right margin stored (prop 7)");
+        assert_eq!(w.x_cursor, 20, "cursor snapped forward to the new left margin");
+    }
+
+    #[test]
+    fn v6_set_margins_out_of_range_window_is_ignored() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x08, &[10, 10, 8], None, None); // window 8 out of range
+        for w in &m.screen.v6.as_ref().unwrap().windows {
+            assert_eq!(w.left_margin, 0, "no window touched by an out-of-range set_margins");
+        }
     }
 
     #[test]

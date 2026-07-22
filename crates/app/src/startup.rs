@@ -280,10 +280,15 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                 if cfg.images { blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b) } else { None }
             );
             let picture_dims = picts.all_pict_dims();
+            // v6: the Blorb `Reso` standard window (e.g. Zork0 → 320×200) is the
+            // game's native picture resolution; `new_with_trace` advertises it as
+            // the screen size before boot so windows + hardcoded art align
+            // (SQ-0186). `None` (no Reso / non-v6) falls back to 320×200 inside.
+            let v6_screen_px = picts.std_window();
 
             // `--debug` (SQ-0449): trace from the first boot instruction so the
             // game's initialisation code is captured (a later `/debug` can't).
-            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number, cli.debug, picture_dims) {
+            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number, cli.debug, picture_dims, v6_screen_px) {
                 Ok(s) => s,
                 Err(e) => {
                     use zvm::error::ZError;
@@ -311,11 +316,16 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             s.flush_boot_pictures();
             // Apply the configured virtual screen dimensions to the VM. init_caps
             // (called inside GameSession::new) seeds defaults; override here.
-            zvm::screen::write_screen_dims(
-                &mut s.machine.mem,
-                cfg.virtual_screen_rows as u8,
-                cfg.virtual_screen_cols as u8,
-            );
+            // v6 stories run at their NATIVE picture resolution (advertised before
+            // boot in new_with_trace); the configurable virtual screen is a v1–5
+            // concern, so leave the v6 native dims untouched here (SQ-0186).
+            if s.machine.mem.version() != 6 {
+                zvm::screen::write_screen_dims(
+                    &mut s.machine.mem,
+                    cfg.virtual_screen_rows as u8,
+                    cfg.virtual_screen_cols as u8,
+                );
+            }
             s.machine.undo_cap = cfg.undo_levels;
             Box::new(s)
         }

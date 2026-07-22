@@ -64,6 +64,11 @@ pub struct Blorb {
     fspc: Option<u32>,
     /// `(start, len)` of the top-level `IFmd` chunk's data, if present.
     ifmd: Option<(usize, usize)>,
+    /// Standard window `(width, height)` in pixels from the top-level `Reso`
+    /// (resolution) chunk — the display size the pictures were authored for.
+    /// A v6 interpreter advertises this as the screen size so the game's
+    /// hardcoded pixel layout lines up with its art (e.g. Zork0 → 320×200).
+    reso_std: Option<(u16, u16)>,
 }
 
 fn be_u32(b: &[u8], off: usize) -> Result<u32, BlorbError> {
@@ -96,6 +101,7 @@ impl Blorb {
         let mut ridx: Option<(usize, usize)> = None; // (entries_start, count)
         let mut fspc: Option<u32> = None;
         let mut ifmd: Option<(usize, usize)> = None;
+        let mut reso_std: Option<(u16, u16)> = None;
         let mut pos = 12;
         while pos + 8 <= end {
             let ctype = [bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]];
@@ -111,6 +117,14 @@ impl Blorb {
                 fspc = be_u32(&bytes, data_start).ok();
             } else if &ctype == b"IFmd" {
                 ifmd = Some((data_start, clen));
+            } else if &ctype == b"Reso" && clen >= 8 {
+                // First two words are the standard window width/height (px);
+                // min/max and per-image ratios follow (ignored here).
+                let w = be_u32(&bytes, data_start).unwrap_or(0);
+                let h = be_u32(&bytes, data_start + 4).unwrap_or(0);
+                if w > 0 && h > 0 {
+                    reso_std = Some((w.min(u16::MAX as u32) as u16, h.min(u16::MAX as u32) as u16));
+                }
             }
             pos = data_start + clen + (clen & 1);
         }
@@ -131,7 +145,7 @@ impl Blorb {
             index.push(ResourceEntry { usage, number, start, chunk_type, len });
             p += 12;
         }
-        Ok(Blorb { bytes, index, fspc, ifmd })
+        Ok(Blorb { bytes, index, fspc, ifmd, reso_std })
     }
 
     /// The parsed resource index (for enumeration).
@@ -151,6 +165,15 @@ impl Blorb {
     /// Returned uninterpreted — parsing is a caller's concern.
     pub fn metadata(&self) -> Option<&[u8]> {
         self.ifmd.map(|(s, l)| &self.bytes[s..s + l])
+    }
+
+    /// The standard window `(width, height)` in pixels from the `Reso`
+    /// (resolution) chunk — the display size the pictures were designed for.
+    /// A v6 story advertises this to the game as its screen size so hardcoded
+    /// pixel art (e.g. Zork0's 320×200 frame) lines up. `None` when the blorb
+    /// carries no `Reso` chunk.
+    pub fn std_window(&self) -> Option<(u16, u16)> {
+        self.reso_std
     }
 
     fn chunk_data(&self, e: &ResourceEntry) -> &[u8] {

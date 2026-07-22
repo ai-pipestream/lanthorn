@@ -55,7 +55,7 @@ fn zork0_v6_windows_smoke() {
     eprintln!("resolved {} Pict dimension entries from the sidecar", picture_dims.len());
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims)
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
             .expect("Zork0 (v6) should load and boot without a ZError");
 
     // (a) No fault/panic during boot.
@@ -99,8 +99,11 @@ fn zork0_v6_windows_smoke() {
             w.y_size
         );
     }
-    assert_eq!((v6.windows[0].x_size, v6.windows[0].y_size), (630, 184), "window 0 geometry");
-    assert_eq!((v6.windows[7].x_size, v6.windows[7].y_size), (640, 192), "window 7 (graphics) geometry");
+    // With the Blorb `Reso` native resolution (320×200) advertised before boot,
+    // Zork0 sizes its full-screen graphics window (7) to 320×200 and insets the
+    // main text window (0) to 310×192 — art and windows now share one 320px space.
+    assert_eq!((v6.windows[0].x_size, v6.windows[0].y_size), (310, 192), "window 0 geometry");
+    assert_eq!((v6.windows[7].x_size, v6.windows[7].y_size), (320, 200), "window 7 (graphics) geometry");
 
     // Thread the Pict source onto the session (Plan 1b Task 2), the same way
     // `startup.rs`'s ZCode arm does after construction: `drain_turn` uses it to
@@ -185,7 +188,7 @@ fn v6_positioned_windows_carry_game_pixel_rects() {
     let picture_dims = picts.all_pict_dims();
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims)
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit, "Zork0 quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
@@ -224,7 +227,7 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
     let picture_dims = picts.all_pict_dims();
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims)
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit, "Zork0 quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
@@ -242,8 +245,12 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
     let main = app::render::v6_canvas::MainText::default();
     let colors = app::colors::ColorScheme::default();
     let canvas = app::render::v6_canvas::build_v6_canvas(
-        items, (80, 24), (8, 8), bg, image::Rgba([255; 4]), &main, &colors,
+        items, bg, image::Rgba([255; 4]), &main, &colors,
     );
-    assert_eq!(canvas.dimensions(), (640, 192), "canvas sized 80x24 cells at 8x8 device px/cell");
+    // Canvas is the game's native pixel extent (max window bottom-right) — near
+    // Zork0's 320×200 screen (a thin top window pokes 1px past the right edge,
+    // harmless after scale-to-fit). It is NOT the terminal's device size.
+    let (cw, ch) = canvas.dimensions();
+    assert!((320..=322).contains(&cw) && ch == 200, "canvas ~= native 320x200, got {cw}x{ch}");
     assert!(canvas.pixels().any(|p| *p != bg), "v6 pixel canvas has painted content, not a flat background");
 }

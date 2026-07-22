@@ -81,67 +81,77 @@ fn blit_scaled(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy: u32, dw: u32, 
     }
 }
 
+/// The v6 font cell size in game pixels — matches `zvm::screen::V6_FONT_WIDTH`/
+/// `V6_FONT_HEIGHT` and the `write_screen_dims` v6 arm. Text is one glyph per
+/// `FONT × FONT` game-pixel cell; the whole canvas is later scaled to the pane.
+const FONT: u32 = 8;
+
+/// Build the v6 story pane as one RGBA canvas in the game's **native pixel
+/// space** (the resolution advertised to the game — the Blorb `Reso` standard
+/// window, e.g. 320×200). Graphics are blitted at their exact pixel coords and
+/// all text is rasterized at the native 8px font cell, so windows and hardcoded
+/// pixel art share one coordinate system. The render layer scales this whole
+/// canvas to fill the story pane (SQ-0186 Phase 1c).
 pub fn build_v6_canvas(
     items: &[PositionedWindow],
-    pane_cells: (u16, u16),
-    cell_px: (u16, u16),
     bg: Rgba<u8>,
     default_fg: Rgba<u8>,
     main: &MainText,
     colors: &ColorScheme,
 ) -> RgbaImage {
-    let (cols, rows) = (pane_cells.0 as u32, pane_cells.1 as u32);
-    let (cw, ch) = (cell_px.0 as u32, cell_px.1 as u32);
-    let w = (cols * cw).max(1);
-    let h = (rows * ch).max(1);
-    let mut canvas = RgbaImage::from_pixel(w, h, bg);
-
-    // game px → device px: multiply by cellpx / 8 (font cell = 8 game px).
-    let gx = |g: u16| g as u32 * cw / 8;
-    let gy = |g: u16| g as u32 * ch / 8;
+    // Canvas = the native screen extent (max window bottom-right). Window 7 is
+    // typically the full-screen background, so this is the advertised size.
+    let mut sw = 1u32;
+    let mut sh = 1u32;
+    for it in items {
+        sw = sw.max(it.x_px as u32 + it.w_px as u32);
+        sh = sh.max(it.y_px as u32 + it.h_px as u32);
+    }
+    let mut canvas = RgbaImage::from_pixel(sw, sh, bg);
 
     // Layers in list order: graphics (background) first, then text on top.
     for it in items {
+        let ox = it.x_px as u32;
+        let oy = it.y_px as u32;
+        let lm = it.left_margin as u32; // set_margins text inset
         match &it.node {
             WinNode::Graphics(gwn) => {
-                blit_scaled(
-                    &mut canvas,
-                    &gwn.canvas,
-                    gx(it.x_px),
-                    gy(it.y_px),
-                    gx(it.w_px).max(1),
-                    gy(it.h_px).max(1),
-                );
+                // 1:1 blit — the window canvas is already native game pixels.
+                blit_scaled(&mut canvas, &gwn.canvas, ox, oy, it.w_px.max(1) as u32, it.h_px.max(1) as u32);
             }
             WinNode::Grid(g) => {
-                let ox = gx(it.x_px);
-                let oy = gy(it.y_px);
-                for row in 0..g.rows {
+                // Clamp to the window's pixel height: a v6 grid's row count can
+                // exceed its pixel box (e.g. Zork0's window 1 is a 40×11 grid in
+                // a 5px-tall window). Drawing all rows spills status text over the
+                // main window — render only the rows that fit.
+                let max_rows = (it.h_px as u32 / FONT).min(g.rows as u32) as u16;
+                for row in 0..max_rows {
                     for col in 0..g.cols {
                         let idx = row as usize * g.cols as usize + col as usize;
                         let Some(cell) = g.cells.get(idx) else { continue };
+                        let px = ox + lm + col as u32 * FONT;
+                        let py = oy + row as u32 * FONT;
                         if cell.ch == '\0' || cell.ch == ' ' {
                             // Blank: paint the cell bg only if the game set one,
                             // else leave the background/graphics showing.
                             if cell.bg != 0 {
                                 let b = packed_to_rgba(cell.bg, bg, colors);
-                                fill_cell(&mut canvas, ox + col as u32 * cw, oy + row as u32 * ch, cw, ch, b);
+                                fill_cell(&mut canvas, px, py, FONT, FONT, b);
                             }
                             continue;
                         }
                         let fg = packed_to_rgba(cell.fg, default_fg, colors);
                         let cellbg = (cell.bg != 0).then(|| packed_to_rgba(cell.bg, bg, colors));
-                        blit_glyph(&mut canvas, cell.ch, ox + col as u32 * cw, oy + row as u32 * ch, cw, ch, fg, cellbg);
+                        blit_glyph(&mut canvas, cell.ch, px, py, FONT, FONT, fg, cellbg);
                     }
                 }
             }
             WinNode::Buffer(b) if b.primary => {
                 // Main scrolling window: rasterize visible lines + input line,
-                // transparent bg (the background window shows through gaps).
-                let ox = gx(it.x_px);
-                let oy = gy(it.y_px);
-                let win_rows = it.h_px as u32 / 8; // rows spanned = pixel height / 8
-                draw_text_block(&mut canvas, &main.lines, &main.input, main.cursor_col, main.awaiting, ox, oy, cw, ch, win_rows, default_fg);
+                // inset by the game's left margin (so text clears a border
+                // frame), transparent bg (the background shows through gaps).
+                let win_rows = it.h_px as u32 / FONT;
+                draw_text_block(&mut canvas, &main.lines, &main.input, main.cursor_col, main.awaiting, ox + lm, oy, FONT, FONT, win_rows, default_fg);
             }
             _ => {}
         }
@@ -207,7 +217,7 @@ mod tests {
     fn grid_item(x_px: u16, y_px: u16, cols: u16, rows: u16, cells: Vec<GridCell>) -> PositionedWindow {
         PositionedWindow {
             x: x_px / 8, y: y_px / 8, w: cols, h: rows,
-            x_px, y_px, w_px: cols * 8, h_px: rows * 8,
+            x_px, y_px, w_px: cols * 8, h_px: rows * 8, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
                 cols, rows, cells, active_rows: rows, cursor: (0, 0), cursor_active: false,
                 border: crate::engine::BorderPref::Unspecified, bg: None, fg: None, reverse: false,
@@ -220,26 +230,29 @@ mod tests {
     }
 
     #[test]
-    fn fills_background() {
+    fn canvas_sized_to_native_window_extent_and_bg_filled() {
+        // Canvas is the native pixel extent (max window bottom-right), not the
+        // pane's device size. A 4×3-cell blank grid → 32×24 game px, all bg.
         let bg = Rgba([10, 20, 30, 255]);
-        let c = build_v6_canvas(&[], (4, 3), (8, 16), bg, Rgba([255; 4]), &MainText::default(), &colors());
-        assert_eq!(c.dimensions(), (32, 48));
+        let item = grid_item(0, 0, 4, 3, vec![blank_cell(); 12]);
+        let c = build_v6_canvas(&[item], bg, Rgba([255; 4]), &MainText::default(), &colors());
+        assert_eq!(c.dimensions(), (32, 24));
         assert_eq!(*c.get_pixel(0, 0), bg);
-        assert_eq!(*c.get_pixel(31, 47), bg);
+        assert_eq!(*c.get_pixel(31, 23), bg);
     }
 
     #[test]
-    fn graphics_blits_at_sub_cell_pixel_offset() {
-        // A 8×8 solid-red game-px canvas at game x=4 (half a cell) lands at
-        // device x = 4*8/8 = 4 — NOT snapped to a cell boundary.
+    fn graphics_blits_at_native_pixel_offset() {
+        // A 8×8 solid-red canvas at game x=4 lands at canvas x=4, 1:1 (native
+        // space — no cell quantization, no scaling).
         let src = RgbaImage::from_pixel(8, 8, Rgba([200, 0, 0, 255]));
         let item = PositionedWindow {
-            x: 0, y: 0, w: 1, h: 1, x_px: 4, y_px: 0, w_px: 8, h_px: 8,
+            x: 0, y: 0, w: 1, h: 1, x_px: 4, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(GraphicsWindow { win: 7, canvas: Arc::new(src), version: 1, upscale: false }),
         };
-        let c = build_v6_canvas(&[item], (4, 2), (8, 8), Rgba([0, 0, 0, 255]), Rgba([255; 4]), &MainText::default(), &colors());
-        assert_eq!(*c.get_pixel(4, 0), Rgba([200, 0, 0, 255]), "red starts at device x=4");
-        assert_eq!(*c.get_pixel(3, 0), Rgba([0, 0, 0, 255]), "device x=3 still background");
+        let c = build_v6_canvas(&[item], Rgba([0, 0, 0, 255]), Rgba([255; 4]), &MainText::default(), &colors());
+        assert_eq!(*c.get_pixel(4, 0), Rgba([200, 0, 0, 255]), "red starts at canvas x=4");
+        assert_eq!(*c.get_pixel(3, 0), Rgba([0, 0, 0, 255]), "x=3 still background");
     }
 
     #[test]
@@ -248,7 +261,7 @@ mod tests {
         cells[0] = GridCell { ch: 'A', style: 0, fg: 0, bg: 0, link: 0, glk_style: 0 };
         let item = grid_item(0, 0, 2, 1, cells);
         let fg = Rgba([0, 255, 0, 255]);
-        let c = build_v6_canvas(&[item], (2, 1), (8, 8), Rgba([0, 0, 0, 255]), fg, &MainText::default(), &colors());
+        let c = build_v6_canvas(&[item], Rgba([0, 0, 0, 255]), fg, &MainText::default(), &colors());
         // Cell 0 has fg pixels; cell 1 (a space, bg=0) stays background.
         assert!((0..8).any(|y| (0..8).any(|x| *c.get_pixel(x, y) == fg)), "A rendered in cell 0");
         assert!((0..8).all(|y| (8..16).all(|x| *c.get_pixel(x, y) == Rgba([0, 0, 0, 255]))), "cell 1 untouched");
@@ -257,14 +270,31 @@ mod tests {
     #[test]
     fn main_window_rasterizes_text_and_cursor() {
         let item = PositionedWindow {
-            x: 0, y: 0, w: 6, h: 3, x_px: 0, y_px: 0, w_px: 48, h_px: 24,
+            x: 0, y: 0, w: 6, h: 3, x_px: 0, y_px: 0, w_px: 48, h_px: 24, left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
         };
         let main = MainText { lines: vec!["hi".into()], input: "go".into(), cursor_col: 2, awaiting: true };
         let fg = Rgba([255, 255, 0, 255]);
-        let c = build_v6_canvas(&[item], (6, 3), (8, 8), Rgba([0, 0, 0, 255]), fg, &main, &colors());
-        // Line 0 has glyph pixels; the cursor block sits on row 1 at col 2.
+        let c = build_v6_canvas(&[item], Rgba([0, 0, 0, 255]), fg, &main, &colors());
+        // Line 0 has glyph pixels; the cursor block sits on row 1 at col 2 (x=16).
         assert!((0..8).any(|y| (0..16).any(|x| *c.get_pixel(x, y) == fg)), "line 0 text drawn");
         assert_eq!(*c.get_pixel(16, 8), fg, "cursor block at row 1 col 2");
+    }
+
+    #[test]
+    fn main_window_text_is_inset_by_left_margin() {
+        // set_margins(left=16) shifts window-0 text right by 16 px, so the caret
+        // block for an empty input sits at x=16 (not x=0) — the fix that keeps
+        // text inside a border frame.
+        let item = PositionedWindow {
+            x: 0, y: 0, w: 8, h: 2, x_px: 0, y_px: 0, w_px: 64, h_px: 16,
+            left_margin: 16, right_margin: 8,
+            node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+        };
+        let main = MainText { lines: vec![], input: String::new(), cursor_col: 0, awaiting: true };
+        let fg = Rgba([255, 0, 0, 255]);
+        let c = build_v6_canvas(&[item], Rgba([0, 0, 0, 255]), fg, &main, &colors());
+        assert_eq!(*c.get_pixel(16, 0), fg, "caret inset by the 16px left margin");
+        assert_eq!(*c.get_pixel(0, 0), Rgba([0, 0, 0, 255]), "flush-left column stays background");
     }
 }

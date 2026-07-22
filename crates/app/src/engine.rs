@@ -246,6 +246,12 @@ pub struct PositionedWindow {
     pub y_px: u16,
     pub w_px: u16,
     pub h_px: u16,
+    /// Text left/right margins (pixels) set by the game via `set_margins` — the
+    /// inset that keeps a window's text inside a graphical border frame. Applied
+    /// when rasterizing this window's text into the pixel canvas (0 = flush to
+    /// the window edge). v6 only; 0 elsewhere.
+    pub left_margin: u16,
+    pub right_margin: u16,
     pub node: WinNode,
 }
 

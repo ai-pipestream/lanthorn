@@ -109,6 +109,14 @@ impl PictSource {
         PictSource { blorb, cache: HashMap::new() }
     }
 
+    /// The Blorb `Reso` standard window `(width, height)` in pixels — the
+    /// resolution the pictures were authored for. A v6 story advertises this
+    /// as its screen size so its hardcoded pixel art lines up (SQ-0186).
+    /// `None` when there's no Blorb or no `Reso` chunk.
+    pub fn std_window(&self) -> Option<(u16, u16)> {
+        self.blorb.as_ref().and_then(|b| b.std_window())
+    }
+
     fn get(&mut self, resnum: u32) -> Option<&Arc<DynamicImage>> {
         if !self.cache.contains_key(&resnum) {
             let decoded = self.blorb.as_ref()

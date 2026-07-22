@@ -391,19 +391,16 @@ fn render_node(
         }
         WinNode::Layered(items) => {
             // Phase 1c: with an image protocol, composite the whole v6 pane as one
-            // device-resolution RGBA canvas and draw it as a single terminal image
-            // (graphics at exact pixel coords, all text rasterized). Without a
-            // picker, fall through to the Phase 1b cell composite below.
+            // RGBA canvas in the game's NATIVE pixel space (graphics at exact
+            // pixel coords, all text rasterized), then draw it scaled to fill the
+            // pane. Without a picker, fall through to the Phase 1b cell composite.
             if let Some(picker) = state.game_picker.as_ref() {
-                let f = picker.font_size();
-                let cell_px = (f.width, f.height);
-                let pane_cells = (area.width, area.height);
                 let theme_bg = state.colors.theme.get("transcript").style;
                 let bg = style_bg_rgba(theme_bg, image::Rgba([0, 0, 0, 255]));
                 let default_fg = style_fg_rgba(theme_bg, image::Rgba([220, 220, 220, 255]));
                 let main = build_main_text(state, items, area);
                 let canvas = crate::render::v6_canvas::build_v6_canvas(
-                    items, pane_cells, cell_px, bg, default_fg, &main, &state.colors,
+                    items, bg, default_fg, &main, &state.colors,
                 );
                 state.graphics_render.borrow_mut().draw_v6_canvas(picker, &canvas, area, buf);
                 return None; // v6 main-window scroll metrics are a follow-up (SQ-0450)
@@ -746,9 +743,21 @@ fn style_fg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> ima
 /// input line and caret column.
 fn build_main_text(state: &AppState, items: &[PositionedWindow], _area: Rect) -> crate::render::v6_canvas::MainText {
     use crate::render::transcript::wrap_line;
-    // Primary window's cell size (cols/rows) drives wrapping + row budget.
+    // Primary window's native pixel size drives wrapping + row budget, in the
+    // game's 8px font cell — MINUS the set_margins inset, so wrapped text fills
+    // exactly the framed area the canvas rasterizes it into.
     let prim = items.iter().find(|it| matches!(&it.node, WinNode::Buffer(b) if b.primary));
-    let (cols, rows) = prim.map(|it| (it.w.max(1), it.h.max(1))).unwrap_or((1, 1));
+    let (cols, rows) = prim
+        .map(|it| {
+            // Text is inset by left_margin on the left; the right inset mirrors it
+            // (v6 decorative frames are symmetric and the window is centred — the
+            // game sets only left_margin, leaving right_margin 0). Respect an
+            // explicit larger right_margin if the game set one.
+            let right = (it.right_margin).max(it.left_margin) as u32;
+            let eff_w = (it.w_px as u32).saturating_sub(it.left_margin as u32 + right);
+            ((eff_w / 8).max(1) as u16, (it.h_px as u32 / 8).max(1) as u16)
+        })
+        .unwrap_or((1, 1));
     // Wrap all transcript lines to the window width, keep the newest `rows-1`
     // wrapped rows (leave one row for the input line).
     let mut wrapped: Vec<String> = Vec::new();
@@ -2028,6 +2037,8 @@ mod tests {
             y_px: 0,
             w_px: 80,
             h_px: 48,
+            left_margin: 0,
+            right_margin: 0,
             node: WinNode::Graphics(crate::engine::GraphicsWindow {
                 win: 1,
                 canvas: std::sync::Arc::new(img),
@@ -2050,6 +2061,8 @@ mod tests {
             y_px: 16,
             w_px: 24,
             h_px: 16,
+            left_margin: 0,
+            right_margin: 0,
             node: WinNode::Grid(grid),
         };
 
