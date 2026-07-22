@@ -358,6 +358,18 @@ impl GameSession {
         self.pict_source = src;
     }
 
+    /// Drain and apply any `draw_picture`/`erase_picture` events the VM queued
+    /// during boot (`Machine::pending_pictures`, populated inside
+    /// `new_with_trace` before this method can ever run). A v6 game like
+    /// Zork0 draws its opening art during boot, before the first turn — call
+    /// this once, right after `set_pict_source`, so the very first `screen()`
+    /// (rendered before the player types anything) already reflects those
+    /// boot draws instead of showing a blank graphics window until the first
+    /// turn's `drain_turn` happens to pick them up (Plan 1b Task 5 gap).
+    pub fn flush_boot_pictures(&mut self) {
+        self.drain_pictures();
+    }
+
     /// Drain the transcript accumulated since the last drain (intro or last turn).
     pub fn take_transcript(&mut self) -> String {
         let raw = sink_mut(&mut self.machine).take_text();

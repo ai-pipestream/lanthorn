@@ -303,6 +303,12 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             // `erase_picture` events into `pictures_canvas` self-contained —
             // Plan 1a's dimension table above is a separate, boot-time-only use.
             s.set_pict_source(Some(picts));
+            // v6 boot-picture flush (Plan 1b Task 5): a v6 game draws its opening
+            // art during boot, inside `new_with_trace` above, before the Pict
+            // source existed to rasterize it — drain that backlog once now so the
+            // very first `screen()` (before the player's first turn) already
+            // shows the boot graphics instead of a blank window.
+            s.flush_boot_pictures();
             // Apply the configured virtual screen dimensions to the VM. init_caps
             // (called inside GameSession::new) seeds defaults; override here.
             zvm::screen::write_screen_dims(

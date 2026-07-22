@@ -20,6 +20,7 @@
 
 use std::path::PathBuf;
 
+use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::session::GameSession;
 
@@ -106,12 +107,49 @@ fn zork0_v6_windows_smoke() {
     // rasterize `pending_pictures` into `pictures_canvas` as it drains them.
     session.set_pict_source(Some(picts));
 
-    // Drive a couple of turns past the first prompt, collecting each turn's
-    // drained picture events (Plan 1b Task 2: `drain_turn` empties
-    // `machine.pending_pictures` into `TurnResult.pictures` every turn now, so
-    // the VM's own queue is expected to be empty again after each submit).
+    // Flush Zork0's boot-time picture events (Plan 1b Task 5): Zork0 draws its
+    // opening art during boot, inside `new_with_trace`, before a Pict source
+    // existed to rasterize it — those events sit in `machine.pending_pictures`
+    // until something drains them. Without this one-time flush, the very
+    // first `screen()` below (before any turn) would show a blank graphics
+    // window; `startup.rs`'s ZCode arm calls this in the same spot.
+    session.flush_boot_pictures();
+
+    // (d) Task 2's whole point, now exercised at boot rather than via the first
+    // turn's drain: Zork0's boot-time `draw_picture` events (`pending_pictures
+    // at first prompt` above, several targeting window 7 — the v6 convention
+    // for its banner/graphics window) must have been rasterized into a real,
+    // non-blank canvas by the flush just above — not left as raw undrained
+    // events.
+    let canvas = session.pictures_canvas.get(&7)
+        .expect("window 7 should have a canvas after the boot-picture flush");
+    let non_transparent = canvas.img.pixels().any(|p| p.0[3] != 0);
+    assert!(non_transparent, "window 7's canvas should have at least one non-transparent pixel drawn");
+
+    // (f) The whole v6 render path, end to end (Plan 1b Task 5): the initial
+    // screen model — built before the player has typed anything — must already
+    // be the z-ordered layered composite (Task 4's adapter), with at least one
+    // rasterized graphics leaf (the boot art just flushed above) and at least
+    // one text leaf (Grid or primary Buffer), at a nonzero content size.
+    let initial_screen = session.screen();
+    let WinNode::Layered(items) = &initial_screen.root else {
+        panic!("v6 story's screen() root must be WinNode::Layered, got {:?}", initial_screen.root);
+    };
+    assert!(
+        items.iter().any(|pw| matches!(pw.node, WinNode::Graphics(_))),
+        "initial (post-boot-flush) screen model should have at least one Graphics leaf"
+    );
+    assert!(
+        items.iter().any(|pw| matches!(pw.node, WinNode::Grid(_) | WinNode::Buffer(_))),
+        "initial screen model should have at least one text leaf (Grid or Buffer)"
+    );
+    assert_ne!(initial_screen.content_size, (0, 0), "v6 content_size must be nonzero");
+
+    // Drive a couple of turns past the first prompt as a regression check: with
+    // the boot backlog now flushed up front, ordinary movement commands should
+    // neither fault nor leave anything stuck in the VM's own picture queue
+    // (`drain_turn` still drains it every turn, even when it stays empty).
     let _ = session.take_transcript();
-    let mut all_pictures = Vec::new();
     for cmd in ["look", "north"] {
         let result = session.submit(cmd);
         eprintln!(
@@ -127,30 +165,5 @@ fn zork0_v6_windows_smoke() {
             session.machine.pending_pictures.is_empty(),
             "drain_turn must drain the VM's queue every turn (Task 2)"
         );
-        all_pictures.extend(result.pictures);
     }
-    eprintln!("pictures drained across two turns: {:?}", all_pictures);
-
-    // (d) draw_picture accumulated at least one draw event, ideally targeting
-    // window 7 (the v6 convention for the banner/graphics window Zork0 draws
-    // its opening image into) — this carries forward the boot-time events too
-    // (`pending_pictures at first prompt` above), since the first `submit`'s
-    // drain is the first one to run.
-    assert!(
-        !all_pictures.is_empty(),
-        "should have drained at least one draw_picture event across the two turns"
-    );
-    let saw_window_7 = all_pictures.iter().any(|e| e.window == 7);
-    assert!(
-        saw_window_7,
-        "expected at least one draw_picture event targeting window 7 (Zork0's graphics window); got {:?}",
-        all_pictures
-    );
-
-    // (e) Task 2's whole point: those events must have been rasterized into a
-    // real, non-blank canvas for window 7 — not just carried as raw events.
-    let canvas = session.pictures_canvas.get(&7)
-        .expect("window 7 should have a canvas after drawing into it");
-    let non_transparent = canvas.img.pixels().any(|p| p.0[3] != 0);
-    assert!(non_transparent, "window 7's canvas should have at least one non-transparent pixel drawn");
 }
