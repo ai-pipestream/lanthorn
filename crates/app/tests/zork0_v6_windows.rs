@@ -99,10 +99,14 @@ fn zork0_v6_windows_smoke() {
             w.y_size
         );
     }
-    // With the Blorb `Reso` native resolution (320×200) advertised before boot,
-    // Zork0 sizes its full-screen graphics window (7) to 320×200 and insets the
-    // main text window (0) to 310×192 — art and windows now share one 320px space.
-    assert_eq!((v6.windows[0].x_size, v6.windows[0].y_size), (310, 192), "window 0 geometry");
+    // With the Blorb `Reso` native resolution (320×200) advertised before boot
+    // AND the Rect placement pictures answering `picture_data` (SQ-0186), Zork0
+    // computes its real layout: the full-screen graphics window (7) is 320×200
+    // and the main text window (0) is inset to 234×160 inside the border art
+    // (split pseudo-picture #387 = 43×39 → win0 at (44,40), 320−2·43 wide,
+    // 200−40 tall).
+    assert_eq!((v6.windows[0].x_size, v6.windows[0].y_size), (234, 160), "window 0 geometry");
+    assert_eq!((v6.windows[0].x_coord, v6.windows[0].y_coord), (44, 40), "window 0 position (1-based)");
     assert_eq!((v6.windows[7].x_size, v6.windows[7].y_size), (320, 200), "window 7 (graphics) geometry");
 
     // Thread the Pict source onto the session (Plan 1b Task 2), the same way
@@ -303,10 +307,12 @@ fn zork0_v6_story_classified_and_clear_interior_inside_frame() {
     let native = v6::native_extent(items);
     let layout = v6::classify_windows(items);
 
-    // Story is the primary buffer window (Zork0's window 0), inside the 320×200 frame.
+    // Story is the primary buffer window (Zork0's window 0), inset inside the
+    // 320×200 frame at the Rect-derived position (1-based (44,40) → 0-based
+    // (43,39), 234×160 — see the geometry assertions in the smoke test).
     let story = layout.story.expect("Zork0 boot has a primary story buffer");
     assert!(matches!(&story.node, WinNode::Buffer(b) if b.primary));
-    assert_eq!((story.x_px, story.y_px, story.w_px, story.h_px), (6, 6, 310, 192));
+    assert_eq!((story.x_px, story.y_px, story.w_px, story.h_px), (43, 39, 234, 160));
 
     // Chrome carries the frame graphics + status grids (the full-screen bg + banner + grids).
     assert!(layout.chrome.iter().any(|w| matches!(&w.node, WinNode::Graphics(_))), "chrome has frame graphics");

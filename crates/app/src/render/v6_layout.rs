@@ -63,6 +63,30 @@ pub(crate) fn blit_scaled(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy: u32
     }
 }
 
+/// 1:1 opaque-over blit of `src` into `dst` at `(dx, dy)`, clipped to the
+/// `max_w × max_h` box anchored at `(dx, dy)` (a v6 window's pixel box).
+pub(crate) fn blit_clipped(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy: u32, max_w: u32, max_h: u32) {
+    let w = src.width().min(max_w);
+    let h = src.height().min(max_h);
+    let (dstw, dsth) = (dst.width(), dst.height());
+    for oy in 0..h {
+        let ty = dy + oy;
+        if ty >= dsth {
+            break;
+        }
+        for ox in 0..w {
+            let tx = dx + ox;
+            if tx >= dstw {
+                break;
+            }
+            let p = *src.get_pixel(ox, oy);
+            if p[3] >= 128 {
+                dst.put_pixel(tx, ty, Rgba([p[0], p[1], p[2], 255]));
+            }
+        }
+    }
+}
+
 /// The v6 font cell size in game pixels — matches `zvm::screen::V6_FONT_WIDTH`.
 const FONT: u32 = 8;
 
@@ -157,13 +181,13 @@ pub fn build_chrome_canvas(
 
     // Pass 1 — Graphics entries, in list order. The window canvas is authored in
     // native game pixels (pictures drawn at their native size/coords), so blit it
-    // 1:1 at the window origin — never scaled to the window's declared pixel box.
-    // v6 pictures routinely overflow their window (Zork Zero draws 45×40 compass
-    // tiles into a 320×5 status window); scaling to the box would squash them.
+    // 1:1 at the window origin — never scaled — and clip to the window's pixel
+    // box (ZMSD §8: plotting is always clipped to the window; a canvas can be
+    // larger than the current box when the window has since shrunk).
     for it in chrome {
         if let WinNode::Graphics(gwn) = &it.node {
             let src = &gwn.canvas;
-            blit_scaled(&mut canvas, src, it.x_px as u32, it.y_px as u32, src.width(), src.height());
+            blit_clipped(&mut canvas, src, it.x_px as u32, it.y_px as u32, it.w_px.max(1) as u32, it.h_px.max(1) as u32);
         }
     }
 
@@ -471,28 +495,34 @@ mod tests {
     }
 
     #[test]
-    fn chrome_graphics_blits_native_not_scaled_to_window() {
-        // A v6 status window can be 320x5 yet the game draws a 45x40 picture into
-        // it (Zork Zero's compass). The window canvas is authored in native game
-        // pixels, so build_chrome_canvas must blit it 1:1 at the window origin —
-        // never squashed into the declared 320x5 box.
+    fn chrome_graphics_blits_native_and_clips_to_window_box() {
+        // The window canvas is authored in native game pixels: build_chrome_canvas
+        // blits it 1:1 at the window origin (never scaled to the declared box) and
+        // clips at the box edge (ZMSD §8: plotting is always clipped to the window).
         let mut src = image::RgbaImage::new(48, 43);
-        src.put_pixel(40, 38, Rgba([10, 200, 30, 255])); // opaque marker low in the canvas
-        let win = PositionedWindow {
+        src.put_pixel(40, 38, Rgba([10, 200, 30, 255])); // marker low in the canvas
+        src.put_pixel(2, 2, Rgba([200, 10, 30, 255])); // marker near the top-left
+        let win = |h_px: u16, canvas: image::RgbaImage| PositionedWindow {
             x: 0, y: 0, w: 40, h: 1,
-            x_px: 4, y_px: 4,       // window origin
-            w_px: 320, h_px: 5,     // declared box far smaller than the 48x43 canvas
+            x_px: 4, y_px: 4, // window origin
+            w_px: 320, h_px,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(GraphicsWindow {
-                win: 1, canvas: Arc::new(src), version: 0, upscale: false,
+                win: 1, canvas: Arc::new(canvas), version: 0, upscale: false,
             }),
         };
-        let canvas = build_chrome_canvas(&[&win], (100, 100), Rgba([0, 0, 0, 255]), &colors());
-        // 1:1 blit: marker lands at origin + its canvas coords = (4+40, 4+38).
-        assert_eq!(canvas.get_pixel(44, 42)[3], 255, "marker preserved at native (44,42)");
-        // The squash bug would have crushed it into y in [4,9); that band is empty.
+        // Box tall enough (40): both markers land 1:1 — never squashed.
+        let tall = win(40, src.clone());
+        let canvas = build_chrome_canvas(&[&tall], (100, 100), Rgba([0, 0, 0, 255]), &colors());
+        assert_eq!(canvas.get_pixel(6, 6)[3], 255, "top-left marker at native (6,6)");
+        assert_eq!(canvas.get_pixel(44, 42)[3], 255, "low marker 1:1 at native (44,42)");
+        // Box only 5 tall: content past the box clips; nothing squashes into it.
+        let short = win(5, src);
+        let canvas = build_chrome_canvas(&[&short], (100, 100), Rgba([0, 0, 0, 255]), &colors());
+        assert_eq!(canvas.get_pixel(6, 6)[3], 255, "top-left marker inside the box survives");
+        assert_eq!(canvas.get_pixel(44, 42)[3], 0, "content below the 5px box is clipped");
         for y in 4..9 {
-            assert_eq!(canvas.get_pixel(44, y)[3], 0, "no squashed copy in the 5px band (y={y})");
+            assert_eq!(canvas.get_pixel(44, y)[3], 0, "no squashed copy inside the box (y={y})");
         }
     }
 

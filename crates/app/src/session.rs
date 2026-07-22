@@ -586,20 +586,18 @@ impl GameSession {
         events
     }
 
-    /// Apply one `PictureEvent` to `pictures_canvas`: size the window's canvas
-    /// from its v6 pixel dims (`ZWindow::x_size`/`y_size`, already pixels — no
-    /// font-cell conversion needed here, unlike the Task 3/4 render-position
-    /// math), then draw or erase. Erase paints the *picture's own* footprint
-    /// (ZMSD §15: "the size of the picture"), falling back to the whole window
-    /// when the Pict's dims can't be resolved. Silently no-ops when the story
-    /// has no v6 window state, the window index is out of range, or (draw only)
-    /// the picture fails to resolve — matching the VM's own "best effort"
-    /// posture toward missing resources.
-    ///
-    /// Known simplification: `x == 0 && y == 0` is the v6 convention for "use
-    /// the window's cursor position" (ZMSD §15); this draws/erases at the
-    /// literal (0, 0) instead of resolving the cursor. No story observed so far
-    /// relies on that convention; revisit if one does.
+    /// Apply one `PictureEvent` to `pictures_canvas`. The event's `(y, x)` are
+    /// the spec's 1-based window-relative pixel coords (zero already resolved to
+    /// the window cursor by the engine); the canvas is 0-based, so both drop by
+    /// one. The canvas is sized to the window's own pixel box and all plotting
+    /// is CLIPPED to it — ZMSD §8: "all text and graphics plotting is always
+    /// clipped to the current window". (The pre-Rect-support canvas grew to fit
+    /// out-of-window draws; those coords were garbage from failed `picture_data`
+    /// placement queries, not real game intent.) Erase paints the *picture's
+    /// own* footprint (ZMSD §15), falling back to the whole window when the
+    /// Pict's dims can't be resolved. Silently no-ops when the story has no v6
+    /// window state, the window index is out of range, or (draw only) the
+    /// picture fails to resolve.
     fn apply_picture_event(&mut self, ev: &PictureEvent) {
         let Some(v6) = self.machine.screen.v6.as_ref() else { return };
         let Some(w) = v6.windows.get(ev.window as usize) else { return };
@@ -609,38 +607,28 @@ impl GameSession {
         // exceeds any real v6 screen (~640 px) yet bounds worst-case storage to
         // ~64 MB — mirroring the grid-cell cap on the engine side (Phase 1a).
         const CANVAS_PX_CAP: u32 = 4096;
-        // A v6 window's picture canvas must be large enough to hold every picture
-        // drawn into it: a game can draw a picture taller/wider than the window's
-        // nominal pixel size (Zork0 draws its 45x40 compass into a 320x5 banner
-        // window), and clamping the canvas to the window size would clip it away.
-        // Size the canvas to the max of the window size and the drawn picture's
-        // extent at its draw offset. (SQ-0186)
-        let dims = self.pict_source.as_mut().and_then(|s| s.dims(ev.number as u32));
-        let (iw, ih) = dims.unwrap_or((0, 0));
-        let need_w = (ev.x as u32).saturating_add(iw);
-        let need_h = (ev.y as u32).saturating_add(ih);
-        // Grow-only: the canvas must accommodate the window size AND every picture
-        // ever drawn into it. Never shrink between draws — `Canvas::resize` clears
-        // on any dimension change, so a smaller follow-up picture would wipe the
-        // earlier ones (e.g. Zork0 stacks 8 compass overlays, then a smaller mark).
-        let (cur_w, cur_h) = self.pictures_canvas.get(&ev.window)
-            .map(|c| { let a = c.arc(); (a.width(), a.height()) })
-            .unwrap_or((0, 0));
         let (pw, ph) = (
-            (w.x_size.max(1) as u32).max(need_w).max(cur_w).min(CANVAS_PX_CAP),
-            (w.y_size.max(1) as u32).max(need_h).max(cur_h).min(CANVAS_PX_CAP),
+            (w.x_size.max(1) as u32).min(CANVAS_PX_CAP),
+            (w.y_size.max(1) as u32).min(CANVAS_PX_CAP),
         );
+        // 1-based window-relative → 0-based canvas coords.
+        let dx = (ev.x.max(1) as i32) - 1;
+        let dy = (ev.y.max(1) as i32) - 1;
+        let canvas = self.pictures_canvas.entry(ev.window)
+            .or_insert_with(|| crate::graphics::Canvas::new(pw, ph));
+        // Track the window's current box without wiping earlier draws: grow
+        // preserves content; a shrunken window only tightens the clip below
+        // (window_size "does not change the current display", ZMSD §15).
+        canvas.grow_to(pw, ph);
         if ev.erase {
-            let canvas = self.pictures_canvas.entry(ev.window)
-                .or_insert_with(|| crate::graphics::Canvas::new(pw, ph));
-            canvas.grow_to(pw, ph);
+            let dims = self.pict_source.as_mut().and_then(|s| s.dims(ev.number as u32));
             let (ew, eh) = dims.unwrap_or((pw, ph));
-            canvas.erase_rect(ev.x as i32, ev.y as i32, ew, eh);
+            // Clip the erase to the window box.
+            let ew = ew.min(pw.saturating_sub(dx.max(0) as u32));
+            let eh = eh.min(ph.saturating_sub(dy.max(0) as u32));
+            canvas.erase_rect(dx, dy, ew, eh);
         } else if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
-            let canvas = self.pictures_canvas.entry(ev.window)
-                .or_insert_with(|| crate::graphics::Canvas::new(pw, ph));
-            canvas.grow_to(pw, ph);
-            canvas.draw_image(&img, ev.x as i32, ev.y as i32, None);
+            canvas.draw_image_clipped(&img, dx, dy, (pw, ph));
             canvas.z_seq = crate::graphics::next_draw_seq();
         }
     }
@@ -681,8 +669,12 @@ impl GameSession {
             if win.x_size == 0 || win.y_size == 0 {
                 continue;
             }
-            let x = win.x_coord / V6_FONT_WIDTH;
-            let y = win.y_coord / V6_FONT_HEIGHT;
+            // ZMSD §8.8.1: window coords are 1-based ((1,1) = screen top-left);
+            // the composite raster is 0-based, so positions drop by one here.
+            let x_px = win.x_coord.saturating_sub(1);
+            let y_px = win.y_coord.saturating_sub(1);
+            let x = x_px / V6_FONT_WIDTH;
+            let y = y_px / V6_FONT_HEIGHT;
             let (cols, rows) = (win.grid.cols, win.grid.rows);
 
             if let Some(canvas) = self.pictures_canvas.get(&(i as u8)) {
@@ -691,8 +683,8 @@ impl GameSession {
                     y,
                     w: cols,
                     h: rows,
-                    x_px: win.x_coord,
-                    y_px: win.y_coord,
+                    x_px,
+                    y_px,
                     w_px: win.x_size,
                     h_px: win.y_size,
                     left_margin: win.left_margin,
@@ -739,8 +731,8 @@ impl GameSession {
                 y,
                 w: cols,
                 h: rows,
-                x_px: win.x_coord,
-                y_px: win.y_coord,
+                x_px,
+                y_px,
                 w_px: win.x_size,
                 h_px: win.y_size,
                 left_margin: win.left_margin,
@@ -2930,14 +2922,15 @@ mod tests {
         let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
 
         let mut windows: [ZWindow; 8] = Default::default();
+        // Window coords are the spec's 1-based pixels ((1,1) = top-left).
         // Window 0: the main scrolling window, at (0, 1) cell, 80x20 cells.
-        windows[0] = ZWindow { x_coord: 0, y_coord: 8, x_size: 640, y_size: 160, ..Default::default() };
+        windows[0] = ZWindow { x_coord: 1, y_coord: 9, x_size: 640, y_size: 160, ..Default::default() };
         windows[0].grid.resize(20, 80);
         // Window 1: a one-row status strip along the top, at (0, 0) cell, 80x1 cells.
-        windows[1] = ZWindow { x_coord: 0, y_coord: 0, x_size: 640, y_size: 8, ..Default::default() };
+        windows[1] = ZWindow { x_coord: 1, y_coord: 1, x_size: 640, y_size: 8, ..Default::default() };
         windows[1].grid.resize(1, 80);
         // Window 7: a small picture window at (2, 1) cell, 8x6 cells.
-        windows[7] = ZWindow { x_coord: 16, y_coord: 8, x_size: 64, y_size: 48, ..Default::default() };
+        windows[7] = ZWindow { x_coord: 17, y_coord: 9, x_size: 64, y_size: 48, ..Default::default() };
         windows[7].grid.resize(6, 8);
         machine.screen.v6 = Some(V6Windows { windows, current: 1 });
 

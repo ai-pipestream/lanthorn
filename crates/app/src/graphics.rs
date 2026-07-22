@@ -125,6 +125,36 @@ impl Canvas {
         self.version += 1;
     }
 
+    /// Like [`Canvas::draw_image`] (unscaled), but clipped to the `clip`
+    /// pixel box `(w, h)` anchored at the canvas origin — ZMSD §8's "all
+    /// plotting is always clipped to the current window" for a canvas that may
+    /// be larger than the window's current box (a window that shrank keeps its
+    /// old pixels; only new plotting is bounded by the new size).
+    pub fn draw_image_clipped(&mut self, src: &DynamicImage, x: i32, y: i32, clip: (u32, u32)) {
+        if x < 0 || y < 0 {
+            // v6 draw coords are 1-based-positive by the time they reach the
+            // canvas; anything else is clamped upstream.
+            return;
+        }
+        let (cx, cy) = (x as u32, y as u32);
+        let (cw, ch) = clip;
+        if cx >= cw || cy >= ch {
+            return;
+        }
+        let allow_w = (cw - cx).min(src.width());
+        let allow_h = (ch - cy).min(src.height());
+        if allow_w == 0 || allow_h == 0 {
+            return;
+        }
+        if allow_w < src.width() || allow_h < src.height() {
+            let cropped = src.crop_imm(0, 0, allow_w, allow_h);
+            image::imageops::overlay(Arc::make_mut(&mut self.img), &cropped, x as i64, y as i64);
+        } else {
+            image::imageops::overlay(Arc::make_mut(&mut self.img), src, x as i64, y as i64);
+        }
+        self.version += 1;
+    }
+
     /// A cheap clone of the canvas bitmap (an `Arc` ref-count bump — see the type
     /// docs), handed to the renderer each frame.
     pub fn arc(&self) -> Arc<RgbaImage> { Arc::clone(&self.img) }
@@ -185,8 +215,22 @@ impl PictSource {
     /// `(width, height)` of Pict `resnum`, sniffed from the image header only —
     /// no full decode. Used by the v6 Z-machine `picture_data` dimension table
     /// (Plan 1a), where only the size is needed at boot, not the pixels.
+    ///
+    /// A `Rect` chunk (Blorb §Rect: 8 bytes, width then height, big-endian) is a
+    /// dimension-only placeholder with no pixels — Infocom v6 games (Zork Zero,
+    /// Shogun, Arthur) query these via `picture_data` as invisible *placement*
+    /// pictures whose (height, width) encode screen (y, x) layout coordinates.
     pub fn dims(&mut self, resnum: u32) -> Option<(u32, u32)> {
-        let (_ty, bytes) = self.blorb.as_ref()?.resource(b"Pict", resnum)?;
+        let (ty, bytes) = self.blorb.as_ref()?.resource(b"Pict", resnum)?;
+        if ty == b"Rect" {
+            let b: &[u8] = bytes;
+            if b.len() < 8 {
+                return None;
+            }
+            let w = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+            let h = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
+            return Some((w, h));
+        }
         image::ImageReader::new(std::io::Cursor::new(bytes))
             .with_guessed_format()
             .ok()?

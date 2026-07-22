@@ -535,8 +535,10 @@ pub fn write_screen_dims(mem: &mut Memory, rows: u8, cols: u8) {
         mem.write_byte(0x21, cols);
         mem.write_word(0x22, cols as u16 * V6_FONT_WIDTH); // screen width, pixels
         mem.write_word(0x24, rows as u16 * V6_FONT_HEIGHT); // screen height, pixels
-        mem.write_byte(0x26, V6_FONT_WIDTH as u8); // font width, pixels
-        mem.write_byte(0x27, V6_FONT_HEIGHT as u8); // font height, pixels
+        // ZMSD §11: in V6 the font-size bytes are SWAPPED relative to V5 —
+        // $26 holds font HEIGHT in units, $27 font WIDTH (width of a '0').
+        mem.write_byte(0x26, V6_FONT_HEIGHT as u8);
+        mem.write_byte(0x27, V6_FONT_WIDTH as u8);
         return;
     }
     mem.write_byte(0x20, rows);
