@@ -587,7 +587,16 @@ impl GameSession {
     fn apply_picture_event(&mut self, ev: &PictureEvent) {
         let Some(v6) = self.machine.screen.v6.as_ref() else { return };
         let Some(w) = v6.windows.get(ev.window as usize) else { return };
-        let (pw, ph) = (w.x_size.max(1) as u32, w.y_size.max(1) as u32);
+        // Clamp the pixel-canvas backing store so a hostile / buggy story that
+        // sets window_size(w, 0xFFFF, 0xFFFF) then draws/erases can't force a
+        // ~17 GB RgbaImage allocation (an OOM abort). CANVAS_PX_CAP (4096) far
+        // exceeds any real v6 screen (~640 px) yet bounds worst-case storage to
+        // ~64 MB — mirroring the grid-cell cap on the engine side (Phase 1a).
+        const CANVAS_PX_CAP: u32 = 4096;
+        let (pw, ph) = (
+            (w.x_size.max(1) as u32).min(CANVAS_PX_CAP),
+            (w.y_size.max(1) as u32).min(CANVAS_PX_CAP),
+        );
         if ev.erase {
             let dims = self.pict_source.as_mut().and_then(|s| s.dims(ev.number as u32));
             let canvas = self.pictures_canvas.entry(ev.window)
@@ -2916,6 +2925,30 @@ mod tests {
             WinNode::Grid(g) => assert_eq!((g.cols, g.rows), (8, 6)),
             other => panic!("expected window 7's Grid leaf, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn v6_picture_canvas_clamps_hostile_window_size() {
+        use zvm::cpu::exec::PictureEvent;
+        use zvm::screen::{V6Windows, ZWindow};
+        // A window sized to the pixel max must not force a ~17 GB canvas alloc.
+        let mem = Memory::new(minimal_v6_story()).unwrap();
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+        let mut windows: [ZWindow; 8] = Default::default();
+        windows[7] = ZWindow { x_size: 0xFFFF, y_size: 0xFFFF, ..Default::default() };
+        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+        let mut sess = GameSession {
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            disasm_cache: std::cell::RefCell::new(None),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+        };
+        // The erase path allocates the canvas even without a resolved image.
+        sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 0, y: 0, erase: true });
+        let c = sess.pictures_canvas.get(&7).expect("erase allocated a canvas");
+        assert!(c.img.width() <= 4096 && c.img.height() <= 4096,
+            "canvas clamped, got {}x{}", c.img.width(), c.img.height());
     }
 
     // Fixture-gated: in-game SAVE then RESTORE on Bureaucracy (v4) must leave the
