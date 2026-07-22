@@ -69,12 +69,19 @@ const FONT: u32 = 8;
 /// The story (primary) window's rasterizable content: visible wrapped lines
 /// (oldest-first), the live input line, and the caret column. `awaiting` gates
 /// the input line + block cursor (drawn only when the game has host focus).
+///
+/// `gutter_cols`/`band_rows` describe a drop-cap gutter: the first `band_rows`
+/// rows are shifted right by `gutter_cols` columns so text flows beside a
+/// story-window picture (e.g. Zork Zero's illuminated initial) sitting at the
+/// top-left; rows past the band start flush left. Both default to 0 (no gutter).
 #[derive(Debug, Default, Clone)]
 pub struct MainText {
     pub lines: Vec<String>,
     pub input: String,
     pub cursor_col: u16,
     pub awaiting: bool,
+    pub gutter_cols: u16,
+    pub band_rows: u16,
 }
 
 /// The native screen extent (max window bottom-right) in game pixels; min 1×1.
@@ -148,10 +155,15 @@ pub fn build_chrome_canvas(
 ) -> RgbaImage {
     let mut canvas = RgbaImage::new(native.0 as u32, native.1 as u32);
 
-    // Pass 1 — Graphics entries, in list order.
+    // Pass 1 — Graphics entries, in list order. The window canvas is authored in
+    // native game pixels (pictures drawn at their native size/coords), so blit it
+    // 1:1 at the window origin — never scaled to the window's declared pixel box.
+    // v6 pictures routinely overflow their window (Zork Zero draws 45×40 compass
+    // tiles into a 320×5 status window); scaling to the box would squash them.
     for it in chrome {
         if let WinNode::Graphics(gwn) = &it.node {
-            blit_scaled(&mut canvas, &gwn.canvas, it.x_px as u32, it.y_px as u32, it.w_px.max(1) as u32, it.h_px.max(1) as u32);
+            let src = &gwn.canvas;
+            blit_scaled(&mut canvas, src, it.x_px as u32, it.y_px as u32, src.width(), src.height());
         }
     }
 
@@ -303,8 +315,12 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
         if row >= rows as u32 {
             return;
         }
-        for (col, glyph) in line.chars().take(cols as usize).enumerate() {
-            crate::render::bitfont::blit_glyph(canvas, glyph, ox + col as u32 * FONT, oy + row * FONT, FONT, FONT, fg, None);
+        // Drop-cap gutter: shift the first `band_rows` rows right by `gutter_cols`
+        // so text flows beside a top-left story picture.
+        let indent = if row < main.band_rows as u32 { main.gutter_cols as u32 } else { 0 };
+        let avail = (cols as u32).saturating_sub(indent);
+        for (col, glyph) in line.chars().take(avail as usize).enumerate() {
+            crate::render::bitfont::blit_glyph(canvas, glyph, ox + (indent + col as u32) * FONT, oy + row * FONT, FONT, FONT, fg, None);
         }
         row += 1;
     }
@@ -316,29 +332,45 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
     }
 }
 
-/// Draw the story window's own picture (the room illustration) at the top-left
-/// of the story region `(sx, sy)` and return the native y below which story text
-/// should begin, so the text flows UNDER the illustration instead of the
-/// illustration overpainting the chrome/banner at the window's raw position.
-/// Returns `sy` unchanged when there is no opaque illustration content.
-pub fn draw_story_gfx(canvas: &mut RgbaImage, story_gfx: &PositionedWindow, sx: u32, sy: u32) -> u32 {
-    let WinNode::Graphics(g) = &story_gfx.node else { return sy };
-    let src = &g.canvas;
-    // The illustration sits near the source canvas's top-left; find its opaque
-    // vertical extent so text can start just below it.
-    let mut bottom = 0u32;
-    let mut any = false;
-    for (_x, y, p) in src.enumerate_pixels() {
+/// The drop-cap gutter a story-window picture reserves: text in the first
+/// `band_rows` rows is inset by `gutter_cols` columns so it flows to the right of
+/// the picture (Zork Zero's illuminated initial), rather than starting below it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StoryGfx {
+    pub gutter_cols: u16,
+    pub band_rows: u16,
+}
+
+/// The drop-cap gutter a story-window picture reserves, from its opaque extent:
+/// `ceil(w/FONT)+1` cols wide over `ceil(h/FONT)` rows. Zero when there is no
+/// opaque content. Measures only — the caller decides whether the picture's
+/// paragraph is on-screen before blitting it (`blit_story_gfx`).
+pub fn measure_story_gfx(story_gfx: &PositionedWindow) -> StoryGfx {
+    let WinNode::Graphics(g) = &story_gfx.node else { return StoryGfx::default() };
+    let (mut right, mut bottom, mut any) = (0u32, 0u32, false);
+    for (x, y, p) in g.canvas.enumerate_pixels() {
         if p[3] >= 128 {
+            right = right.max(x);
             bottom = bottom.max(y);
             any = true;
         }
     }
     if !any {
-        return sy;
+        return StoryGfx::default();
     }
-    blit_scaled(canvas, src, sx, sy, src.width(), src.height());
-    sy + bottom + FONT // one blank row of gap under the picture
+    StoryGfx {
+        gutter_cols: ((right + 1).div_ceil(FONT) + 1) as u16,
+        band_rows: (bottom + 1).div_ceil(FONT) as u16,
+    }
+}
+
+/// Blit the story window's own picture at the top-left of the story region
+/// `(sx, sy)` — 1:1 in native pixels. Call only when its paragraph is on-screen
+/// (the drop-cap gutter is active); otherwise the picture would pin to the top
+/// over unrelated scrolled text.
+pub fn blit_story_gfx(canvas: &mut RgbaImage, story_gfx: &PositionedWindow, sx: u32, sy: u32) {
+    let WinNode::Graphics(g) = &story_gfx.node else { return };
+    blit_scaled(canvas, &g.canvas, sx, sy, g.canvas.width(), g.canvas.height());
 }
 
 #[cfg(test)]
@@ -415,6 +447,53 @@ mod tests {
 
     fn colors() -> ColorScheme {
         ColorScheme::default()
+    }
+
+    #[test]
+    fn story_text_wraps_right_of_dropcap() {
+        // First `band_rows` rows are inset by `gutter_cols`; later rows flush left.
+        let cell_has_ink = |c: &RgbaImage, col: u32, row: u32| -> bool {
+            (0..FONT).any(|dy| (0..FONT).any(|dx| c.get_pixel(col * FONT + dx, row * FONT + dy)[3] > 0))
+        };
+        let main = MainText {
+            lines: vec!["AAAA".into(), "BBBB".into(), "CCCC".into()],
+            input: String::new(), cursor_col: 0, awaiting: false,
+            gutter_cols: 3, band_rows: 2,
+        };
+        let mut canvas = RgbaImage::new(10 * FONT, 5 * FONT);
+        draw_story_text(&mut canvas, &main, 0, 0, 10, 5, Rgba([255, 255, 255, 255]));
+        // Row 0 (in band): ink starts at column 3, the first three cells are blank.
+        assert!(!cell_has_ink(&canvas, 0, 0), "row 0 col 0 blank (behind drop-cap)");
+        assert!(!cell_has_ink(&canvas, 2, 0), "row 0 col 2 blank (behind drop-cap)");
+        assert!(cell_has_ink(&canvas, 3, 0), "row 0 col 3 inked (text flows right of drop-cap)");
+        // Row 2 (past the band): ink flush left.
+        assert!(cell_has_ink(&canvas, 0, 2), "row 2 col 0 inked (flush left below drop-cap)");
+    }
+
+    #[test]
+    fn chrome_graphics_blits_native_not_scaled_to_window() {
+        // A v6 status window can be 320x5 yet the game draws a 45x40 picture into
+        // it (Zork Zero's compass). The window canvas is authored in native game
+        // pixels, so build_chrome_canvas must blit it 1:1 at the window origin —
+        // never squashed into the declared 320x5 box.
+        let mut src = image::RgbaImage::new(48, 43);
+        src.put_pixel(40, 38, Rgba([10, 200, 30, 255])); // opaque marker low in the canvas
+        let win = PositionedWindow {
+            x: 0, y: 0, w: 40, h: 1,
+            x_px: 4, y_px: 4,       // window origin
+            w_px: 320, h_px: 5,     // declared box far smaller than the 48x43 canvas
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(GraphicsWindow {
+                win: 1, canvas: Arc::new(src), version: 0, upscale: false,
+            }),
+        };
+        let canvas = build_chrome_canvas(&[&win], (100, 100), Rgba([0, 0, 0, 255]), &colors());
+        // 1:1 blit: marker lands at origin + its canvas coords = (4+40, 4+38).
+        assert_eq!(canvas.get_pixel(44, 42)[3], 255, "marker preserved at native (44,42)");
+        // The squash bug would have crushed it into y in [4,9); that band is empty.
+        for y in 4..9 {
+            assert_eq!(canvas.get_pixel(44, y)[3], 0, "no squashed copy in the 5px band (y={y})");
+        }
     }
 
     fn graphics_window(x_px: u16, y_px: u16, w: u16, h: u16, canvas: image::RgbaImage) -> PositionedWindow {

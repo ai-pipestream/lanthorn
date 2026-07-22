@@ -405,17 +405,21 @@ fn render_node(
                 // clear interior of the native canvas, then draw the whole thing scaled.
                 // Phase B will branch on `state.config.v6_render` here for the Hybrid terminal path.
                 if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
-                    // The story window's own picture (room illustration) is story
-                    // content: draw it at the top of the story region and flow text
-                    // beneath it, rather than letting it overpaint the banner.
-                    let text_top = match layout.story_gfx {
-                        Some(gfx) => v6::draw_story_gfx(&mut canvas, gfx, sx, sy).min(sy + sh.saturating_sub(8)),
-                        None => sy,
-                    };
+                    // The story window's own picture (e.g. Zork Zero's illuminated
+                    // drop-cap) is story content sitting at the top-left of its
+                    // paragraph. Measure the gutter it reserves, wrap text beside it,
+                    // and blit it ONLY when that paragraph is still on-screen (the
+                    // gutter survives — build_main_text zeroes it once scrolled off).
                     let cols = (sw / 8).max(1) as u16;
-                    let rows = ((sy + sh).saturating_sub(text_top) / 8).max(1) as u16;
-                    let main = build_main_text(state, cols, rows);
-                    v6::draw_story_text(&mut canvas, &main, sx, text_top, cols, rows, default_fg);
+                    let rows = (sh / 8).max(1) as u16;
+                    let gfx = layout.story_gfx.map(v6::measure_story_gfx).unwrap_or_default();
+                    let main = build_main_text(state, cols, rows, gfx.gutter_cols, gfx.band_rows.min(rows));
+                    if main.band_rows > 0 {
+                        if let Some(g) = layout.story_gfx {
+                            v6::blit_story_gfx(&mut canvas, g, sx, sy);
+                        }
+                    }
+                    v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
                 }
                 state.graphics_render.borrow_mut().draw_v6_canvas(picker, &canvas, area, buf);
                 return None; // v6 main-window scroll metrics are a follow-up (SQ-0450)
@@ -750,23 +754,61 @@ fn style_fg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> ima
 /// Build the main-window text block for the pixel composite: the newest visible
 /// wrapped transcript lines that fit the primary window's rows, plus the live
 /// input line and caret column.
-fn build_main_text(state: &AppState, cols: u16, rows: u16) -> crate::render::v6_layout::MainText {
+fn build_main_text(state: &AppState, cols: u16, rows: u16, gutter_cols: u16, band_rows: u16) -> crate::render::v6_layout::MainText {
     use crate::render::transcript::wrap_line;
-    // Wrap all transcript lines to the window width, keep the newest `rows-1`
-    // wrapped rows (leave one row for the input line).
+    // Wrap all transcript lines to the window width. With a drop-cap gutter the
+    // FIRST `band_rows` display rows wrap at `cols - gutter_cols` so leading text
+    // flows beside a top-left story picture; the rest wrap at full width. Keep the
+    // newest `rows-1` wrapped rows (leave one row for the input line).
     let mut wrapped: Vec<String> = Vec::new();
-    for line in &state.transcript {
-        wrapped.extend(wrap_line(line, cols));
+    if band_rows == 0 || gutter_cols == 0 {
+        for line in &state.transcript {
+            wrapped.extend(wrap_line(line, cols));
+        }
+    } else {
+        let narrow = cols.saturating_sub(gutter_cols).max(1);
+        wrapped = wrap_lines_banded(&state.transcript, cols, narrow, band_rows);
     }
     let budget = rows.saturating_sub(1) as usize;
     let start = wrapped.len().saturating_sub(budget);
     let lines = wrapped[start..].to_vec();
+    // The gutter applies only while the leading band is still on screen (i.e. the
+    // drop-cap paragraph hasn't scrolled off the top).
+    let (eff_gutter, eff_band) = if start == 0 { (gutter_cols, band_rows) } else { (0, 0) };
     let input = state.input.value.clone();
     let cursor_col = input.chars().count().min(cols.saturating_sub(1) as usize) as u16;
     // Show the input line + caret only when the game has host focus (awaiting a
     // typed command) — matches when the transcript path draws its live caret.
     let awaiting = matches!(state.focus, crate::state::Focus::Game);
-    crate::render::v6_layout::MainText { lines, input, cursor_col, awaiting }
+    crate::render::v6_layout::MainText { lines, input, cursor_col, awaiting, gutter_cols: eff_gutter, band_rows: eff_band }
+}
+
+/// Word-wrap `lines` where the first `band_rows` produced rows use `narrow`
+/// width and every row after uses `cols` — so text flows beside a drop-cap for
+/// the band, then reflows full-width beneath it. Width is chosen per emitted row
+/// from the running row count, so a paragraph that crosses the band boundary
+/// widens mid-paragraph.
+fn wrap_lines_banded(lines: &[String], cols: u16, narrow: u16, band_rows: u16) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for logical in lines {
+        if logical.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut cur = String::new();
+        for word in logical.split(' ') {
+            let width = if (out.len() as u16) < band_rows { narrow } else { cols } as usize;
+            if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > width {
+                out.push(std::mem::take(&mut cur));
+            }
+            if !cur.is_empty() {
+                cur.push(' ');
+            }
+            cur.push_str(word);
+        }
+        out.push(cur);
+    }
+    out
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -777,6 +819,25 @@ mod tests {
     use crate::engine::{GridWindow, Split};
     use crate::state::StyleRun;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn wrap_lines_banded_narrows_leading_band_then_widens() {
+        // One long paragraph; the first 4 rows wrap at the narrow width, later
+        // rows at full width (text reflows full-width below the drop-cap).
+        let para = "word ".repeat(60);
+        let lines = vec![para.trim_end().to_string()];
+        let rows = wrap_lines_banded(&lines, 40, 33, 4);
+        for (i, row) in rows.iter().enumerate() {
+            let w = row.chars().count();
+            if i < 4 {
+                assert!(w <= 33, "band row {i} width {w} must be <= narrow (33)");
+            } else {
+                assert!(w <= 40, "row {i} width {w} must be <= cols (40)");
+            }
+        }
+        // The band widened: at least one row past the band exceeds the narrow width.
+        assert!(rows.iter().skip(4).any(|r| r.chars().count() > 33), "rows past the band use full width");
+    }
 
     /// Build a `Theme` with the given selectors' bg overridden (like a
     /// `style.toml` decl), so tests exercising render code migrated to
