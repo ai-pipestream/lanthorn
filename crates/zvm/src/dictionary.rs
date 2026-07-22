@@ -91,6 +91,24 @@ impl Dictionary {
         result
     }
 
+    /// Like [`words`](Self::words) but pairs each non-empty decoded word with
+    /// its entry byte address — for the debug inspector's clickable dictionary
+    /// links (jump the Memory pane to the entry). Entry order, same filtering.
+    pub fn entries(&self, mem: &Memory) -> Vec<(u32, String)> {
+        use crate::text::decode::decode_string;
+        let elen = self.entry_length as u32;
+        let mut result = Vec::with_capacity(self.count as usize);
+        for i in 0..self.count as u32 {
+            let entry_addr = self.base + i * elen;
+            let (word, _) = decode_string(mem, entry_addr);
+            let word = word.trim().to_lowercase();
+            if !word.is_empty() {
+                result.push((entry_addr, word));
+            }
+        }
+        result
+    }
+
     /// Look up `word` in the dictionary. Returns the entry's byte address, or
     /// 0 if not found. Encodes `word` with `encode_word` (which truncates to
     /// the key length) and compares against stored keys.
@@ -384,6 +402,21 @@ mod tests {
         let toks = d.tokenise(&m, "open mailbox");
         assert_eq!(toks.len(), 2);
         assert!(toks[0].dict_addr != 0, "'open' should be in MiniZork's dictionary");
+    }
+
+    #[test]
+    fn entries_pairs_each_word_with_its_entry_address() {
+        let (m, _, _, _) = make_v3_mem_with_dict();
+        let d = load(&m);
+        let entries = d.entries(&m);
+        assert_eq!(entries.len(), 3);
+        // Entries are laid out contiguously from `base`, `entry_length` apart.
+        assert_eq!(entries[0].0, d.base);
+        assert_eq!(entries[1].0, d.base + d.entry_length as u32);
+        assert_eq!(entries[2].0, d.base + 2 * d.entry_length as u32);
+        // The words match `words()` (same decode + filtering), now addressed.
+        let words: Vec<String> = entries.iter().map(|(_, w)| w.clone()).collect();
+        assert_eq!(words, d.words(&m));
     }
 
     // Fixture-backed test for words() — skips if minizork.z3 is not present.

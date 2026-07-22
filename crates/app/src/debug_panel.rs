@@ -141,6 +141,18 @@ impl HoverTip {
     pub fn for_lines(lines: Vec<String>, col: u16, row: u16) -> Self {
         HoverTip { col, row, lines }
     }
+
+    /// Build the tooltip explaining a disassembly branch operand: `?` branches
+    /// when the test is TRUE, `?~` when it is FALSE (`inverted`). `col`/`row`
+    /// anchor it.
+    pub fn for_branch(inverted: bool, col: u16, row: u16) -> Self {
+        let lines = if inverted {
+            vec!["?~ branch if test is FALSE (inverted)".to_string()]
+        } else {
+            vec!["?  branch if test is TRUE".to_string()]
+        };
+        HoverTip { col, row, lines }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -723,6 +735,14 @@ pub fn clickable_spans(section: Section, line: &str) -> Vec<(core::ops::Range<us
                 .map(|(range, addr)| (range, ClickTarget::Code(addr)))
                 .collect()
         }
+        // Objects/Dict rows lead with their entry byte address as an `@0x……`
+        // token → a Memory-pane jump (the same Memory target a disasm `@0x`
+        // operand yields). Only the address token is clickable; the object
+        // name / dictionary word is inert.
+        Section::Objects | Section::Dict => find_hex_spans(line, "@0x", 6)
+            .into_iter()
+            .map(|(range, addr)| (range, ClickTarget::Memory(addr)))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -749,6 +769,30 @@ fn classify_disasm_tokens(line: &str) -> Vec<(core::ops::Range<usize>, ClickTarg
         }
     }
     out
+}
+
+/// If `off` lands on a branch operand token (a `?…`/`?~…` branch target — the
+/// disassembler's [`fmt_branch`] sigil), return `(token_start, inverted)` where
+/// `inverted` is true for the `?~` (branch-on-false) form. Tokenises exactly
+/// like [`classify_disasm_tokens`] so the hover offset lines up with what the
+/// span classifier sees.
+fn branch_operand_at(line: &str, off: usize) -> Option<(usize, bool)> {
+    let bytes = line.as_bytes();
+    let is_sep = |b: u8| b == b',' || b.is_ascii_whitespace();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && is_sep(bytes[i]) { i += 1; }
+        if i >= bytes.len() { break; }
+        let start = i;
+        while i < bytes.len() && !is_sep(bytes[i]) { i += 1; }
+        if (start..i).contains(&off) {
+            let token = &line[start..i];
+            // A branch operand is the only `?`-prefixed token the disassembler
+            // emits (`?0x……`/`?rtrue` etc., inverted as `?~…`).
+            return token.strip_prefix('?').map(|rest| (start, rest.starts_with('~')));
+        }
+    }
+    None
 }
 
 /// Classify one whole token to a `ClickTarget`, returning the sub-range within
@@ -897,6 +941,33 @@ pub fn clickable_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -
                     StackRow::Detail { .. } => None,
                 }
             }
+            // Objects tree rows carry their entry-address `@0x……` link; a click
+            // on it jumps the Memory pane (a click elsewhere on the row falls
+            // through to `objects_click_at`'s expand/collapse). The frame text
+            // draws past a 2-col "▶ " marker, like the Call Stack.
+            (1, Section::Objects) => {
+                let r = (row - content.y) as usize;
+                let rows = objects_rows(&panel.snapshot.objects, &panel.expanded_objects,
+                                        &panel.snapshot.object_details, panel.scroll[1], content.height as usize);
+                match rows.get(r)? {
+                    ObjRow::Tree { line_idx, .. } => {
+                        let line = panel.snapshot.objects.get(*line_idx)?;
+                        let off = (col.checked_sub(content.x + 2))? as usize; // +2 for the "▶ " marker
+                        clickable_spans(section, line).into_iter()
+                            .find(|(range, _)| range.contains(&off)).map(|(_, t)| t)
+                    }
+                    ObjRow::Detail { .. } => None,
+                }
+            }
+            // Dictionary rows draw with no marker (the plain list path), so the
+            // entry-address `@0x……` link sits at the content's left edge.
+            (1, Section::Dict) => {
+                let r = (row - content.y) as usize;
+                let line = panel.snapshot.dict.get(panel.scroll[1] + r)?;
+                let off = (col.checked_sub(content.x))? as usize;
+                clickable_spans(section, line).into_iter()
+                    .find(|(range, _)| range.contains(&off)).map(|(_, t)| t)
+            }
             _ => None,
         };
     }
@@ -993,6 +1064,42 @@ pub fn hover_help_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) 
             return None;
         }
         return Some((addr, content.x + 1 + 8, row));
+    }
+    None
+}
+
+/// If `(col, row)` lands on a branch operand (`?0x……` / `?~0x……`) of a
+/// Disassembly instruction, return `(inverted, tooltip_col, row)` for the
+/// branch-sense tooltip: `inverted` is true for the `?~` (branch-on-false)
+/// form. Mirrors [`hover_help_at`]'s geometry; `None` off a branch operand or
+/// outside the Disassembly window.
+pub fn hover_branch_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -> Option<(bool, u16, u16)> {
+    let windows = window_rects(region);
+    for (w, window_rect) in windows.iter().enumerate() {
+        if col < window_rect.x || col >= window_rect.right()
+            || row < window_rect.y || row >= window_rect.bottom() {
+            continue;
+        }
+        let content = Rect::new(
+            window_rect.x + 1, window_rect.y + 1,
+            window_rect.width.saturating_sub(2), window_rect.height.saturating_sub(2),
+        );
+        if col < content.x || col >= content.right() || row < content.y || row >= content.bottom() {
+            return None;
+        }
+        if w != 0 || panel.active_section(0) != Section::Disasm {
+            return None;
+        }
+        let r = (row - content.y) as usize;
+        let rows = disasm_rows(&panel.snapshot.disasm, panel.pc, content.height as usize);
+        let row_entry = rows.get(r)?;
+        if row_entry.divider {
+            return None;
+        }
+        let line = panel.snapshot.disasm.get(row_entry.line_idx)?;
+        let off = (col.checked_sub(content.x + 1))? as usize;
+        let (start, inverted) = branch_operand_at(line, off)?;
+        return Some((inverted, content.x + 1 + start as u16, row));
     }
     None
 }
@@ -1484,6 +1591,97 @@ mod tests {
     #[test]
     fn clickable_spans_empty_for_other_sections() {
         assert!(clickable_spans(Section::Globals, "g00=0012").is_empty());
+    }
+
+    #[test]
+    fn clickable_spans_finds_the_object_entry_address_link() {
+        // An Objects tree row leads with its entry byte address as an `@0x……`
+        // Memory-jump token; the `[N] name` text is inert.
+        let line = "@0x000110 [1] lamp";
+        let spans = clickable_spans(Section::Objects, line);
+        assert_eq!(spans.len(), 1, "only the entry address is clickable: {spans:?}");
+        assert_eq!(spans[0].1, ClickTarget::Memory(0x110));
+        assert_eq!(&line[spans[0].0.clone()], "@0x000110");
+    }
+
+    #[test]
+    fn clickable_spans_finds_the_dict_entry_address_link() {
+        let line = "@0x000abc open";
+        let spans = clickable_spans(Section::Dict, line);
+        assert_eq!(spans.len(), 1, "only the entry address is clickable: {spans:?}");
+        assert_eq!(spans[0].1, ClickTarget::Memory(0xabc));
+        assert_eq!(&line[spans[0].0.clone()], "@0x000abc");
+    }
+
+    #[test]
+    fn clickable_at_resolves_an_object_entry_address_click_to_a_memory_jump() {
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        let (ow, ot) = locate_section(Section::Objects);
+        p.focus = ow;
+        p.tab[ow] = ot;
+        p.snapshot.objects = vec!["@0x000110 [1] lamp".to_string()];
+        let wrect = window_rects(region)[ow];
+        let content = Rect::new(wrect.x + 1, wrect.y + 1, wrect.width.saturating_sub(2), wrect.height.saturating_sub(2));
+        // Line text draws past the 2-col "▶ " marker; the `@0x` sits at its start.
+        let col = content.x + 2 + p.snapshot.objects[0].find("@0x").unwrap() as u16;
+        assert_eq!(clickable_at(region, &p, col, content.y), Some(ClickTarget::Memory(0x110)));
+    }
+
+    #[test]
+    fn clickable_at_resolves_a_dict_entry_address_click_to_a_memory_jump() {
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        let (dw, dt) = locate_section(Section::Dict);
+        p.focus = dw;
+        p.tab[dw] = dt;
+        p.snapshot.dict = vec!["@0x000abc open".to_string()];
+        let wrect = window_rects(region)[dw];
+        let content = Rect::new(wrect.x + 1, wrect.y + 1, wrect.width.saturating_sub(2), wrect.height.saturating_sub(2));
+        // The plain list path draws at the content's left edge (no marker).
+        let col = content.x + p.snapshot.dict[0].find("@0x").unwrap() as u16;
+        assert_eq!(clickable_at(region, &p, col, content.y), Some(ClickTarget::Memory(0xabc)));
+    }
+
+    // ── Branch-operand hover tip ────────────────────────────────────────────
+
+    #[test]
+    fn hover_tip_for_branch_distinguishes_true_and_inverted() {
+        assert_eq!(HoverTip::for_branch(false, 3, 4).lines, vec!["?  branch if test is TRUE".to_string()]);
+        assert_eq!(HoverTip::for_branch(true, 3, 4).lines, vec!["?~ branch if test is FALSE (inverted)".to_string()]);
+        assert_eq!((HoverTip::for_branch(false, 3, 4).col, HoverTip::for_branch(false, 3, 4).row), (3, 4));
+    }
+
+    #[test]
+    fn hover_branch_at_reports_the_branch_sense_under_the_cursor() {
+        // `?0x…` = branch-on-true; `?~0x…` = branch-on-false (inverted).
+        let line = "001000  je local0, #01 ?0x001234";
+        let (p, region, content, row_y) = hover_panel(line);
+        let col = content.x + 1 + line.find("?0x").unwrap() as u16;
+        assert_eq!(hover_branch_at(region, &p, col, row_y), Some((false, col, row_y)));
+
+        let inv = "001000  je local0, #01 ?~0x001234";
+        let (p, region, content, row_y) = hover_panel(inv);
+        let col = content.x + 1 + inv.find("?~0x").unwrap() as u16;
+        assert_eq!(hover_branch_at(region, &p, col, row_y), Some((true, col, row_y)));
+
+        // `?rtrue`/`?~rfalse` short forms are branch operands too.
+        let short = "001000  jz local0 ?rtrue";
+        let (p, region, content, row_y) = hover_panel(short);
+        let col = content.x + 1 + short.find("?rtrue").unwrap() as u16;
+        assert_eq!(hover_branch_at(region, &p, col, row_y), Some((false, col, row_y)));
+    }
+
+    #[test]
+    fn hover_branch_at_is_none_off_a_branch_operand() {
+        let line = "001000  je local0, #01 ?0x001234";
+        let (p, region, content, row_y) = hover_panel(line);
+        // Over the mnemonic — not a branch operand.
+        let m_col = content.x + 1 + 8;
+        assert_eq!(hover_branch_at(region, &p, m_col, row_y), None);
+        // Over the store/operand region — not a branch operand.
+        let op_col = content.x + 1 + line.find("local0").unwrap() as u16;
+        assert_eq!(hover_branch_at(region, &p, op_col, row_y), None);
     }
 
     #[test]

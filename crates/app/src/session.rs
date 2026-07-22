@@ -1308,13 +1308,20 @@ impl Debugger for GameSession {
             |o| zvm::objects::get_child(mem, o),
             |o| zvm::objects::get_sibling(mem, o),
             |o| zvm::objects::short_name(mem, o),
+            |o| zvm::objects::object_entry_addr(mem, o),
         );
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
     }
 
     fn dictionary_lines(&self) -> Vec<String> {
-        let out = zvm::dictionary::load(&self.machine.mem).words(&self.machine.mem);
+        // Each row leads with its entry byte address as a clickable `@0x……`
+        // Memory-jump token (debug inspector), then the decoded word.
+        let out = zvm::dictionary::load(&self.machine.mem)
+            .entries(&self.machine.mem)
+            .into_iter()
+            .map(|(addr, word)| format!("@0x{:06x} {}", addr, word))
+            .collect();
         self.machine.mem.take_mem_fault(); // never leak a debug-read fault into the VM
         out
     }
@@ -1421,6 +1428,7 @@ fn build_object_tree(
     child: impl Fn(u16) -> u16,
     sibling: impl Fn(u16) -> u16,
     name: impl Fn(u16) -> String,
+    addr: impl Fn(u16) -> u32,
 ) -> Vec<String> {
     let mut out = Vec::with_capacity(numbers.len());
     let mut seen = std::collections::HashSet::new();
@@ -1433,7 +1441,7 @@ fn build_object_tree(
         if obj == 0 || depth > 64 || !seen.insert(obj) {
             continue;
         }
-        out.push(format!("{}[{}] {}", "  ".repeat(depth), obj, name(obj)));
+        out.push(format!("@0x{:06x} {}[{}] {}", addr(obj), "  ".repeat(depth), obj, name(obj)));
         // Collect this object's child chain, then push reversed so the first
         // child is visited first. `!kids.contains` + `!seen` guard cycles.
         let mut kids = Vec::new();
@@ -1456,7 +1464,7 @@ fn build_object_tree(
                 depth += 1;
                 p = parent(p);
             }
-            out.push(format!("{}[{}] {}", "  ".repeat(depth), o, name(o)));
+            out.push(format!("@0x{:06x} {}[{}] {}", addr(o), "  ".repeat(depth), o, name(o)));
         }
     }
     out
@@ -1483,14 +1491,15 @@ mod tests {
         let lines = build_object_tree(
             &[1, 2, 3, 4, 5, 6],
             |o| parent[&o], |o| child[&o], |o| sibling[&o], |o| format!("o{o}"),
+            |o| 0x100 + o as u32,
         );
         assert_eq!(lines, vec![
-            "[1] o1".to_string(),
-            "  [3] o3".to_string(),
-            "    [4] o4".to_string(),
-            "  [5] o5".to_string(),
-            "[2] o2".to_string(),
-            "  [6] o6".to_string(),
+            "@0x000101 [1] o1".to_string(),
+            "@0x000103   [3] o3".to_string(),
+            "@0x000104     [4] o4".to_string(),
+            "@0x000105   [5] o5".to_string(),
+            "@0x000102 [2] o2".to_string(),
+            "@0x000106   [6] o6".to_string(),
         ]);
     }
 
@@ -1505,11 +1514,12 @@ mod tests {
         let lines = build_object_tree(
             &[1, 2, 3],
             |o| parent[&o], |o| child[&o], |o| sibling[&o], |o| format!("o{o}"),
+            |o| 0x200 + o as u32,
         );
         assert_eq!(lines, vec![
-            "[1] o1".to_string(),
-            "[2] o2".to_string(),
-            "  [3] o3".to_string(), // appended, depth 1 (parent 2)
+            "@0x000201 [1] o1".to_string(),
+            "@0x000202 [2] o2".to_string(),
+            "@0x000203   [3] o3".to_string(), // appended, depth 1 (parent 2)
         ]);
     }
 

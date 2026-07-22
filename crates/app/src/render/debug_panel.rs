@@ -152,6 +152,9 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
     for (row, line) in lines.iter().skip(scroll).take(content.height as usize).enumerate() {
         let y = content.y + row as u16;
         draw_str_clipped(buf, content.x, y, line, body, content);
+        // Underline any clickable spans (Dict entry-address links); a no-op for
+        // the sections `clickable_spans` classifies as inert.
+        underline_clickables(buf, content.x, y, line, body, section, content);
     }
     frame.tab_rects
 }
@@ -181,6 +184,9 @@ fn draw_objects(buf: &mut Buffer, content: Rect, window: usize, panel: &DebugPan
                 };
                 let text = format!("{marker}{line}");
                 draw_str_clipped(buf, content.x, y, &text, body, content);
+                // The entry-address `@0x……` link underlines like a disasm ref
+                // (the 2-col marker offsets the line text).
+                underline_clickables(buf, content.x + 2, y, line, body, Section::Objects, content);
             }
             debug_panel::ObjRow::Detail { obj, di } => {
                 let Some(det) = panel.snapshot.object_details.get(obj) else { continue };
