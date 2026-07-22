@@ -14,7 +14,7 @@ use crate::dictionary;
 use crate::io::{BufferOutput, Output};
 use crate::memory::Memory;
 use crate::objects;
-use crate::screen::{advertise_colour, advertise_sound, init_header_caps, ScreenState, StreamState};
+use crate::screen::{advertise_colour, advertise_sound, init_header_caps, ScreenState, StreamState, V6Windows};
 use crate::text::cp437::cp437_to_char;
 use crate::text::decode::{decode_string, zscii_to_char};
 
@@ -230,10 +230,12 @@ impl Machine {
         // to push main's frame; when main returns, step() sees an empty v6 frame
         // stack and quits.
         let mut state = State::new(mem.initial_pc());
+        let mut screen = ScreenState::default();
         if mem.version() == 6 {
             state = State::new(0);
             let main_packed = mem.read_word(0x06);
             call_routine(&mut state, &mut mem, main_packed, &[], None);
+            screen.v6 = Some(V6Windows::default());
         }
 
         Machine {
@@ -241,7 +243,7 @@ impl Machine {
             mem,
             out,
             pending_input: None,
-            screen: ScreenState::default(),
+            screen,
             streams: StreamState::new(),
             original_dynamic,
             undo_stack: Vec::new(),

@@ -136,6 +136,47 @@ impl UpperWindow {
     }
 }
 
+/// One v6 window; its fields ARE the ZMSD window-property array (index =
+/// property number, ZMSD §8.4.3).
+#[derive(Debug, Clone, Default)]
+pub struct ZWindow {
+    pub y_coord: u16,          // prop 0  (pixels)
+    pub x_coord: u16,          // prop 1
+    pub y_size: u16,           // prop 2  (height, pixels)
+    pub x_size: u16,           // prop 3  (width, pixels)
+    pub y_cursor: u16,         // prop 4
+    pub x_cursor: u16,         // prop 5
+    pub left_margin: u16,      // prop 6
+    pub right_margin: u16,     // prop 7
+    pub interrupt_routine: u16,// prop 8
+    pub interrupt_countdown: u16, // prop 9
+    pub text_style: u16,       // prop 10
+    pub colour_data: u16,      // prop 11 (high byte bg, low byte fg — ZMSD)
+    pub font_number: u16,      // prop 12
+    pub font_size: u16,        // prop 13 (high byte height, low byte width)
+    pub attributes: u16,       // prop 14 (bit0 wrap, bit1 scroll, bit2 copy-to-transcript, bit3 buffered)
+    pub line_count: u16,       // prop 15
+    /// Character grid for this window (grid windows 1–7). Window 0 scrolls (buffered),
+    /// its text goes to the transcript stream, not a grid.
+    pub grid: UpperWindow,
+    pub fg: ZColour,
+    pub bg: ZColour,
+}
+
+impl ZWindow {
+    /// Read property `n` (0–15). Out-of-range → 0.
+    pub fn get_prop(&self, n: u16) -> u16 { /* Task 6 */ 0 }
+    /// Write property `n` (0–15). Out-of-range → ignored.
+    pub fn put_prop(&mut self, n: u16, v: u16) { /* Task 6 */ }
+}
+
+/// The v6 8-window table (ZMSD §8.4): windows 0–7, addressed in pixels.
+#[derive(Debug, Clone, Default)]
+pub struct V6Windows {
+    pub windows: [ZWindow; 8],
+    pub current: u8, // 0–7
+}
+
 /// Structured screen model the host (TUI etc.) reads to render.
 ///
 /// For v3 the host derives the status line by calling `Machine::status_line()`.
@@ -170,6 +211,9 @@ pub struct ScreenState {
     /// display state — NOT serialised into Quetzal saves.
     pub current_fg: ZColour,
     pub current_bg: ZColour,
+    /// The v6 8-window table; `Some` only when the loaded story is v6
+    /// (v1–5/v7/v8 keep the classic 2-window model above and this stays `None`).
+    pub v6: Option<V6Windows>,
 }
 
 impl Default for ScreenState {
@@ -189,6 +233,7 @@ impl Default for ScreenState {
             current_font: 1,
             current_fg: ZColour::Default,
             current_bg: ZColour::Default,
+            v6: None,
         }
     }
 }
@@ -785,6 +830,20 @@ mod tests {
         let mut mem = Memory::new(sample_story(5)).unwrap();
         init_header_caps(&mut mem, false, false, Some(6));
         assert_eq!(mem.read_byte(0x1E), 6, "override forces IBM PC (6)");
+    }
+
+    #[test]
+    fn v6_screen_state_has_window_table() {
+        let m = crate::cpu::exec::Machine::new(Memory::new(sample_story(6)).unwrap());
+        let v6 = m.screen.v6.as_ref().expect("v6 story has a window table");
+        assert_eq!(v6.windows.len(), 8);
+        assert_eq!(v6.current, 0);
+    }
+
+    #[test]
+    fn non_v6_has_no_window_table() {
+        let m = crate::cpu::exec::Machine::new(Memory::new(sample_story(5)).unwrap());
+        assert!(m.screen.v6.is_none(), "v5 keeps the classic 2-window model");
     }
 
     // ── (d) ScreenState defaults ──────────────────────────────────────────────
