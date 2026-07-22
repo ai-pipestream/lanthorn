@@ -54,6 +54,23 @@ pub struct SoundEvent {
     pub routine: u16,
 }
 
+/// A v6 `draw_picture`/`erase_picture` event (ZMSD §15), recorded for the host
+/// to act on in Plan 1b. `number` is the picture number; `window` is the v6
+/// window the call targeted (`ScreenState.v6.current` at the time); `x`/`y`
+/// are pixel coordinates (of the top-left corner) within that window. Both
+/// opcodes share the same `(picture-number, y, x)` operands, so `erase`
+/// distinguishes them — `erase_picture` needs the real picture number too
+/// (to know the region's dimensions), which rules out a `number: 0`
+/// "erase all" sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PictureEvent {
+    pub number: u16,
+    pub window: u8,
+    pub x: u16,
+    pub y: u16,
+    pub erase: bool,
+}
+
 /// Result of executing one instruction.
 #[derive(Debug, PartialEq)]
 pub enum StepResult {
@@ -156,6 +173,11 @@ pub struct Machine {
     /// width_px, height_px)`. Populated by the host (Task 9) before the boot run
     /// from the self-blorb's `Pict` resources; empty for non-v6 stories.
     pub picture_dims: Vec<(u16, u16, u16)>,
+    /// Draw/erase events recorded by `draw_picture`/`erase_picture` since the
+    /// host last drained them. The engine never rasterizes; the host (Plan
+    /// 1b) decodes the Blorb `Pict` resource and renders it — mirrors
+    /// `pending_sounds`.
+    pub pending_pictures: Vec<PictureEvent>,
     /// Host-facing diagnostic lines (e.g. unimplemented opcodes, sampled sounds)
     /// recorded since the host last drained them. The engine never prints.
     pub diagnostics: Vec<String>,
@@ -259,6 +281,7 @@ impl Machine {
             warned_ext_opcodes: std::collections::HashSet::new(),
             pending_sounds: Vec::new(),
             picture_dims: Vec::new(),
+            pending_pictures: Vec::new(),
             diagnostics: Vec::new(),
             aux_data: std::collections::BTreeMap::new(),
             aux_dirty: false,
@@ -1806,10 +1829,47 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            0x05 | 0x07 | 0x08 | 0x14 | 0x16 | 0x17 | 0x1A | 0x1C => {
-                // draw_picture, erase_picture, set_margins, scroll_window,
-                // read_mouse, mouse_window, print_form,
-                // picture_table — no-op in Phase 0.
+            // EXT:0x05 draw_picture(picture-number, y, x) — ZMSD §15 (confirmed
+            // via inform-fiction.org/zmachine/standards/z1point1/sect15.html):
+            // y/x are the pixel coords (top-left corner) within the current
+            // window; 0 for either means "use the window's cursor position"
+            // (left to the host to resolve — the engine forwards the raw
+            // operand). Recorded as a PictureEvent for the host to rasterize
+            // (Plan 1b), mirroring pending_sounds.
+            0x05 => {
+                let number = ops.first().copied().unwrap_or(0);
+                let y = ops.get(1).copied().unwrap_or(0);
+                let x = ops.get(2).copied().unwrap_or(0);
+                let window = self.screen.v6.as_ref().map(|v| v.current).unwrap_or(0);
+                if self.trace_screen {
+                    self.screen_trace.push(format!(
+                        "@draw_picture(number={number}, window={window}, y={y}, x={x})"
+                    ));
+                }
+                self.pending_pictures.push(PictureEvent { number, window, x, y, erase: false });
+                StepResult::Continue
+            }
+            // EXT:0x07 erase_picture(picture-number, y, x) — ZMSD §15: same
+            // operands as draw_picture; paints the picture's region to the
+            // window's background colour instead of displaying it. Recorded
+            // with `erase: true` (see PictureEvent doc for why not a
+            // `number: 0` sentinel).
+            0x07 => {
+                let number = ops.first().copied().unwrap_or(0);
+                let y = ops.get(1).copied().unwrap_or(0);
+                let x = ops.get(2).copied().unwrap_or(0);
+                let window = self.screen.v6.as_ref().map(|v| v.current).unwrap_or(0);
+                if self.trace_screen {
+                    self.screen_trace.push(format!(
+                        "@erase_picture(number={number}, window={window}, y={y}, x={x})"
+                    ));
+                }
+                self.pending_pictures.push(PictureEvent { number, window, x, y, erase: true });
+                StepResult::Continue
+            }
+            0x08 | 0x14 | 0x16 | 0x17 | 0x1A | 0x1C => {
+                // set_margins, scroll_window, read_mouse, mouse_window,
+                // print_form, picture_table — no-op in Phase 0.
                 StepResult::Continue
             }
             // Unknown / unimplemented EXT opcode: record once, then ignore
@@ -6594,11 +6654,35 @@ pub(crate) mod tests {
     #[test]
     fn v6_graphics_opcodes_are_noops_and_stay_continue() {
         let mut m = v6_exec_machine();
-        for op in [0x05u8, 0x07, 0x08, 0x14, 0x16, 0x17, 0x1A, 0x1C] {
+        for op in [0x08u8, 0x14, 0x16, 0x17, 0x1A, 0x1C] {
             assert!(matches!(m.exec_ext(op, &[0, 0, 0], None, None), StepResult::Continue),
                 "op {op:#04x} no-op → Continue");
         }
         assert!(m.state.eval_stack.is_empty(), "no-op graphics ops must not touch the stack");
+    }
+
+    // ── Task 8: draw_picture / erase_picture → pending_pictures events ──────
+
+    #[test]
+    fn v6_draw_picture_records_event_for_current_window() {
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[7], None, None); // set_window(7)
+        let r = m.exec_ext(0x05, &[5, 1, 1], None, None); // draw_picture(5, y=1, x=1)
+        assert!(matches!(r, StepResult::Continue));
+        assert_eq!(m.pending_pictures, vec![
+            PictureEvent { number: 5, window: 7, x: 1, y: 1, erase: false }
+        ]);
+    }
+
+    #[test]
+    fn v6_erase_picture_records_event_with_erase_flag() {
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[3], None, None); // set_window(3)
+        let r = m.exec_ext(0x07, &[5, 2, 4], None, None); // erase_picture(5, y=2, x=4)
+        assert!(matches!(r, StepResult::Continue));
+        assert_eq!(m.pending_pictures, vec![
+            PictureEvent { number: 5, window: 3, x: 4, y: 2, erase: true }
+        ]);
     }
 
     // ── Task 7: picture_data from the injected dimension table ──────────────
