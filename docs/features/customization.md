@@ -67,9 +67,11 @@ still reach in and override any single selector by name.
   inspector: `pc` and the four confidence tiers that shade how sure the
   disassembler is that a byte is really code. The defaults read as a risk
   gradient — **blue** verified, **yellow** medium, **red** high-risk:
-  - **`disasm_executed`** (blue) — the line's address actually ran this turn.
-    Ground truth; it wins over any static guess. Its `|` gutter mark is the
-    execution-coverage bar (formerly hardcoded).
+  - **`disasm_executed`** (blue) — the line's address has *ever* run. Ground
+    truth; it wins over any static guess and stays blue for the rest of the
+    session (cumulative coverage). Its `|` gutter mark is separate: it flags only
+    the lines that ran during the *last* command, so the bar tracks the most
+    recent turn while the colour accumulates.
   - **`disasm_rd`** (yellow) — hard-discovered code: reached by recursive descent
     from a constant call target or the initial PC, or later confirmed by execution.
   - **`disasm_soft`** (red) — a linear-scan guess that hasn't been verified yet —

@@ -49,6 +49,13 @@ built-in debugger that follows the running story instruction by instruction.
   on the PC, and `r` cycles the disassembly render mode (Full → Basic → Raw). In
   the Memory tab, `:` or `/` opens an address box that also accepts a variable
   token (`sp`, `g44`, `local10`).
+- **Execution coverage.** Once a line's address runs it turns blue and stays
+  blue for the rest of the session, so you build up a map of what has actually
+  executed; a `|` gutter bar additionally marks just the lines the *last* command
+  ran. Launching with `--debug` opens the inspector automatically and traces from
+  the very first boot instruction — capturing the game's start-up code a mid-game
+  `/debug` would miss — and saves the accumulated coverage per story, so a later
+  `--debug` (or a plain `/debug`) starts with the earlier runs' lines already blue.
 - Select-and-copy works inside the inspector exactly as it does in the
   transcript. `Esc` closes it and restores the map.
 
