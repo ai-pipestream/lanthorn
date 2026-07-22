@@ -277,8 +277,8 @@ pub fn opcode_help(name: &str) -> Option<OpcodeHelp> {
         "set_true_colour" => ("Set text colours using 15-bit RGB values.",
             &["foreground colour (−1 = default, −2 = keep current)", "background colour"],
             None, None, None),
-        // v6 graphics/window opcodes — babelmap rejects v6 stories, so these
-        // never appear in practice; kept for completeness.
+        // v6 graphics/window opcodes. v6 stories boot text-only (SQ-0186 Phase 0);
+        // these opcodes are stubbed pending the v6 window/graphics phases.
         "draw_picture" => ("Draw a picture on the screen. (v6)",
             &["picture number", "row", "column"], None, None, None),
         "picture_data" => ("Query a picture's size and availability. (v6)",
