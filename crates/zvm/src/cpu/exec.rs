@@ -1266,8 +1266,23 @@ impl Machine {
                     }
                     if (row as i16) >= 0 {
                         if let Some(w) = v6.windows.get_mut(win as usize) {
-                            w.y_cursor = row;
-                            w.x_cursor = col;
+                            // ZMSD §8.8.3: v6 set_cursor coordinates are in PIXELS,
+                            // relative to the window's top-left. Games right-align
+                            // status labels with a NEGATIVE x — an offset back from
+                            // the window's right edge. Convert to the 1-based char
+                            // cell the grid model stores (font cell = 8px), so the
+                            // banner's left/right columns land at the right cells
+                            // instead of collapsing to column 0.
+                            let fw = crate::screen::V6_FONT_WIDTH;
+                            let fh = crate::screen::V6_FONT_HEIGHT;
+                            let col_i = col as i16;
+                            let abs_x = if col_i < 0 {
+                                (w.x_size as i16 + col_i).max(0) as u16
+                            } else {
+                                col
+                            };
+                            w.y_cursor = row / fh + 1;
+                            w.x_cursor = abs_x / fw + 1;
                         }
                     }
                 } else {
@@ -6969,9 +6984,11 @@ pub(crate) mod tests {
 
     #[test]
     fn v6_set_cursor_targets_current_window_by_default() {
+        // v6 set_cursor coords are PIXELS; the grid stores 1-based char cells
+        // (font 8px): 16px → row 3, 24px → col 4.
         let mut m = v6_exec_machine();
         m.exec_var(0x0B, &[2], None, None); // set_window(2)
-        m.exec_var(0x0F, &[3, 4], None, None); // set_cursor(row=3, col=4)
+        m.exec_var(0x0F, &[16, 24], None, None); // set_cursor(y=16px, x=24px)
         let v6 = m.screen.v6.as_ref().unwrap();
         assert_eq!(v6.windows[2].y_cursor, 3);
         assert_eq!(v6.windows[2].x_cursor, 4);
@@ -6981,11 +6998,29 @@ pub(crate) mod tests {
     fn v6_set_cursor_third_operand_selects_window() {
         let mut m = v6_exec_machine();
         m.exec_var(0x0B, &[2], None, None); // current = 2
-        m.exec_var(0x0F, &[5, 6, 4], None, None); // set_cursor(5, 6, window=4)
+        m.exec_var(0x0F, &[32, 40, 4], None, None); // set_cursor(y=32px, x=40px, window=4)
         let v6 = m.screen.v6.as_ref().unwrap();
-        assert_eq!(v6.windows[4].y_cursor, 5);
-        assert_eq!(v6.windows[4].x_cursor, 6);
+        assert_eq!(v6.windows[4].y_cursor, 5, "32px / 8 + 1 = row 5");
+        assert_eq!(v6.windows[4].x_cursor, 6, "40px / 8 + 1 = col 6");
         assert_eq!(v6.windows[2].y_cursor, 1, "current window (2) untouched");
+    }
+
+    #[test]
+    fn v6_set_cursor_converts_pixels_and_right_aligns_negative_x() {
+        // Positive x → char col from the left edge; a negative x is an offset
+        // back from the window's RIGHT edge (how v6 games right-align status).
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[1], None, None); // current = 1
+        m.screen.v6.as_mut().unwrap().windows[1].x_size = 320; // window width, px
+        m.exec_var(0x0F, &[8, 16], None, None); // set_cursor(y=8px, x=16px)
+        {
+            let w = &m.screen.v6.as_ref().unwrap().windows[1];
+            assert_eq!(w.y_cursor, 2, "8px / 8 + 1 = row 2");
+            assert_eq!(w.x_cursor, 3, "16px / 8 + 1 = col 3");
+        }
+        m.exec_var(0x0F, &[0, (-16i16) as u16], None, None); // x = 320 - 16 = 304px
+        let w = &m.screen.v6.as_ref().unwrap().windows[1];
+        assert_eq!(w.x_cursor, 39, "(320 - 16) / 8 + 1 = col 39, from the right edge");
     }
 
     #[test]
@@ -6994,7 +7029,7 @@ pub(crate) mod tests {
         // are not literal positions and must not be written through.
         let mut m = v6_exec_machine();
         m.exec_var(0x0B, &[1], None, None); // current = 1
-        m.exec_var(0x0F, &[3, 4], None, None); // baseline position
+        m.exec_var(0x0F, &[16, 24], None, None); // baseline (16px,24px) → cell (3,4)
         m.exec_var(0x0F, &[(-1i16) as u16, 0], None, None); // cursor off
         let v6 = m.screen.v6.as_ref().unwrap();
         assert_eq!(v6.windows[1].y_cursor, 3, "negative row leaves prior position");
