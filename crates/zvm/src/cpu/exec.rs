@@ -1652,7 +1652,21 @@ impl Machine {
             // ── v6 window/graphics opcodes — Phase 0 stubs (SQ-0186). ──────────
             // Signatures are honoured (store 0 / documented branch sense) so the
             // VM stays in sync; real behaviour lands in later phases.
-            0x13 => { self.do_store(store, 0); StepResult::Continue } // get_wind_prop → 0
+            // EXT:0x13 get_wind_prop(window, property-number) -> (result) — ZMSD
+            // 1.1 §15/§8.8.3.2: reads the addressed window's property array.
+            0x13 => {
+                let win = ops.first().copied().unwrap_or(0);
+                let prop = ops.get(1).copied().unwrap_or(0);
+                let val = self.screen.v6.as_ref()
+                    .and_then(|v6| v6.windows.get(win as usize))
+                    .map(|w| w.get_prop(prop))
+                    .unwrap_or(0);
+                if self.trace_screen {
+                    self.screen_trace.push(format!("@get_wind_prop(win={win}, prop={prop}) -> {val}"));
+                }
+                self.do_store(store, val);
+                StepResult::Continue
+            }
             0x1D => { self.do_store(store, 0); StepResult::Continue } // buffer_screen → prev mode 0
             0x06 => { self.do_branch(branch, false); StepResult::Continue } // picture_data → no data
             0x1B => { self.do_branch(branch, false); StepResult::Continue } // make_menu → failed
@@ -1737,9 +1751,25 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            0x05 | 0x07 | 0x08 | 0x14 | 0x16 | 0x17 | 0x19 | 0x1A | 0x1C => {
+            // EXT:0x19 put_wind_prop(window, property-number, value) — ZMSD 1.1
+            // §15/§8.8.3.2: writes the addressed window's property array.
+            0x19 => {
+                let win = ops.first().copied().unwrap_or(0);
+                let prop = ops.get(1).copied().unwrap_or(0);
+                let val = ops.get(2).copied().unwrap_or(0);
+                if self.trace_screen {
+                    self.screen_trace.push(format!("@put_wind_prop(win={win}, prop={prop}, val={val})"));
+                }
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    if let Some(w) = v6.windows.get_mut(win as usize) {
+                        w.put_prop(prop, val);
+                    }
+                }
+                StepResult::Continue
+            }
+            0x05 | 0x07 | 0x08 | 0x14 | 0x16 | 0x17 | 0x1A | 0x1C => {
                 // draw_picture, erase_picture, set_margins, scroll_window,
-                // read_mouse, mouse_window, put_wind_prop, print_form,
+                // read_mouse, mouse_window, print_form,
                 // picture_table — no-op in Phase 0.
                 StepResult::Continue
             }
@@ -6459,12 +6489,58 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn v6_get_wind_prop_stores_zero() {
+    fn v6_get_wind_prop_reads_default_zero() {
         let mut m = v6_exec_machine();
         // pre-set local 1 to a nonzero value
         crate::cpu::state::write_var(&mut m.state, &mut m.mem, 0x01, 0xBEEF);
         m.exec_ext(0x13, &[1, 2], Some(0x01), None); // get_wind_prop win=1 prop=2 -> L1
+        // window 1's y-size (prop 2) defaults to 0 until put_wind_prop/window_size sets it.
         assert_eq!(crate::cpu::state::read_var(&mut m.state, &m.mem, 0x01), 0);
+    }
+
+    // ── Task 6: get_wind_prop / put_wind_prop over the property array ───────
+
+    #[test]
+    fn v6_get_put_wind_prop_round_trip() {
+        let mut m = v6_exec_machine();
+        // put via opcode: window 1, prop 2 (y-size) = 40
+        m.exec_ext(0x19, &[1, 2, 40], None, None); // put_wind_prop(win, prop, val)
+        assert_eq!(m.screen.v6.as_ref().unwrap().windows[1].get_prop(2), 40);
+
+        // get via opcode: window 1, prop 2 -> store
+        crate::cpu::state::write_var(&mut m.state, &mut m.mem, 0x01, 0xBEEF);
+        m.exec_ext(0x13, &[1, 2], Some(0x01), None); // get_wind_prop(win, prop) -> L1
+        assert_eq!(crate::cpu::state::read_var(&mut m.state, &m.mem, 0x01), 40);
+    }
+
+    #[test]
+    fn v6_put_wind_prop_out_of_range_window_is_ignored() {
+        let mut m = v6_exec_machine();
+        // window 8 is out of range (table is 0-7) — must not panic, must be a no-op.
+        m.exec_ext(0x19, &[8, 2, 99], None, None);
+        for w in &m.screen.v6.as_ref().unwrap().windows {
+            assert_eq!(w.get_prop(2), 0, "no window was touched by an out-of-range put");
+        }
+    }
+
+    #[test]
+    fn v6_get_wind_prop_out_of_range_window_stores_zero() {
+        let mut m = v6_exec_machine();
+        crate::cpu::state::write_var(&mut m.state, &mut m.mem, 0x01, 0xBEEF);
+        m.exec_ext(0x13, &[8, 2], Some(0x01), None); // window 8 out of range
+        assert_eq!(crate::cpu::state::read_var(&mut m.state, &m.mem, 0x01), 0);
+    }
+
+    #[test]
+    fn v6_put_wind_prop_all_16_props_readable_back() {
+        let mut m = v6_exec_machine();
+        for n in 0..16u16 {
+            m.exec_ext(0x19, &[3, n, 100 + n], None, None);
+        }
+        let w = &m.screen.v6.as_ref().unwrap().windows[3];
+        for n in 0..16u16 {
+            assert_eq!(w.get_prop(n), 100 + n, "prop {n}");
+        }
     }
 
     #[test]
@@ -6479,7 +6555,7 @@ pub(crate) mod tests {
     #[test]
     fn v6_graphics_opcodes_are_noops_and_stay_continue() {
         let mut m = v6_exec_machine();
-        for op in [0x05u8, 0x07, 0x08, 0x14, 0x16, 0x17, 0x19, 0x1A, 0x1C] {
+        for op in [0x05u8, 0x07, 0x08, 0x14, 0x16, 0x17, 0x1A, 0x1C] {
             assert!(matches!(m.exec_ext(op, &[0, 0, 0], None, None), StepResult::Continue),
                 "op {op:#04x} no-op → Continue");
         }

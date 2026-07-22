@@ -137,7 +137,7 @@ impl UpperWindow {
 }
 
 /// One v6 window; its fields ARE the ZMSD window-property array (index =
-/// property number, ZMSD §8.4.3).
+/// property number, ZMSD 1.1 §8.8.3.2).
 #[derive(Debug, Clone, Default)]
 pub struct ZWindow {
     pub y_coord: u16,          // prop 0  (pixels)
@@ -164,10 +164,50 @@ pub struct ZWindow {
 }
 
 impl ZWindow {
-    /// Read property `n` (0–15). Out-of-range → 0.
-    pub fn get_prop(&self, n: u16) -> u16 { /* Task 6 */ 0 }
-    /// Write property `n` (0–15). Out-of-range → ignored.
-    pub fn put_prop(&mut self, n: u16, v: u16) { /* Task 6 */ }
+    /// Read property `n` (0–15, ZMSD 1.1 §8.8.3.2). Out-of-range → 0.
+    pub fn get_prop(&self, n: u16) -> u16 {
+        match n {
+            0 => self.y_coord,
+            1 => self.x_coord,
+            2 => self.y_size,
+            3 => self.x_size,
+            4 => self.y_cursor,
+            5 => self.x_cursor,
+            6 => self.left_margin,
+            7 => self.right_margin,
+            8 => self.interrupt_routine,
+            9 => self.interrupt_countdown,
+            10 => self.text_style,
+            11 => self.colour_data,
+            12 => self.font_number,
+            13 => self.font_size,
+            14 => self.attributes,
+            15 => self.line_count,
+            _ => 0,
+        }
+    }
+    /// Write property `n` (0–15, ZMSD 1.1 §8.8.3.2). Out-of-range → ignored.
+    pub fn put_prop(&mut self, n: u16, v: u16) {
+        match n {
+            0 => self.y_coord = v,
+            1 => self.x_coord = v,
+            2 => self.y_size = v,
+            3 => self.x_size = v,
+            4 => self.y_cursor = v,
+            5 => self.x_cursor = v,
+            6 => self.left_margin = v,
+            7 => self.right_margin = v,
+            8 => self.interrupt_routine = v,
+            9 => self.interrupt_countdown = v,
+            10 => self.text_style = v,
+            11 => self.colour_data = v,
+            12 => self.font_number = v,
+            13 => self.font_size = v,
+            14 => self.attributes = v,
+            15 => self.line_count = v,
+            _ => {}
+        }
+    }
 }
 
 /// The v6 8-window table (ZMSD §8.4): windows 0–7, addressed in pixels.
@@ -844,6 +884,46 @@ mod tests {
     fn non_v6_has_no_window_table() {
         let m = crate::cpu::exec::Machine::new(Memory::new(sample_story(5)).unwrap());
         assert!(m.screen.v6.is_none(), "v5 keeps the classic 2-window model");
+    }
+
+    // ── Task 6: get_prop / put_prop over the ZMSD property array ────────────
+
+    #[test]
+    fn zwindow_prop_round_trip_all_16() {
+        let mut w = ZWindow::default();
+        for n in 0..16u16 {
+            w.put_prop(n, 1000 + n);
+        }
+        for n in 0..16u16 {
+            assert_eq!(w.get_prop(n), 1000 + n, "prop {n} round-trips");
+        }
+    }
+
+    #[test]
+    fn zwindow_prop_out_of_range_get_is_zero_and_put_is_ignored() {
+        // prop 0, untouched by an out-of-range write below
+        let mut w = ZWindow { y_coord: 42, ..Default::default() };
+        assert_eq!(w.get_prop(16), 0, "prop 16+ not modeled here — reads 0");
+        assert_eq!(w.get_prop(255), 0);
+        w.put_prop(16, 999); // ignored — must not alias into any real field
+        w.put_prop(255, 999);
+        assert_eq!(w.get_prop(0), 42, "out-of-range put left prop 0 untouched");
+    }
+
+    #[test]
+    fn zwindow_prop_indices_match_zmsd_1_1_8_8_3_2() {
+        // Direct field <-> index mapping, verified against ZMSD 1.1 §8.8.3.2.
+        let w = ZWindow {
+            y_coord: 1, x_coord: 2, y_size: 3, x_size: 4,
+            y_cursor: 5, x_cursor: 6, left_margin: 7, right_margin: 8,
+            interrupt_routine: 9, interrupt_countdown: 10, text_style: 11, colour_data: 12,
+            font_number: 13, font_size: 14, attributes: 15, line_count: 16,
+            ..Default::default()
+        };
+        let expected = [1u16, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        for (n, exp) in expected.into_iter().enumerate() {
+            assert_eq!(w.get_prop(n as u16), exp, "prop {n}");
+        }
     }
 
     // ── (d) ScreenState defaults ──────────────────────────────────────────────
