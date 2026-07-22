@@ -420,7 +420,7 @@ impl Machine {
             OperandCount::One => self.exec_1op(instr.opcode, &ops, instr.store, instr.branch),
             OperandCount::Zero => self.exec_0op(instr.opcode, instr.store, instr.branch, instr.text),
             OperandCount::Var => self.exec_var(instr.opcode, &ops, instr.store, instr.branch),
-            OperandCount::Ext => self.exec_ext(instr.opcode, &ops, instr.store),
+            OperandCount::Ext => self.exec_ext(instr.opcode, &ops, instr.store, instr.branch),
         }
     }
 
@@ -1378,7 +1378,7 @@ impl Machine {
     // EXT opcodes (v5+)
     // -----------------------------------------------------------------------
 
-    fn exec_ext(&mut self, opcode: u8, ops: &[u16], store: Option<u8>) -> StepResult {
+    fn exec_ext(&mut self, opcode: u8, ops: &[u16], store: Option<u8>, branch: Option<Branch>) -> StepResult {
         match opcode {
             // EXT:0x00 save — 0 operands: full game-state save (suspend).
             // ≥3 operands: v5 auxiliary "save table bytes name [prompt]".
@@ -1489,8 +1489,6 @@ impl Machine {
                 self.do_store(store, result);
                 StepResult::Continue
             }
-            // EXT:0x05 draw_picture (v6) — graphics unsupported; accept and ignore.
-            0x05 => StepResult::Continue,
             // EXT:0x0B print_unicode — output an arbitrary Unicode codepoint.
             0x0B => {
                 let cp = ops.first().copied().unwrap_or(0) as u32;
@@ -1536,6 +1534,32 @@ impl Machine {
                 if let Some(c) = decode_true_colour(bg_op) {
                     self.screen.current_bg = c;
                 }
+                StepResult::Continue
+            }
+            // ── v6 window/graphics opcodes — Phase 0 stubs (SQ-0186). ──────────
+            // Signatures are honoured (store 0 / documented branch sense) so the
+            // VM stays in sync; real behaviour lands in later phases.
+            0x13 => { self.do_store(store, 0); StepResult::Continue } // get_wind_prop → 0
+            0x1D => { self.do_store(store, 0); StepResult::Continue } // buffer_screen → prev mode 0
+            0x06 => { self.do_branch(branch, false); StepResult::Continue } // picture_data → no data
+            0x1B => { self.do_branch(branch, false); StepResult::Continue } // make_menu → failed
+            0x18 => { // push_stack value [dest] — default (game) stack; branch on success
+                let val = ops.first().copied().unwrap_or(0);
+                write_var(&mut self.state, &mut self.mem, 0x00, val);
+                self.do_branch(branch, true); // never overflows here → success
+                StepResult::Continue
+            }
+            0x15 => { // pop_stack items [dest] — discard `items` from the default stack
+                let items = ops.first().copied().unwrap_or(0);
+                for _ in 0..items {
+                    let _ = read_var(&mut self.state, &self.mem, 0x00);
+                }
+                StepResult::Continue
+            }
+            0x05 | 0x07 | 0x08 | 0x10 | 0x11 | 0x12 | 0x14 | 0x16 | 0x17 | 0x19 | 0x1A | 0x1C => {
+                // draw_picture, erase_picture, set_margins, move_window, window_size,
+                // window_style, scroll_window, read_mouse, mouse_window, put_wind_prop,
+                // print_form, picture_table — no-op in Phase 0.
                 StepResult::Continue
             }
             // Unknown / unimplemented EXT opcode: record once, then ignore
@@ -5365,14 +5389,14 @@ pub(crate) mod tests {
         // 0xFE has no arm in exec_ext -> hits the unimplemented fallthrough.
         assert!(m.warned_ext_opcodes.is_empty());
         assert!(m.diagnostics.is_empty());
-        m.exec_ext(0xFE, &[], None);
+        m.exec_ext(0xFE, &[], None, None);
         assert!(m.warned_ext_opcodes.contains(&0xFE), "fallthrough records the opcode");
         assert_eq!(m.diagnostics.len(), 1, "records one diagnostic line");
         assert!(
             m.diagnostics[0].contains("EXT") && m.diagnostics[0].contains("0xFE"),
             "diagnostic names EXT + opcode: {:?}", m.diagnostics[0]
         );
-        m.exec_ext(0xFE, &[], None); // second call must not duplicate
+        m.exec_ext(0xFE, &[], None, None); // second call must not duplicate
         assert_eq!(m.warned_ext_opcodes.len(), 1, "warned at most once per opcode");
         assert_eq!(m.diagnostics.len(), 1, "warn-once: no duplicate diagnostic");
     }
@@ -5974,7 +5998,7 @@ pub(crate) mod tests {
     fn aux_save_table_stores_one_and_fills_table() {
         let mut m = aux_machine();
         // save table=0x310 bytes=4 name=0x280 -> store G0
-        let r = m.exec_ext(0x00, &[0x310, 4, 0x280], Some(0x10));
+        let r = m.exec_ext(0x00, &[0x310, 4, 0x280], Some(0x10), None);
         assert_eq!(r, StepResult::Continue, "aux save never suspends");
         assert_eq!(m.global(0), 1, "aux save stores 1 (success)");
         assert!(m.aux_dirty, "aux save marks the table dirty");
@@ -5984,11 +6008,11 @@ pub(crate) mod tests {
     #[test]
     fn aux_restore_table_round_trips_and_stores_count() {
         let mut m = aux_machine();
-        m.exec_ext(0x00, &[0x310, 4, 0x280], Some(0x10)); // save first
+        m.exec_ext(0x00, &[0x310, 4, 0x280], Some(0x10), None); // save first
         // clobber the region
         for i in 0..4 { m.mem.write_byte(0x310 + i, 0); }
         // restore table=0x310 bytes=4 name=0x280 -> store G0
-        let r = m.exec_ext(0x01, &[0x310, 4, 0x280], Some(0x10));
+        let r = m.exec_ext(0x01, &[0x310, 4, 0x280], Some(0x10), None);
         assert_eq!(r, StepResult::Continue);
         assert_eq!(m.global(0), 4, "restore stores the number of bytes read");
         assert_eq!(m.mem.read_byte(0x310), 0xDE);
@@ -5998,7 +6022,7 @@ pub(crate) mod tests {
     #[test]
     fn aux_restore_missing_name_stores_zero() {
         let mut m = aux_machine();
-        let r = m.exec_ext(0x01, &[0x310, 4, 0x280], Some(0x10));
+        let r = m.exec_ext(0x01, &[0x310, 4, 0x280], Some(0x10), None);
         assert_eq!(r, StepResult::Continue);
         assert_eq!(m.global(0), 0, "restoring an unsaved name stores 0");
     }
@@ -6008,7 +6032,7 @@ pub(crate) mod tests {
         let mut m = aux_machine();
         let huge = (m.mem.len() as u16).wrapping_sub(2);
         // table near EOF, bytes huge, name near EOF -- must clamp, not panic.
-        let r = m.exec_ext(0x00, &[huge, 0xFFFF, huge], Some(0x10));
+        let r = m.exec_ext(0x00, &[huge, 0xFFFF, huge], Some(0x10), None);
         assert_eq!(r, StepResult::Continue);
         assert_eq!(m.global(0), 1);
     }
@@ -6016,8 +6040,8 @@ pub(crate) mod tests {
     #[test]
     fn ext_save_restore_zero_operands_still_suspend() {
         let mut m = aux_machine();
-        assert_eq!(m.exec_ext(0x00, &[], Some(0x10)), StepResult::SaveRequest);
-        assert_eq!(m.exec_ext(0x01, &[], Some(0x10)), StepResult::RestoreRequest);
+        assert_eq!(m.exec_ext(0x00, &[], Some(0x10), None), StepResult::SaveRequest);
+        assert_eq!(m.exec_ext(0x01, &[], Some(0x10), None), StepResult::RestoreRequest);
     }
 
     // ── Font 3 character-graphics translation (EXT:0x04 set_font + print_text) ──
@@ -6070,15 +6094,15 @@ pub(crate) mod tests {
         let mem = Memory::new(sample_story(5)).unwrap();
         let mut m = Machine::new(mem);
         // Default font is 1; set_font(3) should return 1 (previous) and switch to 3.
-        m.exec_ext(0x04, &[3], Some(0x10));
+        m.exec_ext(0x04, &[3], Some(0x10), None);
         assert_eq!(m.global(0), 1, "set_font(3) returns previous font 1");
         assert_eq!(m.screen.current_font, 3, "current_font updated to 3");
         // Query with 0: returns current (3) without changing.
-        m.exec_ext(0x04, &[0], Some(0x10));
+        m.exec_ext(0x04, &[0], Some(0x10), None);
         assert_eq!(m.global(0), 3, "set_font(0) returns current font 3");
         assert_eq!(m.screen.current_font, 3, "current_font unchanged after query");
         // Unsupported font: returns 0 (unavailable).
-        m.exec_ext(0x04, &[2], Some(0x10));
+        m.exec_ext(0x04, &[2], Some(0x10), None);
         assert_eq!(m.global(0), 0, "set_font(2) returns 0 (unavailable)");
         assert_eq!(m.screen.current_font, 3, "current_font unchanged after failed set");
     }
@@ -6220,5 +6244,48 @@ pub(crate) mod tests {
         let r = m.step();
         assert_eq!(r, StepResult::Quit);
         assert!(m.take_fault_trace().is_none());
+    }
+
+    /// A v6 machine with one base frame (eval_base 0) for exec-body tests.
+    fn v6_exec_machine() -> Machine {
+        let mut m = Machine::new(Memory::new(
+            crate::header::tests_support::sample_story(6)).unwrap());
+        // sample_story(6) boots by "calling main" at a garbage addr → may push 0 or
+        // 1 frame; normalise to exactly one clean frame for deterministic stores.
+        m.state.frames.clear();
+        m.state.eval_stack.clear();
+        m.state.frames.push(crate::cpu::state::Frame {
+            return_pc: 0, locals: vec![0; 4], eval_base: 0,
+            store_var: None, arg_count: 0, func_addr: 0,
+        });
+        m
+    }
+
+    #[test]
+    fn v6_get_wind_prop_stores_zero() {
+        let mut m = v6_exec_machine();
+        // pre-set local 1 to a nonzero value
+        crate::cpu::state::write_var(&mut m.state, &mut m.mem, 0x01, 0xBEEF);
+        m.exec_ext(0x13, &[1, 2], Some(0x01), None); // get_wind_prop win=1 prop=2 -> L1
+        assert_eq!(crate::cpu::state::read_var(&mut m.state, &m.mem, 0x01), 0);
+    }
+
+    #[test]
+    fn v6_push_then_pop_default_stack() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x18, &[0x1234], None, None); // push_stack 0x1234 (branch omitted)
+        assert_eq!(m.state.eval_stack.last().copied(), Some(0x1234));
+        m.exec_ext(0x15, &[1], None, None);       // pop_stack 1
+        assert!(m.state.eval_stack.is_empty(), "pop discarded the pushed value");
+    }
+
+    #[test]
+    fn v6_graphics_opcodes_are_noops_and_stay_continue() {
+        let mut m = v6_exec_machine();
+        for op in [0x05u8, 0x07, 0x08, 0x10, 0x11, 0x12, 0x14, 0x16, 0x17, 0x19, 0x1A, 0x1C] {
+            assert!(matches!(m.exec_ext(op, &[0, 0, 0], None, None), StepResult::Continue),
+                "op {op:#04x} no-op → Continue");
+        }
+        assert!(m.state.eval_stack.is_empty(), "no-op graphics ops must not touch the stack");
     }
 }
