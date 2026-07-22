@@ -267,6 +267,10 @@ fn reserve_text_margin(area: Rect, state: &AppState, fill: ratatui::style::Style
     let want_y = ov.and_then(|o| o.margin_y).unwrap_or(state.config.text_margin_y);
     let mx = want_x.min(area.width.saturating_sub(1) / 2);
     let my = want_y.min(area.height.saturating_sub(1) / 2);
+    // Publish the applied horizontal margin so the transcript draws its scrollbar
+    // flush against the border (in the right margin band) rather than inset with
+    // the text (SQ-0345). Set even in the no-op case so a stale value never leaks.
+    state.text_margin_applied.set(mx);
     if mx == 0 && my == 0 {
         return area;
     }
@@ -702,6 +706,39 @@ mod tests {
         assert_eq!(inset.y, base.y + 2, "top margin reserved");
         assert_eq!(inset.width, base.width - 6, "both horizontal margins reserved");
         assert_eq!(inset.height, base.height - 4, "top+bottom margins reserved");
+    }
+
+    #[test]
+    fn scrollbar_sits_at_border_not_inside_text_margin() {
+        // With a horizontal text margin, only the text is inset — the scrollbar
+        // must stay flush against the pane border (rightmost column), never inside
+        // the margin band (SQ-0345).
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        let mx = 3;
+        state.config.text_margin_x = mx;
+        // Far more lines than the viewport → scrollbar must appear.
+        for k in 0..80 { state.push_transcript(&format!("line {k}")); }
+        let model = ScreenModel {
+            root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+            status: StatusModel::HostManaged,
+            bg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+            fg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+            content_size: (0, 0),
+        };
+        let area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        let column: String = (0..area.height)
+            .map(|y| buf.cell((area.width - 1, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(column.contains('█'), "scrollbar thumb should render in the border column, not inset by the margin: {column:?}");
+        // And the inset column (where the scrollbar used to sit) must be clear of it.
+        let inset_col: String = (0..area.height)
+            .map(|y| buf.cell((area.width - 1 - mx, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+            .collect();
+        assert!(!inset_col.contains('█'), "no scrollbar inside the margin band: {inset_col:?}");
     }
 
     #[test]

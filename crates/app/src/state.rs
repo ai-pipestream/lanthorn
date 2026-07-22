@@ -1422,6 +1422,11 @@ pub struct AppState {
     pub selection_edge: i32,
     /// This frame's transcript geometry, published by render for the mouse/copy paths. (SQ-0197)
     pub transcript_geom: std::cell::Cell<Option<crate::clipboard::TranscriptGeom>>,
+    /// Horizontal text margin actually inset on each side of the story text this
+    /// frame (SQ-0345), published by `reserve_text_margin` so `render_middle` can
+    /// draw the scrollbar flush against the pane border rather than inside the
+    /// margin band — only the text gets the margin.
+    pub text_margin_applied: std::cell::Cell<u16>,
     /// The selection's extracted copy text, published by render, read on mouse-release. (SQ-0197)
     pub selection_text: std::cell::RefCell<Option<String>>,
     /// Sub-character pan offset in terminal columns/rows, applied on top of `scroll`.
@@ -1745,6 +1750,7 @@ impl Default for AppState {
             selection: None,
             selection_edge: 0,
             transcript_geom: std::cell::Cell::new(None),
+            text_margin_applied: std::cell::Cell::new(0),
             selection_text: std::cell::RefCell::new(None),
             char_pan: (0, 0),
             symbols: crate::symbols::SymbolSet::default(),

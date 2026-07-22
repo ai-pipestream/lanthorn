@@ -1701,8 +1701,12 @@ fn render_middle(
         let start = total_rows
             .saturating_sub(effective_scroll as usize)
             .saturating_sub(transcript_rows);
+        // Push the scrollbar past the right text margin so it sits flush against
+        // the pane border — only the text is inset by the margin (SQ-0345). The
+        // margin band was already painted blank by `reserve_text_margin`.
+        let right_margin = state.text_margin_applied.get();
         let sb_area = Rect {
-            x: area.right() - 1,
+            x: area.right() - 1 + right_margin,
             y: transcript_top,
             width: 1,
             height: transcript_bottom - transcript_top,
