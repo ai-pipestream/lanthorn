@@ -2219,6 +2219,46 @@ impl Machine {
             return;
         }
         let font3 = self.screen.current_font == 3;
+        // v6: route text to the CURRENT window's grid (windows 1-7); window 0
+        // (the main/buffered window) falls through to the classic stream-1
+        // path below, same as v1-5's lower window.
+        if let Some(v6) = self.screen.v6.as_ref() {
+            let cur = v6.current;
+            if cur >= 1 {
+                let style = self.screen.text_style;
+                let idx = cur as usize;
+                // Read the header before taking &mut self.screen — mirrors the
+                // v1-5 upper-window grow bound below.
+                let screen_h = self.mem.read_byte(0x20) as u16;
+                if let Some(w) = self.screen.v6.as_mut().and_then(|v6| v6.windows.get_mut(idx)) {
+                    let cols = w.grid.cols.max(1);
+                    let (fg, bg) = (w.fg, w.bg);
+                    let bound = screen_h.max(w.grid.rows);
+                    for ch in s.chars() {
+                        if ch == '\n' {
+                            w.y_cursor += 1;
+                            w.x_cursor = 1;
+                            continue;
+                        }
+                        let out_ch = if font3 { font3_translate(ch) } else { ch };
+                        let (r, c) = (w.y_cursor, w.x_cursor);
+                        if r > w.grid.rows && r <= bound {
+                            w.grid.grow_rows(r);
+                        }
+                        w.grid.put(r, c, out_ch, style, fg, bg);
+                        if w.x_cursor >= cols {
+                            w.y_cursor += 1;
+                            w.x_cursor = 1;
+                        } else {
+                            w.x_cursor += 1;
+                        }
+                    }
+                }
+                return;
+            }
+            // cur == 0: fall through to the buffered stream path below
+            // (window 0 = main window).
+        }
         // Window 1 (upper): write chars into the grid, do not stream.
         if self.screen.current_window == 1 {
             let style = self.screen.text_style;
@@ -6806,6 +6846,35 @@ pub(crate) mod tests {
         assert_eq!(m.screen.v6.as_ref().unwrap().windows[1].attributes, 0b0011);
         m.exec_ext(0x12, &[1, 0b1001, 3], None, None); // toggle bits
         assert_eq!(m.screen.v6.as_ref().unwrap().windows[1].attributes, 0b1010);
+    }
+
+    // ── Task 1 (Phase 1b): v6 print_text routes to the current window's grid ──
+
+    #[test]
+    fn v6_print_text_routes_to_current_window_grid() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x11, &[1, 40, 80], None, None); // window_size(1, y=40, x=80) -> 5x10 grid
+        m.exec_var(0x0B, &[1], None, None); // set_window(1)
+        m.exec_var(0x0F, &[1, 1], None, None); // set_cursor(row=1, col=1)
+        m.print_text("HI");
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[1].grid.cell(1, 1).ch, 'H', "first char lands at (1,1)");
+        assert_eq!(v6.windows[1].grid.cell(1, 2).ch, 'I', "second char lands at (1,2)");
+        assert_eq!(v6.windows[1].x_cursor, 3, "cursor advanced past the printed text");
+    }
+
+    #[test]
+    fn v6_print_text_window_zero_streams_to_output() {
+        let mut m = v6_exec_machine();
+        // v6.current defaults to 0 (main/buffered window) — text must reach the
+        // output sink, not a grid.
+        assert_eq!(m.screen.v6.as_ref().unwrap().current, 0);
+        m.print_text("hello");
+        assert_eq!(buf_output(&m), "hello");
+        // No grid window received the text.
+        for w in &m.screen.v6.as_ref().unwrap().windows {
+            assert_eq!(w.grid.cell(1, 1).ch, ' ', "window 0 text must not land in any grid");
+        }
     }
 
     // ── Task 3: v6 split/set/erase_window over the window table ─────────────
