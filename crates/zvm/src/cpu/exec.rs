@@ -219,13 +219,25 @@ impl Machine {
     }
 
     /// Create a new `Machine` with a custom output sink.
-    pub fn with_output(mem: Memory, out: Box<dyn Output>) -> Machine {
-        let initial_pc = mem.initial_pc();
+    pub fn with_output(mut mem: Memory, out: Box<dyn Output>) -> Machine {
         // Capture original dynamic memory for Quetzal CMem XOR diff.
         let dyn_len = mem.static_mem_base() as usize;
         let original_dynamic = mem.raw_bytes()[..dyn_len].to_vec();
+
+        // v3–8: header 0x06 is a direct instruction address; execution begins
+        // there. v6: header 0x06 is the *packed address of `main`*, which the
+        // interpreter calls with no args/result (ZMSD §5.5). Reuse call_routine
+        // to push main's frame; when main returns, step() sees an empty v6 frame
+        // stack and quits.
+        let mut state = State::new(mem.initial_pc());
+        if mem.version() == 6 {
+            state = State::new(0);
+            let main_packed = mem.read_word(0x06);
+            call_routine(&mut state, &mut mem, main_packed, &[], None);
+        }
+
         Machine {
-            state: State::new(initial_pc),
+            state,
             mem,
             out,
             pending_input: None,
@@ -346,6 +358,13 @@ impl Machine {
         if let Some(msg) = state_fault {
             self.fault_trace = Some(self.build_trace(msg, instr_start_pc, op_name));
             return StepResult::Fault;
+        }
+
+        // v6: `main` runs as the base call frame, so an empty frame stack means
+        // it returned — the story is over (ZMSD §5.5). v3–8 run frameless and
+        // end via @quit, so this only triggers for v6.
+        if version == 6 && self.state.frames.is_empty() {
+            return StepResult::Quit;
         }
         result
     }
@@ -2358,6 +2377,44 @@ pub(crate) mod tests {
     use super::*;
     use crate::header::tests_support::sample_story;
     use crate::screen::ZColour;
+
+    /// A v6 story whose `main` routine (0 locals) begins with `first_instr`.
+    /// main is at byte 0x0040; packed routine addr 0x0010 (4·0x10, offset 0).
+    fn v6_boot_story(first_instr: &[u8]) -> Vec<u8> {
+        let mut buf = crate::header::tests_support::sample_story(6);
+        buf[0x06] = 0x00; buf[0x07] = 0x10; // header 0x06 = packed addr of main
+        buf[0x40] = 0x00;                   // routine header: 0 locals
+        for (i, b) in first_instr.iter().enumerate() {
+            buf[0x41 + i] = *b;             // first instruction(s) at 0x41
+        }
+        buf
+    }
+
+    #[test]
+    fn v6_boot_pushes_main_frame() {
+        let m = Machine::new(Memory::new(v6_boot_story(&[0xB0])).unwrap());
+        assert_eq!(m.state.frames.len(), 1, "v6 boot calls main → one base frame");
+    }
+
+    #[test]
+    fn v6_returning_from_main_quits() {
+        // main body: rtrue (0OP:0x00 = 0xB0) → returns from main → frames empty → Quit
+        let mut m = Machine::new(Memory::new(v6_boot_story(&[0xB0])).unwrap());
+        assert!(matches!(m.step(), StepResult::Quit), "return from main ends the story");
+    }
+
+    #[test]
+    fn v6_main_quit_opcode_quits() {
+        // main body: @quit (0OP:0x0A = 0xBA) reached via the call → Quit
+        let mut m = Machine::new(Memory::new(v6_boot_story(&[0xBA])).unwrap());
+        assert!(matches!(m.step(), StepResult::Quit));
+    }
+
+    #[test]
+    fn non_v6_boot_is_frameless() {
+        let m = Machine::new(Memory::new(crate::header::tests_support::sample_story(5)).unwrap());
+        assert!(m.state.frames.is_empty(), "v5 starts frameless at initial_pc");
+    }
 
     #[test]
     fn pending_read_pc_is_the_read_instruction_not_the_advanced_pc() {
