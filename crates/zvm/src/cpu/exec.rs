@@ -617,17 +617,47 @@ impl Machine {
             }
             // 2OP:0x1B set_colour (v5+). Per-channel replace with sentinels
             // (ZMSD §8.3): 0 = keep, 1 = default, 2..=12 = palette + v6 greys.
+            //
+            // v6 (ZMSD §15) extends this to 3 operands (fg, bg, window; window
+            // defaults to current). It reuses the SAME opcode number (2OP:27 =
+            // 0x1B) rather than a VAR-numbered opcode — the ZMSD says the
+            // 3-operand form "uses the same opcode number but in variable-length
+            // encoding". Confirmed against decode.rs: a 2OP opcode encoded in
+            // variable form (top bits 11, bit5=0) is classified OperandCount::Two
+            // but reads its operands via a type byte just like VAR, so it can
+            // carry up to 4 operands (see `Form::Variable` in decode.rs and the
+            // `je`-with-4-operands handling at 0x01 above). So a 3-operand
+            // set_colour decodes as OperandCount::Two and lands HERE in
+            // exec_2op with `ops.len() == 3`, never in exec_var.
             0x1B => {
-                if self.trace_screen {
-                    let fg = decode_set_colour(a).map(zscreen_colour_name).unwrap_or_else(|| a.to_string());
-                    let bg = decode_set_colour(b).map(zscreen_colour_name).unwrap_or_else(|| b.to_string());
-                    self.screen_trace.push(format!("@set_colour(fg={fg}, bg={bg})"));
-                }
-                if let Some(c) = decode_set_colour(a) {
-                    self.screen.current_fg = c;
-                }
-                if let Some(c) = decode_set_colour(b) {
-                    self.screen.current_bg = c;
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    let win = ops.get(2).copied().map(|w| w as u8).unwrap_or(v6.current);
+                    if self.trace_screen {
+                        let fg = decode_set_colour(a).map(zscreen_colour_name).unwrap_or_else(|| a.to_string());
+                        let bg = decode_set_colour(b).map(zscreen_colour_name).unwrap_or_else(|| b.to_string());
+                        self.screen_trace.push(format!("@set_colour(fg={fg}, bg={bg}, window={win})"));
+                    }
+                    if let Some(w) = v6.windows.get_mut(win as usize) {
+                        if let Some(c) = decode_set_colour(a) {
+                            w.fg = c;
+                        }
+                        if let Some(c) = decode_set_colour(b) {
+                            w.bg = c;
+                        }
+                        w.colour_data = pack_colour_data(w.fg, w.bg);
+                    }
+                } else {
+                    if self.trace_screen {
+                        let fg = decode_set_colour(a).map(zscreen_colour_name).unwrap_or_else(|| a.to_string());
+                        let bg = decode_set_colour(b).map(zscreen_colour_name).unwrap_or_else(|| b.to_string());
+                        self.screen_trace.push(format!("@set_colour(fg={fg}, bg={bg})"));
+                    }
+                    if let Some(c) = decode_set_colour(a) {
+                        self.screen.current_fg = c;
+                    }
+                    if let Some(c) = decode_set_colour(b) {
+                        self.screen.current_bg = c;
+                    }
                 }
                 StepResult::Continue
             }
@@ -1185,13 +1215,31 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            // 0x0F set_cursor — update cursor position (row, col) in upper window
+            // 0x0F set_cursor — update cursor position (row, col) in upper window.
+            // v6 (ZMSD §15): addresses the CURRENT window's grid cursor; an
+            // optional 3rd operand names the window instead. A negative row is
+            // the v6 cursor-visibility convention (-1 off, -2 on), not a real
+            // position — no visibility state is modeled yet, so it's a no-op
+            // beyond not corrupting the stored cursor with the sentinel.
             0x0F => {
                 let row = ops.first().copied().unwrap_or(1);
                 let col = ops.get(1).copied().unwrap_or(1);
-                if self.trace_screen { self.screen_trace.push(format!("@set_cursor(row={row}, col={col})")); }
-                self.screen.cursor_row = row;
-                self.screen.cursor_col = col;
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    let win = ops.get(2).copied().map(|w| w as u8).unwrap_or(v6.current);
+                    if self.trace_screen {
+                        self.screen_trace.push(format!("@set_cursor(row={row}, col={col}, window={win})"));
+                    }
+                    if (row as i16) >= 0 {
+                        if let Some(w) = v6.windows.get_mut(win as usize) {
+                            w.y_cursor = row;
+                            w.x_cursor = col;
+                        }
+                    }
+                } else {
+                    if self.trace_screen { self.screen_trace.push(format!("@set_cursor(row={row}, col={col})")); }
+                    self.screen.cursor_row = row;
+                    self.screen.cursor_col = col;
+                }
                 StepResult::Continue
             }
             // 0x11 set_text_style — update text style bitmask (v4+).
@@ -1565,19 +1613,39 @@ impl Machine {
             }
             // EXT:0x0D set_true_colour (v5+). Same channel model as set_colour
             // but signed sentinels: -2 = keep, -1 = default, else 15-bit RGB.
+            // v6-only (ZMSD §15): an optional 3rd operand names the window
+            // (defaults to current).
             0x0D => {
                 let fg_op = ops.first().copied().unwrap_or(0);
                 let bg_op = ops.get(1).copied().unwrap_or(0);
-                if self.trace_screen {
-                    let fg = decode_true_colour(fg_op).map(zscreen_colour_name).unwrap_or_else(|| fg_op.to_string());
-                    let bg = decode_true_colour(bg_op).map(zscreen_colour_name).unwrap_or_else(|| bg_op.to_string());
-                    self.screen_trace.push(format!("@set_true_colour(fg={fg}, bg={bg})"));
-                }
-                if let Some(c) = decode_true_colour(fg_op) {
-                    self.screen.current_fg = c;
-                }
-                if let Some(c) = decode_true_colour(bg_op) {
-                    self.screen.current_bg = c;
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    let win = ops.get(2).copied().map(|w| w as u8).unwrap_or(v6.current);
+                    if self.trace_screen {
+                        let fg = decode_true_colour(fg_op).map(zscreen_colour_name).unwrap_or_else(|| fg_op.to_string());
+                        let bg = decode_true_colour(bg_op).map(zscreen_colour_name).unwrap_or_else(|| bg_op.to_string());
+                        self.screen_trace.push(format!("@set_true_colour(fg={fg}, bg={bg}, window={win})"));
+                    }
+                    if let Some(w) = v6.windows.get_mut(win as usize) {
+                        if let Some(c) = decode_true_colour(fg_op) {
+                            w.fg = c;
+                        }
+                        if let Some(c) = decode_true_colour(bg_op) {
+                            w.bg = c;
+                        }
+                        w.colour_data = pack_colour_data(w.fg, w.bg);
+                    }
+                } else {
+                    if self.trace_screen {
+                        let fg = decode_true_colour(fg_op).map(zscreen_colour_name).unwrap_or_else(|| fg_op.to_string());
+                        let bg = decode_true_colour(bg_op).map(zscreen_colour_name).unwrap_or_else(|| bg_op.to_string());
+                        self.screen_trace.push(format!("@set_true_colour(fg={fg}, bg={bg})"));
+                    }
+                    if let Some(c) = decode_true_colour(fg_op) {
+                        self.screen.current_fg = c;
+                    }
+                    if let Some(c) = decode_true_colour(bg_op) {
+                        self.screen.current_bg = c;
+                    }
                 }
                 StepResult::Continue
             }
@@ -2470,6 +2538,22 @@ fn decode_true_colour(v: u16) -> Option<crate::screen::ZColour> {
         n if n >= 0 => Some(ZColour::True((n as u16) & 0x7FFF)),
         _ => None,                         // -3 transparent / other → keep
     }
+}
+
+/// Pack a v6 window's fg/bg into the `colour_data` window property (prop 11,
+/// ZMSD §8.4.3): high byte = background colour number, low byte = foreground
+/// colour number. `True`/`True24` colours have no discrete colour number and
+/// pack as 0 in that channel.
+fn pack_colour_data(fg: crate::screen::ZColour, bg: crate::screen::ZColour) -> u16 {
+    fn byte(c: crate::screen::ZColour) -> u8 {
+        use crate::screen::ZColour::*;
+        match c {
+            Default => 1,
+            Standard(n) => n,
+            True(_) | True24(_) => 0,
+        }
+    }
+    ((byte(bg) as u16) << 8) | byte(fg) as u16
 }
 
 // ---------------------------------------------------------------------------
@@ -6474,5 +6558,131 @@ pub(crate) mod tests {
         assert!(m.screen.v6.is_none(), "v5 keeps the classic 2-window model");
         m.exec_var(0x0B, &[1], None, None); // set_window(1)
         assert_eq!(m.screen.current_window, 1, "v5 set_window still sets current_window");
+    }
+
+    // ── Task 5: v6 per-window set_cursor / set_colour / set_true_colour ─────
+
+    #[test]
+    fn v6_set_cursor_targets_current_window_by_default() {
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[2], None, None); // set_window(2)
+        m.exec_var(0x0F, &[3, 4], None, None); // set_cursor(row=3, col=4)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[2].y_cursor, 3);
+        assert_eq!(v6.windows[2].x_cursor, 4);
+    }
+
+    #[test]
+    fn v6_set_cursor_third_operand_selects_window() {
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[2], None, None); // current = 2
+        m.exec_var(0x0F, &[5, 6, 4], None, None); // set_cursor(5, 6, window=4)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[4].y_cursor, 5);
+        assert_eq!(v6.windows[4].x_cursor, 6);
+        assert_eq!(v6.windows[2].y_cursor, 1, "current window (2) untouched");
+    }
+
+    #[test]
+    fn v6_set_cursor_negative_row_does_not_corrupt_position() {
+        // ZMSD v6: row -1 turns the cursor off, -2 turns it back on — these
+        // are not literal positions and must not be written through.
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[1], None, None); // current = 1
+        m.exec_var(0x0F, &[3, 4], None, None); // baseline position
+        m.exec_var(0x0F, &[(-1i16) as u16, 0], None, None); // cursor off
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[1].y_cursor, 3, "negative row leaves prior position");
+        assert_eq!(v6.windows[1].x_cursor, 4, "negative row leaves prior position");
+    }
+
+    #[test]
+    fn v6_set_cursor_leaves_v5_classic_path_untouched() {
+        let mut m = build_test_machine(&[]);
+        assert!(m.screen.v6.is_none());
+        m.exec_var(0x0F, &[3, 4], None, None); // set_cursor(3, 4)
+        assert_eq!(m.screen.cursor_row, 3);
+        assert_eq!(m.screen.cursor_col, 4);
+    }
+
+    #[test]
+    fn v6_set_colour_no_window_operand_applies_to_current_window() {
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[5], None, None); // current = 5
+        m.exec_2op(0x1B, &[3, 6], None, None); // set_colour(fg=3, bg=6)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[5].fg, ZColour::Standard(3));
+        assert_eq!(v6.windows[5].bg, ZColour::Standard(6));
+    }
+
+    #[test]
+    fn v6_set_colour_window_operand_targets_named_window() {
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[5], None, None); // current = 5
+        m.exec_2op(0x1B, &[3, 6, 2], None, None); // set_colour(3, 6, window=2)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[2].fg, ZColour::Standard(3));
+        assert_eq!(v6.windows[2].bg, ZColour::Standard(6));
+        assert_eq!(v6.windows[2].colour_data, 0x0603, "bg (6) high byte, fg (3) low byte");
+        assert_eq!(v6.windows[5].fg, ZColour::Default, "current window (5) untouched");
+    }
+
+    #[test]
+    fn v6_set_colour_3operand_dispatches_via_2op_variable_form() {
+        // Verify the dispatch, not just assume it: ZMSD §15 says the v6
+        // 3-operand set_colour "uses the same opcode number (2OP:27 = 0x1B)
+        // but in variable-length encoding" — i.e. a 2OP opcode encoded with
+        // top bits 11 (variable form) and bit5=0 (2OP, not VAR). decode.rs's
+        // Form::Variable handling reads such an instruction's operands from a
+        // type byte exactly like VAR, so it can carry >2 operands, and
+        // classifies it OperandCount::Two — meaning it dispatches to
+        // exec_2op, never exec_var. This test encodes exactly that byte
+        // pattern and drives it through `Machine::step` end-to-end.
+        let mut buf = sample_story(6);
+        let mut pos = 0x10usize;
+        buf[pos] = 0xDB; pos += 1; // variable form (11), 2OP (bit5=0), opcode 0x1B
+        buf[pos] = 0b01_01_01_11; pos += 1; // types: small, small, small, omitted
+        buf[pos] = 5; pos += 1; // fg = std5
+        buf[pos] = 2; pos += 1; // bg = std2
+        buf[pos] = 3; pos += 1; // window = 3
+        buf[pos] = 0xBA; // quit
+
+        let mem = Memory::new(buf).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x10;
+        m.step();
+
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[3].fg, ZColour::Standard(5));
+        assert_eq!(v6.windows[3].bg, ZColour::Standard(2));
+    }
+
+    #[test]
+    fn v6_set_colour_leaves_v5_classic_path_untouched() {
+        let mut m = build_test_machine(&[]);
+        assert!(m.screen.v6.is_none());
+        m.exec_2op(0x1B, &[3, 6], None, None); // set_colour(3, 6)
+        assert_eq!(m.screen.current_fg, ZColour::Standard(3));
+        assert_eq!(m.screen.current_bg, ZColour::Standard(6));
+    }
+
+    #[test]
+    fn v6_set_true_colour_window_operand_targets_named_window() {
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[5], None, None); // current = 5
+        m.exec_ext(0x0D, &[0x7FFF, (-1i16) as u16, 2], None, None); // (fg, bg, window=2)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[2].fg, ZColour::True(0x7FFF));
+        assert_eq!(v6.windows[2].bg, ZColour::Default);
+        assert_eq!(v6.windows[5].fg, ZColour::Default, "current window (5) untouched");
+    }
+
+    #[test]
+    fn v6_set_true_colour_leaves_v5_classic_path_untouched() {
+        let mut m = build_test_machine(&[]);
+        assert!(m.screen.v6.is_none());
+        m.exec_ext(0x0D, &[0x7FFF, (-1i16) as u16], None, None);
+        assert_eq!(m.screen.current_fg, ZColour::True(0x7FFF));
+        assert_eq!(m.screen.current_bg, ZColour::Default);
     }
 }
