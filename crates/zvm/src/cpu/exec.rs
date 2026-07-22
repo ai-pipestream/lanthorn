@@ -1711,6 +1711,12 @@ impl Machine {
             // pixels and branch true; else leave the array untouched and don't
             // branch.
             0x06 => {
+                // v6-only: for a non-v6 story this stays the Phase 0 stub
+                // (no array write, no branch) so v1–5 behaviour is byte-identical.
+                if self.screen.v6.is_none() {
+                    self.do_branch(branch, false);
+                    return StepResult::Continue;
+                }
                 let number = ops.first().copied().unwrap_or(0);
                 let array = ops.get(1).copied().unwrap_or(0) as u32;
                 if number == 0 {
@@ -1774,13 +1780,21 @@ impl Machine {
                 if self.trace_screen {
                     self.screen_trace.push(format!("@window_size(win={win}, y={y}, x={x})"));
                 }
+                // Bound the backing grid so a hostile / buggy story requesting
+                // window_size(w, 0xFFFF, 0xFFFF) can't force a ~1 GB allocation
+                // (8191×8191 cells) — an OOM abort would be worse than the VM's
+                // graceful-fault guarantee. GRID_CELL_CAP (1024) far exceeds any
+                // real terminal (a 4K screen at 8 px/cell is ~480×270 cells) yet
+                // caps worst-case storage at ~1M cells. The pixel sizes (props
+                // 2/3) are still stored verbatim; only the cell grid is bounded.
+                const GRID_CELL_CAP: u16 = 1024;
                 if let Some(v6) = self.screen.v6.as_mut() {
                     if (win as usize) < v6.windows.len() {
                         let w = &mut v6.windows[win as usize];
                         w.y_size = y;
                         w.x_size = x;
-                        let rows = (y / V6_FONT_HEIGHT).max(1);
-                        let cols = (x / V6_FONT_WIDTH).max(1);
+                        let rows = (y / V6_FONT_HEIGHT).clamp(1, GRID_CELL_CAP);
+                        let cols = (x / V6_FONT_WIDTH).clamp(1, GRID_CELL_CAP);
                         w.grid.resize(rows, cols);
                     }
                 }
@@ -1837,16 +1851,18 @@ impl Machine {
             // operand). Recorded as a PictureEvent for the host to rasterize
             // (Plan 1b), mirroring pending_sounds.
             0x05 => {
-                let number = ops.first().copied().unwrap_or(0);
-                let y = ops.get(1).copied().unwrap_or(0);
-                let x = ops.get(2).copied().unwrap_or(0);
-                let window = self.screen.v6.as_ref().map(|v| v.current).unwrap_or(0);
-                if self.trace_screen {
-                    self.screen_trace.push(format!(
-                        "@draw_picture(number={number}, window={window}, y={y}, x={x})"
-                    ));
+                // v6-only: a non-v6 story keeps the Phase 0 no-op (no event).
+                if let Some(window) = self.screen.v6.as_ref().map(|v| v.current) {
+                    let number = ops.first().copied().unwrap_or(0);
+                    let y = ops.get(1).copied().unwrap_or(0);
+                    let x = ops.get(2).copied().unwrap_or(0);
+                    if self.trace_screen {
+                        self.screen_trace.push(format!(
+                            "@draw_picture(number={number}, window={window}, y={y}, x={x})"
+                        ));
+                    }
+                    self.pending_pictures.push(PictureEvent { number, window, x, y, erase: false });
                 }
-                self.pending_pictures.push(PictureEvent { number, window, x, y, erase: false });
                 StepResult::Continue
             }
             // EXT:0x07 erase_picture(picture-number, y, x) — ZMSD §15: same
@@ -1855,16 +1871,18 @@ impl Machine {
             // with `erase: true` (see PictureEvent doc for why not a
             // `number: 0` sentinel).
             0x07 => {
-                let number = ops.first().copied().unwrap_or(0);
-                let y = ops.get(1).copied().unwrap_or(0);
-                let x = ops.get(2).copied().unwrap_or(0);
-                let window = self.screen.v6.as_ref().map(|v| v.current).unwrap_or(0);
-                if self.trace_screen {
-                    self.screen_trace.push(format!(
-                        "@erase_picture(number={number}, window={window}, y={y}, x={x})"
-                    ));
+                // v6-only: a non-v6 story keeps the Phase 0 no-op (no event).
+                if let Some(window) = self.screen.v6.as_ref().map(|v| v.current) {
+                    let number = ops.first().copied().unwrap_or(0);
+                    let y = ops.get(1).copied().unwrap_or(0);
+                    let x = ops.get(2).copied().unwrap_or(0);
+                    if self.trace_screen {
+                        self.screen_trace.push(format!(
+                            "@erase_picture(number={number}, window={window}, y={y}, x={x})"
+                        ));
+                    }
+                    self.pending_pictures.push(PictureEvent { number, window, x, y, erase: true });
                 }
-                self.pending_pictures.push(PictureEvent { number, window, x, y, erase: true });
                 StepResult::Continue
             }
             0x08 | 0x14 | 0x16 | 0x17 | 0x1A | 0x1C => {
@@ -6748,6 +6766,33 @@ pub(crate) mod tests {
         assert_eq!(v6.windows[1].x_size, 80);
         assert_eq!(v6.windows[1].grid.rows, 5, "40 / V6_FONT_HEIGHT(8) = 5 rows");
         assert_eq!(v6.windows[1].grid.cols, 10, "80 / V6_FONT_WIDTH(8) = 10 cols");
+    }
+
+    #[test]
+    fn v6_window_size_clamps_hostile_dimensions() {
+        // A story requesting a max-pixel window must not force a ~1 GB grid
+        // allocation; the cell grid is capped (pixel sizes still stored verbatim).
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x11, &[1, 0xFFFF, 0xFFFF], None, None);
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[1].y_size, 0xFFFF, "pixel size stored verbatim");
+        assert_eq!(v6.windows[1].x_size, 0xFFFF);
+        assert!(v6.windows[1].grid.rows <= 1024, "grid rows capped: {}", v6.windows[1].grid.rows);
+        assert!(v6.windows[1].grid.cols <= 1024, "grid cols capped: {}", v6.windows[1].grid.cols);
+    }
+
+    #[test]
+    fn non_v6_picture_data_is_a_noop_stub() {
+        // v1–5 byte-identical: picture_data on a non-v6 machine must not write
+        // to the array or branch (the Phase 0 stub behaviour).
+        let mut m = Machine::new(Memory::new(crate::header::tests_support::sample_story(5)).unwrap());
+        assert!(m.screen.v6.is_none());
+        // array at 0x0300 (globals region, writable); pre-fill sentinels.
+        m.mem.write_word(0x0300, 0xDEAD);
+        m.mem.write_word(0x0302, 0xBEEF);
+        m.exec_ext(0x06, &[5, 0x0300], None, None); // picture_data(5, array)
+        assert_eq!(m.mem.read_word(0x0300), 0xDEAD, "array untouched for non-v6");
+        assert_eq!(m.mem.read_word(0x0302), 0xBEEF);
     }
 
     #[test]
