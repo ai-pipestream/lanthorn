@@ -31,9 +31,8 @@ fn be16(b: &[u8], at: usize) -> u16 {
 /// Parse the Z-machine header from the first 64 bytes of `bytes`.
 ///
 /// Returns `Err(ZError::NotAStoryFile)` if the slice is shorter than 64 bytes.
-/// Returns `Err(ZError::GraphicalV6)` for version 6.
 /// Returns `Err(ZError::UnsupportedVersion(v))` for versions 1, 2, or any
-/// version not in {3, 4, 5, 7, 8}.
+/// version not in {3, 4, 5, 6, 7, 8}.
 pub fn parse_header(bytes: &[u8]) -> Result<Header, ZError> {
     if bytes.len() < 64 {
         return Err(ZError::NotAStoryFile);
@@ -42,8 +41,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<Header, ZError> {
     let version = bytes[0x00];
 
     match version {
-        6 => return Err(ZError::GraphicalV6),
-        3 | 4 | 5 | 7 | 8 => {}
+        3 | 4 | 5 | 6 | 7 | 8 => {}
         v => return Err(ZError::UnsupportedVersion(v)),
     }
 
@@ -54,12 +52,12 @@ pub fn parse_header(bytes: &[u8]) -> Result<Header, ZError> {
     let file_length = match version {
         3 => raw_len * 2,
         4 | 5 => raw_len * 4,
-        7 | 8 => raw_len * 8,
+        6 | 7 | 8 => raw_len * 8,
         _ => raw_len,
     };
 
-    // routines_offset / strings_offset are meaningful only for v7.
-    let (routines_offset, strings_offset) = if version == 7 {
+    // routines_offset / strings_offset are meaningful only for v6 and v7.
+    let (routines_offset, strings_offset) = if version == 6 || version == 7 {
         (be16(bytes, 0x28), be16(bytes, 0x2A))
     } else {
         (0, 0)
@@ -150,9 +148,14 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v6_with_specific_error() {
-        let err = parse_header(&sample_header_bytes(6)).unwrap_err();
-        assert!(matches!(err, ZError::GraphicalV6));
+    fn parses_v6_header_with_offsets() {
+        let mut b = sample_header_bytes(6);
+        b[0x28] = 0x00; b[0x29] = 0x11; // routines_offset = 0x0011
+        b[0x2A] = 0x00; b[0x2B] = 0x22; // strings_offset  = 0x0022
+        let h = parse_header(&b).unwrap();
+        assert_eq!(h.version, 6);
+        assert_eq!(h.routines_offset, 0x0011);
+        assert_eq!(h.strings_offset, 0x0022);
     }
 
     #[test]
