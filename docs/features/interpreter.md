@@ -11,9 +11,10 @@ sound, colour, timed input, crash-proofing — light up no matter which you're
 playing.
 
 - **Z-machine** (`zvm`) — the Infocom canon and decades of Inform 6, in story-file
-  versions **v3/v4/v5/v7/v8**. It plays the full Infocom/Inform catalog; the only
-  opcodes it leaves out are v6's graphical and other optional operations. (v6 is
-  graphical and unsupported; v1/v2 are not supported.)
+  versions **v3/v4/v5/v6/v7/v8**. It plays the full Infocom/Inform catalog,
+  including graphical **v6** titles (*Zork Zero*, *Shogun*, *Journey*, …), whose
+  pictures and text composite into a single pixel image on image-capable
+  terminals. (v1/v2 are not supported.)
 - **Glulx** (`gvm`) — modern Inform 7, with a complete **Glk 0.7.6** layer verified
   against the standard Glulx/Glk test suites, an accelerated Inform veneer, and the
   full floating-point opcode set. It targets Glulx spec 3.1.3 and reports every
@@ -57,6 +58,13 @@ playing.
   key or `zvm-cli -I N` / `--interpreter N` — e.g. `-I 6` selects the IBM PC path,
   which draws Beyond Zork's map box and cursor arrows as CP437 character graphics
   instead of Font 3.
+- **v6 graphical stories** — babelmap boots and plays graphical v6 titles
+  (*Zork Zero*, *Shogun*, *Journey*, and other Infocom v6 releases). On an
+  image-capable terminal (Kitty / iTerm2 / Sixel) the whole story pane —
+  pictures at their exact pixel position plus all text, rasterized through an
+  embedded bitmap font — composites into one device-resolution image; without
+  an image protocol it falls back to a character-cell rendering. (v6's menu and
+  mouse opcodes are not yet wired up.)
 
 ## Glulx
 

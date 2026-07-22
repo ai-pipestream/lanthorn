@@ -34,9 +34,11 @@ right engine — you never choose. Under the hood are **three brand-new, clean-r
 virtual machines written from scratch in pure Rust** — no forks of Frotz or
 Glulxe, no C bindings, zero runtime dependencies:
 
-- **Z-machine** (v3/v4/v5/v7/v8) — the Infocom canon and decades of Inform 6
+- **Z-machine** (v3/v4/v5/v6/v7/v8) — the Infocom canon and decades of Inform 6
   games, including the v4+ cursor-addressed upper window, timed/interrupt input,
-  and per-title header tuning.
+  and per-title header tuning. Graphical **v6** titles (*Zork Zero*, *Shogun*,
+  *Journey*, …) boot and play too: pictures and text composite into one pixel
+  image on image-capable terminals, with a character-cell fallback elsewhere.
 - **Glulx** — modern Inform 7 games, with an accelerated Inform veneer, full
   float opcodes, and a complete **Glk 0.7.6** layer verified against the standard
   Glulx/Glk test suites.
@@ -62,7 +64,11 @@ playing *Zork*, *Counterfeit Monkey*, or *Adventureland*.
 
 Cover art, in-game Glulx graphics windows, and inline images in the text render
 with your terminal's best protocol — **Kitty, iTerm2, or Sixel** — and fall back
-to a universal Unicode half-block renderer everywhere else.
+to a universal Unicode half-block renderer everywhere else. Graphical
+**Z-machine v6** stories go a step further: the whole story pane — pictures and
+text together — composites into a single device-resolution pixel image, with a
+character-cell rendering as the fallback on terminals without an image
+protocol.
 
 ![In-game graphics rendered with the Kitty graphics protocol](docs/kitty-graphics.png)
 
@@ -157,10 +163,9 @@ For the full, exhaustive feature list, see **[`docs/features/`](docs/features/)*
 interactive-fiction standards babelmap implements (Z-Machine, Glulx, Glk, Quetzal, Blorb,
 Treaty of Babel), see **[`docs/standards.md`](docs/standards.md)**.
 
-**Supported story formats:** Z-machine v3, v4, v5, v7, and v8; Glulx; and Scott
-Adams (ScottFree `.dat`). (Z-machine v6 is graphical and unsupported;
-v1/v2 are not supported.) Story files load raw, from a `.zip`, or from a **Blorb**
-container (`.zblorb`/`.blorb`/`.gblorb`).
+**Supported story formats:** Z-machine v3, v4, v5, v6, v7, and v8; Glulx; and Scott
+Adams (ScottFree `.dat`). (v1/v2 are not supported.) Story files load raw, from a
+`.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
 
 ---
 

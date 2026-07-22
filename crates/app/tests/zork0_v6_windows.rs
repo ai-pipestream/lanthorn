@@ -204,3 +204,46 @@ fn v6_positioned_windows_carry_game_pixel_rects() {
         assert!(it.w_px > 0 && it.h_px > 0, "live window has nonzero pixel size");
     }
 }
+
+/// Phase 1c Task 5: end-to-end pixel-composite smoke. Boots Zork0 the same way
+/// the other tests in this file do, builds the initial v6 `ScreenModel`, then
+/// feeds its `Layered` items straight into `build_v6_canvas` (Task 3) with a
+/// synthetic `MainText` and a fixed 8x8 cell size, asserting the resulting
+/// device-resolution canvas is sized as expected and isn't left as a flat,
+/// unpainted background — i.e. the real Zork0 boot state (graphics + grid
+/// windows) actually composites into pixels.
+#[test]
+fn zork0_v6_pixel_canvas_is_nonempty() {
+    let story_path = stories_dir().join("zork0-r393-s890714.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims)
+            .expect("Zork0 (v6) should load and boot without a ZError");
+    assert!(!session.quit, "Zork0 quit during boot");
+    assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
+
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+
+    let initial_screen = session.screen();
+    let WinNode::Layered(items) = &initial_screen.root else {
+        panic!("v6 story's screen() root must be WinNode::Layered, got {:?}", initial_screen.root);
+    };
+    assert!(!items.is_empty(), "v6 model has positioned windows");
+
+    let bg = image::Rgba([0, 0, 0, 255]);
+    let main = app::render::v6_canvas::MainText::default();
+    let colors = app::colors::ColorScheme::default();
+    let canvas = app::render::v6_canvas::build_v6_canvas(
+        items, (80, 24), (8, 8), bg, image::Rgba([255; 4]), &main, &colors,
+    );
+    assert_eq!(canvas.dimensions(), (640, 192), "canvas sized 80x24 cells at 8x8 device px/cell");
+    assert!(canvas.pixels().any(|p| *p != bg), "v6 pixel canvas has painted content, not a flat background");
+}
