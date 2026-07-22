@@ -41,7 +41,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<Header, ZError> {
     let version = bytes[0x00];
 
     match version {
-        3 | 4 | 5 | 6 | 7 | 8 => {}
+        3..=8 => {}
         v => return Err(ZError::UnsupportedVersion(v)),
     }
 
@@ -52,7 +52,7 @@ pub fn parse_header(bytes: &[u8]) -> Result<Header, ZError> {
     let file_length = match version {
         3 => raw_len * 2,
         4 | 5 => raw_len * 4,
-        6 | 7 | 8 => raw_len * 8,
+        6..=8 => raw_len * 8,
         _ => raw_len,
     };
 
