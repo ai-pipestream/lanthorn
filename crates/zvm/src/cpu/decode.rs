@@ -190,7 +190,9 @@ fn var_op_sig(opcode: u8, version: u8) -> (bool, bool, bool) {
         0x06 => (false, false, false), // print_num
         0x07 => (true, false, false),  // random (stores)
         0x08 => (false, false, false), // push
-        0x09 => (false, false, false), // pull (v1–5; v6 stores — not supporting v6)
+        0x09 => (false, false, false), // pull — variable-operand form (all versions incl. v6:
+                                       // real Infocom v6 stories use this encoding, not the
+                                       // store-form the ZMSD lists for v6; do NOT change to store)
         0x0A => (false, false, false), // split_window
         0x0B => (false, false, false), // set_window
         0x0C => (true, false, false),  // call_vs2 (v4+, stores, uses 2 type bytes)
