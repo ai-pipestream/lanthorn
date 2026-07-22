@@ -124,6 +124,9 @@ pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffe
 #[derive(Default)]
 pub struct GraphicsRender {
     cache: std::collections::HashMap<u32, (u64, u16, u16, Protocol)>,
+    /// One-image cache for the v6 pixel composite (Phase 1c), keyed on a content
+    /// hash + area so unchanged frames reuse the uploaded protocol.
+    v6: Option<(u64, u16, u16, Protocol)>,
 }
 
 impl std::fmt::Debug for GraphicsRender {
@@ -170,6 +173,35 @@ impl GraphicsRender {
     /// Drop cache entries for windows no longer live (evicts on close; bounds growth).
     pub fn retain_live(&mut self, live: &std::collections::HashSet<u32>) {
         self.cache.retain(|win, _| live.contains(win));
+    }
+
+    /// Draw a pre-composited v6 canvas as ONE terminal image filling `area`
+    /// (canvas is sized to the pane's device pixels, so it fits at native size —
+    /// no letterbox). Cached on a content hash so identical frames don't
+    /// re-encode/upload.
+    pub fn draw_v6_canvas(&mut self, picker: &Picker, canvas: &image::RgbaImage, area: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        canvas.as_raw().hash(&mut h);
+        let hash = h.finish();
+        let fresh = matches!(&self.v6, Some((v, w, ht, _)) if *v == hash && *w == area.width && *ht == area.height);
+        if !fresh {
+            let img = image::DynamicImage::ImageRgba8(canvas.clone());
+            match picker.new_protocol(img, Size::new(area.width, area.height), Resize::Fit(None)) {
+                Ok(p) => self.v6 = Some((hash, area.width, area.height, p)),
+                Err(_) => return,
+            }
+        }
+        if let Some((_, _, _, proto)) = &self.v6 {
+            let sz = proto.size();
+            let w = sz.width.min(area.width);
+            let ht = sz.height.min(area.height);
+            let dest = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - ht) / 2, w, ht);
+            Image::new(proto).render(dest, buf);
+        }
     }
 }
 
@@ -315,6 +347,22 @@ mod tests {
         buf.cell_mut((5, 5)).unwrap().set_style(Style::default().bg(Color::Rgb(1, 2, 3)));
         assert!(render_graphics_as_cells(&gw, area, &mut buf, false), "blank window → handled, not protocol");
         assert_eq!(buf.cell((5, 5)).unwrap().style().bg, Some(Color::Rgb(1, 2, 3)), "blank → underlying kept");
+    }
+
+    #[test]
+    fn draw_v6_canvas_caches_on_content_hash() {
+        let picker = Picker::halfblocks();
+        let mut gr = GraphicsRender::default();
+        let area = Rect::new(0, 0, 4, 2);
+        let mut buf = Buffer::empty(area);
+        let canvas = image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]));
+        gr.draw_v6_canvas(&picker, &canvas, area, &mut buf);
+        assert!(gr.v6.is_some(), "first draw builds + caches the protocol");
+        let (hash0, _, _, _) = gr.v6.as_ref().unwrap();
+        let hash0 = *hash0;
+        // Same content → same hash (no rebuild churn on identical frames).
+        gr.draw_v6_canvas(&picker, &canvas, area, &mut buf);
+        assert_eq!(gr.v6.as_ref().unwrap().0, hash0, "identical canvas keeps the cached entry");
     }
 
     #[test]

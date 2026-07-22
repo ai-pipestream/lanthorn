@@ -390,6 +390,24 @@ fn render_node(
             None
         }
         WinNode::Layered(items) => {
+            // Phase 1c: with an image protocol, composite the whole v6 pane as one
+            // device-resolution RGBA canvas and draw it as a single terminal image
+            // (graphics at exact pixel coords, all text rasterized). Without a
+            // picker, fall through to the Phase 1b cell composite below.
+            if let Some(picker) = state.game_picker.as_ref() {
+                let f = picker.font_size();
+                let cell_px = (f.width, f.height);
+                let pane_cells = (area.width, area.height);
+                let theme_bg = state.colors.theme.get("transcript").style;
+                let bg = style_bg_rgba(theme_bg, image::Rgba([0, 0, 0, 255]));
+                let default_fg = style_fg_rgba(theme_bg, image::Rgba([220, 220, 220, 255]));
+                let main = build_main_text(state, items, area);
+                let canvas = crate::render::v6_canvas::build_v6_canvas(
+                    items, pane_cells, cell_px, bg, default_fg, &main, &state.colors,
+                );
+                state.graphics_render.borrow_mut().draw_v6_canvas(picker, &canvas, area, buf);
+                return None; // v6 main-window scroll metrics are a follow-up (SQ-0450)
+            }
             // v6 z-ordered composite (Phase 1b): draw each item in list order —
             // earlier entries (graphics) are background, later entries (text)
             // paint on top. A `Grid` leaf paints only its non-blank cells so an
@@ -707,6 +725,42 @@ fn fill_style(area: Rect, buf: &mut Buffer, style: ratatui::style::Style) {
             }
         }
     }
+}
+
+/// Resolve a themed style's colour to an opaque RGBA for the pixel canvas.
+fn style_bg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> image::Rgba<u8> {
+    match style.bg {
+        Some(ratatui::style::Color::Rgb(r, g, b)) => image::Rgba([r, g, b, 255]),
+        _ => fallback,
+    }
+}
+fn style_fg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> image::Rgba<u8> {
+    match style.fg {
+        Some(ratatui::style::Color::Rgb(r, g, b)) => image::Rgba([r, g, b, 255]),
+        _ => fallback,
+    }
+}
+
+/// Build the main-window text block for the pixel composite: the newest visible
+/// wrapped transcript lines that fit the primary window's rows, plus the live
+/// input line and caret column.
+fn build_main_text(state: &AppState, items: &[PositionedWindow], _area: Rect) -> crate::render::v6_canvas::MainText {
+    use crate::render::transcript::wrap_line;
+    // Primary window's cell size (cols/rows) drives wrapping + row budget.
+    let prim = items.iter().find(|it| matches!(&it.node, WinNode::Buffer(b) if b.primary));
+    let (cols, rows) = prim.map(|it| (it.w.max(1), it.h.max(1))).unwrap_or((1, 1));
+    // Wrap all transcript lines to the window width, keep the newest `rows-1`
+    // wrapped rows (leave one row for the input line).
+    let mut wrapped: Vec<String> = Vec::new();
+    for line in &state.transcript {
+        wrapped.extend(wrap_line(line, cols));
+    }
+    let budget = rows.saturating_sub(1) as usize;
+    let start = wrapped.len().saturating_sub(budget);
+    let lines = wrapped[start..].to_vec();
+    let input = state.input.value.clone();
+    let cursor_col = input.chars().count().min(cols as usize - 1) as u16;
+    crate::render::v6_canvas::MainText { lines, input, cursor_col }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -1956,7 +2010,9 @@ mod tests {
 
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        // No picker: this test exercises the Phase 1b cell composite fallback.
+        // With a picker, Phase 1c takes over `Layered` and draws one pixel image
+        // instead (see `layered_composite_*` picker-path coverage elsewhere).
 
         // Background: a full-area solid-colour graphics window.
         let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]));
