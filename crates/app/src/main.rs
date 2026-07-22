@@ -2452,6 +2452,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                         location_method: None,
                                         pending_io: None,
                                         timed_out: false,
+                                        pictures: Vec::new(),
                                         transcript_elems: Vec::new(),
                                     };
                                     apply_turn(&mut mapper, "", &restore_result);
@@ -2709,6 +2710,7 @@ fn reobserve_location(
         location_method: None,
         pending_io: None,
         timed_out: false,
+        pictures: Vec::new(),
         transcript_elems: Vec::new(),
     };
     apply_turn(mapper, "", &restore_result);

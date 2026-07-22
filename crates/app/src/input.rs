@@ -4988,6 +4988,7 @@ mod tests {
                 location_method: None,
                 pending_io: None,
                 timed_out: false,
+                pictures: Vec::new(),
                 transcript_elems: Vec::new(),
             };
             apply_turn(&mut mapper, "", &seed_result);
@@ -5034,6 +5035,7 @@ mod tests {
                 location_method: None,
                 pending_io: None,
                 timed_out: false,
+                pictures: Vec::new(),
                 transcript_elems: Vec::new(),
             };
             apply_turn(&mut mapper, "", &seed_result);

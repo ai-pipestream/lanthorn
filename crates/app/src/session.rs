@@ -13,7 +13,7 @@ use std::any::Any;
 
 use mapper::direction::parse_direction;
 use mapper::mapper::Mapper;
-use zvm::cpu::exec::{Machine, SoundEvent, StepResult};
+use zvm::cpu::exec::{Machine, PictureEvent, SoundEvent, StepResult};
 use zvm::error::ZError;
 use zvm::io::{Output, TextAttrs};
 use zvm::location::{detect_location, Location, LocationMethod};
@@ -247,6 +247,14 @@ pub struct TurnResult {
     pub timed_out: bool,
     /// Pre-formatted crash stack-trace lines when the VM faulted this turn.
     pub fault: Option<Vec<String>>,
+    /// v6 `draw_picture`/`erase_picture` events emitted this turn (drained from
+    /// the VM), in order. Empty for v1–5/v7/v8 and for the Glulx path (which
+    /// composites its own graphics windows). `GameSession::drain_turn` also
+    /// applies each event to `GameSession::pictures_canvas` as it drains them
+    /// (mirrors `sounds`, but the Z-machine path additionally rasterizes here
+    /// rather than leaving that to the app layer, since a v6 window's canvas
+    /// must be self-contained on the session for the Task 4 screen adapter).
+    pub pictures: Vec<PictureEvent>,
     /// Ordered buffer output for this turn (text runs + inline images). Empty
     /// for the Z-machine path (no images); the Glulx path fills it and the run
     /// loop pushes from it. When empty, the loop falls back to `transcript` +
@@ -271,6 +279,19 @@ pub struct GameSession {
     /// PC at which the disasm cache was last runtime-confirmed; the per-turn
     /// fold is skipped while the VM is parked at the same PC (nav/scroll calls).
     last_confirmed_pc: std::cell::Cell<Option<u32>>,
+    /// v6 Pict resolver (self-blorb/sidecar), set via [`set_pict_source`]
+    /// (`None` for non-v6 stories, or when set before construction hasn't
+    /// happened yet). Kept on the session — rather than only on `AppState` —
+    /// so `drain_turn` can rasterize `pending_pictures` into `pictures_canvas`
+    /// without the app layer reaching in. (Plan 1b Task 2)
+    ///
+    /// [`set_pict_source`]: GameSession::set_pict_source
+    pict_source: Option<crate::graphics::PictSource>,
+    /// Per-v6-window pixel canvas, keyed by window number (1–7; window 0 is
+    /// the main text window and never gets a canvas). Populated by
+    /// `drain_turn` from `Machine::pending_pictures`; read by the Task 4
+    /// screen adapter to build the layered composite.
+    pub pictures_canvas: std::collections::HashMap<u8, crate::graphics::Canvas>,
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
@@ -321,7 +342,20 @@ impl GameSession {
             }
         };
 
-        Ok(GameSession { machine, quit, pending, strip_prompt: true, disasm_cache: std::cell::RefCell::new(None), last_confirmed_pc: std::cell::Cell::new(None) })
+        Ok(GameSession {
+            machine, quit, pending, strip_prompt: true,
+            disasm_cache: std::cell::RefCell::new(None),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Set the v6 Pict resolver used to rasterize `draw_picture`/`erase_picture`
+    /// events into `pictures_canvas`. Call once, right after construction —
+    /// `drain_turn` reads it on every turn (see the `pict_source` field doc).
+    pub fn set_pict_source(&mut self, src: Option<crate::graphics::PictSource>) {
+        self.pict_source = src;
     }
 
     /// Drain the transcript accumulated since the last drain (intro or last turn).
@@ -487,6 +521,7 @@ impl GameSession {
         let fault = self.machine.take_fault_trace().map(|t| t.to_lines());
         let sounds = std::mem::take(&mut self.machine.pending_sounds);
         let erase_lower = std::mem::take(&mut self.machine.screen.erase_lower_requested);
+        let pictures = self.drain_pictures();
 
         TurnResult {
             transcript,
@@ -502,7 +537,57 @@ impl GameSession {
             location_method,
             pending_io,
             timed_out,
+            pictures,
             transcript_elems: Vec::new(),
+        }
+    }
+
+    /// Drain `Machine::pending_pictures`, applying each event to
+    /// `pictures_canvas` as it's drained (resolving/rasterizing via
+    /// `pict_source`), and return the drained events for `TurnResult` — mirrors
+    /// `pending_sounds`, except the rasterization happens here rather than in
+    /// the app layer (Task 2 decision: canvas store + Pict source both live on
+    /// `GameSession` so the Task 4 screen adapter can read `pictures_canvas`
+    /// without reaching into `AppState`). A no-op drain for non-v6 stories,
+    /// which never push a `PictureEvent`.
+    fn drain_pictures(&mut self) -> Vec<PictureEvent> {
+        let events = std::mem::take(&mut self.machine.pending_pictures);
+        for ev in &events {
+            self.apply_picture_event(ev);
+        }
+        events
+    }
+
+    /// Apply one `PictureEvent` to `pictures_canvas`: size the window's canvas
+    /// from its v6 pixel dims (`ZWindow::x_size`/`y_size`, already pixels — no
+    /// font-cell conversion needed here, unlike the Task 3/4 render-position
+    /// math), then draw or erase. Erase paints the *picture's own* footprint
+    /// (ZMSD §15: "the size of the picture"), falling back to the whole window
+    /// when the Pict's dims can't be resolved. Silently no-ops when the story
+    /// has no v6 window state, the window index is out of range, or (draw only)
+    /// the picture fails to resolve — matching the VM's own "best effort"
+    /// posture toward missing resources.
+    ///
+    /// Known simplification: `x == 0 && y == 0` is the v6 convention for "use
+    /// the window's cursor position" (ZMSD §15); this draws/erases at the
+    /// literal (0, 0) instead of resolving the cursor. No story observed so far
+    /// relies on that convention; revisit if one does.
+    fn apply_picture_event(&mut self, ev: &PictureEvent) {
+        let Some(v6) = self.machine.screen.v6.as_ref() else { return };
+        let Some(w) = v6.windows.get(ev.window as usize) else { return };
+        let (pw, ph) = (w.x_size.max(1) as u32, w.y_size.max(1) as u32);
+        if ev.erase {
+            let dims = self.pict_source.as_mut().and_then(|s| s.dims(ev.number as u32));
+            let canvas = self.pictures_canvas.entry(ev.window)
+                .or_insert_with(|| crate::graphics::Canvas::new(pw, ph));
+            canvas.resize(pw, ph);
+            let (ew, eh) = dims.unwrap_or((pw, ph));
+            canvas.erase_rect(ev.x as i32, ev.y as i32, ew, eh);
+        } else if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
+            let canvas = self.pictures_canvas.entry(ev.window)
+                .or_insert_with(|| crate::graphics::Canvas::new(pw, ph));
+            canvas.resize(pw, ph);
+            canvas.draw_image(&img, ev.x as i32, ev.y as i32, None);
         }
     }
 }
@@ -1659,6 +1744,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
         apply_turn(&mut m, "look", &first);
@@ -1681,6 +1767,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
         apply_turn(&mut m, "north", &second);
@@ -1711,6 +1798,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
         apply_turn(&mut m, "look", &result);
@@ -1753,6 +1841,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
         let mut m = Mapper::default();
@@ -1792,6 +1881,7 @@ mod tests {
             location_method: method,
             pending_io: None,
             timed_out: false,
+            pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
 
@@ -1833,6 +1923,7 @@ mod tests {
             location_method: Some(LocationMethod::RoomHeading),
             pending_io: None,
             timed_out: false,
+            pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
         apply_turn(&mut m, "", &result);
@@ -1859,6 +1950,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
         assert!(r.info.is_none());
@@ -1882,6 +1974,7 @@ mod tests {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            pictures: Vec::new(),
             transcript_elems: Vec::new(),
         }
     }
@@ -2522,6 +2615,111 @@ mod tests {
         // VM queues are drained after the turn.
         assert!(sess.machine.pending_sounds.is_empty());
         assert!(sess.machine.diagnostics.is_empty());
+    }
+
+    // ── Plan 1b Task 2: pending_pictures → per-window canvases ────────────────
+
+    /// A minimal v6 story buffer: version 6, header 0x06/0x07 (main's packed
+    /// address) left at 0 so `Machine::with_output`'s v6 boot path
+    /// (`call_routine` on the unpacked address) reads byte 0 (the version byte,
+    /// 6) as a harmless in-range "locals count" — this test never steps the VM,
+    /// so the routine is never actually executed. Mirrors the header layout of
+    /// `inventory.rs`'s `sample_story_v3` shim (zvm's own `tests_support` is
+    /// crate-private).
+    fn minimal_v6_story() -> Vec<u8> {
+        let mut buf = vec![0u8; 0x1000];
+        buf[0x00] = 6;                       // version = 6
+        buf[0x04] = 0x04; buf[0x05] = 0x00; // high_mem_base = 0x0400
+        buf[0x06] = 0x00; buf[0x07] = 0x00; // main's packed addr = 0
+        buf[0x08] = 0x02; buf[0x09] = 0x00; // dictionary = 0x0200
+        buf[0x0A] = 0x01; buf[0x0B] = 0x00; // object_table = 0x0100
+        buf[0x0C] = 0x03; buf[0x0D] = 0x00; // global_vars = 0x0300
+        buf[0x0E] = 0x04; buf[0x0F] = 0x00; // static_mem_base = 0x0400
+        buf[0x18] = 0x00; buf[0x19] = 0x60; // abbrev_table = 0x0060
+        buf
+    }
+
+    /// A valid 2x2 red PNG, encoded via the `image` crate (mirrors
+    /// `graphics.rs`'s private test helper of the same shape).
+    fn png_bytes_2x2_red() -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(2, 2, image::Rgb([255, 0, 0]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn drain_turn_applies_pending_draw_picture_to_the_window_canvas() {
+        use zvm::screen::{V6Windows, ZWindow};
+
+        // A v6 machine with window 7 sized 64x48px, current window = 7, and one
+        // pending draw_picture(number=1, window=7, x=2, y=3) event — as if
+        // `exec_ext(0x05, ...)` had just run (Task 1/Plan 1a).
+        let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+        let mut windows: [ZWindow; 8] = Default::default();
+        windows[7] = ZWindow { x_size: 64, y_size: 48, ..Default::default() };
+        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false });
+
+        // Construct the session directly (bypassing the constructor's boot
+        // loop, which this synthetic story can't usefully run) with a Pict
+        // source that resolves resource #1 to the red 2x2 PNG.
+        let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
+        let mut sess = GameSession {
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            disasm_cache: std::cell::RefCell::new(None),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+        };
+        sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
+
+        assert!(sess.pictures_canvas.is_empty(), "no canvas before the turn is drained");
+        let result = sess.drain_turn(false, None, false);
+
+        assert_eq!(result.pictures, vec![PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false }],
+            "the drained event is carried on TurnResult (mirrors pending_sounds)");
+        assert!(sess.machine.pending_pictures.is_empty(), "the VM queue is drained after the turn");
+
+        let canvas = sess.pictures_canvas.get(&7).expect("a canvas was created for window 7");
+        assert_eq!(canvas.img.dimensions(), (64, 48), "canvas sized from the v6 window's pixel dims");
+        assert_ne!(canvas.img.get_pixel(2, 3).0, [0, 0, 0, 0], "the picture was drawn (non-blank at its origin)");
+        assert_eq!(canvas.img.get_pixel(2, 3).0, [0xFF, 0x00, 0x00, 0xFF], "the drawn pixel is the source PNG's red");
+        // Outside the drawn 2x2 picture the canvas stays at its transparent default.
+        assert_eq!(canvas.img.get_pixel(0, 0).0, [0, 0, 0, 0], "untouched region stays transparent");
+    }
+
+    #[test]
+    fn drain_turn_applies_pending_erase_picture_to_the_window_canvas() {
+        use zvm::screen::{V6Windows, ZWindow};
+
+        let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+        let mut windows: [ZWindow; 8] = Default::default();
+        windows[7] = ZWindow { x_size: 64, y_size: 48, ..Default::default() };
+        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+        // Draw, then erase the same picture — the erase must clear back to
+        // transparent over the picture's own footprint (2x2, ZMSD §15).
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: false });
+        machine.pending_pictures.push(PictureEvent { number: 1, window: 7, x: 2, y: 3, erase: true });
+
+        let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
+        let mut sess = GameSession {
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            disasm_cache: std::cell::RefCell::new(None),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+        };
+        sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
+
+        let result = sess.drain_turn(false, None, false);
+        assert_eq!(result.pictures.len(), 2);
+        let canvas = sess.pictures_canvas.get(&7).expect("a canvas was created for window 7");
+        assert_eq!(canvas.img.get_pixel(2, 3).0, [0, 0, 0, 0], "erased back to transparent");
     }
 
     // Fixture-gated: in-game SAVE then RESTORE on Bureaucracy (v4) must leave the

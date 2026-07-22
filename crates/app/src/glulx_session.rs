@@ -535,6 +535,7 @@ impl GlulxSession {
             location_method,
             pending_io: self.pending_io.take(),
             timed_out: false,
+            pictures: Vec::new(),
             transcript_elems: elems,
         }
     }

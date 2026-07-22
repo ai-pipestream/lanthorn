@@ -131,6 +131,7 @@ impl ScottSession {
             location_method: None,
             pending_io: None,
             timed_out: false,
+            pictures: Vec::new(),
             transcript_elems: Vec::new(),
         }
     }

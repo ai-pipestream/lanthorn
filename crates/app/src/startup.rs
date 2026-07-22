@@ -263,11 +263,6 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     let start_map_hidden = app::styles::read_per_game_show_map(&game_dir) == Some(false);
     let theme_colours = app::glk_backend::theme_style_colours(&cs);
 
-    // v6 Pict source, retained for Plan 1b's draw-time decode (mirrors
-    // `state.sound_blorb` below). Populated only for a Z-code story, in its
-    // `match loaded` arm.
-    let mut zcode_pict_source: Option<app::graphics::PictSource> = None;
-
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
     // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
     // setup (screen dims, undo cap) runs in its arm before boxing.
@@ -285,7 +280,6 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                 if cfg.images { blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b) } else { None }
             );
             let picture_dims = picts.all_pict_dims();
-            zcode_pict_source = Some(picts);
 
             // `--debug` (SQ-0449): trace from the first boot instruction so the
             // game's initialisation code is captured (a later `/debug` can't).
@@ -304,6 +298,11 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                     std::process::exit(1);
                 }
             };
+            // v6 Pict source (Plan 1b Task 2, SQ-0186): retained on the session
+            // (not `AppState`) so `drain_turn` can rasterize `draw_picture`/
+            // `erase_picture` events into `pictures_canvas` self-contained —
+            // Plan 1a's dimension table above is a separate, boot-time-only use.
+            s.set_pict_source(Some(picts));
             // Apply the configured virtual screen dimensions to the VM. init_caps
             // (called inside GameSession::new) seeds defaults; override here.
             zvm::screen::write_screen_dims(
@@ -482,7 +481,6 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     state.show_loc_method = cfg.show_loc_method;
     state.show_status_bar = cfg.show_status_bar;
     state.game_picker = game_picker;
-    state.zcode_pict_source = zcode_pict_source;
     state.pane_sizes = app::state::PaneSizes {
         split_ratio: cfg.split_ratio,
         verb_dock_pct: cfg.verb_dock_pct,
@@ -591,6 +589,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             location_method: None,
             pending_io: None,
             timed_out: false,
+            pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
         apply_turn(&mut mapper, "", &seed_result);

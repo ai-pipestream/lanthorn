@@ -101,32 +101,56 @@ fn zork0_v6_windows_smoke() {
     assert_eq!((v6.windows[0].x_size, v6.windows[0].y_size), (630, 184), "window 0 geometry");
     assert_eq!((v6.windows[7].x_size, v6.windows[7].y_size), (640, 192), "window 7 (graphics) geometry");
 
-    // Drive a couple of turns past the first prompt.
+    // Thread the Pict source onto the session (Plan 1b Task 2), the same way
+    // `startup.rs`'s ZCode arm does after construction: `drain_turn` uses it to
+    // rasterize `pending_pictures` into `pictures_canvas` as it drains them.
+    session.set_pict_source(Some(picts));
+
+    // Drive a couple of turns past the first prompt, collecting each turn's
+    // drained picture events (Plan 1b Task 2: `drain_turn` empties
+    // `machine.pending_pictures` into `TurnResult.pictures` every turn now, so
+    // the VM's own queue is expected to be empty again after each submit).
     let _ = session.take_transcript();
+    let mut all_pictures = Vec::new();
     for cmd in ["look", "north"] {
         let result = session.submit(cmd);
         eprintln!(
-            "turn {cmd:?}: quit={} fault={:?} transcript_chars={}",
+            "turn {cmd:?}: quit={} fault={:?} transcript_chars={} pictures={}",
             result.quit,
             result.fault,
-            result.transcript.chars().count()
+            result.transcript.chars().count(),
+            result.pictures.len(),
         );
         assert!(!result.quit, "Zork0 quit on command {cmd:?}");
         assert!(result.fault.is_none(), "Zork0 faulted on command {cmd:?}: {:?}", result.fault);
+        assert!(
+            session.machine.pending_pictures.is_empty(),
+            "drain_turn must drain the VM's queue every turn (Task 2)"
+        );
+        all_pictures.extend(result.pictures);
     }
-    eprintln!("pending_pictures after two turns: {:?}", session.machine.pending_pictures);
+    eprintln!("pictures drained across two turns: {:?}", all_pictures);
 
     // (d) draw_picture accumulated at least one draw event, ideally targeting
     // window 7 (the v6 convention for the banner/graphics window Zork0 draws
-    // its opening image into).
+    // its opening image into) — this carries forward the boot-time events too
+    // (`pending_pictures at first prompt` above), since the first `submit`'s
+    // drain is the first one to run.
     assert!(
-        !session.machine.pending_pictures.is_empty(),
-        "machine.pending_pictures should have accumulated at least one draw_picture event"
+        !all_pictures.is_empty(),
+        "should have drained at least one draw_picture event across the two turns"
     );
-    let saw_window_7 = session.machine.pending_pictures.iter().any(|e| e.window == 7);
+    let saw_window_7 = all_pictures.iter().any(|e| e.window == 7);
     assert!(
         saw_window_7,
         "expected at least one draw_picture event targeting window 7 (Zork0's graphics window); got {:?}",
-        session.machine.pending_pictures
+        all_pictures
     );
+
+    // (e) Task 2's whole point: those events must have been rasterized into a
+    // real, non-blank canvas for window 7 — not just carried as raw events.
+    let canvas = session.pictures_canvas.get(&7)
+        .expect("window 7 should have a canvas after drawing into it");
+    let non_transparent = canvas.img.pixels().any(|p| p.0[3] != 0);
+    assert!(non_transparent, "window 7's canvas should have at least one non-transparent pixel drawn");
 }
