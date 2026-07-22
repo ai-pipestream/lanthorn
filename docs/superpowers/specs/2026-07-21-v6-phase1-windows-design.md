@@ -76,18 +76,20 @@ Back EXT:0x13/0x19 with the window table. Implement the ZMSD §8.4.3 window-prop
 - **App resolves + decodes** the picture from Blorb at draw time into a `Canvas`/`GraphicsWindow` (reusing the `blorb` crate, `image` crate, and the existing `render/graphics.rs` path), keyed to the target window.
 - `picture_table` (EXT:0x1C) sets the adaptive-picture remap table (stored; consulted when resolving a picture number) — minimal support: store and honor the mapping for `draw_picture`/`picture_data`.
 
-### 6. Adapter → WinNode tree (`crates/app/src/session.rs`)
+### 6. Adapter → z-ordered layered render (`crates/app/src/session.rs`, `render/screen.rs`)
 
-Replace the hard-coded `Pair{Grid, Buffer}` in `screen_model_from_machine` with a **v6 branch** that builds a `WinNode` tree from the v6 window table (v1–5 branch unchanged):
-- text windows → cell-quantized `WinNode::Grid` (positioned) / `WinNode::Buffer` (window 0, scrolling), tiled into a `Pair` tree by cell rect (cell-text-wins).
-- graphics windows → `WinNode::Graphics(GraphicsWindow{...})` fed by the app-resolved canvas — exactly as `glk_backend.rs::convert_tree` does for Glulx.
-- Given the structural similarity to `glk_backend.rs::convert_tree`, factor a shared cell-rect-tree→`WinNode` helper if it reduces duplication (judgment call at implementation).
+**Correction to the original tiling assumption (2026-07-21, grounded in the Zork0 geometry):** v6 windows OVERLAP — window 7 (graphics) is a *full-screen background* (640×192px = the whole screen), with the text body (window 0) and top strip (window 1) composited on top. This cannot be a non-overlapping `Pair` tree. v6 renders as a **z-ordered layered composite (cell-text-wins)**, not a tiling tree.
 
-Set `content_size` nonzero so v6 routes through the generic `render_node` path (like Glulx), not the Z-machine simple path.
+The `screen()` adapter (a `GameSession` method, so it can reach both `machine.screen.v6` and the per-window canvases) emits, for a v6 story, an ordered list of positioned windows — each carrying its **absolute cell rect** (pixel rect ÷ font size) and its leaf kind (Graphics / Grid / Buffer). This is a new `WinNode::Layered(Vec<PositionedWindow>)` variant (or an equivalent v6 render path); `render_node` gains a `Layered` arm that draws each entry in order at its absolute rect:
+- **z-order:** graphics windows first (background), then text windows on top. Order = window number (0 body, then 1 strip) after the graphics layer, or the game's stacking if a clearer signal exists.
+- **cell-text-wins:** a text grid paints only its **non-blank** cells (blank/space cells stay transparent so the graphics layer shows through the gaps); the buffer (window 0) paints its text; graphics paint via `render_graphics_as_cells`/`GraphicsRender` (already skip empty canvas regions).
+- windows with zero size are skipped.
+
+Set `content_size` nonzero so v6 leaves the Z-machine simple path.
 
 ### 7. App-side picture resolution + render (`crates/app`)
 
-At story open, parse the Pict index → dimension table (inject into zvm) and keep the Blorb handle. Per turn, drain zvm's picture-draw events; resolve+decode each picture into the target window's `Canvas` (bump a version for render-cache invalidation, as `AppGlk` does); the adapter's `WinNode::Graphics` then renders via the existing `render/graphics.rs` (kitty/sixel + cell fallback). No new render code — reuse the Glulx graphics render path wholesale.
+At story open (Plan 1a, done): dimension table injected, `zcode_pict_source` retained. **Plan 1b per turn:** drain zvm's `pending_pictures`, resolve each `PictureEvent` via `zcode_pict_source` (`PictSource::image`) and composite it into the target window's `Canvas` (a new per-v6-window `HashMap<u8, Canvas>` on `GameSession`, mirroring `AppGlk.graphics`; bump `version` for the render cache), exactly as `AppGlk::graphics_draw_image` does. The layered adapter (§6) then emits a `WinNode::Graphics` for each window with a canvas, rendered via the existing `render/graphics.rs` (kitty/sixel + cell fallback). The graphics *rendering* reuses `render/graphics.rs` wholesale; the new code is the **layered composite arm** in `render_node` and the per-window canvas store + draw handler.
 
 ### 8. Text routing
 
