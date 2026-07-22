@@ -65,15 +65,17 @@ still reach in and override any single selector by name.
   arrows — there is no separate override table.
 - **`[debug]`** holds only the disassembly-specific selectors for the debug
   inspector: `pc` and the four confidence tiers that shade how sure the
-  disassembler is that a byte is really code, brightest (most certain) to dimmest:
-  - **`disasm_executed`** — the line's address actually ran this turn. Ground
-    truth; it wins over any static guess. Its `|` gutter mark is the execution-
-    coverage bar (formerly hardcoded).
-  - **`disasm_rd`** — hard-discovered code: reached by recursive descent from a
-    constant call target or the initial PC, or later confirmed by execution.
-  - **`disasm_soft`** — a linear-scan guess that hasn't been verified yet — the
-    "don't fully trust this" tier.
-  - **`disasm_data`** — bytes shown as `.byte`, not decoded as code at all.
+  disassembler is that a byte is really code. The defaults read as a risk
+  gradient — **blue** verified, **yellow** medium, **red** high-risk:
+  - **`disasm_executed`** (blue) — the line's address actually ran this turn.
+    Ground truth; it wins over any static guess. Its `|` gutter mark is the
+    execution-coverage bar (formerly hardcoded).
+  - **`disasm_rd`** (yellow) — hard-discovered code: reached by recursive descent
+    from a constant call target or the initial PC, or later confirmed by execution.
+  - **`disasm_soft`** (red) — a linear-scan guess that hasn't been verified yet —
+    the "don't fully trust this" tier.
+  - **`disasm_data`** — bytes shown as `.byte`, not decoded as code at all
+    (muted; it's not a risk level).
 
   Each tier carries both a line style and a gutter **`glyph`** (e.g.
   `disasm_executed`'s `|` mark; the others default to a blank space — set

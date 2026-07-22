@@ -563,7 +563,7 @@ mod tests {
         let (gx, tx) = (left.x + 1, left.x + 2);
         let y = left.y + 1; // first content row (the divider)
 
-        // Executed line (0x1000, row 1): executed tier — `|` gutter + accent fg,
+        // Executed line (0x1000, row 1): executed tier — `|` gutter + its fg,
         // NOT the soft fg (overlay beats static provenance).
         assert_eq!(buf.cell((gx, y + 1)).unwrap().symbol(), "|");
         assert_eq!(buf.cell((tx, y + 1)).unwrap().style().fg, exec.style.fg);

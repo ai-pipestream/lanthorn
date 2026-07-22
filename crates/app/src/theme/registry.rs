@@ -246,9 +246,11 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("map.portal_path_style", Section::Map, Kind::Placement, None, glyph("dotted")),
     // ── §4b debug.* (disasm-only; each tier carries a gutter glyph) ───────────
     row("debug.pc", Section::Debug, Kind::Style, Some("accent"), mods(false, false, false, true)),
-    row("debug.disasm_executed", Section::Debug, Kind::Style, Some("accent"), glyph("|")),
-    row("debug.disasm_rd", Section::Debug, Kind::Style, Some("text"), glyph(" ")),
-    row("debug.disasm_soft", Section::Debug, Kind::Style, Some("muted"), glyph(" ")),
+    // Default tier colours read as a risk gradient: blue = verified (executed),
+    // yellow = medium (RD-discovered), red = high risk (unverified linear scan).
+    row("debug.disasm_executed", Section::Debug, Kind::Style, Some("accent"), Delta { fg: Some(Color::Blue), glyph: Some("|".to_string()), ..Delta::EMPTY }),
+    row("debug.disasm_rd", Section::Debug, Kind::Style, Some("text"), Delta { fg: Some(Color::Yellow), glyph: Some(" ".to_string()), ..Delta::EMPTY }),
+    row("debug.disasm_soft", Section::Debug, Kind::Style, Some("muted"), Delta { fg: Some(Color::Red), glyph: Some(" ".to_string()), ..Delta::EMPTY }),
     row("debug.disasm_data", Section::Debug, Kind::Style, Some("muted"), Delta { italic: true, glyph: Some(" ".to_string()), ..Delta::EMPTY }),
     // ── §2c dialog.* (modal surface: background + own frame + title/buttons/shadow) ──
     row("dialog.background", Section::Dialog, Kind::Style, Some("chrome"), Delta::EMPTY),
