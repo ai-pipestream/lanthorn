@@ -2707,6 +2707,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         17 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.watch_style = !cs.working.watch_style; } }
         18 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.record_turn_history = !cs.working.record_turn_history; } }
         21 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hint_skip_screen_warning = !cs.working.hint_skip_screen_warning; } }
+        24 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_v6_render(&mut cs.working.v6_render, 1); } }
         _ => {}
     }
 }
@@ -2723,6 +2724,14 @@ fn config_cycle_background_tidy(val: &mut crate::config::BackgroundTidy, delta: 
 fn config_cycle_aux_storage(val: &mut crate::config::AuxStorage, delta: i32) {
     use crate::config::AuxStorage::*;
     let variants = [Ask, Archive, Global];
+    let pos = variants.iter().position(|v| v == val).unwrap_or(0) as i32;
+    let n = variants.len() as i32;
+    *val = variants[((pos + delta).rem_euclid(n)) as usize];
+}
+
+fn config_cycle_v6_render(val: &mut crate::config::V6RenderMode, delta: i32) {
+    use crate::config::V6RenderMode::*;
+    let variants = [Hybrid, Raster];
     let pos = variants.iter().position(|v| v == val).unwrap_or(0) as i32;
     let n = variants.len() as i32;
     *val = variants[((pos + delta).rem_euclid(n)) as usize];
@@ -2760,6 +2769,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         21 => working.hint_skip_screen_warning = !working.hint_skip_screen_warning,
         22 => working.text_margin_x = (working.text_margin_x as i32 + delta).clamp(0, 8) as u16,
         23 => working.text_margin_y = (working.text_margin_y as i32 + delta).clamp(0, 8) as u16,
+        24 => config_cycle_v6_render(&mut working.v6_render, delta),
         _ => {}
     }
 }

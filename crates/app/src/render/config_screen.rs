@@ -37,6 +37,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("hint_skip_screen_warning", ConfigRowKind::Bool, "Auto-skip the InvisiClues 'your screen is only N characters wide' banner when opening izm hints, landing straight on the topic menu."),
     ("text_margin_x",        ConfigRowKind::Num,  "Blank columns reserved on each side inside the story text pane. Imported from garglk tmarginx. Use ← / → to adjust."),
     ("text_margin_y",        ConfigRowKind::Num,  "Blank rows reserved above and below the story text. Imported from garglk tmarginy. Use ← / → to adjust."),
+    ("v6_render",            ConfigRowKind::Enum, "How v6 graphical games (Zork Zero) render: hybrid (crisp terminal story in a scaled pixel frame) or raster (whole pane as one pixel image)."),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -238,6 +239,10 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
         21 => bool_str(cfg.hint_skip_screen_warning),
         22 => cfg.text_margin_x.to_string(),
         23 => cfg.text_margin_y.to_string(),
+        24 => match cfg.v6_render {
+            crate::config::V6RenderMode::Hybrid => "hybrid".to_string(),
+            crate::config::V6RenderMode::Raster => "raster".to_string(),
+        },
         _ => String::new(),
     }
 }
@@ -324,6 +329,16 @@ mod tests {
         assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.text_margin_x, 2, "Space is a no-op for the Num margin row");
         for _ in 0..3 { apply_action(Action::ConfigCycle(-1), &mut state, &mut m); }
         assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.text_margin_x, 0, "text_margin_x clamps at 0");
+
+        // The v6_render enum row (SQ-0186) cycles via ConfigCycle at its index,
+        // Hybrid -> Raster and back.
+        let vidx = CONFIG_ROWS.iter().position(|(n, _, _)| *n == "v6_render").unwrap();
+        state.overlays.config_screen.as_mut().unwrap().scroll.selected = vidx;
+        assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.v6_render, crate::config::V6RenderMode::Hybrid);
+        apply_action(Action::ConfigCycle(1), &mut state, &mut m);
+        assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.v6_render, crate::config::V6RenderMode::Raster, "v6_render must cycle to Raster");
+        apply_action(Action::ConfigCycle(1), &mut state, &mut m);
+        assert_eq!(state.overlays.config_screen.as_ref().unwrap().working.v6_render, crate::config::V6RenderMode::Hybrid, "v6_render must cycle back to Hybrid");
     }
 
     #[test]

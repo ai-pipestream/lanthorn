@@ -341,6 +341,20 @@ pub enum AuxStorage {
     Global,
 }
 
+/// How the v6 graphical story pane is rendered.
+///
+/// TOML: `v6_render = "hybrid"` (default) or `"raster"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum V6RenderMode {
+    /// Chrome (frame + status) as a scaled pixel ring around a terminal story
+    /// viewport with crisp text (default).
+    #[default]
+    Hybrid,
+    /// The whole pane rasterized into one pixel image (feature-limited).
+    Raster,
+}
+
 // ── Animation config ──────────────────────────────────────────────────────────
 
 fn default_scroll_ms() -> u64 { 120 }
@@ -467,6 +481,9 @@ pub struct Config {
     /// Where to persist v5 auxiliary save data. Default: Ask.
     #[serde(default)]
     pub aux_storage: AuxStorage,
+    /// How the v6 graphical story pane is rendered. Default: Hybrid.
+    #[serde(default)]
+    pub v6_render: V6RenderMode,
     /// Keymap overrides: command_name → key-spec string(s).
     #[serde(default)]
     pub keymap: KeymapConfig,
@@ -586,6 +603,7 @@ impl Default for Config {
             hint_skip_screen_warning: true,
             background_tidy: BackgroundTidy::EveryRoom,
             aux_storage: AuxStorage::Ask,
+            v6_render: V6RenderMode::Hybrid,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: None,
@@ -672,6 +690,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.hint_skip_screen_warning = from_file.hint_skip_screen_warning;
             cfg.background_tidy = from_file.background_tidy;
             cfg.aux_storage = from_file.aux_storage;
+            cfg.v6_render = from_file.v6_render;
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
             cfg.style = from_file.style;
@@ -771,6 +790,11 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
         AuxStorage::Global => "global",
     };
     doc["aux_storage"] = toml_edit::value(aux_str);
+    let v6_str = match cfg.v6_render {
+        V6RenderMode::Hybrid => "hybrid",
+        V6RenderMode::Raster => "raster",
+    };
+    doc["v6_render"] = toml_edit::value(v6_str);
     doc["show_room_numbers"] = toml_edit::value(cfg.show_room_numbers);
     doc["show_loc_method"] = toml_edit::value(cfg.show_loc_method);
     doc["show_status_bar"] = toml_edit::value(cfg.show_status_bar);
@@ -1104,6 +1128,23 @@ use_defaults = false
     }
 
     #[test]
+    fn v6_render_defaults_to_hybrid() {
+        assert_eq!(Config::default().v6_render, V6RenderMode::Hybrid);
+    }
+
+    #[test]
+    fn v6_render_parses_raster_from_toml() {
+        let c: Config = toml::from_str("v6_render = \"raster\"").unwrap();
+        assert_eq!(c.v6_render, V6RenderMode::Raster);
+    }
+
+    #[test]
+    fn v6_render_absent_is_hybrid() {
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.v6_render, V6RenderMode::Hybrid);
+    }
+
+    #[test]
     fn write_config_round_trips_scalars_and_preserves_keymap() {
         let dir = std::env::temp_dir().join(format!("babelmap_write_config_test_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1126,6 +1167,7 @@ use_defaults = false
             hint_skip_screen_warning: true,
             background_tidy: BackgroundTidy::OnOverlap,
             aux_storage: AuxStorage::Ask,
+            v6_render: V6RenderMode::Hybrid,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: Some("neon".into()),
