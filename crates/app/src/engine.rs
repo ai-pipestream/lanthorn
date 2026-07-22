@@ -229,6 +229,19 @@ pub struct GraphicsWindow {
     pub upscale: bool,
 }
 
+/// One window placed at an absolute cell rect within the story pane, for the
+/// v6 z-ordered layered composite (Phase 1b). `x`/`y`/`w`/`h` are the absolute
+/// cell rect (not pixels) within the pane; `node` is the leaf drawn there
+/// (`Grid`, `Buffer`, or `Graphics`).
+#[derive(Debug, Clone)]
+pub struct PositionedWindow {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+    pub node: WinNode,
+}
+
 /// A node in the engine-neutral window tree.
 #[derive(Debug, Clone)]
 pub enum WinNode {
@@ -255,6 +268,12 @@ pub enum WinNode {
     Graphics(GraphicsWindow),
     /// An empty placeholder.
     Blank,
+    /// A v6 z-ordered layered composite (Phase 1b): an ordered list of windows
+    /// placed at absolute cell rects within the story pane. Drawn in list
+    /// order — earlier entries are background (graphics), later entries paint
+    /// on top (text); a `Grid` leaf paints only its non-blank cells so an
+    /// earlier layer shows through gaps ("cell-text-wins").
+    Layered(Vec<PositionedWindow>),
 }
 
 /// The right-hand field of a classic (v3-style) status line.

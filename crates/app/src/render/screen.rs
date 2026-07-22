@@ -13,9 +13,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use crate::colors::ColorScheme;
-use crate::engine::{BorderPref, BufferWindow, Introspect, ScreenModel, StatusModel, WinNode};
+use crate::engine::{BorderPref, BufferWindow, Introspect, PositionedWindow, ScreenModel, StatusModel, WinNode};
 use crate::render::transcript::{draw_str_runs, render_transcript, visible_wrapped_lines_kinded};
-use crate::render::upper_window::{draw_grid, draw_upper_window};
+use crate::render::upper_window::{draw_grid, draw_grid_transparent, draw_upper_window};
 use crate::state::{AppState, TranscriptKind};
 
 /// Metrics the story-pane render reports back for scrollbar / mouse routing.
@@ -46,6 +46,10 @@ fn count_leaves(node: &WinNode) -> (u32, u32, u32) {
         // A Graphics leaf can't use the simple text path — counts as "other",
         // forcing the generic path.
         WinNode::Graphics(_) => (0, 0, 1),
+        // A v6 layered composite (Phase 1b) is likewise never the simple text
+        // shape — counts as "other". Its own items aren't tallied; nothing
+        // reads this test-only helper's counts below leaf granularity.
+        WinNode::Layered(_) => (0, 0, 1),
         WinNode::Pair { first, second, .. } => {
             let a = count_leaves(first);
             let b = count_leaves(second);
@@ -385,7 +389,39 @@ fn render_node(
             }
             None
         }
+        WinNode::Layered(items) => {
+            // v6 z-ordered composite (Phase 1b): draw each item in list order —
+            // earlier entries (graphics) are background, later entries (text)
+            // paint on top. A `Grid` leaf paints only its non-blank cells so an
+            // earlier layer shows through the gaps ("cell-text-wins"); other
+            // leaves (`Buffer`/`Graphics`) render through the normal recursion.
+            let mut result = None;
+            for item in items {
+                let sub = layered_item_rect(area, item);
+                if sub.width == 0 || sub.height == 0 {
+                    continue;
+                }
+                if let WinNode::Grid(g) = &item.node {
+                    draw_grid_transparent(g, sub, buf, state.config.honor_game_colours, grid_colors, links);
+                } else {
+                    let m = render_node(&item.node, status, char_mode, introspect, state, sub, buf, game_input, links, grid_colors);
+                    result = result.or(m);
+                }
+            }
+            result
+        }
     }
+}
+
+/// A [`PositionedWindow`]'s absolute cell rect, offset from `area`'s origin and
+/// clamped so it never extends past `area`'s bounds (the layered composite's
+/// containing rect).
+fn layered_item_rect(area: Rect, item: &PositionedWindow) -> Rect {
+    let x = area.x.saturating_add(item.x).min(area.right());
+    let y = area.y.saturating_add(item.y).min(area.bottom());
+    let w = item.w.min(area.right().saturating_sub(x));
+    let h = item.h.min(area.bottom().saturating_sub(y));
+    Rect::new(x, y, w, h)
 }
 
 /// The region a modal dialog should center within: the whole `frame`, minus any
@@ -428,6 +464,12 @@ fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>) {
         }
         WinNode::Graphics(_) => out.push(area),
         WinNode::Grid(_) | WinNode::Buffer(_) | WinNode::Blank => {}
+        WinNode::Layered(items) => {
+            for item in items {
+                let sub = layered_item_rect(area, item);
+                collect_graphics_rects(&item.node, sub, out);
+            }
+        }
     }
 }
 
@@ -483,7 +525,11 @@ fn edge_touches_painted_graphics(node: &WinNode, vertical: bool, high: bool) -> 
         // empty graphics windows) is NOT a divider — suppressing our separator
         // there would leave the pane with no visible boundary at all. (SQ-0340)
         WinNode::Graphics(g) => g.canvas.pixels().any(|p| p[3] >= 128),
-        WinNode::Buffer(_) | WinNode::Grid(_) | WinNode::Blank => false,
+        // A v6 layered composite (Phase 1b) only ever appears as a whole-tree
+        // root (built directly by the v6 adapter, never nested inside a Pair
+        // sibling), so it can't be the game's own divider here — treat it like
+        // the other non-Pair, non-Graphics leaves.
+        WinNode::Buffer(_) | WinNode::Grid(_) | WinNode::Blank | WinNode::Layered(_) => false,
         WinNode::Pair { vertical: v, first, second, .. } => {
             if *v == vertical {
                 let child = if high { second } else { first };
@@ -1862,5 +1908,63 @@ mod tests {
         let mut ids = std::collections::HashSet::new();
         collect_graphics_ids(&tree, &mut ids);
         assert_eq!(ids, std::collections::HashSet::from([1, 7]));
+    }
+
+    /// v6 layered composite (Phase 1b): a full-area solid graphics window
+    /// (background) with a small grid (foreground) drawn on top. The grid's
+    /// one non-blank cell must land at its absolute rect; a BLANK grid cell
+    /// must leave the graphics layer's colour showing through — cell-text-wins.
+    #[test]
+    fn layered_composite_draws_zorder_with_cell_text_wins() {
+        use ratatui::style::Color;
+
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+
+        // Background: a full-area solid-colour graphics window.
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]));
+        let background = PositionedWindow {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 6,
+            node: WinNode::Graphics(crate::engine::GraphicsWindow {
+                win: 1,
+                canvas: std::sync::Arc::new(img),
+                version: 1,
+                upscale: false,
+            }),
+        };
+
+        // Foreground: a 3x2 grid, positioned at (2,2), with a single non-blank cell.
+        let mut grid = GridWindow::default();
+        grid.resize(2, 3);
+        grid.active_rows = 2;
+        grid.put(1, 1, 'X', 0);
+        let foreground = PositionedWindow { x: 2, y: 2, w: 3, h: 2, node: WinNode::Grid(grid) };
+
+        let model = ScreenModel {
+            root: WinNode::Layered(vec![background, foreground]),
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (10, 6),
+        };
+
+        let area = Rect::new(0, 0, 10, 6);
+        let mut buf = Buffer::empty(area);
+        render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        // The grid's non-blank cell is drawn at its absolute rect (2,2).
+        assert_eq!(buf.cell((2, 2)).unwrap().symbol(), "X", "grid glyph at its absolute cell");
+
+        // A blank grid cell (grid col 2, row 1 → absolute (3,2)) is transparent:
+        // the background graphics colour shows through instead of a grid fill.
+        assert_eq!(
+            buf.cell((3, 2)).unwrap().style().bg,
+            Some(Color::Rgb(10, 20, 30)),
+            "blank grid cell is transparent — graphics layer shows through"
+        );
     }
 }

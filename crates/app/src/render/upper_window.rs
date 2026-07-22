@@ -271,6 +271,50 @@ pub fn draw_grid(
     needed
 }
 
+/// Draw `grid`'s cells directly into `area` at a 1:1 mapping — no border, no
+/// centering, no viewport scroll; `area` IS the grid's absolute cell rect
+/// (the v6 layered composite's [`PositionedWindow`](crate::engine::PositionedWindow)
+/// already carries the exact placement). Paints ONLY non-blank cells: a cell
+/// is "blank" when its glyph is a space with the default (unset) background
+/// (`ch == ' ' && bg == 0`); those cells are left UNTOUCHED so an earlier
+/// composited layer (e.g. a v6 graphics window) shows through the gaps
+/// ("cell-text-wins", Phase 1b).
+pub fn draw_grid_transparent(
+    grid: &GridWindow,
+    area: Rect,
+    buf: &mut Buffer,
+    honor_game_colours: bool,
+    colors: &ColorScheme,
+    links: &mut Vec<((u16, u16), u32)>,
+) {
+    let rows = area.height.min(grid.rows);
+    let cols = area.width.min(grid.cols);
+    for dy in 0..rows {
+        let grid_row = dy + 1; // 1-based
+        for dx in 0..cols {
+            let grid_col = dx + 1; // 1-based
+            let cell = grid.cell(grid_row, grid_col);
+            if cell.ch == ' ' && cell.bg == 0 {
+                continue; // blank: leave the layer beneath showing through
+            }
+            let bx = area.x + dx;
+            let by = area.y + dy;
+            if let Some(buf_cell) = buf.cell_mut((bx, by)) {
+                let mut style = cell_style(grid_cell_to_zvm(cell), cell.glk_style, colors, honor_game_colours, grid.bg);
+                if cell.link != 0 {
+                    if honor_game_colours {
+                        style = style.patch(colors.theme.get("hyperlink").style);
+                    }
+                    style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+                    links.push(((bx, by), cell.link));
+                }
+                let mut ch_buf = [0u8; 4];
+                buf_cell.set_symbol(cell.ch.encode_utf8(&mut ch_buf)).set_style(style);
+            }
+        }
+    }
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 /// Draw the engine's text-grid (upper) window into the top of `area`, returning

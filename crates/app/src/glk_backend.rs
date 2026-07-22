@@ -1626,6 +1626,8 @@ mod tests {
                     collect(second, out);
                 }
                 crate::engine::WinNode::Blank => {}
+                // gvm never produces a v6 layered composite (Phase 1b, zvm-only).
+                crate::engine::WinNode::Layered(_) => {}
             }
         }
         let mut leaves = Vec::new();
