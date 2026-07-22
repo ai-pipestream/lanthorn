@@ -14,7 +14,7 @@ use crate::dictionary;
 use crate::io::{BufferOutput, Output};
 use crate::memory::Memory;
 use crate::objects;
-use crate::screen::{advertise_colour, advertise_sound, init_header_caps, ScreenState, StreamState, V6Windows};
+use crate::screen::{advertise_colour, advertise_sound, init_header_caps, ScreenState, StreamState, V6Windows, V6_FONT_HEIGHT, V6_FONT_WIDTH};
 use crate::text::cp437::cp437_to_char;
 use crate::text::decode::{decode_string, zscii_to_char};
 
@@ -1601,10 +1601,78 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            0x05 | 0x07 | 0x08 | 0x10 | 0x11 | 0x12 | 0x14 | 0x16 | 0x17 | 0x19 | 0x1A | 0x1C => {
-                // draw_picture, erase_picture, set_margins, move_window, window_size,
-                // window_style, scroll_window, read_mouse, mouse_window, put_wind_prop,
-                // print_form, picture_table — no-op in Phase 0.
+            // EXT:0x10 move_window(window, y, x) — ZMSD §15: reposition the window's
+            // top-left corner (pixels). Purely notional — does not change the
+            // current display, only where future plotting/geometry lands.
+            0x10 => {
+                let win = ops.first().copied().unwrap_or(0);
+                let y = ops.get(1).copied().unwrap_or(0);
+                let x = ops.get(2).copied().unwrap_or(0);
+                if self.trace_screen {
+                    self.screen_trace.push(format!("@move_window(win={win}, y={y}, x={x})"));
+                }
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    if (win as usize) < v6.windows.len() {
+                        let w = &mut v6.windows[win as usize];
+                        w.y_coord = y;
+                        w.x_coord = x;
+                    }
+                }
+                StepResult::Continue
+            }
+            // EXT:0x11 window_size(window, y, x) — ZMSD §15: resize the window
+            // (pixels). We also quantize to the character grid so the window's
+            // text-cell storage (used for grid rendering) matches the new size.
+            0x11 => {
+                let win = ops.first().copied().unwrap_or(0);
+                let y = ops.get(1).copied().unwrap_or(0);
+                let x = ops.get(2).copied().unwrap_or(0);
+                if self.trace_screen {
+                    self.screen_trace.push(format!("@window_size(win={win}, y={y}, x={x})"));
+                }
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    if (win as usize) < v6.windows.len() {
+                        let w = &mut v6.windows[win as usize];
+                        w.y_size = y;
+                        w.x_size = x;
+                        let rows = (y / V6_FONT_HEIGHT).max(1);
+                        let cols = (x / V6_FONT_WIDTH).max(1);
+                        w.grid.resize(rows, cols);
+                    }
+                }
+                StepResult::Continue
+            }
+            // EXT:0x12 window_style(window, flags, operation) — ZMSD §15
+            // (confirmed via inform-fiction.org/zmachine/standards/z1point1/sect15.html):
+            // operation 0 = replace (attributes := flags), 1 = set bits (OR),
+            // 2 = clear bits (AND NOT), 3 = toggle bits (XOR).
+            0x12 => {
+                let win = ops.first().copied().unwrap_or(0);
+                let flags = ops.get(1).copied().unwrap_or(0);
+                let operation = ops.get(2).copied().unwrap_or(0);
+                if self.trace_screen {
+                    self.screen_trace.push(format!(
+                        "@window_style(win={win}, flags={flags:#06b}, op={operation})"
+                    ));
+                }
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    if (win as usize) < v6.windows.len() {
+                        let w = &mut v6.windows[win as usize];
+                        w.attributes = match operation {
+                            0 => flags,
+                            1 => w.attributes | flags,
+                            2 => w.attributes & !flags,
+                            3 => w.attributes ^ flags,
+                            _ => w.attributes,
+                        };
+                    }
+                }
+                StepResult::Continue
+            }
+            0x05 | 0x07 | 0x08 | 0x14 | 0x16 | 0x17 | 0x19 | 0x1A | 0x1C => {
+                // draw_picture, erase_picture, set_margins, scroll_window,
+                // read_mouse, mouse_window, put_wind_prop, print_form,
+                // picture_table — no-op in Phase 0.
                 StepResult::Continue
             }
             // Unknown / unimplemented EXT opcode: record once, then ignore
@@ -6327,11 +6395,46 @@ pub(crate) mod tests {
     #[test]
     fn v6_graphics_opcodes_are_noops_and_stay_continue() {
         let mut m = v6_exec_machine();
-        for op in [0x05u8, 0x07, 0x08, 0x10, 0x11, 0x12, 0x14, 0x16, 0x17, 0x19, 0x1A, 0x1C] {
+        for op in [0x05u8, 0x07, 0x08, 0x14, 0x16, 0x17, 0x19, 0x1A, 0x1C] {
             assert!(matches!(m.exec_ext(op, &[0, 0, 0], None, None), StepResult::Continue),
                 "op {op:#04x} no-op → Continue");
         }
         assert!(m.state.eval_stack.is_empty(), "no-op graphics ops must not touch the stack");
+    }
+
+    // ── Task 4: move_window / window_size / window_style bodies ─────────────
+
+    #[test]
+    fn v6_move_window_sets_window_coords() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x10, &[1, 6, 6], None, None); // move_window(1, y=6, x=6)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[1].y_coord, 6);
+        assert_eq!(v6.windows[1].x_coord, 6);
+    }
+
+    #[test]
+    fn v6_window_size_sets_size_and_resizes_grid() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x11, &[1, 40, 80], None, None); // window_size(1, y=40, x=80)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[1].y_size, 40);
+        assert_eq!(v6.windows[1].x_size, 80);
+        assert_eq!(v6.windows[1].grid.rows, 5, "40 / V6_FONT_HEIGHT(8) = 5 rows");
+        assert_eq!(v6.windows[1].grid.cols, 10, "80 / V6_FONT_WIDTH(8) = 10 cols");
+    }
+
+    #[test]
+    fn v6_window_style_operations() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x12, &[1, 0b0101, 0], None, None); // replace
+        assert_eq!(m.screen.v6.as_ref().unwrap().windows[1].attributes, 0b0101);
+        m.exec_ext(0x12, &[1, 0b0010, 1], None, None); // set bits
+        assert_eq!(m.screen.v6.as_ref().unwrap().windows[1].attributes, 0b0111);
+        m.exec_ext(0x12, &[1, 0b0100, 2], None, None); // clear bits
+        assert_eq!(m.screen.v6.as_ref().unwrap().windows[1].attributes, 0b0011);
+        m.exec_ext(0x12, &[1, 0b1001, 3], None, None); // toggle bits
+        assert_eq!(m.screen.v6.as_ref().unwrap().windows[1].attributes, 0b1010);
     }
 
     // ── Task 3: v6 split/set/erase_window over the window table ─────────────
