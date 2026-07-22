@@ -167,7 +167,7 @@ impl Memory {
         match self.header.version {
             3 => 2 * p,
             4 | 5 => 4 * p,
-            7 => 4 * p + 8 * self.header.routines_offset as u32,
+            6 | 7 => 4 * p + 8 * self.header.routines_offset as u32,
             8 => 8 * p,
             _ => unreachable!("version validated by parse_header"),
         }
@@ -236,7 +236,7 @@ impl Memory {
         match self.header.version {
             3 => 2 * p,
             4 | 5 => 4 * p,
-            7 => 4 * p + 8 * self.header.strings_offset as u32,
+            6 | 7 => 4 * p + 8 * self.header.strings_offset as u32,
             8 => 8 * p,
             _ => unreachable!("version validated by parse_header"),
         }
@@ -269,6 +269,16 @@ mod tests {
         assert_eq!(Memory::new(sample_story(3)).unwrap().unpack_string(0x0100), 0x0200);
         assert_eq!(Memory::new(sample_story(5)).unwrap().unpack_string(0x0100), 0x0400);
         assert_eq!(Memory::new(sample_story(8)).unwrap().unpack_string(0x0100), 0x0800);
+    }
+
+    #[test]
+    fn unpack_v6_uses_offsets() {
+        let mut buf = sample_story(6);
+        buf[0x28] = 0x00; buf[0x29] = 0x10; // routines_offset = 0x0010
+        buf[0x2A] = 0x00; buf[0x2B] = 0x20; // strings_offset  = 0x0020
+        let m = Memory::new(buf).unwrap();
+        assert_eq!(m.unpack_routine(0x0100), 4 * 0x0100 + 8 * 0x0010);
+        assert_eq!(m.unpack_string(0x0100), 4 * 0x0100 + 8 * 0x0020);
     }
 
     #[test]
