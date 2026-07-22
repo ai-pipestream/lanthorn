@@ -86,7 +86,7 @@ pub struct StoryEntry {
 /// `.blorb` / zips are handled by `load_story_bytes`; `.dat` covers some
 /// Infocom releases.
 const STORY_EXTS: &[&str] = &[
-    "z3", "z4", "z5", "z7", "z8", "zblorb", "blorb", "zlb", "dat", "ulx", "gblorb", "blb",
+    "z3", "z4", "z5", "z6", "z7", "z8", "zblorb", "blorb", "zlb", "dat", "ulx", "gblorb", "blb",
 ];
 
 fn has_story_ext(path: &Path) -> bool {
@@ -1108,11 +1108,12 @@ mod tests {
     #[test]
     fn scan_lists_v6_but_skips_unsupported_versions() {
         let dir = temp_dir("v6");
-        // v6 is supported since SQ-0186 (it boots) — a v6 story in a recognised
-        // extension IS now listed.
+        // v6 is supported since SQ-0186 (it boots) — a v6 story with the real
+        // `.z6` extension IS now listed (the extension is in STORY_EXTS and the
+        // header parses).
         let mut v6 = minimal_v3_story();
         v6[0x00] = 6;
-        std::fs::write(dir.join("graphic.z5"), &v6).unwrap();
+        std::fs::write(dir.join("graphic.z6"), &v6).unwrap();
         // v1/v2 remain unsupported (parse_header rejects them) → skipped.
         let mut v1 = minimal_v3_story();
         v1[0x00] = 1;
@@ -1121,7 +1122,7 @@ mod tests {
         let stories = scan_stories(&dir, &dir);
         let names: Vec<String> = stories.iter().map(|s| s.filename.clone()).collect();
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(names.iter().any(|n| n == "graphic.z5"), "v6 story is listed (supported): {names:?}");
+        assert!(names.iter().any(|n| n == "graphic.z6"), "v6 .z6 story is listed (supported): {names:?}");
         assert!(!names.iter().any(|n| n == "old.z5"), "v1 remains unsupported → skipped: {names:?}");
     }
 
