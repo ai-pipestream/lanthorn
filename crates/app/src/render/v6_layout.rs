@@ -88,27 +88,36 @@ pub fn native_extent(items: &[PositionedWindow]) -> (u16, u16) {
     (w, h)
 }
 
-/// The v6 window list split into the one story window and the rest (chrome),
-/// in input order.
+/// The v6 window list split into the story window, the story window's own
+/// picture (the room illustration — story content, NOT chrome), and everything
+/// else (chrome), in input order.
 pub struct V6Layout<'a> {
     pub story: Option<&'a PositionedWindow>,
+    /// The primary window's Graphics entry (window 0's picture canvas — a room
+    /// illustration). It belongs to the story, so it is rendered inside the story
+    /// region rather than composited as absolute chrome over the frame.
+    pub story_gfx: Option<&'a PositionedWindow>,
     pub chrome: Vec<&'a PositionedWindow>,
 }
 
-/// Classify `items`: the first primary `Buffer` becomes `story`; every other
-/// entry (in input order) goes into `chrome`. With no primary `Buffer`,
-/// `story` is `None` and all entries are chrome.
+/// Classify `items`: the first primary `Buffer` becomes `story`; window 0's own
+/// `Graphics` entry becomes `story_gfx` (story content); every other entry (in
+/// input order) goes into `chrome`. With no primary `Buffer`, `story` is `None`
+/// and non-window-0 graphics/grids are chrome.
 pub fn classify_windows(items: &[PositionedWindow]) -> V6Layout<'_> {
     let mut story = None;
+    let mut story_gfx = None;
     let mut chrome = Vec::new();
     for pw in items {
         if story.is_none() && matches!(&pw.node, WinNode::Buffer(b) if b.primary) {
             story = Some(pw);
+        } else if story_gfx.is_none() && matches!(&pw.node, WinNode::Graphics(g) if g.win == 0) {
+            story_gfx = Some(pw);
         } else {
             chrome.push(pw);
         }
     }
-    V6Layout { story, chrome }
+    V6Layout { story, story_gfx, chrome }
 }
 
 fn fill_cell(canvas: &mut RgbaImage, px: u32, py: u32, cw: u32, ch: u32, color: Rgba<u8>) {
@@ -307,6 +316,31 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
     }
 }
 
+/// Draw the story window's own picture (the room illustration) at the top-left
+/// of the story region `(sx, sy)` and return the native y below which story text
+/// should begin, so the text flows UNDER the illustration instead of the
+/// illustration overpainting the chrome/banner at the window's raw position.
+/// Returns `sy` unchanged when there is no opaque illustration content.
+pub fn draw_story_gfx(canvas: &mut RgbaImage, story_gfx: &PositionedWindow, sx: u32, sy: u32) -> u32 {
+    let WinNode::Graphics(g) = &story_gfx.node else { return sy };
+    let src = &g.canvas;
+    // The illustration sits near the source canvas's top-left; find its opaque
+    // vertical extent so text can start just below it.
+    let mut bottom = 0u32;
+    let mut any = false;
+    for (_x, y, p) in src.enumerate_pixels() {
+        if p[3] >= 128 {
+            bottom = bottom.max(y);
+            any = true;
+        }
+    }
+    if !any {
+        return sy;
+    }
+    blit_scaled(canvas, src, sx, sy, src.width(), src.height());
+    sy + bottom + FONT // one blank row of gap under the picture
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,10 +358,14 @@ mod tests {
     }
 
     fn graphics_item(x_px: u16) -> PositionedWindow {
+        graphics_item_win(x_px, 7)
+    }
+
+    fn graphics_item_win(x_px: u16, win: u32) -> PositionedWindow {
         let canvas = Arc::new(image::RgbaImage::new(1, 1));
         PositionedWindow {
             x: 0, y: 0, w: 1, h: 1, x_px, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
-            node: WinNode::Graphics(GraphicsWindow { win: 0, canvas, version: 0, upscale: false }),
+            node: WinNode::Graphics(GraphicsWindow { win, canvas, version: 0, upscale: false }),
         }
     }
 
@@ -355,7 +393,24 @@ mod tests {
         let items = vec![grid_item(1), graphics_item(2), buffer_item(3, false)];
         let layout = classify_windows(&items);
         assert!(layout.story.is_none());
+        assert!(layout.story_gfx.is_none());
         assert_eq!(layout.chrome.len(), items.len());
+    }
+
+    #[test]
+    fn window_zero_graphics_is_story_content_not_chrome() {
+        // The primary window's own picture (window 0) is the room illustration —
+        // story content, kept out of chrome so it renders inside the story region.
+        let items = vec![
+            graphics_item_win(1, 0), // window 0's illustration
+            graphics_item_win(2, 7), // window 7 frame → chrome
+            buffer_item(3, true),    // story
+        ];
+        let layout = classify_windows(&items);
+        assert_eq!(layout.story.expect("story").x_px, 3);
+        assert_eq!(layout.story_gfx.expect("story_gfx").x_px, 1);
+        assert_eq!(layout.chrome.len(), 1, "only window 7 graphics is chrome");
+        assert_eq!(layout.chrome[0].x_px, 2);
     }
 
     fn colors() -> ColorScheme {

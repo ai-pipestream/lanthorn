@@ -405,10 +405,17 @@ fn render_node(
                 // clear interior of the native canvas, then draw the whole thing scaled.
                 // Phase B will branch on `state.config.v6_render` here for the Hybrid terminal path.
                 if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
+                    // The story window's own picture (room illustration) is story
+                    // content: draw it at the top of the story region and flow text
+                    // beneath it, rather than letting it overpaint the banner.
+                    let text_top = match layout.story_gfx {
+                        Some(gfx) => v6::draw_story_gfx(&mut canvas, gfx, sx, sy).min(sy + sh.saturating_sub(8)),
+                        None => sy,
+                    };
                     let cols = (sw / 8).max(1) as u16;
-                    let rows = (sh / 8).max(1) as u16;
+                    let rows = ((sy + sh).saturating_sub(text_top) / 8).max(1) as u16;
                     let main = build_main_text(state, cols, rows);
-                    v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
+                    v6::draw_story_text(&mut canvas, &main, sx, text_top, cols, rows, default_fg);
                 }
                 state.graphics_render.borrow_mut().draw_v6_canvas(picker, &canvas, area, buf);
                 return None; // v6 main-window scroll metrics are a follow-up (SQ-0450)
