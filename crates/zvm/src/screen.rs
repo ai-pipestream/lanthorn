@@ -426,6 +426,12 @@ pub fn advertise_sound(mem: &mut Memory, on: bool) {
 pub const DEFAULT_SCREEN_ROWS: u8 = 24;
 pub const DEFAULT_SCREEN_COLS: u8 = 80;
 
+/// v6 font cell size in pixels — a tuning param (adjust in Plan 1b's TTY
+/// smoke if proportions look off). v6 addresses everything in pixels; the
+/// app quantizes to character cells by dividing by these.
+pub const V6_FONT_WIDTH: u16 = 8;
+pub const V6_FONT_HEIGHT: u16 = 8;
+
 /// Write the screen-dimension header fields for the loaded story's version.
 ///
 /// v4+: byte 0x20 = height in lines, byte 0x21 = width in chars (ZMSD §11.1).
@@ -439,6 +445,15 @@ pub fn write_screen_dims(mem: &mut Memory, rows: u8, cols: u8) {
     }
     let rows = rows.max(1);
     let cols = cols.max(1);
+    if version == 6 {
+        mem.write_byte(0x20, rows);
+        mem.write_byte(0x21, cols);
+        mem.write_word(0x22, cols as u16 * V6_FONT_WIDTH); // screen width, pixels
+        mem.write_word(0x24, rows as u16 * V6_FONT_HEIGHT); // screen height, pixels
+        mem.write_byte(0x26, V6_FONT_WIDTH as u8); // font width, pixels
+        mem.write_byte(0x27, V6_FONT_HEIGHT as u8); // font height, pixels
+        return;
+    }
     mem.write_byte(0x20, rows);
     mem.write_byte(0x21, cols);
     if version >= 5 {
@@ -631,6 +646,18 @@ mod tests {
         write_screen_dims(&mut mem, 0, 0);
         assert_eq!(mem.read_byte(0x20), 1, "zero rows clamped to 1");
         assert_eq!(mem.read_byte(0x21), 1, "zero cols clamped to 1");
+    }
+
+    #[test]
+    fn v6_advertises_pixel_screen_and_font() {
+        let mut m = Memory::new(sample_story(6)).unwrap();
+        write_screen_dims(&mut m, 24, 80);
+        assert_eq!(m.read_byte(0x20), 24, "rows");
+        assert_eq!(m.read_byte(0x21), 80, "cols");
+        assert_eq!(m.read_word(0x22), 80 * V6_FONT_WIDTH, "screen width in pixels");
+        assert_eq!(m.read_word(0x24), 24 * V6_FONT_HEIGHT, "screen height in pixels");
+        assert_eq!(m.read_byte(0x26), V6_FONT_WIDTH as u8, "font width");
+        assert_eq!(m.read_byte(0x27), V6_FONT_HEIGHT as u8, "font height");
     }
 
     #[test]
