@@ -104,8 +104,20 @@ SQ-0450.)
 
 A native-resolution `N_w × N_h` RGBA canvas, **transparent by default**:
 
-1. For each chrome window (ascending window number = back-to-front): blit its
-   picture canvas at the window's native pixel rect (honoring source alpha).
+1. Composite the chrome-window pictures, **preserving picture-on-picture draw
+   order** (later draws land on top), each at its native pixel rect honoring
+   source alpha:
+   - *Within a window*, the existing per-window picture canvas already composites
+     in draw order — this is how a compass is built up: a base plus a stack of
+     small transparent direction-indicator images drawn over it at the same spot
+     (Zork0 draws ~8 of them into its top window). That must render as the base
+     with the lit directions on top.
+   - *Across overlapping chrome windows* (e.g. a compass window layered over the
+     banner-frame window), composite in the order the windows were last drawn to,
+     so a later overlay lands on top of an earlier background. Non-overlapping
+     chrome windows are order-independent.
+
+   This picture stacking is the chrome plane's z-order stress test (see Testing).
 2. Rasterize each chrome window's **grid text** (status) with the embedded bitmap
    font at native pixel positions: cell `(col, row)` → native
    `(win.x_coord + col·FONT_W, win.y_coord + row·FONT_H)`, colored by the cell's
@@ -216,9 +228,11 @@ classify_windows ──► story window (window 0)     chrome windows (1..7)
 
 Native 320×200. Windows: 7 = full-screen frame `(0,0,320,200)` (top banner
 Pict 5 at y=1..35, left column at x=1..37, right column at x=284..321,
-transparent interior); 1 = status `(1,1,320,5)` with grid text "Banquet Hall",
-"Moves:", score positioned by `set_cursor`; 0 = story `(6,6,310,192)`,
-`set_margins left=32 right=0`.
+transparent interior); 1 = status `(1,1,320,5)` carrying the compass — a base
+plus ~8 overlapping transparent direction-indicator pictures drawn to the same
+spot (available exits) — and grid status text "Banquet Hall", "Moves:", score
+positioned by `set_cursor`; 0 = story `(6,6,310,192)`, `set_margins left=32
+right=0`.
 
 - Classify: story = window 0; chrome = windows 1 & 7.
 - Chrome canvas: frame + rasterized status; interior transparent.
@@ -236,6 +250,12 @@ Unit (pure, deterministic — no terminal):
 - `classify_windows`: the primary buffer is the story window; all others chrome.
 - `build_chrome_canvas`: frame pixels opaque, story-window interior transparent,
   status glyph pixels present at expected native coords.
+- **Picture-on-picture z-order (compass stress test):** a stack of overlapping
+  transparent images drawn to the same spot in draw order composites base-first,
+  last-on-top — the later (indicator) image's opaque pixels win over the earlier
+  (base) ones, and both windows' contributions land in the correct order when a
+  compass window overlays a banner window. Mirrors Zork0's compass + direction
+  indicators.
 - `story_viewport`: given a synthetic chrome canvas with an opaque border ring,
   the returned cell rect is the clear interior, snapped inward, never overlapping
   an opaque pixel; full-pane when no chrome.
