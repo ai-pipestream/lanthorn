@@ -40,6 +40,24 @@ image-over-text z-order conflict.
 This is generic for v6 (no per-game constants) and degrades cleanly: with no
 image protocol, it falls back to the existing Phase 1b cell composite.
 
+### Render modes
+
+Three selectable modes (config `v6_render`, default `hybrid`):
+
+- **`hybrid`** (default) — the chrome-ring + terminal-story split described here.
+- **`raster`** — the whole pane as one scaled pixel image (chrome + story text
+  rasterized with the bitmap font). Deliberately **feature-limited** (no terminal
+  selection/scrollback/inline-image in the story), retained as the faithful
+  pixel-look option and a fallback where the hybrid ring is unwanted. It reuses
+  the same window classification and clear-interior placement, so text still
+  lands in the frame's interior — it just draws the story as bitmap glyphs into
+  the one canvas instead of leaving a viewport for terminal text.
+- **`cell`** — the existing Phase 1b cell composite, used automatically when no
+  image protocol is available (regardless of the configured mode).
+
+`hybrid` and `raster` share everything up to the story region; they diverge only
+in how the story area is drawn (terminal viewport vs bitmap into the canvas).
+
 ### Why this is the right shape
 
 - The story text is the bulk of what the player reads; keeping it in the terminal
@@ -280,9 +298,11 @@ the composited terminal image.
 
 - **In:** window classification; uniform aspect-preserving scale + letterbox;
   chrome canvas (frame + status raster) with transparent interior; clear-interior
-  story viewport; chrome ring image bands; terminal story render (text +
-  scrollback + inline images) in the viewport; cell fallback with no picker;
-  unit + integration + visual-confirm tests.
+  story viewport; the `raster` mode (whole-pane image, story as bitmap) as a
+  retained feature-limited option; the `hybrid` mode (chrome ring image bands +
+  terminal story render with scrollback + inline images) as default; the
+  `v6_render` mode selector; `cell` fallback with no picker; unit + integration +
+  visual-confirm tests.
 - **Out (SQ-0450 / later):** pixel-precise placement of pictures drawn into the
   story window (currently inline); per-image `Reso` scaling ratios; sub-cell
   precision at the story/frame seam beyond snapping; edge-relative status cursor
