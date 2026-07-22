@@ -283,6 +283,14 @@ impl GameSession {
     /// game's opening text into the sink.  The sink is NOT drained here; the
     /// caller can call `take_transcript` to retrieve the banner/intro text.
     pub fn new(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>) -> Result<GameSession, ZError> {
+        Self::new_with_trace(story, honor_game_colours, sound_available, interpreter_number, false)
+    }
+
+    /// Like [`new`](Self::new) but enables execution tracing BEFORE the VM runs to
+    /// its first input prompt, so the boot/initialisation code — the whole reason
+    /// `--debug` exists (a mid-game `/debug` can never see it) — is captured into
+    /// the cumulative coverage set. (SQ-0449)
+    pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
         let sink = Box::new(CaptureSink::new());
         let mut machine = Machine::with_output(mem, sink);
@@ -290,6 +298,9 @@ impl GameSession {
         machine.set_sound_available(sound_available);
         machine.set_interpreter_number(interpreter_number);
         machine.init_caps();
+        // Trace from the very first instruction when requested, so the opening
+        // run below records boot PCs into `ever_exec_pcs`.
+        machine.trace_exec = trace_from_boot;
 
         let mut quit = false;
         let pending = loop {
@@ -753,7 +764,18 @@ impl GameSession {
         {
             let mut slot = self.disasm_cache.borrow_mut();
             if slot.is_none() {
-                *slot = Some(zvm::cpu::disasm_cache::DisasmCache::build(&self.machine.mem));
+                let mut cache = zvm::cpu::disasm_cache::DisasmCache::build(&self.machine.mem);
+                // Fold the ENTIRE cumulative "ever executed" set ONCE at build
+                // time (covers loaded-sidecar seed + all boot/turn PCs) so those
+                // regions decode as real code (soft→rd re-decode). The per-turn
+                // `exec_pcs` fold in `fold_confirmations` handles later turns; this
+                // stays O(build), never O(turn·|ever|). (SQ-0449)
+                let mem = &self.machine.mem;
+                for &pc in &self.machine.ever_exec_pcs {
+                    cache.confirm_pc(mem, pc);
+                }
+                self.machine.mem.take_mem_fault();
+                *slot = Some(cache);
             }
         } // drop borrow_mut before confirmation / the shared borrow
         // Runtime confirmation, once per turn (skip while parked at same PC).
@@ -1118,7 +1140,13 @@ impl Engine for GameSession {
 
     fn set_debug_trace(&mut self, on: bool) {
         self.machine.trace_exec = on;
+        // Only the per-turn set is cleared when tracing stops; the cumulative
+        // `ever_exec_pcs` (permanent colour + persisted coverage) is preserved.
         if !on { self.machine.exec_pcs.clear(); }
+    }
+
+    fn seed_executed_pcs(&mut self, pcs: &std::collections::HashSet<u32>) {
+        self.machine.seed_executed(pcs.iter().copied());
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -1248,6 +1276,10 @@ impl Debugger for GameSession {
 
     fn executed_pcs(&self) -> std::collections::HashSet<u32> {
         self.machine.exec_pcs.clone()
+    }
+
+    fn ever_executed_pcs(&self) -> std::collections::HashSet<u32> {
+        self.machine.ever_exec_pcs.clone()
     }
 
     fn stack_lines(&self) -> Vec<String> {
@@ -1991,6 +2023,22 @@ mod tests {
         let session = GameSession::new(story, false, false, None).expect("GameSession::new");
         let loc = session.current_location().expect("v5 starting room must be detected at boot");
         assert!(loc.name.starts_with("West"), "expected West of House, got {:?}", loc.name);
+    }
+
+    #[test]
+    fn new_with_trace_captures_boot_pcs() {
+        // --debug (SQ-0449) traces from the first boot instruction, so the
+        // cumulative set is non-empty even before any player turn — capturing the
+        // boot/init code a mid-game /debug can never see.
+        let story = read_char_story_v5();
+        let traced = GameSession::new_with_trace(story.clone(), false, false, None, true)
+            .expect("traced session");
+        assert!(!traced.machine.ever_exec_pcs.is_empty(),
+            "boot PCs must be captured when tracing from boot");
+        // Without tracing, the cumulative set stays empty until a traced turn runs.
+        let untraced = GameSession::new(story, false, false, None).expect("untraced session");
+        assert!(untraced.machine.ever_exec_pcs.is_empty(),
+            "no capture without --debug");
     }
 
     /// Variant of `read_char_story_v5`: after the read_char completes, instead

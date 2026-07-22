@@ -268,7 +268,9 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // setup (screen dims, undo cap) runs in its arm before boxing.
     let mut session: Box<dyn Engine> = match loaded {
         app::hints::LoadedStory::ZCode(bytes) => {
-            let mut s = match GameSession::new(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number) {
+            // `--debug` (SQ-0449): trace from the first boot instruction so the
+            // game's initialisation code is captured (a later `/debug` can't).
+            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number, cli.debug) {
                 Ok(s) => s,
                 Err(e) => {
                     use zvm::error::ZError;
@@ -330,6 +332,17 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // Strip the game's own inline read prompt only when the dedicated command
     // bar is on (SQ-0264); otherwise inline-prompt mode keeps the game's ">".
     session.set_strip_prompt(cfg.command_bar);
+
+    // `--debug` (SQ-0449): tracing is already on from the first boot instruction
+    // (the Z-machine arm used `GameSession::new_with_trace` above), so the boot
+    // PCs are already in the cumulative set. Here we just seed prior runs' coverage
+    // from the per-story sidecar so those lines colour immediately too.
+    if cli.debug {
+        let loaded = app::pcset_store::read_pcs(&game_dir);
+        if !loaded.is_empty() {
+            session.seed_executed_pcs(&loaded);
+        }
+    }
 
     // Engine is up — stop the loading spinner and let it erase its line.
     loading_done.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -619,6 +632,19 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
         }
         eprintln!("babelmap: story ended without asking for input.");
         std::process::exit(0);
+    }
+
+    // `--debug` (SQ-0449): persist the cumulative coverage on story-end, and
+    // auto-open the debug inspector now (mirrors `/debug`'s open recipe). Tracing
+    // was already enabled above; `set_debug_trace(true)` here is idempotent.
+    state.persist_debug_trace = cli.debug;
+    if cli.debug && session.debugger().is_some() {
+        session.set_debug_trace(true);
+        let dbg = session.debugger().expect("checked above");
+        let mut panel = app::debug_panel::DebugPanelState::new(dbg.pc());
+        panel.refresh(dbg);
+        state.debug = Some(panel);
+        state.focus = app::state::Focus::Map;
     }
 
     // ── 4. Terminal setup ─────────────────────────────────────────────────────

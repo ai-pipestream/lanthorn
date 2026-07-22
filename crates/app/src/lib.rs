@@ -37,6 +37,7 @@ pub mod list_scroll;
 pub mod map_dump;
 pub mod notify;
 pub mod pager;
+pub mod pcset_store;
 pub mod persist_files;
 pub mod picker;
 pub mod reload;

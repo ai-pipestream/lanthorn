@@ -89,6 +89,10 @@ pub struct DebugSnapshot {
     /// Instruction start-PCs executed during the last command turn (execution-
     /// coverage marking — a `|` gutter is drawn beside these disasm lines).
     pub executed: std::collections::HashSet<u32>,
+    /// Cumulative instruction start-PCs ever executed (plus seeded prior coverage);
+    /// never cleared per turn. Drives the permanent "executed" (blue) colour,
+    /// decoupled from the last-turn `|` gutter. (SQ-0449)
+    pub executed_ever: std::collections::HashSet<u32>,
     /// Detail lines (attributes + properties) for each currently-expanded
     /// object, keyed by object number. Refreshed each turn for whichever
     /// objects are still in `DebugPanelState::expanded_objects`.
@@ -243,6 +247,7 @@ impl DebugPanelState {
         self.snapshot.eval_stack = dbg.eval_stack_lines();
         self.snapshot.memory = dbg.memory_hex(self.mem_addr, MEM_WINDOW);
         self.snapshot.executed = dbg.executed_pcs();
+        self.snapshot.executed_ever = dbg.ever_executed_pcs();
         self.snapshot.object_details = self.expanded_objects.iter()
             .map(|&o| (o, dbg.object_detail(o)))
             .collect();

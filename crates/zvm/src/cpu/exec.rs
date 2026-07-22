@@ -189,6 +189,11 @@ pub struct Machine {
     pub trace_exec: bool,
     /// Start PCs of instructions executed since the host last cleared them.
     pub exec_pcs: std::collections::HashSet<u32>,
+    /// Cumulative start PCs of every instruction ever executed while tracing was
+    /// on — NEVER cleared per turn (unlike `exec_pcs`). Drives the permanent
+    /// "executed" disassembly colour, and can be pre-seeded from host-persisted
+    /// coverage (the debug PC-set sidecar) via [`seed_executed`](Machine::seed_executed).
+    pub ever_exec_pcs: std::collections::HashSet<u32>,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -247,6 +252,7 @@ impl Machine {
             screen_trace: Vec::new(),
             trace_exec: false,
             exec_pcs: std::collections::HashSet::new(),
+            ever_exec_pcs: std::collections::HashSet::new(),
         }
     }
 
@@ -288,6 +294,13 @@ impl Machine {
         self.interpreter_number = n;
     }
 
+    /// Seed the cumulative "ever executed" set from host-persisted knowledge
+    /// (the debug PC-set sidecar) so prior runs' coverage colours immediately.
+    /// Independent of `trace_exec` — the host seeds regardless of tracing state.
+    pub fn seed_executed(&mut self, pcs: impl IntoIterator<Item = u32>) {
+        self.ever_exec_pcs.extend(pcs);
+    }
+
     /// Borrow the default `BufferOutput` sink if that is what `out` holds, else `None`.
     pub fn buffer_output(&self) -> Option<&BufferOutput> {
         self.out.as_any().downcast_ref::<BufferOutput>()
@@ -309,6 +322,7 @@ impl Machine {
         self.cur_instr_pc = instr_start_pc;
         if self.trace_exec {
             self.exec_pcs.insert(instr_start_pc);
+            self.ever_exec_pcs.insert(instr_start_pc);
         }
         let instr = decode(&self.mem, self.state.pc, version);
         let op_name = opcode_name(instr.operand_count.clone(), instr.opcode);
@@ -5717,6 +5731,24 @@ pub(crate) mod tests {
         m.step();
         assert!(m.exec_pcs.contains(&first_pc), "{:?}", m.exec_pcs);
         assert!(m.exec_pcs.contains(&second_pc), "{:?}", m.exec_pcs);
+        // The cumulative set mirrors the per-turn set as instructions run…
+        assert!(m.ever_exec_pcs.contains(&first_pc), "{:?}", m.ever_exec_pcs);
+        assert!(m.ever_exec_pcs.contains(&second_pc), "{:?}", m.ever_exec_pcs);
+        // …but a host clear of the per-turn set leaves the cumulative set intact.
+        m.exec_pcs.clear();
+        assert!(m.exec_pcs.is_empty());
+        assert!(m.ever_exec_pcs.contains(&first_pc), "{:?}", m.ever_exec_pcs);
+        assert!(m.ever_exec_pcs.contains(&second_pc), "{:?}", m.ever_exec_pcs);
+    }
+
+    #[test]
+    fn seed_executed_extends_the_cumulative_set() {
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        m.seed_executed([0x0400u32, 0x0500]);
+        assert!(m.ever_exec_pcs.contains(&0x0400));
+        assert!(m.ever_exec_pcs.contains(&0x0500));
+        // Seeding does not touch the per-turn set (only cumulative coverage).
+        assert!(m.exec_pcs.is_empty());
     }
 
     // -----------------------------------------------------------------------

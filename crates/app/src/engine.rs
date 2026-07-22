@@ -406,6 +406,13 @@ pub trait Debugger {
     /// The set of instruction start-PCs executed during the last command turn
     /// (empty until a turn runs with tracing on).
     fn executed_pcs(&self) -> std::collections::HashSet<u32>;
+    /// The cumulative set of instruction start-PCs ever executed while tracing
+    /// was on (never cleared per turn), plus any host-seeded prior coverage.
+    /// Drives the permanent "executed" disassembly colour. Default empty for
+    /// engines/doubles with no cumulative model. (SQ-0449)
+    fn ever_executed_pcs(&self) -> std::collections::HashSet<u32> {
+        std::collections::HashSet::new()
+    }
     /// Call stack, one or more lines per frame, innermost last.
     fn stack_lines(&self) -> Vec<String>;
     /// Evaluation/value stack, top first, marking frame-base boundaries.
@@ -572,6 +579,12 @@ pub trait Engine {
 
     /// Enable/disable per-turn execution tracing for the debug inspector.
     fn set_debug_trace(&mut self, _on: bool) {}
+
+    /// Seed the cumulative "ever executed" coverage set from host-persisted
+    /// knowledge (the debug PC-set sidecar) so prior runs' coverage colours the
+    /// disassembly immediately. Default no-op for engines with no such model.
+    /// (SQ-0449)
+    fn seed_executed_pcs(&mut self, _pcs: &std::collections::HashSet<u32>) {}
 
     // ── persistence (engine-tagged) ──
     /// Capture the game state as an engine-tagged save.

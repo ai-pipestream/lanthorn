@@ -219,6 +219,12 @@ pub struct Cli {
     /// (or `all`/`none`). Output goes to <user_dir>/trace.log. (trace feature)
     #[arg(long, value_name = "LIST")]
     pub trace: Option<String>,
+
+    /// Trace execution from boot into the debug disassembly cache and auto-open
+    /// the inspector. Loads/saves a per-story executed-PC sidecar so coverage
+    /// (blue lines) persists across runs. (SQ-0449)
+    #[arg(long)]
+    pub debug: bool,
 }
 
 /// Terminal image protocol for cover art. `Auto` detects the best available
@@ -967,6 +973,7 @@ mod tests {
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             trace: None,
+            debug: false,
         };
 
         let cfg = resolve(&cli);
@@ -985,6 +992,7 @@ mod tests {
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             trace: None,
+            debug: false,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir.file_name().unwrap(), ".babelmap");
@@ -1004,6 +1012,7 @@ mod tests {
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             trace: None,
+            debug: false,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, PathBuf::from("/tmp/from-file"));
@@ -1384,6 +1393,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             trace: None,
+            debug: false,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.acceleration);
@@ -1401,6 +1411,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             trace: None,
+            debug: false,
         };
         // Absent flag: sound stays on (config default).
         assert!(resolve(&base).enable_sound);
@@ -1421,6 +1432,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: false,
             trace: None,
+            debug: false,
         };
         cli.trace = Some("screen,map".to_string());
         let cfg = resolve(&cli);
@@ -1441,6 +1453,7 @@ use_defaults = false
             image_protocol: ImageProtocol::Auto,
             no_images: true,
             trace: None,
+            debug: false,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.images);

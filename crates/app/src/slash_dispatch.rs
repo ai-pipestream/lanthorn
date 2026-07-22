@@ -435,6 +435,13 @@ fn toggle_debug(state: &mut AppState, session: &mut dyn Engine) {
         session.set_debug_trace(false);
     } else if session.debugger().is_some() {
         session.set_debug_trace(true);
+        // Seed cumulative coverage from a prior `--debug` run's sidecar so a casual
+        // `/debug` immediately shows the blue "ever executed" lines (SQ-0449).
+        // Idempotent — re-seeding an already-populated set is harmless.
+        let loaded = app::pcset_store::read_pcs(&state.game_dir);
+        if !loaded.is_empty() {
+            session.seed_executed_pcs(&loaded);
+        }
         let dbg = session.debugger().expect("checked above");
         let mut panel = app::debug_panel::DebugPanelState::new(dbg.pc());
         panel.refresh(dbg);

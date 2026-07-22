@@ -54,26 +54,32 @@ fn draw_disasm(buf: &mut Buffer, content: Rect, panel: &DebugPanelState, state: 
             continue;
         }
         let Some(line) = disasm.get(row_entry.line_idx) else { continue };
-        // Final confidence tier: a Data line is always `data`; else runtime
-        // execution (this line's leading address ran last turn — ground truth)
-        // wins over the static provenance; else the static Rd/Soft tag. A missing
-        // provenance entry falls back to the plain `rd` tier.
-        let ran = line.get(0..6)
-            .and_then(|a| u32::from_str_radix(a, 16).ok())
-            .is_some_and(|addr| panel.snapshot.executed.contains(&addr));
+        // COLOUR and GLYPH are decoupled (SQ-0449): the confidence tier (colour)
+        // is driven by CUMULATIVE coverage — a line that EVER ran stays blue —
+        // while the `|` gutter marks ONLY the LAST command's execution. Data
+        // always wins the colour tier; else ever-executed; else the static tag.
+        let addr = line.get(0..6).and_then(|a| u32::from_str_radix(a, 16).ok());
+        let ran_ever = addr.is_some_and(|a| panel.snapshot.executed_ever.contains(&a));
+        let ran_last = addr.is_some_and(|a| panel.snapshot.executed.contains(&a));
         let prov = panel.snapshot.disasm_prov.get(row_entry.line_idx).copied().unwrap_or(DisasmProvenance::Rd);
         let tier = match prov {
             DisasmProvenance::Data => &data,
-            _ if ran => &executed,
+            _ if ran_ever => &executed,
             DisasmProvenance::Soft => &soft,
             DisasmProvenance::Rd => &rd,
         };
         let tier_style = tier.style;
-        // 1-column gutter mark from the tier selector's glyph (the executed tier's
-        // `|` replaces the old hardcoded exec mark; rd/soft/data default to a
-        // space, so they show nothing unless themed). Text is drawn one column in
-        // so the gutter never overlaps it, and it carries the tier's line style.
-        let mark = tier.glyph.as_ref().and_then(|g| g.single.as_deref()).unwrap_or(" ");
+        // Gutter: only a line that ran THIS turn gets the executed tier's `|`.
+        // A cumulative-executed line is blue (tier == executed, whose glyph is
+        // `|`) but must NOT carry the bar unless it ran last turn — so force a
+        // space there. Other tiers use their own glyph (default space).
+        let mark = if ran_last {
+            executed.glyph.as_ref().and_then(|g| g.single.as_deref()).unwrap_or("|")
+        } else if ran_ever {
+            " " // executed tier chosen for colour, but not last turn → no bar
+        } else {
+            tier.glyph.as_ref().and_then(|g| g.single.as_deref()).unwrap_or(" ")
+        };
         draw_str_clipped(buf, content.x, y, mark, tier_style, content);
         draw_str_clipped(buf, content.x + 1, y, line, tier_style, text_rect);
         underline_clickables(buf, content.x + 1, y, line, tier_style, Section::Disasm, text_rect);
@@ -545,7 +551,9 @@ mod tests {
             DisasmProvenance::Rd,
         ];
         // 0x1000 ran last turn; 0x1008 is also in the set but Data must still win.
+        // Cumulative coverage (colour driver) mirrors the per-turn set here (SQ-0449).
         panel.snapshot.executed = std::collections::HashSet::from([0x1000, 0x1008]);
+        panel.snapshot.executed_ever = std::collections::HashSet::from([0x1000, 0x1008]);
         state.debug = Some(panel);
 
         let exec = state.colors.theme.get("debug.disasm_executed");
@@ -581,6 +589,59 @@ mod tests {
 
         // Rd line (0x100c, row 4): plain rd fg.
         assert_eq!(buf.cell((tx, y + 4)).unwrap().style().fg, rd.fg);
+    }
+
+    #[test]
+    fn cumulative_executed_colours_blue_but_only_last_turn_gets_the_bar() {
+        // SQ-0449: colour (blue/executed tier) is driven by the CUMULATIVE
+        // "ever executed" set; the `|` gutter is driven ONLY by the last-turn set.
+        let mut state = crate::state::AppState::default();
+        state.colors.dialog_box_style = crate::render::paneframe::BorderStyle::Single;
+        let mut panel = crate::debug_panel::DebugPanelState::new(0x1000);
+        panel.pc = 0x1000;
+        panel.snapshot.disasm = vec![
+            "001000  add".into(),      // ever-executed, NOT last turn → blue, no bar
+            "001004  sub".into(),      // ever + last turn → blue, `|`
+            "001008  .byte 00".into(), // Data + ever-executed → data tier wins colour
+            "00100c  mul".into(),      // never executed → rd tier
+        ];
+        panel.snapshot.disasm_prov = vec![
+            DisasmProvenance::Rd,
+            DisasmProvenance::Rd,
+            DisasmProvenance::Data,
+            DisasmProvenance::Rd,
+        ];
+        panel.snapshot.executed_ever = std::collections::HashSet::from([0x1000, 0x1004, 0x1008]);
+        panel.snapshot.executed = std::collections::HashSet::from([0x1004]); // only last turn
+        state.debug = Some(panel);
+
+        let exec = state.colors.theme.get("debug.disasm_executed").style;
+        let data = state.colors.theme.get("debug.disasm_data").style;
+        let rd = state.colors.theme.get("debug.disasm_rd").style;
+
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        draw_debug_panel(&state, area, &mut buf);
+
+        let [left, ..] = crate::debug_panel::window_rects(area);
+        let (gx, tx) = (left.x + 1, left.x + 2);
+        let y = left.y + 1; // first content row (the divider)
+
+        // (a) ever-executed but NOT last turn (0x1000): blue colour, blank gutter.
+        assert_eq!(buf.cell((tx, y + 1)).unwrap().style().fg, exec.fg);
+        assert_eq!(buf.cell((gx, y + 1)).unwrap().symbol(), " ", "no bar unless last turn");
+
+        // (b) ever-executed AND last turn (0x1004): blue colour AND the `|` bar.
+        assert_eq!(buf.cell((tx, y + 2)).unwrap().style().fg, exec.fg);
+        assert_eq!(buf.cell((gx, y + 2)).unwrap().symbol(), "|");
+
+        // (c) Data beats ever-executed for colour (0x1008): data fg, not blue.
+        assert_eq!(buf.cell((tx, y + 3)).unwrap().style().fg, data.fg);
+        assert_ne!(data.fg, exec.fg, "data tier must differ from executed");
+
+        // Never-executed (0x100c): plain rd fg, blank gutter.
+        assert_eq!(buf.cell((tx, y + 4)).unwrap().style().fg, rd.fg);
+        assert_eq!(buf.cell((gx, y + 4)).unwrap().symbol(), " ");
     }
 
     #[test]

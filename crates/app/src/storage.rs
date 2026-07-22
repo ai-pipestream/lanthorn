@@ -39,12 +39,13 @@ pub fn is_reserved_slug(slug: &str) -> bool {
 
 /// Delete the game's AUTO persistent data so the next boot starts from scratch:
 /// the Glk VFS cache (`default.glkvfs`), the Z-machine aux sidecar (`default.aux`),
-/// and the auto/singleton Save State (`default.babelmap`). The player's named
-/// Save States (`<slug>.babelmap`) and in-game saves (`<slug>.qzl` / `_*.qzl`)
-/// are left untouched — only the three reserved `default.*` files go. A missing
-/// file is not an error.
+/// the auto/singleton Save State (`default.babelmap`), and the debug executed-PC
+/// coverage sidecar (`default.pcs`). The player's named Save States
+/// (`<slug>.babelmap`) and in-game saves (`<slug>.qzl` / `_*.qzl`) are left
+/// untouched — only the reserved `default.*` files go. A missing file is not an
+/// error.
 pub fn delete_auto_persistent(game_dir: &Path) {
-    for name in ["default.glkvfs", "default.aux", "default.babelmap"] {
+    for name in ["default.glkvfs", "default.aux", "default.babelmap", "default.pcs"] {
         let path = game_dir.join(name);
         match std::fs::remove_file(&path) {
             Ok(()) => {}
@@ -127,8 +128,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        // The three auto sidecars that must go.
-        for f in ["default.glkvfs", "default.aux", "default.babelmap"] {
+        // The auto sidecars that must go.
+        for f in ["default.glkvfs", "default.aux", "default.babelmap", "default.pcs"] {
             std::fs::write(tmp.join(f), b"x").unwrap();
         }
         // Player data that must survive.
@@ -138,7 +139,7 @@ mod tests {
 
         delete_auto_persistent(&tmp);
 
-        for f in ["default.glkvfs", "default.aux", "default.babelmap"] {
+        for f in ["default.glkvfs", "default.aux", "default.babelmap", "default.pcs"] {
             assert!(!tmp.join(f).exists(), "{f} should be deleted");
         }
         for f in ["myslot.babelmap", "quick.qzl", "_autosave.qzl"] {

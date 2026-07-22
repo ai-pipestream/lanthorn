@@ -1519,6 +1519,11 @@ pub struct AppState {
     /// `/quit-to-library`. (SQ-0435)
     pub launched_from_library: bool,
 
+    /// True when launched with `--debug`: the cumulative executed-PC coverage set
+    /// is written to the per-story `.pcs` sidecar on story-end. Set once at
+    /// startup. (SQ-0449)
+    pub persist_debug_trace: bool,
+
     /// Per-turn rewind/replay history. Filled when `config.record_turn_history`
     /// is on; persisted into the `.babelmap` archive. Empty otherwise.
     pub history: Vec<crate::history::TurnRecord>,
@@ -1768,6 +1773,7 @@ impl Default for AppState {
             unsaved_progress: false,
             exit_target: ExitTarget::Exit,
             launched_from_library: false,
+            persist_debug_trace: false,
             history: Vec::new(),
             pending_filename: None,
             filename_submitted: None,
