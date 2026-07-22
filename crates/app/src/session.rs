@@ -649,6 +649,10 @@ impl GameSession {
                     y,
                     w: cols,
                     h: rows,
+                    x_px: win.x_coord,
+                    y_px: win.y_coord,
+                    w_px: win.x_size,
+                    h_px: win.y_size,
                     node: WinNode::Graphics(GraphicsWindow {
                         win: i as u32,
                         canvas: canvas.arc(),
@@ -686,7 +690,17 @@ impl GameSession {
                     reverse: false,
                 })
             };
-            text_entries.push(PositionedWindow { x, y, w: cols, h: rows, node });
+            text_entries.push(PositionedWindow {
+                x,
+                y,
+                w: cols,
+                h: rows,
+                x_px: win.x_coord,
+                y_px: win.y_coord,
+                w_px: win.x_size,
+                h_px: win.y_size,
+                node,
+            });
         }
 
         // content_size: the max right/bottom cell extent actually covered by a

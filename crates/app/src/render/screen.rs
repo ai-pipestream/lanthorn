@@ -1965,6 +1965,10 @@ mod tests {
             y: 0,
             w: 10,
             h: 6,
+            x_px: 0,
+            y_px: 0,
+            w_px: 80,
+            h_px: 48,
             node: WinNode::Graphics(crate::engine::GraphicsWindow {
                 win: 1,
                 canvas: std::sync::Arc::new(img),
@@ -1978,7 +1982,17 @@ mod tests {
         grid.resize(2, 3);
         grid.active_rows = 2;
         grid.put(1, 1, 'X', 0);
-        let foreground = PositionedWindow { x: 2, y: 2, w: 3, h: 2, node: WinNode::Grid(grid) };
+        let foreground = PositionedWindow {
+            x: 2,
+            y: 2,
+            w: 3,
+            h: 2,
+            x_px: 16,
+            y_px: 16,
+            w_px: 24,
+            h_px: 16,
+            node: WinNode::Grid(grid),
+        };
 
         let model = ScreenModel {
             root: WinNode::Layered(vec![background, foreground]),

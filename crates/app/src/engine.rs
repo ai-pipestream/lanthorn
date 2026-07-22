@@ -239,6 +239,13 @@ pub struct PositionedWindow {
     pub y: u16,
     pub w: u16,
     pub h: u16,
+    /// Game-pixel origin/size (font cell = 8 px) for the Phase 1c pixel
+    /// composite. `x`/`y`/`w`/`h` above are the cell-quantized rect used by the
+    /// Phase 1b fallback; these preserve the sub-cell offset it discards.
+    pub x_px: u16,
+    pub y_px: u16,
+    pub w_px: u16,
+    pub h_px: u16,
     pub node: WinNode,
 }
 

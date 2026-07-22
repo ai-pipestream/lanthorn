@@ -167,3 +167,40 @@ fn zork0_v6_windows_smoke() {
         );
     }
 }
+
+/// Phase 1c Task 2: `PositionedWindow` now carries game-pixel rects alongside
+/// the existing cell rect. Boots Zork0 the same way `zork0_v6_windows_smoke`
+/// does, builds the initial v6 `ScreenModel`, and asserts every positioned
+/// window's pixel rect is consistent with its cell rect at 8 px/cell
+/// (`cell = px / 8`) and that live windows have a nonzero pixel size.
+#[test]
+fn v6_positioned_windows_carry_game_pixel_rects() {
+    let story_path = stories_dir().join("zork0-r393-s890714.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims)
+            .expect("Zork0 (v6) should load and boot without a ZError");
+    assert!(!session.quit, "Zork0 quit during boot");
+    assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
+
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+
+    let initial_screen = session.screen();
+    let WinNode::Layered(items) = &initial_screen.root else {
+        panic!("v6 story's screen() root must be WinNode::Layered, got {:?}", initial_screen.root);
+    };
+    assert!(!items.is_empty(), "v6 model has positioned windows");
+    for it in items {
+        assert_eq!(it.x, it.x_px / 8, "cell x derived from px x");
+        assert_eq!(it.y, it.y_px / 8, "cell y derived from px y");
+        assert!(it.w_px > 0 && it.h_px > 0, "live window has nonzero pixel size");
+    }
+}
