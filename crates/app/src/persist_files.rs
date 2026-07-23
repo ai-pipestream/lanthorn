@@ -544,7 +544,7 @@ mod tests {
         let ifid = "ZCODE-1-TEST00-0009";
 
         // "Default" slugifies to "default" — reserved for the auto/singleton slot.
-        let err = super::save_named(&dir, ifid, "Default", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 1, None, None, &[], &[], &[], &[])
+        let err = super::save_named(&dir, ifid, "Default", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 1, None, None, &[], &[], &[], &[])
             .expect_err("reserved slug must be rejected");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(!dir.join("default.babelmap").exists(), "must not clobber the default slot");
@@ -565,11 +565,11 @@ mod tests {
             .expect("default save ok");
 
         // Write two named saves.
-        super::save_named(&dir, ifid, "save-a", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 10, None, None, &[], &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "save-a", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 10, None, None, &[], &[], &[], &[]).unwrap();
         // Small sleep between named saves so timestamps differ, but since we
         // can't sleep in tests, we directly patch the timestamps via the archive
         // — instead, just verify ordering constraint is maintained.
-        super::save_named(&dir, ifid, "save-b", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 20, None, None, &[], &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "save-b", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 20, None, None, &[], &[], &[], &[]).unwrap();
 
         let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 3, "should find 3 saves (1 default + 2 named)");
@@ -658,7 +658,7 @@ mod tests {
         let mapper = Mapper::default();
         let ifid = "ZCODE-1-TEST00-0004";
 
-        super::save_named(&dir, ifid, "to-delete", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 5, None, None, &[], &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "to-delete", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 5, None, None, &[], &[], &[], &[]).unwrap();
         let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 1);
         let path = saves[0].path.clone();
