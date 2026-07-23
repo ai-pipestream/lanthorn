@@ -1434,9 +1434,29 @@ fn render_middle(
         // Inline images parallel the filtered lines, indexed by the SAME visible
         // indices. Bands are only emitted when a game Picker is present (images
         // enabled); `char_px` is the picker's cell pixel size for pixel-accurate fit.
+        // v6 hybrid: the chrome frame is scaled by the letterbox factor, so the
+        // story's inline pictures (drop-caps, room icons — authored in native
+        // game pixels) must scale by the SAME factor to match it. Published
+        // per-frame by the v6 Layered arm; 0 (unset) or 1 = no scaling.
+        let img_scale = state.v6_image_scale.get();
+        let img_scale = if img_scale > 1.0 { img_scale } else { 1.0 };
         let filtered_images: Vec<Option<crate::inline_image::InlineImage>> = visible_indices
             .iter()
-            .map(|&i| state.transcript_images.get(i).cloned().flatten())
+            .map(|&i| {
+                let mut img = state.transcript_images.get(i).cloned().flatten();
+                if img_scale > 1.0 {
+                    if let Some(im) = img.as_mut() {
+                        if im.scaled.is_none() {
+                            let (w, h) = (im.pixels.width().max(1), im.pixels.height().max(1));
+                            im.scaled = Some((
+                                (w as f32 * img_scale) as u32,
+                                (h as f32 * img_scale) as u32,
+                            ));
+                        }
+                    }
+                }
+                img
+            })
             .collect();
         // Bound the inline-image protocol cache to the images present in the
         // filtered transcript, keyed by source Arc-ptr. Combined with the pinned

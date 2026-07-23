@@ -1422,6 +1422,10 @@ pub struct AppState {
     pub selection_edge: i32,
     /// This frame's transcript geometry, published by render for the mouse/copy paths. (SQ-0197)
     pub transcript_geom: std::cell::Cell<Option<crate::clipboard::TranscriptGeom>>,
+    /// v6 hybrid letterbox scale, published per-frame by the render's Layered
+    /// arm so inline story pictures scale to match the chrome frame (see
+    /// `render_transcript`). 0.0 (the Default) and 1.0 both mean "no scaling".
+    pub v6_image_scale: std::cell::Cell<f32>,
     /// Horizontal text margin actually inset on each side of the story text this
     /// frame (SQ-0345), published by `reserve_text_margin` so `render_middle` can
     /// draw the scrollbar flush against the pane border rather than inside the
@@ -1755,6 +1759,7 @@ impl Default for AppState {
             selection: None,
             selection_edge: 0,
             transcript_geom: std::cell::Cell::new(None),
+            v6_image_scale: std::cell::Cell::new(1.0),
             text_margin_applied: std::cell::Cell::new(0),
             selection_text: std::cell::RefCell::new(None),
             char_pan: (0, 0),

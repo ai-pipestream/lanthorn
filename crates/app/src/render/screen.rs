@@ -402,6 +402,12 @@ fn render_node(
             // RGBA canvas in the game's NATIVE pixel space (graphics at exact
             // pixel coords, all text rasterized), then draw it scaled to fill the
             // pane. Without a picker, fall through to the Phase 1b cell composite.
+            // With an OVERLAY open, likewise fall through: image placements draw
+            // above terminal cells in classic protocols, so a menu/dialog under
+            // the v6 image would be invisible — the cell fallback keeps the pane
+            // readable behind the overlay until it closes.
+            state.v6_image_scale.set(1.0);
+            if !state.any_overlay_open() {
             if let Some(picker) = state.game_picker.as_ref() {
                 let theme_bg = state.colors.theme.get("transcript").style;
                 let default_fg = style_fg_rgba(theme_bg, image::Rgba([220, 220, 220, 255]));
@@ -425,6 +431,9 @@ fn render_node(
                             area.height as u32 * fs.height.max(1) as u32,
                         );
                         let scale = v6::uniform_scale(native, pane_dev);
+                        // Publish the letterbox factor so inline story pictures
+                        // (drop-caps, room icons) scale to match the chrome ring.
+                        state.v6_image_scale.set(scale.s);
                         let vp = v6::story_viewport_box(Some(story), &scale, (area.width, area.height), cell_px);
                         // The viewport in the pane's absolute cell coordinates.
                         let viewport = Rect::new(area.x + vp.x, area.y + vp.y, vp.width, vp.height);
@@ -469,6 +478,7 @@ fn render_node(
                 state.graphics_render.borrow_mut().draw_v6_canvas(picker, &canvas, area, buf);
                 return None; // v6 main-window scroll metrics are a follow-up (SQ-0450)
             }
+            } // !any_overlay_open
             // Cell fallback with a primary story window (no image protocol —
             // remote/text-only terminals): the v6 native cell geometry is a
             // 40x25-cell postage stamp on a real terminal and pixel art can't
