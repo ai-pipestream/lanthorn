@@ -459,9 +459,6 @@ impl Machine {
         }
         let instr = decode(&self.mem, self.state.pc, version);
         let op_name = opcode_name(instr.operand_count.clone(), instr.opcode);
-        if self.trace_exec && std::env::var("BM_PCTRACE").is_ok() {
-            eprintln!("PC {:#07x} {} depth={}", instr_start_pc, op_name, self.state.frames.len());
-        }
 
         // CRITICAL: advance PC before executing so call/branch targets are correct.
         self.state.pc = instr.next_pc;
@@ -532,6 +529,27 @@ impl Machine {
     // -----------------------------------------------------------------------
 
     fn execute(&mut self, instr: Instr) -> StepResult {
+        // v6 user-stack `pull` (ZMSD §15, frotz z_pull v6 branch): when `pull`'s
+        // single operand is a raw address constant it names a *user* stack — pop
+        // one word off it (bump the free-slot count, read the freed slot) and
+        // store the popped value to this instruction's store variable (the decoder
+        // reads the store byte for exactly this large-constant form; see decode.rs).
+        // The v1-5 variable form (Small/Var operand = destination variable, game
+        // stack) is left to the normal 0x09 handler below.
+        if matches!(instr.operand_count, OperandCount::Var)
+            && instr.opcode == 0x09
+            && self.mem.version() == 6
+        {
+            if let Some(&Operand::Large(addr16)) = instr.operands.first() {
+                let addr = addr16 as u32;
+                let size = self.mem.read_word(addr).wrapping_add(1);
+                self.mem.write_word(addr, size);
+                let value = self.mem.read_word(addr.wrapping_add(2u32.wrapping_mul(size as u32)));
+                self.do_store(instr.store, value);
+                return StepResult::Continue;
+            }
+        }
+
         // Resolve all operands left-to-right (Var operands can pop the stack).
         let ops: Vec<u16> = instr
             .operands
@@ -789,9 +807,6 @@ impl Machine {
             0x1C => {
                 let value = a;
                 let target_depth = b as usize;
-                if self.trace_exec && std::env::var("BM_PCTRACE").is_ok() {
-                    eprintln!("  THROW value={value:#x} target_depth={target_depth} cur_depth={}", self.state.frames.len());
-                }
                 self.unwind_to_depth(target_depth);
                 // Return `value` from the catching routine itself (defensive: skip
                 // if the depth was invalid and nothing remains to return from).
@@ -988,9 +1003,6 @@ impl Machine {
                 } else {
                     // catch: stores current call stack depth (frame count)
                     let depth = self.state.frames.len() as u16;
-                    if self.trace_exec && std::env::var("BM_PCTRACE").is_ok() {
-                        eprintln!("  CATCH pc={:#x} depth={depth} store={store:?}", self.cur_instr_pc);
-                    }
                     self.do_store(store, depth);
                 }
                 StepResult::Continue
@@ -1208,9 +1220,6 @@ impl Machine {
                 let parse_buf = ops.get(1).copied().unwrap_or(0) as u32;
                 let interrupt_time = ops.get(2).copied().unwrap_or(0);
                 let interrupt_routine = ops.get(3).copied().unwrap_or(0);
-                if std::env::var("BM_PCTRACE").is_ok() {
-                    eprintln!("READ pc={:#07x} nops={} ops={:x?} store={:?}", self.cur_instr_pc, ops.len(), ops, store);
-                }
                 self.pending_input = Some(PendingInput {
                     store_var: store, text_buf, parse_buf, interrupt_time, interrupt_routine,
                     instr_pc: self.cur_instr_pc,
@@ -1222,9 +1231,6 @@ impl Machine {
             0x16 => {
                 let interrupt_time = ops.get(1).copied().unwrap_or(0);
                 let interrupt_routine = ops.get(2).copied().unwrap_or(0);
-                if std::env::var("BM_PCTRACE").is_ok() {
-                    eprintln!("READ_CHAR pc={:#07x} nops={} ops={:x?} store={:?}", self.cur_instr_pc, ops.len(), ops, store);
-                }
                 self.pending_input = Some(PendingInput {
                     store_var: store, text_buf: 0, parse_buf: 0, interrupt_time, interrupt_routine,
                     instr_pc: self.cur_instr_pc,

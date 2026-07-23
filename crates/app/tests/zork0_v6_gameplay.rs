@@ -221,3 +221,108 @@ fn zork0_v6_gameplay_turns_after_move_do_not_fault() {
         session.machine.fault_trace
     );
 }
+
+/// True if the soft-function-key definition screen ("Function Keys …") is
+/// showing. Zork Zero renders that screen into a v6 window *grid* (SOFT-WINDOW =
+/// window 2) via `DIROUT`/`PRINTT`, not the scrolling transcript, so scan both.
+/// Its glyphs land one-per-run in the grid, so the joined-without-separator text
+/// reads "Function Keys …".
+fn function_key_screen_showing(session: &GameSession, transcript: &str) -> bool {
+    if transcript.contains("Function Key") {
+        return true;
+    }
+    if let Some(v6) = session.machine.screen.v6.as_ref() {
+        for w in v6.windows.iter() {
+            let joined: String = w.texts.iter().map(|t| t.text.as_str()).collect();
+            if joined.contains("Function Key") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Boot fresh and return a ready-to-play session (no boot-time screen tracing).
+fn boot_session() -> Option<GameSession> {
+    let story_path = stories_dir().join("zork0-r393-s890714.z6");
+    let story_bytes = std::fs::read(&story_path).ok()?;
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+            .expect("Zork0 (v6) should load and boot without a ZError");
+    assert!(!session.quit, "Zork0 quit during boot");
+    assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+    Some(session)
+}
+
+/// SQ-0452 regression: a normal typed command must actually *dispatch* — parse to
+/// a real action and return the player to the main line prompt — instead of
+/// soft-locking into the phantom `V-DEFINE` function-key screen. Before the v6
+/// user-stack opcode fix (`push_stack`/`pop_stack`/`pull` on a user stack) the
+/// parser's syntax-template walk thrashed and produced PRSA=0, dispatching verb 0
+/// (`DEFINE`) which reads a keypress forever.
+///
+/// Drives boot → "look" → several more verb/direction commands and asserts every
+/// turn stays a normal line prompt with no fault, no quit, and the function-key
+/// screen never appears.
+#[test]
+fn zork0_v6_gameplay_look_then_commands_dispatch_normally() {
+    use app::session::InputKind;
+    let Some(mut session) = boot_session() else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+
+    for (turn, cmd) in ["look", "i", "wait", "look", "examine me"].into_iter().enumerate() {
+        assert_eq!(
+            session.pending_input(),
+            InputKind::Line,
+            "turn {turn}: expected a line prompt (typed commands must dispatch, not soft-lock the fkey screen) before {cmd:?}"
+        );
+        let result = session.submit(cmd);
+        let transcript = session.take_transcript();
+        assert!(!result.quit, "turn {turn} ({cmd:?}) quit the game");
+        assert!(result.fault.is_none(), "turn {turn} ({cmd:?}) faulted: {:?}", result.fault);
+        assert!(
+            !function_key_screen_showing(&session, &transcript),
+            "turn {turn} ({cmd:?}) fell into the Function Key screen (SQ-0452 phantom V-DEFINE)"
+        );
+    }
+}
+
+/// SQ-0452 regression for the harder DIRECTION path: a bare direction command
+/// (verbless move) drives Zork Zero's direction-specific syntax path, which needs
+/// the v6 user-stack `pull` to carry a store byte (`pull stack -> result`) so the
+/// popped token pointer survives. Without it the direction walk never advances and
+/// dispatches the function-key screen.
+///
+/// Drives boot → "ne" (the opening narration points northeast) → several more
+/// moves and commands, asserting every turn dispatches normally.
+#[test]
+fn zork0_v6_gameplay_move_then_commands_dispatch_normally() {
+    use app::session::InputKind;
+    let Some(mut session) = boot_session() else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+
+    for (turn, cmd) in ["ne", "look", "n", "e", "wait", "s", "i"].into_iter().enumerate() {
+        assert_eq!(
+            session.pending_input(),
+            InputKind::Line,
+            "turn {turn}: expected a line prompt before the move/command {cmd:?} (directions must dispatch, not soft-lock)"
+        );
+        let result = session.submit(cmd);
+        let transcript = session.take_transcript();
+        assert!(!result.quit, "turn {turn} ({cmd:?}) quit the game");
+        assert!(result.fault.is_none(), "turn {turn} ({cmd:?}) faulted: {:?}", result.fault);
+        assert!(
+            !function_key_screen_showing(&session, &transcript),
+            "turn {turn} ({cmd:?}) fell into the Function Key screen (SQ-0452 direction-path soft-lock)"
+        );
+    }
+}

@@ -419,7 +419,24 @@ pub fn decode(mem: &Memory, pc: u32, version: u8) -> Instr {
     }
 
     // Look up signature: does this opcode store / branch / carry text?
-    let (stores, branches, has_text) = get_signature(&operand_count, opcode, version);
+    let (mut stores, branches, has_text) = get_signature(&operand_count, opcode, version);
+
+    // v6 `pull` disambiguation (ZMSD §15). Two forms share VAR:0x09:
+    //   * `pull (variable)` — v1-5 form, no store byte (destination is the operand).
+    //   * `pull stack -> (result)` — v6 user-stack form, WHICH DOES store its
+    //     popped value.
+    // Infocom's ZILCH encodes the user-stack address as a large constant and the
+    // variable form as a variable/small operand, so key the store byte off the
+    // first operand's type. Missing it mis-reads the store byte as the next
+    // opcode (an invalid 2OP:0x00), silently corrupting all following decode —
+    // exactly the failure that soft-locked v6 direction parsing (SQ-0452).
+    if version == 6
+        && operand_count == OperandCount::Var
+        && opcode == 0x09
+        && matches!(operands.first(), Some(Operand::Large(_)))
+    {
+        stores = true;
+    }
 
     // Store variable byte (read after operands)
     let store = if stores {
