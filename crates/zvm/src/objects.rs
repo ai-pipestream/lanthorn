@@ -43,13 +43,27 @@ fn entry_addr(mem: &Memory, obj: u16) -> u32 {
     entries_base(mem) + (obj as u32 - 1) * entry_size(mem.version())
 }
 
+/// True when object `obj` is a real, in-memory object (non-null and its whole
+/// entry lies within loaded memory). Out-of-range object numbers are treated as
+/// the null object by every accessor below rather than faulting the VM.
+///
+/// This matters for Zork Zero (v6): its display code deterministically derives a
+/// window-record *address* (e.g. 0xc118) and hands it to `test_attr`, guarded
+/// only by `je gb1, #021c` — i.e. the story assumes the interpreter answers
+/// `test_attr`/`get_prop`/tree queries on a non-object with the null-object
+/// result (false / defaults / 0) instead of reading past the story image. A
+/// bounds fault here made the game unplayable on the turn after any room change.
+fn addressable(mem: &Memory, obj: u16) -> bool {
+    obj != 0 && (entry_addr(mem, obj) + entry_size(mem.version())) as usize <= mem.len()
+}
+
 // ── Attributes ────────────────────────────────────────────────────────────────
 
 /// Read attribute `attr` of object `obj`.  Attribute N is bit `7-(N%8)` of
 /// attribute byte `N/8` (MSB-first, ZMSD §12.3).
 /// Object 0 is the null object; returns false.
 pub fn get_attr(mem: &Memory, obj: u16, attr: u8) -> bool {
-    if obj == 0 {
+    if !addressable(mem, obj) {
         return false;
     }
     let byte_addr = entry_addr(mem, obj) + (attr / 8) as u32;
@@ -59,7 +73,7 @@ pub fn get_attr(mem: &Memory, obj: u16, attr: u8) -> bool {
 
 /// Set attribute `attr` of object `obj`.
 pub fn set_attr(mem: &mut Memory, obj: u16, attr: u8) {
-    if obj == 0 { return; }
+    if !addressable(mem, obj) { return; }
     let byte_addr = entry_addr(mem, obj) + (attr / 8) as u32;
     let bit = 7 - (attr % 8);
     let v = mem.read_byte(byte_addr) | (1 << bit);
@@ -68,7 +82,7 @@ pub fn set_attr(mem: &mut Memory, obj: u16, attr: u8) {
 
 /// Clear attribute `attr` of object `obj`.
 pub fn clear_attr(mem: &mut Memory, obj: u16, attr: u8) {
-    if obj == 0 { return; }
+    if !addressable(mem, obj) { return; }
     let byte_addr = entry_addr(mem, obj) + (attr / 8) as u32;
     let bit = 7 - (attr % 8);
     let v = mem.read_byte(byte_addr) & !(1 << bit);
@@ -89,7 +103,7 @@ fn tree_offset(version: u8, which: u8) -> u32 {
 }
 
 fn read_tree_ptr(mem: &Memory, obj: u16, which: u8) -> u16 {
-    if obj == 0 {
+    if !addressable(mem, obj) {
         return 0;
     }
     let base = entry_addr(mem, obj) + tree_offset(mem.version(), which);
@@ -101,6 +115,12 @@ fn read_tree_ptr(mem: &Memory, obj: u16, which: u8) -> u16 {
 }
 
 fn write_tree_ptr(mem: &mut Memory, obj: u16, which: u8, val: u16) {
+    // Same null-object leniency as the read side: an out-of-range object's
+    // tree writes are graceful no-ops (insert_obj/remove_obj on a non-object
+    // must not corrupt memory past the entry table or fault).
+    if !addressable(mem, obj) {
+        return;
+    }
     let base = entry_addr(mem, obj) + tree_offset(mem.version(), which);
     if mem.version() <= 3 {
         mem.write_byte(base, val as u8);
@@ -185,7 +205,7 @@ fn prop_table_addr(mem: &Memory, obj: u16) -> u32 {
 
 /// Decode the short name of object `obj` from its property table.
 pub fn short_name(mem: &Memory, obj: u16) -> String {
-    if obj == 0 {
+    if !addressable(mem, obj) {
         return String::new();
     }
     let ptbl = prop_table_addr(mem, obj);
@@ -241,7 +261,7 @@ fn parse_prop_header(mem: &Memory, addr: u32) -> (u16, u32, u32) {
 /// Find the address of property `prop`'s data in `obj`'s property table.
 /// Returns 0 if the property is absent or `obj` is 0.
 pub fn get_prop_addr(mem: &Memory, obj: u16, prop: u8) -> u16 {
-    if obj == 0 {
+    if !addressable(mem, obj) {
         return 0;
     }
     let mut addr = first_prop_addr(mem, obj);
@@ -305,6 +325,12 @@ pub fn get_prop(mem: &Memory, obj: u16, prop: u8) -> u16 {
 /// Write property `prop` of object `obj` to `val`.  Only 1- and 2-byte
 /// properties are writable via put_prop. (ZMSD §12.4)
 pub fn put_prop(mem: &mut Memory, obj: u16, prop: u8, val: u16) {
+    // An out-of-range object has no property table (get_prop_addr → 0); treat
+    // the write as a graceful no-op rather than faulting, matching the read-side
+    // null-object handling above.
+    if !addressable(mem, obj) {
+        return;
+    }
     let addr = get_prop_addr(mem, obj, prop);
     if addr == 0 {
         panic!("put_prop: object {} has no property {}", obj, prop);
@@ -320,7 +346,7 @@ pub fn put_prop(mem: &mut Memory, obj: u16, prop: u8, val: u16) {
 /// table.  If `prop` is 0, returns the first property number.  Returns 0 if
 /// there are no more properties. (ZMSD §12.4.3)
 pub fn get_next_prop(mem: &Memory, obj: u16, prop: u8) -> u8 {
-    if obj == 0 {
+    if !addressable(mem, obj) {
         return 0;
     }
     let mut addr = first_prop_addr(mem, obj);

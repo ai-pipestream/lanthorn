@@ -139,31 +139,35 @@ fn zork0_v6_gameplay_smoke_boot_compass_and_one_safe_move() {
     );
 }
 
-/// Documents a real, reproducible bug found while building the gameplay smoke
-/// above: submitting a **second** command after a room-changing move (any
-/// direction — "ne", "n", "s", "w" were all tried) deterministically faults
-/// the VM, regardless of what that second command's text is (tried: "n", "s",
-/// "look", "north" — all fault identically). The fault:
+/// Regression guard for a high-severity v6 VM fault (Lane F): before the fix,
+/// submitting **any** command on the turn AFTER a room-changing move
+/// deterministically faulted the VM with
 ///
 /// ```text
 /// memory fault: read8 @0x000a9438
 /// PC=0x01296e  op=op:Two/0x0a   (2OP:10 = test_attr)
 /// ```
 ///
-/// i.e. a `test_attr` on a garbage/out-of-range object number, most likely a
-/// per-turn daemon (e.g. the "insistent finger" servant-escort NPC introduced
-/// in the opening narration) reading a bad object after the move sets up its
-/// state. By contrast, if the FIRST command is a non-committal "look" (no room
-/// change), a second command does NOT fault — it instead surfaces Infocom's
-/// "Software Function Key definition" screen text (an interpreter-level
-/// menu overlay baked into the story, unrelated to normal parser play).
+/// Root cause: Zork Zero's post-room-change display code walks its window-record
+/// pool and deterministically derives a record *address* (0xc118) which it then
+/// hands to `test_attr` as if it were an object number, guarded only by
+/// `je gb1, #021c`. The story assumes the interpreter answers object queries on
+/// such an out-of-range "object" with the null-object result (attribute clear)
+/// rather than reading past the story image — our stricter bounds check faulted
+/// the whole VM instead. The engine now treats an out-of-range object number as
+/// the null object (see `objects::addressable`), matching lenient reference
+/// interpreters, so the crash is gone.
 ///
-/// This test asserts the fault happens exactly as observed (a regression pin
-/// for a KNOWN bug, not a requirement) so a future fix is visible as a test
-/// change here rather than silently drifting. Per Lane S's rules, this is
-/// reported, not fixed, in this lane.
+/// This drives the exact sequence that used to fault — a room-changing move
+/// followed by several more turns — supplying whatever input kind the game asks
+/// for, and asserts the VM never faults and never quits. (Note: Zork Zero's full
+/// post-move display path still exercises v6 window-model behaviour that is not
+/// yet complete in this engine, so this test verifies the *crash* is fixed and
+/// the VM stays responsive, not full intro playability.)
 #[test]
-fn zork0_v6_gameplay_second_turn_after_move_faults_known_bug() {
+fn zork0_v6_gameplay_turns_after_move_do_not_fault() {
+    use app::session::InputKind;
+
     let story_path = stories_dir().join("zork0-r393-s890714.z6");
     let Ok(story_bytes) = std::fs::read(&story_path) else {
         eprintln!("SKIP: gitignored story missing at {}", story_path.display());
@@ -182,19 +186,38 @@ fn zork0_v6_gameplay_second_turn_after_move_faults_known_bug() {
     session.flush_boot_pictures();
     let _ = session.take_transcript();
 
-    let first = session.submit("ne");
-    assert!(!first.quit && first.fault.is_none(), "the first move itself should not fault");
+    // Turn 1 is a room-changing move ("ne" — the opening narration points the
+    // player northeast); it sets up the state that used to make the NEXT turn
+    // fault. Turns 2..N then drive the exact post-move code path — a mix of
+    // line commands and, once the game enters its keypress-driven display, single
+    // keypresses. Every interaction must complete without a VM fault or quit.
+    assert_eq!(session.pending_input(), InputKind::Line, "expected a line prompt before the move");
 
-    let second = session.submit("look");
-    eprintln!("known-bug fault trace: {:?}", second.fault);
+    let mut line_cmds = ["ne", "look", "n", "wait"].into_iter();
+    for turn in 0..12 {
+        let result = match session.pending_input() {
+            InputKind::Line => session.submit(line_cmds.next().unwrap_or("wait")),
+            InputKind::Char => session.submit_char(b' '),
+            InputKind::Event => session.submit(""),
+        };
+        assert!(
+            !result.quit,
+            "Zork0 quit on post-move interaction {turn} (should stay in play)"
+        );
+        assert!(
+            result.fault.is_none(),
+            "Zork0 faulted on post-move interaction {turn} — the high-severity bug: {:?}",
+            result.fault
+        );
+        let _ = session.take_transcript();
+    }
+
+    // The story image is only 0x49400 bytes, yet the pre-fix fault read object
+    // 0xc118's entry at 0x000a9438. Confirm no such out-of-range object fault is
+    // latched anywhere in the run.
     assert!(
-        second.quit,
-        "expected the known bug to force a quit on the second turn after a move \
-         (if this now passes, the bug may be fixed — replace this pin with a real assertion)"
-    );
-    assert!(
-        second.fault.as_ref().is_some_and(|f| f.iter().any(|l| l.contains("test_attr") || l.contains("op:Two/0x0a"))),
-        "expected the known test_attr memory-fault signature, got: {:?}",
-        second.fault
+        session.machine.fault_trace.is_none(),
+        "a VM fault was latched during post-move play: {:?}",
+        session.machine.fault_trace
     );
 }
