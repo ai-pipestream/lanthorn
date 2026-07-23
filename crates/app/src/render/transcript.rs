@@ -1571,6 +1571,7 @@ fn render_middle(
     let transcript_rows = (transcript_bottom - transcript_top) as usize;
 
     let images_enabled = state.game_picker.is_some();
+    let frameless = state.config.v6_render == crate::config::V6RenderMode::Frameless;
     let char_px = state
         .game_picker
         .as_ref()
@@ -1609,6 +1610,7 @@ fn render_middle(
                     || c.key.width != body_area.width
                     || c.key.images_enabled != images_enabled
                     || c.key.char_px != char_px
+                    || c.key.frameless != frameless
                     || c.key.clear_anchor != state.clear_anchor
                     || c.key.room_name.as_deref() != state.current_room_name.as_deref()
                     || c.key.colors != state.colors
@@ -1659,13 +1661,23 @@ fn render_middle(
         // per-frame by the v6 Layered arm; 0 (unset) or 1 = no scaling.
         let img_scale = state.v6_image_scale.get();
         let img_scale = if img_scale > 1.0 { img_scale } else { 1.0 };
+        // Frameless mode (SQ-0461) applies its OWN inline-image sizing (drop-caps
+        // to ~3–4 rows, band art upscaled) and is the ONLY mode that draws
+        // graphics-window CONTENT splashes inline — hybrid/raster render the
+        // window canvas itself, so they must DROP `ContentSplash` entries here to
+        // avoid double-rendering. Both branches leave hybrid/raster byte-identical.
         let filtered_images: Vec<Option<crate::inline_image::InlineImage>> = visible_indices
             .iter()
             .map(|&i| {
                 let mut img = state.transcript_images.get(i).cloned().flatten();
-                if img_scale > 1.0 {
-                    if let Some(im) = img.as_mut() {
-                        if im.scaled.is_none() {
+                if let Some(im) = img.as_mut() {
+                    if !frameless && im.source == crate::inline_image::ImageSource::ContentSplash {
+                        return None; // hybrid/raster draw the window itself
+                    }
+                    if im.scaled.is_none() {
+                        if frameless {
+                            im.scaled = im.frameless_scaled(char_px, body_area.width);
+                        } else if img_scale > 1.0 {
                             let (w, h) = (im.pixels.width().max(1), im.pixels.height().max(1));
                             im.scaled = Some((
                                 (w as f32 * img_scale) as u32,
@@ -1724,6 +1736,7 @@ fn render_middle(
                 width: body_area.width,
                 images_enabled,
                 char_px,
+                frameless,
                 clear_anchor: state.clear_anchor,
                 room_name: state.current_room_name.clone(),
                 colors: state.colors.clone(),
@@ -2098,7 +2111,7 @@ mod tests {
     // ── Inline-image band wrapping ────────────────────────────────────────────
 
     fn dummy_img(w: u32, h: u32, align: crate::inline_image::ImageAlign) -> crate::inline_image::InlineImage {
-        crate::inline_image::InlineImage { pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)), align, scaled: None , margin_px: None }
+        crate::inline_image::InlineImage { pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)), align, scaled: None , margin_px: None, source: crate::inline_image::ImageSource::Story }
     }
 
     #[test]
@@ -2186,6 +2199,7 @@ mod tests {
             align: crate::inline_image::ImageAlign::MarginLeft,
             scaled: None,
             margin_px,
+            source: crate::inline_image::ImageSource::Story,
         }
     }
 

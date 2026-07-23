@@ -47,13 +47,21 @@ Sixel):
   scrollback, the game's chrome/status text collapses to a compact terminal
   status band across the top of the pane, and window-0's inline story pictures
   (drop-caps, room icons) still render via the transcript image path. The
-  border art, compass, and full-screen graphics windows are simply not drawn.
-  With `--no-images` this is identical to the cell fallback below.
-  - *What you lose:* the compass rose, the decorative borders/banner, and any
-    full-screen splash art.
+  decorative borders, compass, and banner are simply not drawn — but a
+  full-screen **splash** (a title screen, a cutscene illustration) *does* show,
+  inline, once, in the flow of the transcript (see below). With `--no-images`
+  this is identical to the cell fallback below.
+  - Because native 320×200-era art is postage-stamp tiny on a modern display,
+    frameless **resizes inline images to taste**: a drop-cap floats at about
+    **3–4 text rows** tall, and any band-rendered picture (splashes included)
+    is **upscaled by a crisp integer factor** (2× or 3×) up to roughly 60% of
+    the viewport width — pixel art stays sharp, never blurred or shrunk below
+    life size. (Hybrid and raster keep their own letterbox-matched sizing.)
+  - *What you lose:* the compass rose and the decorative borders/banner.
   - *What you gain:* full-size story text (no letterbox shrink), native
-    terminal scrollback, and selectable text everywhere — the most legible
-    mode on a small window or a slow terminal.
+    terminal scrollback, selectable text everywhere, and splash art that
+    scrolls with the story instead of living in a fixed frame — the most
+    legible mode on a small window or a slow terminal.
 - **Cell fallback** — without an image protocol (a remote or text-only
   terminal, or while a menu/dialog is open), everything (graphics windows,
   status grids, and story text) composites as terminal cells instead of
@@ -71,6 +79,28 @@ icons — aren't separate chrome; they're story content. babelmap floats them
 at the left margin of the story text and wraps the surrounding lines beside
 them, so they scroll naturally with the transcript instead of sitting in a
 fixed frame.
+
+## Splash art, inline (frameless mode)
+
+Some v6 titles paint a big picture straight into a graphics window: Shogun's
+320×200 title screen, Zork Zero's cutscene illustrations. `hybrid` and
+`raster` draw those windows directly, but `frameless` drops graphics windows —
+so it would lose the splash entirely. Instead, frameless recognizes a
+*content-sized* draw and re-emits it as a one-off inline image band in the
+transcript, upscaled by the sizing policy above, anchored at the point in the
+story where the game drew it. It scrolls away with the rest of the turn.
+
+The catch is telling a splash from decoration. babelmap classifies a
+graphics-window picture by its size against the reported screen: a picture is
+**content** when it covers ≥ 40% of the screen area, or is ≥ 60% of the screen
+width *and* ≥ 30% of its height; a narrow strip (≤ 15% of screen width, like
+Shogun's 23-pixel side borders) or any small tile stays **frame** and is left
+undrawn. On the real games this lands cleanly — Shogun's title (320×200) and
+Zork Zero's full-screen cutscenes come through, while their borders, banners,
+and 45×40 compass tiles do not. A repeated redraw of the same splash into the
+same window is de-duplicated, so a per-turn refresh can't stamp the same
+picture down the page twice; clearing the window resets that, so a genuinely
+new splash shows again.
 
 ## Pixel-faithful status text and colour
 

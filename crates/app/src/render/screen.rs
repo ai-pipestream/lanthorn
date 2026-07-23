@@ -983,6 +983,12 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
     let mut floats: Vec<AbsFloat> = Vec::new();
     for (i, line) in state.transcript.iter().enumerate() {
         if let Some(Some(img)) = state.transcript_images.get(i) {
+            // ContentSplash entries exist only for frameless mode; the raster
+            // path draws the graphics window canvas itself, so skip them here to
+            // avoid double-rendering (SQ-0461). They still occupy no text row.
+            if img.source == crate::inline_image::ImageSource::ContentSplash {
+                continue;
+            }
             // An image line is a float, not a text row.
             let px = &img.pixels;
             let indent_px = img.margin_px.unwrap_or(px.width() + FONT);
@@ -1111,6 +1117,7 @@ mod tests {
             align: crate::inline_image::ImageAlign::MarginLeft,
             scaled: None,
             margin_px: Some(40),
+            source: crate::inline_image::ImageSource::Story,
         });
         let para = "word ".repeat(40);
         state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
@@ -2001,7 +2008,7 @@ mod tests {
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None ,
+            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
         };
         let b = BufferWindow {
             lines: vec!["a".to_string(), String::new(), "b".to_string()],

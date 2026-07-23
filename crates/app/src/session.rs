@@ -145,6 +145,34 @@ pub(crate) fn clamp_runs(
 /// The line separator consumed by a split is dropped from the emitted text
 /// (the element boundary itself is the break) and its style-chunk char is
 /// consumed in lockstep.
+/// Classify a graphics-window picture as CONTENT art (worth an inline band in
+/// frameless mode) versus decorative FRAME art (borders/tiles — left canvas-only).
+/// (SQ-0461 decision 3)
+///
+/// A picture is CONTENT when it covers **≥ 40% of the screen area**, OR is **≥
+/// 60% of screen width AND ≥ 30% of screen height**. Narrow strips (**≤ 15% of
+/// screen width** — Shogun's 23px side borders) are always FRAME, as is anything
+/// that doesn't clearly meet a content rule (short bands, small compass tiles).
+///
+/// Worked examples (screen 320×200):
+/// - Shogun title splash 320×200 → area 100% ⇒ **content**.
+/// - Shogun side border 23×200 → width 23 ≤ 48 (15%) ⇒ **frame**.
+/// - Zork Zero compass tile ~24×24 → width 24 < 60% and area ~0.9% ⇒ **frame**.
+fn is_content_art(pic_w: u32, pic_h: u32, screen_w: u32, screen_h: u32) -> bool {
+    let screen_w = screen_w.max(1);
+    let screen_h = screen_h.max(1);
+    // Narrow vertical strip → decorative frame, regardless of height.
+    if pic_w * 100 <= screen_w * 15 {
+        return false;
+    }
+    let pic_area = pic_w as u64 * pic_h as u64;
+    let screen_area = screen_w as u64 * screen_h as u64;
+    if pic_area * 100 >= screen_area * 40 {
+        return true;
+    }
+    pic_w * 100 >= screen_w * 60 && pic_h * 100 >= screen_h * 30
+}
+
 fn interleave_story_pics(
     text: &str,
     runs: &[(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)],
@@ -389,6 +417,11 @@ pub struct GameSession {
     /// `Machine::v6_win0_out_chars` at the last transcript drain — an event's
     /// offset within the current turn's text is `out_chars - this`.
     v6_win0_chars_seen: u64,
+    /// The last CONTENT-art picture number anchored inline per graphics window
+    /// (1–7), so a per-turn redraw of the same splash doesn't spam the frameless
+    /// transcript. Cleared for a window on its canvas-clear (number-0 erase).
+    /// (SQ-0461 decision 3)
+    last_content_pic: std::collections::HashMap<u8, u16>,
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
@@ -463,6 +496,7 @@ impl GameSession {
             pictures_canvas: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
+            last_content_pic: std::collections::HashMap::new(),
         })
     }
 
@@ -763,6 +797,9 @@ impl GameSession {
         // vanish when the game erases window 7 before drawing the menu frame.
         if ev.erase && ev.number == 0 {
             self.pictures_canvas.remove(&ev.window);
+            // The window's canvas was cleared, so a later redraw of a content
+            // splash into it is genuinely new — forget the dedupe key. (SQ-0461)
+            self.last_content_pic.remove(&ev.window);
             return;
         }
         let Some(v6) = self.machine.screen.v6.as_ref() else { return };
@@ -783,6 +820,7 @@ impl GameSession {
                     align: crate::inline_image::ImageAlign::MarginLeft,
                     scaled: None,
                     margin_px: ev.margin_after.map(|m| m as u32),
+                    source: crate::inline_image::ImageSource::Story,
                 };
                 self.story_pics.push((ev.out_chars, float));
             }
@@ -817,7 +855,36 @@ impl GameSession {
         } else if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
             canvas.draw_image_clipped(&img, dx, dy, (pw, ph));
             canvas.z_seq = crate::graphics::next_draw_seq();
+            // SQ-0461 decision 3: a large CONTENT-art draw into a graphics window
+            // (Shogun's title splash) ALSO anchors a transcript inline band, so
+            // the frameless mode — which drops graphics windows — still shows it.
+            // Frame/border art (narrow side strips, small compass tiles) is left
+            // canvas-only. Dedupe repeated identical draws so a per-turn redraw
+            // can't spam the transcript. Hybrid/raster ignore ContentSplash
+            // entries (they render the window canvas itself), so no double-draw.
+            let (iw, ih) = (img.width(), img.height());
+            let (screen_w, screen_h) = self.v6_screen_px();
+            if is_content_art(iw, ih, screen_w, screen_h)
+                && self.last_content_pic.get(&ev.window) != Some(&ev.number)
+            {
+                self.last_content_pic.insert(ev.window, ev.number);
+                self.story_pics.push((ev.out_chars, crate::inline_image::InlineImage {
+                    pixels: std::sync::Arc::new(img.to_rgba8()),
+                    align: crate::inline_image::ImageAlign::InlineUp,
+                    scaled: None,
+                    margin_px: None,
+                    source: crate::inline_image::ImageSource::ContentSplash,
+                }));
+            }
         }
+    }
+
+    /// The reported v6 screen size in pixels (header words 0x22/0x24), falling
+    /// back to the classic 320×200 standard window when unset. (SQ-0461)
+    fn v6_screen_px(&self) -> (u32, u32) {
+        let w = self.machine.mem.read_word(0x22) as u32;
+        let h = self.machine.mem.read_word(0x24) as u32;
+        (if w == 0 { 320 } else { w }, if h == 0 { 200 } else { h })
     }
 
     /// Build the v6 z-ordered layered [`ScreenModel`] from `screen.v6`'s 8-window
@@ -2125,6 +2192,7 @@ mod tests {
             align: ImageAlign::MarginLeft,
             scaled: None,
             margin_px: Some(56),
+            source: crate::inline_image::ImageSource::Story,
         };
         let text = "first line\nsecond line";
         // One style chunk covering everything (bold), to verify run splitting.
@@ -2150,11 +2218,49 @@ mod tests {
             align: ImageAlign::MarginLeft,
             scaled: None,
             margin_px: None,
+            source: crate::inline_image::ImageSource::Story,
         };
         let elems = interleave_story_pics("story text", &[], vec![(0, img)], 0);
         assert_eq!(elems.len(), 2, "Image then Text");
         assert!(matches!(&elems[0], TranscriptElem::Image(_)));
         assert!(matches!(&elems[1], TranscriptElem::Text { text, .. } if text == "story text"));
+    }
+
+    // ── content-art classification (SQ-0461 decision 3) ───────────────────────
+
+    #[test]
+    fn content_art_shogun_title_splash_is_content() {
+        // Shogun's title: a full 320×200 splash on a 320×200 screen → 100% area.
+        assert!(is_content_art(320, 200, 320, 200));
+    }
+
+    #[test]
+    fn content_art_shogun_side_border_is_frame() {
+        // Shogun's 23px-wide side border on a 320×200 screen: width 23 ≤ 48 (15%).
+        assert!(!is_content_art(23, 200, 320, 200));
+    }
+
+    #[test]
+    fn content_art_zork0_compass_tiles_are_frame() {
+        // Zork Zero's compass/frame tiles (pictures 9..24) are small squares —
+        // neither 40% area nor 60%×30% of the screen.
+        for dim in [9u32, 12, 16, 20, 24] {
+            assert!(!is_content_art(dim, dim, 320, 200), "{dim}×{dim} tile must be frame art");
+        }
+    }
+
+    #[test]
+    fn content_art_wide_short_band_is_frame() {
+        // A full-width but shallow banner (e.g. 320×20 = 10% height, 32% area) is
+        // decorative, not content.
+        assert!(!is_content_art(320, 20, 320, 200));
+    }
+
+    #[test]
+    fn content_art_room_illustration_is_content() {
+        // A 220×120 room picture: 220/320 = 69% width, 120/200 = 60% height → content
+        // (also 41% area).
+        assert!(is_content_art(220, 120, 320, 200));
     }
 
     #[test]
@@ -2175,7 +2281,7 @@ mod tests {
         crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(2, 2)),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None ,
+            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
         }
     }
 
@@ -3168,6 +3274,7 @@ mod tests {
             pictures_canvas: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
+            last_content_pic: std::collections::HashMap::new(),
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -3184,6 +3291,85 @@ mod tests {
         assert_eq!(canvas.img.get_pixel(2, 3).0, [0xFF, 0x00, 0x00, 0xFF], "the drawn pixel is the source PNG's red");
         // Outside the drawn 2x2 picture the canvas stays at its transparent default.
         assert_eq!(canvas.img.get_pixel(0, 0).0, [0, 0, 0, 0], "untouched region stays transparent");
+    }
+
+    /// A valid `w`×`h` red PNG.
+    fn png_bytes_red(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_pixel(w, h, image::Rgb([255, 0, 0]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn content_splash_anchors_once_and_dedupes_until_canvas_clear() {
+        use zvm::screen::{V6Windows, ZWindow};
+        // Window 7 sized to the full 320×200 screen; picture 1 is a 320×200 splash
+        // → CONTENT art. Drawing it should anchor ONE inline band; a repeat draw
+        // (per-turn redraw) must NOT add a second. A canvas-clear (number-0 erase)
+        // resets the dedupe so a genuinely new draw anchors again. (SQ-0461)
+        let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+        let mut windows: [ZWindow; 8] = Default::default();
+        windows[7] = ZWindow { x_size: 320, y_size: 200, ..Default::default() };
+        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+
+        let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_red(320, 200));
+        let mut sess = GameSession {
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            disasm_cache: std::cell::RefCell::new(None),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
+            last_content_pic: std::collections::HashMap::new(),
+        };
+        sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
+
+        let draw = PictureEvent { number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None };
+        sess.apply_picture_event(&draw);
+        assert_eq!(sess.story_pics.len(), 1, "content splash anchors one inline band");
+        assert_eq!(sess.story_pics[0].1.source, crate::inline_image::ImageSource::ContentSplash);
+
+        sess.apply_picture_event(&draw);
+        assert_eq!(sess.story_pics.len(), 1, "a repeat draw of the same pic is deduped");
+
+        // Canvas clear (erase_window rides the queue as number 0) resets dedupe.
+        sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None });
+        sess.apply_picture_event(&draw);
+        assert_eq!(sess.story_pics.len(), 2, "after a canvas clear a fresh draw anchors again");
+    }
+
+    #[test]
+    fn frame_art_draw_never_anchors_an_inline_band() {
+        use zvm::screen::{V6Windows, ZWindow};
+        // A 23×200 side border (Shogun idiom) draws into the canvas but must NOT
+        // anchor an inline band — it's decorative frame art.
+        let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+        let mut windows: [ZWindow; 8] = Default::default();
+        windows[7] = ZWindow { x_size: 320, y_size: 200, ..Default::default() };
+        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+
+        let blorb = crate::graphics::test_blorb_with_pict(3, &png_bytes_red(23, 200));
+        let mut sess = GameSession {
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            disasm_cache: std::cell::RefCell::new(None),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
+            last_content_pic: std::collections::HashMap::new(),
+        };
+        sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
+
+        sess.apply_picture_event(&PictureEvent { number: 3, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None });
+        assert!(sess.story_pics.is_empty(), "frame art stays canvas-only");
+        assert!(sess.pictures_canvas.contains_key(&7), "but it IS drawn into the window canvas");
     }
 
     #[test]
@@ -3209,6 +3395,7 @@ mod tests {
             pictures_canvas: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
+            last_content_pic: std::collections::HashMap::new(),
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -3251,6 +3438,7 @@ mod tests {
             pictures_canvas: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
+            last_content_pic: std::collections::HashMap::new(),
         };
         // Window 7 has a rendered picture (a canvas sized to its pixel dims).
         sess.pictures_canvas.insert(7, crate::graphics::Canvas::new(64, 48));
@@ -3315,6 +3503,7 @@ mod tests {
             pictures_canvas: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
+            last_content_pic: std::collections::HashMap::new(),
         };
         // The erase path allocates the canvas even without a resolved image.
         // (number != 0: a real erase_picture — number 0 is the erase_window

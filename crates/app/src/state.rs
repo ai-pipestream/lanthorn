@@ -1115,6 +1115,9 @@ pub(crate) struct TranscriptWrapKey {
     pub images_enabled: bool,
     /// Picker cell pixel size (drives image-band fit).
     pub char_px: (u16, u16),
+    /// Frameless v6 render mode: applies its own inline-image sizing and draws
+    /// content splashes inline, so a live mode toggle must re-wrap (SQ-0461).
+    pub frameless: bool,
     /// Screen-clear anchor (full-transcript index); drives top-anchoring.
     pub clear_anchor: Option<usize>,
     /// Current room name — location-header style matching in `resolve_story_style`.
@@ -3278,7 +3281,7 @@ mod tests {
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(4, 4)),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None ,
+            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
         };
         let elems = vec![
             TranscriptElem::Text { text: "a".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0)] },
@@ -3624,7 +3627,7 @@ mod tests {
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(4, 4)),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None ,
+            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
         };
         st.push_transcript_image(dummy);
         st.push_transcript("world");
@@ -3700,7 +3703,7 @@ mod tests {
         let dummy = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(image::RgbaImage::new(4, 4)),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None ,
+            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
         };
         s.push_transcript_image(dummy); // transcript_images[0] = Some, len 1
         s.push_transcript("a\nb"); // grow to len 3

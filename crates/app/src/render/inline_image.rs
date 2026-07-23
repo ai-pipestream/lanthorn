@@ -165,7 +165,7 @@ mod tests {
         let img = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None ,
+            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
         };
         let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
         let picker = Picker::halfblocks();
@@ -181,7 +181,7 @@ mod tests {
         let img = crate::inline_image::InlineImage {
             pixels: std::sync::Arc::new(px),
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None ,
+            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
         };
         let band = crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 };
         let picker = Picker::halfblocks();
@@ -204,7 +204,7 @@ mod tests {
         let img = crate::inline_image::InlineImage {
             pixels,
             align: crate::inline_image::ImageAlign::InlineUp,
-            scaled: None, margin_px: None ,
+            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
         };
         crate::render::transcript::ImageBand { image: img, cols: 2, rows: 2, row: 0, x_off: 0 }
     }
