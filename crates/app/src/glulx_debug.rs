@@ -336,7 +336,6 @@ impl GlulxSession {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::debug_panel::{DebugPanelState, Section};
     use crate::engine::Engine;
     use crate::glulx_session::GlulxSession;
