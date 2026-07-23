@@ -125,12 +125,12 @@ impl DisasmCache {
         // Code starts to tile from: routine entries (which carry a header) plus
         // the headerless initial-PC main context. Kept as one sorted set so
         // each run's extent is bounded by the next code start of either kind.
-        let initial_pc = mem.read_word(0x06) as u32;
+        //
+        // v6's `main` is a real ROUTINE (packed header-0x06 address), already
+        // discovered by `discover_rd` and present in `rd`/`routines` — so it
+        // needs no extra headerless start. Only v1-5/7/8, where header 0x06 is a
+        // direct PC into a headerless main, inject `initial_pc` here.
         let mut starts: BTreeSet<u32> = routines.clone();
-        if initial_pc >= rstart && initial_pc < rend {
-            starts.insert(initial_pc);
-        }
-
         // Truncation boundaries are HARD: only real RD routine entries (reached
         // by a constant call) and the initial-PC main context force an
         // instruction to end. Linear-scan entries (`extra`) are SOFT — honoured
@@ -139,8 +139,12 @@ impl DisasmCache {
         // store byte, `0x01`, misread as a 1-local routine header) and is
         // dropped so it can never split a real instruction.
         let mut hard: BTreeSet<u32> = rd.clone();
-        if initial_pc >= rstart && initial_pc < rend {
-            hard.insert(initial_pc);
+        if version != 6 {
+            let initial_pc = mem.read_word(0x06) as u32;
+            if initial_pc >= rstart && initial_pc < rend {
+                starts.insert(initial_pc);
+                hard.insert(initial_pc);
+            }
         }
 
         let mut units: Vec<Unit> = Vec::new();
@@ -522,15 +526,31 @@ impl DisasmCache {
     }
 }
 
+/// Byte address where the interpreter begins executing (ZMSD §5.5).
+///
+/// v1-5/7/8: header 0x06 is the *direct* first-instruction PC of a headerless
+/// "main" context — returned as-is. v6: header 0x06 is the *packed address of
+/// the `main` routine* (a real routine with a locals header); returned unpacked
+/// to its byte entry. A v6 disassembler that used the raw word here would root
+/// its reachability at a nonsense address (the packed value is ~1/4 the real
+/// one) and misclassify the whole region.
+pub fn boot_root(mem: &Memory) -> u32 {
+    let w = mem.read_word(0x06);
+    if mem.version() == 6 {
+        Unpack::from_mem(mem).routine(w)
+    } else {
+        w as u32
+    }
+}
+
 /// Code-region bounds: `(region_start, region_end)`.
 ///
-/// `region_start` = `min(high_mem_base, initial_pc)`; `region_end` =
+/// `region_start` = `min(high_mem_base, boot_root)`; `region_end` =
 /// `mem.len()`. Permissive by design — discovery/validation in later tasks
 /// reject non-code content within these bounds.
 pub fn code_region(mem: &Memory) -> (u32, u32) {
     let high_mem_base = mem.read_word(0x04) as u32;
-    let initial_pc = mem.read_word(0x06) as u32;
-    let region_start = high_mem_base.min(initial_pc);
+    let region_start = high_mem_base.min(boot_root(mem));
     let region_end = mem.len() as u32;
     (region_start, region_end)
 }
@@ -596,8 +616,24 @@ pub fn discover_rd(mem: &Memory, version: u8, unpack: &Unpack, region: (u32, u32
     let mut routines: BTreeSet<u32> = BTreeSet::new();
     let mut visited: HashSet<u32> = HashSet::new();
 
-    let initial_pc = mem.read_word(0x06) as u32;
-    let mut worklist: Vec<u32> = vec![initial_pc];
+    // Seed the reachability root. v1-5/7/8: header 0x06 is the direct
+    // first-instruction PC of the headerless main context — enqueue it. v6:
+    // header 0x06 is the PACKED address of the `main` ROUTINE, which the
+    // interpreter calls (ZMSD §5.5); unpack it to the routine entry, record it
+    // as a discovered routine, and enqueue its first instruction.
+    let mut worklist: Vec<u32> = Vec::new();
+    if version == 6 {
+        let entry = unpack.routine(mem.read_word(0x06));
+        if entry >= rstart && entry < rend {
+            let fi = routine_first_instr(mem, entry, version);
+            if fi < rend {
+                routines.insert(entry);
+                worklist.push(fi);
+            }
+        }
+    } else {
+        worklist.push(mem.read_word(0x06) as u32);
+    }
 
     while let Some(first) = worklist.pop() {
         if !visited.insert(first) {
@@ -761,6 +797,41 @@ mod tests {
         assert!(start <= initial_pc, "region_start {start:#x} > initial_pc {initial_pc:#x}");
         assert!(start < end, "region_start {start:#x} >= region_end {end:#x}");
         assert_eq!(end, mem.len() as u32);
+    }
+
+    #[test]
+    fn v6_boot_root_unpacks_the_packed_main_address() {
+        // v6: header 0x06 is the PACKED address of `main`, not a direct PC.
+        // With routine offset 0, unpack.routine(p) = 4*p. The old bug used the
+        // raw word directly, rooting reachability ~4x too low.
+        let mut buf = crate::header::tests_support::sample_story(6);
+        buf[0x04] = 0x01; buf[0x05] = 0x00; // high_mem_base = 0x0100
+        buf[0x06] = 0x00; buf[0x07] = 0x80; // packed main = 0x0080 → entry 0x0200
+        buf[0x28] = 0x00; buf[0x29] = 0x00; // routine offset = 0
+        buf[0x2A] = 0x00; buf[0x2B] = 0x00; // string offset = 0
+        buf[0x0200] = 0x00; // main routine: 0 locals
+        buf[0x0201] = 0xB0; // rtrue — clean terminator for RD/validation
+        let mem = Memory::new(buf).unwrap();
+
+        // boot_root unpacks 0x0080 → 0x0200, NOT the raw 0x0080.
+        assert_eq!(boot_root(&mem), 0x0200, "v6 boot root must unpack the packed word");
+
+        // region_start is high memory, not min(high_mem, raw_word) = 0x0080.
+        let (rstart, rend) = code_region(&mem);
+        assert_eq!(rstart, 0x0100, "v6 region must root at high memory, not the raw packed word");
+        assert_eq!(rend, mem.len() as u32);
+
+        // RD roots at the true main entry and records it as a routine.
+        let unpack = Unpack::from_mem(&mem);
+        let rd = discover_rd(&mem, 6, &unpack, (rstart, rend));
+        assert!(rd.contains(&0x0200), "RD did not root at the unpacked v6 main entry");
+    }
+
+    #[test]
+    fn boot_root_is_the_raw_word_for_non_v6() {
+        // v1-5/7/8: header 0x06 is a direct PC — boot_root returns it verbatim.
+        let mem = Memory::new(crate::header::tests_support::sample_story(5)).unwrap();
+        assert_eq!(boot_root(&mem), mem.read_word(0x06) as u32);
     }
 
     #[test]
