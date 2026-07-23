@@ -154,7 +154,20 @@ pub fn classify_windows(items: &[PositionedWindow]) -> V6Layout<'_> {
     V6Layout { story, story_gfx, chrome }
 }
 
-fn fill_cell(canvas: &mut RgbaImage, px: u32, py: u32, cw: u32, ch: u32, color: Rgba<u8>) {
+/// The story window's own background colour (set by the game via
+/// `set_colour`), resolved to an opaque RGBA for filling the story rect
+/// before floats/text. `None` when the game set no colour — the caller then
+/// leaves the rect transparent (the theme backdrop shows through, unchanged
+/// from before this colour handling existed).
+pub fn story_bg_rgba(story: Option<&PositionedWindow>, colors: &ColorScheme) -> Option<Rgba<u8>> {
+    let WinNode::Buffer(b) = &story?.node else { return None };
+    // `bg`, when `Some`, always packs a non-Default channel (see
+    // `state::pack_zcolour`), so the fallback here is never actually used —
+    // it exists only to satisfy `packed_to_rgba`'s signature.
+    Some(packed_to_rgba(b.bg?, Rgba([0, 0, 0, 255]), colors))
+}
+
+pub(crate) fn fill_cell(canvas: &mut RgbaImage, px: u32, py: u32, cw: u32, ch: u32, color: Rgba<u8>) {
     let (w, h) = (canvas.width(), canvas.height());
     for y in py..(py + ch).min(h) {
         for x in px..(px + cw).min(w) {
@@ -174,10 +187,18 @@ fn fill_cell(canvas: &mut RgbaImage, px: u32, py: u32, cw: u32, ch: u32, color: 
 /// compass); Grid entries are rasterized second, one glyph per `FONT × FONT`
 /// native-pixel cell, drawing every row regardless of the window's pixel
 /// height (a v6 status grid can legitimately exceed its pixel box).
+///
+/// A `px_texts` run's `style` bit 1 (reverse) swaps its resolved fg/bg: the
+/// glyph ink is drawn in the run's (window) background colour and a solid
+/// block in the run's foreground colour is painted behind it — reverse always
+/// paints an opaque block (there is no "transparent ink"), so a run whose
+/// colours are unset falls back to `default_bg`/`default_fg` respectively
+/// rather than leaving the swapped-in channel transparent.
 pub fn build_chrome_canvas(
     chrome: &[&PositionedWindow],
     native: (u16, u16),
     default_fg: Rgba<u8>,
+    default_bg: Rgba<u8>,
     colors: &ColorScheme,
 ) -> RgbaImage {
     let mut canvas = RgbaImage::new(native.0 as u32, native.1 as u32);
@@ -205,8 +226,16 @@ pub fn build_chrome_canvas(
             let oy = it.y_px as u32;
             if !g.px_texts.is_empty() {
                 for t in &g.px_texts {
-                    let fg = packed_to_rgba(t.fg, default_fg, colors);
-                    let bg = (t.bg != 0).then(|| packed_to_rgba(t.bg, Rgba([0, 0, 0, 255]), colors));
+                    let resolved_fg = packed_to_rgba(t.fg, default_fg, colors);
+                    let resolved_bg = packed_to_rgba(t.bg, default_bg, colors);
+                    let (fg, bg) = if t.style & 1 != 0 {
+                        // Reverse: swap — ink takes the (window) background
+                        // colour, and a solid block in the foreground colour
+                        // is painted behind it.
+                        (resolved_bg, Some(resolved_fg))
+                    } else {
+                        (resolved_fg, (t.bg != 0).then_some(resolved_bg))
+                    };
                     let py = oy + (t.y.max(1) as u32 - 1);
                     for (i, ch) in t.text.chars().enumerate() {
                         let px = ox + (t.x.max(1) as u32 - 1) + i as u32 * FONT;
@@ -475,7 +504,7 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{BorderPref, BufferWindow, GraphicsWindow, GridCell, GridWindow};
+    use crate::engine::{BorderPref, BufferWindow, GraphicsWindow, GridCell, GridWindow, PxText};
     use std::sync::Arc;
 
     fn grid_item(x_px: u16) -> PositionedWindow {
@@ -614,12 +643,12 @@ mod tests {
         };
         // Box tall enough (40): both markers land 1:1 — never squashed.
         let tall = win(40, src.clone());
-        let canvas = build_chrome_canvas(&[&tall], (100, 100), Rgba([0, 0, 0, 255]), &colors());
+        let canvas = build_chrome_canvas(&[&tall], (100, 100), Rgba([0, 0, 0, 255]), Rgba([0, 0, 0, 255]), &colors());
         assert_eq!(canvas.get_pixel(6, 6)[3], 255, "top-left marker at native (6,6)");
         assert_eq!(canvas.get_pixel(44, 42)[3], 255, "low marker 1:1 at native (44,42)");
         // Box only 5 tall: content past the box clips; nothing squashes into it.
         let short = win(5, src);
-        let canvas = build_chrome_canvas(&[&short], (100, 100), Rgba([0, 0, 0, 255]), &colors());
+        let canvas = build_chrome_canvas(&[&short], (100, 100), Rgba([0, 0, 0, 255]), Rgba([0, 0, 0, 255]), &colors());
         assert_eq!(canvas.get_pixel(6, 6)[3], 255, "top-left marker inside the box survives");
         assert_eq!(canvas.get_pixel(44, 42)[3], 0, "content below the 5px box is clipped");
         for y in 4..9 {
@@ -652,7 +681,7 @@ mod tests {
         }
         let win = graphics_window(0, 0, 20, 20, src);
         let chrome: Vec<&PositionedWindow> = vec![&win];
-        let c = build_chrome_canvas(&chrome, (20, 20), Rgba([255, 255, 255, 255]), &colors());
+        let c = build_chrome_canvas(&chrome, (20, 20), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors());
         assert_eq!(c.get_pixel(0, 0)[3], 255, "border pixel is opaque");
         assert_eq!(c.get_pixel(10, 10)[3], 0, "center is transparent");
     }
@@ -676,7 +705,7 @@ mod tests {
         let base_win = graphics_window(4, 4, 8, 8, base);
         let indicator_win = graphics_window(4, 4, 8, 8, indicator);
         let chrome: Vec<&PositionedWindow> = vec![&base_win, &indicator_win];
-        let c = build_chrome_canvas(&chrome, (20, 20), Rgba([255, 255, 255, 255]), &colors());
+        let c = build_chrome_canvas(&chrome, (20, 20), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors());
         assert_eq!(*c.get_pixel(5, 8), color_b, "left half shows the indicator (last-drawn wins)");
         assert_eq!(*c.get_pixel(10, 8), color_a, "right half shows the base through the transparent margin");
     }
@@ -695,12 +724,128 @@ mod tests {
         };
         let chrome: Vec<&PositionedWindow> = vec![&win];
         let fg = Rgba([0, 255, 255, 255]);
-        let c = build_chrome_canvas(&chrome, (40, 24), fg, &colors());
+        let c = build_chrome_canvas(&chrome, (40, 24), fg, Rgba([0, 0, 0, 255]), &colors());
         // cell (col=2,row=1) native px box is (26,12)..(34,20).
         assert!(
             (26..34).any(|x| (12..20).any(|y| *c.get_pixel(x, y) == fg)),
             "glyph fg pixels appear within the status cell's native box"
         );
+    }
+
+    // ── px_text colour + reverse-video (Lane C) ─────────────────────────────
+    //
+    // These probe the SOLID FILL colour behind a run, not individual glyph
+    // pixels: a run whose text is a single space has no ink bits set, so its
+    // whole FONT×FONT cell is exactly `blit_glyph`'s `bg` fill colour (or
+    // fully transparent when `bg` is `None`) — a robust way to assert which
+    // colour the resolver chose without depending on font-bitmap geometry.
+    const RED: u32 = 0x03FF_0000; // True24 packed
+    const BLUE: u32 = 0x0300_00FF; // True24 packed
+
+    fn px_text_grid_item(text: &str, style: u8, fg: u32, bg: u32) -> PositionedWindow {
+        PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(GridWindow {
+                cols: 1, rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0), cursor_active: false,
+                border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
+                px_texts: vec![PxText { y: 1, x: 1, text: text.into(), style, fg, bg }],
+            }),
+        }
+    }
+
+    #[test]
+    fn px_text_run_fills_its_cell_with_the_explicit_background() {
+        let win = px_text_grid_item(" ", 0, RED, BLUE);
+        let chrome: Vec<&PositionedWindow> = vec![&win];
+        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors());
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(*c.get_pixel(x, y), Rgba([0, 0, 255, 255]), "cell filled with the run's bg (blue) at ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn px_text_reverse_swaps_the_fill_to_the_foreground_colour() {
+        // Same run as above but with style bit 1 (reverse) set: the swap makes
+        // the run's FOREGROUND (red) the fill colour instead of its background.
+        let win = px_text_grid_item(" ", 1, RED, BLUE);
+        let chrome: Vec<&PositionedWindow> = vec![&win];
+        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors());
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(*c.get_pixel(x, y), Rgba([255, 0, 0, 255]), "reverse fill is the run's fg (red) at ({x},{y})");
+            }
+        }
+    }
+
+    #[test]
+    fn px_text_reverse_with_unset_colours_falls_back_to_themed_defaults() {
+        // The run never set an explicit colour (fg=bg=0/Default): reverse still
+        // must paint a solid block (there's no "transparent ink"), falling back
+        // to the caller's themed default_fg for the fill.
+        let win = px_text_grid_item(" ", 1, 0, 0);
+        let chrome: Vec<&PositionedWindow> = vec![&win];
+        let default_fg = Rgba([10, 20, 30, 255]);
+        let default_bg = Rgba([40, 50, 60, 255]);
+        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors());
+        assert_eq!(*c.get_pixel(4, 4), default_fg, "reverse fill falls back to the themed default_fg");
+    }
+
+    #[test]
+    fn px_text_no_bg_stays_transparent_without_reverse() {
+        // Regression guard: a run with no explicit bg (0/Default) and no
+        // reverse style stays transparent — unchanged from before colour
+        // handling existed, so frame art under status text still shows through.
+        let win = px_text_grid_item(" ", 0, RED, 0);
+        let chrome: Vec<&PositionedWindow> = vec![&win];
+        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors());
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(c.get_pixel(x, y)[3], 0, "no bg, no reverse ⇒ transparent at ({x},{y})");
+            }
+        }
+    }
+
+    // ── story region background fill (Lane C) ───────────────────────────────
+
+    #[test]
+    fn story_bg_rgba_resolves_the_windows_own_colour() {
+        let story = PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
+            node: WinNode::Buffer(BufferWindow { primary: true, bg: Some(BLUE), ..Default::default() }),
+        };
+        let color = story_bg_rgba(Some(&story), &colors()).expect("win0 set a bg colour");
+        assert_eq!(color, Rgba([0, 0, 255, 255]));
+    }
+
+    #[test]
+    fn story_bg_rgba_is_none_when_the_game_set_no_colour() {
+        let story = PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
+            node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+        };
+        assert!(story_bg_rgba(Some(&story), &colors()).is_none(), "no game colour ⇒ None (caller leaves it transparent)");
+    }
+
+    #[test]
+    fn story_bg_rgba_fills_the_clear_interior_rect() {
+        // End-to-end through the same calls screen.rs makes: resolve the colour,
+        // then fill_cell the story_clear_native rect with it.
+        let story = PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: 2, y_px: 2, w_px: 4, h_px: 4, left_margin: 0, right_margin: 0,
+            node: WinNode::Buffer(BufferWindow { primary: true, bg: Some(RED), ..Default::default() }),
+        };
+        let mut canvas = RgbaImage::new(8, 8);
+        let (sx, sy, sw, sh) = story_clear_native(Some(&story), &canvas).expect("story window present");
+        let color = story_bg_rgba(Some(&story), &colors()).expect("bg set");
+        fill_cell(&mut canvas, sx, sy, sw, sh, color);
+        for y in 2..6 {
+            for x in 2..6 {
+                assert_eq!(*canvas.get_pixel(x, y), Rgba([255, 0, 0, 255]), "story rect filled red at ({x},{y})");
+            }
+        }
+        assert_eq!(canvas.get_pixel(0, 0)[3], 0, "outside the story rect stays transparent");
     }
 
     #[test]

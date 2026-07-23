@@ -832,7 +832,12 @@ impl GameSession {
             }
 
             let node = if i == 0 {
-                WinNode::Buffer(BufferWindow { primary: true, ..Default::default() })
+                WinNode::Buffer(BufferWindow {
+                    primary: true,
+                    bg: (win.bg != ZColour::Default).then(|| crate::state::pack_zcolour(win.bg)),
+                    fg: (win.fg != ZColour::Default).then(|| crate::state::pack_zcolour(win.fg)),
+                    ..Default::default()
+                })
             } else {
                 WinNode::Grid(GridWindow {
                     cols,

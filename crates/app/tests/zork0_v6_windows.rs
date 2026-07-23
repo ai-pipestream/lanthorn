@@ -250,7 +250,8 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
     let native = v6::native_extent(items);
     let layout = v6::classify_windows(items);
     let default_fg = image::Rgba([220, 220, 220, 255]);
-    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, &colors);
+    let default_bg = image::Rgba([0, 0, 0, 255]);
+    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors);
     // A visible story line of 'X's; assert none of its glyph pixels land on an opaque chrome
     // pixel of the frame (they sit in the clear interior).
     let main = v6::MainText { lines: vec!["X".repeat(30)], input: String::new(), cursor_col: 0, awaiting: false, floats: Vec::new() };
@@ -323,7 +324,8 @@ fn zork0_v6_story_classified_and_clear_interior_inside_frame() {
     // invariants, not exact pixels, so a rebuild of the art can't make this brittle.)
     let colors = app::colors::ColorScheme::default();
     let default_fg = image::Rgba([220, 220, 220, 255]);
-    let chrome = v6::build_chrome_canvas(&layout.chrome, native, default_fg, &colors);
+    let default_bg = image::Rgba([0, 0, 0, 255]);
+    let chrome = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors);
     let (sx, sy, sw, sh) = v6::story_clear_native(layout.story, &chrome).expect("story has a clear interior");
     assert!(sw > 100 && sh > 60, "clear interior is a real story region, got {sw}x{sh}");
     assert!(sy >= story.y_px as u32, "story text starts at/below the window top (banner cleared)");

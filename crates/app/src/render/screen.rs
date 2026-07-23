@@ -397,10 +397,11 @@ fn render_node(
             if let Some(picker) = state.game_picker.as_ref() {
                 let theme_bg = state.colors.theme.get("transcript").style;
                 let default_fg = style_fg_rgba(theme_bg, image::Rgba([220, 220, 220, 255]));
+                let default_bg = style_bg_rgba(theme_bg, image::Rgba([0, 0, 0, 255]));
                 use crate::render::v6_layout as v6;
                 let native = v6::native_extent(items);
                 let layout = v6::classify_windows(items);
-                let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, &state.colors);
+                let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
 
                 // Hybrid mode (Lane H): draw the chrome as a scaled pixel RING
                 // around a terminal story viewport, then render the story window as
@@ -438,6 +439,13 @@ fn render_node(
                 // text into the clear interior of the native canvas, then draw the
                 // whole thing scaled.
                 if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
+                    // The story window's own background colour (set by the game
+                    // via set_colour), when it set one — paints the page instead
+                    // of leaving it transparent over the theme backdrop. No
+                    // colour set ⇒ unchanged (transparent) behaviour.
+                    if let Some(color) = v6::story_bg_rgba(layout.story, &state.colors) {
+                        v6::fill_cell(&mut canvas, sx, sy, sw, sh, color);
+                    }
                     // Window-0 inline pictures (drop-caps, room icons) arrive as
                     // transcript-anchored floats (`transcript_images` sidecar):
                     // build_main_text wraps text beside them and draw_story_text
@@ -772,6 +780,16 @@ fn fill_style(area: Rect, buf: &mut Buffer, style: ratatui::style::Style) {
 /// Resolve a themed style's colour to an opaque RGBA for the pixel canvas.
 fn style_fg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> image::Rgba<u8> {
     match style.fg {
+        Some(ratatui::style::Color::Rgb(r, g, b)) => image::Rgba([r, g, b, 255]),
+        _ => fallback,
+    }
+}
+
+/// Resolve a themed style's background colour to an opaque RGBA for the pixel
+/// canvas (the `default_bg` fallback for chrome reverse-video and the story
+/// background fill — see [`crate::render::v6_layout::build_chrome_canvas`]).
+fn style_bg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> image::Rgba<u8> {
+    match style.bg {
         Some(ratatui::style::Color::Rgb(r, g, b)) => image::Rgba([r, g, b, 255]),
         _ => fallback,
     }
