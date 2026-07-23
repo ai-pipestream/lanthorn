@@ -236,6 +236,11 @@ re-seed the new template, or hand-write the new shape from
   into one scaled pixel image instead. It also cycles in the settings screen.
   (Applies only to graphical v6 stories; other games are unaffected.) See
   [Graphical v6](v6-graphics.md) for the full picture.
+- **v6 arrow keys** — `v6_arrow_keys` (default `true`) controls whether arrow
+  keypresses are forwarded to a v6 story as movement input; set it `false` (or
+  launch with `--no-v6-arrows`) to withhold them so arrows drive babelmap's own
+  scrollback recall / map panning instead. Only v6 stories are affected — v1-5
+  and Glulx games always get arrows. See [Graphical v6](v6-graphics.md#arrow-keys-movement-or-map-panning-your-call).
 - **Story text margins** — `text_margin_x` / `text_margin_y` (default 0) reserve
   blank columns on each side / rows top and bottom *inside* the story text pane,
   for a little breathing room around the transcript. The margin applies to the

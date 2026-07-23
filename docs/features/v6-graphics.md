@@ -65,6 +65,19 @@ The story page itself fills with the window's own background colour (when
 the game set one) rather than leaving the terminal's theme backdrop showing
 through.
 
+## Arrow keys: movement or map panning, your call
+
+Several v6 titles bind the arrow keys straight to movement — press ↑ and your
+character walks north. That's authentic, but it collides with babelmap's own
+use of arrows for scrollback recall and map panning, which some players would
+rather keep. Set `v6_arrow_keys = false` in the config (or launch with
+`--no-v6-arrows`) and arrows are withheld from v6 stories specifically:
+instead of being delivered as a ZSCII cursor code, the keypress falls through
+to whatever babelmap would do with it if no game input were pending —
+command-history recall or map panning, depending on focus. Enter and every
+other key are untouched, and v1–v5/Glulx stories keep getting arrows
+regardless of this setting; it only ever withholds them from v6.
+
 ## Not yet there
 
 - **Mouse and menu input** — `read_mouse`/`mouse_window` are recognized but

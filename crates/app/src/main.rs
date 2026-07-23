@@ -85,6 +85,18 @@ impl From<app::state::ExitTarget> for RunOutcome {
     }
 }
 
+// ── Arrow-key withholding (SQ-0460) ──────────────────────────────────────────
+
+/// Whether an arrow keypress should be forwarded to the story as a ZSCII
+/// cursor code (129-132; ZMSD §3.8). Some v6 games bind arrows to movement;
+/// `v6_arrow_keys = false` withholds them so the key falls through to
+/// app-side handling (scrollback / map panning) instead. Only v6 is gated —
+/// v1-5 and Glulx stories always get arrows, regardless of `version`'s value
+/// for a non-Z-machine session (callers pass a version of 0 in that case).
+fn forward_arrow_to_v6(v6_arrow_keys: bool, version: u8) -> bool {
+    version != 6 || v6_arrow_keys
+}
+
 // ── Terminal restore helpers ──────────────────────────────────────────────────
 
 /// Restore the terminal to cooked mode and leave the alternate screen.
@@ -1842,19 +1854,34 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         // Map to a neutral KeyInput and forward; the engine
                         // converts it (ZSCII for the Z-machine) and returns None
                         // for keys with no input meaning, which are ignored.
-                        if let Some(result) = app::engine::key_event_to_input(*k)
-                            .and_then(|ki| {
+                        let ki = app::engine::key_event_to_input(*k);
+                        // Arrows withheld from a v6 story (SQ-0460, `v6_arrow_keys`)
+                        // are NOT consumed here — skip forwarding and let the event
+                        // fall through to the normal action routing below, the same
+                        // path it would take if no game input were pending
+                        // (scrollback / map panning per focus).
+                        let withhold_arrow = ki.is_some_and(|ki| {
+                            matches!(ki, app::engine::KeyInput::Up | app::engine::KeyInput::Down
+                                | app::engine::KeyInput::Left | app::engine::KeyInput::Right)
+                                && !forward_arrow_to_v6(
+                                    state.config.v6_arrow_keys,
+                                    zvm_session_opt(&*session).map_or(0, |z| z.machine.mem.version()),
+                                )
+                        });
+                        if !withhold_arrow {
+                            if let Some(result) = ki.and_then(|ki| {
                                 app::trace::hostio(&state.config.user_dir, state.config.trace.hostio, format!("input_key({ki:?})"));
                                 session.submit_key(ki)
                             })
-                        {
-                            if turn::apply_game_driven_result(
-                                &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
-                            ) {
-                                break 'event_loop state.exit_target.into();
+                            {
+                                if turn::apply_game_driven_result(
+                                    &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
+                                ) {
+                                    break 'event_loop state.exit_target.into();
+                                }
                             }
+                            continue;
                         }
-                        continue;
                     }
                 }
             }
@@ -2974,6 +3001,23 @@ mod tests {
 
     use super::{dim_area, is_slash, scroll_for_match, should_prompt_save_on_quit};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetCaps, InsetSegment, PaneGlyphs};
+
+    // ── SQ-0460: withhold arrow keys from v6 stories ───────────────────────────
+
+    #[test]
+    fn forward_arrow_to_v6_gates_only_v6_when_disabled() {
+        // v6_arrow_keys = true (default): every version forwards arrows.
+        assert!(super::forward_arrow_to_v6(true, 6));
+        assert!(super::forward_arrow_to_v6(true, 5));
+        assert!(super::forward_arrow_to_v6(true, 0));
+
+        // v6_arrow_keys = false: only version 6 is withheld; v1-5 and the
+        // Glulx/no-session placeholder (version 0) still forward arrows.
+        assert!(!super::forward_arrow_to_v6(false, 6));
+        assert!(super::forward_arrow_to_v6(false, 5));
+        assert!(super::forward_arrow_to_v6(false, 3));
+        assert!(super::forward_arrow_to_v6(false, 0));
+    }
 
     // ── SQ-0297: map-export slash commands must actually write the file ────────
 

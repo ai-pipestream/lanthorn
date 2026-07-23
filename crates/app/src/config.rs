@@ -225,6 +225,12 @@ pub struct Cli {
     /// (blue lines) persists across runs. (SQ-0449)
     #[arg(long)]
     pub debug: bool,
+
+    /// Withhold arrow keypresses from a v6 story (some bind them to movement);
+    /// they fall through to app-side scrollback/map panning instead. Overrides
+    /// the config's `v6_arrow_keys`. v1-5/Glulx stories always get arrows.
+    #[arg(long)]
+    pub no_v6_arrows: bool,
 }
 
 /// Terminal image protocol for cover art. `Auto` detects the best available
@@ -484,6 +490,13 @@ pub struct Config {
     /// How the v6 graphical story pane is rendered. Default: Hybrid.
     #[serde(default)]
     pub v6_render: V6RenderMode,
+    /// When true (default), forward arrow keypresses to a v6 story as ZSCII
+    /// cursor codes (129-132). Some v6 games bind arrows to movement; set false
+    /// (or `--no-v6-arrows`) to withhold them so arrows drive app-side
+    /// scrollback/map panning instead. Only affects v6 — v1-5/Glulx stories
+    /// always get arrows regardless of this setting.
+    #[serde(default = "default_true")]
+    pub v6_arrow_keys: bool,
     /// Keymap overrides: command_name → key-spec string(s).
     #[serde(default)]
     pub keymap: KeymapConfig,
@@ -604,6 +617,7 @@ impl Default for Config {
             background_tidy: BackgroundTidy::EveryRoom,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
+            v6_arrow_keys: true,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: None,
@@ -691,6 +705,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.background_tidy = from_file.background_tidy;
             cfg.aux_storage = from_file.aux_storage;
             cfg.v6_render = from_file.v6_render;
+            cfg.v6_arrow_keys = from_file.v6_arrow_keys;
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
             cfg.style = from_file.style;
@@ -731,6 +746,11 @@ pub fn resolve(cli: &Cli) -> Config {
     // absence must not turn on a config that persisted `enable_sound = false`.
     if cli.no_sound {
         cfg.enable_sound = false;
+    }
+    // One-way override: `--no-v6-arrows` withholds arrows for this run, but its
+    // absence must not turn arrows back on for a config that persisted `false`.
+    if cli.no_v6_arrows {
+        cfg.v6_arrow_keys = false;
     }
 
     if let Some(list) = &cli.trace {
@@ -795,6 +815,7 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
         V6RenderMode::Raster => "raster",
     };
     doc["v6_render"] = toml_edit::value(v6_str);
+    doc["v6_arrow_keys"] = toml_edit::value(cfg.v6_arrow_keys);
     doc["show_room_numbers"] = toml_edit::value(cfg.show_room_numbers);
     doc["show_loc_method"] = toml_edit::value(cfg.show_loc_method);
     doc["show_status_bar"] = toml_edit::value(cfg.show_status_bar);
@@ -998,6 +1019,7 @@ mod tests {
             no_images: false,
             trace: None,
             debug: false,
+            no_v6_arrows: false,
         };
 
         let cfg = resolve(&cli);
@@ -1017,6 +1039,7 @@ mod tests {
             no_images: false,
             trace: None,
             debug: false,
+            no_v6_arrows: false,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir.file_name().unwrap(), ".babelmap");
@@ -1037,6 +1060,7 @@ mod tests {
             no_images: false,
             trace: None,
             debug: false,
+            no_v6_arrows: false,
         };
         let cfg = resolve(&cli);
         assert_eq!(cfg.user_dir, PathBuf::from("/tmp/from-file"));
@@ -1168,6 +1192,7 @@ use_defaults = false
             background_tidy: BackgroundTidy::OnOverlap,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
+            v6_arrow_keys: true,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
             style: Some("neon".into()),
@@ -1436,6 +1461,7 @@ use_defaults = false
             no_images: false,
             trace: None,
             debug: false,
+            no_v6_arrows: false,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.acceleration);
@@ -1454,12 +1480,35 @@ use_defaults = false
             no_images: false,
             trace: None,
             debug: false,
+            no_v6_arrows: false,
         };
         // Absent flag: sound stays on (config default).
         assert!(resolve(&base).enable_sound);
         // Flag present: sound forced off for this run.
         let muted = Cli { no_sound: true, ..base };
         assert!(!resolve(&muted).enable_sound);
+    }
+
+    #[test]
+    fn no_v6_arrows_flag_disables_v6_arrow_keys() {
+        let base = Cli {
+            story: Some(PathBuf::from("foo.z5")),
+            user_dir: None,
+            data_dir: None,
+            config: Some(PathBuf::from("/nonexistent/path/config.toml")),
+            no_accel: false,
+            no_sound: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: false,
+            trace: None,
+            debug: false,
+            no_v6_arrows: false,
+        };
+        // Absent flag: arrows stay forwarded (config default).
+        assert!(resolve(&base).v6_arrow_keys);
+        // Flag present: arrows withheld from v6 for this run.
+        let no_arrows = Cli { no_v6_arrows: true, ..base };
+        assert!(!resolve(&no_arrows).v6_arrow_keys);
     }
 
     #[test]
@@ -1475,6 +1524,7 @@ use_defaults = false
             no_images: false,
             trace: None,
             debug: false,
+            no_v6_arrows: false,
         };
         cli.trace = Some("screen,map".to_string());
         let cfg = resolve(&cli);
@@ -1496,6 +1546,7 @@ use_defaults = false
             no_images: true,
             trace: None,
             debug: false,
+            no_v6_arrows: false,
         };
         let cfg = resolve(&cli);
         assert!(!cfg.images);
