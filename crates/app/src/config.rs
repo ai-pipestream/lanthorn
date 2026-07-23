@@ -349,7 +349,7 @@ pub enum AuxStorage {
 
 /// How the v6 graphical story pane is rendered.
 ///
-/// TOML: `v6_render = "hybrid"` (default) or `"raster"`.
+/// TOML: `v6_render = "hybrid"` (default), `"raster"`, or `"frameless"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum V6RenderMode {
@@ -359,6 +359,13 @@ pub enum V6RenderMode {
     Hybrid,
     /// The whole pane rasterized into one pixel image (feature-limited).
     Raster,
+    /// No decorative frame at all: the story runs as a normal full-pane terminal
+    /// transcript (native scrollback, full-size text), the game's chrome/status
+    /// text collapses to a compact terminal status band across the top, and
+    /// inline story pictures still render via the transcript image path. The
+    /// decorative frame art and full-screen graphics windows are simply not
+    /// drawn. With `--no-images` this equals the classic cell fallback. (SQ-0461)
+    Frameless,
 }
 
 // ── Animation config ──────────────────────────────────────────────────────────
@@ -813,6 +820,7 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     let v6_str = match cfg.v6_render {
         V6RenderMode::Hybrid => "hybrid",
         V6RenderMode::Raster => "raster",
+        V6RenderMode::Frameless => "frameless",
     };
     doc["v6_render"] = toml_edit::value(v6_str);
     doc["v6_arrow_keys"] = toml_edit::value(cfg.v6_arrow_keys);
@@ -1166,6 +1174,25 @@ use_defaults = false
     fn v6_render_absent_is_hybrid() {
         let c: Config = toml::from_str("").unwrap();
         assert_eq!(c.v6_render, V6RenderMode::Hybrid);
+    }
+
+    #[test]
+    fn v6_render_parses_frameless_from_toml() {
+        let c: Config = toml::from_str("v6_render = \"frameless\"").unwrap();
+        assert_eq!(c.v6_render, V6RenderMode::Frameless);
+    }
+
+    #[test]
+    fn v6_render_frameless_round_trips_through_writer() {
+        let dir = std::env::temp_dir().join(format!("babelmap-v6-frameless-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cfg = Config::default();
+        cfg.v6_render = V6RenderMode::Frameless;
+        write_config(&dir, &cfg).unwrap();
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.v6_render, V6RenderMode::Frameless, "frameless must survive save→load");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

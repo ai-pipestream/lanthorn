@@ -2731,7 +2731,7 @@ fn config_cycle_aux_storage(val: &mut crate::config::AuxStorage, delta: i32) {
 
 fn config_cycle_v6_render(val: &mut crate::config::V6RenderMode, delta: i32) {
     use crate::config::V6RenderMode::*;
-    let variants = [Hybrid, Raster];
+    let variants = [Hybrid, Raster, Frameless];
     let pos = variants.iter().position(|v| v == val).unwrap_or(0) as i32;
     let n = variants.len() as i32;
     *val = variants[((pos + delta).rem_euclid(n)) as usize];

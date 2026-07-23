@@ -25,7 +25,7 @@ then height, big-endian) with no pixel data at all. babelmap recognizes a
 mechanism these games rely on — it isn't a general Blorb image feature, it's a
 placement protocol these specific titles speak.
 
-## Three render modes
+## Render modes
 
 Set `v6_render` in the config (or cycle it from the settings screen) to pick
 how a v6 story's pane is drawn on an image-capable terminal (Kitty, iTerm2, or
@@ -41,9 +41,28 @@ Sixel):
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
   engine drew it natively.
-- **Cell fallback** — without an image protocol, everything (graphics
-  windows, status grids, and story text) composites as terminal cells instead
-  of pixels, so the game stays playable everywhere.
+- **`frameless`** — a deliberate "classic terminal interpreter, but the
+  pictures still show" presentation: **no decorative frame at all**. The story
+  runs as a normal full-pane terminal transcript at full size with native
+  scrollback, the game's chrome/status text collapses to a compact terminal
+  status band across the top of the pane, and window-0's inline story pictures
+  (drop-caps, room icons) still render via the transcript image path. The
+  border art, compass, and full-screen graphics windows are simply not drawn.
+  With `--no-images` this is identical to the cell fallback below.
+  - *What you lose:* the compass rose, the decorative borders/banner, and any
+    full-screen splash art.
+  - *What you gain:* full-size story text (no letterbox shrink), native
+    terminal scrollback, and selectable text everywhere — the most legible
+    mode on a small window or a slow terminal.
+- **Cell fallback** — without an image protocol (a remote or text-only
+  terminal, or while a menu/dialog is open), everything (graphics windows,
+  status grids, and story text) composites as terminal cells instead of
+  pixels, so the game stays playable everywhere. This is what `frameless`
+  makes the *deliberate, always-on* choice even when an image protocol is
+  available.
+
+The status band in `frameless` and the cell fallback is themed by the
+`upper_window` style selector (the same one that colours a v4+ status line).
 
 ## Illuminated drop-caps and room icons, inline
 

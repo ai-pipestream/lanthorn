@@ -407,7 +407,14 @@ fn render_node(
             // the v6 image would be invisible — the cell fallback keeps the pane
             // readable behind the overlay until it closes.
             state.v6_image_scale.set(1.0);
-            if !state.any_overlay_open() {
+            // Frameless mode (SQ-0461): deliberately skip the pixel chrome (both
+            // the hybrid ring and the raster composite) and fall through to the
+            // cell path below — a compact terminal status band over the story as
+            // a normal full-pane transcript. A picker still renders inline story
+            // pictures there (the primary-Buffer transcript path blits them at
+            // native scale, `v6_image_scale` == 1.0 set just above).
+            let frameless = state.config.v6_render == crate::config::V6RenderMode::Frameless;
+            if !state.any_overlay_open() && !frameless {
             if let Some(picker) = state.game_picker.as_ref() {
                 let theme_bg = state.colors.theme.get("transcript").style;
                 let default_fg = style_fg_rgba(theme_bg, image::Rgba([220, 220, 220, 255]));
@@ -567,8 +574,10 @@ fn render_node(
                 return None;
             }
             } // !any_overlay_open
-            // Cell fallback with a primary story window (no image protocol —
-            // remote/text-only terminals): the v6 native cell geometry is a
+            // Cell path with a primary story window. Reached three ways: no image
+            // protocol (remote/text-only terminals), an overlay is open, or the
+            // user chose `v6_render = "frameless"` (SQ-0461) to always present the
+            // story this way. The v6 native cell geometry is a
             // 40x25-cell postage stamp on a real terminal and pixel art can't
             // render at all, so render like a classic two-window Z-machine
             // game instead — the status window's text rows across the top of
@@ -2644,5 +2653,109 @@ mod tests {
         let geom = state.transcript_geom.get().expect("raster mode publishes scroll geometry");
         assert_eq!(geom.total_rows, 40);
         assert_eq!(geom.first_abs_row, 21, "offset 0 → newest body at the bottom (40 - 19)");
+    }
+
+    /// A synthetic v6 `Layered` model for the frameless-mode tests: a chrome
+    /// `Grid` carrying one status px-run at native (1,1) → cell (0,0), plus a
+    /// primary story `Buffer`. No decorative graphics window.
+    fn frameless_v6_model() -> ScreenModel {
+        let status = PositionedWindow {
+            x: 0, y: 0, w: 40, h: 1, x_px: 0, y_px: 0, w_px: 320, h_px: 8,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(crate::engine::GridWindow {
+                cols: 40, rows: 1, cells: vec![], active_rows: 1, cursor: (1, 1),
+                cursor_active: false, border: crate::engine::BorderPref::Unspecified,
+                bg: None, fg: None, reverse: false,
+                px_texts: vec![
+                    crate::engine::PxText { y: 1, x: 1, text: "SCORE 10".into(), style: 0, fg: 0, bg: 0 },
+                ],
+            }),
+        };
+        let story = PositionedWindow {
+            x: 0, y: 1, w: 40, h: 24, x_px: 0, y_px: 8, w_px: 320, h_px: 192,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+        };
+        ScreenModel {
+            root: WinNode::Layered(vec![status, story]),
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (40, 25),
+        }
+    }
+
+    #[test]
+    fn frameless_renders_full_pane_transcript_with_status_band_and_no_graphics() {
+        // SQ-0461: `v6_render = "frameless"` deliberately skips the pixel chrome
+        // (both the hybrid ring and the raster composite) even with a picker
+        // present, and presents the story as a normal full-pane terminal
+        // transcript with the chrome text collapsed to a compact status band.
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        // A picker is present (images enabled) — frameless must STILL bypass the
+        // pixel paths and use the terminal transcript.
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = crate::config::V6RenderMode::Frameless;
+        state.push_transcript("HELLO STORY WORLD");
+
+        let model = frameless_v6_model();
+        let area = Rect::new(0, 0, 40, 25);
+        let mut buf = Buffer::empty(area);
+        let mut links = Vec::new();
+        let m = render_node(
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+        );
+        let m = m.expect("frameless returns the primary-buffer transcript metrics");
+
+        // The transcript occupies the FULL pane below the one-row status band —
+        // NOT an inset chrome-ring viewport (hybrid) and NOT a pixel raster. The
+        // transcript always reserves the rightmost column as a scrollbar gutter,
+        // so a full-pane body is `area.width - 1` wide (vs hybrid's much-narrower
+        // inset viewport).
+        let geom = state.transcript_geom.get().expect("frameless publishes transcript geometry");
+        let vp = geom.area;
+        assert_eq!(vp.x, area.x, "transcript is flush to the left pane edge (not inset)");
+        assert_eq!(vp.width, area.width - 1, "transcript spans the full pane width minus the scrollbar gutter");
+        assert_eq!(vp.y, area.y + 1, "transcript starts below the 1-row status band");
+        assert_eq!(m.viewport_rows, area.height - 1, "metrics report the full-pane body height below the band");
+
+        // The whole pane rendered as real terminal cells: the status run sits in
+        // the top row and the story text renders as selectable text below it.
+        let screen: String = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect::<String>() + "\n")
+            .collect();
+        assert!(screen.contains("SCORE 10"), "status band renders as terminal text, screen:\n{screen}");
+        assert!(screen.contains("HELLO STORY WORLD"), "story renders as a full-pane transcript, screen:\n{screen}");
+    }
+
+    #[test]
+    fn frameless_no_images_equals_cell_fallback() {
+        // With `--no-images` (no picker) frameless must be byte-identical to the
+        // classic cell fallback: same full-pane transcript + status band. Render
+        // the SAME model once as the default (no picker → cell fallback) and once
+        // as frameless (no picker) and assert the buffers match.
+        let render = |mode: crate::config::V6RenderMode| {
+            let mut state = AppState::default();
+            state.colors = crate::colors::ColorScheme::terminal_default();
+            state.game_picker = None; // --no-images
+            state.config.v6_render = mode;
+            state.push_transcript("HELLO STORY WORLD");
+            let model = frameless_v6_model();
+            let area = Rect::new(0, 0, 40, 25);
+            let mut buf = Buffer::empty(area);
+            let mut links = Vec::new();
+            let _ = render_node(
+                &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+            );
+            (0..area.height)
+                .map(|y| (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect::<String>() + "\n")
+                .collect::<String>()
+        };
+        assert_eq!(
+            render(crate::config::V6RenderMode::Hybrid),
+            render(crate::config::V6RenderMode::Frameless),
+            "with no picker, frameless equals the classic cell fallback"
+        );
     }
 }
