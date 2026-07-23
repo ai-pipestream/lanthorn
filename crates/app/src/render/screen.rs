@@ -451,7 +451,51 @@ fn render_node(
                             gr.record_hybrid_click_map(area, &scale, native, cell_px);
                         }
                         // The story window as real terminal text (primary-Buffer path).
-                        return render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors);
+                        let metrics = render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors);
+                        // Chrome text runs that fall INSIDE the story box paint
+                        // ON TOP of the terminal transcript (v6 paint order —
+                        // Shogun overlays its boot-menu items and selection
+                        // caret on the story strip; the ring canvas can't show
+                        // them because the terminal viewport covers that area).
+                        // Native px → device px (chrome-ring scale) → terminal
+                        // cell, glyphs only (no background fill).
+                        let base = state.colors.theme.get("upper_window").style;
+                        for it in &layout.chrome {
+                            if let WinNode::Grid(g) = &it.node {
+                                for t in &g.px_texts {
+                                    let px = t.x.max(1) as f32 - 1.0;
+                                    let py = t.y.max(1) as f32 - 1.0;
+                                    if px < story.x_px as f32
+                                        || px >= (story.x_px + story.w_px) as f32
+                                        || py < story.y_px as f32
+                                        || py >= (story.y_px + story.h_px) as f32
+                                    {
+                                        continue; // outside the story box → already in the ring
+                                    }
+                                    let cw = cell_px.0.max(1) as f32;
+                                    let ch = cell_px.1.max(1) as f32;
+                                    // Pane-relative cell → absolute buffer cell.
+                                    let col = area.x as i32 + ((scale.off_x as f32 + px * scale.s) / cw).round() as i32;
+                                    let row = area.y as i32 + ((scale.off_y as f32 + py * scale.s) / ch).round() as i32;
+                                    if row < viewport.y as i32
+                                        || row >= viewport.bottom() as i32
+                                        || col < viewport.x as i32
+                                        || col >= viewport.right() as i32
+                                    {
+                                        continue;
+                                    }
+                                    let mut style = base;
+                                    if t.style & 1 != 0 {
+                                        style = style.add_modifier(ratatui::style::Modifier::REVERSED);
+                                    }
+                                    let max_w = viewport.right() as usize - col as usize;
+                                    if max_w > 0 {
+                                        buf.set_stringn(col as u16, row as u16, &t.text, max_w, style);
+                                    }
+                                }
+                            }
+                        }
+                        return metrics;
                     }
                 }
 
@@ -2357,6 +2401,58 @@ mod tests {
         assert!(vp.width < area.width && vp.height < area.height, "viewport is inset inside the chrome ring: {vp:?}");
         assert!(vp.x >= area.x && vp.y >= area.y && vp.right() <= area.right() && vp.bottom() <= area.bottom(),
             "viewport stays inside the pane: {vp:?}");
+    }
+
+    #[test]
+    fn hybrid_overlays_chrome_text_runs_inside_the_story_box() {
+        // Shogun paints its boot-menu items (window-2 pixel runs) INSIDE the
+        // story window's box; the terminal transcript viewport covers that
+        // area, so the runs must overlay ON TOP of the terminal text — one
+        // menu item visible under the transcript was the live report.
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        // A 16x16 cell over a 40x25 pane gives scale s = 2.0 (like a real
+        // terminal, which upscales the 320x200 native raster), so the items'
+        // 8-px native line spacing lands on DISTINCT terminal rows.
+        state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize((16, 16).into()));
+        state.config.v6_render = crate::config::V6RenderMode::Hybrid;
+        state.push_transcript("You may choose to:");
+
+        let mut model = hybrid_v6_model();
+        // A chrome grid whose pixel runs sit INSIDE the story box
+        // (story native box: x 43..277, y 39..199).
+        let menu = PositionedWindow {
+            x: 12, y: 6, w: 1, h: 3, x_px: 100, y_px: 50, w_px: 1, h_px: 24,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(crate::engine::GridWindow {
+                cols: 1, rows: 3, cells: vec![], active_rows: 3, cursor: (1, 1),
+                cursor_active: false, border: crate::engine::BorderPref::Unspecified,
+                bg: None, fg: None, reverse: false,
+                px_texts: vec![
+                    crate::engine::PxText { y: 51, x: 101, text: "START the game".into(), style: 0, fg: 0, bg: 0 },
+                    crate::engine::PxText { y: 59, x: 101, text: "RESTORE a saved game".into(), style: 0, fg: 0, bg: 0 },
+                    crate::engine::PxText { y: 67, x: 101, text: "QUIT the game".into(), style: 0, fg: 0, bg: 0 },
+                ],
+            }),
+        };
+        if let WinNode::Layered(items) = &mut model.root {
+            items.push(menu);
+        }
+        let area = Rect::new(0, 0, 40, 25);
+        let mut buf = Buffer::empty(area);
+        let mut links = Vec::new();
+        let _ = render_node(
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+        );
+        let screen: String = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect::<String>() + "\n")
+            .collect();
+        for item in ["START the game", "RESTORE a saved game", "QUIT the game"] {
+            assert!(
+                screen.contains(item),
+                "menu item {item:?} must overlay the terminal viewport, screen:\n{screen}"
+            );
+        }
     }
 
     #[test]
