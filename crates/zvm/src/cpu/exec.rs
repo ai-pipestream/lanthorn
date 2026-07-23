@@ -234,6 +234,15 @@ pub struct Machine {
     /// "executed" disassembly colour, and can be pre-seeded from host-persisted
     /// coverage (the debug PC-set sidecar) via [`seed_executed`](Machine::seed_executed).
     pub ever_exec_pcs: std::collections::HashSet<u32>,
+    /// v6 `buffer_screen` (EXT:0x1D) state: 0 = update immediately, 1 = the
+    /// interpreter may buffer to a backing store. No rendering effect here —
+    /// the value is tracked purely so the opcode's store result (the OLD
+    /// mode) is correct (ZMSD §15).
+    buffer_screen_mode: u16,
+    /// True once a `scroll_window` (EXT:0x14) targeting window 0 has recorded
+    /// its "not modeled here" diagnostic — window 0's scrolling is owned by
+    /// the host's transcript renderer, not this grid model.
+    warned_scroll_window0: bool,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -320,6 +329,8 @@ impl Machine {
             trace_exec: false,
             exec_pcs: std::collections::HashSet::new(),
             ever_exec_pcs: std::collections::HashSet::new(),
+            buffer_screen_mode: 0,
+            warned_scroll_window0: false,
         }
     }
 
@@ -1735,7 +1746,24 @@ impl Machine {
                 self.do_store(store, val);
                 StepResult::Continue
             }
-            0x1D => { self.do_store(store, 0); StepResult::Continue } // buffer_screen → prev mode 0
+            // EXT:0x1D buffer_screen(mode) -> (result) — ZMSD §15: "If mode is
+            // 0, updates must be made as soon as possible. If mode is 1, the
+            // interpreter may make changes to a backing store, and need not
+            // update the screen." Issuing buffer_screen(-1) forces an
+            // immediate update WITHOUT altering the buffering state. Returns
+            // the OLD buffering state (no rendering effect either way).
+            0x1D => {
+                let mode = ops.first().copied().unwrap_or(0) as i16;
+                let prev = self.buffer_screen_mode;
+                if self.trace_screen {
+                    self.screen_trace.push(format!("@buffer_screen(mode={mode}) -> prev={prev}"));
+                }
+                if mode != -1 {
+                    self.buffer_screen_mode = mode as u16;
+                }
+                self.do_store(store, prev);
+                StepResult::Continue
+            }
             // EXT:0x06 picture_data(picture-number, array) [branch] — ZMSD §15:
             // picture-number 0 asks for "number of pictures available" (word 0)
             // and "release number of the picture file" (word 1), branching if any
@@ -1984,9 +2012,50 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            0x14 | 0x16 | 0x17 | 0x1A | 0x1C => {
-                // scroll_window, read_mouse, mouse_window, print_form,
-                // picture_table — no-op in Phase 0.
+            // EXT:0x14 scroll_window(window, pixels) — ZMSD §15: "Scrolls the
+            // given window by the given number of pixels (a negative value
+            // scrolls backwards, i.e., down) writing in blank (background
+            // colour) pixels in the new lines." No store/branch. Window 0 (the
+            // main scrolling window) is owned by the host's transcript
+            // renderer, not this grid model — record a diagnostic once and
+            // otherwise no-op; grid windows 1–7 shift their pixel-positioned
+            // text runs and cell grid via `ZWindow::scroll_pixels`.
+            0x14 => {
+                let win = ops.first().copied().unwrap_or(0);
+                let pixels = ops.get(1).copied().unwrap_or(0) as i16;
+                if self.trace_screen {
+                    self.screen_trace.push(format!("@scroll_window(win={win}, pixels={pixels})"));
+                }
+                if win == 0 {
+                    if !self.warned_scroll_window0 {
+                        self.warned_scroll_window0 = true;
+                        self.diagnostics.push(
+                            "scroll_window(0, ...) ignored — host transcript owns window-0 scrolling".to_string(),
+                        );
+                    }
+                } else if let Some(v6) = self.screen.v6.as_mut() {
+                    if let Some(w) = v6.windows.get_mut(win as usize) {
+                        w.scroll_pixels(pixels);
+                    }
+                }
+                StepResult::Continue
+            }
+            // EXT:0x1C picture_table(table) — ZMSD §15: "Given a table of
+            // picture numbers, the interpreter may if it wishes load or
+            // unpack these pictures from disc into a cache for convenient
+            // rapid plotting later." This engine's picture pipeline decodes
+            // Blorb resources on demand host-side, so pre-caching buys
+            // nothing — formal no-op, trace only.
+            0x1C => {
+                let table = ops.first().copied().unwrap_or(0);
+                if self.trace_screen {
+                    self.screen_trace.push(format!("@picture_table(table={table:#06x})"));
+                }
+                StepResult::Continue
+            }
+            0x16 | 0x17 | 0x1A => {
+                // read_mouse, mouse_window, print_form — no-op in Phase 0
+                // (mouse/print_form are a different lane; left untouched).
                 StepResult::Continue
             }
             // Unknown / unimplemented EXT opcode: record once, then ignore
@@ -7028,6 +7097,85 @@ pub(crate) mod tests {
         assert_eq!(m.screen.v6.as_ref().unwrap().windows[1].attributes, 0b0011);
         m.exec_ext(0x12, &[1, 0b1001, 3], None, None); // toggle bits
         assert_eq!(m.screen.v6.as_ref().unwrap().windows[1].attributes, 0b1010);
+    }
+
+    // ── Lane Z: scroll_window (EXT:0x14) ──────────────────────────────────────
+
+    #[test]
+    fn v6_scroll_window_shifts_grid_window_text_and_grid() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x11, &[1, 24, 80], None, None); // window_size(1, y=24, x=80) -> 3x10 grid
+        m.exec_var(0x0B, &[1], None, None); // set_window(1)
+        m.exec_var(0x0F, &[1, 1], None, None); // set_cursor: pixel y=1,x=1 -> grid row 1
+        m.print_text("A");
+        m.exec_var(0x0F, &[9, 1], None, None); // set_cursor: pixel y=9,x=1 -> grid row 2 (one 8px line down)
+        m.print_text("B");
+        // scroll_window(1, 8) — one line forward/up.
+        m.exec_ext(0x14, &[1, 8], None, None);
+        let v6 = m.screen.v6.as_ref().unwrap();
+        // "A" started at pixel y=1: 1-8=-7, bottom=-7+8-1=0 <1 -> dropped.
+        // "B" started at pixel y=9: 9-8=1, bottom=1+8-1=8 >=1 -> kept at y=1.
+        assert_eq!(v6.windows[1].texts.len(), 1, "run scrolled fully off top is dropped");
+        assert_eq!(v6.windows[1].texts[0].text, "B");
+        assert_eq!(v6.windows[1].texts[0].y, 1);
+        // Grid also shifted up by one row (8px / 8px-per-row = 1 row).
+        assert_eq!(v6.windows[1].grid.cell(1, 1).ch, 'B', "grid row 2 moved to row 1");
+    }
+
+    #[test]
+    fn v6_scroll_window_on_window_zero_records_diagnostic_once_and_no_ops() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x14, &[0, 8], None, None);
+        m.exec_ext(0x14, &[0, 8], None, None); // second call must not duplicate
+        assert_eq!(
+            m.diagnostics.iter().filter(|d| d.contains("scroll_window")).count(),
+            1,
+            "window-0 scroll diagnostic recorded exactly once"
+        );
+    }
+
+    #[test]
+    fn v6_scroll_window_traces_when_enabled() {
+        let mut m = v6_exec_machine();
+        m.trace_screen = true;
+        m.exec_ext(0x14, &[1, -8i16 as u16], None, None);
+        assert!(m.screen_trace.iter().any(|l| l.contains("@scroll_window")));
+    }
+
+    // ── Lane Z: buffer_screen (EXT:0x1D) ──────────────────────────────────────
+
+    #[test]
+    fn v6_buffer_screen_tracks_mode_and_returns_previous() {
+        let mut m = v6_exec_machine();
+        // Default (unset) mode is 0 (update immediately, ZMSD §15).
+        m.exec_ext(0x1D, &[1], Some(0x01), None); // switch to buffered (1), store prev
+        assert_eq!(crate::cpu::state::read_var(&mut m.state, &m.mem, 0x01), 0, "prev mode was 0");
+        m.exec_ext(0x1D, &[1], Some(0x01), None); // still 1 -> 1, store prev (now 1)
+        assert_eq!(crate::cpu::state::read_var(&mut m.state, &m.mem, 0x01), 1, "prev mode was 1");
+    }
+
+    #[test]
+    fn v6_buffer_screen_negative_one_forces_update_without_altering_state() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x1D, &[1], None, None); // set mode to buffered (1)
+        m.exec_ext(0x1D, &[0xFFFFu16], Some(0x01), None); // -1: force update, don't change state
+        assert_eq!(crate::cpu::state::read_var(&mut m.state, &m.mem, 0x01), 1, "returns current mode (1) unchanged");
+        // A subsequent buffer_screen(1) must still report prev=1 (state untouched by -1).
+        m.exec_ext(0x1D, &[1], Some(0x01), None);
+        assert_eq!(crate::cpu::state::read_var(&mut m.state, &m.mem, 0x01), 1);
+    }
+
+    // ── Lane Z: picture_table (EXT:0x1C) ──────────────────────────────────────
+
+    #[test]
+    fn v6_picture_table_is_a_traced_formal_noop() {
+        let mut m = v6_exec_machine();
+        m.trace_screen = true;
+        let result = m.exec_ext(0x1C, &[0x0300], None, None);
+        assert!(matches!(result, StepResult::Continue));
+        assert!(m.screen_trace.iter().any(|l| l.contains("@picture_table")));
+        // Must not be routed through the unimplemented-opcode diagnostic path.
+        assert!(m.diagnostics.iter().all(|d| !d.contains("0x1C")));
     }
 
     // ── Task 1 (Phase 1b): v6 print_text routes to the current window's grid ──

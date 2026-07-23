@@ -116,6 +116,30 @@ impl UpperWindow {
             .resize(new_rows as usize * self.cols as usize, Cell::default());
         self.rows = new_rows;
     }
+    /// Scroll the grid vertically by whole rows (used by `scroll_window`,
+    /// EXT:0x14, quantized to the character grid): positive shifts content
+    /// forward/up (drops the top `rows`, appends blank rows at the bottom);
+    /// negative shifts backward/down (drops the bottom `rows`, inserts blank
+    /// rows at the top). `rows` at or beyond the grid's extent clears it.
+    pub fn scroll_rows(&mut self, rows: i16) {
+        if rows == 0 || self.rows == 0 {
+            return;
+        }
+        let total = self.rows as usize;
+        let cols = self.cols as usize;
+        let n = (rows.unsigned_abs() as usize).min(total);
+        if n == total {
+            self.clear();
+            return;
+        }
+        if rows > 0 {
+            self.cells.drain(0..n * cols);
+            self.cells.resize(total * cols, Cell::default());
+        } else {
+            self.cells.truncate((total - n) * cols);
+            self.cells.splice(0..0, vec![Cell::default(); n * cols]);
+        }
+    }
     fn idx(&self, row: u16, col: u16) -> Option<usize> {
         if row == 0 || col == 0 || row > self.rows || col > self.cols {
             return None;
@@ -228,6 +252,31 @@ impl ZWindow {
             15 => self.line_count = v,
             _ => {}
         }
+    }
+
+    /// Scroll this grid window's content by `pixels` (ZMSD 1.1 §15
+    /// `scroll_window`: "Scrolls the given window by the given number of
+    /// pixels (a negative value scrolls backwards, i.e., down) writing in
+    /// blank (background colour) pixels in the new lines."). Shifts each
+    /// pixel-positioned text run's `y` by `-pixels` (dropping runs that land
+    /// fully outside the window's visible height `[1, y_size]`), and shifts
+    /// the cell-grid fallback by whole rows (`pixels / V6_FONT_HEIGHT`,
+    /// truncated toward zero).
+    pub fn scroll_pixels(&mut self, pixels: i16) {
+        let y_size = self.y_size as i32;
+        let delta = pixels as i32;
+        self.texts.retain_mut(|t| {
+            let new_y = t.y as i32 - delta;
+            let bottom = new_y + V6_FONT_HEIGHT as i32 - 1;
+            if bottom < 1 || new_y > y_size {
+                false
+            } else {
+                t.y = new_y.clamp(1, u16::MAX as i32) as u16;
+                true
+            }
+        });
+        let rows = pixels / V6_FONT_HEIGHT as i16;
+        self.grid.scroll_rows(rows);
     }
 }
 
@@ -977,6 +1026,84 @@ mod tests {
         w.put(9, 9, 'Z', 0, ZColour::Default, ZColour::Default); // out of range -> ignored, no panic
         w.clear();
         assert_eq!(w.cell(2, 3).ch, ' ');
+    }
+
+    // ── Lane Z: scroll_window (EXT:0x14) helpers ─────────────────────────────
+
+    #[test]
+    fn upper_window_scroll_rows_up_shifts_content_and_blanks_bottom() {
+        let mut w = UpperWindow::default();
+        w.resize(3, 2);
+        w.put(1, 1, 'A', 0, ZColour::Default, ZColour::Default);
+        w.put(2, 1, 'B', 0, ZColour::Default, ZColour::Default);
+        w.put(3, 1, 'C', 0, ZColour::Default, ZColour::Default);
+        w.scroll_rows(1); // positive: scroll forward/up
+        assert_eq!(w.cell(1, 1).ch, 'B', "row 2 moved up to row 1");
+        assert_eq!(w.cell(2, 1).ch, 'C', "row 3 moved up to row 2");
+        assert_eq!(w.cell(3, 1).ch, ' ', "new bottom row is blank");
+    }
+
+    #[test]
+    fn upper_window_scroll_rows_down_shifts_content_and_blanks_top() {
+        let mut w = UpperWindow::default();
+        w.resize(3, 2);
+        w.put(1, 1, 'A', 0, ZColour::Default, ZColour::Default);
+        w.put(2, 1, 'B', 0, ZColour::Default, ZColour::Default);
+        w.put(3, 1, 'C', 0, ZColour::Default, ZColour::Default);
+        w.scroll_rows(-1); // negative: scroll backward/down
+        assert_eq!(w.cell(1, 1).ch, ' ', "new top row is blank");
+        assert_eq!(w.cell(2, 1).ch, 'A', "row 1 moved down to row 2");
+        assert_eq!(w.cell(3, 1).ch, 'B', "row 2 moved down to row 3");
+    }
+
+    #[test]
+    fn upper_window_scroll_rows_beyond_extent_clears() {
+        let mut w = UpperWindow::default();
+        w.resize(2, 2);
+        w.put(1, 1, 'A', 0, ZColour::Default, ZColour::Default);
+        w.scroll_rows(5);
+        assert_eq!(w.cell(1, 1).ch, ' ');
+        assert_eq!(w.cell(2, 1).ch, ' ');
+    }
+
+    #[test]
+    fn zwindow_scroll_pixels_shifts_text_runs_and_drops_out_of_range() {
+        let mut w = ZWindow { y_size: 24, ..Default::default() };
+        w.texts.push(V6Text { y: 9, x: 1, text: "far".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
+        w.texts.push(V6Text { y: 1, x: 1, text: "near".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
+        // Scroll forward by 16px (two lines):
+        //   y=9  -> new_y=-7, bottom=-7+8-1=0  < 1 -> fully above, dropped.
+        //   y=1  -> new_y=-15, bottom=-15+8-1=-8 < 1 -> fully above, dropped.
+        w.scroll_pixels(16);
+        assert!(w.texts.is_empty(), "both runs fully scrolled above the window");
+    }
+
+    #[test]
+    fn zwindow_scroll_pixels_keeps_run_still_partially_visible() {
+        let mut w = ZWindow { y_size: 24, ..Default::default() };
+        w.texts.push(V6Text { y: 9, x: 1, text: "keep".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
+        // Scroll forward by 8px (one line): y=9 -> 1, bottom=1+8-1=8 >= 1, kept.
+        w.scroll_pixels(8);
+        assert_eq!(w.texts.len(), 1, "run still overlapping the window is kept");
+        assert_eq!(w.texts[0].y, 1, "kept run shifted by -pixels");
+    }
+
+    #[test]
+    fn zwindow_scroll_pixels_negative_scrolls_down() {
+        let mut w = ZWindow { y_size: 24, ..Default::default() };
+        w.texts.push(V6Text { y: 5, x: 1, text: "a".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
+        w.scroll_pixels(-3);
+        assert_eq!(w.texts[0].y, 8, "negative pixels shift y downward (y - (-3) = y+3)");
+    }
+
+    #[test]
+    fn zwindow_scroll_pixels_also_shifts_cell_grid_by_whole_rows() {
+        let mut w = ZWindow { y_size: 24, ..Default::default() };
+        w.grid.resize(3, 2);
+        w.grid.put(1, 1, 'A', 0, ZColour::Default, ZColour::Default);
+        w.grid.put(2, 1, 'B', 0, ZColour::Default, ZColour::Default);
+        w.scroll_pixels(V6_FONT_HEIGHT as i16); // exactly one row
+        assert_eq!(w.grid.cell(1, 1).ch, 'B', "grid shifted one row up");
     }
 
     // ── (e) StreamState: stream-3 push/pop/write ─────────────────────────────
