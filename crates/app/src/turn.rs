@@ -82,6 +82,7 @@ pub(crate) fn finish_command_turn(
     }
     apply_turn_events(state, &result);
     flush_screen_trace(&state.config.user_dir, session, state.config.trace.screen);
+    flush_v6_trace(&state.config.user_dir, session, state.config.trace.v6);
     // [more] pager (SQ-0404): arm the pager for this command's output only when
     // the game is now awaiting a normal LINE command — never on a screen clear
     // (menu takeover) or when it switched to char/event input (a keypress menu or
@@ -355,6 +356,19 @@ pub(crate) fn flush_screen_trace(user_dir: &std::path::Path, session: &mut dyn E
     let lines = session.take_screen_trace();
     if on {
         app::trace::write(user_dir, app::trace::Section::Screen, &lines);
+    }
+}
+
+/// When `on` and the story is v6, append this turn's `v6` window/picture-canvas
+/// state snapshot to trace.log. Unlike `flush_screen_trace`, there is no buffer
+/// to drain — the snapshot reads live state directly — so this is skipped
+/// entirely (no snapshot built) when the section is off. (trace feature)
+pub(crate) fn flush_v6_trace(user_dir: &std::path::Path, session: &mut dyn Engine, on: bool) {
+    if !on {
+        return;
+    }
+    if let Some(lines) = session.v6_snapshot() {
+        app::trace::write(user_dir, app::trace::Section::V6, &lines);
     }
 }
 
@@ -682,9 +696,11 @@ mod tests {
 
     /// A minimal `Engine` double whose `take_screen_trace` returns one line on
     /// its first call and is empty thereafter, so a test can observe both the
-    /// write-when-on path and the always-drain (no regrowth) behavior.
+    /// write-when-on path and the always-drain (no regrowth) behavior. `v6` lets
+    /// a test stand in for a v6-vs-non-v6 engine on `v6_snapshot`.
     struct TraceOnlyEngine {
         line: Option<String>,
+        v6: Option<Vec<String>>,
     }
 
     impl app::engine::Engine for TraceOnlyEngine {
@@ -724,6 +740,9 @@ mod tests {
         fn take_screen_trace(&mut self) -> Vec<String> {
             self.line.take().into_iter().collect()
         }
+        fn v6_snapshot(&self) -> Option<Vec<String>> {
+            self.v6.clone()
+        }
         fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> {
             unreachable!("not exercised by this test")
         }
@@ -749,7 +768,7 @@ mod tests {
     fn flush_screen_trace_writes_when_on_and_drains() {
         let dir = std::env::temp_dir().join(format!("bm-flush-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut eng = TraceOnlyEngine { line: Some("@split_window(1)".to_string()) };
+        let mut eng = TraceOnlyEngine { line: Some("@split_window(1)".to_string()), v6: None };
 
         super::flush_screen_trace(&dir, &mut eng, true);
         let body = std::fs::read_to_string(dir.join("trace.log")).unwrap_or_default();
@@ -762,6 +781,46 @@ mod tests {
         super::flush_screen_trace(&dir, &mut eng, false);
         let body2 = std::fs::read_to_string(dir.join("trace.log")).unwrap_or_default();
         assert_eq!(body, body2, "off flush must not append");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ── v6-trace flush (skip-when-off, snapshot-only-for-v6-engines) ────────────
+
+    #[test]
+    fn flush_v6_trace_writes_when_on_and_skips_when_off() {
+        let dir = std::env::temp_dir().join(format!("bm-flush-v6-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut eng = TraceOnlyEngine {
+            line: None,
+            v6: Some(vec!["turn snapshot (current=7)".to_string()]),
+        };
+
+        // Off: nothing built, nothing written.
+        super::flush_v6_trace(&dir, &mut eng, false);
+        let body = std::fs::read_to_string(dir.join("trace.log")).unwrap_or_default();
+        assert!(body.is_empty(), "off flush must not append: {body:?}");
+
+        // On: the snapshot lines land, tagged.
+        super::flush_v6_trace(&dir, &mut eng, true);
+        let body2 = std::fs::read_to_string(dir.join("trace.log")).unwrap_or_default();
+        assert!(
+            body2.contains("[v6]") && body2.contains("turn snapshot (current=7)"),
+            "{body2:?}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn flush_v6_trace_writes_nothing_for_an_engine_with_no_v6_model() {
+        let dir = std::env::temp_dir().join(format!("bm-flush-v6-none-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut eng = TraceOnlyEngine { line: None, v6: None };
+
+        super::flush_v6_trace(&dir, &mut eng, true);
+        let body = std::fs::read_to_string(dir.join("trace.log")).unwrap_or_default();
+        assert!(body.is_empty(), "no v6 model → nothing written: {body:?}");
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -928,7 +987,7 @@ mod tests {
         state.config.user_dir = tmp.clone();
         let mut m = mapper::mapper::Mapper::default();
         let rect = ratatui::layout::Rect::new(0, 0, 20, 20);
-        let eng = TraceOnlyEngine { line: None };
+        let eng = TraceOnlyEngine { line: None, v6: None };
 
         state.push_transcript("room description"); // pre-menu content
 
@@ -962,7 +1021,7 @@ mod tests {
         m.observe(1, "Lab", None); // a known, placed room
         let gen0 = state.graph_gen;
         let rect = ratatui::layout::Rect::new(0, 0, 20, 20);
-        let eng = TraceOnlyEngine { line: None };
+        let eng = TraceOnlyEngine { line: None, v6: None };
 
         // Re-reporting the SAME room (a menu keystroke) must not re-route.
         let same = game_driven_result(Some(zvm::ObjectSnapshot { number: 1, parent: 0, name: "Lab".into() }));

@@ -628,6 +628,15 @@ pub trait Engine {
         Vec::new()
     }
 
+    /// Build a per-turn `v6` debug-trace snapshot (window geometry, paint runs,
+    /// picture canvases) — read directly from live state, not drained from a
+    /// buffer. `None` when the engine has no v6 model at all (Glulx, Scott) OR
+    /// the loaded story isn't v6; `GameSession` overrides this. Default `None`.
+    /// (trace feature)
+    fn v6_snapshot(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// Report a mouse click at game-pixel `(y_px, x_px)` (1-based) to the engine,
     /// so a subsequent `read_mouse` (or the game reading the header extension
     /// table) sees the click coordinates. Default no-op: only the v6 Z-machine

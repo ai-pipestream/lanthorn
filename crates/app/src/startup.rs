@@ -614,6 +614,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
         };
         apply_turn(&mut mapper, "", &seed_result);
         crate::turn::flush_screen_trace(&state.config.user_dir, &mut *session, state.config.trace.screen);
+        crate::turn::flush_v6_trace(&state.config.user_dir, &mut *session, state.config.trace.v6);
         if state.config.trace.any() {
             let ptr = format!(
                 "[trace → {}: {}]",

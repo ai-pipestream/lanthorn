@@ -1750,6 +1750,43 @@ impl Engine for GameSession {
         std::mem::take(&mut self.machine.screen_trace)
     }
 
+    fn v6_snapshot(&self) -> Option<Vec<String>> {
+        let v6 = self.machine.screen.v6.as_ref()?;
+        let mut lines = vec![format!("turn snapshot (current={})", v6.current)];
+        for (i, w) in v6.windows.iter().enumerate() {
+            let nontrivial =
+                w.x_size != 0 || w.y_size != 0 || !w.texts.is_empty() || w.attributes != 0;
+            if !nontrivial {
+                continue;
+            }
+            lines.push(format!(
+                "win{i}: pos=({},{}) size={}x{} cursor=({},{}) attrs=0b{:04b} margins=({},{}) font=({},{}) runs={}",
+                w.x_coord, w.y_coord, w.x_size, w.y_size, w.y_cursor, w.x_cursor,
+                w.attributes, w.left_margin, w.right_margin, w.font_number, w.font_size,
+                w.texts.len(),
+            ));
+            let shown = w.texts.len().min(20);
+            for t in w.texts.iter().take(shown) {
+                let text: String = if t.text.chars().count() > 60 {
+                    t.text.chars().take(60).collect()
+                } else {
+                    t.text.clone()
+                };
+                lines.push(format!("  y={} x={} style={} {:?}", t.y, t.x, t.style, text));
+            }
+            if w.texts.len() > shown {
+                lines.push(format!("  ... ({} more)", w.texts.len() - shown));
+            }
+        }
+        let mut wins: Vec<&u8> = self.pictures_canvas.keys().collect();
+        wins.sort();
+        for i in wins {
+            let c = &self.pictures_canvas[i];
+            lines.push(format!("canvas win{i}: {}x{} z={}", c.img.width(), c.img.height(), c.z_seq));
+        }
+        Some(lines)
+    }
+
     fn set_debug_trace(&mut self, on: bool) {
         self.machine.trace_exec = on;
         // Only the per-turn set is cleared when tracing stops; the cumulative
@@ -3483,6 +3520,70 @@ mod tests {
             WinNode::Grid(g) => assert_eq!((g.cols, g.rows), (8, 6)),
             other => panic!("expected window 7's Grid leaf, got {other:?}"),
         }
+    }
+
+    // ── `v6` debug-trace snapshot ──────────────────────────────────────────────
+
+    #[test]
+    fn v6_snapshot_is_none_for_non_v6_stories() {
+        let sess = GameSession::new(read_char_story_v5(), true, false, None)
+            .expect("GameSession::new failed");
+        assert!(sess.v6_snapshot().is_none(), "no v6 window table -> no snapshot");
+    }
+
+    #[test]
+    fn v6_snapshot_reports_nontrivial_windows_runs_and_canvases_and_skips_blank_windows() {
+        use zvm::screen::{V6Text, V6Windows, ZWindow};
+
+        let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+        let mut windows: [ZWindow; 8] = Default::default();
+        // Window 1: a real status window with one paint run.
+        windows[1] = ZWindow {
+            x_coord: 1, y_coord: 1, x_size: 640, y_size: 8,
+            y_cursor: 1, x_cursor: 9,
+            left_margin: 2, right_margin: 3,
+            font_number: 1, font_size: 0x0808,
+            attributes: 3, // bit0 wrap + bit1 scroll
+            ..Default::default()
+        };
+        windows[1].texts.push(V6Text {
+            y: 1, x: 1, text: "Score: 10".to_string(), style: 0,
+            fg: ZColour::Default, bg: ZColour::Default,
+        });
+        // Window 3 stays entirely default (blank) — must be skipped.
+        machine.screen.v6 = Some(V6Windows { windows, current: 1 });
+
+        let mut sess = GameSession {
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            disasm_cache: std::cell::RefCell::new(None),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
+            last_content_pic: std::collections::HashMap::new(),
+        };
+        let mut canvas = crate::graphics::Canvas::new(64, 48);
+        canvas.z_seq = 42;
+        sess.pictures_canvas.insert(1, canvas);
+
+        let lines = sess.v6_snapshot().expect("v6 story yields Some snapshot");
+        assert_eq!(lines[0], "turn snapshot (current=1)");
+
+        let win_line = lines.iter().find(|l| l.starts_with("win1:"))
+            .unwrap_or_else(|| panic!("win1 line present: {lines:?}"));
+        assert!(win_line.contains("pos=(1,1)"), "{win_line}");
+        assert!(win_line.contains("size=640x8"), "{win_line}");
+        assert!(win_line.contains("cursor=(1,9)"), "{win_line}");
+        assert!(win_line.contains("margins=(2,3)"), "{win_line}");
+        assert!(win_line.contains("font=(1,2056)"), "{win_line}"); // 0x0808 = 2056
+        assert!(win_line.contains("runs=1"), "{win_line}");
+
+        assert!(lines.iter().any(|l| l.contains("y=1 x=1") && l.contains("\"Score: 10\"")), "{lines:?}");
+        assert!(lines.iter().any(|l| l == "canvas win1: 64x48 z=42"), "{lines:?}");
+
+        assert!(!lines.iter().any(|l| l.starts_with("win3:")), "blank window 3 must be skipped: {lines:?}");
     }
 
     #[test]

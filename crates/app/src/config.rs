@@ -215,7 +215,7 @@ pub struct Cli {
     #[arg(long)]
     pub no_images: bool,
 
-    /// Debug trace sections to enable from boot: comma list of screen,map,hostio
+    /// Debug trace sections to enable from boot: comma list of screen,map,hostio,v6
     /// (or `all`/`none`). Output goes to <user_dir>/trace.log. (trace feature)
     #[arg(long, value_name = "LIST")]
     pub trace: Option<String>,
@@ -764,7 +764,7 @@ pub fn resolve(cli: &Cli) -> Config {
         let (sections, unknown) = crate::trace::TraceSections::parse(list);
         cfg.trace = sections;
         for u in unknown {
-            eprintln!("warning: unknown --trace section '{u}' (valid: screen, map, hostio, all, none)");
+            eprintln!("warning: unknown --trace section '{u}' (valid: screen, map, hostio, v6, all, none)");
         }
     }
 

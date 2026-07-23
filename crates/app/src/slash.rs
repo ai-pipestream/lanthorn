@@ -445,7 +445,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "trace", category: Category::Help, context: Context::Global,
         usage: "trace [sections|all|none]",
-        description: "toggle debug-trace sections (screen, map, hostio) written to trace.log; no arg shows current state",
+        description: "toggle debug-trace sections (screen, map, hostio, v6) written to trace.log; no arg shows current state",
         dispatch: |a| SlashOutcome::Trace(a.first().map(|s| s.to_string())),
     },
     CommandSpec { name: "dump-notifications", category: Category::Help, context: Context::Global,

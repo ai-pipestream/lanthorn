@@ -14,6 +14,8 @@ pub enum Section {
     Map,
     /// Host-side save/restore, VFS file I/O, input/events.
     HostIo,
+    /// Per-turn v6 window/picture-canvas state snapshots (v6 stories only).
+    V6,
 }
 
 impl Section {
@@ -22,6 +24,7 @@ impl Section {
             Section::Screen => "screen",
             Section::Map => "map",
             Section::HostIo => "hostio",
+            Section::V6 => "v6",
         }
     }
 }
@@ -32,11 +35,12 @@ pub struct TraceSections {
     pub screen: bool,
     pub map: bool,
     pub hostio: bool,
+    pub v6: bool,
 }
 
 impl TraceSections {
     pub fn any(self) -> bool {
-        self.screen || self.map || self.hostio
+        self.screen || self.map || self.hostio || self.v6
     }
 
     /// The active sections as a comma list (`"screen,map"`), or `"off"`.
@@ -45,6 +49,7 @@ impl TraceSections {
         if self.screen { v.push("screen"); }
         if self.map { v.push("map"); }
         if self.hostio { v.push("hostio"); }
+        if self.v6 { v.push("v6"); }
         if v.is_empty() { "off".to_string() } else { v.join(",") }
     }
 
@@ -56,11 +61,12 @@ impl TraceSections {
         for tok in s.split(',') {
             match tok.trim() {
                 "" => {}
-                "all" => out = TraceSections { screen: true, map: true, hostio: true },
+                "all" => out = TraceSections { screen: true, map: true, hostio: true, v6: true },
                 "none" | "off" => out = TraceSections::default(),
                 "screen" => out.screen = true,
                 "map" => out.map = true,
                 "hostio" => out.hostio = true,
+                "v6" => out.v6 = true,
                 other => unknown.push(other.to_string()),
             }
         }
@@ -114,11 +120,11 @@ mod tests {
     #[test]
     fn parse_reads_comma_list_all_none_and_unknowns() {
         let (s, unknown) = TraceSections::parse("screen,map");
-        assert!(s.screen && s.map && !s.hostio);
+        assert!(s.screen && s.map && !s.hostio && !s.v6);
         assert!(unknown.is_empty());
 
         let (s, _) = TraceSections::parse("all");
-        assert!(s.screen && s.map && s.hostio);
+        assert!(s.screen && s.map && s.hostio && s.v6);
 
         let (s, _) = TraceSections::parse("none");
         assert!(!s.any());
@@ -127,9 +133,12 @@ mod tests {
         assert!(s.screen && !s.map);
         assert_eq!(unknown, vec!["bogus".to_string()]);
 
+        let (s, _) = TraceSections::parse("v6");
+        assert!(s.v6 && !s.screen);
+
         assert_eq!(TraceSections::default().active_list(), "off");
         assert_eq!(
-            TraceSections { screen: true, map: true, hostio: false }.active_list(),
+            TraceSections { screen: true, map: true, hostio: false, v6: false }.active_list(),
             "screen,map"
         );
     }
