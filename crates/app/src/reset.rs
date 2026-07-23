@@ -84,6 +84,9 @@ pub(crate) fn reset_game(
                 // The live theme's rendered colours, in place before the fresh
                 // boot probes glk_style_measure (SQ-0315).
                 app::glk_backend::theme_style_colours(&state.colors),
+                // Keep the debug inspector's boot-tracing across @restart when a
+                // `--debug` session is active, so the restarted boot is captured too.
+                state.persist_debug_trace,
             )
             .map_err(|e| format!("{e:?}"))
             .map(|new_session| {

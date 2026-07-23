@@ -344,6 +344,9 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                 pict_blorb,
                 &vfs_sidecar,
                 theme_colours,
+                // `--debug` (SQ-0465): trace from the first boot instruction so the
+                // game's initialisation code is captured (a later `/debug` can't).
+                cli.debug,
             ) {
                 Ok(s) => Box::new(s),
                 Err(e) => {

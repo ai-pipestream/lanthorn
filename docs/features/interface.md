@@ -85,6 +85,39 @@ register machine (no call stack, eval stack, or linear memory).
   vocabularies with their synonyms), and **World** (every room with its exits,
   followed by the message table).
 
+### Glulx inspector
+
+`/debug` (and `--debug`) light up Glulx stories too — and here the inspector is
+in its element, because Glulx *is* a register machine. The full layout survives:
+a live **Disassembly** column that follows the PC instruction by instruction, a
+real **Call Stack** and **Eval Stack**, the innermost frame's **Locals**, and a
+**Memory** hex view you can jump anywhere in with `:` (raw Glulx addresses,
+absolute — the ROM/RAM boundary is flagged with a `<RAM>` marker so you always
+know which side you're on).
+
+- **A disassembler that discovers.** Glulx code isn't laid out for a reader, so
+  the inspector maps the image first: it follows the call graph from the start
+  function, then type-validates a linear scan of the rest. Every instruction is
+  tinted by confidence — solid for code reached from the start function, dimmer
+  for a scan-only guess — and any address the story *actually executes* is
+  promoted to certain on the spot. Call, branch, `jumpabs`, `streamstr`, and
+  `glk` operands are annotated inline: a call shows its target, a `glk` shows the
+  named selector (`glk_window_open`), a string print shows a snippet of the text.
+- **Three repurposed tabs** trade the Z-machine's object world for Glulx's:
+  **Functions** lists every discovered routine with its entry address, `C0`/`C1`
+  calling convention, local count, confidence tier, and — for the well-known
+  accelerated routines the VM shortcuts natively — an `[accel: Z__Region]` badge.
+  **Strings** lists the discovered string objects (plain, compressed, or Unicode)
+  with a decoded preview. **Glk** shows the live window tree, the same snapshot
+  `/dump-windows` prints. Each Functions/Strings row leads with a clickable
+  address that jumps the Memory pane straight there.
+- **Coverage and boot tracing** work exactly as elsewhere: the blue tier marks
+  instructions ever executed, the `|` gutter marks the last turn, and `--debug`
+  traces from the very first boot instruction (so an I7 game's lengthy startup is
+  captured, which a later `/debug` toggle would miss) and persists coverage per
+  story. Discovery is lazy — it runs once, the first time you open the inspector,
+  and never touches a normal launch.
+
 ## Playing aids
 - **Verb/noun menu** — a two-pane token palette of common verbs and in-scope
   nouns; pick tokens to assemble a command (multi-noun sentences via

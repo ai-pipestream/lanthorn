@@ -19,6 +19,7 @@ pub mod debug_panel;
 pub mod engine;
 pub mod garglk_ini;
 pub mod glk_backend;
+pub mod glulx_debug;
 pub mod glulx_session;
 pub mod graphics;
 pub mod inline_image;

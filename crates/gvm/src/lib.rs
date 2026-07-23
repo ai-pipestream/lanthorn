@@ -8,7 +8,7 @@
 //! specifications into `GLULX_NOTES.md`, and the code is implemented against
 //! that file.
 
-pub(crate) mod accel;
+pub mod accel;
 #[cfg(test)]
 mod asm;
 pub(crate) mod decode;

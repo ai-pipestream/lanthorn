@@ -2560,6 +2560,67 @@ impl Machine {
         &self.mem
     }
 
+    /// PC of the instruction the machine is parked at — the start PC of the last
+    /// instruction whose execution began (captured before its operand reads). The
+    /// debug inspector uses this as its "current PC" anchor; when the machine is
+    /// settled at a Glk input request this is the `glk` instruction that suspended,
+    /// which is a real instruction boundary the disassembly can key its divider on.
+    pub fn instr_start_pc(&self) -> u32 {
+        self.instr_start_pc
+    }
+
+    /// The live call stack, innermost (current) frame first — each frame's return
+    /// PC, locals, and working value-stack operands. Read-only (never mutates the
+    /// machine); the debug inspector renders it, and [`Machine::build_trace`] wraps
+    /// it into a crash [`StackTrace`](crate::trace::StackTrace).
+    pub fn call_frames(&self) -> Vec<crate::trace::TraceFrame> {
+        use crate::trace::TraceFrame;
+        let mut frames = Vec::new();
+        let mut f = self.fp; // innermost frame offset
+        let mut inner_bottom = self.sp; // top of innermost value region
+        loop {
+            // A frame header needs 8 bytes at [f, f+8) for FrameLen/LocalsPos,
+            // and (if not the start frame) a 16-byte call stub at [f-16, f).
+            // On a corrupt/attacker-influenced fp, bail out with whatever
+            // frames we've collected rather than risk a panic below.
+            if f + 8 > self.stack.len() || (f != 0 && f < 16) {
+                break;
+            }
+            let (frame_len, localspos) = match (self.st_r32_opt(f), self.st_r32_opt(f + 4)) {
+                (Some(fl), Some(lp)) => (fl as usize, lp as usize),
+                _ => break,
+            };
+            // Walk the locals-format list at f+8 to read each local value.
+            let locals = self.read_frame_locals(f, localspos);
+            // Value/operand region: above this frame's frame_len, up to inner_bottom.
+            let val_lo = f + frame_len;
+            let operands = self.read_stack_words(val_lo, inner_bottom);
+            let (caller_fp, this_ret_pc) = if f == 0 {
+                (0usize, 0u32) // start frame: no stub beneath it
+            } else {
+                match (self.st_r32_opt(f - 4), self.st_r32_opt(f - 8)) {
+                    (Some(caller_fp), Some(ret_pc)) => (caller_fp as usize, ret_pc),
+                    _ => break, // corrupt stub: stop, keeping frames collected so far
+                }
+            };
+            frames.push(TraceFrame {
+                func_addr: 0, // Glulx does not store per-frame entry addresses
+                return_pc: this_ret_pc,
+                locals,
+                operands,
+            });
+            if f == 0 {
+                break;
+            }
+            inner_bottom = f.saturating_sub(16); // stub sits at [f-16, f)
+            f = caller_fp;
+            if frames.len() > 256 {
+                break; // guard against a corrupt chain
+            }
+        }
+        frames
+    }
+
     /// Test-only: set an acceleration parameter directly, bypassing `accelparam`.
     #[cfg(test)]
     pub(crate) fn set_accel_param(&mut self, index: u32, value: u32) {
@@ -5241,51 +5302,9 @@ impl Machine {
     /// from the current (innermost) frame down to the start frame (`fp == 0`).
     /// Read-only: never mutates the machine.
     fn build_trace(&self, fault: String) -> crate::trace::StackTrace {
-        use crate::trace::{StackTrace, TraceFrame};
+        use crate::trace::StackTrace;
         let fault_op = self.opcode_name_at(self.instr_start_pc);
-        let mut frames = Vec::new();
-        let mut f = self.fp; // innermost frame offset
-        let mut inner_bottom = self.sp; // top of innermost value region
-        loop {
-            // A frame header needs 8 bytes at [f, f+8) for FrameLen/LocalsPos,
-            // and (if not the start frame) a 16-byte call stub at [f-16, f).
-            // On a corrupt/attacker-influenced fp, bail out with whatever
-            // frames we've collected rather than risk a panic below.
-            if f + 8 > self.stack.len() || (f != 0 && f < 16) {
-                break;
-            }
-            let (frame_len, localspos) = match (self.st_r32_opt(f), self.st_r32_opt(f + 4)) {
-                (Some(fl), Some(lp)) => (fl as usize, lp as usize),
-                _ => break,
-            };
-            // Walk the locals-format list at f+8 to read each local value.
-            let locals = self.read_frame_locals(f, localspos);
-            // Value/operand region: above this frame's frame_len, up to inner_bottom.
-            let val_lo = f + frame_len;
-            let operands = self.read_stack_words(val_lo, inner_bottom);
-            let (caller_fp, this_ret_pc) = if f == 0 {
-                (0usize, 0u32) // start frame: no stub beneath it
-            } else {
-                match (self.st_r32_opt(f - 4), self.st_r32_opt(f - 8)) {
-                    (Some(caller_fp), Some(ret_pc)) => (caller_fp as usize, ret_pc),
-                    _ => break, // corrupt stub: stop, keeping frames collected so far
-                }
-            };
-            frames.push(TraceFrame {
-                func_addr: 0, // Glulx does not store per-frame entry addresses
-                return_pc: this_ret_pc,
-                locals,
-                operands,
-            });
-            if f == 0 {
-                break;
-            }
-            inner_bottom = f.saturating_sub(16); // stub sits at [f-16, f)
-            f = caller_fp;
-            if frames.len() > 256 {
-                break; // guard against a corrupt chain
-            }
-        }
+        let frames = self.call_frames();
         StackTrace { fault, fault_pc: self.instr_start_pc, fault_op, width: 4, frames }
     }
 

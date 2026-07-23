@@ -65,7 +65,7 @@ pub fn key_to_glk(key: KeyInput) -> Option<u32> {
 
 /// A running Glulx game session.
 pub struct GlulxSession {
-    machine: Machine,
+    pub(crate) machine: Machine,
     /// Which kind of input the VM is currently waiting for.
     pending: InputKind,
     /// Whether the game has ended.
@@ -82,8 +82,14 @@ pub struct GlulxSession {
     screen_cache: ScreenModel,
     /// The last `/dump-windows` diagnostic snapshot of the live Glk window tree,
     /// refreshed alongside `screen_cache` (the tree is only reachable mutably, so
-    /// `window_dump()` returns this cache). (SQ-0329)
-    window_dump_cache: Vec<String>,
+    /// `window_dump()` returns this cache). (SQ-0329) The debug inspector's Glk
+    /// section reuses this snapshot.
+    pub(crate) window_dump_cache: Vec<String>,
+    /// The debug inspector's lazily-built Glulx disassembly + discovery cache
+    /// (SQ-0465). `None` until the inspector's first `debugger()` read builds it —
+    /// discovery over a multi-MB I7 image is not free, so it never runs unless the
+    /// inspector is actually opened. See [`crate::glulx_debug`].
+    pub(crate) disasm_cache: std::cell::RefCell<Option<gvm::disasm::DisasmCache>>,
     /// Auxiliary persistent data (Glulx aux persistence is a later phase).
     aux: BTreeMap<String, Vec<u8>>,
     aux_dirty: bool,
@@ -284,7 +290,7 @@ impl GlulxSession {
         Self::new_in(
             std::path::PathBuf::new(), image, cols, rows, acceleration,
             graphics_enabled, sound_enabled, false, char_px, pict_blorb, vfs_bytes,
-            ((None, None), (None, None)),
+            ((None, None), (None, None)), false,
         )
     }
 
@@ -293,6 +299,9 @@ impl GlulxSession {
     /// autotesting) are serviced silently against `<game_dir>/<name>.qzl` during
     /// every drive (including boot), with no host UI. Only the player's SAVE/
     /// RESTORE verb (`create_by_prompt`) bubbles up for the app's saves dialog.
+    ///
+    /// `debug` enables the debug inspector's execution tracing from the very first
+    /// boot instruction (the `--debug` flag); leave it `false` for a normal launch.
     #[allow(clippy::too_many_arguments)]
     pub fn new_in(
         game_dir: std::path::PathBuf,
@@ -307,6 +316,7 @@ impl GlulxSession {
         pict_blorb: Option<blorb::Blorb>,
         vfs_bytes: &[u8],
         theme: (crate::glk_backend::ThemePair, crate::glk_backend::ThemePair),
+        debug: bool,
     ) -> Result<GlulxSession, GError> {
         let mem = Memory::new(image)?;
         let picts = crate::graphics::PictSource::new(pict_blorb);
@@ -332,6 +342,11 @@ impl GlulxSession {
         // glk_fileref_does_file_exist during init would otherwise never see its
         // own on-disk save across launches (SQ-0301).
         seed_saved_games(&mut machine, &game_dir);
+        // `--debug` (SQ-0465): enable execution tracing BEFORE the boot drive so
+        // the game's initialisation code is captured in the coverage set — a
+        // later `/debug` toggle cannot see the boot PCs. Off by default, so a
+        // normal launch keeps the single-branch hot loop with zero trace work.
+        machine.trace_exec = debug;
         let (pending, quit) = drive_settled(&mut machine, &game_dir);
         let mut session = GlulxSession {
             machine,
@@ -341,6 +356,7 @@ impl GlulxSession {
             pending_filename: None,
             screen_cache: blank_screen(),
             window_dump_cache: Vec::new(),
+            disasm_cache: std::cell::RefCell::new(None),
             aux: BTreeMap::new(),
             aux_dirty: false,
             last_room: None,
@@ -752,6 +768,12 @@ fn blank_screen() -> ScreenModel {
 
 impl Engine for GlulxSession {
     fn submit(&mut self, command: &str) -> TurnResult {
+        // A new command turn re-starts per-turn execution coverage (the `|` gutter
+        // + last-turn set); the cumulative `ever_executed` is preserved. Mirrors
+        // the Z-machine engine's per-turn clear chokepoint.
+        if self.machine.trace_exec {
+            self.machine.executed_pcs.clear();
+        }
         if !self.quit {
             self.machine.supply_line(command);
             self.drive_turn();
@@ -761,6 +783,9 @@ impl Engine for GlulxSession {
 
     fn submit_key(&mut self, key: KeyInput) -> Option<TurnResult> {
         let code = key_to_glk(key)?;
+        if self.machine.trace_exec {
+            self.machine.executed_pcs.clear();
+        }
         if !self.quit {
             self.machine.supply_char(code);
             self.drive_turn();
@@ -925,6 +950,19 @@ impl Engine for GlulxSession {
         std::mem::take(&mut self.machine.screen_trace)
     }
 
+    fn set_debug_trace(&mut self, on: bool) {
+        self.machine.trace_exec = on;
+        // Only the per-turn set is cleared when tracing stops; the cumulative
+        // `ever_executed` (permanent colour + persisted coverage) is preserved.
+        if !on {
+            self.machine.executed_pcs.clear();
+        }
+    }
+
+    fn seed_executed_pcs(&mut self, pcs: &std::collections::HashSet<u32>) {
+        self.machine.seed_ever_executed(pcs);
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -933,7 +971,11 @@ impl Engine for GlulxSession {
         self
     }
 
-    // introspect() / debugger() use the trait defaults (None).
+    fn debugger(&self) -> Option<&dyn crate::engine::Debugger> {
+        Some(self)
+    }
+
+    // introspect() uses the trait default (None).
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -1129,7 +1171,7 @@ mod tests {
 
         let mut sess = GlulxSession::new_in(
             dir.clone(), image_for(body, 3), 80, 24, true, false, false, false, (1, 1), None, &[],
-            ((None, None), (None, None)),
+            ((None, None), (None, None)), false,
         )
         .expect("new_in");
         assert_eq!(sess.pending_input(), InputKind::Line);
@@ -1363,7 +1405,7 @@ mod tests {
 
         let sess = GlulxSession::new_in(
             dir.clone(), image_for(body, 2), 80, 24, true, false, false, false, (1, 1), None, &[],
-            ((None, None), (None, None)),
+            ((None, None), (None, None)), false,
         )
         .expect("new");
         // No Save request reached the host: the boot drive ran straight to the prompt.

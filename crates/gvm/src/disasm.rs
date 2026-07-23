@@ -641,6 +641,16 @@ impl Unit {
     }
 }
 
+/// Public per-string summary for the inspector's Strings list.
+#[derive(Clone, Debug)]
+pub struct StringInfo {
+    pub addr: u32,
+    /// `0xE0` (C string), `0xE1` (compressed), or `0xE2` (Unicode).
+    pub type_byte: u8,
+    /// A short, lossy decoded preview of the string's text.
+    pub preview: String,
+}
+
 /// Public per-function summary for the inspector's function list.
 #[derive(Clone, Debug)]
 pub struct FuncInfo {
@@ -761,6 +771,35 @@ impl DisasmCache {
                     accel: accel.get(&f.addr).copied(),
                 }),
                 _ => None,
+            })
+            .collect()
+    }
+
+    /// Count of discovered string objects (cheap: the static tiling, no preview
+    /// decoding). Lets a caller size/paginate its Strings list without paying to
+    /// decode every preview.
+    pub fn string_count(&self) -> usize {
+        self.units.iter().filter(|u| matches!(u, Unit::Str { .. })).count()
+    }
+
+    /// Up to `limit` discovered string objects, in address order, each with a
+    /// short preview — the inspector's Strings list. Discovery is static (the ROM
+    /// tiling); previews are decoded here, only for the returned entries, so the
+    /// cost is bounded by `limit` (a huge I7 image can hold tens of thousands of
+    /// strings, and preview decoding an E1 stream is not free). Cold: only ever
+    /// called while the inspector is open.
+    pub fn strings(&self, mem: &Memory, limit: usize) -> Vec<StringInfo> {
+        self.units
+            .iter()
+            .filter_map(|u| match u {
+                Unit::Str { addr, type_byte, .. } => Some((*addr, *type_byte)),
+                _ => None,
+            })
+            .take(limit)
+            .map(|(addr, type_byte)| StringInfo {
+                addr,
+                type_byte,
+                preview: self.string_preview(mem, addr).unwrap_or_default(),
             })
             .collect()
     }

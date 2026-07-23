@@ -12,7 +12,7 @@ pub(crate) fn accel_impl_supported(num: u32) -> bool {
 /// The well-known name of accelerated function `num` (spec §2.17 / Glulxe
 /// accel.c), for the disassembler's function-header badge. Numbers 2/8, 3/9,
 /// … are the V1/V2 variants of the same routine.
-pub(crate) fn accel_name(num: u32) -> &'static str {
+pub fn accel_name(num: u32) -> &'static str {
     match num {
         1 => "Z__Region",
         2 | 8 => "CP__Tab",
