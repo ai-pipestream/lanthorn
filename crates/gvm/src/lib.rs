@@ -11,6 +11,8 @@
 pub(crate) mod accel;
 #[cfg(test)]
 mod asm;
+pub(crate) mod decode;
+pub mod disasm;
 pub mod error;
 pub mod exec;
 pub mod glk;

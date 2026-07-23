@@ -9,6 +9,22 @@ pub(crate) fn accel_impl_supported(num: u32) -> bool {
     (1..=13).contains(&num)
 }
 
+/// The well-known name of accelerated function `num` (spec §2.17 / Glulxe
+/// accel.c), for the disassembler's function-header badge. Numbers 2/8, 3/9,
+/// … are the V1/V2 variants of the same routine.
+pub(crate) fn accel_name(num: u32) -> &'static str {
+    match num {
+        1 => "Z__Region",
+        2 | 8 => "CP__Tab",
+        3 | 9 => "RA__Pr",
+        4 | 10 => "RL__Pr",
+        5 | 11 => "OC__Cl",
+        6 | 12 => "RV__Pr",
+        7 | 13 => "OP__Pr",
+        _ => "accel?",
+    }
+}
+
 /// Which property-table offset `CP__Tab` (and everything built on it) uses inside
 /// the object record. See algorithms.md §"cp_tab" — the only V1/V2 divergence.
 #[derive(Clone, Copy, PartialEq)]

@@ -315,6 +315,20 @@ pub struct Machine {
     cur_localspos: u32,
     /// `(offset_within_locals, size_bytes)` for each local of the current frame.
     cur_locals: Vec<(u32, u8)>,
+
+    /// When true, `step_once` records each instruction's start PC into
+    /// `executed_pcs`/`ever_executed` (the debug inspector's execution coverage).
+    /// Default false; guarded so it is a single predictable branch — and zero
+    /// set-touching / allocation — on the hot path when off (SQ-0465).
+    pub trace_exec: bool,
+    /// Instruction-start PCs executed since the host last cleared them (per-turn
+    /// coverage). The host drains/clears this each turn via `clear_executed_pcs`.
+    pub executed_pcs: std::collections::HashSet<u32>,
+    /// Cumulative instruction-start PCs ever executed while tracing was on —
+    /// NEVER cleared per turn. Feeds the disassembler as dynamic discovery
+    /// (executed bytes are ground-truth code) and can be pre-seeded from
+    /// host-persisted coverage via [`Machine::seed_ever_executed`].
+    pub ever_executed: std::collections::HashSet<u32>,
 }
 
 fn align_up(v: u32, to: u32) -> u32 {
@@ -375,7 +389,7 @@ fn is_glk_text_io(sel: u32) -> bool {
 /// mapping is taken from this interpreter's own `glk_dispatch` arms (the
 /// authoritative source — not the Glk spec constants, which differ), so it stays
 /// correct as the dispatch evolves. Unknown selectors fall back to hex.
-fn glk_selector_name(sel: u32) -> String {
+pub(crate) fn glk_selector_name(sel: u32) -> String {
     let name = match sel {
         0x0001 => "glk_exit",
         0x0002 => "glk_tick",
@@ -756,6 +770,9 @@ impl Machine {
             cur_frame_len: 0,
             cur_localspos: 0,
             cur_locals: Vec::new(),
+            trace_exec: false,
+            executed_pcs: std::collections::HashSet::new(),
+            ever_executed: std::collections::HashSet::new(),
         };
         // Enter the start function directly (no call stub beneath it; its fp is 0).
         if let Err(msg) = m.build_frame_and_enter(start, &[]) {
@@ -798,13 +815,13 @@ impl Machine {
     // ── opcode + operand decode (GLULX_NOTES §3) ──────────────────────────────
 
     /// Decode the variable-length opcode number at `pc`, advancing past it.
+    /// Delegates the layout to the shared [`crate::decode::decode_opcode`] so the
+    /// interpreter and disassembler decode opcode numbers identically.
+    #[inline]
     pub(crate) fn decode_opcode(&mut self) -> R<u32> {
-        let b0 = self.m8(self.pc)?;
-        match b0 & 0xC0 {
-            0xC0 => Ok(self.take32()? - 0xC000_0000), // top bits 11 → 4 bytes
-            0x80 => Ok(self.take16()? - 0x8000),      // top bits 10 → 2 bytes
-            _ => self.take8(),                        // top bit 0 → 1 byte
-        }
+        let (opcode, next) = crate::decode::decode_opcode(&self.mem, self.pc)?;
+        self.pc = next;
+        Ok(opcode)
     }
 
     /// Decode `n_load` load values then `n_store` store destinations from the
@@ -919,8 +936,27 @@ impl Machine {
     pub(crate) fn step_once(&mut self) -> R<()> {
         self.insn_count += 1;
         self.instr_start_pc = self.pc;
+        // Debug execution-coverage trace. Off by default: a single predictable
+        // branch with no set access / allocation on the hot path (SQ-0465).
+        if self.trace_exec {
+            self.executed_pcs.insert(self.pc);
+            self.ever_executed.insert(self.pc);
+        }
         let opcode = self.decode_opcode()?;
         self.execute(opcode)
+    }
+
+    /// Clear the per-turn `executed_pcs` set (call at the start/end of each turn).
+    /// Leaves the cumulative `ever_executed` intact.
+    pub fn clear_executed_pcs(&mut self) {
+        self.executed_pcs.clear();
+    }
+
+    /// Pre-seed the cumulative `ever_executed` set from host-persisted coverage
+    /// (the debug PC-set sidecar) so prior runs' disassembly tiers light up
+    /// immediately. Independent of `trace_exec`.
+    pub fn seed_ever_executed(&mut self, pcs: &std::collections::HashSet<u32>) {
+        self.ever_executed.extend(pcs.iter().copied());
     }
 
     /// Dispatch a decoded opcode to its handler.
@@ -2511,6 +2547,17 @@ impl Machine {
     /// The acceleration parameter stored at `index` via `accelparam`, or `None`.
     pub fn accel_param(&self, index: u32) -> Option<u32> {
         self.accel_params.get(&index).copied()
+    }
+
+    /// The full VM-function-address → accelerated-function-number map. Passed to
+    /// the disassembler so it can badge accelerated functions in their headers.
+    pub fn accel_funcs(&self) -> &std::collections::HashMap<u32, u32> {
+        &self.accel_funcs
+    }
+
+    /// Borrow the loaded image memory (for the debug disassembler / inspector).
+    pub fn mem(&self) -> &Memory {
+        &self.mem
     }
 
     /// Test-only: set an acceleration parameter directly, bypassing `accelparam`.
@@ -5341,6 +5388,80 @@ mod tests {
     use super::*;
     use crate::asm;
     use crate::glk::TestBackend;
+
+    /// Release-mode hot-loop micro-benchmark (SQ-0465 perf guard). Executes a
+    /// tight decrement/branch loop of ~20M instructions and prints throughput.
+    /// `#[ignore]`d (run via `cargo test --release -p gvm -- --ignored perf_hot_loop
+    /// --nocapture`); used only to compare decode-split before/after numbers.
+    #[test]
+    #[ignore]
+    fn perf_hot_loop() {
+        use asm::Op::*;
+        const N: u32 = 10_000_000;
+        let body = [
+            asm::ins(0x40, &[C32(N), Local8(0)]),         // copy #N -> L0
+            asm::ins(0x11, &[Local8(0), C8(1), Local8(0)]), // sub L0,1 -> L0
+            asm::ins(0x23, &[Local8(0), C16(-9)]),        // jnz L0, back-to-sub
+            asm::ins(0x31, &[C8(0)]),                     // return 0
+        ]
+        .concat();
+        let start = asm::func(0xC1, &[(4, 1)], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = Machine::with_glk(Memory::new(built.image).unwrap(), Box::new(TestBackend::new()));
+        let t0 = std::time::Instant::now();
+        m.run();
+        let dt = t0.elapsed();
+        let n = m.insn_count();
+        eprintln!(
+            "perf_hot_loop: {n} insns in {:.3}s = {:.1} Minsn/s",
+            dt.as_secs_f64(),
+            n as f64 / dt.as_secs_f64() / 1e6
+        );
+    }
+
+    #[test]
+    fn trace_exec_records_instruction_start_pcs() {
+        // Off by default: no PCs recorded.
+        let body = [
+            asm::ins(0x40, &[asm::Op::C32(5), asm::Op::Local8(0)]),
+            asm::ins(0x11, &[asm::Op::Local8(0), asm::Op::C8(1), asm::Op::Local8(0)]),
+            asm::ins(0x31, &[asm::Op::Local8(0)]),
+        ]
+        .concat();
+        let start = asm::func(0xC1, &[(4, 1)], &body);
+        let built = asm::assemble(&[start], 0, 0x100);
+        let mut m = Machine::with_glk(Memory::new(built.image.clone()).unwrap(), Box::new(TestBackend::new()));
+        while m.step() == StepResult::Continue {}
+        assert!(m.ever_executed.is_empty(), "tracing off records nothing");
+
+        // On: every instruction-start PC is captured in both sets.
+        let mut m = Machine::with_glk(Memory::new(built.image).unwrap(), Box::new(TestBackend::new()));
+        m.trace_exec = true;
+        let mut expected = std::collections::HashSet::new();
+        loop {
+            expected.insert(m.pc);
+            if m.step() != StepResult::Continue {
+                break;
+            }
+        }
+        assert_eq!(m.executed_pcs, expected);
+        assert_eq!(m.ever_executed, expected);
+
+        // Per-turn clear empties executed_pcs but not ever_executed.
+        m.clear_executed_pcs();
+        assert!(m.executed_pcs.is_empty());
+        assert_eq!(m.ever_executed, expected);
+    }
+
+    #[test]
+    fn seed_ever_executed_merges_persisted_coverage() {
+        let mut m = super::tests::machine_with_glk(&[]);
+        let mut seed = std::collections::HashSet::new();
+        seed.insert(0x1234);
+        seed.insert(0x5678);
+        m.seed_ever_executed(&seed);
+        assert!(m.ever_executed.contains(&0x1234) && m.ever_executed.contains(&0x5678));
+    }
 
     #[test]
     fn glk_trace_names_structural_selectors_and_skips_text_io() {
