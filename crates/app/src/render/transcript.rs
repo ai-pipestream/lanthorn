@@ -1282,13 +1282,30 @@ pub fn render_transcript(
     render_middle(state, buf, middle_area, normal_style, game_input)
 }
 
-/// Draw the top-right notification toasts over `area` (the full frame).
+/// Choose the rect notification toasts anchor to: the story pane's inner
+/// content rect when it has room for at least a 1-row strip, else the full
+/// frame. `draw_frame` calls this with the story pane's content rect (as
+/// drawn this frame) and the full terminal frame, so a toast is never lost
+/// even in `Layout::TranscriptFull`-without-room edge cases or a terminal so
+/// small the story pane collapses to zero content area. (SQ-0415)
+pub fn notification_anchor_rect(story_area: Rect, full: Rect) -> Rect {
+    if story_area.width >= 6 && story_area.height > 0 {
+        story_area
+    } else {
+        full
+    }
+}
+
+/// Draw the top-right notification toasts over `area` — normally the story
+/// pane's content rect, or the full frame as a fallback (see
+/// [`notification_anchor_rect`]).
 ///
-/// Newest is drawn on top; each toast slides in from the right edge, holds for a
-/// few seconds, and slides out (see [`crate::notify`]). Called last in
-/// `draw_frame` so toasts overlay every pane. When animations are disabled the
-/// toast simply appears and disappears on the same clock, without sliding.
-/// (SQ-0176)
+/// Newest is drawn on top; each toast slides in from `area`'s right edge,
+/// holds for a few seconds, and slides out (see [`crate::notify`]), clipped to
+/// `area` throughout. Called last in `draw_frame` so toasts overlay the story
+/// pane's own content (and anything else drawn under `area`). When animations
+/// are disabled the toast simply appears and disappears on the same clock,
+/// without sliding. (SQ-0176, SQ-0415)
 pub fn render_notifications(buf: &mut Buffer, area: Rect, state: &AppState) {
     let notes = state.notifications.active();
     if notes.is_empty() || area.width < 6 || area.height == 0 {
@@ -2044,19 +2061,26 @@ mod tests {
         state.config.animation.enabled = false;
         state.notifications.push("[Saved as: foo]");
 
-        let area = Rect::new(0, 0, 40, 10);
-        let mut buf = Buffer::empty(area);
-        render_notifications(&mut buf, area, &state);
+        // The full frame is wider than the story pane (SQ-0415: a map pane sits
+        // to the right of it, cols 40..60) — proves the toast anchors to the
+        // PANE's right edge, not the frame's.
+        let full = Rect::new(0, 0, 60, 10);
+        let story_area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(full);
+        render_notifications(&mut buf, story_area, &state);
 
         // Default is a single-bordered box: top border (row 0), content (row 1),
         // bottom border (row 2). The bracket pair is stripped for a clean toast:
         // inner is " Saved as: foo " (15 chars), box 17 wide, right-anchored to
-        // col 40, so it spans cols 23..40.
+        // col 40 (the pane's right edge), so it spans cols 23..40.
         let content = read_row(&buf, 1, 24, 39);
         assert_eq!(content, " Saved as: foo ", "content row, bracket-stripped + padded: {content:?}");
         // Borders drawn above and below (non-blank in the box columns).
         assert!(!read_row(&buf, 0, 23, 40).trim().is_empty(), "top border drawn");
         assert!(!read_row(&buf, 2, 23, 40).trim().is_empty(), "bottom border drawn");
+        // Nothing drawn past the story pane into the map's columns — the toast
+        // is clipped to the pane, not the wider frame.
+        assert_eq!(read_row(&buf, 1, 40, 60).trim(), "", "toast is clipped to the story pane, not the map");
         // The notification style — the registry's `notification` selector, which
         // derives from the `accent` role reversed (cyan reverse-video) — is
         // applied to the content cells. (SQ-0309: was a baked black-on-cyan
@@ -2074,15 +2098,20 @@ mod tests {
         state.notifications.push("older");
         state.notifications.push("newer");
 
-        let area = Rect::new(0, 0, 40, 12);
-        let mut buf = Buffer::empty(area);
-        render_notifications(&mut buf, area, &state);
+        // Same pane-narrower-than-frame setup as above (SQ-0415).
+        let full = Rect::new(0, 0, 60, 12);
+        let story_area = Rect::new(0, 0, 40, 12);
+        let mut buf = Buffer::empty(full);
+        render_notifications(&mut buf, story_area, &state);
 
         // Each toast is a 3-row box: newest in rows 0-2, older in rows 3-5.
         let newest_box = (0..3).map(|r| read_row(&buf, r, 0, 40)).collect::<String>();
         let older_box = (3..6).map(|r| read_row(&buf, r, 0, 40)).collect::<String>();
         assert!(newest_box.contains("newer"), "newest is in the top box");
         assert!(older_box.contains("older"), "older is pushed to the box below");
+        // Nothing spills past the pane into the map columns on either box.
+        let map_cols = (0..6).map(|r| read_row(&buf, r, 40, 60)).collect::<String>();
+        assert_eq!(map_cols.trim(), "", "toasts stay within the story pane's width");
     }
 
     #[test]
@@ -2093,6 +2122,28 @@ mod tests {
         render_notifications(&mut buf, area, &state);
         // Nothing drawn: the top-right stays blank.
         assert_eq!(read_row(&buf, 0, 0, 40).trim(), "");
+    }
+
+    #[test]
+    fn notification_anchor_falls_back_to_full_frame_when_pane_absent_or_tiny() {
+        let full = Rect::new(0, 0, 80, 24);
+
+        // A real story pane with room: anchors there, not the frame (SQ-0415).
+        let roomy_pane = Rect::new(0, 0, 40, 24);
+        assert_eq!(notification_anchor_rect(roomy_pane, full), roomy_pane);
+
+        // No story pane at all (e.g. a layout/edge case with zero content rect):
+        // falls back to the full frame so a toast is never lost.
+        assert_eq!(notification_anchor_rect(Rect::default(), full), full);
+
+        // A pane too narrow for even the 1-row/6-col minimum toast strip: also
+        // falls back to the full frame.
+        let tiny_pane = Rect::new(0, 0, 4, 24);
+        assert_eq!(notification_anchor_rect(tiny_pane, full), full);
+
+        // A pane with zero height (borders alone ate all the rows): falls back.
+        let zero_height_pane = Rect::new(0, 0, 40, 0);
+        assert_eq!(notification_anchor_rect(zero_height_pane, full), full);
     }
 
     #[test]

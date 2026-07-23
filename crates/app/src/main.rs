@@ -696,9 +696,15 @@ fn draw_frame(
         // The former bottom-bar map-edit prompts are now the text-entry modal drawn
         // by the overlay ladder in the graphics-free dialog area (SQ-0307).
 
-        // Notification toasts overlay everything (including modals): drawn last so
-        // they always sit topmost in the top-right corner. (SQ-0176)
-        app::render::transcript::render_notifications(buf, full, state);
+        // Notification toasts anchor to the story pane's top-right (sliding in
+        // from the pane's right edge) rather than the full frame, so they never
+        // cover the map (SQ-0415). `story_area` is that pane's content rect as
+        // drawn above this frame; if it's absent or too small, fall back to the
+        // full frame so a toast is never lost. Drawn last so toasts sit topmost
+        // over the story pane's own content (and anything else under them).
+        // (SQ-0176, SQ-0415)
+        let toast_area = app::render::transcript::notification_anchor_rect(story_area, full);
+        app::render::transcript::render_notifications(buf, toast_area, state);
     })?;
 
     // The draw closure runs exactly once, so the overlay ladder always ran.

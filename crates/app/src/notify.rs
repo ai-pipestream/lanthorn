@@ -9,6 +9,11 @@
 //! also kept in a bounded `history`, which `/dump-notifications` replays into the
 //! transcript "in case some are missed".
 //!
+//! SQ-0415: the toasts render inside the story pane (top-right of that rect,
+//! sliding in from the pane's right edge) rather than over the full frame, so
+//! they never cover the map. If the story pane is absent or too small to hold
+//! anything, rendering falls back to the full frame so a toast is never lost.
+//!
 //! Timing is clock-based (`Instant`), mirroring the `sound_pulse` flash: the run
 //! loop's redraw gate ([`Notifications::needs_tick`]) keeps frames stepping only
 //! while a toast is sliding in/out or waiting to be reaped — the multi-second
