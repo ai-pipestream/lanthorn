@@ -39,6 +39,23 @@ pub(crate) fn try_blit_band_row(
     false
 }
 
+/// Blit a left-margin float's picture strip (`x_off == 0`) for one row. Unlike
+/// [`try_blit_band_row`] this does NOT consume the row — the caller has already
+/// drawn the row's text to the right of the picture, so this only lays the image
+/// down over the left `cols` columns. No-op without a game picker. (SQ-0454)
+pub(crate) fn blit_float_row(
+    state: &AppState,
+    band: &ImageBand,
+    area_x: u16,
+    area_width: u16,
+    row_y: u16,
+    buf: &mut Buffer,
+) {
+    if let Some(picker) = state.game_picker.as_ref() {
+        blit_band(&state.inline_image_render, picker, band, area_x, area_width, row_y, state.colors.theme.get("inline_image").style, buf);
+    }
+}
+
 /// Compute the clamped 1-row `dest` for an image band within a body area and
 /// blit its strip. Shared by the transcript draw loop (Task 8) and non-primary
 /// buffer windows (Task 9): both offset by `band.x_off`, clamp the width to the

@@ -26,6 +26,12 @@ pub(crate) struct WrappedRow {
     /// For a row that is part of an inline-image band, the geometry to blit
     /// (Task 8). Text rows carry `None`.
     pub band: Option<ImageBand>,
+    /// For a row that flows *beside* a left-margin float (SQ-0454): the image
+    /// strip to blit at the left margin (`x_off == 0`) after the row's text is
+    /// drawn. Unlike `band`, a float row also carries text (already indented past
+    /// the picture); a leftover float row taller than its text carries an empty
+    /// `text`. `None` for ordinary rows and for band rows.
+    pub float: Option<ImageBand>,
 }
 
 /// Geometry for one terminal row of an inline-image band: the source `image`,
@@ -463,70 +469,278 @@ pub(crate) fn wrap_lines_kinded(
     images: &[Option<crate::inline_image::InlineImage>],
     char_px: (u16, u16),
     images_enabled: bool,
+    left_float: bool,
     width: u16,
 ) -> Vec<WrappedRow> {
-    transcript
-        .iter()
-        .enumerate()
-        .flat_map(|(i, line)| {
-            // An image unit expands into an N-row band (or zero rows when images
-            // are disabled). `images.get(i)` yields `None` for a plain text line
-            // (and for any `images` slice shorter than `transcript`).
-            if let Some(Some(img)) = images.get(i) {
-                if !images_enabled {
-                    return Vec::new();
-                }
-                let (cols, rows) = img.fitted_cells(width, char_px);
-                let x_off = match img.align {
-                    crate::inline_image::ImageAlign::MarginRight => width.saturating_sub(cols),
-                    _ => 0,
-                };
-                return (0..rows)
-                    .map(|r| WrappedRow {
-                        text: String::new(),
-                        kind: TranscriptKind::Story,
-                        style: Style::default(),
-                        runs: Vec::new(),
-                        band: Some(ImageBand { image: img.clone(), cols, rows, row: r, x_off }),
-                    })
-                    .collect();
+    let mut out: Vec<WrappedRow> = Vec::new();
+    // The currently-active left-margin float (Zork Zero's drop-cap idiom): its
+    // picture occupies the left `indent` columns and the following Story/Input
+    // rows wrap beside it. Only ONE float is active at a time; a new image or a
+    // non-prose line flushes it first (so the whole picture always renders, even
+    // when the text beside it is shorter than the image — or absent). (SQ-0454)
+    let mut float: Option<FloatState> = None;
+
+    for (i, line) in transcript.iter().enumerate() {
+        // An image unit either starts a left-margin float or expands into an
+        // N-row band (or zero rows when images are disabled). `images.get(i)`
+        // yields `None` for a plain text line (and for a short `images` slice).
+        if let Some(Some(img)) = images.get(i) {
+            if !images_enabled {
+                continue;
             }
-            let kind = kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
-            let style = styles.get(i).copied().unwrap_or_default();
-            let line_runs = runs.get(i);
-            let w = match kind {
-                TranscriptKind::Meta | TranscriptKind::Warning => width.saturating_sub(META_GUTTER),
-                TranscriptKind::Story | TranscriptKind::Input => width,
-            };
-            let out: Vec<WrappedRow> = match kind {
-                // Meta/Warning are app-generated (always unstyled) and use hanging
-                // wrap, whose indentation shifts offsets — emit empty runs.
-                TranscriptKind::Meta | TranscriptKind::Warning => {
-                    wrap_line_hanging(line, w, leading_spaces(line).max(2))
-                        .into_iter()
-                        .map(|row| WrappedRow { text: row, kind, style, runs: Vec::new(), band: None })
-                        .collect()
+            // A new picture ends any active float (finishing it as strip rows).
+            flush_float(&mut out, &mut float);
+            if left_float {
+                if let Some(fl) = FloatState::start(img, char_px, width) {
+                    float = Some(fl);
+                    continue; // the float emits no rows of its own; text rides beside it
                 }
-                TranscriptKind::Story | TranscriptKind::Input => {
-                    let pf = para.get(i).copied().unwrap_or_default();
-                    wrap_para_ranges(line, w, pf)
-                        .into_iter()
-                        .map(|(row, start, end, pad)| WrappedRow {
-                            text: row,
-                            kind,
-                            style,
-                            // Shift the row's runs right by the leading padding so
-                            // selection/copy/search coordinates match the padded
-                            // text that is actually drawn (SQ-0330).
-                            runs: shift_runs(rebase_runs(line_runs, start, end), pad),
-                            band: None,
-                        })
-                        .collect()
-                }
+            }
+            // Band fallback: inline aligns, margin-right, floats-disabled, or a
+            // left-margin image too wide (or too cramped) to float.
+            let (cols, rows) = img.fitted_cells(width, char_px);
+            let x_off = match img.align {
+                crate::inline_image::ImageAlign::MarginRight => width.saturating_sub(cols),
+                _ => 0,
             };
-            out
-        })
-        .collect()
+            for r in 0..rows {
+                out.push(WrappedRow {
+                    text: String::new(),
+                    kind: TranscriptKind::Story,
+                    style: Style::default(),
+                    runs: Vec::new(),
+                    band: Some(ImageBand { image: img.clone(), cols, rows, row: r, x_off }),
+                    float: None,
+                });
+            }
+            continue;
+        }
+
+        let kind = kinds.get(i).copied().unwrap_or(TranscriptKind::Story);
+        let style = styles.get(i).copied().unwrap_or_default();
+        let line_runs = runs.get(i);
+        let is_prose = matches!(kind, TranscriptKind::Story | TranscriptKind::Input);
+        // A float only wraps the game's own prose. Any other line kind flushes
+        // the picture first, then renders normally at full width.
+        if !is_prose {
+            flush_float(&mut out, &mut float);
+        }
+
+        match kind {
+            // Meta/Warning are app-generated (always unstyled) and use hanging
+            // wrap, whose indentation shifts offsets — emit empty runs.
+            TranscriptKind::Meta | TranscriptKind::Warning => {
+                let w = width.saturating_sub(META_GUTTER);
+                for row in wrap_line_hanging(line, w, leading_spaces(line).max(2)) {
+                    out.push(WrappedRow { text: row, kind, style, runs: Vec::new(), band: None, float: None });
+                }
+            }
+            TranscriptKind::Story | TranscriptKind::Input if float.is_some() => {
+                // Wrap this prose line beside the active float: the first `rem`
+                // output rows are narrowed by the float `indent` and carry the
+                // next image strip; rows past the picture reclaim full width.
+                // Copy the geometry up front so the row loop borrows nothing.
+                let (image, cols, total, indent, start_strip, rem) = {
+                    let fl = float.as_ref().unwrap();
+                    (fl.image.clone(), fl.cols, fl.rows, fl.indent, fl.next_strip, fl.remaining() as usize)
+                };
+                let narrow = width.saturating_sub(indent).max(1);
+                let ranges = wrap_line_ranges_var(line, |k| if k < rem { narrow } else { width });
+                let nrows = ranges.len();
+                for (k, (text, start, end)) in ranges.into_iter().enumerate() {
+                    let (pad, float_band) = if k < rem {
+                        let band = ImageBand { image: image.clone(), cols, rows: total, row: start_strip + k as u16, x_off: 0 };
+                        (indent, Some(band))
+                    } else {
+                        (0, None)
+                    };
+                    let padded = if pad == 0 { text } else { format!("{}{}", " ".repeat(pad as usize), text) };
+                    out.push(WrappedRow {
+                        text: padded,
+                        kind,
+                        style,
+                        // Shift the row's runs right by the leading padding so
+                        // selection/copy/search coordinates match the drawn text.
+                        runs: shift_runs(rebase_runs(line_runs, start, end), pad),
+                        band: None,
+                        float: float_band,
+                    });
+                }
+                // Advance the float by the strips just placed; retire it once the
+                // whole picture has been laid down.
+                let placed = nrows.min(rem) as u16;
+                let fl = float.as_mut().unwrap();
+                fl.next_strip += placed;
+                if fl.remaining() == 0 {
+                    float = None;
+                }
+            }
+            TranscriptKind::Story | TranscriptKind::Input => {
+                let pf = para.get(i).copied().unwrap_or_default();
+                for (row, start, end, pad) in wrap_para_ranges(line, width, pf) {
+                    out.push(WrappedRow {
+                        text: row,
+                        kind,
+                        style,
+                        // Shift the row's runs right by the leading padding so
+                        // selection/copy/search coordinates match the padded
+                        // text that is actually drawn (SQ-0330).
+                        runs: shift_runs(rebase_runs(line_runs, start, end), pad),
+                        band: None,
+                        float: None,
+                    });
+                }
+            }
+        }
+    }
+    // Finish any float whose picture outran (or had no) text beside it.
+    flush_float(&mut out, &mut float);
+    out
+}
+
+/// An in-progress left-margin float while `wrap_lines_kinded` walks the
+/// transcript: the source `image`, its cell footprint (`cols` wide × `rows`
+/// tall), the text `indent` (≥ `cols`, so prose never overlaps the picture), and
+/// the next strip row to place. (SQ-0454)
+struct FloatState {
+    image: crate::inline_image::InlineImage,
+    cols: u16,
+    rows: u16,
+    indent: u16,
+    next_strip: u16,
+}
+
+impl FloatState {
+    /// Begin a float for a `MarginLeft` image, or `None` to fall back to a band:
+    /// non-left aligns, a picture wider than ~half the viewport, or one whose
+    /// text indent would leave no room for prose.
+    fn start(img: &crate::inline_image::InlineImage, char_px: (u16, u16), width: u16) -> Option<FloatState> {
+        if img.align != crate::inline_image::ImageAlign::MarginLeft {
+            return None;
+        }
+        let (cols, rows) = img.fitted_cells(width, char_px);
+        if cols == 0 || rows == 0 {
+            return None;
+        }
+        // Fall back to a full-width band when the picture is wider than ~half the
+        // viewport — floating it would starve the prose column.
+        if cols.saturating_mul(2) > width {
+            return None;
+        }
+        let indent = float_text_indent(img, char_px.0, cols);
+        if indent >= width {
+            return None; // no room for text beside the picture
+        }
+        Some(FloatState { image: img.clone(), cols, rows, indent, next_strip: 0 })
+    }
+
+    /// Strip rows not yet placed.
+    fn remaining(&self) -> u16 {
+        self.rows.saturating_sub(self.next_strip)
+    }
+
+    /// The band geometry for strip `row` of this float (blitted at the left
+    /// margin, `x_off == 0`).
+    fn strip(&self, row: u16) -> ImageBand {
+        ImageBand { image: self.image.clone(), cols: self.cols, rows: self.rows, row, x_off: 0 }
+    }
+}
+
+/// The text indent (in cells) for a left-margin float: the game's own
+/// `set_margins` value (`margin_px`, in GAME pixels — scaled the same way the
+/// picture is, then rounded up to whole cells) when present, else the picture's
+/// cell width plus a one-column gutter. Never less than the picture width, so
+/// prose can't overlap the image. (SQ-0454)
+fn float_text_indent(img: &crate::inline_image::InlineImage, cell_w: u16, cols: u16) -> u16 {
+    let cell_w = cell_w.max(1) as u32;
+    let indent = match img.margin_px {
+        Some(margin) => {
+            // `scaled` already encodes `v6_image_scale`; derive the same factor
+            // and apply it to the game-pixel margin so text lines up with the
+            // scaled picture.
+            let native_w = img.pixels.width().max(1);
+            let scaled_w = img.scaled.map(|(w, _)| w).unwrap_or(native_w).max(1);
+            let scaled_margin = (margin as u64 * scaled_w as u64 / native_w as u64) as u32;
+            scaled_margin.div_ceil(cell_w).max(1) as u16
+        }
+        None => cols + 1,
+    };
+    indent.max(cols)
+}
+
+/// Emit a float's not-yet-placed strips as empty rows so its whole picture
+/// renders even when the text beside it is shorter than the image (or absent),
+/// then clear the float. (SQ-0454)
+fn flush_float(out: &mut Vec<WrappedRow>, float: &mut Option<FloatState>) {
+    if let Some(fl) = float.take() {
+        for r in fl.next_strip..fl.rows {
+            out.push(WrappedRow {
+                text: String::new(),
+                kind: TranscriptKind::Story,
+                style: Style::default(),
+                runs: Vec::new(),
+                band: None,
+                float: Some(fl.strip(r)),
+            });
+        }
+    }
+}
+
+/// Word-wrap `line` into rows where output row `k` may use a different width
+/// `width_for(k)` (clamped to ≥ 1). Like [`wrap_line_ranges`] but the usable
+/// width can shrink or grow per row — used to wrap prose beside a left-margin
+/// float (narrow while the picture is present, full width once it ends). Each
+/// row carries its `[start, end)` char range in the original `line` so per-line
+/// style runs can be re-based onto the wrapped rows. (SQ-0454)
+fn wrap_line_ranges_var(line: &str, width_for: impl Fn(usize) -> u16) -> Vec<(String, usize, usize)> {
+    if line.is_empty() {
+        return vec![(String::new(), 0, 0)];
+    }
+    let mut rows: Vec<(String, usize, usize)> = Vec::new();
+    let mut remaining = line;
+    let mut base_col = 0usize; // char offset of `remaining`'s start within `line`
+
+    while !remaining.is_empty() {
+        let width = width_for(rows.len()).max(1) as usize;
+        let char_count = remaining.chars().count();
+        if char_count <= width {
+            rows.push((remaining.to_string(), base_col, base_col + char_count));
+            break;
+        }
+        // Last space at char index ≤ width to break at (see `wrap_line_ranges`).
+        let mut last_space_before: Option<usize> = None;
+        let mut byte_at_width = remaining.len();
+        for (idx, (byte_i, ch)) in remaining.char_indices().enumerate() {
+            if idx == width {
+                byte_at_width = byte_i;
+                if ch == ' ' {
+                    last_space_before = Some(byte_i);
+                }
+                break;
+            }
+            if ch == ' ' {
+                last_space_before = Some(byte_i);
+            }
+        }
+        if let Some(sp) = last_space_before {
+            let head = &remaining[..sp];
+            let head_chars = head.chars().count();
+            rows.push((head.to_string(), base_col, base_col + head_chars));
+            let next = sp + ' '.len_utf8();
+            remaining = &remaining[next..];
+            base_col += head_chars + 1; // +1 for the dropped break space
+        } else {
+            let head = &remaining[..byte_at_width];
+            let head_chars = head.chars().count();
+            rows.push((head.to_string(), base_col, base_col + head_chars));
+            remaining = &remaining[byte_at_width..];
+            base_col += head_chars;
+        }
+    }
+    if rows.is_empty() {
+        rows.push((String::new(), 0, 0));
+    }
+    rows
 }
 
 /// Wrapped-row count before the screen-clear anchor `clear_anchor` (a source-line
@@ -544,6 +758,7 @@ pub(crate) fn anchor_wrapped_rows(
     images: &[Option<crate::inline_image::InlineImage>],
     char_px: (u16, u16),
     images_enabled: bool,
+    left_float: bool,
     width: u16,
     clear_anchor: Option<usize>,
 ) -> Option<usize> {
@@ -561,6 +776,7 @@ pub(crate) fn anchor_wrapped_rows(
             &images[..a.min(images.len())],
             char_px,
             images_enabled,
+            left_float,
             width,
         )
         .len(),
@@ -633,11 +849,14 @@ pub(crate) fn visible_wrapped_lines_kinded(
     if rows == 0 || transcript.is_empty() {
         return (Vec::new(), 0, 0);
     }
-    let display_rows = wrap_lines_kinded(transcript, kinds, styles, runs, para, images, char_px, images_enabled, width);
+    // Secondary buffer windows (the only caller besides tests) keep the legacy
+    // band rendering for margin images — left-margin floats are a main-transcript
+    // affordance (SQ-0454), so `left_float` is off here.
+    let display_rows = wrap_lines_kinded(transcript, kinds, styles, runs, para, images, char_px, images_enabled, false, width);
     // Only the bottom (scroll == 0) view can top-anchor, so skip the extra wrap
     // of `[..a]` while scrolled back.
     let anchor_row = if scroll == 0 {
-        anchor_wrapped_rows(transcript, kinds, styles, runs, para, images, char_px, images_enabled, width, clear_anchor)
+        anchor_wrapped_rows(transcript, kinds, styles, runs, para, images, char_px, images_enabled, false, width, clear_anchor)
     } else {
         None
     };
@@ -1476,6 +1695,7 @@ fn render_middle(
             &filtered_images,
             char_px,
             images_enabled,
+            true, // main transcript: left-margin images float, text wraps beside (SQ-0454)
             body_area.width,
         );
         // Map the screen-clear boundary (a full-transcript index) to a position in
@@ -1492,6 +1712,7 @@ fn render_middle(
             &filtered_images,
             char_px,
             images_enabled,
+            true,
             body_area.width,
             clear_anchor_filtered,
         );
@@ -1616,6 +1837,14 @@ fn render_middle(
                 // A non-blank Default row closes the band.
                 band_bg = None;
             }
+        }
+
+        // Left-margin float (SQ-0454): blit the picture strip over the left
+        // `cols` columns AFTER the row's (indented) text and any background fill,
+        // so the image always wins. The prose already started past `indent`, so
+        // it never collides with the picture.
+        if let Some(float) = &wr.float {
+            crate::render::inline_image::blit_float_row(state, float, body_area.x, body_area.width, row_y, buf);
         }
     }
 
@@ -1858,11 +2087,11 @@ mod tests {
         let line = vec!["abcdefgh".to_string()];
         let st = [Style::default()];
         // Input: full width 8 (no gutter) → unsplit.
-        let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], &st, &[], &[], &[], (1, 1), false, 8);
+        let i = wrap_lines_kinded(&line, &[TranscriptKind::Input], &st, &[], &[], &[], (1, 1), false, false, 8);
         assert_eq!(i.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
         // Warning: wraps to width-2 = 6 like Meta; continuation gets 2-space
         // hanging indent (leading_spaces("abcdefgh")=0, .max(2)=2).
-        let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], &st, &[], &[], &[], (1, 1), false, 8);
+        let w = wrap_lines_kinded(&line, &[TranscriptKind::Warning], &st, &[], &[], &[], (1, 1), false, false, 8);
         assert_eq!(w.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
     }
 
@@ -1881,7 +2110,7 @@ mod tests {
         let styles = vec![Style::default(); 3];
         let runs = vec![Vec::new(); 3];
         let images = vec![None, Some(dummy_img(16, 24, crate::inline_image::ImageAlign::InlineUp)), None];
-        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, 40);
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, false, 40);
         // 1 (hi) + 3 (band) + 1 (bye) = 5 rows.
         assert_eq!(rows.len(), 5);
         assert!(rows[0].band.is_none());
@@ -1898,7 +2127,7 @@ mod tests {
         let styles = vec![Style::default(); 2];
         let runs = vec![Vec::new(); 2];
         let images = vec![None, Some(dummy_img(16, 24, crate::inline_image::ImageAlign::InlineUp))];
-        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), false, 40);
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), false, false, 40);
         assert_eq!(rows.len(), 1); // only "hi"
     }
 
@@ -1910,8 +2139,8 @@ mod tests {
         let styles = vec![Style::default()];
         let runs = vec![Vec::new()];
         let images = vec![Some(dummy_img(800, 400, crate::inline_image::ImageAlign::InlineUp))];
-        let wide = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, 40);
-        let narrow = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, 20);
+        let wide = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, false, 40);
+        let narrow = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, false, 20);
         assert_eq!(wide.len(), 20);
         assert_eq!(narrow.len(), 10);
     }
@@ -1927,7 +2156,7 @@ mod tests {
         let styles = vec![Style::default()];
         let runs = vec![Vec::new()];
         let images = vec![Some(dummy_img(16, 24, crate::inline_image::ImageAlign::MarginRight))];
-        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, 40);
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, false, 40);
         assert_eq!(rows.len(), 3);
         for (expected_row, wr) in rows.iter().enumerate() {
             let band = wr.band.as_ref().unwrap();
@@ -1945,8 +2174,166 @@ mod tests {
         let styles = vec![Style::default()];
         let runs = vec![Vec::new()];
         let images = vec![Some(dummy_img(16, 8, crate::inline_image::ImageAlign::MarginRight))]; // 2x1 cells
-        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, 40);
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, false, 40);
         assert_eq!(rows[0].band.as_ref().unwrap().x_off, 38); // 40 - 2
+    }
+
+    // ── Left-margin floats (SQ-0454) ─────────────────────────────────────────
+
+    fn left_img(w: u32, h: u32, margin_px: Option<u32>) -> crate::inline_image::InlineImage {
+        crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::new(w, h)),
+            align: crate::inline_image::ImageAlign::MarginLeft,
+            scaled: None,
+            margin_px,
+        }
+    }
+
+    #[test]
+    fn float_indent_derives_from_width_with_gutter_when_no_margin() {
+        // No margin_px: text offset = image cell width + a 1-column gutter.
+        let img = left_img(16, 24, None); // 2 cols at cell width 8
+        assert_eq!(float_text_indent(&img, 8, 2), 3);
+    }
+
+    #[test]
+    fn float_indent_honours_margin_px_scaled() {
+        // margin_px is in GAME pixels; scale 1 → 48px / 8 = 6 cols.
+        let img = left_img(16, 24, Some(48));
+        assert_eq!(float_text_indent(&img, 8, 2), 6);
+        // With a 2x scaled request (scaled_w 32 / native 16), the game margin
+        // scales too: 48 * 2 = 96px / 8 = 12 cols.
+        let mut scaled = left_img(16, 24, Some(48));
+        scaled.scaled = Some((32, 48));
+        assert_eq!(float_text_indent(&scaled, 8, 4), 12);
+    }
+
+    #[test]
+    fn float_indent_never_below_image_width() {
+        // A tiny game margin can't pull text under the picture: indent ≥ cols.
+        let img = left_img(64, 8, Some(1)); // margin 1px → 1 col, but 8 cols wide
+        assert_eq!(float_text_indent(&img, 8, 8), 8);
+    }
+
+    #[test]
+    fn float_start_falls_back_to_band_for_non_left_or_wide() {
+        // Non-left alignment never floats.
+        assert!(FloatState::start(&dummy_img(16, 24, crate::inline_image::ImageAlign::MarginRight), (8, 8), 40).is_none());
+        // Wider than ~half the viewport (25 cols of 40) → band.
+        assert!(FloatState::start(&left_img(200, 8, None), (8, 8), 40).is_none());
+        // A normal left-margin picture floats: 16x24 px at cell 8x8 → 2x3 cells,
+        // indent 3 (cols + gutter), starting at strip 0.
+        let fs = FloatState::start(&left_img(16, 24, None), (8, 8), 40).unwrap();
+        assert_eq!((fs.cols, fs.rows, fs.indent, fs.next_strip), (2, 3, 3, 0));
+    }
+
+    #[test]
+    fn left_float_wraps_following_prose_beside_the_picture() {
+        // A left-margin drop-cap (16x24 px → 2x3 cells, indent 3) followed by a
+        // long paragraph: the image emits NO band rows of its own; the first 3
+        // output rows carry the picture strip and are indented by 3, wrapping the
+        // prose at 40-3=37; rows past the picture reclaim full width.
+        let para = "word ".repeat(30);
+        let transcript = vec![para.trim_end().to_string()];
+        let images = vec![Some(left_img(16, 24, None))];
+        // The image is a SEPARATE transcript unit before the prose.
+        let mut full_transcript = vec![String::new()];
+        full_transcript.extend(transcript);
+        let full_images = vec![images[0].clone(), None];
+        let kinds = vec![TranscriptKind::Story; 2];
+        let styles = vec![Style::default(); 2];
+        let runs = vec![Vec::new(); 2];
+        let rows = wrap_lines_kinded(&full_transcript, &kinds, &styles, &runs, &[], &full_images, (8, 8), true, true, 40);
+
+        // No standalone band rows for a floated image.
+        assert!(rows.iter().all(|r| r.band.is_none()), "a floated image emits no bands");
+        let float_rows: Vec<&WrappedRow> = rows.iter().filter(|r| r.float.is_some()).collect();
+        assert_eq!(float_rows.len(), 3, "one float strip per image cell-row");
+        for (k, r) in float_rows.iter().enumerate() {
+            let fb = r.float.as_ref().unwrap();
+            assert_eq!((fb.row, fb.cols, fb.rows, fb.x_off), (k as u16, 2, 3, 0));
+            if !r.text.is_empty() {
+                assert!(r.text.starts_with("   "), "float-row prose indented by 3");
+            }
+            assert!(r.text.chars().count() <= 40, "drawn width fits the viewport");
+        }
+        // The float begins at the first output row (no prose preceded the image).
+        assert!(rows[0].float.is_some());
+        // Rows past the 3-row picture reclaim full width (no forced float indent).
+        assert!(
+            rows.iter().skip(3).any(|r| r.float.is_none() && !r.text.is_empty()),
+            "prose past the picture flows full-width"
+        );
+    }
+
+    #[test]
+    fn left_float_emits_leftover_strips_when_taller_than_text() {
+        // A 1-col x 5-row picture beside a single short line: the line rides strip
+        // 0 (indented by 2), and the remaining 4 strips render as empty float rows
+        // so the whole picture still draws.
+        let transcript = vec![String::new(), "hi".to_string()];
+        let images = vec![Some(left_img(8, 40, None)), None]; // 1 col, 5 rows
+        let kinds = vec![TranscriptKind::Story; 2];
+        let styles = vec![Style::default(); 2];
+        let runs = vec![Vec::new(); 2];
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, true, 40);
+        assert_eq!(rows.len(), 5, "5 output rows: 1 with text + 4 leftover strips");
+        assert_eq!(rows[0].text, "  hi", "text indented by 2 (1 col + gutter)");
+        for (k, r) in rows.iter().enumerate() {
+            let fb = r.float.as_ref().expect("every row carries a strip");
+            assert_eq!((fb.row, fb.cols, fb.rows), (k as u16, 1, 5));
+            if k > 0 {
+                assert_eq!(r.text, "", "leftover strip rows carry no text");
+            }
+        }
+    }
+
+    #[test]
+    fn left_float_too_wide_renders_as_band() {
+        // A left-margin image wider than half the viewport falls back to the
+        // existing full-width band path (band Some, float None).
+        let transcript = vec![String::new()];
+        let images = vec![Some(left_img(400, 8, None))]; // 40 cols after fit-to-width
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let runs = vec![Vec::new()];
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, true, 40);
+        assert!(rows.iter().all(|r| r.float.is_none()), "too-wide image never floats");
+        assert!(rows[0].band.is_some(), "it renders as a band instead");
+    }
+
+    #[test]
+    fn non_prose_line_flushes_the_float_first() {
+        // An app-generated Meta line between the picture and prose finishes the
+        // picture (as leftover strips) before rendering at full width.
+        let transcript = vec![String::new(), "note".to_string()];
+        let images = vec![Some(left_img(8, 24, None)), None]; // 1 col, 3 rows
+        let kinds = vec![TranscriptKind::Story, TranscriptKind::Meta];
+        let styles = vec![Style::default(); 2];
+        let runs = vec![Vec::new(); 2];
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, true, 40);
+        // 3 leftover float strips, then the meta line.
+        assert_eq!(rows.len(), 4);
+        for (k, r) in rows.iter().take(3).enumerate() {
+            assert_eq!(r.float.as_ref().unwrap().row, k as u16);
+            assert_eq!(r.text, "");
+        }
+        assert!(rows[3].float.is_none() && rows[3].band.is_none());
+        assert_eq!(rows[3].kind, TranscriptKind::Meta);
+    }
+
+    #[test]
+    fn float_disabled_keeps_left_margin_as_band() {
+        // With left_float off (the secondary-buffer-window path), a MarginLeft
+        // image renders as a band exactly as before.
+        let transcript = vec![String::new()];
+        let images = vec![Some(left_img(16, 24, None))];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let runs = vec![Vec::new()];
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, false, 40);
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|r| r.band.is_some() && r.float.is_none()));
     }
 
     fn fields_score() -> StatusFields {
@@ -2367,7 +2754,7 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]]; // bold "BBBBB"
-        let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], &[], (1, 1), false, 5);
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], &[], (1, 1), false, false, 5);
         // row 0 ("AAAAA", 0..5) → no runs; row 1 ("BBBBB", 6..11) → bold 0..5
         assert!(out[0].runs.is_empty());
         assert_eq!(out[1].runs, vec![StyleRun { start: 0, end: 5, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
@@ -2383,7 +2770,7 @@ mod tests {
         let styles = vec![Style::default()];
         let runs = vec![vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]];
         let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 2 }];
-        let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &para, &[], (1, 1), false, 10);
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &para, &[], (1, 1), false, false, 10);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "    hi", "text padded to centre");
         // The bold run must move right by the 4 padding columns so selection/copy
@@ -2397,7 +2784,7 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 3 }];
-        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, 10);
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, false, 10);
         assert_eq!(out[0].text, "        hi", "right-flush pads to the right edge");
     }
 
@@ -2409,7 +2796,7 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         let para = vec![ParaFmt { indent: 2, para_indent: 0, justify: 0 }];
-        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, 8);
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, false, 8);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].text, "  AAAAA");
         assert_eq!(out[1].text, "  BBBBB");
@@ -2422,7 +2809,7 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         let para = vec![ParaFmt { indent: 1, para_indent: 2, justify: 0 }];
-        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, 10);
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, false, 10);
         assert_eq!(out[0].text, "   AAAAA", "row 0 gets indent+para_indent");
         assert_eq!(out[1].text, " BBBBB", "continuation gets only indent");
     }
@@ -2436,8 +2823,8 @@ mod tests {
         let styles = vec![Style::default()];
         let runs = vec![vec![StyleRun { start: 6, end: 11, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]];
         let para = vec![ParaFmt::default()];
-        let with_para = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &para, &[], (1, 1), false, 5);
-        let without = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], &[], (1, 1), false, 5);
+        let with_para = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &para, &[], (1, 1), false, false, 5);
+        let without = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &[], &[], (1, 1), false, false, 5);
         let texts_p: Vec<&str> = with_para.iter().map(|r| r.text.as_str()).collect();
         let texts_n: Vec<&str> = without.iter().map(|r| r.text.as_str()).collect();
         assert_eq!(texts_p, texts_n);
@@ -2454,7 +2841,7 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 2 }];
-        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, 10);
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, false, 10);
         let row = &out[0].text;
         let sel: String = row.chars().skip(4).take(2).collect();
         assert_eq!(sel, "hi", "columns [4,6) of the padded row are the visible text");
@@ -2504,7 +2891,7 @@ mod tests {
         let kinds = vec![TranscriptKind::Story; 2];
         let styles = vec![Style::default(); 2];
         // width 5: "hello" + "world" + "test" + "short"
-        let result = wrap_lines_kinded(&lines, &kinds, &styles, &[], &[], &[], (1, 1), false, 5);
+        let result = wrap_lines_kinded(&lines, &kinds, &styles, &[], &[], &[], (1, 1), false, false, 5);
         let rows: Vec<&str> = result.iter().map(|wr| wr.text.as_str()).collect();
         assert_eq!(rows, vec!["hello", "world", "test", "short"]);
     }
@@ -2516,10 +2903,10 @@ mod tests {
         // .max(2)=2).
         let transcript = vec!["abcdefgh".to_string()];
         let st = [Style::default()];
-        let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], &st, &[], &[], &[], (1, 1), false, 8);
+        let m = wrap_lines_kinded(&transcript, &[TranscriptKind::Meta], &st, &[], &[], &[], (1, 1), false, false, 8);
         assert_eq!(m.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdef", "  gh"]);
         assert!(m.iter().all(|wr| matches!(wr.kind, TranscriptKind::Meta)));
-        let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &st, &[], &[], &[], (1, 1), false, 8);
+        let s = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &st, &[], &[], &[], (1, 1), false, false, 8);
         assert_eq!(s.iter().map(|wr| wr.text.as_str()).collect::<Vec<_>>(), vec!["abcdefgh"]);
     }
 
@@ -2529,7 +2916,7 @@ mod tests {
         // One logical line that wraps to 3 rows; its style must appear on all rows.
         let transcript = vec!["alpha beta gamma".to_string()];
         let styles = [Style::new().fg(Color::Magenta)];
-        let rows = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &styles, &[], &[], &[], (1, 1), false, 5);
+        let rows = wrap_lines_kinded(&transcript, &[TranscriptKind::Story], &styles, &[], &[], &[], (1, 1), false, false, 5);
         assert!(rows.len() >= 3, "expected wrap to >= 3 rows, got {}", rows.len());
         assert!(rows.iter().all(|wr| wr.style.fg == Some(Color::Magenta)),
             "every wrapped row must carry the logical line's style");
@@ -3916,6 +4303,7 @@ mod tests {
             style: Style::default(),
             runs: Vec::new(),
             band: None,
+            float: None,
         });
     }
 
@@ -4019,6 +4407,7 @@ mod tests {
                 style: Style::default(),
                 runs: Vec::new(),
                 band: None,
+                float: None,
             })
             .collect();
         // No anchor, scroll 0 → newest 3 at the bottom.
