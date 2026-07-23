@@ -502,6 +502,7 @@ fn render_node(
                 // Raster mode (or Hybrid with no story window): rasterize the story
                 // text into the clear interior of the native canvas, then draw the
                 // whole thing scaled.
+                let mut raster_metrics: Option<RasterMetrics> = None;
                 if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
                     // The story window's own background colour (set by the game
                     // via set_colour), when it set one — paints the page instead
@@ -516,11 +517,54 @@ fn render_node(
                     // blits each at its anchored row — they scroll with the text.
                     let cols = (sw / 8).max(1) as u16;
                     let rows = (sh / 8).max(1) as u16;
-                    let main = build_main_text(state, cols, rows);
+                    let (main, rm) = build_main_text(state, cols, rows);
                     v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
+                    // [more] pager indicator (SQ-0455): when a single turn's output
+                    // overflowed the story box the shared pager (SQ-0404) parks the
+                    // scroll and shows a `[more]` prompt. The raster path can't reserve
+                    // a terminal row, so draw the prompt as a text run bottom-right of
+                    // the story box, themed via the `more_prompt` selector (drawn as a
+                    // reverse-video block, matching the terminal bar).
+                    if state.pager.active {
+                        let mp = state.colors.theme.get("more_prompt").style;
+                        let block = style_fg_rgba(mp, image::Rgba([220, 220, 220, 255]));
+                        let ink = style_bg_rgba(mp, image::Rgba([0, 0, 0, 255]));
+                        let label = "[more]";
+                        let n = label.chars().count() as u32;
+                        let last_row = rows.saturating_sub(1) as u32;
+                        let start_col = (cols as u32).saturating_sub(n);
+                        for (i, ch) in label.chars().enumerate() {
+                            crate::render::bitfont::blit_glyph(
+                                &mut canvas, ch, sx + (start_col + i as u32) * 8, sy + last_row * 8, 8, 8, ink, Some(block),
+                            );
+                        }
+                    }
+                    raster_metrics = Some(rm);
                 }
                 state.graphics_render.borrow_mut().draw_v6_canvas(picker, &canvas, area, buf);
-                return None; // v6 main-window scroll metrics are a follow-up (SQ-0450)
+                // Publish the raster viewport geometry so the shared scroll
+                // keybindings, the [more] pager, and mouse routing engage exactly as
+                // in the hybrid/terminal paths (SQ-0455). The rasterized text is a
+                // scaled pixel image with no cell-accurate transcript grid, so
+                // `transcript_geom.area` is the whole pane and mouse mapping is
+                // approximate; the scroll/pager math is exact via the returned
+                // `StoryPaneMetrics`. Without a story window (`raster_metrics` unset)
+                // there is nothing to scroll — fall through to `None`.
+                if let Some(rm) = raster_metrics {
+                    state.transcript_geom.set(Some(crate::clipboard::TranscriptGeom {
+                        area,
+                        first_abs_row: rm.first_visible_row as usize,
+                        total_rows: rm.total_rows as usize,
+                    }));
+                    return Some(StoryPaneMetrics {
+                        scrollbar: false,
+                        max_scroll: rm.max_scroll,
+                        viewport_rows: rm.viewport_rows,
+                        total_rows: rm.total_rows,
+                        links: Vec::new(),
+                    });
+                }
+                return None;
             }
             } // !any_overlay_open
             // Cell fallback with a primary story window (no image protocol —
@@ -910,7 +954,7 @@ fn style_bg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> ima
 /// indents the `pic_height/8` rows beside it (Zork Zero's drop-cap idiom; the
 /// indent comes from the game's own `set_margins` when it was captured). Keeps
 /// the newest `rows-1` wrapped rows (one row is left for the input line).
-pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> crate::render::v6_layout::MainText {
+pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render::v6_layout::MainText, RasterMetrics) {
     const FONT: u32 = 8;
     struct AbsFloat {
         row: usize,
@@ -964,15 +1008,28 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> crate::render:
         }
         wrapped.push(cur);
     }
+    // One row is reserved for the live input line, so the transcript body budget
+    // is `rows - 1` — this is the raster viewport height the [more] pager and the
+    // scroll keybindings measure against.
     let budget = rows.saturating_sub(1) as usize;
-    let start = wrapped.len().saturating_sub(budget);
-    let lines = wrapped[start..].to_vec();
+    let total = wrapped.len();
+    let max_scroll = total.saturating_sub(budget);
+    // Rows-from-bottom scroll offset (0 = newest at the bottom), clamped so it
+    // never scrolls past the oldest row. Same scroll model as the terminal
+    // transcript (`effective_transcript_scroll`), so the shared scroll keys and
+    // the [more] pager (SQ-0404) drive the raster and terminal paths identically:
+    // when the user scrolls back the visible slice shifts up in lockstep. (SQ-0455)
+    let scroll = (state.effective_transcript_scroll() as usize).min(max_scroll);
+    let end = total.saturating_sub(scroll);
+    let start = end.saturating_sub(budget);
+    let visible_len = end - start;
+    let lines = wrapped[start..end].to_vec();
     // Shift floats into the visible window; keep those still (partially) visible.
     let floats: Vec<crate::render::v6_layout::RasterFloat> = floats
         .into_iter()
         .filter_map(|f| {
             let rel = f.row as i64 - start as i64;
-            (rel + f.rows as i64 > 0 && rel < budget as i64).then_some(crate::render::v6_layout::RasterFloat {
+            (rel + f.rows as i64 > 0 && rel < visible_len as i64).then_some(crate::render::v6_layout::RasterFloat {
                 row: rel as i32,
                 rows: f.rows,
                 indent_cols: f.indent,
@@ -982,10 +1039,36 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> crate::render:
         .collect();
     let input = state.input.value.clone();
     let cursor_col = input.chars().count().min(cols.saturating_sub(1) as usize) as u16;
-    // Show the input line + caret only when the game has host focus (awaiting a
-    // typed command) — matches when the transcript path draws its live caret.
-    let awaiting = matches!(state.focus, crate::state::Focus::Game);
-    crate::render::v6_layout::MainText { lines, input, cursor_col, awaiting, floats }
+    // Show the input line + caret only when the game has host focus AND the view
+    // is at the bottom — scrolled-back history must not be overwritten by the live
+    // line (matching the terminal transcript's `effective_scroll == 0` guard).
+    let awaiting = scroll == 0 && matches!(state.focus, crate::state::Focus::Game);
+    let main = crate::render::v6_layout::MainText { lines, input, cursor_col, awaiting, floats };
+    let metrics = RasterMetrics {
+        total_rows: total.min(u16::MAX as usize) as u16,
+        viewport_rows: budget.min(u16::MAX as usize) as u16,
+        max_scroll: max_scroll.min(u16::MAX as usize) as u16,
+        first_visible_row: start.min(u16::MAX as usize) as u16,
+    };
+    (main, metrics)
+}
+
+/// Scroll/pager geometry the raster story text reports back so the [more] pager
+/// (SQ-0404) and the transcript scroll keybindings engage on the raster path
+/// exactly as they do on the terminal transcript. Rows are counted in the
+/// raster's own 8-px text lines. (SQ-0455)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RasterMetrics {
+    /// Total wrapped transcript rows this frame (the pager needs the true total).
+    pub total_rows: u16,
+    /// The transcript body viewport height in rows (`story_box_rows - 1`, the
+    /// input line reserved).
+    pub viewport_rows: u16,
+    /// The largest meaningful scroll offset (`total_rows - viewport_rows`).
+    pub max_scroll: u16,
+    /// Absolute wrapped-row index drawn at the top of the visible slice (for the
+    /// published `TranscriptGeom`).
+    pub first_visible_row: u16,
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -1022,7 +1105,7 @@ mod tests {
         });
         let para = "word ".repeat(40);
         state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
-        let main = build_main_text(&state, 40, 30);
+        let (main, _) = build_main_text(&state, 40, 30);
         assert_eq!(main.floats.len(), 1, "the image line became a float, not a text row");
         let f = &main.floats[0];
         assert_eq!((f.row, f.rows, f.indent_cols), (1, 4, 5), "anchored after 'before', 32px/8 = 4 rows, 40px/8 = 5 cols");
@@ -1037,6 +1120,53 @@ mod tests {
             }
         }
         assert!(main.lines[5..].iter().any(|r| r.chars().count() > 35), "rows past the float use full width");
+    }
+
+    #[test]
+    fn build_main_text_honors_transcript_scroll_offset() {
+        // 20 short story lines into a 6-row story box (budget = 5 body rows). The
+        // visible slice must window by `effective_transcript_scroll` (rows from the
+        // bottom), clamped to `max_scroll`, newest-at-bottom when the offset is 0.
+        let mut state = crate::state::AppState::default();
+        for k in 0..20 {
+            state.push_transcript_kind(&format!("L{k}"), crate::state::TranscriptKind::Story);
+        }
+        // Offset 0: the newest 5 rows (L15..=L19).
+        state.transcript_scroll = 0;
+        let (main, m) = build_main_text(&state, 40, 6);
+        assert_eq!(m.total_rows, 20);
+        assert_eq!(m.viewport_rows, 5, "6 story-box rows minus the input line");
+        assert_eq!(m.max_scroll, 15, "20 total - 5 body");
+        assert_eq!(main.lines, vec!["L15", "L16", "L17", "L18", "L19"]);
+        assert_eq!(m.first_visible_row, 15);
+
+        // Scrolled back 3: the window shifts up by 3 (L12..=L16).
+        state.transcript_scroll = 3;
+        let (main, m) = build_main_text(&state, 40, 6);
+        assert_eq!(main.lines, vec!["L12", "L13", "L14", "L15", "L16"]);
+        assert_eq!(m.first_visible_row, 12);
+
+        // Over-scroll past the top clamps to max_scroll: the oldest 5 rows.
+        state.transcript_scroll = 999;
+        let (main, m) = build_main_text(&state, 40, 6);
+        assert_eq!(main.lines, vec!["L0", "L1", "L2", "L3", "L4"]);
+        assert_eq!(m.first_visible_row, 0);
+    }
+
+    #[test]
+    fn build_main_text_short_transcript_shows_all_and_never_scrolls() {
+        // Fewer wrapped rows than the budget: everything is visible, max_scroll is
+        // 0, and any scroll offset is a no-op (the view stays pinned at the bottom).
+        let mut state = crate::state::AppState::default();
+        for k in 0..3 {
+            state.push_transcript_kind(&format!("L{k}"), crate::state::TranscriptKind::Story);
+        }
+        state.transcript_scroll = 7; // clamped to 0
+        let (main, m) = build_main_text(&state, 40, 6);
+        assert_eq!(m.total_rows, 3);
+        assert_eq!(m.max_scroll, 0, "content fits — nothing to scroll");
+        assert_eq!(main.lines, vec!["L0", "L1", "L2"]);
+        assert_eq!(m.first_visible_row, 0);
     }
 
     /// Build a `Theme` with the given selectors' bg overridden (like a
@@ -2455,25 +2585,64 @@ mod tests {
         }
     }
 
+    /// A v6 Layered model whose chrome is fully TRANSPARENT, leaving the story
+    /// window's box as a clear raster interior (the opaque `hybrid_v6_model` chrome
+    /// insets `story_clear_native` to nothing). Story box native (43,39,234,160) →
+    /// 29×20 raster cells (a 19-row body budget).
+    fn raster_v6_model() -> ScreenModel {
+        let chrome_img = image::RgbaImage::new(320, 200); // all alpha 0 (transparent)
+        let chrome = PositionedWindow {
+            x: 0, y: 0, w: 40, h: 25, x_px: 0, y_px: 0, w_px: 320, h_px: 200,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(crate::engine::GraphicsWindow {
+                win: 7, canvas: std::sync::Arc::new(chrome_img), version: 1, upscale: false,
+            }),
+        };
+        let story = PositionedWindow {
+            x: 5, y: 4, w: 29, h: 20, x_px: 43, y_px: 39, w_px: 234, h_px: 160,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+        };
+        ScreenModel {
+            root: WinNode::Layered(vec![chrome, story]),
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (40, 25),
+        }
+    }
+
     #[test]
-    fn raster_mode_does_not_render_terminal_transcript() {
-        // Raster mode with a picker keeps today's behavior: the whole pane is one
-        // rasterized pixel image (draw_v6_canvas), NOT a terminal transcript — so
-        // render_node returns None and no transcript geometry is published.
+    fn raster_mode_publishes_scroll_geometry() {
+        // SQ-0455: raster mode is still one rasterized pixel image (draw_v6_canvas),
+        // but it now REPORTS the story box's scroll geometry so the shared scroll
+        // keybindings and the [more] pager (SQ-0404) engage — replacing the old
+        // behavior where the raster path returned None and published no geometry.
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
         state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
         state.config.v6_render = crate::config::V6RenderMode::Raster;
-        state.push_transcript("HELLO STORY WORLD");
+        // 40 short lines overflow the 19-row body → real scroll capacity.
+        for k in 0..40 {
+            state.push_transcript(&format!("L{k}"));
+        }
 
-        let model = hybrid_v6_model();
+        let model = raster_v6_model();
         let area = Rect::new(0, 0, 40, 25);
         let mut buf = Buffer::empty(area);
         let mut links = Vec::new();
         let m = render_node(
             &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
         );
-        assert!(m.is_none(), "raster path returns no primary-buffer metrics (rasterized image)");
-        assert!(state.transcript_geom.get().is_none(), "raster mode publishes no terminal transcript geometry");
+        let m = m.expect("raster path now reports story-box scroll metrics");
+        assert_eq!(m.viewport_rows, 19, "story box is 20 raster rows minus the input line");
+        assert_eq!(m.total_rows, 40, "all 40 wrapped transcript rows counted");
+        assert_eq!(m.max_scroll, 21, "40 total - 19 body");
+
+        // Geometry is published (the raster grid is pixel-scaled, so area is the
+        // whole pane — mouse mapping is approximate, scroll math is exact).
+        let geom = state.transcript_geom.get().expect("raster mode publishes scroll geometry");
+        assert_eq!(geom.total_rows, 40);
+        assert_eq!(geom.first_abs_row, 21, "offset 0 → newest body at the bottom (40 - 19)");
     }
 }

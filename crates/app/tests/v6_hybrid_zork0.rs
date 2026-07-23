@@ -104,7 +104,7 @@ fn zork0_hybrid_renders_story_as_terminal_text() {
 }
 
 #[test]
-fn zork0_raster_mode_unchanged_no_terminal_transcript() {
+fn zork0_raster_mode_publishes_scroll_geometry() {
     let Some(session) = boot_zork0() else { return };
     let model = session.screen();
 
@@ -115,8 +115,16 @@ fn zork0_raster_mode_unchanged_no_terminal_transcript() {
     let mut buf = Buffer::empty(area);
     let metrics = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
 
-    // Raster mode rasterizes the whole pane as one pixel image — no terminal
-    // transcript geometry is published, and the v6 arm returns default metrics.
-    assert!(state.transcript_geom.get().is_none(), "raster mode publishes no terminal transcript geometry");
-    assert_eq!(metrics.viewport_rows, area.height, "raster falls back to the default full-pane metrics");
+    // Raster mode still rasterizes the whole pane as one pixel image, but it now
+    // REPORTS the story box's scroll geometry (SQ-0455) so the shared scroll
+    // keybindings and the [more] pager (SQ-0404) engage. The reported viewport is
+    // the story box's raster body rows (never the default full-pane height), and
+    // geometry is published (approximate mouse mapping over the pixel-scaled text).
+    assert!(state.transcript_geom.get().is_some(), "raster mode publishes scroll geometry");
+    assert!(metrics.viewport_rows > 0, "raster reports real story-box viewport rows");
+    assert!(
+        metrics.viewport_rows < area.height,
+        "the story box is smaller than the full pane (chrome ring reserved): {}",
+        metrics.viewport_rows
+    );
 }
