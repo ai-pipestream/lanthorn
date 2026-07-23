@@ -232,6 +232,14 @@ pub fn render_story_pane(
 /// instead of ballooning the last right-spine window. Falls back to the full
 /// `area` when `content_size` is `(0, 0)` (the simple/Z-machine paths — no margin).
 pub fn content_bounds(model: &ScreenModel, area: Rect) -> Rect {
+    // A v6 Layered root is PIXEL content: the raster/hybrid paths scale the
+    // native game frame (e.g. Zork0's 320x200 ≈ 40x25 cells) up to fill the
+    // pane, so clamping to the cell content_size would pin the whole game to
+    // a native-size postage stamp in the corner (the SQ-0303 gvm snap-margin
+    // clamp is for cell-fixed window trees only).
+    if matches!(model.root, crate::engine::WinNode::Layered(_)) {
+        return area;
+    }
     let (cw, ch) = model.content_size;
     if cw == 0 || ch == 0 {
         return area;
@@ -934,6 +942,16 @@ mod tests {
     use crate::engine::{GridWindow, Split};
     use crate::state::StyleRun;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn content_bounds_never_clamps_a_layered_v6_root() {
+        // The v6 raster/hybrid paths scale pixel content to the pane; clamping
+        // to the cell content_size pinned the game to a native-size stamp in
+        // the corner of a large terminal (the live "tiny render" bug).
+        let model = hybrid_v6_model(); // Layered root, content_size (40, 25)
+        let area = Rect::new(0, 0, 210, 55);
+        assert_eq!(content_bounds(&model, area), area, "Layered root gets the full pane");
+    }
 
     #[test]
     fn build_main_text_floats_inline_image_and_narrows_beside_it() {
