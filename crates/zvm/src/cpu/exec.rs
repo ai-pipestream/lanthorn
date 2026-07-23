@@ -459,6 +459,9 @@ impl Machine {
         }
         let instr = decode(&self.mem, self.state.pc, version);
         let op_name = opcode_name(instr.operand_count.clone(), instr.opcode);
+        if self.trace_exec && std::env::var("BM_PCTRACE").is_ok() {
+            eprintln!("PC {:#07x} {} depth={}", instr_start_pc, op_name, self.state.frames.len());
+        }
 
         // CRITICAL: advance PC before executing so call/branch targets are correct.
         self.state.pc = instr.next_pc;
@@ -752,15 +755,15 @@ impl Machine {
                 if let Some(v6) = self.screen.v6.as_mut() {
                     let win = ops.get(2).copied().map(|w| w as u8).unwrap_or(v6.current);
                     if self.trace_screen {
-                        let fg = decode_set_colour(a).map(zscreen_colour_name).unwrap_or_else(|| a.to_string());
-                        let bg = decode_set_colour(b).map(zscreen_colour_name).unwrap_or_else(|| b.to_string());
+                        let fg = decode_set_colour_v6(a).map(zscreen_colour_name).unwrap_or_else(|| a.to_string());
+                        let bg = decode_set_colour_v6(b).map(zscreen_colour_name).unwrap_or_else(|| b.to_string());
                         self.screen_trace.push(format!("@set_colour(fg={fg}, bg={bg}, window={win})"));
                     }
                     if let Some(w) = v6.windows.get_mut(win as usize) {
-                        if let Some(c) = decode_set_colour(a) {
+                        if let Some(c) = decode_set_colour_v6(a) {
                             w.fg = c;
                         }
-                        if let Some(c) = decode_set_colour(b) {
+                        if let Some(c) = decode_set_colour_v6(b) {
                             w.bg = c;
                         }
                         w.colour_data = pack_colour_data(w.fg, w.bg);
@@ -786,6 +789,9 @@ impl Machine {
             0x1C => {
                 let value = a;
                 let target_depth = b as usize;
+                if self.trace_exec && std::env::var("BM_PCTRACE").is_ok() {
+                    eprintln!("  THROW value={value:#x} target_depth={target_depth} cur_depth={}", self.state.frames.len());
+                }
                 self.unwind_to_depth(target_depth);
                 // Return `value` from the catching routine itself (defensive: skip
                 // if the depth was invalid and nothing remains to return from).
@@ -982,6 +988,9 @@ impl Machine {
                 } else {
                     // catch: stores current call stack depth (frame count)
                     let depth = self.state.frames.len() as u16;
+                    if self.trace_exec && std::env::var("BM_PCTRACE").is_ok() {
+                        eprintln!("  CATCH pc={:#x} depth={depth} store={store:?}", self.cur_instr_pc);
+                    }
                     self.do_store(store, depth);
                 }
                 StepResult::Continue
@@ -1199,6 +1208,9 @@ impl Machine {
                 let parse_buf = ops.get(1).copied().unwrap_or(0) as u32;
                 let interrupt_time = ops.get(2).copied().unwrap_or(0);
                 let interrupt_routine = ops.get(3).copied().unwrap_or(0);
+                if std::env::var("BM_PCTRACE").is_ok() {
+                    eprintln!("READ pc={:#07x} nops={} ops={:x?} store={:?}", self.cur_instr_pc, ops.len(), ops, store);
+                }
                 self.pending_input = Some(PendingInput {
                     store_var: store, text_buf, parse_buf, interrupt_time, interrupt_routine,
                     instr_pc: self.cur_instr_pc,
@@ -1210,6 +1222,9 @@ impl Machine {
             0x16 => {
                 let interrupt_time = ops.get(1).copied().unwrap_or(0);
                 let interrupt_routine = ops.get(2).copied().unwrap_or(0);
+                if std::env::var("BM_PCTRACE").is_ok() {
+                    eprintln!("READ_CHAR pc={:#07x} nops={} ops={:x?} store={:?}", self.cur_instr_pc, ops.len(), ops, store);
+                }
                 self.pending_input = Some(PendingInput {
                     store_var: store, text_buf: 0, parse_buf: 0, interrupt_time, interrupt_routine,
                     instr_pc: self.cur_instr_pc,
@@ -1856,16 +1871,36 @@ impl Machine {
                 StepResult::Continue
             }
             0x1B => { self.do_branch(branch, false); StepResult::Continue } // make_menu → failed
-            0x18 => { // push_stack value [dest] — default (game) stack; branch on success
+            0x18 => { // push_stack value stack -> (branch) — v6 user stack (ZMSD §15).
+                // The user stack at `addr` stores the number of FREE slots in its
+                // first word; entries fill downward from the end. Mirrors frotz
+                // z_push_stack exactly, branch included (on the post-push free count).
                 let val = ops.first().copied().unwrap_or(0);
-                write_var(&mut self.state, &mut self.mem, 0x00, val);
-                self.do_branch(branch, true); // never overflows here → success
+                let addr = ops.get(1).copied().unwrap_or(0) as u32;
+                let size = self.mem.read_word(addr);
+                let free_after = if size != 0 {
+                    self.mem.write_word(addr.wrapping_add(2u32.wrapping_mul(size as u32)), val);
+                    let ns = size - 1;
+                    self.mem.write_word(addr, ns);
+                    ns
+                } else {
+                    0
+                };
+                self.do_branch(branch, free_after != 0);
                 StepResult::Continue
             }
-            0x15 => { // pop_stack items [dest] — discard `items` from the default stack
+            0x15 => { // pop_stack items [stack] — v6 (ZMSD §15, frotz z_pop_stack).
+                // With a stack operand it frees `items` slots on that user stack;
+                // without one it discards `items` from the game (eval) stack.
                 let items = ops.first().copied().unwrap_or(0);
-                for _ in 0..items {
-                    let _ = read_var(&mut self.state, &self.mem, 0x00);
+                if let Some(&addr16) = ops.get(1) {
+                    let addr = addr16 as u32;
+                    let size = self.mem.read_word(addr);
+                    self.mem.write_word(addr, size.wrapping_add(items));
+                } else {
+                    for _ in 0..items {
+                        let _ = read_var(&mut self.state, &self.mem, 0x00);
+                    }
                 }
                 StepResult::Continue
             }
@@ -2991,6 +3026,21 @@ fn decode_set_colour(v: u16) -> Option<crate::screen::ZColour> {
         1 => Some(ZColour::Default),   // default
         2..=12 => Some(ZColour::Standard(v as u8)), // palette + v6 greys
         _ => None,                     // -1 (pixel) / unknown → keep
+    }
+}
+
+/// v6 variant of [`decode_set_colour`]: ZMSD §8.3.4 — in Version 6, colour
+/// **-1 means "the colour of the pixel under the cursor" (transparent)**.
+/// Zork Zero prints its banner labels under `COLOR 1 -1` so the text draws
+/// over the ribbon art. Our compositor's closest equivalent is the inherited
+/// `Default` channel (which renders with NO opaque fill), so -1 resolves to
+/// `Default` rather than "keep" — keeping an earlier explicit bg (black from
+/// the border setup) painted opaque boxes over the banner art.
+fn decode_set_colour_v6(v: u16) -> Option<crate::screen::ZColour> {
+    use crate::screen::ZColour;
+    match v as i16 {
+        -1 => Some(ZColour::Default), // transparent → inherit (no opaque fill)
+        _ => decode_set_colour(v),
     }
 }
 
@@ -7040,6 +7090,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn v6_set_colour_minus_one_is_transparent_not_keep() {
+        // ZMSD §8.3.4: in v6, colour -1 = transparent (the pixel under the
+        // cursor). Zork0 prints banner labels under COLOR 1 -1 so text draws
+        // over the ribbon art — a "keep" reading here left an earlier explicit
+        // black bg active and painted boxes over the banner.
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[1], None, None); // current = 1
+        m.exec_2op(0x1B, &[4, 2, 1], None, None); // COLOR 4 2 (explicit green on black)
+        {
+            let w = &m.screen.v6.as_ref().unwrap().windows[1];
+            assert_eq!(w.bg, ZColour::Standard(2), "explicit bg stored");
+        }
+        m.exec_2op(0x1B, &[1, (-1i16) as u16, 1], None, None); // COLOR 1 -1
+        let w = &m.screen.v6.as_ref().unwrap().windows[1];
+        assert_eq!(w.fg, ZColour::Default, "fg 1 = default");
+        assert_eq!(w.bg, ZColour::Default, "bg -1 = transparent → inherited Default, NOT the kept black");
+    }
+
+    #[test]
     fn v6_draw_picture_stamps_out_chars_and_attaches_following_margin() {
         // The event records how many chars had been printed to window 0 (its
         // anchor in the text stream), and a set_margins directly after the draw
@@ -7104,12 +7173,40 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn v6_push_then_pop_default_stack() {
+    fn v6_push_stack_pop_stack_user_stack() {
+        // ZMSD §15 v6 user stack: word[addr] holds the free-slot count; entries
+        // fill downward from the end. Mirrors frotz z_push_stack / z_pop_stack.
         let mut m = v6_exec_machine();
-        m.exec_ext(0x18, &[0x1234], None, None); // push_stack 0x1234 (branch omitted)
-        assert_eq!(m.state.eval_stack.last().copied(), Some(0x1234));
-        m.exec_ext(0x15, &[1], None, None);       // pop_stack 1
-        assert!(m.state.eval_stack.is_empty(), "pop discarded the pushed value");
+        let addr: u32 = 0x0100; // dynamic memory (static base = 0x0400)
+        m.mem.write_word(addr, 3); // 3 free slots
+        m.exec_ext(0x18, &[0xAAAA, addr as u16], None, None); // push_stack 0xAAAA, stack=addr
+        assert_eq!(m.mem.read_word(addr), 2, "free count decremented after push");
+        assert_eq!(m.mem.read_word(addr + 2 * 3), 0xAAAA, "value stored at addr + 2*size");
+        assert!(m.state.eval_stack.is_empty(), "user-stack push must not touch the game stack");
+        m.exec_ext(0x15, &[1, addr as u16], None, None); // pop_stack 1, stack=addr
+        assert_eq!(m.mem.read_word(addr), 3, "free count restored after pop");
+    }
+
+    #[test]
+    fn v6_push_stack_full_stack_branches_false() {
+        // A stack with 0 free slots: push does nothing and reports failure.
+        let mut m = v6_exec_machine();
+        let addr: u32 = 0x0100;
+        m.mem.write_word(addr, 0);
+        // Branch omitted here (None) — just assert no write and no game-stack use.
+        m.exec_ext(0x18, &[0x55, addr as u16], None, None);
+        assert_eq!(m.mem.read_word(addr), 0, "full stack unchanged");
+        assert!(m.state.eval_stack.is_empty());
+    }
+
+    #[test]
+    fn v6_pop_stack_game_stack_form_discards() {
+        // pop_stack with a single operand still targets the game stack.
+        let mut m = v6_exec_machine();
+        write_var(&mut m.state, &mut m.mem, 0x00, 0x11);
+        write_var(&mut m.state, &mut m.mem, 0x00, 0x22);
+        m.exec_ext(0x15, &[1], None, None);
+        assert_eq!(m.state.eval_stack.len(), 1, "one value discarded from the game stack");
     }
 
     #[test]
