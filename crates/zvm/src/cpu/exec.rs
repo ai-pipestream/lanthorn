@@ -1663,10 +1663,34 @@ impl Machine {
                 StepResult::Continue
             }
             // 0x0E erase_line — erase from cursor to end of line in the upper window.
+            // v6 (ZMSD §15): value 1 erases from the cursor to the end of the
+            // line in the CURRENT window; value n erases n-1 pixels. Menu
+            // screens (Zork Zero's InvisiClues) erase_line before repainting
+            // each highlighted row — a no-op left stale tails behind.
             0x0E => {
                 let value = ops.first().copied().unwrap_or(0);
                 if self.trace_screen { self.screen_trace.push(format!("@erase_line({value})")); }
-                if value == 1 {
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    let cur = v6.current as usize;
+                    let (top, left, width) = {
+                        let w = &v6.windows[cur.min(7)];
+                        let y_abs = w.y_coord.max(1) as i32 + w.y_cursor.max(1) as i32 - 1;
+                        let x_abs = w.x_coord.max(1) as i32 + w.x_cursor.max(1) as i32 - 1;
+                        let to_edge =
+                            (w.x_coord.max(1) as i32 + w.x_size as i32).saturating_sub(x_abs);
+                        let width = if value == 1 { to_edge } else { (value as i32 - 1).min(to_edge) };
+                        (y_abs, x_abs, width)
+                    };
+                    v6.erase_screen_rect(top, left, crate::screen::V6_FONT_HEIGHT as i32, width);
+                    // Cell-grid mirror: blank from the cursor cell rightward.
+                    let w = &mut v6.windows[cur.min(7)];
+                    let row = (w.y_cursor.max(1) - 1) / crate::screen::V6_FONT_HEIGHT + 1;
+                    let start = (w.x_cursor.max(1) - 1) / crate::screen::V6_FONT_WIDTH + 1;
+                    let cells = (width.max(0) as u16).div_ceil(crate::screen::V6_FONT_WIDTH);
+                    for c in start..(start + cells).min(w.grid.cols + 1) {
+                        w.grid.put(row, c, ' ', 0, w.fg, w.bg);
+                    }
+                } else if value == 1 {
                     let (row, start) = (self.screen.cursor_row, self.screen.cursor_col);
                     let cols = self.screen.upper.cols;
                     let style = self.screen.text_style;
@@ -2602,10 +2626,15 @@ impl Machine {
         let font3 = self.screen.current_font == 3;
         // v6: route text to the CURRENT window's grid (windows 1-7); window 0
         // (the main/buffered window) falls through to the classic stream-1
-        // path below, same as v1-5's lower window.
+        // path below, same as v1-5's lower window — UNLESS its wrapping
+        // attribute is cleared: menu screens (Zork Zero's InvisiClues) switch
+        // win0 to positioned output (window_style clears bit 0, then
+        // set_cursor per row), and that output is PAINT like windows 1-7, not
+        // prose for the scrolling transcript.
         if let Some(v6) = self.screen.v6.as_ref() {
             let cur = v6.current;
-            if cur >= 1 {
+            let win0_paint_mode = cur == 0 && v6.windows[0].attributes & 1 == 0;
+            if cur >= 1 || win0_paint_mode {
                 let style = self.screen.text_style;
                 let idx = cur as usize;
                 // Read the header before taking &mut self.screen — mirrors the
@@ -7325,6 +7354,64 @@ pub(crate) mod tests {
         assert_eq!(w2.texts.len(), 1);
         assert_eq!((w2.texts[0].y, w2.texts[0].x), (169, 24), "run keeps its painted screen position");
         assert_eq!(w2.texts[0].text, "START the game");
+    }
+
+    #[test]
+    fn v6_win0_wrap_off_routes_output_to_paint_runs() {
+        // Zork Zero's hint menu clears window 0's wrapping attribute
+        // (window_style op 2) and paints topics via set_cursor, one row per
+        // item. With wrapping OFF, win0 output is positioned PAINT like
+        // windows 1-7 — runs at the cursor, nothing to the stream (the flat
+        // transcript strung all topics together). Restoring wrap resumes
+        // streaming.
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 0, 17, 1, 160, 320);
+        m.exec_var(0x0B, &[0], None, None); // set_window(0)
+        m.exec_ext(0x12, &[0, 1, 2], None, None); // window_style(0, wrapping, CLEAR)
+        m.exec_var(0x0F, &[9, 1, 0], None, None); // set_cursor(row 9, col 1, win 0)
+        m.print_text("PROLOGUE");
+        m.exec_var(0x0F, &[17, 1, 0], None, None);
+        m.print_text("EAST WING");
+        {
+            let w0 = &m.screen.v6.as_ref().unwrap().windows[0];
+            let mut runs: Vec<(u16, u16, &str)> =
+                w0.texts.iter().map(|t| (t.y, t.x, t.text.as_str())).collect();
+            runs.sort();
+            assert_eq!(
+                runs,
+                vec![(25, 1, "PROLOGUE"), (33, 1, "EAST WING")],
+                "menu items are positioned paint runs (abs y = win 17 + cursor - 1)"
+            );
+        }
+        // Restore wrapping: output streams again, runs stay untouched.
+        m.exec_ext(0x12, &[0, 1, 1], None, None); // window_style(0, wrapping, OR)
+        m.print_text("back to prose");
+        assert_eq!(m.screen.v6.as_ref().unwrap().windows[0].texts.len(), 2, "streamed output adds no runs");
+    }
+
+    #[test]
+    fn v6_erase_line_erases_to_window_right_edge() {
+        // ZMSD §15 erase_line (v6): value 1 erases from the cursor to the end
+        // of the line in the current window; value n erases n-1 pixels. The
+        // hint menu repaints highlighted items over erase_line'd rows — a
+        // no-op left stale tails of longer items behind.
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 1, 1, 1, 16, 320);
+        m.print_text("GENERAL QUESTIONS");
+        m.exec_var(0x0F, &[1, 1, 1], None, None); // cursor back to row 1 col 1
+        m.exec_var(0x0E, &[1], None, None); // erase_line(1): to end of line
+        assert!(
+            m.screen.v6.as_ref().unwrap().windows[1].texts.is_empty(),
+            "erase_line(1) clears the painted row: {:?}",
+            m.screen.v6.as_ref().unwrap().windows[1].texts
+        );
+        // Partial form: erase exactly the first glyph's 8 px.
+        m.print_text("ABC");
+        m.exec_var(0x0F, &[1, 1, 1], None, None);
+        m.exec_var(0x0E, &[9], None, None); // erase 8 px
+        let joined: String =
+            m.screen.v6.as_ref().unwrap().windows[1].texts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(joined, "BC", "erase_line(9) erases 8 px = one glyph");
     }
 
     #[test]

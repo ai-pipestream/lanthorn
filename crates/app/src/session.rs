@@ -885,7 +885,12 @@ impl GameSession {
                 }));
             }
 
-            let node = if i == 0 {
+            // Window 0 is normally the scrolling transcript Buffer — but with
+            // its wrapping attribute CLEARED it is in positioned paint mode
+            // (menu screens: Zork Zero's InvisiClues clears bit 0 and paints
+            // topics via set_cursor), and its pixel runs render like any grid
+            // window's.
+            let node = if i == 0 && win.attributes & 1 != 0 {
                 WinNode::Buffer(BufferWindow {
                     primary: true,
                     bg: (win.bg != ZColour::Default).then(|| crate::state::pack_zcolour(win.bg)),
@@ -3202,7 +3207,9 @@ mod tests {
         let mut windows: [ZWindow; 8] = Default::default();
         // Window coords are the spec's 1-based pixels ((1,1) = top-left).
         // Window 0: the main scrolling window, at (0, 1) cell, 80x20 cells.
-        windows[0] = ZWindow { x_coord: 1, y_coord: 9, x_size: 640, y_size: 160, ..Default::default() };
+        // attributes 15 = the boot default (wrapping on → transcript Buffer;
+        // a cleared wrapping bit would mean positioned paint mode → Grid).
+        windows[0] = ZWindow { x_coord: 1, y_coord: 9, x_size: 640, y_size: 160, attributes: 15, ..Default::default() };
         windows[0].grid.resize(20, 80);
         // Window 1: a one-row status strip along the top, at (0, 0) cell, 80x1 cells.
         windows[1] = ZWindow { x_coord: 1, y_coord: 1, x_size: 640, y_size: 8, ..Default::default() };
