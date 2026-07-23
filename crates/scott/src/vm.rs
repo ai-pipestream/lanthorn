@@ -1,4 +1,25 @@
 use crate::*;
+use std::collections::HashSet;
+
+/// Condition codes 0..=19 implemented by `Vm::eval_condition` below (the
+/// loader unpacks the raw `20*value + code` encoding into this range, see
+/// `Database::parse`). Test-only: exists purely so `decompile.rs`'s mnemonic
+/// coverage test can assert its table has exactly these keys, so the two
+/// can't silently drift apart. Kept in sync by hand next to the match arms.
+#[cfg(test)]
+pub(crate) const CONDITION_CODES: [u8; 20] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+];
+
+/// Command opcodes 52..=89, individually implemented by `Vm::run_commands`
+/// below (0 is a no-op slot; 1..=51 and 102.. print a message; 90..=101 are
+/// unimplemented/no-op — see the `_ => {}` arm there). Test-only, for the
+/// same reason as `CONDITION_CODES` above. Kept in sync by hand.
+#[cfg(test)]
+pub(crate) const FIXED_COMMAND_OPCODES: [u16; 38] = [
+    52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74,
+    75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89,
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepResult {
@@ -36,6 +57,23 @@ pub struct Vm {
     // the default room picture until the next command. Cosmetic, host-read via
     // `current_picture`; excluded from snapshot/restore.
     pub(crate) pending_picture: Option<u16>,
+    // --- SQ-0464 debug-inspector support: fired-action tracing. Off by
+    // default; every field below is a no-op / stays empty unless a host opts
+    // in via `set_trace_fired`, so there is zero cost in normal play beyond a
+    // single `bool` check per action. Not game state — excluded from
+    // snapshot/restore, like `save_requested` and `pending_picture` above.
+    pub(crate) trace_fired: bool,
+    /// Action indices whose commands executed THIS turn (cleared at the start
+    /// of every `run_turn`; the opening occurrence pass in `new` populates it
+    /// for the pre-first-prompt "turn").
+    pub(crate) fired_actions: Vec<usize>,
+    /// Action indices whose commands have EVER executed this session. Never
+    /// cleared; seed via `seed_ever_fired` to restore persisted coverage.
+    pub(crate) ever_fired: HashSet<usize>,
+    /// This turn's (action index, first failing condition slot) pairs, for
+    /// player-command actions whose verb/noun matched but a condition blocked
+    /// them. Cleared every turn; only populated while `trace_fired` is on.
+    pub(crate) last_blocked: Vec<(usize, usize)>,
 }
 
 impl Vm {
@@ -65,6 +103,10 @@ impl Vm {
             pending_line: None,
             save_requested: false,
             pending_picture: None,
+            trace_fired: false,
+            fired_actions: Vec::new(),
+            ever_fired: HashSet::new(),
+            last_blocked: Vec::new(),
         };
         // Run the opening occurrence pass before the first prompt, so auto-events
         // that fire at game start (e.g. "A Voice BOOOMS out:") are shown on load —
@@ -112,6 +154,39 @@ impl Vm {
     /// Value of the live current counter.
     pub fn counter(&self) -> i32 {
         self.current_counter
+    }
+
+    /// Enable/disable fired-action tracing (off by default). While off, the
+    /// action interpreter pays only a single `bool` check per action — no
+    /// vec/set writes, no allocation. The app's debug inspector turns this on.
+    pub fn set_trace_fired(&mut self, on: bool) {
+        self.trace_fired = on;
+    }
+    /// Whether fired-action tracing is currently on.
+    pub fn trace_fired(&self) -> bool {
+        self.trace_fired
+    }
+    /// Action indices whose commands executed this turn. Empty unless
+    /// `trace_fired` is on.
+    pub fn fired_actions(&self) -> &[usize] {
+        &self.fired_actions
+    }
+    /// Action indices whose commands have ever executed this session. Empty
+    /// unless `trace_fired` is on (or has been at some point this session).
+    pub fn ever_fired(&self) -> &HashSet<usize> {
+        &self.ever_fired
+    }
+    /// Merge a previously-persisted coverage set (stored as `u32`s, the
+    /// SQ-0449 pattern used elsewhere) into the cumulative ever-fired set.
+    pub fn seed_ever_fired(&mut self, seed: &HashSet<u32>) {
+        self.ever_fired.extend(seed.iter().map(|&v| v as usize));
+    }
+    /// This turn's (action index, first failing condition slot) pairs, for
+    /// player-command actions whose verb/noun matched but were blocked by a
+    /// condition — answers "why didn't my command work". Empty unless
+    /// `trace_fired` is on.
+    pub fn last_blocked(&self) -> &[(usize, usize)] {
+        &self.last_blocked
     }
 
     /// Serialize mutable game state: item locations, player room, flags,
@@ -476,6 +551,14 @@ impl Vm {
     /// of its loop, so they fire after the command that precedes them (seeing its
     /// effects); the opening pass runs in `Vm::new`.
     fn run_turn(&mut self, cmd: &str) {
+        // Debug-inspector tracing (SQ-0464): reset this turn's records. Gated
+        // on `trace_fired` so the off path is a single `bool` check and
+        // nothing else — the vecs only ever grow while tracing is on, so
+        // there is nothing to clear when it never was.
+        if self.trace_fired {
+            self.fired_actions.clear();
+            self.last_blocked.clear();
+        }
         let mut w = cmd.split_whitespace();
         let w1 = w.next();
         let w2 = w.next();
@@ -516,17 +599,39 @@ impl Vm {
             // reserved for occurrences (the top-of-turn auto-event pass), so an
             // unrecognized command must NOT match them here — otherwise an
             // occurrence (e.g. a conditional death) fires as if it were the reply.
-            let matched = self
-                .db
-                .actions
-                .iter()
-                .enumerate()
-                .find(|(_, a)| {
-                    a.verb == vb
-                        && (a.noun == no || a.noun == 0)
-                        && a.conditions.iter().all(|c| self.eval_condition(c))
-                })
-                .map(|(i, _)| i);
+            // Manual loop (rather than `.iter().find(..)`) so a verb/noun match
+            // whose conditions block it can be recorded for the debug
+            // inspector's `last_blocked` (SQ-0464). `conditions` is copied out
+            // of the borrowed `Action` (it's `Copy`, five small structs) so
+            // the borrow ends before `eval_condition(&self)` is called —
+            // otherwise short-circuits/perf are unchanged from `.find`.
+            let mut matched = None;
+            let mut blocked: Vec<(usize, usize)> = Vec::new();
+            for i in 0..self.db.actions.len() {
+                let a = &self.db.actions[i];
+                let (av, an, conditions) = (a.verb, a.noun, a.conditions);
+                if av != vb || (an != no && an != 0) {
+                    continue;
+                }
+                let mut first_fail = None;
+                for (slot, c) in conditions.iter().enumerate() {
+                    if !self.eval_condition(c) {
+                        first_fail = Some(slot);
+                        break;
+                    }
+                }
+                match first_fail {
+                    None => {
+                        matched = Some(i);
+                        break;
+                    }
+                    Some(slot) if self.trace_fired => blocked.push((i, slot)),
+                    Some(_) => {}
+                }
+            }
+            if self.trace_fired {
+                self.last_blocked = blocked;
+            }
             if let Some(idx) = matched {
                 self.run_action_chain(idx);
                 handled = true;
@@ -703,7 +808,15 @@ impl Vm {
                 .collect();
             (a.commands, params)
         };
-        self.run_commands(&cmds, &params)
+        let did_continue = self.run_commands(&cmds, &params);
+        // SQ-0464: record this firing (both player-command and occurrence /
+        // continuation actions run through here). Off path is one `bool`
+        // check — no vec push, no set insert.
+        if self.trace_fired {
+            self.fired_actions.push(idx);
+            self.ever_fired.insert(idx);
+        }
+        did_continue
     }
 
     fn print_message(&mut self, n: usize) {
@@ -1513,5 +1626,145 @@ mod tests {
         vm.step();
         assert!(vm.take_output().to_lowercase().contains("can't go"));
         assert_eq!(vm.current_room(), 1);
+    }
+
+    // --- SQ-0464: fired-action tracing --------------------------------
+
+    #[test]
+    fn trace_fired_off_by_default_records_nothing() {
+        let mut verbs = vec![String::new(); 2];
+        verbs[1] = "PUSH".into();
+        let db = Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 4,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![Action {
+                verb: 1,
+                noun: 0,
+                conditions: [Condition { code: 0, value: 0 }; 5],
+                commands: [1, 0, 0, 0], // print message 1
+            }],
+            verbs,
+            nouns: vec![String::new(); 1],
+            rooms: rooms4(),
+            messages: vec![String::new(), "Click.".into()],
+            items: one_item(),
+            adventure_number: 0,
+        };
+        let mut vm = Vm::new(db);
+        assert!(!vm.trace_fired(), "tracing is off by default");
+        vm.supply_line("push");
+        vm.step();
+        assert!(vm.fired_actions().is_empty(), "tracing off: no per-turn firings recorded");
+        assert!(vm.ever_fired().is_empty(), "tracing off: no cumulative firings recorded");
+    }
+
+    #[test]
+    fn trace_fired_records_per_turn_and_cumulative_firings() {
+        let mut verbs = vec![String::new(); 3];
+        verbs[1] = "PUSH".into();
+        verbs[2] = "PULL".into();
+        let db = Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 4,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![
+                Action {
+                    verb: 1,
+                    noun: 0,
+                    conditions: [Condition { code: 0, value: 0 }; 5],
+                    commands: [1, 0, 0, 0], // idx 0: print message 1
+                },
+                Action {
+                    verb: 2,
+                    noun: 0,
+                    conditions: [Condition { code: 0, value: 0 }; 5],
+                    commands: [2, 0, 0, 0], // idx 1: print message 2
+                },
+            ],
+            verbs,
+            nouns: vec![String::new(); 1],
+            rooms: rooms4(),
+            messages: vec![String::new(), "Click.".into(), "Clunk.".into()],
+            items: one_item(),
+            adventure_number: 0,
+        };
+        let mut vm = Vm::new(db);
+        vm.set_trace_fired(true);
+
+        vm.supply_line("push");
+        vm.step();
+        assert_eq!(vm.fired_actions(), &[0]);
+        assert!(vm.ever_fired().contains(&0));
+
+        vm.supply_line("pull");
+        vm.step();
+        // Per-turn list is turn-scoped: only this turn's firing (idx 1).
+        assert_eq!(vm.fired_actions(), &[1]);
+        // The cumulative set keeps both turns' firings.
+        assert!(vm.ever_fired().contains(&0));
+        assert!(vm.ever_fired().contains(&1));
+    }
+
+    #[test]
+    fn trace_fired_records_blocked_action_when_verb_noun_matches_but_condition_fails() {
+        let mut verbs = vec![String::new(); 2];
+        verbs[1] = "OPEN".into();
+        let db = Database {
+            max_carry: 6,
+            start_room: 1,
+            num_treasures: 0,
+            word_length: 4,
+            light_time: -1,
+            treasure_room: 0,
+            actions: vec![Action {
+                verb: 1,
+                noun: 0,
+                conditions: [
+                    Condition { code: 8, value: 5 }, // requires flag 5 set
+                    Condition { code: 0, value: 0 },
+                    Condition { code: 0, value: 0 },
+                    Condition { code: 0, value: 0 },
+                    Condition { code: 0, value: 0 },
+                ],
+                commands: [1, 0, 0, 0],
+            }],
+            verbs,
+            nouns: vec![String::new(); 1],
+            rooms: rooms4(),
+            messages: vec![String::new(), "It opens.".into()],
+            items: one_item(),
+            adventure_number: 0,
+        };
+        let mut vm = Vm::new(db);
+        vm.set_trace_fired(true);
+
+        vm.supply_line("open"); // flag 5 is not set -> verb/noun match, condition blocks it
+        vm.step();
+        assert!(vm.fired_actions().is_empty(), "the guarded action must not have fired");
+        assert_eq!(vm.last_blocked(), &[(0, 0)], "action 0's condition slot 0 blocked it");
+
+        vm.set_flag(5, true);
+        vm.supply_line("open"); // now the guard passes
+        vm.step();
+        assert_eq!(vm.fired_actions(), &[0]);
+        assert!(vm.last_blocked().is_empty(), "no longer blocked once it fires");
+    }
+
+    #[test]
+    fn seed_ever_fired_merges_persisted_coverage() {
+        let mut vm = vm_with(one_item(), rooms4(), 0);
+        let mut seed: HashSet<u32> = HashSet::new();
+        seed.insert(3);
+        seed.insert(7);
+        vm.seed_ever_fired(&seed);
+        assert!(vm.ever_fired().contains(&3));
+        assert!(vm.ever_fired().contains(&7));
     }
 }
