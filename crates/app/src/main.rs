@@ -1839,7 +1839,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // ── Char-input mode gate ──────────────────────────────────────────────
         // When the Z-machine is waiting for a single keypress (read_char) and no
         // overlay is open, forward the keystroke directly to the VM — unless it is
-        // the hotkey-dialog prefix (Ctrl+K) or any Ctrl/Alt combo. Those are
+        // the hotkey-dialog prefix (Ctrl+P) or any Ctrl/Alt combo. Those are
         // reserved for app routing so the user can always escape (quit, hotkeys)
         // out of a read_char form; only plain keypresses become game input.
         if state.char_mode && !state.any_overlay_open() {
@@ -3419,17 +3419,18 @@ mod tests {
         use app::state::AppState;
         use mapper::mapper::Mapper;
         let mut s = AppState::default();
-        // Default prefix is Ctrl+K
-        let ctrlk = KeyEvent {
-            code: KeyCode::Char('k'),
+        // Default prefix is Ctrl+P (moved off Ctrl+K, SQ-0447 — Ctrl+K is now the
+        // story prompt's readline delete-to-end shortcut).
+        let ctrlp = KeyEvent {
+            code: KeyCode::Char('p'),
             modifiers: KeyModifiers::CONTROL,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         };
-        let action = key_to_action(&s, ctrlk);
+        let action = key_to_action(&s, ctrlp);
         assert!(
             matches!(action, Action::OpenHotkeyDialog),
-            "Ctrl+K should produce OpenHotkeyDialog"
+            "Ctrl+P should produce OpenHotkeyDialog"
         );
         apply_action(action, &mut s, &mut Mapper::default());
         assert!(s.overlays.hotkey_dialog, "hotkey_dialog should be true after OpenHotkeyDialog");
@@ -3443,16 +3444,16 @@ mod tests {
         use mapper::mapper::Mapper;
         let mut s = AppState::default();
         s.overlays.hotkey_dialog = true;
-        let ctrlk = KeyEvent {
-            code: KeyCode::Char('k'),
+        let ctrlp = KeyEvent {
+            code: KeyCode::Char('p'),
             modifiers: KeyModifiers::CONTROL,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         };
-        let action = key_to_action(&s, ctrlk);
+        let action = key_to_action(&s, ctrlp);
         assert!(
             matches!(action, Action::CloseHotkeyDialog),
-            "Ctrl+K when dialog open should produce CloseHotkeyDialog"
+            "Ctrl+P when dialog open should produce CloseHotkeyDialog"
         );
         apply_action(action, &mut s, &mut Mapper::default());
         assert!(!s.overlays.hotkey_dialog, "hotkey_dialog should be false after CloseHotkeyDialog");
@@ -3794,7 +3795,7 @@ mod tests {
         };
         let spec = app::keymap::KeySpec::from_key_event(y_key);
         let is_prefix = spec == s.hotkeys.prefix;
-        assert!(!is_prefix, "'y' must not be the default prefix (Ctrl+K)");
+        assert!(!is_prefix, "'y' must not be the default prefix (Ctrl+P)");
         assert!(s.char_mode && !s.any_overlay_open() && !is_prefix && !app_combo(y_key.modifiers),
             "char_mode gate should fire for 'y' with no overlays");
         // 'y' maps to a neutral KeyInput the engine then converts to input.
@@ -3813,20 +3814,21 @@ mod tests {
         assert!(!(s.char_mode && !s.any_overlay_open() && !is_prefix_q && !app_combo(ctrlq.modifiers)),
             "char_mode gate must NOT fire for Ctrl+Q (a Ctrl combo)");
 
-        // Ctrl+K (the default prefix): gate must NOT fire for it (falls through
-        // to normal routing so the hotkey dialog still opens).
-        let ctrlk = KeyEvent {
-            code: KeyCode::Char('k'),
+        // Ctrl+P (the default prefix, moved off Ctrl+K in SQ-0447): gate must NOT
+        // fire for it (falls through to normal routing so the hotkey dialog
+        // still opens).
+        let ctrlp = KeyEvent {
+            code: KeyCode::Char('p'),
             modifiers: KeyModifiers::CONTROL,
             kind: KeyEventKind::Press,
             state: KeyEventState::NONE,
         };
-        let spec_k = app::keymap::KeySpec::from_key_event(ctrlk);
-        let is_prefix_k = spec_k == s.hotkeys.prefix;
-        assert!(is_prefix_k, "Ctrl+K must match the default prefix");
+        let spec_p = app::keymap::KeySpec::from_key_event(ctrlp);
+        let is_prefix_p = spec_p == s.hotkeys.prefix;
+        assert!(is_prefix_p, "Ctrl+P must match the default prefix");
         // Gate condition false because is_prefix = true (and it is a Ctrl combo).
-        assert!(!(s.char_mode && !s.any_overlay_open() && !is_prefix_k && !app_combo(ctrlk.modifiers)),
-            "char_mode gate must NOT fire for the prefix key Ctrl+K");
+        assert!(!(s.char_mode && !s.any_overlay_open() && !is_prefix_p && !app_combo(ctrlp.modifiers)),
+            "char_mode gate must NOT fire for the prefix key Ctrl+P");
 
         // If an overlay is open, the gate must not fire.
         s.overlays.hotkey_dialog = true;

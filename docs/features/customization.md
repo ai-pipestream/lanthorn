@@ -130,7 +130,7 @@ switches that make babelmap feel like yours without opening the whole registry.
   emphasis (bold / italic / reverse-video) is rendered per-span — a bold word
   inside a sentence shows just that word bold — layered over the category/rule
   colors and preserved across save/reload.
-- **Tmux-style leader keymap**: a configurable prefix (default `Ctrl+K`) pops up
+- **Tmux-style leader keymap**: a configurable prefix (default `Ctrl+P`) pops up
   a **reference panel** listing every command with an assigned single letter;
   pressing that letter runs the command and returns to normal — one keypress,
   then the panel closes (any unbound key or `Esc` just closes it). A small
@@ -250,7 +250,7 @@ re-seed the new template, or hand-write the new shape from
   text buffer only — the upper-window status line stays flush — and adjusts in
   the settings screen with `←` / `→`. A game's imported `garglk.ini` margin (below)
   overrides this default while that story is open.
-- **In-app config screen** — pop the leader panel (default `Ctrl+K`) and press
+- **In-app config screen** — pop the leader panel (default `Ctrl+P`) and press
   the `open-config` key for a settings modal covering the common options, with an
   explicit Save (writes the config file, comments and layout preserved) and
   Cancel; changes apply live.

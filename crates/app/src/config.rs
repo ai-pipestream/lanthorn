@@ -261,12 +261,12 @@ pub struct HotkeyGroupConfig {
 }
 
 /// The `[hotkeys]` section of config.toml.
-/// `prefix` overrides the dialog-open key (default: Ctrl+K).
+/// `prefix` overrides the dialog-open key (default: Ctrl+P).
 /// `direct` overrides which commands are always available (bypass dialog).
 /// `group` overrides the command groups shown in the dialog.
 #[derive(Debug, Default, Deserialize, Clone)]
 pub struct HotkeysConfig {
-    /// Override the dialog-prefix key spec string (e.g. "ctrl+k").
+    /// Override the dialog-prefix key spec string (e.g. "ctrl+p").
     pub prefix: Option<String>,
     /// Override the set of always-available commands (by snake_case name).
     pub direct: Option<Vec<String>>,

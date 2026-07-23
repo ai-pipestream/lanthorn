@@ -43,7 +43,7 @@ playing.
   smaller than that, the viewport auto-follows the cursor. The virtual window is
   themeable (`upper_window`, `upper_window_border`, `virtual_window_border`).
   During a `read_char` prompt keystrokes go to the game; only the hotkey prefix
-  (default `Ctrl+K`) stays reserved.
+  (default `Ctrl+P`) stays reserved.
 - **Timed / interrupt input** — v4+ `read` and `read_char` honor their `time`+
   `routine` operands, so real-time games keep ticking while you think: the game's
   interrupt routine fires every N tenths of a second (countdowns and clocks — the

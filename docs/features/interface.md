@@ -71,6 +71,11 @@ built-in debugger that follows the running story instruction by instruction.
 - **Command history** — press **↑**/**↓** at the prompt to recall and re-run
   earlier commands, shell-style. History persists across sessions inside the
   `.babelmap` archive; turn recording off with `record_history = false`.
+- **Readline-style line editing** at the story prompt: `Ctrl+A`/`Ctrl+E` jump to
+  the start/end of the line, `Ctrl+U` clears back to the start, `Ctrl+K` clears
+  forward to the end, and `Ctrl+W` deletes the word behind the caret — the same
+  shortcuts your shell uses. Only live while you're actually typing a command
+  (not mid-`read_char` prompt), so they never steal a keystroke the game expects.
 - **Inventory strip** — a toggleable strip of your carried items along the
   bottom of the story pane.
 - **Notification toasts** — status messages slide in at the top-right and fade

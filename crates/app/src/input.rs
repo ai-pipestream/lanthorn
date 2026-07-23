@@ -7,6 +7,8 @@
 //! 3. Tidy-anim sub-mode → KeyMap lookup in Anim context; no fallthrough.
 //! 4. Saves-manager sub-mode → saves_key_to_action.
 //! 6. Hotkey dialog open → hotkey_dialog_key_to_action.
+//! 6.7. Ctrl+A/E/U/K/W at a live story prompt (Game focus, not char_mode/event_wait)
+//!    → readline caret/delete ops on the input line.
 //! 7. Key == hotkeys.prefix → OpenHotkeyDialog.
 //! 8. Tab (no modifiers) → autocomplete-or-ToggleFocus special case.
 //! 9. Ctrl modifier → Global KeyMap lookup, filtered by hotkeys.is_direct.
@@ -122,6 +124,13 @@ pub enum Action {
     CursorEnd,
     /// Delete the char AT the caret (Backspace deletes the one before it).
     DeleteChar,
+    /// Delete from the start of the input line to the caret (readline Ctrl+U).
+    DeleteToStart,
+    /// Delete from the caret to the end of the input line (readline Ctrl+K —
+    /// free at the story prompt now that the leader-dialog prefix is Ctrl+P).
+    DeleteToEnd,
+    /// Delete the word behind the caret, readline style (Ctrl+W).
+    DeleteWordBack,
     /// Put the input caret on the char under a click at this screen column/row.
     CursorToClick(u16, u16),
     /// Zoom the map in one VISIBLE step (more detail). A keypress must move the map.
@@ -173,9 +182,10 @@ pub enum Action {
     ExportDot(Option<String>),
     /// Caller: write an annotatable text/ASCII map dump. `Some(dest)` is the optional `[file]` arg.
     ExportMap(Option<String>),
-    /// Toggle the in-box alignment code overlay (Ctrl+A).
+    /// Toggle the in-box alignment code overlay (dialog-only, leader letter `j`).
     ToggleAlignment,
-    /// Toggle portal destination name labels beside in-room portal icons (Ctrl+P).
+    /// Toggle portal destination name labels beside in-room portal icons
+    /// (dialog-only, leader letter `q`).
     TogglePortalLabels,
     /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
     ToggleRoomNumbers,
@@ -380,6 +390,8 @@ pub enum KeyResolve {
 /// 3. Tidy-anim active → Anim context lookup (Ctrl+Left/Right stage-jump hardwired).
 ///    4-6. Modal sub-modes (saves/replay/file-browser/verb-menu/
 ///    config-screen/hotkey-dialog/room-panel) → their handlers (hardwired Actions).
+/// 6.7. Ctrl+A/E/U/K/W in Game focus with the line prompt live (not char_mode/
+///    event_wait) → readline caret/delete ops on the input line.
 /// 7. Key == hotkeys.prefix → OpenHotkeyDialog.
 /// 8. Tab (no modifiers) → autocomplete-or-ToggleFocus.
 /// 9. Ctrl modifier → Global KeyMap lookup, filtered by hotkeys.is_direct_name.
@@ -467,6 +479,26 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
             }
             _ => KeyResolve::Action(Action::PagerDismiss),
         };
+    }
+
+    // 6.7. Readline-style line-edit shortcuts at the story prompt (SQ-0447):
+    // Ctrl+A/E/U/K/W act on the input line instead of falling through to the
+    // generic Ctrl handling in step 9. Gated to Game focus with the line prompt
+    // actually live — NOT during char_mode/event_wait, which hide the input line
+    // and (per main.rs's char-input gate) route Ctrl combos to app dispatch
+    // instead. Placed ahead of step 7 too: Ctrl+K used to be the hotkey-dialog
+    // prefix, but that moved to Ctrl+P, freeing Ctrl+K for delete-to-end here.
+    if key.modifiers == KeyModifiers::CONTROL
+        && state.focus == Focus::Game && !state.char_mode && !state.event_wait
+    {
+        match key.code {
+            KeyCode::Char('a') => return KeyResolve::Action(Action::CursorHome),
+            KeyCode::Char('e') => return KeyResolve::Action(Action::CursorEnd),
+            KeyCode::Char('u') => return KeyResolve::Action(Action::DeleteToStart),
+            KeyCode::Char('k') => return KeyResolve::Action(Action::DeleteToEnd),
+            KeyCode::Char('w') => return KeyResolve::Action(Action::DeleteWordBack),
+            _ => {}
+        }
     }
 
     // 7. Prefix key → open the hotkey dialog.
@@ -1372,6 +1404,18 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::CursorEnd => state.input.end(),
         Action::DeleteChar => {
             state.input.delete();
+            recompute_suggestions(state);
+        }
+        Action::DeleteToStart => {
+            state.input.delete_to_start();
+            recompute_suggestions(state);
+        }
+        Action::DeleteToEnd => {
+            state.input.delete_to_end();
+            recompute_suggestions(state);
+        }
+        Action::DeleteWordBack => {
+            state.input.delete_prev_word();
             recompute_suggestions(state);
         }
         Action::CursorRight => {
@@ -3482,10 +3526,17 @@ mod tests {
 
     #[test]
     fn ctrl_a_toggles_alignment_overlay() {
-        // toggle_alignment is dialog-only: Ctrl+A returns None when dialog closed.
+        // toggle_alignment is dialog-only (leader letter 'j'); it has never had a
+        // direct key. Ctrl+A is now the readline "move to start" shortcut at a
+        // live story prompt (SQ-0447), so it resolves to CursorHome there instead
+        // of None.
         let s = AppState::default();
         assert!(!s.show_alignment, "off by default");
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::CursorHome));
+        // In Map focus (no line prompt live) Ctrl+A is unbound, same as before.
+        let mut s_map = AppState::default();
+        s_map.focus = Focus::Map;
+        assert!(matches!(key_to_action(&s_map, ctrl(KeyCode::Char('a'))), Action::None));
         // The action itself still works when dispatched directly.
         let mut s = AppState::default();
         let mut m = Mapper::default();
@@ -3497,11 +3548,13 @@ mod tests {
 
     #[test]
     fn ctrl_p_toggles_portal_labels() {
-        // toggle_portal_labels is dialog-only: Ctrl+P returns None when dialog closed.
+        // toggle_portal_labels is dialog-only (leader letter 'q'); it has never
+        // had a direct key. Ctrl+P is now the leader-dialog prefix itself (moved
+        // from Ctrl+K, SQ-0447), so pressing it opens the hotkey dialog.
         let s = AppState::default();
         assert!(matches!(
             key_to_action(&s, ctrl(KeyCode::Char('p'))),
-            Action::None
+            Action::OpenHotkeyDialog
         ));
         // The action itself still works when dispatched directly.
         let mut s = AppState::default();
@@ -3875,14 +3928,17 @@ mod tests {
         assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-state"));
         assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('r'))), KeyResolve::Command(c, _) if c == "restore-state"));
         // Non-direct ctrl commands return None when dialog is closed.
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('t'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('y'))), Action::None));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::None));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('p'))), Action::None));
+        // Ctrl+A/E/P are no longer None in Game focus (SQ-0447): Ctrl+A/E are the
+        // readline move-to-start/end shortcuts at the story prompt, and Ctrl+P is
+        // now the hotkey-dialog prefix (moved off Ctrl+K).
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::CursorHome));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::CursorEnd));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('p'))), Action::OpenHotkeyDialog));
         // Ctrl+Arrows no longer nudge (nudge moved to plain F6-F9).
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::None));
@@ -4153,27 +4209,44 @@ mod tests {
 
     #[test]
     fn prefix_opens_hotkey_dialog_action() {
-        // Ctrl+K in any non-dialog state → OpenHotkeyDialog.
+        // Ctrl+P in any non-dialog state → OpenHotkeyDialog (prefix moved off
+        // Ctrl+K to Ctrl+P, SQ-0447, freeing Ctrl+K for the readline delete-to-end
+        // shortcut below).
         let s = AppState::default(); // game focus
         assert!(matches!(
-            key_to_action(&s, ctrl(KeyCode::Char('k'))),
+            key_to_action(&s, ctrl(KeyCode::Char('p'))),
             Action::OpenHotkeyDialog
         ));
         let mut s = AppState::default();
         s.focus = Focus::Map;
         assert!(matches!(
-            key_to_action(&s, ctrl(KeyCode::Char('k'))),
+            key_to_action(&s, ctrl(KeyCode::Char('p'))),
             Action::OpenHotkeyDialog
         ));
     }
 
     #[test]
+    fn ctrl_k_deletes_to_end_at_story_prompt_not_hotkey_dialog() {
+        // Ctrl+K used to be the hotkey-dialog prefix; now it's a readline
+        // delete-to-end shortcut at the live story prompt (SQ-0447) and must NOT
+        // open the palette.
+        let mut s = AppState::default(); // game focus, line prompt live
+        s.push_input_char('g');
+        s.push_input_char('o');
+        assert!(matches!(
+            key_to_action(&s, ctrl(KeyCode::Char('k'))),
+            Action::DeleteToEnd
+        ));
+        assert!(!s.overlays.hotkey_dialog);
+    }
+
+    #[test]
     fn prefix_closes_hotkey_dialog_action() {
-        // Ctrl+K when dialog is open → CloseHotkeyDialog.
+        // Ctrl+P when dialog is open → CloseHotkeyDialog.
         let mut s = AppState::default();
         s.overlays.hotkey_dialog = true;
         assert!(matches!(
-            key_to_action(&s, ctrl(KeyCode::Char('k'))),
+            key_to_action(&s, ctrl(KeyCode::Char('p'))),
             Action::CloseHotkeyDialog
         ));
     }
@@ -4961,7 +5034,7 @@ mod tests {
 
     // ── reset-game is now leader-only; F5 has no default binding ──────────────
     // reset-game was demoted out of the always-active default keymap (SQ-0202):
-    // it's reached only through the Ctrl+K leader panel now. This test pins that
+    // it's reached only through the Ctrl+P leader panel now. This test pins that
     // F5 no longer resolves directly, and (still) that Action::ResetGame — however
     // it's triggered — opens the confirmation dialog rather than instant-wiping.
     #[test]

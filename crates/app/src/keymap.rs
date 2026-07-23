@@ -395,7 +395,7 @@ pub struct HotkeyLayout {
 impl Default for HotkeyLayout {
     /// Build the built-in default layout.
     fn default() -> Self {
-        let prefix: KeySpec = "ctrl+k".parse().expect("ctrl+k must parse");
+        let prefix: KeySpec = "ctrl+p".parse().expect("ctrl+p must parse");
 
         let direct = DEFAULT_DIRECT_COMMANDS.iter().map(|s| s.to_string()).collect();
 

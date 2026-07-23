@@ -121,6 +121,45 @@ impl TextField {
         self.cursor += s.chars().count();
     }
 
+    /// Delete from the start of the buffer up to (not including) the caret;
+    /// the caret moves to 0. Readline's Ctrl+U.
+    pub fn delete_to_start(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let end = self.byte_of(self.cursor);
+        self.value.replace_range(0..end, "");
+        self.cursor = 0;
+    }
+
+    /// Delete from the caret to the end of the buffer; the caret is unchanged.
+    /// Readline's Ctrl+K.
+    pub fn delete_to_end(&mut self) {
+        let start = self.byte_of(self.cursor);
+        self.value.truncate(start);
+    }
+
+    /// Delete the word behind the caret, readline style: first eat any run of
+    /// whitespace immediately before the caret, then eat the run of
+    /// non-whitespace before that. No-op at the start. Readline's Ctrl+W.
+    pub fn delete_prev_word(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.value.chars().collect();
+        let mut start_idx = self.cursor;
+        while start_idx > 0 && chars[start_idx - 1].is_whitespace() {
+            start_idx -= 1;
+        }
+        while start_idx > 0 && !chars[start_idx - 1].is_whitespace() {
+            start_idx -= 1;
+        }
+        let start = self.byte_of(start_idx);
+        let end = self.byte_of(self.cursor);
+        self.value.replace_range(start..end, "");
+        self.cursor = start_idx;
+    }
+
     /// Keep the first `n` CHARS, dropping the rest. The caret is clamped to the new end.
     ///
     /// Chars, not bytes: `String::truncate` panics on a non-char boundary, which a byte count
@@ -230,5 +269,66 @@ mod tests {
         g.home();
         g.delete(); // removes '日'
         assert_eq!(g.value, "X本");
+    }
+
+    #[test]
+    fn delete_to_start_and_end() {
+        let mut f = TextField::new("hello world");
+        f.cursor = 5; // between "hello" and " world"
+        f.delete_to_end();
+        assert_eq!(f.value, "hello");
+        assert_eq!(f.cursor, 5);
+
+        let mut g = TextField::new("hello world");
+        g.cursor = 5;
+        g.delete_to_start();
+        assert_eq!(g.value, " world");
+        assert_eq!(g.cursor, 0);
+
+        // No-ops at the boundaries.
+        let mut h = TextField::new("abc");
+        h.home();
+        h.delete_to_start();
+        assert_eq!(h.value, "abc");
+        h.end();
+        h.delete_to_end();
+        assert_eq!(h.value, "abc");
+    }
+
+    #[test]
+    fn delete_prev_word_eats_trailing_space_then_the_word() {
+        let mut f = TextField::new("go north  ");
+        f.end();
+        f.delete_prev_word(); // eats trailing spaces + "north"
+        assert_eq!(f.value, "go ");
+        assert_eq!(f.cursor, 3);
+        f.delete_prev_word(); // eats "go "
+        assert_eq!(f.value, "");
+        assert_eq!(f.cursor, 0);
+        f.delete_prev_word(); // no-op at start
+        assert_eq!(f.value, "");
+    }
+
+    #[test]
+    fn utf8_multibyte_ops_are_char_safe() {
+        // "héllo wörld" — 'é' and 'ö' are each 2 bytes.
+        let mut f = TextField::new("héllo wörld");
+        assert_eq!(f.char_len(), 11);
+        f.cursor = 6; // just after "héllo "
+        f.delete_to_start();
+        assert_eq!(f.value, "wörld");
+        assert_eq!(f.cursor, 0);
+
+        let mut g = TextField::new("héllo wörld");
+        g.cursor = 6;
+        g.delete_to_end();
+        assert_eq!(g.value, "héllo ");
+        assert_eq!(g.cursor, 6);
+
+        let mut h = TextField::new("héllo wörld");
+        h.end();
+        h.delete_prev_word();
+        assert_eq!(h.value, "héllo ");
+        assert_eq!(h.cursor, 6);
     }
 }

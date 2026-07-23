@@ -183,13 +183,15 @@ mod tests {
     }
 
     #[test]
-    fn leader_hint_advertises_ctrl_k_menu() {
+    fn leader_hint_advertises_ctrl_p_menu() {
         // The bottom-bar default branch prepends "{prefix.label()}: menu" ahead
         // of the hint_bar output (SQ-0202). Pin the exact construction here since
-        // the help-row assembly itself lives inline in the render loop.
+        // the help-row assembly itself lives inline in the render loop. Prefix
+        // moved from Ctrl+K to Ctrl+P (SQ-0447), freeing Ctrl+K for the story
+        // prompt's readline delete-to-end shortcut.
         let layout = HotkeyLayout::default();
         let leader_hint = format!("{}: menu", layout.prefix.label());
-        assert_eq!(leader_hint, "Ctrl+K: menu");
+        assert_eq!(leader_hint, "Ctrl+P: menu");
     }
 
     #[test]
