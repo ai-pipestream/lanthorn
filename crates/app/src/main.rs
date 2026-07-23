@@ -2030,6 +2030,39 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         }
                     }
                 }
+                // Z-machine v6 mouse input (Lane M): a left-Down landing inside the
+                // drawn v6 image, while the game awaits read_char, is delivered to
+                // the VM as a ZSCII single-click (254) with the click's game-pixel
+                // coordinates recorded via set_mouse (the header extension table +
+                // read_mouse). Only fires when the click maps into the image
+                // (map_click → Some); a Line read (normal play), a click in the
+                // letterbox margin, or a click outside the pane all fall through to
+                // the app's own story-pane handling (selection) below. No overlay
+                // may be open (a modal owns the click first).
+                if matches!(m.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left))
+                    && !state.any_overlay_open()
+                    && zvm_session_opt(&*session)
+                        .is_some_and(|z| z.pending_input() == app::session::InputKind::Char)
+                {
+                    let hit = state
+                        .graphics_render
+                        .borrow()
+                        .last_v6_map
+                        .as_ref()
+                        .and_then(|cm| cm.map_click(m.column, m.row));
+                    if let Some((gx, gy)) = hit {
+                        let z = zvm_session_opt_mut(&mut *session)
+                            .expect("z-machine char read is pending");
+                        z.set_mouse(gy, gx); // engine stores (y, x)
+                        let result = z.submit_char(254); // ZSCII single-click (§3.8)
+                        if turn::apply_game_driven_result(
+                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
+                        ) {
+                            break 'event_loop state.exit_target.into();
+                        }
+                        continue 'event_loop;
+                    }
+                }
                 mouse_to_action(&state, m, last_panes.map, last_panes.story, &last_panes.room_rects, &last_panes.dialog)
             }
             // Resize: continue so the next draw uses the updated terminal size.

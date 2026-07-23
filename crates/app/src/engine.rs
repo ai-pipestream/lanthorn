@@ -628,6 +628,13 @@ pub trait Engine {
         Vec::new()
     }
 
+    /// Report a mouse click at game-pixel `(y_px, x_px)` (1-based) to the engine,
+    /// so a subsequent `read_mouse` (or the game reading the header extension
+    /// table) sees the click coordinates. Default no-op: only the v6 Z-machine
+    /// consumes host mouse coordinates this way (Glulx has its own Glk mouse
+    /// event path). (Lane M)
+    fn set_mouse(&mut self, _y_px: u16, _x_px: u16) {}
+
     /// Enable/disable per-turn execution tracing for the debug inspector.
     fn set_debug_trace(&mut self, _on: bool) {}
 

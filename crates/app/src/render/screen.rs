@@ -429,6 +429,9 @@ fn render_node(
                             for band in &bands {
                                 gr.draw_chrome_band(picker, &canvas, &scale, area, *band, buf);
                             }
+                            // Record the letterbox geometry for click→game-pixel
+                            // mapping (Lane M): the chrome ring shares this scale.
+                            gr.record_hybrid_click_map(area, &scale, native, cell_px);
                         }
                         // The story window as real terminal text (primary-Buffer path).
                         return render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors);

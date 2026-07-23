@@ -121,9 +121,67 @@ pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffe
     true
 }
 
+/// The geometry needed to invert the v6 letterbox mapping: given a terminal
+/// cell click, recover the game-pixel coordinate under the pointer. Recorded by
+/// the last v6 draw path (single-canvas [`GraphicsRender::draw_v6_canvas`] or the
+/// hybrid chrome ring) so [`map_click`](GraphicsRender::map_click) can be a pure
+/// inverse of the forward scale-and-centre placement.
+///
+/// All fields are in the terminal's device-pixel space, measured relative to the
+/// v6 pane's top-left cell (`pane_x`, `pane_y`). The drawn game image occupies the
+/// device-pixel rect (`img_x`, `img_y`, `img_w`, `img_h`) inside that pane, and
+/// maps a `native_w × native_h` game-pixel canvas across it, aspect-preserved.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct V6ClickMap {
+    pub pane_x: u16,
+    pub pane_y: u16,
+    pub cell_w: u16,
+    pub cell_h: u16,
+    pub img_x: f32,
+    pub img_y: f32,
+    pub img_w: f32,
+    pub img_h: f32,
+    pub native_w: u16,
+    pub native_h: u16,
+}
+
+impl V6ClickMap {
+    /// Map a terminal cell click at `(col, row)` to a 1-based game pixel
+    /// `(x, y)`, or `None` when the cell lies outside the drawn game image
+    /// (the letterbox margin, or another pane). This is the exact inverse of the
+    /// forward letterbox: the forward map places game pixel `p` (0-based) at
+    /// device offset `img_origin + (p + ½)·(img_size/native)`; inverting, a click
+    /// at device position `d` recovers `p = ⌊(d − img_origin)/img_size · native⌋`.
+    /// The click's device position is taken at the clicked cell's centre, giving
+    /// a subcell estimate finer than the cell grid.
+    pub fn map_click(&self, col: u16, row: u16) -> Option<(u16, u16)> {
+        if self.img_w <= 0.0 || self.img_h <= 0.0 || self.native_w == 0 || self.native_h == 0 {
+            return None;
+        }
+        if col < self.pane_x || row < self.pane_y {
+            return None;
+        }
+        // Device-pixel position of the clicked cell's centre, relative to pane.
+        let dx = (col - self.pane_x) as f32 * self.cell_w as f32 + self.cell_w as f32 / 2.0;
+        let dy = (row - self.pane_y) as f32 * self.cell_h as f32 + self.cell_h as f32 / 2.0;
+        let fx = (dx - self.img_x) / self.img_w;
+        let fy = (dy - self.img_y) / self.img_h;
+        if !(0.0..1.0).contains(&fx) || !(0.0..1.0).contains(&fy) {
+            return None;
+        }
+        let gx = (fx * self.native_w as f32).floor() as u16 + 1;
+        let gy = (fy * self.native_h as f32).floor() as u16 + 1;
+        Some((gx.min(self.native_w), gy.min(self.native_h)))
+    }
+}
+
 #[derive(Default)]
 pub struct GraphicsRender {
     cache: std::collections::HashMap<u32, (u64, u16, u16, Protocol)>,
+    /// Letterbox geometry recorded by the most recent v6 draw, for inverting a
+    /// terminal click back to a game pixel (Lane M mouse input). `None` until a
+    /// v6 frame has been drawn.
+    pub last_v6_map: Option<V6ClickMap>,
     /// One-image cache for the v6 pixel composite (Phase 1c), keyed on a content
     /// hash + area so unchanged frames reuse the uploaded protocol.
     v6: Option<(u64, u16, u16, Protocol)>,
@@ -218,7 +276,53 @@ impl GraphicsRender {
             let ht = sz.height.min(area.height);
             let dest = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - ht) / 2, w, ht);
             Image::new(proto).render(dest, buf);
+            // Record the letterbox geometry so a click in the pane can be mapped
+            // back to a game pixel (Lane M). The image fills `dest`'s cells
+            // aspect-preserved, so the click map's image rect is `dest` in
+            // device pixels and its native extent is the canvas dimensions.
+            let fs = picker.font_size();
+            let (cw, ch) = (fs.width.max(1), fs.height.max(1));
+            self.last_v6_map = Some(V6ClickMap {
+                pane_x: area.x,
+                pane_y: area.y,
+                cell_w: cw,
+                cell_h: ch,
+                img_x: (dest.x - area.x) as f32 * cw as f32,
+                img_y: (dest.y - area.y) as f32 * ch as f32,
+                img_w: dest.width as f32 * cw as f32,
+                img_h: dest.height as f32 * ch as f32,
+                native_w: canvas.width() as u16,
+                native_h: canvas.height() as u16,
+            });
         }
+    }
+
+    /// Record the letterbox click map for the HYBRID draw path (Lane H), where the
+    /// game image is drawn as a chrome ring around a terminal viewport rather than
+    /// one canvas. `scale` is the same [`uniform_scale`](crate::render::v6_layout::uniform_scale)
+    /// the chrome bands were placed through, so the recovered game pixel matches
+    /// what the player sees. `pane` is the whole v6 pane's cell rect; `native` is
+    /// the chrome canvas's game-pixel extent; `cell_px` is the font cell size.
+    pub fn record_hybrid_click_map(
+        &mut self,
+        pane: Rect,
+        scale: &crate::render::v6_layout::Scale,
+        native: (u16, u16),
+        cell_px: (u16, u16),
+    ) {
+        let (cw, ch) = (cell_px.0.max(1), cell_px.1.max(1));
+        self.last_v6_map = Some(V6ClickMap {
+            pane_x: pane.x,
+            pane_y: pane.y,
+            cell_w: cw,
+            cell_h: ch,
+            img_x: scale.off_x as f32,
+            img_y: scale.off_y as f32,
+            img_w: native.0 as f32 * scale.s,
+            img_h: native.1 as f32 * scale.s,
+            native_w: native.0,
+            native_h: native.1,
+        });
     }
 
     /// Drop cached chrome-band protocols whose band rect is not in `live` — called
@@ -310,6 +414,67 @@ impl GraphicsRender {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A 100×100 native image drawn 1:1 (scale 1) into a pane at the origin with
+    // 10×10-pixel cells — one cell == 10 game pixels.
+    fn unit_map() -> V6ClickMap {
+        V6ClickMap {
+            pane_x: 0,
+            pane_y: 0,
+            cell_w: 10,
+            cell_h: 10,
+            img_x: 0.0,
+            img_y: 0.0,
+            img_w: 100.0,
+            img_h: 100.0,
+            native_w: 100,
+            native_h: 100,
+        }
+    }
+
+    #[test]
+    fn map_click_inverts_letterbox_at_cell_centre() {
+        let m = unit_map();
+        // Cell (0,0) centre is device px (5,5) -> game px floor(5/100*100)+1 = 6.
+        assert_eq!(m.map_click(0, 0), Some((6, 6)));
+        // Cell (3,4) centre is device px (35,45) -> game px (36, 46).
+        assert_eq!(m.map_click(3, 4), Some((36, 46)));
+        // Last in-image cell (9,9): centre (95,95) -> (96, 96), within native.
+        assert_eq!(m.map_click(9, 9), Some((96, 96)));
+    }
+
+    #[test]
+    fn map_click_rejects_clicks_outside_the_image() {
+        let m = unit_map();
+        // Cell 10 starts at device px 100 == native width -> outside (letterbox).
+        assert_eq!(m.map_click(10, 0), None);
+        assert_eq!(m.map_click(0, 10), None);
+    }
+
+    #[test]
+    fn map_click_honours_pane_and_letterbox_offset() {
+        // Pane origin at cell (4,2); image centred with an 8px/4px letterbox
+        // offset inside a 5×5-pixel cell grid; native 40×40 scaled 2×.
+        let m = V6ClickMap {
+            pane_x: 4,
+            pane_y: 2,
+            cell_w: 5,
+            cell_h: 5,
+            img_x: 8.0,
+            img_y: 4.0,
+            img_w: 80.0, // 40 native * 2
+            img_h: 80.0,
+            native_w: 40,
+            native_h: 40,
+        };
+        // A click left of the pane origin is rejected outright.
+        assert_eq!(m.map_click(3, 2), None);
+        // Cell (6,4) rel to pane is (2,2): centre device px (12.5, 12.5);
+        // (12.5-8)/80 * 40 = 2.25 -> floor+1 = 3 in x; (12.5-4)/80*40=4.25 -> 5 in y.
+        assert_eq!(m.map_click(6, 4), Some((3, 5)));
+        // A click in the top-left letterbox margin (before img_x/img_y) → None.
+        assert_eq!(m.map_click(4, 2), None);
+    }
 
     fn window(win: u32) -> GraphicsWindow {
         GraphicsWindow {

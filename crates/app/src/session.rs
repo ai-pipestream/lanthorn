@@ -1464,6 +1464,13 @@ impl Engine for GameSession {
         Some(self.submit_char(byte))
     }
 
+    fn set_mouse(&mut self, y_px: u16, x_px: u16) {
+        // Primary button (bit 0) — a host left-click. The VM records the coords
+        // and writes the header extension table (ZMSD §11); a following
+        // `read_mouse` reports them.
+        self.machine.set_mouse(y_px, x_px, 0b1);
+    }
+
     fn take_transcript(&mut self) -> String {
         self.take_transcript()
     }

@@ -243,6 +243,17 @@ pub struct Machine {
     /// its "not modeled here" diagnostic — window 0's scrolling is owned by
     /// the host's transcript renderer, not this grid model.
     warned_scroll_window0: bool,
+    /// v5/v6 mouse state (ZMSD §15/§8). Set by [`set_mouse`](Machine::set_mouse)
+    /// when the host reports a click; `read_mouse` (EXT:0x16) reports these back.
+    /// Coordinates are game pixels, 1-based (ZMSD §8.8.1 coordinate convention).
+    mouse_x: u16,
+    mouse_y: u16,
+    /// Button bitmask (bit 0 = primary, per ZMSD §15 read_mouse ordering).
+    mouse_buttons: u16,
+    /// Mouse-confinement window from `mouse_window` (EXT:0x17); −1 = no
+    /// constraint. Defaults to 1 per ZMSD §15 ("By default it sits in window 1").
+    /// Recorded for observability; the host owns actual pointer confinement.
+    mouse_window: i16,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -331,6 +342,10 @@ impl Machine {
             ever_exec_pcs: std::collections::HashSet::new(),
             buffer_screen_mode: 0,
             warned_scroll_window0: false,
+            mouse_x: 0,
+            mouse_y: 0,
+            mouse_buttons: 0,
+            mouse_window: 1,
         }
     }
 
@@ -349,6 +364,39 @@ impl Machine {
         init_header_caps(&mut self.mem, self.honor_game_colours, self.sound_available, self.interpreter_number);
         // Communicate the initial buffer_mode state (false = off) to the sink.
         self.out.set_buffer_mode(self.screen.buffer_mode);
+    }
+
+    /// Record a mouse click at game-pixel `(y, x)` (1-based, ZMSD §8.8.1: "the
+    /// origin of the screen is at the top left, so that the coordinates of the
+    /// top left pixel are (1,1)") with `buttons` as the button bitmask (bit 0 =
+    /// primary). Called by the host when the player clicks inside the v6 image.
+    ///
+    /// Besides recording the state for `read_mouse` (EXT:0x16), this writes the
+    /// header extension table so a game that reads the coordinates directly from
+    /// the header — rather than via `read_mouse` — also sees the click. Per the
+    /// ZMSD §11 header-extension table layout, word 1 holds "X-coordinate of
+    /// mouse after a click" and word 2 holds "Y-coordinate of mouse after a
+    /// click" (note the X-before-Y order, the reverse of `read_mouse`'s array).
+    /// Word 0 is the count of further words; the writes are skipped when the
+    /// table is absent or too short (ZMSD §11: "If the interpreter needs to read
+    /// a word which is beyond the length of the extension table, or the
+    /// extension table doesn't exist at all, then the result is 0").
+    pub fn set_mouse(&mut self, y: u16, x: u16, buttons: u16) {
+        self.mouse_y = y;
+        self.mouse_x = x;
+        self.mouse_buttons = buttons;
+        // Header 0x36 holds the byte address of the extension table (0 = none).
+        let ext = self.mem.read_word(0x36) as u32;
+        if ext == 0 {
+            return;
+        }
+        let count = self.mem.read_word(ext); // word 0: number of further words
+        if count >= 1 {
+            self.mem.write_word(ext + 2, x); // word 1: mouse X-coordinate
+        }
+        if count >= 2 {
+            self.mem.write_word(ext + 4, y); // word 2: mouse Y-coordinate
+        }
     }
 
     /// Enable/disable honoring game-driven colour. Advertises (or clears) the
@@ -2053,9 +2101,40 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            0x16 | 0x17 | 0x1A => {
-                // read_mouse, mouse_window, print_form — no-op in Phase 0
-                // (mouse/print_form are a different lane; left untouched).
+            // EXT:0x16 read_mouse(array) — ZMSD §15: "The four words in the array
+            // are written with the mouse y coordinate, x coordinate, button bits,
+            // and a menu word." Coordinates come from the last `set_mouse` click;
+            // menus are unsupported so the menu word is always 0.
+            0x16 => {
+                let array = ops.first().copied().unwrap_or(0) as u32;
+                if self.trace_screen {
+                    self.screen_trace.push(format!(
+                        "@read_mouse(array={array:#06x}) -> y={} x={} buttons={:#06x}",
+                        self.mouse_y, self.mouse_x, self.mouse_buttons
+                    ));
+                }
+                if array != 0 {
+                    self.mem.write_word(array, self.mouse_y); // word 0: y
+                    self.mem.write_word(array + 2, self.mouse_x); // word 1: x
+                    self.mem.write_word(array + 4, self.mouse_buttons); // word 2
+                    self.mem.write_word(array + 6, 0); // word 3: menu (unsupported)
+                }
+                StepResult::Continue
+            }
+            // EXT:0x17 mouse_window(window) — ZMSD §15: "Constrain the mouse arrow
+            // to sit inside the given window. By default it sits in window 1.
+            // Setting to -1 takes all restriction away." Recorded for
+            // observability; the host owns actual pointer confinement.
+            0x17 => {
+                let win = ops.first().copied().unwrap_or(0) as i16;
+                if self.trace_screen {
+                    self.screen_trace.push(format!("@mouse_window(window={win})"));
+                }
+                self.mouse_window = win;
+                StepResult::Continue
+            }
+            0x1A => {
+                // print_form — no-op in Phase 0 (a different lane; left untouched).
                 StepResult::Continue
             }
             // Unknown / unimplemented EXT opcode: record once, then ignore
@@ -6618,6 +6697,79 @@ pub(crate) mod tests {
         let r = m.exec_ext(0x00, &[huge, 0xFFFF, huge], Some(0x10), None);
         assert_eq!(r, StepResult::Continue);
         assert_eq!(m.global(0), 1);
+    }
+
+    // ── mouse input: set_mouse / read_mouse (EXT:0x16) / mouse_window (EXT:0x17) ──
+
+    // Machine with a header extension table of `count` words at 0x340, its byte
+    // address planted in header word 0x36.
+    fn mouse_machine(count: u16) -> Machine {
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+        m.mem.write_word(0x36, 0x0340); // header extension table address (bytes)
+        m.mem.write_word(0x0340, count); // word 0: number of further words
+        m
+    }
+
+    #[test]
+    fn set_mouse_writes_header_extension_x_then_y() {
+        // ZMSD §11 extension table: word 1 = X-coordinate, word 2 = Y-coordinate.
+        let mut m = mouse_machine(2);
+        m.set_mouse(10, 172, 1); // (y, x, buttons)
+        assert_eq!(m.mem.read_word(0x0342), 172, "ext word 1 = mouse X");
+        assert_eq!(m.mem.read_word(0x0344), 10, "ext word 2 = mouse Y");
+    }
+
+    #[test]
+    fn set_mouse_short_table_writes_only_available_words() {
+        // count=1 -> only word 1 (X) exists; word 2 (Y) must not be written.
+        let mut m = mouse_machine(1);
+        m.mem.write_word(0x0344, 0xBEEF); // sentinel in the (absent) Y slot
+        m.set_mouse(10, 172, 1);
+        assert_eq!(m.mem.read_word(0x0342), 172, "X still written");
+        assert_eq!(m.mem.read_word(0x0344), 0xBEEF, "Y slot beyond table untouched");
+    }
+
+    #[test]
+    fn set_mouse_no_extension_table_is_silent() {
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+        m.mem.write_word(0x36, 0); // no extension table
+        m.set_mouse(10, 172, 1); // must not panic / write anywhere
+        assert_eq!(m.mouse_x, 172);
+        assert_eq!(m.mouse_y, 10);
+    }
+
+    #[test]
+    fn read_mouse_fills_four_words_y_x_buttons_menu() {
+        // ZMSD §15: array words are y, x, button bits, menu word (menu = 0 here).
+        let mut m = mouse_machine(2);
+        m.set_mouse(10, 172, 0b1);
+        let r = m.exec_ext(0x16, &[0x0380], None, None);
+        assert_eq!(r, StepResult::Continue, "read_mouse never suspends/stores");
+        assert_eq!(m.mem.read_word(0x0380), 10, "word 0 = y");
+        assert_eq!(m.mem.read_word(0x0382), 172, "word 1 = x");
+        assert_eq!(m.mem.read_word(0x0384), 0b1, "word 2 = buttons");
+        assert_eq!(m.mem.read_word(0x0386), 0, "word 3 = menu (unsupported)");
+    }
+
+    #[test]
+    fn read_mouse_default_state_is_zero() {
+        let mut m = mouse_machine(2);
+        m.exec_ext(0x16, &[0x0380], None, None);
+        for off in [0, 2, 4, 6] {
+            assert_eq!(m.mem.read_word(0x0380 + off), 0, "unclicked read_mouse -> 0");
+        }
+    }
+
+    #[test]
+    fn mouse_window_records_constraint() {
+        let mut m = mouse_machine(2);
+        assert_eq!(m.mouse_window, 1, "default constraint is window 1 (ZMSD §15)");
+        m.exec_ext(0x17, &[3], None, None);
+        assert_eq!(m.mouse_window, 3);
+        m.exec_ext(0x17, &[0xFFFF], None, None); // -1 = remove restriction
+        assert_eq!(m.mouse_window, -1);
     }
 
     #[test]
