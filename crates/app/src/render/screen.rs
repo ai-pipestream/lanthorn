@@ -461,6 +461,47 @@ fn render_node(
                 state.graphics_render.borrow_mut().draw_v6_canvas(picker, &canvas, area, buf);
                 return None; // v6 main-window scroll metrics are a follow-up (SQ-0450)
             }
+            // Cell fallback with a primary story window (no image protocol —
+            // remote/text-only terminals): the v6 native cell geometry is a
+            // 40x25-cell postage stamp on a real terminal and pixel art can't
+            // render at all, so render like a classic two-window Z-machine
+            // game instead — the status window's text rows across the top of
+            // the pane (from the chrome grids' pixel runs, quantized to
+            // cells), and the story transcript filling everything below at
+            // full size, with working metrics/scrollback. (SQ-0186)
+            {
+                let layout = crate::render::v6_layout::classify_windows(items);
+                if let Some(story) = layout.story {
+                    let status_style = state.colors.theme.get("upper_window").style;
+                    let mut rows_used = 0u16;
+                    for it in &layout.chrome {
+                        if let WinNode::Grid(g) = &it.node {
+                            for t in &g.px_texts {
+                                let row = (t.y.max(1) - 1) / 8;
+                                let col = (t.x.max(1) - 1) / 8;
+                                if row >= 4 || area.y + row >= area.bottom() || col >= area.width {
+                                    continue; // status band is at most 4 rows
+                                }
+                                rows_used = rows_used.max(row + 1);
+                                buf.set_stringn(
+                                    area.x + col,
+                                    area.y + row,
+                                    &t.text,
+                                    (area.width - col) as usize,
+                                    status_style,
+                                );
+                            }
+                        }
+                    }
+                    let story_area = Rect::new(
+                        area.x,
+                        area.y + rows_used,
+                        area.width,
+                        area.height.saturating_sub(rows_used),
+                    );
+                    return render_node(&story.node, status, char_mode, introspect, state, story_area, buf, game_input, links, grid_colors);
+                }
+            }
             // v6 z-ordered composite (Phase 1b): draw each item in list order —
             // earlier entries (graphics) are background, later entries (text)
             // paint on top. A `Grid` leaf paints only its non-blank cells so an

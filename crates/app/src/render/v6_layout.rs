@@ -225,16 +225,28 @@ pub fn build_chrome_canvas(
             let ox = it.x_px as u32;
             let oy = it.y_px as u32;
             if !g.px_texts.is_empty() {
+                // A packed colour is EXPLICIT only when the game named a real
+                // colour: ZColour::Default (0) and Standard 0/1 ("current"/
+                // "default", ZMSD §8.3.1) are not choices, they're inheritance.
+                // Reverse video over frame art (Zork0's ribbon labels) with
+                // only inherited colours must NOT paint an opaque block — the
+                // original renders dark ink directly ON the art. A block is
+                // painted only when the game explicitly chose colours.
+                let explicit = |packed: u32| packed != 0 && !((packed >> 24) == 1 && (packed & 0xFF) <= 1);
                 for t in &g.px_texts {
-                    let resolved_fg = packed_to_rgba(t.fg, default_fg, colors);
-                    let resolved_bg = packed_to_rgba(t.bg, default_bg, colors);
                     let (fg, bg) = if t.style & 1 != 0 {
-                        // Reverse: swap — ink takes the (window) background
-                        // colour, and a solid block in the foreground colour
-                        // is painted behind it.
-                        (resolved_bg, Some(resolved_fg))
+                        if explicit(t.fg) || explicit(t.bg) {
+                            // Real colour pair: swap and paint the block.
+                            (packed_to_rgba(t.bg, default_bg, colors), Some(packed_to_rgba(t.fg, default_fg, colors)))
+                        } else {
+                            // Inherited colours: dark ink on the art, no block.
+                            (default_bg, None)
+                        }
                     } else {
-                        (resolved_fg, (t.bg != 0).then_some(resolved_bg))
+                        (
+                            packed_to_rgba(t.fg, default_fg, colors),
+                            explicit(t.bg).then(|| packed_to_rgba(t.bg, default_bg, colors)),
+                        )
                     };
                     let py = oy + (t.y.max(1) as u32 - 1);
                     for (i, ch) in t.text.chars().enumerate() {
@@ -780,16 +792,35 @@ mod tests {
     }
 
     #[test]
-    fn px_text_reverse_with_unset_colours_falls_back_to_themed_defaults() {
-        // The run never set an explicit colour (fg=bg=0/Default): reverse still
-        // must paint a solid block (there's no "transparent ink"), falling back
-        // to the caller's themed default_fg for the fill.
+    fn px_text_reverse_with_inherited_colours_draws_dark_ink_no_block() {
+        // The run never chose an explicit colour (fg=bg=0/Default): reverse
+        // over frame art must NOT paint an opaque block — Zork0's ribbon
+        // labels print in reverse with inherited colours and the original
+        // shows dark ink directly ON the banner art (a block would erase it,
+        // the black-box regression the user hit). A blank glyph therefore
+        // leaves the canvas transparent; an inked glyph draws in default_bg.
         let win = px_text_grid_item(" ", 1, 0, 0);
         let chrome: Vec<&PositionedWindow> = vec![&win];
         let default_fg = Rgba([10, 20, 30, 255]);
         let default_bg = Rgba([40, 50, 60, 255]);
         let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors());
-        assert_eq!(*c.get_pixel(4, 4), default_fg, "reverse fill falls back to the themed default_fg");
+        assert_eq!(c.get_pixel(4, 4)[3], 0, "no block behind a blank reverse glyph with inherited colours");
+        let win = px_text_grid_item("X", 1, 0, 0);
+        let chrome: Vec<&PositionedWindow> = vec![&win];
+        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors());
+        assert!(
+            (0..8).any(|x| (0..8).any(|y| *c.get_pixel(x, y) == default_bg)),
+            "reverse ink with inherited colours draws in the themed default_bg (dark on the art)"
+        );
+    }
+
+    #[test]
+    fn px_text_reverse_with_explicit_colours_paints_the_swapped_block() {
+        // A run whose game explicitly chose colours DOES paint the swap block.
+        let win = px_text_grid_item(" ", 1, RED, BLUE);
+        let chrome: Vec<&PositionedWindow> = vec![&win];
+        let c = build_chrome_canvas(&chrome, (8, 8), Rgba([1, 1, 1, 255]), Rgba([2, 2, 2, 255]), &colors());
+        assert_eq!(c.get_pixel(4, 4)[3], 255, "explicit reverse paints an opaque block");
     }
 
     #[test]
