@@ -311,7 +311,11 @@ impl Machine {
                 w.font_number = 1;
                 w.font_size =
                     (crate::screen::V6_FONT_HEIGHT << 8) | crate::screen::V6_FONT_WIDTH;
+                // frotz restart_screen: attribute 8 (buffered) everywhere...
+                w.attributes = 8;
             }
+            // ...and 15 (wrapping+scrolling+scripting+buffering) on window 0.
+            v6.windows[0].attributes = 15;
             // Frotz restart_screen also gives windows 0 and 1 the full screen
             // width (pixels in v6) — games read it back via get_wind_prop
             // before ever calling window_size. Reseeded with the real screen
@@ -378,6 +382,21 @@ impl Machine {
         init_header_caps(&mut self.mem, self.honor_game_colours, self.sound_available, self.interpreter_number);
         // Communicate the initial buffer_mode state (false = off) to the sink.
         self.out.set_buffer_mode(self.screen.buffer_mode);
+    }
+
+    /// Resolve a v6 window operand: `-3` (0xFFFD) means the CURRENTLY selected
+    /// window (ZMSD §8.8.3.2; frotz `winarg0`). Shogun addresses most of its
+    /// status-line cursor/property reads through window -3 — leaving it
+    /// unresolved made every such read return 0 and scrambled its layout
+    /// math. Other values pass through (downstream bounds checks ignore
+    /// out-of-range windows).
+    fn v6_window_operand(&self, w: u16) -> u16 {
+        if w == 0xFFFD {
+            if let Some(v6) = self.screen.v6.as_ref() {
+                return v6.current as u16;
+            }
+        }
+        w
     }
 
     /// Report the screen size to the story: writes the header dimension fields
@@ -803,7 +822,7 @@ impl Machine {
             // exec_2op with `ops.len() == 3`, never in exec_var.
             0x1B => {
                 if let Some(v6) = self.screen.v6.as_mut() {
-                    let win = ops.get(2).copied().map(|w| w as u8).unwrap_or(v6.current);
+                    let win = ops.get(2).copied().map(|w| (if w == 0xFFFD { v6.current as u16 } else { w }) as u8).unwrap_or(v6.current);
                     if self.trace_screen {
                         let fg = decode_set_colour_v6(a).map(zscreen_colour_name).unwrap_or_else(|| a.to_string());
                         let bg = decode_set_colour_v6(b).map(zscreen_colour_name).unwrap_or_else(|| b.to_string());
@@ -1321,7 +1340,7 @@ impl Machine {
             // v6: selects one of the 8 windows and resets its grid cursor to
             // the top-left cell (ZMSD §8.4).
             0x0B => {
-                let win = ops.first().copied().unwrap_or(0) as u8;
+                let win = self.v6_window_operand(ops.first().copied().unwrap_or(0)) as u8;
                 if self.trace_screen { self.screen_trace.push(format!("@set_window({})", zscreen_window_name(win as u16))); }
                 if let Some(v6) = self.screen.v6.as_mut() {
                     let w = win as usize;
@@ -1346,26 +1365,60 @@ impl Machine {
             // grid and reset its cursor; a window number 0–7 clears just that
             // window's grid + cursor.
             0x0D => {
-                let win = ops.first().copied().unwrap_or(0) as i16;
+                // -3 = current window (frotz winarg0); -1/-2 keep their own
+                // erase-all meanings below.
+                let win = self.v6_window_operand(ops.first().copied().unwrap_or(0)) as i16;
                 if self.trace_screen { self.screen_trace.push(format!("@erase_window({})", zscreen_window_name(win as u16))); }
                 if let Some(v6) = self.screen.v6.as_mut() {
+                    // v6 erase is PAINT: background fills the window's CURRENT
+                    // screen rect. Painted text runs (any window's) lose the
+                    // covered glyphs — no more, no less: Shogun erases its
+                    // 1-px caret window without touching the menu items
+                    // painted around it. Picture canvases clear via a
+                    // number-0 erase event pushed onto the SAME ordered queue
+                    // as draws, so "erase, then draw the borders" replays in
+                    // order host-side (the title splash must actually vanish).
+                    let out_chars = self.v6_win0_out_chars;
+                    let mut clear_canvas: Vec<u8> = Vec::new();
                     match win {
                         -1 | -2 => {
-                            for w in v6.windows.iter_mut() {
+                            for (i, w) in v6.windows.iter_mut().enumerate() {
                                 w.grid.clear();
                                 w.texts.clear();
                                 w.y_cursor = 1;
                                 w.x_cursor = 1;
+                                clear_canvas.push(i as u8);
                             }
                         }
                         n if (0..8).contains(&n) => {
+                            let (top, left, h, wd) = {
+                                let w = &v6.windows[n as usize];
+                                (
+                                    w.y_coord.max(1) as i32,
+                                    w.x_coord.max(1) as i32,
+                                    w.y_size as i32,
+                                    w.x_size as i32,
+                                )
+                            };
+                            v6.erase_screen_rect(top, left, h, wd);
                             let w = &mut v6.windows[n as usize];
                             w.grid.clear();
-                            w.texts.clear();
                             w.y_cursor = 1;
                             w.x_cursor = 1;
+                            clear_canvas.push(n as u8);
                         }
                         _ => {}
+                    }
+                    for window in clear_canvas {
+                        self.pending_pictures.push(PictureEvent {
+                            number: 0,
+                            window,
+                            x: 1,
+                            y: 1,
+                            erase: true,
+                            out_chars,
+                            margin_after: None,
+                        });
                     }
                 } else {
                     match win {
@@ -1399,7 +1452,7 @@ impl Machine {
                 let row = ops.first().copied().unwrap_or(1);
                 let col = ops.get(1).copied().unwrap_or(1);
                 if let Some(v6) = self.screen.v6.as_mut() {
-                    let win = ops.get(2).copied().map(|w| w as u8).unwrap_or(v6.current);
+                    let win = ops.get(2).copied().map(|w| (if w == 0xFFFD { v6.current as u16 } else { w }) as u8).unwrap_or(v6.current);
                     if self.trace_screen {
                         self.screen_trace.push(format!("@set_cursor(row={row}, col={col}, window={win})"));
                     }
@@ -1807,7 +1860,7 @@ impl Machine {
                 let fg_op = ops.first().copied().unwrap_or(0);
                 let bg_op = ops.get(1).copied().unwrap_or(0);
                 if let Some(v6) = self.screen.v6.as_mut() {
-                    let win = ops.get(2).copied().map(|w| w as u8).unwrap_or(v6.current);
+                    let win = ops.get(2).copied().map(|w| (if w == 0xFFFD { v6.current as u16 } else { w }) as u8).unwrap_or(v6.current);
                     if self.trace_screen {
                         let fg = decode_true_colour(fg_op).map(zscreen_colour_name).unwrap_or_else(|| fg_op.to_string());
                         let bg = decode_true_colour(bg_op).map(zscreen_colour_name).unwrap_or_else(|| bg_op.to_string());
@@ -1843,7 +1896,7 @@ impl Machine {
             // EXT:0x13 get_wind_prop(window, property-number) -> (result) — ZMSD
             // 1.1 §15/§8.8.3.2: reads the addressed window's property array.
             0x13 => {
-                let win = ops.first().copied().unwrap_or(0);
+                let win = self.v6_window_operand(ops.first().copied().unwrap_or(0));
                 let prop = ops.get(1).copied().unwrap_or(0);
                 let val = self.screen.v6.as_ref()
                     .and_then(|v6| v6.windows.get(win as usize))
@@ -1954,7 +2007,7 @@ impl Machine {
             // top-left corner (pixels). Purely notional — does not change the
             // current display, only where future plotting/geometry lands.
             0x10 => {
-                let win = ops.first().copied().unwrap_or(0);
+                let win = self.v6_window_operand(ops.first().copied().unwrap_or(0));
                 let y = ops.get(1).copied().unwrap_or(0);
                 let x = ops.get(2).copied().unwrap_or(0);
                 if self.trace_screen {
@@ -1973,7 +2026,7 @@ impl Machine {
             // (pixels). We also quantize to the character grid so the window's
             // text-cell storage (used for grid rendering) matches the new size.
             0x11 => {
-                let win = ops.first().copied().unwrap_or(0);
+                let win = self.v6_window_operand(ops.first().copied().unwrap_or(0));
                 let y = ops.get(1).copied().unwrap_or(0);
                 let x = ops.get(2).copied().unwrap_or(0);
                 if self.trace_screen {
@@ -2004,7 +2057,7 @@ impl Machine {
             // operation 0 = replace (attributes := flags), 1 = set bits (OR),
             // 2 = clear bits (AND NOT), 3 = toggle bits (XOR).
             0x12 => {
-                let win = ops.first().copied().unwrap_or(0);
+                let win = self.v6_window_operand(ops.first().copied().unwrap_or(0));
                 let flags = ops.get(1).copied().unwrap_or(0);
                 let operation = ops.get(2).copied().unwrap_or(0);
                 if self.trace_screen {
@@ -2029,7 +2082,7 @@ impl Machine {
             // EXT:0x19 put_wind_prop(window, property-number, value) — ZMSD 1.1
             // §15/§8.8.3.2: writes the addressed window's property array.
             0x19 => {
-                let win = ops.first().copied().unwrap_or(0);
+                let win = self.v6_window_operand(ops.first().copied().unwrap_or(0));
                 let prop = ops.get(1).copied().unwrap_or(0);
                 let val = ops.get(2).copied().unwrap_or(0);
                 if self.trace_screen {
@@ -2112,7 +2165,7 @@ impl Machine {
                 let left = ops.first().copied().unwrap_or(0);
                 let right = ops.get(1).copied().unwrap_or(0);
                 let win = match ops.get(2).copied() {
-                    Some(w) => w,
+                    Some(w) => self.v6_window_operand(w),
                     None => self.screen.v6.as_ref().map_or(0, |v| v.current as u16),
                 };
                 if self.trace_screen {
@@ -2150,7 +2203,7 @@ impl Machine {
             // otherwise no-op; grid windows 1–7 shift their pixel-positioned
             // text runs and cell grid via `ZWindow::scroll_pixels`.
             0x14 => {
-                let win = ops.first().copied().unwrap_or(0);
+                let win = self.v6_window_operand(ops.first().copied().unwrap_or(0));
                 let pixels = ops.get(1).copied().unwrap_or(0) as i16;
                 if self.trace_screen {
                     self.screen_trace.push(format!("@scroll_window(win={win}, pixels={pixels})"));
@@ -2207,7 +2260,7 @@ impl Machine {
             // Setting to -1 takes all restriction away." Recorded for
             // observability; the host owns actual pointer confinement.
             0x17 => {
-                let win = ops.first().copied().unwrap_or(0) as i16;
+                let win = self.v6_window_operand(ops.first().copied().unwrap_or(0)) as i16;
                 if self.trace_screen {
                     self.screen_trace.push(format!("@mouse_window(window={win})"));
                 }
@@ -2556,8 +2609,21 @@ impl Machine {
                 let style = self.screen.text_style;
                 let idx = cur as usize;
                 // Read the header before taking &mut self.screen — mirrors the
-                // v1-5 upper-window grow bound below.
+                // v1-5 upper-window grow bound below. Screen width (px, word
+                // 0x22) is the clip bound for no-wrap printing; 0 (unwritten
+                // header) leaves it unclipped.
                 let screen_h = self.mem.read_byte(0x20) as u16;
+                let screen_w_px = match self.mem.read_word(0x22) {
+                    0 => u16::MAX,
+                    w => w,
+                };
+                // Finished runs collect here with SCREEN-ABSOLUTE pixel coords
+                // stamped at paint time (window origin + cursor, both 1-based),
+                // then paint via `V6Windows::paint_run` after the window borrow
+                // ends — v6 text is paint, and painting must trim whatever
+                // earlier runs it covers (Shogun overprints its status line at
+                // a fixed pixel cursor every turn).
+                let mut finished: Vec<crate::screen::V6Text> = Vec::new();
                 if let Some(w) = self.screen.v6.as_mut().and_then(|v6| v6.windows.get_mut(idx)) {
                     let fw = crate::screen::V6_FONT_WIDTH;
                     let fh = crate::screen::V6_FONT_HEIGHT;
@@ -2571,21 +2637,35 @@ impl Machine {
                     for ch in s.chars() {
                         if ch == '\n' {
                             if let Some(r) = run.take() {
-                                w.texts.push(r);
+                                finished.push(r);
                             }
                             w.y_cursor += fh;
                             w.x_cursor = w.left_margin + 1;
                             continue;
                         }
                         let out_ch = if font3 { font3_translate(ch) } else { ch };
+                        // Wrapping is the window's attribute bit 0 (ZMSD
+                        // §8.8.3.2 prop 14; frotz update_attributes). With it
+                        // CLEAR — the boot default for windows 1-7 — text does
+                        // NOT wrap at the window's own width: Shogun prints
+                        // its boot-menu items through a 1-px caret window and
+                        // they must paint rightward on the screen, clipped
+                        // only at the screen edge.
+                        let wrapping = w.attributes & 1 != 0;
                         let (r, c) = ((w.y_cursor.max(1) - 1) / fh + 1, (w.x_cursor.max(1) - 1) / fw + 1);
+                        if !wrapping {
+                            let abs_x = w.x_coord.max(1) + w.x_cursor.max(1) - 1;
+                            if abs_x + fw - 1 > screen_w_px {
+                                continue; // clipped at the screen edge; cursor pinned
+                            }
+                        }
                         if r > w.grid.rows && w.y_cursor <= bound {
                             w.grid.grow_rows(r);
                         }
                         w.grid.put(r, c, out_ch, style, fg, bg);
                         run.get_or_insert_with(|| crate::screen::V6Text {
-                            y: w.y_cursor,
-                            x: w.x_cursor,
+                            y: w.y_coord.max(1) + w.y_cursor.max(1) - 1,
+                            x: w.x_coord.max(1) + w.x_cursor.max(1) - 1,
                             text: String::new(),
                             style,
                             fg,
@@ -2593,9 +2673,9 @@ impl Machine {
                         })
                         .text
                         .push(out_ch);
-                        if c >= cols {
+                        if wrapping && c >= cols {
                             if let Some(r) = run.take() {
-                                w.texts.push(r);
+                                finished.push(r);
                             }
                             w.y_cursor += fh;
                             w.x_cursor = w.left_margin + 1;
@@ -2604,7 +2684,12 @@ impl Machine {
                         }
                     }
                     if let Some(r) = run.take() {
-                        w.texts.push(r);
+                        finished.push(r);
+                    }
+                }
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    for r in finished {
+                        v6.paint_run(idx, r);
                     }
                 }
                 return;
@@ -7216,6 +7301,188 @@ pub(crate) mod tests {
         for n in 0..16u16 {
             assert_eq!(w.get_prop(n), 100 + n, "prop {n}");
         }
+    }
+
+    /// Position window `win` at `(y, x)` with size `h`×`w` px and select it.
+    fn v6_place_window(m: &mut Machine, win: u8, y: u16, x: u16, h: u16, w: u16) {
+        m.exec_ext(0x10, &[win as u16, y, x], None, None); // move_window
+        m.exec_ext(0x11, &[win as u16, h, w], None, None); // window_size
+        m.exec_var(0x0B, &[win as u16], None, None); // set_window
+    }
+
+    #[test]
+    fn v6_paint_runs_are_screen_absolute_and_survive_window_moves() {
+        // Shogun prints its boot menu into window 2 while it is wide at
+        // (24,169), then MOVES it to (159,169) and shrinks it to 1 px as a
+        // caret. "window_size does not change the current display" (ZMSD §15):
+        // the painted runs keep their screen positions.
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 2, 169, 24, 24, 274);
+        m.print_text("START the game");
+        m.exec_ext(0x10, &[2, 169, 159], None, None); // move_window
+        m.exec_ext(0x11, &[2, 24, 1], None, None); // window_size 1px wide
+        let w2 = &m.screen.v6.as_ref().unwrap().windows[2];
+        assert_eq!(w2.texts.len(), 1);
+        assert_eq!((w2.texts[0].y, w2.texts[0].x), (169, 24), "run keeps its painted screen position");
+        assert_eq!(w2.texts[0].text, "START the game");
+    }
+
+    #[test]
+    fn v6_stream3_close_stores_text_width_in_header_30() {
+        // ZMSD §7.1.2.1: v6 stream-3 deselect stores "the total width of
+        // printing (in units)" at header $30. Infocom games measure string
+        // widths this way (Shogun right-aligns and centres its whole status
+        // line off $30 readbacks).
+        let mut m = v6_exec_machine();
+        m.exec_var(0x13, &[3, 0x0100], None, None); // output_stream 3 -> table
+        m.print_text("Score:");
+        m.exec_var(0x13, &[0xFFFD], None, None); // output_stream -3 (close)
+        assert_eq!(m.mem.read_word(0x0100), 6, "table word 0 = char count");
+        assert_eq!(
+            m.mem.read_word(0x30),
+            6 * crate::screen::V6_FONT_WIDTH,
+            "header $30 = printed width in units"
+        );
+    }
+
+    #[test]
+    fn v6_window_operand_minus_three_is_current_window() {
+        // ZMSD §8.8.3.2 / frotz winarg0: window -3 (0xFFFD) = the currently
+        // selected window. Shogun reads its status-line cursor via
+        // get_wind_prop(-3, 4/5); an unresolved -3 returned 0 and scrambled
+        // its right-aligned layout math.
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 3, 41, 25, 24, 100);
+        m.screen.v6.as_mut().unwrap().windows[3].y_cursor = 7;
+        m.screen.v6.as_mut().unwrap().windows[3].x_cursor = 33;
+        // get_wind_prop(-3, prop) must read window 3 (the current window).
+        m.exec_ext(0x13, &[0xFFFD, 4], Some(0), None); // y_cursor -> sp
+        m.exec_ext(0x13, &[0xFFFD, 5], Some(0), None); // x_cursor -> sp
+        assert_eq!(m.state.eval_stack.pop(), Some(33), "x_cursor via window -3");
+        assert_eq!(m.state.eval_stack.pop(), Some(7), "y_cursor via window -3");
+        // put_wind_prop(-3, ...) writes the current window too.
+        m.exec_ext(0x19, &[0xFFFD, 15, 42], None, None); // line_count = 42
+        assert_eq!(m.screen.v6.as_ref().unwrap().windows[3].line_count, 42);
+    }
+
+    #[test]
+    fn v6_no_wrap_window_prints_past_its_width() {
+        // Shogun's boot menu: items print into a 1-px-wide caret window
+        // (wrapping OFF, the boot default — frotz seeds attribute=8) and must
+        // paint rightward across the screen, clipped only at the screen edge —
+        // NOT wrap at the window's own width (which turned each item into a
+        // vertical column of glyphs).
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 2, 169, 159, 24, 1);
+        m.print_text("START the game");
+        let w2 = &m.screen.v6.as_ref().unwrap().windows[2];
+        assert_eq!(w2.texts.len(), 1, "one horizontal run, got {:?}", w2.texts);
+        assert_eq!((w2.texts[0].y, w2.texts[0].x), (169, 159));
+        assert_eq!(w2.texts[0].text, "START the game");
+    }
+
+    #[test]
+    fn v6_no_wrap_window_clips_at_screen_edge() {
+        // sample_story(6) has no screen-dims written; write 320 px wide.
+        let mut m = v6_exec_machine();
+        m.mem.write_word(0x22, 320);
+        v6_place_window(&mut m, 2, 1, 305, 24, 1);
+        m.print_text("ABCDEF"); // 6 glyphs from x=305 → only 305,313 fit fully
+        let w2 = &m.screen.v6.as_ref().unwrap().windows[2];
+        let joined: String = w2.texts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(joined, "AB", "chars past the screen edge are dropped, got {:?}", w2.texts);
+    }
+
+    #[test]
+    fn v6_wrapping_attribute_restores_window_width_wrap() {
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 1, 1, 1, 32, 32); // 4 cols wide
+        m.exec_ext(0x12, &[1, 1, 0], None, None); // window_style(win1, wrapping, set)
+        m.print_text("ABCDEF");
+        let w1 = &m.screen.v6.as_ref().unwrap().windows[1];
+        assert_eq!(w1.texts.len(), 2, "wrapped into two runs: {:?}", w1.texts);
+        assert_eq!((w1.texts[0].y, w1.texts[0].x, w1.texts[0].text.as_str()), (1, 1, "ABCD"));
+        assert_eq!((w1.texts[1].y, w1.texts[1].x, w1.texts[1].text.as_str()), (9, 1, "EF"));
+    }
+
+    #[test]
+    fn v6_windows_boot_with_frotz_attributes() {
+        // frotz restart_screen: every window boots with attribute 8 (buffered);
+        // window 0 gets 15 (wrapping+scrolling+scripting+buffering).
+        let m = v6_exec_machine();
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[0].attributes, 15, "window 0 attributes");
+        for i in 1..8 {
+            assert_eq!(v6.windows[i].attributes, 8, "window {i} attributes");
+        }
+    }
+
+    #[test]
+    fn v6_overprint_replaces_covered_glyphs() {
+        // Shogun re-prints its status at the same pixel cursor every turn; the
+        // new glyphs must replace the old ones, not stack on top of them.
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 1, 1, 1, 16, 320);
+        m.print_text("Bridge");
+        // Reset the cursor to the same spot and overprint.
+        m.exec_var(0x0F, &[1, 1], None, None); // set_cursor(y=1, x=1)
+        m.print_text("Chapel");
+        let w1 = &m.screen.v6.as_ref().unwrap().windows[1];
+        let joined: String = w1.texts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(joined, "Chapel", "old run fully covered → removed, got runs: {:?}", w1.texts);
+    }
+
+    #[test]
+    fn v6_overprint_trims_partial_overlap_into_remnant() {
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 1, 1, 1, 16, 320);
+        m.print_text("ABCDEF");
+        // Overprint just the first three glyph cells.
+        m.exec_var(0x0F, &[1, 1], None, None);
+        m.print_text("xyz");
+        let w1 = &m.screen.v6.as_ref().unwrap().windows[1];
+        let mut runs: Vec<(u16, String)> = w1.texts.iter().map(|t| (t.x, t.text.clone())).collect();
+        runs.sort();
+        assert_eq!(
+            runs,
+            vec![(1, "xyz".into()), (1 + 3 * crate::screen::V6_FONT_WIDTH, "DEF".into())],
+            "right remnant keeps its screen x"
+        );
+    }
+
+    #[test]
+    fn v6_erase_window_erases_rect_and_emits_canvas_clear() {
+        // erase_window paints background over the window's CURRENT rect only:
+        // Shogun erases its 1-px caret window without disturbing the menu
+        // items painted around it — but erasing the big window takes them out.
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 2, 169, 24, 24, 274);
+        m.print_text("START the game");
+        // Shrink to the 1-px caret and erase it: runs survive minus one glyph
+        // column at most.
+        m.exec_ext(0x10, &[2, 169, 159], None, None);
+        m.exec_ext(0x11, &[2, 24, 1], None, None);
+        m.pending_pictures.clear();
+        m.exec_var(0x0D, &[2], None, None); // erase_window(2)
+        {
+            let w2 = &m.screen.v6.as_ref().unwrap().windows[2];
+            let joined: String = w2.texts.iter().map(|t| t.text.as_str()).collect();
+            assert!(
+                joined.contains("START"),
+                "menu items painted earlier must survive the caret-rect erase, got {joined:?}"
+            );
+            assert_eq!(
+                m.pending_pictures.last(),
+                Some(&PictureEvent { number: 0, window: 2, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None }),
+                "erase_window rides the picture queue as a number-0 erase"
+            );
+        }
+        // Now grow the window back over the menu and erase: runs go away.
+        m.exec_ext(0x10, &[2, 169, 24], None, None);
+        m.exec_ext(0x11, &[2, 24, 274], None, None);
+        m.exec_var(0x0D, &[2], None, None);
+        let w2 = &m.screen.v6.as_ref().unwrap().windows[2];
+        assert!(w2.texts.is_empty(), "full-rect erase removes the painted runs: {:?}", w2.texts);
     }
 
     #[test]

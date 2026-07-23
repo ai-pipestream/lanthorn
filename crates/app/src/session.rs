@@ -757,6 +757,14 @@ impl GameSession {
     /// window state, the window index is out of range, or (draw only) the
     /// picture fails to resolve.
     fn apply_picture_event(&mut self, ev: &PictureEvent) {
+        // number 0 + erase = a v6 `erase_window`'s canvas-clear, riding the
+        // ordered picture queue (so "erase, then draw the borders" replays in
+        // order). Drop the whole canvas: Shogun's title splash must actually
+        // vanish when the game erases window 7 before drawing the menu frame.
+        if ev.erase && ev.number == 0 {
+            self.pictures_canvas.remove(&ev.window);
+            return;
+        }
         let Some(v6) = self.machine.screen.v6.as_ref() else { return };
         let Some(w) = v6.windows.get(ev.window as usize) else { return };
         // Window 0 is the main scrolling text window: its pictures are INLINE
@@ -3278,7 +3286,9 @@ mod tests {
             v6_win0_chars_seen: 0,
         };
         // The erase path allocates the canvas even without a resolved image.
-        sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 0, y: 0, erase: true, out_chars: 0, margin_after: None });
+        // (number != 0: a real erase_picture — number 0 is the erase_window
+        // canvas-clear sentinel, which removes the canvas instead.)
+        sess.apply_picture_event(&PictureEvent { number: 5, window: 7, x: 0, y: 0, erase: true, out_chars: 0, margin_after: None });
         let c = sess.pictures_canvas.get(&7).expect("erase allocated a canvas");
         assert!(c.img.width() <= 4096 && c.img.height() <= 4096,
             "canvas clamped, got {}x{}", c.img.width(), c.img.height());

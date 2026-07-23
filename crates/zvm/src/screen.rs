@@ -189,15 +189,21 @@ pub struct ZWindow {
     pub fg: ZColour,
     pub bg: ZColour,
     /// Pixel-positioned text runs (grid windows 1–7): each print records the
-    /// exact 1-based pixel cursor it started at, so a pixel-faithful raster can
-    /// draw text where the game put it (e.g. Zork Zero's status text at rows
-    /// 6/14, ON the banner ribbons) instead of snapping to the char grid. The
-    /// char grid above remains the cell-mode fallback. Cleared with the grid.
+    /// exact 1-based pixel position it painted at, so a pixel-faithful raster
+    /// can draw text where the game put it (e.g. Zork Zero's status text at
+    /// rows 6/14, ON the banner ribbons) instead of snapping to the char grid.
+    /// The char grid above remains the cell-mode fallback.
     pub texts: Vec<V6Text>,
 }
 
 /// One pixel-positioned text run in a v6 grid window: `(y, x)` are the 1-based
-/// window-relative pixel coords of the run's first glyph's top-left.
+/// **screen-absolute** pixel coords of the run's first glyph's top-left,
+/// captured at paint time. v6 text is PAINT — once drawn, pixels stay where
+/// they were put regardless of later `move_window`/`window_size` calls
+/// ("window_size does not change the current display", ZMSD §15; Shogun
+/// shrinks its menu window to a 1-px caret AFTER printing the menu items).
+/// A run is only removed or trimmed by later paint over the same pixels
+/// ([`V6Windows::paint_run`]) or an erase ([`V6Windows::erase_screen_rect`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V6Text {
     pub y: u16,
@@ -206,6 +212,13 @@ pub struct V6Text {
     pub style: u8,
     pub fg: ZColour,
     pub bg: ZColour,
+}
+
+impl V6Text {
+    /// Pixel width of this run (fixed-cell font).
+    fn px_w(&self) -> u32 {
+        self.text.chars().count() as u32 * V6_FONT_WIDTH as u32
+    }
 }
 
 impl ZWindow {
@@ -263,12 +276,15 @@ impl ZWindow {
     /// the cell-grid fallback by whole rows (`pixels / V6_FONT_HEIGHT`,
     /// truncated toward zero).
     pub fn scroll_pixels(&mut self, pixels: i16) {
-        let y_size = self.y_size as i32;
+        // Runs are screen-absolute: the scroll region is this window's CURRENT
+        // screen rect; runs shift within it and drop when they leave it.
+        let top = self.y_coord.max(1) as i32;
+        let bottom_edge = top + self.y_size.max(1) as i32 - 1;
         let delta = pixels as i32;
         self.texts.retain_mut(|t| {
             let new_y = t.y as i32 - delta;
             let bottom = new_y + V6_FONT_HEIGHT as i32 - 1;
-            if bottom < 1 || new_y > y_size {
+            if bottom < top || new_y > bottom_edge {
                 false
             } else {
                 t.y = new_y.clamp(1, u16::MAX as i32) as u16;
@@ -285,6 +301,126 @@ impl ZWindow {
 pub struct V6Windows {
     pub windows: [ZWindow; 8],
     pub current: u8, // 0–7
+}
+
+/// Trim `run` against the screen rect `(top, left)..(top+h, left+w)` in pixels:
+/// drop it entirely, keep it, or split it into up-to-two remnants. A glyph is
+/// erased when its 8×8 cell intersects the rect at all (paint replaces whole
+/// glyphs; sub-glyph residue can't be represented as text).
+fn trim_run_against_rect(run: V6Text, top: i32, left: i32, h: i32, w: i32) -> Vec<V6Text> {
+    let ry = run.y as i32;
+    // Vertical band overlap?
+    if ry + V6_FONT_HEIGHT as i32 <= top || ry >= top + h {
+        return vec![run];
+    }
+    let fw = V6_FONT_WIDTH as i32;
+    let rx = run.x as i32;
+    let n = run.text.chars().count() as i32;
+    if rx + n * fw <= left || rx >= left + w {
+        return vec![run];
+    }
+    // Glyph i covers [rx + i*fw, rx + (i+1)*fw); erased iff it intersects
+    // [left, left+w). Chars form one contiguous erased span, leaving at most a
+    // left and a right remnant.
+    let first_erased = ((left - rx).div_euclid(fw)).max(0); // first glyph whose cell intersects
+    let last_erased = (((left + w - 1) - rx).div_euclid(fw)).min(n - 1);
+    if first_erased > last_erased {
+        return vec![run];
+    }
+    let chars: Vec<char> = run.text.chars().collect();
+    let mut out = Vec::new();
+    if first_erased > 0 {
+        out.push(V6Text {
+            y: run.y,
+            x: run.x,
+            text: chars[..first_erased as usize].iter().collect(),
+            style: run.style,
+            fg: run.fg,
+            bg: run.bg,
+        });
+    }
+    if (last_erased as usize) + 1 < chars.len() {
+        out.push(V6Text {
+            y: run.y,
+            x: (rx + (last_erased + 1) * fw) as u16,
+            text: chars[last_erased as usize + 1..].iter().collect(),
+            style: run.style,
+            fg: run.fg,
+            bg: run.bg,
+        });
+    }
+    out
+}
+
+impl V6Windows {
+    /// Paint one text run: erase whatever earlier runs its pixels cover (in
+    /// EVERY window — the screen is one shared raster), then store it on
+    /// window `win`. This is what keeps overprinted status lines legible:
+    /// Shogun re-prints its location/score at the same pixel cursor each turn
+    /// and relies on the new glyphs replacing the old ones.
+    ///
+    /// A glyph only erases underneath where it deposits OPAQUE pixels: any
+    /// glyph over an opaque background paints its whole cell, but a SPACE on a
+    /// transparent background paints nothing — Shogun pads its status fields
+    /// with such spaces, and erasing under them would eat the neighbouring
+    /// labels. (Non-space ink on transparent bg is approximated as covering
+    /// its cell: latest-wins per cell, since a text-run model can't
+    /// overstrike.)
+    pub fn paint_run(&mut self, win: usize, run: V6Text) {
+        if run.text.is_empty() {
+            return;
+        }
+        // Inherited colours (Default / Standard "current"/"default") are
+        // transparent; a real chosen colour paints an opaque block.
+        let bg_opaque = !matches!(run.bg, ZColour::Default | ZColour::Standard(0) | ZColour::Standard(1));
+        let fw = V6_FONT_WIDTH as i32;
+        let mut seg_start: Option<i32> = None; // char index of current erasing segment
+        let chars: Vec<char> = run.text.chars().collect();
+        for i in 0..=chars.len() {
+            let erases = i < chars.len() && (bg_opaque || chars[i] != ' ');
+            match (erases, seg_start) {
+                (true, None) => seg_start = Some(i as i32),
+                (false, Some(s)) => {
+                    self.erase_screen_rect(
+                        run.y as i32,
+                        run.x as i32 + s * fw,
+                        V6_FONT_HEIGHT as i32,
+                        (i as i32 - s) * fw,
+                    );
+                    seg_start = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(w) = self.windows.get_mut(win) {
+            w.texts.push(run);
+        }
+    }
+
+    /// Erase a screen-absolute pixel rect: every stored run (any window) loses
+    /// the glyphs the rect covers. Backs both `paint_run` and `erase_window`
+    /// (which erases the target window's CURRENT screen rect — Shogun erases
+    /// its 1-px caret window without disturbing the menu items painted around
+    /// it earlier).
+    pub fn erase_screen_rect(&mut self, top: i32, left: i32, h: i32, w: i32) {
+        if h <= 0 || w <= 0 {
+            return;
+        }
+        for win in self.windows.iter_mut() {
+            if win.texts.iter().any(|t| {
+                let ty = t.y as i32;
+                let tx = t.x as i32;
+                ty + (V6_FONT_HEIGHT as i32) > top
+                    && ty < top + h
+                    && tx + (t.px_w() as i32) > left
+                    && tx < left + w
+            }) {
+                let old = std::mem::take(&mut win.texts);
+                win.texts =
+                    old.into_iter().flat_map(|t| trim_run_against_rect(t, top, left, h, w)).collect();
+            }
+        }
+    }
 }
 
 /// Structured screen model the host (TUI etc.) reads to render.
@@ -421,6 +557,14 @@ impl StreamState {
             mem.write_word(frame.table_addr, n);
             for (i, &b) in frame.buf.iter().enumerate() {
                 mem.write_byte(frame.table_addr + 2 + i as u32, b);
+            }
+            // ZMSD §7.1.2.1: in v6, deselecting stream 3 stores "the total
+            // width of printing (in units)" in header word $30. Infocom games
+            // MEASURE string widths this way — Shogun prints its status
+            // fields to stream 3 and reads $30 back to right-align them; an
+            // unwritten $30 collapses that math to garbage columns.
+            if mem.version() == 6 {
+                mem.write_word(0x30, n.saturating_mul(V6_FONT_WIDTH));
             }
         }
     }

@@ -248,9 +248,13 @@ pub fn build_chrome_canvas(
                             explicit(t.bg).then(|| packed_to_rgba(t.bg, default_bg, colors)),
                         )
                     };
-                    let py = oy + (t.y.max(1) as u32 - 1);
+                    // Run coords are SCREEN-absolute 1-based pixels stamped at
+                    // paint time (v6 paint semantics) — no window-origin
+                    // offset: the window may have moved/shrunk since (Shogun
+                    // turns its menu window into a 1-px caret after printing).
+                    let py = t.y.max(1) as u32 - 1;
                     for (i, ch) in t.text.chars().enumerate() {
-                        let px = ox + (t.x.max(1) as u32 - 1) + i as u32 * FONT;
+                        let px = (t.x.max(1) as u32 - 1) + i as u32 * FONT;
                         crate::render::bitfont::blit_glyph(&mut canvas, ch, px, py, FONT, FONT, fg, bg);
                     }
                 }

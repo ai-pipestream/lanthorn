@@ -64,8 +64,10 @@ fn advent_z6_boots_and_look_redescribes_via_window_7() {
     };
     let _ = session.take_transcript();
 
-    // The title (and its "[Press any key to start]" screen) wait on
-    // keypresses; a few keys reach the command prompt.
+    // The title screens wait on keypresses; a few keys reach the command
+    // prompt. (NOTE: the Inform v6 library positions text purely by cursor —
+    // its windows all sit at (1,1) with height 0 — so assertions here stay
+    // behavioral; faithful Inform-library window modelling is SQ-0459.)
     assert_eq!(session.pending_input(), InputKind::Char, "advent boots to a keypress title");
     for _ in 0..4 {
         if session.pending_input() == InputKind::Line {
@@ -82,22 +84,16 @@ fn advent_z6_boots_and_look_redescribes_via_window_7() {
         wins.iter().any(|t| t.contains("At End Of Road")),
         "status window should name the opening room, windows: {wins:?}"
     );
-    assert!(
-        wins.iter().any(|t| t.contains("Welcome to Adventure!")),
-        "window 7 should carry the intro banner (Inform v6 library main window)"
-    );
 
-    // Each "look" re-prints the room description into window 7 — assert real
-    // growth with the expected text, two turns in a row (parser + v6 pull
-    // path under Inform codegen).
+    // Each "look" re-paints the room description into the main window (v6
+    // paint semantics: re-prints REPLACE covered glyphs, so total text need
+    // not grow — presence of the description is the signal). Two turns in a
+    // row exercise the parser + v6 pull path under Inform codegen.
     for turn in 0..2 {
-        let before: usize = window_texts(&session).iter().map(String::len).sum();
         let result = session.submit("look");
         assert!(result.fault.is_none(), "look {turn} faulted: {:?}", result.fault);
         assert!(!result.quit, "look {turn} quit");
         let wins = window_texts(&session);
-        let after: usize = wins.iter().map(String::len).sum();
-        assert!(after > before, "look {turn} produced no window text (before={before} after={after})");
         assert!(
             wins.iter().any(|t| t.contains("end of a road before a small brick building")),
             "look {turn} should re-describe End Of Road, windows: {wins:?}"
