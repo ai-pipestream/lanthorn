@@ -435,7 +435,7 @@ impl GameSession {
             let (w, h) = v6_screen_px.unwrap_or((320, 200));
             let cols = (w / zvm::screen::V6_FONT_WIDTH).clamp(1, 255) as u8;
             let rows = (h / zvm::screen::V6_FONT_HEIGHT).clamp(1, 255) as u8;
-            zvm::screen::write_screen_dims(&mut machine.mem, rows, cols);
+            machine.set_screen_dims(rows, cols);
         }
         // Trace from the very first instruction when requested, so the opening
         // run below records boot PCs into `ever_exec_pcs`. Also capture screen

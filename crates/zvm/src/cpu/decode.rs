@@ -190,9 +190,8 @@ fn var_op_sig(opcode: u8, version: u8) -> (bool, bool, bool) {
         0x06 => (false, false, false), // print_num
         0x07 => (true, false, false),  // random (stores)
         0x08 => (false, false, false), // push
-        0x09 => (false, false, false), // pull — variable-operand form (all versions incl. v6:
-                                       // real Infocom v6 stories use this encoding, not the
-                                       // store-form the ZMSD lists for v6; do NOT change to store)
+        0x09 => (false, false, false), // pull (v1-5). v6 always stores — see the
+                                       // dedicated disambiguation after this lookup.
         0x0A => (false, false, false), // split_window
         0x0B => (false, false, false), // set_window
         0x0C => (true, false, false),  // call_vs2 (v4+, stores, uses 2 type bytes)
@@ -421,20 +420,16 @@ pub fn decode(mem: &Memory, pc: u32, version: u8) -> Instr {
     // Look up signature: does this opcode store / branch / carry text?
     let (mut stores, branches, has_text) = get_signature(&operand_count, opcode, version);
 
-    // v6 `pull` disambiguation (ZMSD §15). Two forms share VAR:0x09:
-    //   * `pull (variable)` — v1-5 form, no store byte (destination is the operand).
-    //   * `pull stack -> (result)` — v6 user-stack form, WHICH DOES store its
-    //     popped value.
-    // Infocom's ZILCH encodes the user-stack address as a large constant and the
-    // variable form as a variable/small operand, so key the store byte off the
-    // first operand's type. Missing it mis-reads the store byte as the next
-    // opcode (an invalid 2OP:0x00), silently corrupting all following decode —
-    // exactly the failure that soft-locked v6 direction parsing (SQ-0452).
-    if version == 6
-        && operand_count == OperandCount::Var
-        && opcode == 0x09
-        && matches!(operands.first(), Some(Operand::Large(_)))
-    {
+    // v6 `pull` (ZMSD §15): the instruction is `pull stack -> (result)` — it
+    // ALWAYS carries a store byte in v6, whatever the operand encoding (frotz
+    // z_pull calls store() unconditionally in its V6 branch; user vs game stack
+    // is picked by argument count at execution, not operand type). Missing the
+    // store byte mis-reads it as the next opcode, silently corrupting all
+    // following decode — the failure behind the SQ-0452 parser soft-lock. An
+    // earlier fix keyed this off a Large-constant operand only, which repaired
+    // direction parsing but left Zork Zero's verb path (Var-operand encoding)
+    // corrupted.
+    if version == 6 && operand_count == OperandCount::Var && opcode == 0x09 {
         stores = true;
     }
 
@@ -791,5 +786,49 @@ mod tests {
             assert_eq!(instr.branch.is_some(), branches, "op {op:#04x} branch");
             assert_eq!(instr.next_pc, n as u32,          "op {op:#04x} next_pc");
         }
+    }
+
+    // v6 `pull stack -> (result)` ALWAYS carries a store byte, whatever the
+    // operand encoding — frotz z_pull calls store() unconditionally in its V6
+    // branch and picks user vs game stack by argc, not operand type. Zork Zero's
+    // verb parse path encodes the stack address as a Var operand; keying the
+    // store byte off Operand::Large alone corrupted decode there (SQ-0452).
+    #[test]
+    fn v6_pull_var_operand_has_store_byte() {
+        let mut m = Memory::new(sample_story(6)).unwrap();
+        m.write_byte(0x40, 0xE9);        // VAR:0x09 pull
+        m.write_byte(0x41, 0b10_11_11_11); // type byte: one Var operand
+        m.write_byte(0x42, 0x10);        // operand: global G0 (holds the stack addr)
+        m.write_byte(0x43, 0x07);        // store byte -> var 7
+        let ins = decode(&m, 0x40, 6);
+        assert_eq!(ins.opcode, 0x09);
+        assert_eq!(ins.operands, vec![Operand::Var(0x10)]);
+        assert_eq!(ins.store, Some(0x07), "v6 pull always stores");
+        assert_eq!(ins.next_pc, 0x44);
+    }
+
+    #[test]
+    fn v6_pull_no_operand_has_store_byte() {
+        // Omitted operand = game-stack pop; store byte still present in v6.
+        let mut m = Memory::new(sample_story(6)).unwrap();
+        m.write_byte(0x40, 0xE9);
+        m.write_byte(0x41, 0xFF); // all operands omitted
+        m.write_byte(0x42, 0x07); // store byte
+        let ins = decode(&m, 0x40, 6);
+        assert!(ins.operands.is_empty());
+        assert_eq!(ins.store, Some(0x07));
+        assert_eq!(ins.next_pc, 0x43);
+    }
+
+    #[test]
+    fn v5_pull_var_operand_has_no_store_byte() {
+        // v1-5 form is `pull (variable)` — the operand IS the destination.
+        let mut m = Memory::new(sample_story(5)).unwrap();
+        m.write_byte(0x40, 0xE9);
+        m.write_byte(0x41, 0b10_11_11_11);
+        m.write_byte(0x42, 0x10);
+        let ins = decode(&m, 0x40, 5);
+        assert_eq!(ins.store, None, "v1-5 pull must not eat a store byte");
+        assert_eq!(ins.next_pc, 0x43);
     }
 }

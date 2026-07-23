@@ -104,18 +104,26 @@ pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
                     let idx = (zc - 6) as usize;
                     // A2 newline (idx 1) is special and is never taken from a custom
                     // table; A2 escape (idx 0) is already handled above.
-                    let ch = match custom {
+                    match custom {
                         Some(tbl) if !(alphabet == 2 && idx == 1) => {
+                            // The table holds ZSCII codes (ZMSD §3.5.5), which
+                            // take the same §3.8 output translation as the
+                            // 10-bit escape above — a raw char cast leaks
+                            // control chars (Shogun places ZSCII 11, the
+                            // sentence gap, in an alphabet slot).
                             let row = alphabet as u32;
-                            mem.read_byte(tbl + row * 26 + idx as u32)
+                            let zscii = mem.read_byte(tbl + row * 26 + idx as u32) as u16;
+                            result.push(mem.unicode_char(zscii).unwrap_or_else(|| zscii_to_char(zscii)));
                         }
-                        _ => match alphabet {
-                            0 => A0[idx],
-                            1 => A1[idx],
-                            _ => A2[idx],
-                        },
-                    };
-                    result.push(ch as char);
+                        _ => {
+                            let ch = match alphabet {
+                                0 => A0[idx],
+                                1 => A1[idx],
+                                _ => A2[idx],
+                            };
+                            result.push(ch as char);
+                        }
+                    }
                     alphabet = 0;
                 }
             }
@@ -147,10 +155,14 @@ const UNICODE_TABLE: [char; 69] = [
 /// emits it between sentences in its boxed description. Rendering it as a space
 /// matches that (a blank column showing the current background) instead of the
 /// stray '?' the generic fallback would print.
+/// ZSCII 9 (tab) and 11 (sentence gap) → ' ': printable in v6 output
+/// (ZMSD §3.8.2.3-4); Frotz displays both as spacing (Shogun's prose uses 11
+/// between sentences). Never the raw control char — that panics terminal
+/// rendering downstream.
 /// Everything else maps to '?'.
 pub fn zscii_to_char(zscii: u16) -> char {
     match zscii {
-        10 => ' ',
+        9..=11 => ' ',
         13 => '\n',
         32..=126 => zscii as u8 as char,
         155..=223 => UNICODE_TABLE[(zscii - 155) as usize],
@@ -334,6 +346,44 @@ mod tests {
         m.write_word(0x0100, w);
         let (s, _end) = decode_string(&m, 0x0100);
         assert_eq!(s, "z", "custom A0[0] should decode to 'z' not the default 'a'");
+    }
+
+    #[test]
+    fn custom_alphabet_bytes_are_zscii_codes_not_raw_chars() {
+        // ZMSD §3.5.5: a custom alphabet table holds ZSCII codes, which must go
+        // through the §3.8 output translation like any other printed ZSCII —
+        // NOT be cast to a char raw. Shogun's table puts ZSCII 11 (sentence
+        // gap) in an alphabet slot; the raw cast leaked '\u{b}' into every
+        // prose string and panicked ratatui's cell_width debug assert (SQ-0456).
+        // A code ≥155 cast raw is a C1 control char instead of its accent.
+        let mut bytes = sample_story(6);
+        let tbl: usize = 0x0200;
+        bytes[0x34] = (tbl >> 8) as u8;
+        bytes[0x35] = (tbl & 0xFF) as u8;
+        let mut a0 = *b"abcdefghijklmnopqrstuvwxyz";
+        a0[0] = 11; // ZSCII 11 = sentence gap
+        a0[1] = 155; // ZSCII 155 = 'ä' via the default Unicode table
+        let a1 = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let a2 = b"\x00\n0123456789.,!?_#'\"/\\-:()";
+        for (i, &c) in a0.iter().enumerate() { bytes[tbl + i] = c; }
+        for (i, &c) in a1.iter().enumerate() { bytes[tbl + 26 + i] = c; }
+        for (i, &c) in a2.iter().enumerate() { bytes[tbl + 52 + i] = c; }
+        let mut m = Memory::new(bytes).unwrap();
+        // Z-chars: 6 (A0[0] = ZSCII 11), 7 (A0[1] = ZSCII 155), pad 5.
+        let w: u16 = 0x8000 | (6 << 10) | (7 << 5) | 5;
+        m.write_word(0x0100, w);
+        let (s, _end) = decode_string(&m, 0x0100);
+        assert_eq!(s, " ä", "table bytes must be ZSCII-translated: 11 → space, 155 → ä");
+    }
+
+    #[test]
+    fn zscii_tab_and_sentence_gap_render_as_spaces() {
+        // ZMSD §3.8.2.3-4: ZSCII 9 (tab) and 11 (sentence gap) are printable in
+        // v6 output. Frotz displays both as spacing (its curses layer expands
+        // them to runs of spaces); a space, never '?', and never the raw
+        // control char.
+        assert_eq!(zscii_to_char(9), ' ');
+        assert_eq!(zscii_to_char(11), ' ');
     }
 
     #[test]

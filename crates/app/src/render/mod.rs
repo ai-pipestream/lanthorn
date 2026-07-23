@@ -145,6 +145,9 @@ pub fn draw_char_clipped(
     if x < area.x || x >= area.right() || y < area.y || y >= area.bottom() {
         return;
     }
+    // Ratatui's low-level cell API doesn't filter control chars (its debug
+    // build asserts on them); game text is untrusted, so blank them here.
+    let ch = if ch.is_control() { ' ' } else { ch };
     if let Some(cell) = buf.cell_mut((x, y)) {
         let mut s = [0u8; 4];
         cell.set_symbol(ch.encode_utf8(&mut s)).set_style(style);
@@ -178,6 +181,8 @@ pub fn put_char(buf: &mut Buffer, x: i32, y: i32, ch: char, style: Style, area: 
     if x < area.x as i32 || x >= area.right() as i32 || y < area.y as i32 || y >= area.bottom() as i32 {
         return;
     }
+    // Same control-char guard as draw_char_clipped (untrusted game text).
+    let ch = if ch.is_control() { ' ' } else { ch };
     if let Some(cell) = buf.cell_mut((x as u16, y as u16)) {
         let mut s = [0u8; 4];
         cell.set_symbol(ch.encode_utf8(&mut s)).set_style(style);

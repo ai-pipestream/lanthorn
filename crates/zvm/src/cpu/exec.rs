@@ -297,14 +297,28 @@ impl Machine {
             call_routine(&mut state, &mut mem, main_packed, &[], None);
             // ZMSD §8.8.1: coordinates are 1-based with (1,1) top-left, and
             // "all eight windows begin at (1,1)"; each window's cursor likewise
-            // starts at its own (1,1).
+            // starts at its own (1,1). Frotz restart_screen also seeds every
+            // window's font props: font = TEXT_FONT (1) and font_size =
+            // (font_height << 8) | font_width — games read the width back out
+            // of prop 13 for layout math (Shogun sizes its READ input buffer
+            // with it; 0 there means zero-length input forever).
             let mut v6 = V6Windows::default();
             for w in v6.windows.iter_mut() {
                 w.y_coord = 1;
                 w.x_coord = 1;
                 w.y_cursor = 1;
                 w.x_cursor = 1;
+                w.font_number = 1;
+                w.font_size =
+                    (crate::screen::V6_FONT_HEIGHT << 8) | crate::screen::V6_FONT_WIDTH;
             }
+            // Frotz restart_screen also gives windows 0 and 1 the full screen
+            // width (pixels in v6) — games read it back via get_wind_prop
+            // before ever calling window_size. Reseeded with the real screen
+            // size by `set_screen_dims` when the host reports it.
+            let width = crate::screen::DEFAULT_SCREEN_COLS as u16 * crate::screen::V6_FONT_WIDTH;
+            v6.windows[0].x_size = width;
+            v6.windows[1].x_size = width;
             screen.v6 = Some(v6);
         }
 
@@ -364,6 +378,22 @@ impl Machine {
         init_header_caps(&mut self.mem, self.honor_game_colours, self.sound_available, self.interpreter_number);
         // Communicate the initial buffer_mode state (false = off) to the sink.
         self.out.set_buffer_mode(self.screen.buffer_mode);
+    }
+
+    /// Report the screen size to the story: writes the header dimension fields
+    /// (see [`write_screen_dims`]) and, for v6, reseeds windows 0 and 1 with
+    /// the new screen width in pixels (frotz restart_screen) so games that
+    /// read window widths via `get_wind_prop` before sizing anything see the
+    /// real screen, not the boot-time default.
+    pub fn set_screen_dims(&mut self, rows: u8, cols: u8) {
+        crate::screen::write_screen_dims(&mut self.mem, rows, cols);
+        if self.mem.version() == 6 {
+            if let Some(v6) = self.screen.v6.as_mut() {
+                let width = cols.max(1) as u16 * crate::screen::V6_FONT_WIDTH;
+                v6.windows[0].x_size = width;
+                v6.windows[1].x_size = width;
+            }
+        }
     }
 
     /// Record a mouse click at game-pixel `(y, x)` (1-based, ZMSD §8.8.1: "the
@@ -529,25 +559,27 @@ impl Machine {
     // -----------------------------------------------------------------------
 
     fn execute(&mut self, instr: Instr) -> StepResult {
-        // v6 user-stack `pull` (ZMSD §15, frotz z_pull v6 branch): when `pull`'s
-        // single operand is a raw address constant it names a *user* stack — pop
-        // one word off it (bump the free-slot count, read the freed slot) and
-        // store the popped value to this instruction's store variable (the decoder
-        // reads the store byte for exactly this large-constant form; see decode.rs).
-        // The v1-5 variable form (Small/Var operand = destination variable, game
-        // stack) is left to the normal 0x09 handler below.
+        // v6 `pull stack -> (result)` (ZMSD §15, frotz z_pull V6 branch): with an
+        // operand — of ANY encoding, resolved like every other operand — its value
+        // is a *user*-stack address: pop one word off it (bump the free-slot
+        // count, read the freed slot). With no operand, pop the game stack. In
+        // both cases store the popped value (the decoder always reads the store
+        // byte for v6 pull; see decode.rs). The v1-5 form (operand = destination
+        // variable) is handled by the normal 0x09 arm below.
         if matches!(instr.operand_count, OperandCount::Var)
             && instr.opcode == 0x09
             && self.mem.version() == 6
         {
-            if let Some(&Operand::Large(addr16)) = instr.operands.first() {
-                let addr = addr16 as u32;
+            let value = if let Some(op) = instr.operands.first() {
+                let addr = self.resolve(op) as u32;
                 let size = self.mem.read_word(addr).wrapping_add(1);
                 self.mem.write_word(addr, size);
-                let value = self.mem.read_word(addr.wrapping_add(2u32.wrapping_mul(size as u32)));
-                self.do_store(instr.store, value);
-                return StepResult::Continue;
-            }
+                self.mem.read_word(addr.wrapping_add(2u32.wrapping_mul(size as u32)))
+            } else {
+                read_var(&mut self.state, &self.mem, 0) // pop the game stack
+            };
+            self.do_store(instr.store, value);
+            return StepResult::Continue;
         }
 
         // Resolve all operands left-to-right (Var operands can pop the stack).
@@ -1451,10 +1483,18 @@ impl Machine {
                 StepResult::Continue
             }
             // VAR:0x10 get_cursor — write (row, col) of the upper-window cursor into a 2-word array.
+            // v6 (frotz z_get_cursor): the CURRENT window's pixel cursor, verbatim —
+            // the non-v6 screen cursor fields are never updated by the v6 path.
             0x10 => {
                 let array = ops.first().copied().unwrap_or(0) as u32;
-                self.mem.write_word(array, self.screen.cursor_row);
-                self.mem.write_word(array + 2, self.screen.cursor_col);
+                if let Some(v6) = self.screen.v6.as_ref() {
+                    let w = &v6.windows[(v6.current as usize).min(7)];
+                    self.mem.write_word(array, w.y_cursor);
+                    self.mem.write_word(array + 2, w.x_cursor);
+                } else {
+                    self.mem.write_word(array, self.screen.cursor_row);
+                    self.mem.write_word(array + 2, self.screen.cursor_col);
+                }
                 StepResult::Continue
             }
             // VAR:0x17 scan_table — search a table for x; store match address (0 if none), branch if found.
@@ -7175,6 +7215,48 @@ pub(crate) mod tests {
         let w = &m.screen.v6.as_ref().unwrap().windows[3];
         for n in 0..16u16 {
             assert_eq!(w.get_prop(n), 100 + n, "prop {n}");
+        }
+    }
+
+    #[test]
+    fn v6_get_cursor_reads_current_window_pixel_cursor() {
+        // Frotz z_get_cursor: in V6 the current window's pixel cursor is stored
+        // verbatim (no grid conversion). Before the fix this always wrote the
+        // non-v6 screen cursor fields, which v6 never updates — (0,0).
+        let mut m = v6_exec_machine();
+        m.exec_var(0x0B, &[3], None, None); // set_window(3)
+        m.screen.v6.as_mut().unwrap().windows[3].y_cursor = 57;
+        m.screen.v6.as_mut().unwrap().windows[3].x_cursor = 123;
+        m.exec_var(0x10, &[0x0100], None, None); // get_cursor -> array at 0x0100
+        assert_eq!(m.mem.read_word(0x0100), 57, "word 0 = y cursor in pixels");
+        assert_eq!(m.mem.read_word(0x0102), 123, "word 1 = x cursor in pixels");
+    }
+
+    #[test]
+    fn v6_windows_boot_seed_screen_width() {
+        // Frotz restart_screen: windows 0 and 1 boot with x_size = screen width
+        // (pixels in v6); games read it back via get_wind_prop(win, 3) for
+        // layout math before ever calling window_size.
+        let m = v6_exec_machine();
+        let v6 = m.screen.v6.as_ref().unwrap();
+        let width = crate::screen::DEFAULT_SCREEN_COLS as u16 * crate::screen::V6_FONT_WIDTH;
+        assert_eq!(v6.windows[0].x_size, width, "window 0 x_size = screen width px");
+        assert_eq!(v6.windows[1].x_size, width, "window 1 x_size = screen width px");
+        assert_eq!(v6.windows[2].x_size, 0, "other windows stay unsized (frotz)");
+    }
+
+    #[test]
+    fn v6_windows_boot_with_font_number_and_size() {
+        // Frotz restart_screen: every v6 window starts with font = TEXT_FONT (1)
+        // and font_size = (font_height << 8) | font_width. Shogun reads the
+        // width out of window prop 13 at boot to size its READ input buffer —
+        // a zero here becomes max-input-length 0 and every command turns into
+        // "[I beg your pardon?]".
+        let m = v6_exec_machine();
+        let expected = (crate::screen::V6_FONT_HEIGHT << 8) | crate::screen::V6_FONT_WIDTH;
+        for (i, w) in m.screen.v6.as_ref().unwrap().windows.iter().enumerate() {
+            assert_eq!(w.get_prop(12), 1, "window {i} font number");
+            assert_eq!(w.get_prop(13), expected, "window {i} font size (height<<8 | width)");
         }
     }
 

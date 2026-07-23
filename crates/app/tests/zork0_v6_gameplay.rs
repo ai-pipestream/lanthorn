@@ -284,13 +284,26 @@ fn zork0_v6_gameplay_look_then_commands_dispatch_normally() {
             "turn {turn}: expected a line prompt (typed commands must dispatch, not soft-lock the fkey screen) before {cmd:?}"
         );
         let result = session.submit(cmd);
-        let transcript = session.take_transcript();
+        // `submit` drains the sink into `result.transcript` — a later
+        // `take_transcript()` returns "" and would make these assertions
+        // vacuous (the weak oracle that let SQ-0452 ship half-fixed).
+        let transcript = &result.transcript;
         assert!(!result.quit, "turn {turn} ({cmd:?}) quit the game");
         assert!(result.fault.is_none(), "turn {turn} ({cmd:?}) faulted: {:?}", result.fault);
         assert!(
-            !function_key_screen_showing(&session, &transcript),
+            !transcript.contains("too complicated"),
+            "turn {turn} ({cmd:?}) failed to parse — the SQ-0452 v6 pull store-byte bug: {transcript:?}"
+        );
+        assert!(
+            !function_key_screen_showing(&session, transcript),
             "turn {turn} ({cmd:?}) fell into the Function Key screen (SQ-0452 phantom V-DEFINE)"
         );
+        if turn == 0 {
+            assert!(
+                transcript.contains("Banquet Hall"),
+                "\"look\" must re-describe the room, got: {transcript:?}"
+            );
+        }
     }
 }
 
@@ -317,11 +330,17 @@ fn zork0_v6_gameplay_move_then_commands_dispatch_normally() {
             "turn {turn}: expected a line prompt before the move/command {cmd:?} (directions must dispatch, not soft-lock)"
         );
         let result = session.submit(cmd);
-        let transcript = session.take_transcript();
+        // Assert on `result.transcript` — `take_transcript()` after `submit`
+        // is always empty (already drained) and made the old check vacuous.
+        let transcript = &result.transcript;
         assert!(!result.quit, "turn {turn} ({cmd:?}) quit the game");
         assert!(result.fault.is_none(), "turn {turn} ({cmd:?}) faulted: {:?}", result.fault);
         assert!(
-            !function_key_screen_showing(&session, &transcript),
+            !transcript.contains("too complicated"),
+            "turn {turn} ({cmd:?}) failed to parse — the SQ-0452 v6 pull store-byte bug: {transcript:?}"
+        );
+        assert!(
+            !function_key_screen_showing(&session, transcript),
             "turn {turn} ({cmd:?}) fell into the Function Key screen (SQ-0452 direction-path soft-lock)"
         );
     }

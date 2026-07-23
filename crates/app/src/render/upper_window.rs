@@ -236,7 +236,9 @@ pub fn draw_grid(
                     links.push(((bx, by), cell.link));
                 }
                 let mut ch_buf = [0u8; 4];
-                buf_cell.set_symbol(cell.ch.encode_utf8(&mut ch_buf)).set_style(style);
+                // Control chars would trip ratatui's cell_width debug assert.
+                let ch = if cell.ch.is_control() { ' ' } else { cell.ch };
+                buf_cell.set_symbol(ch.encode_utf8(&mut ch_buf)).set_style(style);
             }
         }
     }
@@ -309,7 +311,9 @@ pub fn draw_grid_transparent(
                     links.push(((bx, by), cell.link));
                 }
                 let mut ch_buf = [0u8; 4];
-                buf_cell.set_symbol(cell.ch.encode_utf8(&mut ch_buf)).set_style(style);
+                // Control chars would trip ratatui's cell_width debug assert.
+                let ch = if cell.ch.is_control() { ' ' } else { cell.ch };
+                buf_cell.set_symbol(ch.encode_utf8(&mut ch_buf)).set_style(style);
             }
         }
     }
