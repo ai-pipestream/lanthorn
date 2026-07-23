@@ -298,6 +298,14 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("input_prompt", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("upper_window_border", Section::Elements, Kind::Style, Some("line"), Delta::EMPTY),
     row("room_panel", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    // ── command palette (SQ-0419) — reuses the dialog chrome; these style its
+    // rows. `palette_match` highlights the fuzzy-matched characters; `palette_selected`
+    // is the highlighted row; `palette_query` is the input line. ──────────────
+    row("palette_query", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("palette_name", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("palette_match", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
+    row("palette_desc", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("palette_selected", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
 ]);
 
 #[cfg(test)]
@@ -430,6 +438,11 @@ mod tests {
         "input_prompt",
         "upper_window_border",
         "room_panel",
+        "palette_query",
+        "palette_name",
+        "palette_match",
+        "palette_desc",
+        "palette_selected",
     ];
 
     #[test]

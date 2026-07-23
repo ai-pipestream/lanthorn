@@ -31,6 +31,7 @@ use app::render::hotkeys::draw_hotkey_dialog;
 use app::render::launch_dialog::{
     draw_launch_dialog, launch_dialog_key_focused, LaunchDialogAction, LaunchDialogRects,
 };
+use app::render::palette::draw_palette;
 use app::render::quit_dialog::{draw_quit_dialog, quit_dialog_key_focused, QuitDialogAction, QuitDialogRects};
 use app::render::reset_dialog::{draw_reset_dialog, reset_dialog_key_focused, ResetDialogAction, ResetDialogRects};
 use app::render::save_name_dialog::{draw_save_name_dialog, save_name_dialog_key, SaveNameAction, SaveNameDialogRects};
@@ -79,6 +80,7 @@ pub(crate) fn draw_all(
     buf: &mut Buffer,
     dialog_seed: Option<DialogRects>,
     modal_list_viewport: &mut usize,
+    palette_hits: &mut Vec<(usize, Rect)>,
 ) -> OverlayRects {
     let mut out = OverlayRects {
         dialog: dialog_seed,
@@ -141,6 +143,11 @@ pub(crate) fn draw_all(
         if ov.is_open(&state.overlays) {
             ov.draw(state, dialog_area, buf, &mut out);
         }
+    }
+
+    // ── Command palette popup — drawn over everything (SQ-0419) ────────────
+    if state.overlays.palette.is_some() {
+        out.dialog = draw_palette(state, dialog_area, buf, modal_list_viewport, palette_hits);
     }
 
     // ── Hints panel overlay — drawn after the common dialogs ───────────────

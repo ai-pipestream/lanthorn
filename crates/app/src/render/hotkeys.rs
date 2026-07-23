@@ -46,7 +46,9 @@ pub fn draw_hotkey_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
     ];
 
     let prefix_label = state.hotkeys.prefix.label();
-    let title = format!("Commands ({prefix_label}: close)");
+    // Advertise the command-palette transition ('/' promotes this dialog into the
+    // fuzzy command palette — SQ-0419) alongside the close hint.
+    let title = format!("Commands ({prefix_label}: close  /: palette)");
 
     let spec = DialogSpec {
         title: title.as_str(),
@@ -206,6 +208,18 @@ mod tests {
         let text = buf_text(&buf);
         // Footer or title should show close hint
         assert!(text.contains("close") || text.contains("q"), "expected close hint");
+    }
+
+    #[test]
+    fn draw_hotkey_dialog_advertises_palette_transition() {
+        // The '/' → command palette hint must be discoverable in the dialog (SQ-0419).
+        let mut state = AppState::default();
+        state.overlays.hotkey_dialog = true;
+        let area = Rect::new(0, 0, 80, 40);
+        let mut buf = Buffer::empty(area);
+        draw_hotkey_dialog(&state, area, &mut buf);
+        let text = buf_text(&buf);
+        assert!(text.contains("palette"), "expected a '/: palette' hint in the hotkey dialog");
     }
 
     #[test]

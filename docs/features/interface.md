@@ -107,6 +107,16 @@ built-in debugger that follows the running story instruction by instruction.
   grouped by category; `/help <command>` shows one command's usage and
   description. Names Tab-autocomplete, and feedback stays quiet on the status
   line.
+- **Command palette** — a fuzzy-searchable popup over *every* registry command,
+  reachable even where no prompt exists (modals, the debug pane). Press `/` at an
+  empty story prompt, or `/` inside the leader dialog (`Ctrl+P`), to summon it.
+  It owns its own input line: type to filter — matching is subsequence fuzzy,
+  ranked prefix › word-boundary › scattered, with the matched characters lit up —
+  then keep typing past the command name to pass arguments. **↑/↓** move the
+  selection (wrapping), **Tab** completes the highlighted name, **Enter** runs it
+  (through the same dispatch a typed command uses), and **Esc** closes — returning
+  to the leader dialog when that's where you came from, or to your untouched
+  prompt otherwise. Click a row to run it, wheel to scroll, `[X]`/outside to close.
 - **Transcript search / filter / export** — `/search-transcript <query>`
   highlights matches (case-insensitive) and lands on the most recent; `n`/`N`
   step back/forward (configurable), `Esc` clears. A bare `/search-transcript`

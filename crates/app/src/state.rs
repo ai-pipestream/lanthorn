@@ -790,6 +790,65 @@ impl FilePickerState {
     }
 }
 
+// ── Command palette state ───────────────────────────────────────────────────────
+
+/// Transient state for the command-palette popup (SQ-0419): a fuzzy-searchable
+/// list of every registry command, usable even where no text prompt exists
+/// (modal / debug views). `None` in `AppState.overlays.palette` = closed.
+///
+/// The palette owns its own input line ([`input`](Self::input)): its first
+/// whitespace token is the fuzzy *query* that filters commands; anything after it
+/// is passed to the chosen command as *arguments*. Enter runs the selected
+/// candidate with those args through the normal slash dispatch path; Esc closes.
+#[derive(Debug, Clone)]
+pub struct PaletteState {
+    /// The palette's own editable line (query + optional args), with a caret.
+    pub input: crate::text_field::TextField,
+    /// Selection + animated scroll over the current filtered candidate list.
+    pub scroll: crate::list_scroll::ListScroll,
+    /// True when the palette was promoted from the hotkey (leader) dialog by
+    /// pressing `/`; Esc then returns to that dialog instead of closing outright.
+    pub from_hotkey: bool,
+}
+
+impl PaletteState {
+    /// Open an empty palette. `from_hotkey` records whether it was promoted from
+    /// the leader dialog (so Esc returns there).
+    pub fn new(from_hotkey: bool) -> PaletteState {
+        PaletteState {
+            input: crate::text_field::TextField::new(String::new()),
+            scroll: crate::list_scroll::ListScroll::new(),
+            from_hotkey,
+        }
+    }
+
+    /// The fuzzy query: the first whitespace-delimited token of the input line.
+    pub fn query(&self) -> &str {
+        self.input.value.split_whitespace().next().unwrap_or("")
+    }
+
+    /// The argument string passed to the chosen command: everything after the
+    /// first token (leading whitespace trimmed). Empty when only a query is typed.
+    pub fn args(&self) -> &str {
+        let v = &self.input.value;
+        match v.find(char::is_whitespace) {
+            Some(sp) => v[sp..].trim_start(),
+            None => "",
+        }
+    }
+
+    /// The command line to execute for command `name`: the command name plus any
+    /// typed arguments (`"name"` when there are none).
+    pub fn command_line(&self, name: &str) -> String {
+        let args = self.args();
+        if args.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name} {args}")
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Game,
@@ -1191,6 +1250,9 @@ pub struct OverlayState {
     pub file_picker: Option<FilePickerState>,
     /// Active verb/item token-palette modal state. `None` means the modal is closed.
     pub verb_menu: Option<VerbMenuState>,
+    /// Active command-palette popup state (fuzzy slash-command search). `None`
+    /// means the palette is closed. (SQ-0419)
+    pub palette: Option<PaletteState>,
     /// Active config-screen modal state. `None` means the screen is closed.
     pub config_screen: Option<ConfigScreenState>,
     /// Active rewind/replay modal state. `None` means the modal is closed.
@@ -2100,6 +2162,7 @@ impl AppState {
             || self.overlays.file_picker.is_some()
             || self.overlays.config_screen.is_some()
             || self.overlays.verb_menu.is_some()
+            || self.overlays.palette.is_some()
             || self.overlays.hotkey_dialog
             || self.room_panel.is_some()
             || self.tidy_anim.is_some()

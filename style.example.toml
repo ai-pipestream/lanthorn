@@ -75,6 +75,11 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # input_prompt = { parent = "text" }
 # upper_window_border = { parent = "line" }
 # room_panel = { parent = "accent", reversed = true }
+# palette_query = { parent = "text" }
+# palette_name = { parent = "text" }
+# palette_match = { parent = "accent", bold = true }
+# palette_desc = { parent = "muted" }
+# palette_selected = { parent = "accent", reversed = true }
 
 # ── The 11 Glk styles for text-buffer windows (base: text).
 [glk.buffer]

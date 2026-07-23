@@ -237,6 +237,9 @@ struct PaneRects {
     pub hints_panel: Option<HintsPanelRects>,
     /// Hit-rects for the verb dock's token rows and section headers (when open).
     pub verb_menu: app::render::verbmenu::VerbMenuHits,
+    /// Hit-rects for the command palette's candidate rows, as `(cmd_index, rect)`;
+    /// the mouse handler hit-tests these to execute a command on click. (SQ-0419)
+    pub palette: Vec<(usize, Rect)>,
     /// Per-frame map from rendered story-pane cell `(col, row)` → Glk hyperlink
     /// value. Built during transcript render; the mouse handler hit-tests these
     /// on click to deliver the hyperlink event. Empty when nothing on screen is
@@ -300,6 +303,7 @@ fn draw_frame(
     let mut dialog_rects_out: Option<DialogRects> = None;
     let mut overlay_rects: Option<overlays::OverlayRects> = None;
     let mut verb_hits = app::render::verbmenu::VerbMenuHits::default();
+    let mut palette_hits: Vec<(usize, Rect)> = Vec::new();
     let mut modal_list_viewport: usize = 0;
     let mut transcript_max_scroll: u16 = 0;
     let mut transcript_viewport_rows: u16 = 0;
@@ -687,6 +691,7 @@ fn draw_frame(
             buf,
             dialog_rects_out.take(),
             &mut modal_list_viewport,
+            &mut palette_hits,
         ));
 
         // Story-pane text-selection highlight + copy extraction now happen inside
@@ -709,7 +714,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, verb_menu: verb_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, verb_menu: verb_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -900,7 +905,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, verb_menu: Default::default(), transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_total_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, verb_menu: Default::default(), palette: Vec::new(), transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_total_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1943,6 +1948,8 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     KeyResolve::Action(a) => a,
                     KeyResolve::Command(s, ctx) => {
                         let close_leader = state.overlays.hotkey_dialog;
+                        // A palette-resolved command closes the palette after it runs.
+                        let close_palette = state.overlays.palette.is_some();
                         let outcome = slash::parse_in_context(&s, state.config.command_prefix, ctx);
                         let should_break = dispatch_slash_outcome(
                             outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
@@ -1951,6 +1958,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         );
                         if close_leader {
                             state.overlays.hotkey_dialog = false;
+                        }
+                        if close_palette {
+                            state.overlays.palette = None;
                         }
                         lifecycle::flush_pending_config_write(&mut state);
                         if should_break {
@@ -2026,6 +2036,57 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                 continue 'event_loop;
                             }
                         }
+                    }
+                }
+                // Command palette popup (SQ-0419): a row click executes that
+                // command; the wheel scrolls the list; [X] / outside-click close.
+                // A click elsewhere inside the dialog (input field, footer) is
+                // swallowed so the popup stays open. Owns the mouse while open.
+                if state.overlays.palette.is_some() {
+                    use crossterm::event::{MouseButton, MouseEventKind};
+                    match m.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let pt = ratatui::layout::Position { x: m.column, y: m.row };
+                            if let Some(&(cmd_index, _)) =
+                                last_panes.palette.iter().find(|(_, r)| r.contains(pt))
+                            {
+                                let spec = &app::slash::COMMANDS[cmd_index];
+                                let cmd = state
+                                    .overlays
+                                    .palette
+                                    .as_ref()
+                                    .map(|p| p.command_line(spec.name))
+                                    .unwrap_or_else(|| spec.name.to_string());
+                                state.overlays.palette = None;
+                                let outcome =
+                                    slash::parse_in_context(&cmd, state.config.command_prefix, spec.context);
+                                let should_break = dispatch_slash_outcome(
+                                    outcome, &mut state, &mut mapper, &mut *session, &mut style_watcher,
+                                    &game_dir, &ifid, &arc_file, &story_bytes, &story_path,
+                                    last_panes.map, last_panes.story, true,
+                                );
+                                lifecycle::flush_pending_config_write(&mut state);
+                                if should_break {
+                                    break 'event_loop state.exit_target.into();
+                                }
+                                continue 'event_loop;
+                            }
+                            // Not a row: close on [X] or a click outside the dialog;
+                            // swallow clicks landing elsewhere inside the popup.
+                            let close_x = last_panes.dialog.as_ref().and_then(|d| d.close).is_some_and(|r| r.contains(pt));
+                            let inside = last_panes.dialog.as_ref().is_some_and(|d| d.area.contains(pt));
+                            if close_x || !inside {
+                                apply_action(Action::PaletteClose, &mut state, &mut mapper);
+                            }
+                            continue 'event_loop;
+                        }
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                            if let Some(d) = app::input::wheel_delta(m.kind, state.config.mouse_wheel_invert) {
+                                apply_action(Action::PaletteNav(d as i32), &mut state, &mut mapper);
+                            }
+                            continue 'event_loop;
+                        }
+                        _ => continue 'event_loop,
                     }
                 }
                 // Map layer tab: a left-click on a layer tab selects that layer as the

@@ -230,6 +230,22 @@ pub enum Action {
     OpenHotkeyDialog,
     /// Close the hotkey dialog overlay.
     CloseHotkeyDialog,
+    /// Open the command palette popup (SQ-0419). `from_hotkey` = promoted from the
+    /// leader dialog by pressing `/` (Esc returns there); otherwise promoted from
+    /// the story prompt or opened cold in a modal/debug view.
+    OpenCommandPalette { from_hotkey: bool },
+    /// Move the palette selection by `delta` rows, wrapping at the ends.
+    PaletteNav(i32),
+    /// Append a character to the palette input line.
+    PaletteChar(char),
+    /// Delete the char before the palette caret.
+    PaletteBackspace,
+    /// Complete the palette input's first token to the selected command's name
+    /// (Tab), preserving any typed arguments.
+    PaletteComplete,
+    /// Close the palette without executing (Esc / [X] / outside click). Returns to
+    /// the hotkey dialog when the palette was promoted from it.
+    PaletteClose,
     /// Open the saves-manager modal (loads the save list).
     OpenSaves,
     /// Navigate the saves list by delta (-1 = up, +1 = down).
@@ -437,6 +453,15 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     }
     if state.overlays.file_browser.is_some() {
         return KeyResolve::Action(filebrowser_key_to_action(key));
+    }
+    // 6.5b. Command palette popup (SQ-0419): owns all keys while open. Typing
+    // filters; Up/Down (+ Shift-Tab reverse) move the selection; Tab completes the
+    // selected name; Enter executes it (with any typed args) through the slash
+    // dispatch path; Esc closes. Placed at the top of the modal ladder because it
+    // can be summoned over any other view (incl. the debug pane where no prompt
+    // exists).
+    if state.overlays.palette.is_some() {
+        return palette_key_to_command(state, key);
     }
     // 6.6. Resize mode: Tab cycles the target pane, arrows adjust it, 0 resets,
     // Esc/Enter exits. Placed ABOVE the verb-menu intercept (SQ-0238) so resize
@@ -1035,6 +1060,15 @@ pub fn mouse_to_action(
 /// fire the bound command. The dialog closes itself when a sub-mode
 /// opens (handled in apply_action).
 fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> KeyResolve {
+    // '/' promotes the leader dialog into the command palette (SQ-0419). Checked
+    // before the leader-letter lookup below, which would otherwise treat '/' as an
+    // unbound letter and just close the dialog.
+    if let KeyCode::Char('/') = key.code {
+        if !key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT) {
+            return KeyResolve::Action(Action::OpenCommandPalette { from_hotkey: true });
+        }
+    }
+
     // ESC or Enter always closes the hotkey dialog (same as [X] / [Done]).
     // Enter is handled before the leader-letter lookup to prevent the
     // Anim/AnimExit binding from firing when the hotkey dialog is open.
@@ -1070,6 +1104,47 @@ fn hotkey_dialog_key_to_action(state: &AppState, key: KeyEvent) -> KeyResolve {
     }
 
     KeyResolve::Action(Action::CloseHotkeyDialog)
+}
+
+// ── Internal: command-palette key routing ─────────────────────────────────────
+
+/// Route a key while the command palette is open (SQ-0419). Typing edits the
+/// palette's own input line; Up/Down (and Shift-Tab as the reverse) move the
+/// selection; Tab completes the selected command name into the line; Enter
+/// resolves to the selected command + typed args as a `Command` for the run loop
+/// to dispatch (and then close the palette); Esc closes.
+fn palette_key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
+    let Some(palette) = &state.overlays.palette else {
+        return KeyResolve::None;
+    };
+    match key.code {
+        KeyCode::Esc => KeyResolve::Action(Action::PaletteClose),
+        KeyCode::Up => KeyResolve::Action(Action::PaletteNav(-1)),
+        KeyCode::Down => KeyResolve::Action(Action::PaletteNav(1)),
+        // Shift-Tab reverses the Up/Down selection cycler (standing convention).
+        KeyCode::BackTab => KeyResolve::Action(Action::PaletteNav(-1)),
+        KeyCode::Tab => KeyResolve::Action(Action::PaletteComplete),
+        KeyCode::Backspace => KeyResolve::Action(Action::PaletteBackspace),
+        KeyCode::Enter => {
+            // Execute the highlighted candidate with any typed args through the
+            // same slash path a typed command uses.
+            let cands = crate::complete::palette_candidates(palette.query());
+            match cands.get(palette.scroll.selected) {
+                Some(cand) => {
+                    let spec = &crate::slash::COMMANDS[cand.cmd_index];
+                    KeyResolve::Command(palette.command_line(spec.name), spec.context)
+                }
+                None => KeyResolve::Action(Action::PaletteClose),
+            }
+        }
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            KeyResolve::Action(Action::PaletteChar(c))
+        }
+        _ => KeyResolve::None,
+    }
 }
 
 // ── Internal: saves-manager key routing ───────────────────────────────────────
@@ -1274,6 +1349,11 @@ fn game_key_to_action(state: &AppState, key: KeyEvent) -> Action {
         // Enter submits the current input buffer content as the command.
         KeyCode::Enter => Action::SubmitCommand(state.input.value.clone()),
         KeyCode::Backspace => Action::Backspace,
+        // '/' at an EMPTY prompt promotes into the command palette (SQ-0419); '/'
+        // mid-line stays a literal character (falls through to InputChar below).
+        KeyCode::Char('/') if key.modifiers == KeyModifiers::NONE && state.input.value.is_empty() => {
+            Action::OpenCommandPalette { from_hotkey: false }
+        }
         KeyCode::Char(c)
             if key.modifiers == KeyModifiers::NONE
                 || key.modifiers == KeyModifiers::SHIFT =>
@@ -1745,6 +1825,77 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::CloseHotkeyDialog => {
             state.overlays.hotkey_dialog = false;
+        }
+
+        // ── Command palette actions (SQ-0419) ─────────────────────────────────
+
+        Action::OpenCommandPalette { from_hotkey } => {
+            // The palette owns its own input line; the story prompt underneath is
+            // left untouched, so closing restores it unchanged.
+            state.overlays.hotkey_dialog = false;
+            state.overlays.palette = Some(crate::state::PaletteState::new(from_hotkey));
+        }
+
+        Action::PaletteNav(delta) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(p) = &mut state.overlays.palette {
+                let len = crate::complete::palette_candidates(p.query()).len();
+                if len > 0 {
+                    p.scroll.len(len);
+                    let next = ((p.scroll.selected as i32 + delta).rem_euclid(len as i32)) as usize;
+                    p.scroll.select(next, vp, &anim);
+                }
+            }
+        }
+
+        Action::PaletteChar(c) => {
+            if let Some(p) = &mut state.overlays.palette {
+                p.input.insert(c);
+                // A changed query re-ranks the list; snap the selection to the top.
+                let vp = state.modal_list_viewport;
+                let anim = state.config.animation.clone();
+                let len = crate::complete::palette_candidates(p.query()).len();
+                p.scroll.len(len);
+                p.scroll.select(0, vp, &anim);
+            }
+        }
+
+        Action::PaletteBackspace => {
+            if let Some(p) = &mut state.overlays.palette {
+                p.input.backspace();
+                let vp = state.modal_list_viewport;
+                let anim = state.config.animation.clone();
+                let len = crate::complete::palette_candidates(p.query()).len();
+                p.scroll.len(len);
+                p.scroll.select(p.scroll.selected.min(len.saturating_sub(1)), vp, &anim);
+            }
+        }
+
+        Action::PaletteComplete => {
+            if let Some(p) = &mut state.overlays.palette {
+                let cands = crate::complete::palette_candidates(p.query());
+                if let Some(cand) = cands.get(p.scroll.selected) {
+                    let name = crate::slash::COMMANDS[cand.cmd_index].name;
+                    // Replace the first token with the full command name, keeping
+                    // any typed args; append a trailing space so args can follow.
+                    let args = p.args();
+                    let line = if args.is_empty() {
+                        format!("{name} ")
+                    } else {
+                        format!("{name} {args}")
+                    };
+                    p.input.set(line, true);
+                }
+            }
+        }
+
+        Action::PaletteClose => {
+            let from_hotkey = state.overlays.palette.as_ref().map(|p| p.from_hotkey).unwrap_or(false);
+            state.overlays.palette = None;
+            if from_hotkey {
+                state.overlays.hotkey_dialog = true;
+            }
         }
 
         // ── Saves-manager actions ─────────────────────────────────────────────
@@ -4173,6 +4324,129 @@ mod tests {
         // Up from first wraps to last.
         apply_action(Action::SavesNav(-1), &mut s, &mut Mapper::default());
         assert_eq!(s.overlays.saves.as_ref().unwrap().scroll.selected, 1, "should wrap to last");
+    }
+
+    // ── Command palette dispatch tests (SQ-0419) ──────────────────────────────
+
+    #[test]
+    fn slash_at_empty_prompt_opens_palette() {
+        let mut s = AppState::default(); // Game focus, empty input line.
+        let a = key_to_action(&s, key(KeyCode::Char('/')));
+        assert!(matches!(a, Action::OpenCommandPalette { from_hotkey: false }));
+        apply_action(a, &mut s, &mut Mapper::default());
+        assert!(s.overlays.palette.is_some(), "'/' at an empty prompt opens the palette");
+    }
+
+    #[test]
+    fn slash_midline_stays_a_literal_char() {
+        let mut s = AppState::default();
+        s.input = crate::text_field::TextField::new("go");
+        // '/' with a non-empty line is an ordinary character, not a palette trigger.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('/'))), Action::InputChar('/')));
+    }
+
+    #[test]
+    fn slash_inside_hotkey_dialog_transitions_to_palette() {
+        let mut s = AppState::default();
+        s.overlays.hotkey_dialog = true;
+        let a = key_to_action(&s, key(KeyCode::Char('/')));
+        assert!(matches!(a, Action::OpenCommandPalette { from_hotkey: true }));
+        apply_action(a, &mut s, &mut Mapper::default());
+        assert!(s.overlays.palette.is_some(), "'/' in the hotkey dialog opens the palette");
+        assert!(!s.overlays.hotkey_dialog, "the hotkey dialog closes when the palette opens");
+    }
+
+    #[test]
+    fn palette_esc_closes_and_preserves_empty_prompt() {
+        let mut s = AppState::default();
+        // '/' promotes the empty prompt; Esc returns to it unchanged (still empty).
+        apply_action(key_to_action(&s, key(KeyCode::Char('/'))), &mut s, &mut Mapper::default());
+        let a = key_to_action(&s, key(KeyCode::Esc));
+        assert!(matches!(a, Action::PaletteClose));
+        apply_action(a, &mut s, &mut Mapper::default());
+        assert!(s.overlays.palette.is_none(), "Esc closes the palette");
+        assert!(!s.overlays.hotkey_dialog, "prompt-promoted palette does not reopen the hotkey dialog");
+        assert!(s.input.value.is_empty(), "the story prompt is preserved (empty)");
+    }
+
+    #[test]
+    fn palette_esc_returns_to_hotkey_dialog_when_promoted_from_it() {
+        let mut s = AppState::default();
+        s.overlays.hotkey_dialog = true;
+        apply_action(key_to_action(&s, key(KeyCode::Char('/'))), &mut s, &mut Mapper::default());
+        apply_action(Action::PaletteClose, &mut s, &mut Mapper::default());
+        assert!(s.overlays.palette.is_none());
+        assert!(s.overlays.hotkey_dialog, "Esc returns to the hotkey dialog it was promoted from");
+    }
+
+    #[test]
+    fn palette_shift_tab_reverses_selection_cycler() {
+        // Down/Up (and Shift-Tab as Up) cycle the selection with wrap.
+        let mut s = AppState::default();
+        s.overlays.palette = Some(crate::state::PaletteState::new(false));
+        // Empty query → the whole registry is the candidate list.
+        let n = crate::slash::COMMANDS.len();
+        // Down moves to index 1.
+        apply_action(key_to_action(&s, key(KeyCode::Down)), &mut s, &mut Mapper::default());
+        assert_eq!(s.overlays.palette.as_ref().unwrap().scroll.selected, 1);
+        // Shift-Tab reverses back to 0.
+        apply_action(key_to_action(&s, KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)), &mut s, &mut Mapper::default());
+        assert_eq!(s.overlays.palette.as_ref().unwrap().scroll.selected, 0);
+        // Shift-Tab again wraps to the last entry (reverse of Down's wrap).
+        apply_action(key_to_action(&s, KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)), &mut s, &mut Mapper::default());
+        assert_eq!(s.overlays.palette.as_ref().unwrap().scroll.selected, n - 1);
+    }
+
+    #[test]
+    fn palette_typing_filters_and_tab_completes() {
+        let mut s = AppState::default();
+        s.overlays.palette = Some(crate::state::PaletteState::new(false));
+        for c in "zoom".chars() {
+            apply_action(Action::PaletteChar(c), &mut s, &mut Mapper::default());
+        }
+        // Best match for "zoom" is zoom-map; Tab completes the first token.
+        apply_action(Action::PaletteComplete, &mut s, &mut Mapper::default());
+        assert_eq!(s.overlays.palette.as_ref().unwrap().input.value, "zoom-map ");
+    }
+
+    #[test]
+    fn palette_enter_executes_selected_command_end_to_end() {
+        // Type a safe no-arg toggle, Enter, dispatch as the run loop would, and
+        // observe the state mutation.
+        let mut s = AppState::default();
+        s.overlays.palette = Some(crate::state::PaletteState::new(false));
+        for c in "toggle-alignment".chars() {
+            apply_action(Action::PaletteChar(c), &mut s, &mut Mapper::default());
+        }
+        let before = s.show_alignment;
+        // Enter resolves to a Command through the palette handler.
+        let resolved = key_to_command(&s, key(KeyCode::Enter));
+        let (cmd, ctx) = match resolved {
+            KeyResolve::Command(c, ctx) => (c, ctx),
+            other => panic!("expected a Command, got {other:?}"),
+        };
+        assert_eq!(cmd, "toggle-alignment");
+        // Dispatch it exactly like the run loop's Command arm.
+        match crate::slash::parse_in_context(&cmd, '/', ctx) {
+            crate::slash::SlashOutcome::Action(a) => apply_action(a, &mut s, &mut Mapper::default()),
+            other => panic!("expected an Action outcome, got {other:?}"),
+        }
+        assert_ne!(s.show_alignment, before, "the toggle command mutated state end-to-end");
+    }
+
+    #[test]
+    fn palette_enter_passes_typed_args_to_the_command() {
+        // "zoom-map in" → the args ride along into the executed command line.
+        let mut s = AppState::default();
+        s.overlays.palette = Some(crate::state::PaletteState::new(false));
+        for c in "zoom-map in".chars() {
+            apply_action(Action::PaletteChar(c), &mut s, &mut Mapper::default());
+        }
+        let resolved = key_to_command(&s, key(KeyCode::Enter));
+        match resolved {
+            KeyResolve::Command(cmd, _) => assert_eq!(cmd, "zoom-map in"),
+            other => panic!("expected a Command, got {other:?}"),
+        }
     }
 
     // ── Hotkey dialog dispatch tests ──────────────────────────────────────────

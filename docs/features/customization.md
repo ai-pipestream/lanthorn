@@ -144,6 +144,12 @@ switches that make babelmap feel like yours without opening the whole registry.
   `"key" = "command args"` (each value a slash-command string the key runs); set
   `use_defaults = false` under `[keymap]` to clear the built-ins and define your
   own from scratch.
+- **Command palette** — press `/` at an empty prompt (or `/` inside the leader
+  panel) to open a fuzzy search over every command; its rows theme via five
+  `[elements]` selectors: `palette_query` (the input line), `palette_name` (a
+  command name), `palette_match` (the fuzzy-matched characters, accent + bold by
+  default), `palette_desc` (the one-line help), and `palette_selected` (the
+  highlighted row). Its frame reuses the shared `[dialog]` chrome.
 - **Decorated panes** — configurable per-pane borders (`none`/`single`/`double`/
   `thick`/`rounded`) via the shared `[panel]` chrome above: unfocused panels use
   `panel.border`, the focused one uses `panel.border:active`. The map's top

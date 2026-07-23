@@ -139,7 +139,8 @@ tell the three engines apart at a glance (`Z5`, `Scott`, `G3.1.2`).
 - **Rewind & replay** — step back through a recorded per-turn history with the map
   reconstructed at each moment, and resume from any earlier turn. → [saves](docs/features/saves.md)
 - **A full TUI** — mouse support, select-and-copy, verb/noun menu, dictionary
-  autocomplete, inventory strip, command history,
+  autocomplete, a `/`-summoned fuzzy **command palette** over every command,
+  inventory strip, command history,
   animated top-right notification toasts (with a `dump-notifications` recall), and
   transcript search / filter / export. → [interface](docs/features/interface.md)
 - **In-game hints** — open a matching *InvisiClues* hint file and babelmap boots
