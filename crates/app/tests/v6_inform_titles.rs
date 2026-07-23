@@ -9,9 +9,10 @@
 //!
 //! Verified behaviors these tests pin (observed against the real games):
 //! - `advent.z6` (Graham Nelson's Adventure): boots to a keypress title, then
-//!   plays. The Inform v6 library prints story text into WINDOW 7, not window
-//!   0 — so the assertions read the v6 window model, not the transcript
-//!   (whose emptiness in hybrid mode is tracked as SQ-0459).
+//!   plays. The Inform v6 library prints story prose into WINDOW 7 (not window
+//!   0) but sets that window's wrapping attribute, so the prose STREAMS to the
+//!   transcript like any window-0 game (SQ-0459); its cursor-positioned status
+//!   line stays in window 1's paint model. The assertions read both.
 //! - `scopa.z6`: checks the reported screen size at boot and refuses below
 //!   600×400 — exercising our header screen-dims reporting end to end.
 //! - `sunburst.z6`: keypress-driven boot menu ('s' = start), then a
@@ -57,7 +58,7 @@ fn window_texts(session: &GameSession) -> Vec<String> {
 }
 
 #[test]
-fn advent_z6_boots_and_look_redescribes_via_window_7() {
+fn advent_z6_boots_and_look_streams_room_to_transcript() {
     let Some(mut session) = boot("advent.z6", None) else {
         eprintln!("SKIP: gitignored story missing");
         return;
@@ -65,9 +66,7 @@ fn advent_z6_boots_and_look_redescribes_via_window_7() {
     let _ = session.take_transcript();
 
     // The title screens wait on keypresses; a few keys reach the command
-    // prompt. (NOTE: the Inform v6 library positions text purely by cursor —
-    // its windows all sit at (1,1) with height 0 — so assertions here stay
-    // behavioral; faithful Inform-library window modelling is SQ-0459.)
+    // prompt.
     assert_eq!(session.pending_input(), InputKind::Char, "advent boots to a keypress title");
     for _ in 0..4 {
         if session.pending_input() == InputKind::Line {
@@ -79,24 +78,27 @@ fn advent_z6_boots_and_look_redescribes_via_window_7() {
     }
     assert_eq!(session.pending_input(), InputKind::Line, "advent reaches the command prompt");
 
+    // The status line lives in window 1 (upper), whose wrapping bit is CLEAR —
+    // it stays PAINT and shows up in the v6 window model, not the transcript.
     let wins = window_texts(&session);
     assert!(
         wins.iter().any(|t| t.contains("At End Of Road")),
         "status window should name the opening room, windows: {wins:?}"
     );
 
-    // Each "look" re-paints the room description into the main window (v6
-    // paint semantics: re-prints REPLACE covered glyphs, so total text need
-    // not grow — presence of the description is the signal). Two turns in a
-    // row exercise the parser + v6 pull path under Inform codegen.
+    // SQ-0459: Inform's v6 library prints prose into window 7 with its wrapping
+    // attribute SET (attrs 0b1111), so that prose now STREAMS to the transcript
+    // exactly like a window-0 game's — a clean, ungarbled room description
+    // (unlike the pixel-overprinted paint runs it used to leave in win7). Two
+    // turns exercise the parser + v6 pull path under Inform codegen.
     for turn in 0..2 {
         let result = session.submit("look");
         assert!(result.fault.is_none(), "look {turn} faulted: {:?}", result.fault);
         assert!(!result.quit, "look {turn} quit");
-        let wins = window_texts(&session);
         assert!(
-            wins.iter().any(|t| t.contains("end of a road before a small brick building")),
-            "look {turn} should re-describe End Of Road, windows: {wins:?}"
+            result.transcript.contains("end of a road before a small brick building"),
+            "look {turn} should stream the End Of Road description into the transcript, got: {:?}",
+            result.transcript
         );
     }
 }

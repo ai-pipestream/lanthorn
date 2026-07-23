@@ -973,7 +973,8 @@ impl GameSession {
             max_x = max_x.max(pw.x + pw.w);
             max_y = max_y.max(pw.y + pw.h);
         }
-        let content_size = if max_x == 0 || max_y == 0 {
+        let degenerate = max_x == 0 || max_y == 0;
+        let content_size = if degenerate {
             (
                 self.machine.mem.read_byte(0x21) as u16,
                 self.machine.mem.read_byte(0x20) as u16,
@@ -981,6 +982,29 @@ impl GameSession {
         } else {
             (max_x, max_y)
         };
+
+        // Inform 6's v6 library (SQ-0459) leaves every window at height 0 and
+        // flows its prose through the transcript (its main window sets the
+        // wrapping bit, so `print_text` streams rather than paints). The size-0
+        // skip above therefore drops ALL windows, and raster mode would render
+        // a blank screen. When nothing survived, synthesise a full-screen
+        // primary Buffer so the streamed transcript still renders — Infocom v6
+        // titles keep real nonzero windows and never reach this branch.
+        if degenerate {
+            text_entries.push(PositionedWindow {
+                x: 0,
+                y: 0,
+                w: content_size.0,
+                h: content_size.1,
+                x_px: 0,
+                y_px: 0,
+                w_px: self.machine.mem.read_word(0x22),
+                h_px: self.machine.mem.read_word(0x24),
+                left_margin: 0,
+                right_margin: 0,
+                node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+            });
+        }
 
         graphics_entries.extend(text_entries);
         ScreenModel {

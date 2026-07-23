@@ -1488,6 +1488,19 @@ impl Machine {
                 } else {
                     self.screen.text_style |= style;
                 }
+                // ZMSD §8.8.3.2.3: "The text style is set just as in Version 4,
+                // using set_text_style (which sets that for the current
+                // window). The property holds the operand of that instruction
+                // (e.g. 4 for italic)." Mirror the resulting bitmask into the
+                // CURRENT v6 window's prop 10 so get_wind_prop(w, 10) reads
+                // fresh.
+                let new_style = self.screen.text_style as u16;
+                if let Some(v6) = self.screen.v6.as_mut() {
+                    let cur = v6.current as usize;
+                    if let Some(w) = v6.windows.get_mut(cur) {
+                        w.text_style = new_style;
+                    }
+                }
                 StepResult::Continue
             }
             // 0x12 buffer_mode — toggle output buffering (v4+)
@@ -1502,7 +1515,8 @@ impl Machine {
             // 0x13 output_stream — select/deselect output streams (ZMSD §7.1.2.5)
             //   +1/-1: stream 1 (screen) on/off
             //   +2/-2: stream 2 (transcript) on/off
-            //   +3:    stream 3 on — second operand is table address
+            //   +3:    stream 3 on — second operand is table address, third
+            //          (v6 only) is the width operand (see below)
             //   -3:    stream 3 off — finalise table, restore routing
             //   +4/-4: stream 4 (commands) on/off
             0x13 => {
@@ -1514,7 +1528,31 @@ impl Machine {
                     -2 => { self.streams.stream2 = false; }
                     3  => {
                         let table = ops.get(1).copied().unwrap_or(0) as u32;
-                        self.streams.push_stream3(table);
+                        // ZMSD §15 output_stream: "In Version 6, a width field
+                        // may optionally be given: text will then be
+                        // justified as if it were in the window with that
+                        // number (if width is zero or positive) or a box
+                        // -width pixels wide (if negative)." Resolve to a
+                        // concrete pixel width here (needs the v6 window
+                        // table, which StreamState doesn't have); `None` when
+                        // the operand is absent, or on non-v6 stories where
+                        // this operand doesn't exist.
+                        let width_px = if self.mem.version() == 6 {
+                            ops.get(2).map(|&w| {
+                                let w = w as i16;
+                                if w < 0 {
+                                    (-w) as u16
+                                } else {
+                                    self.screen.v6.as_ref()
+                                        .and_then(|v6| v6.windows.get(w as usize))
+                                        .map(|win| win.x_size)
+                                        .unwrap_or(0)
+                                }
+                            })
+                        } else {
+                            None
+                        };
+                        self.streams.push_stream3(table, width_px);
                     }
                     -3 => {
                         self.streams.pop_stream3(&mut self.mem);
@@ -1829,21 +1867,43 @@ impl Machine {
                 self.do_store(store, result as u16);
                 StepResult::Continue
             }
-            // EXT:0x04 set_font (ZMSD §16): operand 0 = query current font without
+            // EXT:0x04 set_font (ZMSD §15): operand 0 = query current font without
             // changing; 1 = normal, 3 = character-graphics (Font 3), 4 = Courier/
             // fixed-pitch (rendered like font 1 on a fixed grid). Returns the
             // previously-active font, or 0 if the requested font is unavailable.
+            //
+            // ZMSD §15 set_font: "In Version 6, set_font has an optional window
+            // parameter, as for set_colour." -3 (0xFFFD) means the currently
+            // selected window (`v6_window_operand`); when the operand is
+            // omitted, mirror `set_colour`'s default (the current window).
+            // Mirror the NEW font into that window's prop 12 (font_number) so
+            // a subsequent get_wind_prop(win, 12) reads it fresh.
             0x04 => {
                 let requested = ops.first().copied().unwrap_or(0);
                 if self.trace_screen { self.screen_trace.push(format!("@set_font({})", zscreen_font_name(requested))); }
                 let prev = self.screen.current_font as u16;
+                let mut changed = false;
                 let result = match requested {
                     0 => prev,       // query: return current, no change
-                    1 => { self.screen.current_font = 1; prev }
-                    3 => { self.screen.current_font = 3; prev }
-                    4 => { self.screen.current_font = 4; prev }
+                    1 => { self.screen.current_font = 1; changed = true; prev }
+                    3 => { self.screen.current_font = 3; changed = true; prev }
+                    4 => { self.screen.current_font = 4; changed = true; prev }
                     _ => 0,          // unsupported → 0
                 };
+                if changed {
+                    let new_font = self.screen.current_font as u16;
+                    let win = match ops.get(1).copied() {
+                        Some(w) => Some(self.v6_window_operand(w)),
+                        None => self.screen.v6.as_ref().map(|v6| v6.current as u16),
+                    };
+                    if let Some(win) = win {
+                        if let Some(v6) = self.screen.v6.as_mut() {
+                            if let Some(w) = v6.windows.get_mut(win as usize) {
+                                w.font_number = new_font;
+                            }
+                        }
+                    }
+                }
                 self.do_store(store, result);
                 StepResult::Continue
             }
@@ -1993,7 +2053,7 @@ impl Machine {
                 }
                 StepResult::Continue
             }
-            0x1B => { self.do_branch(branch, false); StepResult::Continue } // make_menu → failed
+            0x1B => { self.do_branch(branch, false); StepResult::Continue } // make_menu → failed (stub; SQ-0457 tracks a real implementation)
             0x18 => { // push_stack value stack -> (branch) — v6 user stack (ZMSD §15).
                 // The user stack at `addr` stores the number of FREE slots in its
                 // first word; entries fill downward from the end. Mirrors frotz
@@ -2293,6 +2353,9 @@ impl Machine {
             }
             0x1A => {
                 // print_form — no-op in Phase 0 (a different lane; left untouched).
+                // Stub; SQ-0457 tracks a real implementation (would consume the
+                // formatted-text table stream-3 close now produces — see
+                // `wrap_stream3_text` in screen.rs).
                 StepResult::Continue
             }
             // Unknown / unimplemented EXT opcode: record once, then ignore
@@ -2624,17 +2687,28 @@ impl Machine {
             return;
         }
         let font3 = self.screen.current_font == 3;
-        // v6: route text to the CURRENT window's grid (windows 1-7); window 0
-        // (the main/buffered window) falls through to the classic stream-1
-        // path below, same as v1-5's lower window — UNLESS its wrapping
-        // attribute is cleared: menu screens (Zork Zero's InvisiClues) switch
-        // win0 to positioned output (window_style clears bit 0, then
-        // set_cursor per row), and that output is PAINT like windows 1-7, not
-        // prose for the scrolling transcript.
+        // v6: prop-14 attributes route stream-vs-paint UNIFORMLY across all 8
+        // windows. A window is a flowing-prose "main" window — its output
+        // streams to the buffered stream-1/transcript path below (window 0's
+        // classic route) — only when BOTH the wrapping (bit 0) and scrolling
+        // (bit 1) attributes are set; otherwise its output PAINTS into the grid
+        // at screen-absolute pixels (status lines, menus, graphics captions),
+        // where the per-char `wrapping` bit still decides whether a paint run
+        // wraps at the window's own width.
+        //   * Infocom v6: prose streams via window 0 (default attrs 0b1111 =
+        //     wrap+scroll); windows 1-7 stay paint (attrs 0b1000, no wrap/scroll)
+        //     — Zork Zero even clears window 0's wrap bit (attrs 0b1110) to paint
+        //     its InvisiClues menu.
+        //   * Inform 6's v6 library prints prose into WINDOW 7 (its "main"
+        //     window), which it explicitly sets to attrs 0b1111 (wrap+scroll);
+        //     that diverts win7's prose to the transcript exactly like window 0,
+        //     so Inform-library games (advent) show story text in hybrid mode
+        //     while Zork0/Shogun (win7 lacks wrap+scroll) stay byte-identical.
+        // (SQ-0459)
         if let Some(v6) = self.screen.v6.as_ref() {
             let cur = v6.current;
-            let win0_paint_mode = cur == 0 && v6.windows[0].attributes & 1 == 0;
-            if cur >= 1 || win0_paint_mode {
+            let paint_mode = v6.windows[cur as usize].attributes & 0b11 != 0b11;
+            if paint_mode {
                 let style = self.screen.text_style;
                 let idx = cur as usize;
                 // Read the header before taking &mut self.screen — mirrors the
@@ -2723,8 +2797,8 @@ impl Machine {
                 }
                 return;
             }
-            // cur == 0: fall through to the buffered stream path below
-            // (window 0 = main window).
+            // wrap+scroll both set: fall through to the buffered stream path
+            // below (window 0 normally; Inform's win7 prose window, SQ-0459).
         }
         // Window 1 (upper): write chars into the grid, do not stream.
         if self.screen.current_window == 1 {
@@ -5625,7 +5699,7 @@ pub(crate) mod tests {
         // not the multi-byte UTF-8 encoding of 'û' (SQ-0240).
         let table_addr: u32 = 0x0060;
         let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
-        m.streams.push_stream3(table_addr);
+        m.streams.push_stream3(table_addr, None);
         m.exec_var(0x05, &[195], None, None);
         m.streams.pop_stream3(&mut m.mem);
 
@@ -5640,7 +5714,7 @@ pub(crate) mod tests {
         // not the round-tripped display value (SQ-0247).
         let table_addr: u32 = 0x0060;
         let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
-        m.streams.push_stream3(table_addr);
+        m.streams.push_stream3(table_addr, None);
         m.exec_var(0x05, &[10], None, None);
         m.streams.pop_stream3(&mut m.mem);
 
@@ -5656,7 +5730,7 @@ pub(crate) mod tests {
         // directly through write_stream3_bytes instead of print_text.
         let table_addr: u32 = 0x0060;
         let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
-        m.streams.push_stream3(table_addr);
+        m.streams.push_stream3(table_addr, None);
         m.exec_var(0x05, &[195], None, None);
         m.streams.pop_stream3(&mut m.mem);
 
@@ -7433,6 +7507,36 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn v6_output_stream3_width_operand_resolves_window_number_to_pixels() {
+        // ZMSD §15 output_stream: "In Version 6, a width field may optionally
+        // be given: text will then be justified as if it were in the window
+        // with that number (if width is zero or positive) ...". window 2's
+        // x_size (40px = 5 chars) is too narrow for "AAAA BBBB" (72px) on one
+        // line, so the wrap point must land between the words.
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 2, 0, 0, 10, 40); // window 2, x_size=40px
+        m.exec_var(0x13, &[3, 0x0100, 2], None, None); // output_stream 3 -> table, width=window 2
+        m.print_text("AAAA BBBB");
+        m.exec_var(0x13, &[0xFFFD], None, None); // output_stream -3 (close)
+        assert_eq!(m.mem.read_word(0x0100), 9, "byte count unchanged (space -> newline)");
+        let bytes: Vec<u8> = (0..9).map(|i| m.mem.read_byte(0x0100 + 2 + i)).collect();
+        assert_eq!(bytes, b"AAAA\rBBBB", "wraps at the window-2 width");
+    }
+
+    #[test]
+    fn v6_output_stream3_negative_width_operand_is_literal_pixel_box() {
+        // ZMSD §15 output_stream: "... or a box -width pixels wide (if
+        // negative)." A negative operand is the box width directly, no
+        // window lookup — here -40 means a 40px box, same wrap as above.
+        let mut m = v6_exec_machine();
+        m.exec_var(0x13, &[3, 0x0100, 0xFFD8], None, None); // width = -40 (0xFFD8)
+        m.print_text("AAAA BBBB");
+        m.exec_var(0x13, &[0xFFFD], None, None);
+        let bytes: Vec<u8> = (0..9).map(|i| m.mem.read_byte(0x0100 + 2 + i)).collect();
+        assert_eq!(bytes, b"AAAA\rBBBB", "negative operand wraps to -width pixels, no window lookup");
+    }
+
+    #[test]
     fn v6_window_operand_minus_three_is_current_window() {
         // ZMSD §8.8.3.2 / frotz winarg0: window -3 (0xFFFD) = the currently
         // selected window. Shogun reads its status-line cursor via
@@ -7450,6 +7554,43 @@ pub(crate) mod tests {
         // put_wind_prop(-3, ...) writes the current window too.
         m.exec_ext(0x19, &[0xFFFD, 15, 42], None, None); // line_count = 42
         assert_eq!(m.screen.v6.as_ref().unwrap().windows[3].line_count, 42);
+    }
+
+    #[test]
+    fn v6_set_font_mirrors_into_window_prop_12() {
+        // ZMSD §15 set_font: "In Version 6, set_font has an optional window
+        // parameter, as for set_colour." Changing the font for window 3 must
+        // be visible via get_wind_prop(3, 12) (font_number) afterwards.
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 3, 1, 1, 10, 100);
+        m.exec_ext(0x04, &[3, 3], Some(0x10), None); // set_font(3, window=3)
+        assert_eq!(m.global(0), 1, "returns previous font (1)");
+        m.exec_ext(0x13, &[3, 12], Some(0), None); // get_wind_prop(3, font_number)
+        assert_eq!(m.state.eval_stack.pop(), Some(3), "window 3's prop 12 mirrors the new font");
+    }
+
+    #[test]
+    fn v6_set_font_window_minus_three_targets_current_window() {
+        // -3 (0xFFFD) resolves to the currently selected window via
+        // `v6_window_operand`.
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 5, 1, 1, 10, 100); // selects window 5 as current
+        m.exec_ext(0x04, &[4, 0xFFFD], Some(0x10), None); // set_font(4, window=-3)
+        m.exec_ext(0x13, &[5, 12], Some(0), None); // get_wind_prop(5, font_number)
+        assert_eq!(m.state.eval_stack.pop(), Some(4), "current window (5) gets the new font");
+    }
+
+    #[test]
+    fn v6_set_text_style_mirrors_into_current_window_prop_10() {
+        // ZMSD §8.8.3.2.3: "The text style is set just as in Version 4, using
+        // set_text_style (which sets that for the current window). The
+        // property holds the operand of that instruction (e.g. 4 for
+        // italic)."
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 2, 1, 1, 10, 100); // selects window 2 as current
+        m.exec_var(0x11, &[4], None, None); // set_text_style(italic=4)
+        m.exec_ext(0x13, &[2, 10], Some(0), None); // get_wind_prop(2, text_style)
+        assert_eq!(m.state.eval_stack.pop(), Some(4), "window 2's prop 10 mirrors the style bitmask");
     }
 
     #[test]

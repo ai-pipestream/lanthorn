@@ -494,6 +494,13 @@ struct Stream3Frame {
     table_addr: u32,
     /// Bytes written so far into this frame (accumulated before we flush).
     buf: Vec<u8>,
+    /// Resolved box width in pixels for v6's optional 3rd `output_stream`
+    /// operand (ZMSD §15 `output_stream`: "In Version 6, a width field may
+    /// optionally be given: text will then be justified as if it were in the
+    /// window with that number (if width is zero or positive) or a box
+    /// -width pixels wide (if negative)."). `None` means the operand was
+    /// omitted — text is stored verbatim, unwrapped (pre-existing behaviour).
+    width_px: Option<u16>,
 }
 
 /// Manages all four Z-machine output streams plus the selected input stream.
@@ -540,9 +547,14 @@ impl StreamState {
     }
 
     /// Select (push) stream 3 with a table at `table_addr` (ZMSD §7.1.2.5).
-    pub fn push_stream3(&mut self, table_addr: u32) {
+    /// `width_px` is the resolved box width in pixels for v6's optional 3rd
+    /// operand (the caller resolves a window-number-vs-negative-pixel-width
+    /// operand into pixels before calling, since that needs the v6 window
+    /// table which lives outside `StreamState`); `None` when the operand was
+    /// omitted.
+    pub fn push_stream3(&mut self, table_addr: u32, width_px: Option<u16>) {
         if self.stream3_stack.len() < 16 {
-            self.stream3_stack.push(Stream3Frame { table_addr, buf: Vec::new() });
+            self.stream3_stack.push(Stream3Frame { table_addr, buf: Vec::new(), width_px });
         }
     }
 
@@ -550,12 +562,27 @@ impl StreamState {
     /// the length word, and return.
     ///
     /// The table layout: word at `table_addr` = byte count; bytes follow from
-    /// `table_addr + 2`.
+    /// `table_addr + 2`. When a v6 width was given, the text is word-wrapped
+    /// to that width first (ZMSD §15 `output_stream`, quoted on
+    /// `Stream3Frame::width_px`) — "Then the table will contain not ordinary
+    /// text but formatted text: see print_form." Wrapping happens here, at
+    /// close, on the whole accumulated buffer (splitting on ASCII spaces)
+    /// rather than incrementally per printed word the way Frotz's
+    /// `memory_word` does it; nothing yet consumes the formatted-text table
+    /// (`print_form` is a stub — SQ-0457), so a faithful approximation is
+    /// enough to make the header math and stored bytes sane.
     pub fn pop_stream3(&mut self, mem: &mut Memory) {
         if let Some(frame) = self.stream3_stack.pop() {
-            let n = frame.buf.len() as u16;
+            let (bytes, total_width) = match frame.width_px {
+                Some(w) => wrap_stream3_text(&frame.buf, w),
+                None => {
+                    let w = frame.buf.len() as u32 * V6_FONT_WIDTH as u32;
+                    (frame.buf, w)
+                }
+            };
+            let n = bytes.len() as u16;
             mem.write_word(frame.table_addr, n);
-            for (i, &b) in frame.buf.iter().enumerate() {
+            for (i, &b) in bytes.iter().enumerate() {
                 mem.write_byte(frame.table_addr + 2 + i as u32, b);
             }
             // ZMSD §7.1.2.1: in v6, deselecting stream 3 stores "the total
@@ -564,7 +591,7 @@ impl StreamState {
             // fields to stream 3 and reads $30 back to right-align them; an
             // unwritten $30 collapses that math to garbage columns.
             if mem.version() == 6 {
-                mem.write_word(0x30, n.saturating_mul(V6_FONT_WIDTH));
+                mem.write_word(0x30, total_width.min(u16::MAX as u32) as u16);
             }
         }
     }
@@ -578,6 +605,49 @@ impl StreamState {
             frame.buf.extend_from_slice(bytes);
         }
     }
+}
+
+/// Word-wrap a stream-3 buffer to `width_px` pixels (fixed-width v6 font,
+/// `V6_FONT_WIDTH` per glyph), replacing the space at each wrap point with a
+/// ZSCII 13 newline (ZMSD §7.1.2.2.1: "Newlines are written to output stream
+/// 3 as ZSCII 13") — mirrors Frotz's `memory_word`/`memory_close`
+/// (`redirect.c`): a word that would overflow the current line drops its
+/// leading space and starts a fresh line instead. Existing embedded ZSCII 13
+/// bytes are treated as hard breaks: they end the current line without being
+/// counted as printable width, and line-width accounting restarts after them.
+/// Returns the rewritten bytes and the total width (sum of every completed
+/// line's pixel width, hard-broken or wrapped) for header $30.
+fn wrap_stream3_text(buf: &[u8], width_px: u16) -> (Vec<u8>, u32) {
+    let fw = V6_FONT_WIDTH as u32;
+    let mut out = Vec::with_capacity(buf.len());
+    let mut total: u32 = 0;
+    for segment in buf.split(|&b| b == 13) {
+        let mut line_width: u32 = 0;
+        let mut first = true;
+        for word in segment.split(|&b| b == b' ') {
+            if first {
+                first = false;
+                line_width = word.len() as u32 * fw;
+                out.extend_from_slice(word);
+                continue;
+            }
+            let candidate = line_width + fw + word.len() as u32 * fw;
+            if line_width > 0 && candidate > width_px as u32 {
+                total += line_width;
+                out.push(13);
+                line_width = word.len() as u32 * fw;
+                out.extend_from_slice(word);
+            } else {
+                out.push(b' ');
+                out.extend_from_slice(word);
+                line_width = candidate;
+            }
+        }
+        total += line_width;
+        out.push(13); // restore the hard break consumed by `split`
+    }
+    out.pop(); // the loop always adds one trailing 13 too many
+    (out, total)
 }
 
 // ---------------------------------------------------------------------------
@@ -1262,7 +1332,7 @@ mod tests {
         let mut ss = StreamState::new();
 
         assert!(!ss.stream3_active());
-        ss.push_stream3(table_addr);
+        ss.push_stream3(table_addr, None);
         assert!(ss.stream3_active());
 
         ss.write_stream3_bytes(b"Hello");
@@ -1289,7 +1359,7 @@ mod tests {
         let mut mem = Memory::new(buf).unwrap();
         let mut ss = StreamState::new();
 
-        ss.push_stream3(table_addr);
+        ss.push_stream3(table_addr, None);
         ss.write_stream3_bytes(&[195]);
         ss.pop_stream3(&mut mem);
 
@@ -1330,9 +1400,9 @@ mod tests {
         let mut mem = Memory::new(buf).unwrap();
         let mut ss = StreamState::new();
 
-        ss.push_stream3(table1);
+        ss.push_stream3(table1, None);
         ss.write_stream3_bytes(b"ab");
-        ss.push_stream3(table2);
+        ss.push_stream3(table2, None);
         ss.write_stream3_bytes(b"cd");
         ss.pop_stream3(&mut mem); // finalise table2
         ss.write_stream3_bytes(b"ef");
@@ -1349,5 +1419,54 @@ mod tests {
         assert_eq!(mem.read_byte(table1 + 3), b'b');
         assert_eq!(mem.read_byte(table1 + 4), b'e');
         assert_eq!(mem.read_byte(table1 + 5), b'f');
+    }
+
+    // ── (f) v6 output_stream 3 width operand: word-wrap on close ─────────────
+    // ZMSD §15 output_stream: "In Version 6, a width field may optionally be
+    // given: text will then be justified as if it were in the window with
+    // that number (if width is zero or positive) or a box -width pixels wide
+    // (if negative). Then the table will contain not ordinary text but
+    // formatted text: see print_form."
+
+    #[test]
+    fn stream3_width_wraps_overflowing_word_onto_new_line() {
+        // "AAAA BBBB" at a 40px box (V6_FONT_WIDTH=8 -> 5 chars) doesn't fit
+        // "AAAA BBBB" (72px) on one line; the wrap point replaces the space
+        // with ZSCII 13 and drops it from the width tally (Frotz
+        // redirect.c:memory_word skips the leading space of the overflowing
+        // word).
+        let buf = sample_story(6);
+        let table_addr: u32 = 0x0050;
+        let mut mem = Memory::new(buf).unwrap();
+        let mut ss = StreamState::new();
+
+        ss.push_stream3(table_addr, Some(40));
+        ss.write_stream3_bytes(b"AAAA BBBB");
+        ss.pop_stream3(&mut mem);
+
+        let n = mem.read_word(table_addr);
+        assert_eq!(n, 9, "byte count unchanged: the space becomes a newline byte");
+        let bytes: Vec<u8> = (0..n).map(|i| mem.read_byte(table_addr + 2 + i as u32)).collect();
+        assert_eq!(bytes, b"AAAA\rBBBB", "wrap point replaces the space with ZSCII 13");
+        // Total width = 4 chars + 4 chars (the newline isn't printable width).
+        assert_eq!(mem.read_word(0x30), 8 * V6_FONT_WIDTH, "header $30 excludes the wrap newline");
+    }
+
+    #[test]
+    fn stream3_width_no_wrap_when_text_fits() {
+        // Text that fits within the box on one line is untouched, and the
+        // total width matches the simple char-count case (no formatting
+        // actually needed).
+        let buf = sample_story(6);
+        let table_addr: u32 = 0x0050;
+        let mut mem = Memory::new(buf).unwrap();
+        let mut ss = StreamState::new();
+
+        ss.push_stream3(table_addr, Some(200));
+        ss.write_stream3_bytes(b"Score:");
+        ss.pop_stream3(&mut mem);
+
+        assert_eq!(mem.read_word(table_addr), 6);
+        assert_eq!(mem.read_word(0x30), 6 * V6_FONT_WIDTH);
     }
 }
