@@ -141,17 +141,23 @@ pub fn draw_verb_menu(
         }
     }
 
-    // The verb dock is not an interactive resize target (the verb menu is a
-    // keyboard-modal, so resize mode and the menu can never be open at once;
-    // see SQ-0238), so its border never picks up the resize highlight and always
-    // uses the plain `panel.border` selector. The border style now follows
-    // `panel.border` (so a user's `border = { style = "double" }` reaches the
-    // dock) with the caps tracking it; the dialog-background colour and the
-    // "Verbs" strip are preserved exactly.
+    // While resize mode is targeting the verb dock (SQ-0238), the border picks
+    // up the `panel.border:active` accent — the same affordance the story/map
+    // and inventory panes use — so the live-resizing pane is obvious. Otherwise
+    // the border follows the plain `panel.border` selector/style (so a user's
+    // `border = { style = "double" }` reaches the dock) with the caps tracking
+    // it; the dialog-background colour and the "Verbs" strip are preserved.
+    let resize_hl = state.resize_mode
+        && state.resize_target == crate::state::ResizeTarget::VerbDock;
+    let (border_selector, border_color) = if resize_hl {
+        ("panel.border:active", state.colors.theme.get("panel.border:active").style)
+    } else {
+        ("panel.border", base)
+    };
     let spec = PanelSpec {
         area,
-        border_selector: "panel.border",
-        border_color: Some(base),
+        border_selector,
+        border_color: Some(border_color),
         border_style: None,
         glyphs: &PaneGlyphs::default(),
         header_on: true,

@@ -426,6 +426,15 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     if state.overlays.file_browser.is_some() {
         return KeyResolve::Action(filebrowser_key_to_action(key));
     }
+    // 6.6. Resize mode: Tab cycles the target pane, arrows adjust it, 0 resets,
+    // Esc/Enter exits. Placed ABOVE the verb-menu intercept (SQ-0238) so resize
+    // mode owns Tab/arrows/0/Esc/Enter even when the verb menu is open — the two
+    // now coexist, with resize targeting the verb dock and Esc/Enter dropping
+    // back to the still-open menu. (config_screen/hotkey_dialog below can never
+    // be active together with resize mode, so their relative order is moot.)
+    if state.resize_mode {
+        return KeyResolve::Action(resize_mode_key_to_action(key));
+    }
     if state.overlays.verb_menu.is_some() {
         if let Some(a) = verb_menu_intercept(key, state) {
             return KeyResolve::Action(a);
@@ -437,13 +446,6 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     }
     if state.overlays.hotkey_dialog {
         return hotkey_dialog_key_to_action(state, key);
-    }
-
-    // 6.6. Resize mode: Tab cycles the target pane, arrows adjust it, 0 resets,
-    // Esc/Enter exits. Comes after the modal checks above but before the Tab
-    // intercept below so resize mode owns Tab while active.
-    if state.resize_mode {
-        return KeyResolve::Action(resize_mode_key_to_action(key));
     }
 
     // 6.5. Room panel close: Esc or Enter while a panel is open.
@@ -1115,6 +1117,15 @@ fn filebrowser_key_to_action(key: KeyEvent) -> Action {
 /// keys the dock consumes given the current focus, else `None` (the key falls
 /// through and is handled by the always-live story input).
 fn verb_menu_intercept(key: KeyEvent, state: &AppState) -> Option<Action> {
+    // The hotkey-dialog leader prefix is never swallowed by the dock: it must
+    // fall through so the player can open the leader palette (and reach
+    // resize-panes → 'z') while the verb menu is open (SQ-0238). This guard is
+    // first so it wins even if the prefix is bound to a key the dock would
+    // otherwise consume (Tab/Esc/an arrow).
+    if KeySpec::from_key_event(key) == state.hotkeys.prefix {
+        return None;
+    }
+
     // Tab / Shift-Tab cycle focus through the ring (incl. story) and Esc closes
     // the dock regardless of which element is focused.
     match key.code {
@@ -2109,6 +2120,14 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 crate::state::ResizeTarget::InvDock => match dir {
                     Up => state.pane_sizes.inv_dock_pct = (state.pane_sizes.inv_dock_pct + STEP).min(80),
                     Down => state.pane_sizes.inv_dock_pct = state.pane_sizes.inv_dock_pct.saturating_sub(STEP).max(10),
+                    _ => {}
+                },
+                // Verb dock is a left-docked column: Right grows its width, Left
+                // shrinks it. Bounds mirror the split-ratio clamp; the column
+                // clamp in `verb_dock_target_width` still applies at layout time.
+                crate::state::ResizeTarget::VerbDock => match dir {
+                    Left => state.pane_sizes.verb_dock_pct = state.pane_sizes.verb_dock_pct.saturating_sub(STEP).max(10),
+                    Right => state.pane_sizes.verb_dock_pct = (state.pane_sizes.verb_dock_pct + STEP).min(80),
                     _ => {}
                 },
             }
@@ -5316,19 +5335,25 @@ mod tests {
     }
 
     #[test]
-    fn resize_targets_visible_excludes_verb_dock_even_when_menu_open() {
-        // SQ-0237: the verb dock is deferred to SQ-0238 as an interactive
-        // resize target (the verb menu is a keyboard-modal that swallows all
-        // keys before resize mode's intercept, so the two can never be active
-        // together). Opening the verb menu must not surface it as a target.
+    fn resize_targets_visible_includes_verb_dock_when_menu_open() {
+        // SQ-0238: resize mode now preempts the verb-menu key intercept, so the
+        // two coexist and the verb dock becomes a resize target while the menu
+        // is open (appended after StoryMap/InvDock in the Tab-cycle order).
         let mut s = AppState::default();
         open_verb_menu_with_nouns(&mut s, vec![]);
-        assert_eq!(s.resize_targets_visible(), vec![crate::state::ResizeTarget::StoryMap]);
+        assert_eq!(
+            s.resize_targets_visible(),
+            vec![crate::state::ResizeTarget::StoryMap, crate::state::ResizeTarget::VerbDock]
+        );
 
         s.show_inventory = true;
         assert_eq!(
             s.resize_targets_visible(),
-            vec![crate::state::ResizeTarget::StoryMap, crate::state::ResizeTarget::InvDock]
+            vec![
+                crate::state::ResizeTarget::StoryMap,
+                crate::state::ResizeTarget::InvDock,
+                crate::state::ResizeTarget::VerbDock,
+            ]
         );
     }
 
@@ -6643,6 +6668,82 @@ mod tests {
         s.resize_mode = true;
         let a = key_to_action(&s, key(KeyCode::Tab));
         assert!(matches!(a, Action::ResizeNav(ResizeNavKind::NextTarget)));
+    }
+
+    // ── SQ-0238: verb dock ⇄ resize mode coexistence ──────────────────────────
+
+    /// Build a KeyEvent equal to the current hotkey-dialog leader prefix,
+    /// regardless of what it is bound to (default ctrl+k, but another lane may
+    /// move it) — the prefix must always pass through the verb-menu intercept.
+    fn prefix_key(s: &AppState) -> KeyEvent {
+        let p = s.hotkeys.prefix;
+        let mut m = KeyModifiers::NONE;
+        if p.ctrl { m |= KeyModifiers::CONTROL; }
+        if p.shift { m |= KeyModifiers::SHIFT; }
+        if p.alt { m |= KeyModifiers::ALT; }
+        KeyEvent::new(p.code, m)
+    }
+
+    #[test]
+    fn resize_mode_preempts_verb_menu_intercept() {
+        // (a) With the verb menu open AND resize mode on, arrows/Tab resolve to
+        // ResizeNav (resize owns them), not the verb-menu navigation actions.
+        let mut s = AppState::default();
+        open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
+        s.resize_mode = true;
+
+        assert!(matches!(
+            key_to_action(&s, key(KeyCode::Down)),
+            Action::ResizeNav(ResizeNavKind::Down)
+        ), "Down resizes, not VerbMenuNav");
+        assert!(matches!(
+            key_to_action(&s, key(KeyCode::Tab)),
+            Action::ResizeNav(ResizeNavKind::NextTarget)
+        ), "Tab cycles resize target, not verb-menu pane");
+        assert!(matches!(
+            key_to_action(&s, key(KeyCode::Esc)),
+            Action::ResizeExit
+        ), "Esc exits resize mode (back to the still-open menu), not VerbMenuClose");
+    }
+
+    #[test]
+    fn verb_menu_intercept_passes_through_leader_prefix() {
+        // (b) With the verb menu open, the leader prefix is NOT swallowed by the
+        // verb-menu intercept, so it can open the leader palette (→ 'z' → resize).
+        let mut s = AppState::default();
+        open_verb_menu_with_nouns(&mut s, vec![]);
+        // Both focus states: the prefix must fall through either way.
+        s.overlays.verb_menu.as_mut().unwrap().story_focused = true;
+        assert!(verb_menu_intercept(prefix_key(&s), &s).is_none(), "prefix falls through (story focus)");
+        s.overlays.verb_menu.as_mut().unwrap().story_focused = false;
+        assert!(verb_menu_intercept(prefix_key(&s), &s).is_none(), "prefix falls through (pane focus)");
+
+        // End-to-end: the prefix resolves to OpenHotkeyDialog while the menu is open.
+        assert!(matches!(
+            key_to_command(&s, prefix_key(&s)),
+            KeyResolve::Action(Action::OpenHotkeyDialog)
+        ), "prefix opens the hotkey dialog with the verb menu open");
+    }
+
+    #[test]
+    fn verb_dock_is_a_resize_target_only_while_menu_open() {
+        // The verb dock joins the resize Tab-cycle exactly when the menu is open.
+        let mut s = AppState::default();
+        assert!(!s.resize_targets_visible().contains(&crate::state::ResizeTarget::VerbDock));
+        open_verb_menu_with_nouns(&mut s, vec![]);
+        assert!(s.resize_targets_visible().contains(&crate::state::ResizeTarget::VerbDock));
+    }
+
+    #[test]
+    fn verb_menu_nav_still_resolves_when_resize_mode_off() {
+        // (c) With resize mode OFF, verb-menu navigation resolves normally.
+        let mut s = AppState::default();
+        open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
+        assert!(!s.resize_mode);
+        assert!(matches!(
+            key_to_action(&s, key(KeyCode::Tab)),
+            Action::VerbMenuNav(VerbMenuNavKind::NextPane)
+        ), "Tab cycles verb-menu pane when not resizing");
     }
 
     #[test]

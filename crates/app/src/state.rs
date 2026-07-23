@@ -1017,6 +1017,8 @@ pub enum ResizeTarget {
     StoryMap,
     /// The inventory dock height.
     InvDock,
+    /// The verb dock width (only while the verb menu is open; SQ-0238).
+    VerbDock,
 }
 
 /// Where the event loop should go when the current story ends. `Exit` leaves
@@ -2331,14 +2333,12 @@ impl AppState {
 
     /// Which panes are currently visible and eligible for resize mode, in
     /// Tab-cycle order: StoryMap (Split layout only), InvDock (inventory
-    /// shown).
+    /// shown), VerbDock (verb menu open).
     ///
-    /// The verb dock is intentionally NOT an interactive resize target: the
-    /// verb menu is a keyboard-modal that routes all keys to
-    /// `verb_menu_key_to_action` before resize mode's intercept, so resize
-    /// mode and the verb menu can never be active at the same time. Its width
-    /// (`verb_dock_pct`) stays a persisted, resettable config value; see
-    /// SQ-0238 for interactive verb-dock resize.
+    /// The verb dock is only a resize target while the verb menu is open —
+    /// resize mode now preempts the verb-menu key intercept, so the two can be
+    /// active at once (SQ-0238). Its width (`verb_dock_pct`) is also a
+    /// persisted, resettable config value.
     pub fn resize_targets_visible(&self) -> Vec<ResizeTarget> {
         let mut targets = Vec::new();
         if self.layout == Layout::Split {
@@ -2346,6 +2346,9 @@ impl AppState {
         }
         if self.show_inventory {
             targets.push(ResizeTarget::InvDock);
+        }
+        if self.overlays.verb_menu.is_some() {
+            targets.push(ResizeTarget::VerbDock);
         }
         targets
     }

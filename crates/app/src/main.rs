@@ -641,6 +641,7 @@ fn draw_frame(
             let t = match state.resize_target {
                 ResizeTarget::StoryMap => "story/map",
                 ResizeTarget::InvDock => "inventory",
+                ResizeTarget::VerbDock => "verb dock",
             };
             format!("Resize [{t}] | Tab: pane | arrows: adjust | 0: reset | Esc: done")
         } else {
