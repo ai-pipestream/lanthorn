@@ -2212,7 +2212,10 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     location,
                     score,
                 };
-                match save_archive_meta(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history) {
+                // v6 graphics canvases ride along (Lane P): empty for non-v6
+                // sessions, so the archive layout is unchanged for them.
+                let v6_pics = zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default();
+                match app::archive::save_archive_meta_pics(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history, &v6_pics) {
                     Ok(()) => {
                         state.push_notice(&format!(
                             "[Game saved to {}]",
@@ -2235,6 +2238,10 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             Ok(()) => {
                                 if let Some(scr) = ac.screen.clone() {
                                     if let Some(z) = zvm_session_opt_mut(&mut *session) { z.machine.screen = scr; }
+                                }
+                                // v6 graphics canvases (Lane P): no-op for non-v6 archives.
+                                if let Some(z) = zvm_session_opt_mut(&mut *session) {
+                                    z.load_pictures_png(&ac.pictures);
                                 }
                                 if state.config.aux_storage != app::config::AuxStorage::Global {
                                     session.set_aux_data(ac.aux.clone());
@@ -2394,6 +2401,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             state.ingame_io = None;
                             if let Some(scr) = ac.screen.clone() {
                                 if let Some(z) = zvm_session_opt_mut(&mut *session) { z.machine.screen = scr; }
+                            }
+                            // Restore the v6 graphics canvases in their persisted
+                            // paint order (Lane P); a no-op for non-v6 archives.
+                            if let Some(z) = zvm_session_opt_mut(&mut *session) {
+                                z.load_pictures_png(&ac.pictures);
                             }
                             if state.config.aux_storage != app::config::AuxStorage::Global {
                                 session.set_aux_data(ac.aux.clone());

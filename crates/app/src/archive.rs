@@ -68,8 +68,13 @@ pub fn restore_engine_allowed(archive_engine: &str, current_engine: &str) -> Res
     }
 }
 const HISTORY_INDEX: &str = "history/index.json";
+/// Prefix for the per-window v6 graphics-canvas PNG blobs (`pictures/win-N.png`).
+/// These carry the rasterized `GameSession::pictures_canvas` so a v6 story's
+/// frame/graphics windows redraw identically after a host Save State restore
+/// (Lane P) — without them a fresh session shows blank graphics windows.
+const ENTRY_PICTURES_PREFIX: &str = "pictures/win-";
 
-pub const CURRENT_FORMAT_VERSION: u32 = 3;
+pub const CURRENT_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Meta {
@@ -125,6 +130,12 @@ struct ScreenDto {
     cols: u16,
     rows: u16,
     cells: Vec<(char, u8)>, // upper-window grid (ch, style) in row-major order
+    /// The full v6 8-window table (geometry, cursors, margins, colours, grids,
+    /// pixel-text runs), `Some` only for v6 stories. Serialized so a host Save
+    /// State restore reproduces the v6 chrome/status layout exactly (Lane P);
+    /// `#[serde(default)]` keeps pre-v6 archives loading as `None`.
+    #[serde(default)]
+    v6: Option<V6WindowsDto>,
 }
 
 impl ScreenDto {
@@ -140,6 +151,7 @@ impl ScreenDto {
             cols: s.upper.cols,
             rows: s.upper.rows,
             cells: s.upper.cells.iter().map(|c| (c.ch, c.style)).collect(),
+            v6: s.v6.as_ref().map(V6WindowsDto::from_v6),
         }
     }
 
@@ -161,8 +173,123 @@ impl ScreenDto {
                     .map(|&(ch, style)| zvm::screen::Cell { ch, style, fg: zvm::screen::ZColour::Default, bg: zvm::screen::ZColour::Default })
                     .collect(),
             },
+            v6: self.v6.as_ref().map(V6WindowsDto::to_v6),
             ..Default::default()
         }
+    }
+}
+
+// ── v6 window-table mirror DTOs (zvm has no serde, so we mirror its public
+// fields here, matching `ScreenDto`'s style). Restored on the host-mediated
+// restore paths so a v6 story's window geometry/status text survive. ────────
+
+/// serde mirror of `zvm::screen::ZColour` (that type is transient display state
+/// zvm does not serialize; we persist it for host Save State render fidelity).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum ZColourDto {
+    Default,
+    Standard(u8),
+    True(u16),
+    True24(u32),
+}
+
+impl ZColourDto {
+    fn from_z(c: zvm::screen::ZColour) -> Self {
+        use zvm::screen::ZColour as Z;
+        match c {
+            Z::Default => ZColourDto::Default,
+            Z::Standard(n) => ZColourDto::Standard(n),
+            Z::True(v) => ZColourDto::True(v),
+            Z::True24(v) => ZColourDto::True24(v),
+        }
+    }
+    fn to_z(&self) -> zvm::screen::ZColour {
+        use zvm::screen::ZColour as Z;
+        match self {
+            ZColourDto::Default => Z::Default,
+            ZColourDto::Standard(n) => Z::Standard(*n),
+            ZColourDto::True(v) => Z::True(*v),
+            ZColourDto::True24(v) => Z::True24(*v),
+        }
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct GridCellDto { ch: char, style: u8, fg: ZColourDto, bg: ZColourDto }
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct V6TextDto { y: u16, x: u16, text: String, style: u8, fg: ZColourDto, bg: ZColourDto }
+
+/// serde mirror of one `zvm::screen::ZWindow`. `props` holds the 16 ZMSD window
+/// properties (indices 0–15, §8.8.3.2) in field order; the grid, colours and
+/// pixel-text runs travel alongside.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ZWindowDto {
+    props: [u16; 16],
+    cols: u16,
+    rows: u16,
+    cells: Vec<GridCellDto>,
+    fg: ZColourDto,
+    bg: ZColourDto,
+    texts: Vec<V6TextDto>,
+}
+
+impl ZWindowDto {
+    fn from_window(w: &zvm::screen::ZWindow) -> Self {
+        let mut props = [0u16; 16];
+        for (n, p) in props.iter_mut().enumerate() {
+            *p = w.get_prop(n as u16);
+        }
+        ZWindowDto {
+            props,
+            cols: w.grid.cols,
+            rows: w.grid.rows,
+            cells: w.grid.cells.iter().map(|c| GridCellDto {
+                ch: c.ch, style: c.style, fg: ZColourDto::from_z(c.fg), bg: ZColourDto::from_z(c.bg),
+            }).collect(),
+            fg: ZColourDto::from_z(w.fg),
+            bg: ZColourDto::from_z(w.bg),
+            texts: w.texts.iter().map(|t| V6TextDto {
+                y: t.y, x: t.x, text: t.text.clone(), style: t.style,
+                fg: ZColourDto::from_z(t.fg), bg: ZColourDto::from_z(t.bg),
+            }).collect(),
+        }
+    }
+    fn to_window(&self) -> zvm::screen::ZWindow {
+        let mut w = zvm::screen::ZWindow::default();
+        for (n, &v) in self.props.iter().enumerate() {
+            w.put_prop(n as u16, v);
+        }
+        w.grid = zvm::screen::UpperWindow {
+            cols: self.cols,
+            rows: self.rows,
+            cells: self.cells.iter().map(|c| zvm::screen::Cell {
+                ch: c.ch, style: c.style, fg: c.fg.to_z(), bg: c.bg.to_z(),
+            }).collect(),
+        };
+        w.fg = self.fg.to_z();
+        w.bg = self.bg.to_z();
+        w.texts = self.texts.iter().map(|t| zvm::screen::V6Text {
+            y: t.y, x: t.x, text: t.text.clone(), style: t.style, fg: t.fg.to_z(), bg: t.bg.to_z(),
+        }).collect();
+        w
+    }
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct V6WindowsDto { windows: Vec<ZWindowDto>, current: u8 }
+
+impl V6WindowsDto {
+    fn from_v6(v: &zvm::screen::V6Windows) -> Self {
+        V6WindowsDto { windows: v.windows.iter().map(ZWindowDto::from_window).collect(), current: v.current }
+    }
+    fn to_v6(&self) -> zvm::screen::V6Windows {
+        let mut v = zvm::screen::V6Windows::default();
+        for (i, wd) in self.windows.iter().take(8).enumerate() {
+            v.windows[i] = wd.to_window();
+        }
+        v.current = self.current;
+        v
     }
 }
 
@@ -194,7 +321,13 @@ pub struct ArchiveContents {
     pub history: Vec<crate::history::TurnRecord>,
     /// Saved Z-machine screen state (None for archives without `screen.json`).
     /// Applied on the host-mediated restore paths so the upper window is restored.
+    /// For v6 stories this also carries the full 8-window table (`screen.v6`).
     pub screen: Option<zvm::screen::ScreenState>,
+    /// Per-window v6 graphics-canvas PNG blobs `(window_number, png_bytes)`,
+    /// sorted by window number (empty for non-v6 / archives without graphics).
+    /// Feed to `GameSession::load_pictures_png` so a restored v6 story redraws
+    /// its frame/graphics windows identically (Lane P).
+    pub pictures: Vec<(u8, Vec<u8>)>,
     /// Auxiliary key/value data from the machine (empty for archives without `aux.dat`).
     pub aux: std::collections::BTreeMap<String, Vec<u8>>,
     /// Shell-style command history (empty for archives without `command_history.json`).
@@ -241,7 +374,10 @@ pub fn save_archive(
 /// Write a `.babelmap` archive with explicit metadata (name, turns, saved_at).
 ///
 /// Used by `persist_files::save_named` to attach save slot information. See
-/// [`save_archive`] for the `save`/`screen`/`aux` parameters.
+/// [`save_archive`] for the `save`/`screen`/`aux` parameters. Persists no v6
+/// graphics canvases — a thin wrapper over [`save_archive_meta_pics`] for the
+/// non-v6 (or graphics-less) callers.
+#[allow(clippy::too_many_arguments)]
 pub fn save_archive_meta(
     path: &Path,
     mapper: &Mapper,
@@ -255,6 +391,31 @@ pub fn save_archive_meta(
     transcript_para: &[crate::state::ParaFmt],
     history: &[crate::history::TurnRecord],
     command_history: &[String],
+) -> io::Result<()> {
+    save_archive_meta_pics(path, mapper, save, screen, aux, meta, transcript,
+        transcript_kinds, transcript_runs, transcript_para, history, command_history, &[])
+}
+
+/// Write a `.babelmap` archive including per-window v6 graphics-canvas PNG
+/// blobs (`pictures/win-N.png`), the host Save State entry point for v6 stories
+/// (Lane P). `pictures` is `(window_number, png_bytes)` — pass
+/// `GameSession::pictures_png()`. Non-v6 callers use [`save_archive_meta`],
+/// which forwards an empty `pictures`.
+#[allow(clippy::too_many_arguments)]
+pub fn save_archive_meta_pics(
+    path: &Path,
+    mapper: &Mapper,
+    save: &EngineSave,
+    screen: Option<&zvm::screen::ScreenState>,
+    aux: &BTreeMap<String, Vec<u8>>,
+    meta: Meta,
+    transcript: &[String],
+    transcript_kinds: &[crate::state::TranscriptKind],
+    transcript_runs: &[Vec<crate::state::StyleRun>],
+    transcript_para: &[crate::state::ParaFmt],
+    history: &[crate::history::TurnRecord],
+    command_history: &[String],
+    pictures: &[(u8, Vec<u8>)],
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -353,6 +514,17 @@ pub fn save_archive_meta(
             }
             zip.start_file(format!("history/turn-{:04}.txt", r.turn), options)?;
             zip.write_all(r.transcript.as_bytes())?;
+        }
+    }
+
+    // pictures/win-N.png — v6 per-window graphics canvases (only when present).
+    // PNG is already compressed; store without extra Deflate.
+    if !pictures.is_empty() {
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (win, png) in pictures {
+            zip.start_file(format!("{ENTRY_PICTURES_PREFIX}{win}.png"), stored)?;
+            zip.write_all(png)?;
         }
     }
 
@@ -537,7 +709,29 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         Err(_) => std::collections::BTreeMap::new(),
     };
 
-    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, transcript_para, history, screen, aux, command_history, engine })
+    // pictures/win-N.png — v6 per-window graphics canvases (absent for non-v6).
+    // Collect the matching names first (releases each borrow before the reads).
+    // ZIP central-directory (by_index) order == write order, which is the paint
+    // order `pictures_png` emits (ascending z_seq) — preserved here, NOT sorted
+    // by window, so `load_pictures_png` can reproduce the relative z-order.
+    let picture_names: Vec<(u8, String)> = (0..zip.len())
+        .filter_map(|i| zip.by_index(i).ok().map(|e| e.name().to_string()))
+        .filter_map(|name| {
+            let n = name.strip_prefix(ENTRY_PICTURES_PREFIX)?.strip_suffix(".png")?;
+            n.parse::<u8>().ok().map(|win| (win, name))
+        })
+        .collect();
+    let mut pictures: Vec<(u8, Vec<u8>)> = Vec::with_capacity(picture_names.len());
+    for (win, name) in picture_names {
+        if let Ok(mut e) = zip.by_name(&name) {
+            let mut buf = Vec::new();
+            if e.read_to_end(&mut buf).is_ok() {
+                pictures.push((win, buf));
+            }
+        }
+    }
+
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, transcript_para, history, screen, aux, command_history, engine, pictures })
 }
 
 /// Read ONLY the `meta.json` entry from a save archive — avoids `load_archive`
@@ -1310,6 +1504,90 @@ mod tests {
         assert!(ac.screen.is_some(), "legacy screen.json still loads");
         assert_eq!(ac.engine_save().engine, DEFAULT_ENGINE);
         assert_eq!(ac.engine_save().bytes, quetzal);
+    }
+
+    #[test]
+    fn v6_window_table_round_trips_through_screen_dto() {
+        // A populated v6 8-window table (geometry, cursor, margins, colours, a
+        // grid glyph and a pixel-text run) survives ScreenDto → JSON → ScreenDto
+        // → ScreenState losslessly, so a host Save State reproduces v6 chrome.
+        use zvm::screen::{Cell, ScreenState, V6Text, V6Windows, ZColour};
+        let mut v6 = V6Windows::default();
+        v6.current = 7;
+        // Window 0: the main text window box + a colour pair.
+        let w0 = &mut v6.windows[0];
+        w0.put_prop(0, 40);  // y_coord
+        w0.put_prop(1, 44);  // x_coord
+        w0.put_prop(2, 160); // y_size
+        w0.put_prop(3, 234); // x_size
+        w0.put_prop(6, 8);   // left_margin
+        w0.fg = ZColour::Standard(2);
+        w0.bg = ZColour::True(0x1234);
+        // Window 1: a status grid with one styled glyph + a pixel-text run.
+        let w1 = &mut v6.windows[1];
+        w1.put_prop(3, 320);
+        w1.put_prop(2, 8);
+        w1.grid.resize(1, 4);
+        w1.grid.put(1, 2, 'Z', 0x01, ZColour::Standard(3), ZColour::Standard(9));
+        w1.texts.push(V6Text { y: 6, x: 139, text: "SCORE".into(), style: 2, fg: ZColour::True24(0xABCDEF), bg: ZColour::Default });
+
+        let src = ScreenState { v6: Some(v6), ..Default::default() };
+        let dto = ScreenDto::from_screen(&src);
+        let json = serde_json::to_string(&dto).unwrap();
+        let back: ScreenDto = serde_json::from_str(&json).unwrap();
+        let out = back.to_screen();
+
+        let rv = out.v6.expect("v6 table restored");
+        assert_eq!(rv.current, 7);
+        assert_eq!((rv.windows[0].y_coord, rv.windows[0].x_coord), (40, 44));
+        assert_eq!((rv.windows[0].y_size, rv.windows[0].x_size), (160, 234));
+        assert_eq!(rv.windows[0].left_margin, 8);
+        assert_eq!(rv.windows[0].fg, ZColour::Standard(2));
+        assert_eq!(rv.windows[0].bg, ZColour::True(0x1234));
+        let c: Cell = rv.windows[1].grid.cell(1, 2);
+        assert_eq!((c.ch, c.style, c.fg, c.bg), ('Z', 0x01, ZColour::Standard(3), ZColour::Standard(9)));
+        assert_eq!(rv.windows[1].texts.len(), 1);
+        assert_eq!(rv.windows[1].texts[0], V6Text { y: 6, x: 139, text: "SCORE".into(), style: 2, fg: ZColour::True24(0xABCDEF), bg: ZColour::Default });
+    }
+
+    #[test]
+    fn non_v6_screen_dto_has_no_v6_table() {
+        // A classic (v5) screen serializes v6 as None; to_screen restores None.
+        let src = zvm::screen::ScreenState::default(); // v6 = None
+        let dto = ScreenDto::from_screen(&src);
+        let json = serde_json::to_string(&dto).unwrap();
+        let back: ScreenDto = serde_json::from_str(&json).unwrap();
+        assert!(back.to_screen().v6.is_none());
+    }
+
+    #[test]
+    fn picture_blobs_round_trip_through_archive() {
+        // Per-window graphics PNG blobs survive save_archive_meta_pics →
+        // load_archive byte-for-byte, keyed and sorted by window number.
+        let machine = dummy_machine();
+        let png_a = vec![0x89, b'P', b'N', b'G', 1, 2, 3];   // opaque stand-in blobs;
+        let png_b = vec![0x89, b'P', b'N', b'G', 9, 8, 7, 6]; // load doesn't decode them
+        let path = temp_archive_path("pics");
+        save_archive_meta_pics(
+            &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None },
+            &[], &[], &[], &[], &[], &[],
+            &[(7, png_a.clone()), (1, png_b.clone())],
+        ).expect("save with pictures");
+        let ac = load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+        // Write order (paint order) is preserved, NOT re-sorted by window number.
+        assert_eq!(ac.pictures, vec![(7, png_a), (1, png_b)], "blobs round-trip in write order");
+    }
+
+    #[test]
+    fn archive_without_pictures_loads_empty() {
+        let machine = dummy_machine();
+        let path = temp_archive_path("nopics");
+        save_archive_m(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
+        let ac = load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+        assert!(ac.pictures.is_empty(), "archive without pictures/ → empty pictures");
     }
 
     #[test]

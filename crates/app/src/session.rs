@@ -485,6 +485,52 @@ impl GameSession {
         self.drain_pictures();
     }
 
+    /// Encode each rasterized v6 window canvas (`pictures_canvas`) to PNG bytes,
+    /// keyed by window number, for Lane P host Save State persistence. Ordered by
+    /// each canvas's draw-order stamp (`z_seq`) ASCENDING — the same order the v6
+    /// compositor paints them — so `load_pictures_png` can reproduce the relative
+    /// z-order (later-drawn windows on top) from the blob order alone, without
+    /// storing the raw stamps. Empty for non-v6 stories / before any graphics are
+    /// drawn. Pass the result to `archive::save_archive_meta_pics`. PNG is
+    /// lossless for RGBA, so a save → restore round-trip reproduces the canvases
+    /// byte-for-byte.
+    pub fn pictures_png(&self) -> Vec<(u8, Vec<u8>)> {
+        let mut keys: Vec<u8> = self.pictures_canvas.keys().copied().collect();
+        keys.sort_by_key(|k| (self.pictures_canvas[k].z_seq, *k));
+        let mut out = Vec::with_capacity(keys.len());
+        for k in keys {
+            let canvas = &self.pictures_canvas[&k];
+            let mut bytes = Vec::new();
+            if image::DynamicImage::ImageRgba8((*canvas.img).clone())
+                .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .is_ok()
+            {
+                out.push((k, bytes));
+            }
+        }
+        out
+    }
+
+    /// Rebuild `pictures_canvas` from persisted per-window PNG blobs
+    /// (`archive::ArchiveContents::pictures`) after a host Save State restore, so
+    /// a v6 story's graphics windows redraw identically without replaying draw
+    /// events (Lane P). Replaces the current canvases. `blobs` are expected in
+    /// paint order (as `pictures_png` emits them and the archive preserves);
+    /// fresh z-order stamps are assigned sequentially so the ORIGINAL relative
+    /// z-order (later-drawn windows on top) is reproduced.
+    pub fn load_pictures_png(&mut self, blobs: &[(u8, Vec<u8>)]) {
+        self.pictures_canvas.clear();
+        for (win, png) in blobs {
+            let Ok(img) = image::load_from_memory(png) else { continue };
+            let rgba = img.to_rgba8();
+            let mut canvas = crate::graphics::Canvas::new(rgba.width(), rgba.height());
+            canvas.img = std::sync::Arc::new(rgba);
+            canvas.version = canvas.version.wrapping_add(1);
+            canvas.z_seq = crate::graphics::next_draw_seq();
+            self.pictures_canvas.insert(*win, canvas);
+        }
+    }
+
     /// Drain the transcript accumulated since the last drain (intro or last turn).
     pub fn take_transcript(&mut self) -> String {
         let raw = sink_mut(&mut self.machine).take_text();

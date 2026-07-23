@@ -100,6 +100,7 @@ pub fn save_named(
     mapper: &Mapper,
     save: &crate::engine::EngineSave,
     screen: Option<&zvm::screen::ScreenState>,
+    pics: &[(u8, Vec<u8>)],
     aux: &std::collections::BTreeMap<String, Vec<u8>>,
     turns: u32,
     location: Option<String>,
@@ -129,7 +130,7 @@ pub fn save_named(
         score,
     };
     // Named saves are separate slots; command history is per-game, not per-slot.
-    crate::archive::save_archive_meta(&path, mapper, save, screen, aux, meta, transcript, transcript_kinds, transcript_runs, transcript_para, &[], &[])
+    crate::archive::save_archive_meta_pics(&path, mapper, save, screen, aux, meta, transcript, transcript_kinds, transcript_runs, transcript_para, &[], &[], pics)
 }
 
 /// Remove a save file.
@@ -489,7 +490,7 @@ mod tests {
         mapper.observe(1, "Foyer", None);
 
         let ifid = "ZCODE-1-TEST00-0001";
-        super::save_named(&dir, ifid, "before-troll", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 42, None, None, &[], &[], &[], &[])
+        super::save_named(&dir, ifid, "before-troll", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 42, None, None, &[], &[], &[], &[])
             .expect("save_named ok");
 
         // Path is `<slug>.babelmap` inside the game dir (no ifid in the name).
@@ -520,7 +521,7 @@ mod tests {
         let dir = make_temp_dir("summary");
         let mapper = Mapper::default();
         let ifid = "ZCODE-1-TEST00-0411";
-        super::save_named(&dir, ifid, "at-troll", &mapper, &es(&machine), Some(&machine.screen), &machine.aux_data, 7, Some("The Troll Room".into()), Some(10), &[], &[], &[], &[])
+        super::save_named(&dir, ifid, "at-troll", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 7, Some("The Troll Room".into()), Some(10), &[], &[], &[], &[])
             .expect("save_named ok");
 
         let saves = super::list_saves(&dir);

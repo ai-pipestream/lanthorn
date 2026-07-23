@@ -420,6 +420,10 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                                     zs.machine.screen = scr;
                                 }
                             }
+                            // v6 graphics canvases (Lane P): no-op for non-v6 archives.
+                            if let Some(zs) = zvm_session_opt_mut(&mut *session) {
+                                zs.load_pictures_png(&ac.pictures);
+                            }
                             startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs, ac.transcript_para));
                             startup_history = ac.history;
                             // Restore the turn counter from the same archive (SQ-0429):
