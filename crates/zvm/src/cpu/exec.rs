@@ -254,6 +254,12 @@ pub struct Machine {
     /// constraint. Defaults to 1 per ZMSD §15 ("By default it sits in window 1").
     /// Recorded for observability; the host owns actual pointer confinement.
     mouse_window: i16,
+    /// True while a v6 newline-interrupt routine (window prop 8) is running, so a
+    /// newline the routine itself emits cannot recursively re-fire the interrupt
+    /// (ZMSD §8.8.3.2.2). Frotz relies on the zeroed countdown alone; this flag is
+    /// a hang-safety belt for a spec-violating routine that both prints and re-arms
+    /// prop 9. See [`newline_interrupt`](Machine::newline_interrupt).
+    newline_interrupt_active: bool,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -364,6 +370,7 @@ impl Machine {
             mouse_y: 0,
             mouse_buttons: 0,
             mouse_window: 1,
+            newline_interrupt_active: false,
         }
     }
 
@@ -2610,6 +2617,49 @@ impl Machine {
         ret
     }
 
+    /// v6 newline interrupt (ZMSD §8.8.3.2.2) — the print-path analogue of
+    /// Frotz's `countdown()` (`src/common/screen.c`). Each new-line a *scrolling*
+    /// window emits decrements that window's interrupt countdown (prop 9); when it
+    /// reaches zero the routine whose packed address is in prop 8 is called "before
+    /// text printing resumes". Called once per '\n' streamed to the window in
+    /// [`print_text`].
+    ///
+    /// Semantics matched to Frotz: `if countdown != 0 { if --countdown == 0 { call }}`
+    /// — the routine fires exactly once, and because the countdown is now 0 any
+    /// new-line the routine itself emits is a no-op (Frotz's `!= 0` guard), so the
+    /// zeroed prop 9 *is* the re-entrancy guard. The routine "should not attempt to
+    /// print anything" (§8.8.3.2.2); Zork0 r393's is three instructions — set a
+    /// flag byte, `set_margins 0,0`, `rtrue` — i.e. it rolls prose back inside its
+    /// border frame. We run it synchronously via [`run_routine`], which safely
+    /// abandons (and restores state) if a spec-violating routine attempts a nested
+    /// blocking read our step model cannot suspend for. `newline_interrupt_active`
+    /// hard-stops recursion for a pathological routine that both prints and re-arms
+    /// prop 9 (Frotz would stack-overflow there; we simply skip).
+    ///
+    /// No-op below v6 (window props 8/9 do not exist), and no-op unless the
+    /// countdown is armed, so it costs a single field read on the hot path.
+    fn newline_interrupt(&mut self, win: usize) {
+        if self.newline_interrupt_active {
+            return;
+        }
+        let routine = match self.screen.v6.as_mut().and_then(|v6| v6.windows.get_mut(win)) {
+            Some(w) if w.interrupt_countdown != 0 => {
+                w.interrupt_countdown -= 1;
+                if w.interrupt_countdown != 0 {
+                    return; // not yet zero — just counted down
+                }
+                w.interrupt_routine
+            }
+            _ => return,
+        };
+        if routine == 0 {
+            return;
+        }
+        self.newline_interrupt_active = true;
+        self.run_routine(routine);
+        self.newline_interrupt_active = false;
+    }
+
     /// Complete a pending timed read as *interrupted* (the interrupt routine
     /// returned true / the host timed out): `read_char` stores ZSCII 0;
     /// `read` writes the partial `typed` line and stores terminator 0 (v5+).
@@ -2852,6 +2902,20 @@ impl Machine {
                 self.out.print_attr(&translated, attrs);
             } else {
                 self.out.print_attr(s, attrs);
+            }
+            // v6 newline interrupt (ZMSD §8.8.3.2.2): this stream path is the
+            // *scrolling* regime (v6 window 0 / Inform's wrap+scroll win7), the
+            // only place Frotz counts new-lines. Tick the current window's prop-9
+            // countdown once per '\n' emitted; `newline_interrupt` fires the prop-8
+            // routine when it reaches zero. No-op below v6 and when disarmed.
+            // Firing after the line is streamed matches Zork0 r393's fire-at-end
+            // quirk (Frotz's `story_id == ZORK_ZERO && h_release == 393` branch) and
+            // is invisible for a spec-compliant routine, which prints nothing.
+            if self.screen.v6.is_some() && s.contains('\n') {
+                let win = self.screen.v6.as_ref().map_or(0, |v6| v6.current as usize);
+                for _ in 0..s.matches('\n').count() {
+                    self.newline_interrupt(win);
+                }
             }
         }
     }
@@ -5359,6 +5423,117 @@ pub(crate) mod tests {
         let mut m = Machine::new(mem);
         let packed = (rout / 4) as u16;
         assert_eq!(m.run_routine(packed), 7, "ret 7 returns 7");
+    }
+
+    // -----------------------------------------------------------------------
+    // v6 newline interrupt (window props 8/9, ZMSD §8.8.3.2.2). Frotz reference:
+    // `countdown()` / `screen_new_line` in src/common/screen.c.
+    //
+    // Helper: v6 story whose `main` (byte 0x40, packed 0x10) runs `main_body` at
+    // 0x41, plus a newline-interrupt routine at byte 0x280 (packed 0xA0, since
+    // sample_story's routines_offset is 0 → 4*0xA0 = 0x280) with `rout_body` at
+    // 0x281. Window-0 output flows through print_text's scrolling stream path.
+    // -----------------------------------------------------------------------
+    fn v6_newline_story(main_body: &[u8], rout_body: &[u8]) -> Vec<u8> {
+        let mut buf = crate::header::tests_support::sample_story(6);
+        buf[0x06] = 0x00; buf[0x07] = 0x10; // header 0x06 = packed addr of main → byte 0x40
+        buf[0x40] = 0x00;                   // main: 0 locals
+        for (i, b) in main_body.iter().enumerate() { buf[0x41 + i] = *b; }
+        buf[0x280] = 0x00;                  // interrupt routine: 0 locals
+        for (i, b) in rout_body.iter().enumerate() { buf[0x281 + i] = *b; }
+        buf
+    }
+
+    // Test: a new-line printed to the scrolling window decrements prop 9 but does
+    // NOT fire the routine while the count is still above zero.
+    #[test]
+    fn newline_interrupt_counts_down_without_firing() {
+        let mut m = Machine::new(
+            Memory::new(crate::header::tests_support::sample_story(6)).unwrap(),
+        );
+        {
+            let w = &mut m.screen.v6.as_mut().unwrap().windows[0];
+            w.interrupt_countdown = 3;
+            w.interrupt_routine = 0xA0; // present, but must not fire yet
+        }
+        m.print_text("hello\n");
+        assert_eq!(
+            m.screen.v6.as_ref().unwrap().windows[0].interrupt_countdown, 2,
+            "one new-line → one decrement",
+        );
+        assert_eq!(m.global(0), 0, "routine must not run while the count is above zero");
+    }
+
+    // Test: when the countdown hits zero the prop-8 routine fires exactly once,
+    // synchronously, returning cleanly to the caller's frame.
+    #[test]
+    fn newline_interrupt_fires_at_zero() {
+        // main: new_line (0xBB) then quit (0xBA).
+        // routine: inc G0 (0x95 0x10) then rtrue (0xB0).
+        let mut m = Machine::new(
+            Memory::new(v6_newline_story(&[0xBB, 0xBA], &[0x95, 0x10, 0xB0])).unwrap(),
+        );
+        {
+            let w = &mut m.screen.v6.as_mut().unwrap().windows[0];
+            w.interrupt_countdown = 1; // fire after this one new-line
+            w.interrupt_routine = 0xA0;
+        }
+        assert_eq!(m.global(0), 0);
+        // Step main's new_line: prints "\n" to window 0 → countdown 1→0 → fire.
+        assert_eq!(m.step(), StepResult::Continue);
+        assert_eq!(m.global(0), 1, "interrupt routine ran exactly once");
+        assert_eq!(
+            m.screen.v6.as_ref().unwrap().windows[0].interrupt_countdown, 0,
+            "the fired countdown stays at zero (Frotz's re-fire guard)",
+        );
+        assert_eq!(m.state.frames.len(), 1, "routine returned cleanly to main's frame");
+    }
+
+    // Test: re-entrancy guard. The routine re-arms prop 9 to 1 AND emits a
+    // new-line of its own; without the guard that new-line would re-fire the
+    // interrupt forever. It must run once and leave its re-armed count intact.
+    #[test]
+    fn newline_interrupt_guards_reentrancy() {
+        // routine: put_wind_prop(win0, prop9, 1) [BE 19 57 00 09 01],
+        //          new_line [BB], inc G0 [95 10], rtrue [B0].
+        let rout = [0xBE, 0x19, 0x57, 0x00, 0x09, 0x01, 0xBB, 0x95, 0x10, 0xB0];
+        let mut m = Machine::new(
+            Memory::new(v6_newline_story(&[0xBB, 0xBA], &rout)).unwrap(),
+        );
+        {
+            let w = &mut m.screen.v6.as_mut().unwrap().windows[0];
+            w.interrupt_countdown = 1;
+            w.interrupt_routine = 0xA0;
+        }
+        // Fires via main's new_line; must terminate (no unbounded recursion).
+        assert_eq!(m.step(), StepResult::Continue);
+        assert_eq!(m.global(0), 1, "routine ran exactly once despite emitting a new-line");
+        assert_eq!(
+            m.screen.v6.as_ref().unwrap().windows[0].interrupt_countdown, 1,
+            "the routine's own new-line is ignored while it runs (re-entrancy guarded)",
+        );
+        assert!(!m.newline_interrupt_active, "active flag cleared after the routine returns");
+    }
+
+    // Test: writing prop 9 via put_wind_prop (EXT:0x19) arms and later resets the
+    // running countdown.
+    #[test]
+    fn put_wind_prop_9_arms_and_resets_countdown() {
+        let mut m = Machine::new(
+            Memory::new(crate::header::tests_support::sample_story(6)).unwrap(),
+        );
+        // put_wind_prop(win0, prop9, 5) arms the countdown.
+        m.exec_ext(0x19, &[0, 9, 5], None, None);
+        assert_eq!(m.screen.v6.as_ref().unwrap().windows[0].interrupt_countdown, 5);
+        // One new-line decrements it.
+        m.print_text("x\n");
+        assert_eq!(m.screen.v6.as_ref().unwrap().windows[0].interrupt_countdown, 4);
+        // A fresh prop-9 write resets the running count.
+        m.exec_ext(0x19, &[0, 9, 2], None, None);
+        assert_eq!(
+            m.screen.v6.as_ref().unwrap().windows[0].interrupt_countdown, 2,
+            "put_wind_prop(9, ..) resets the count",
+        );
     }
 
     // -----------------------------------------------------------------------
