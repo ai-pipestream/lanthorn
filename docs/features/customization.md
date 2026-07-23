@@ -230,10 +230,12 @@ re-seed the new template, or hand-write the new shape from
 - `undo_levels` (default 16) — how many in-memory undo states the Z-machine
   keeps for the game's own UNDO command (0 disables undo).
 - **v6 story rendering** — `v6_render` selects how graphical v6 titles (*Zork Zero*,
-  *Shogun*, …) draw their story text on an image-capable terminal: `raster` renders
-  the whole pane — frame, status, and story text — as one scaled pixel image. It also
-  cycles in the settings screen. (Applies only to graphical v6 stories; other games
-  are unaffected.)
+  *Shogun*, …) draw their story pane on an image-capable terminal: `hybrid`
+  (the default) keeps the story text as real terminal text inside an image
+  chrome ring; `raster` bakes the whole pane — frame, status, and story text —
+  into one scaled pixel image instead. It also cycles in the settings screen.
+  (Applies only to graphical v6 stories; other games are unaffected.) See
+  [Graphical v6](v6-graphics.md) for the full picture.
 - **Story text margins** — `text_margin_x` / `text_margin_y` (default 0) reserve
   blank columns on each side / rows top and bottom *inside* the story text pane,
   for a little breathing room around the transcript. The margin applies to the

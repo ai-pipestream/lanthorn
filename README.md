@@ -36,9 +36,11 @@ Glulxe, no C bindings, zero runtime dependencies:
 
 - **Z-machine** (v3/v4/v5/v6/v7/v8) — the Infocom canon and decades of Inform 6
   games, including the v4+ cursor-addressed upper window, timed/interrupt input,
-  and per-title header tuning. Graphical **v6** titles (*Zork Zero*, *Shogun*,
-  *Journey*, …) boot and play too: pictures and text composite into one pixel
-  image on image-capable terminals, with a character-cell fallback elsewhere.
+  and per-title header tuning. Graphical **v6** stories run too — *Zork Zero*
+  boots and plays with its full banner, columns, and per-room compass rendered
+  faithfully, chrome and story text composited together on image-capable
+  terminals (or split, by default, into a crisp real terminal viewport ringed
+  by an image frame), with a character-cell fallback elsewhere.
 - **Glulx** — modern Inform 7 games, with an accelerated Inform veneer, full
   float opcodes, and a complete **Glk 0.7.6** layer verified against the standard
   Glulx/Glk test suites.
@@ -65,9 +67,12 @@ playing *Zork*, *Counterfeit Monkey*, or *Adventureland*.
 Cover art, in-game Glulx graphics windows, and inline images in the text render
 with your terminal's best protocol — **Kitty, iTerm2, or Sixel** — and fall back
 to a universal Unicode half-block renderer everywhere else. Graphical
-**Z-machine v6** stories go a step further: the whole story pane — pictures and
-text together — composites into a single device-resolution pixel image, with a
-character-cell rendering as the fallback on terminals without an image
+**Z-machine v6** stories go a step further: by default, the decorative chrome —
+banner, borders, the compass — renders as a pixel-accurate image ring around
+the story text, while the story itself stays real, selectable terminal text
+with its own inline drop-caps and room icons. Prefer the whole pane baked into
+one pixel image instead? Switch `v6_render` to `raster`. Either way, a
+character-cell rendering is the fallback on terminals without an image
 protocol.
 
 ![In-game graphics rendered with the Kitty graphics protocol](docs/kitty-graphics.png)
@@ -106,11 +111,15 @@ tell the three engines apart at a glance (`Z5`, `Scott`, `G3.1.2`).
 
 ## Every headline feature
 
-- **Three engines** — Z-machine (v3/v4/v5/v7/v8), Glulx (Inform 7), and Scott
+- **Three engines** — Z-machine (v3/v4/v5/v6/v7/v8), Glulx (Inform 7), and Scott
   Adams (ScottFree), auto-detected from the file. Full Glk 0.7.6 support for
   Glulx: file/resource streams, date/time with real local timezones, sound
   channels with pause and volume ramps, echo streams, and Unicode normalization.
   → [interpreter](docs/features/interpreter.md)
+- **Graphical Z-machine v6** — *Zork Zero*'s full illustrated frame (banner,
+  columns, per-room compass, illuminated drop-caps) renders faithfully; by
+  default the chrome composites as one pixel image around real, crisp
+  terminal story text. → [v6 graphics](docs/features/v6-graphics.md)
 - **Live automapping** — rooms and connections placed, routed, and de-overlapped
   as you explore, across layered multi-level areas, and continuously re-tidied.
   Works for every engine. → [mapping](docs/features/mapping.md)

@@ -11,10 +11,11 @@ sound, colour, timed input, crash-proofing — light up no matter which you're
 playing.
 
 - **Z-machine** (`zvm`) — the Infocom canon and decades of Inform 6, in story-file
-  versions **v3/v4/v5/v6/v7/v8**. It plays the full Infocom/Inform catalog,
-  including graphical **v6** titles (*Zork Zero*, *Shogun*, *Journey*, …), whose
-  pictures and text composite into a single pixel image on image-capable
-  terminals. (v1/v2 are not supported.)
+  versions **v3/v4/v5/v6/v7/v8**, including graphical **v6** — verified in depth
+  against *Zork Zero*, whose pictures and text composite together on
+  image-capable terminals, with the same engine targeting the wider v6
+  catalogue (*Shogun*, *Journey*, *Arthur*). See [Graphical v6](v6-graphics.md)
+  for how. (v1/v2 are not supported.)
 - **Glulx** (`gvm`) — modern Inform 7, with a complete **Glk 0.7.6** layer verified
   against the standard Glulx/Glk test suites, an accelerated Inform veneer, and the
   full floating-point opcode set. It targets Glulx spec 3.1.3 and reports every
@@ -58,16 +59,20 @@ playing.
   key or `zvm-cli -I N` / `--interpreter N` — e.g. `-I 6` selects the IBM PC path,
   which draws Beyond Zork's map box and cursor arrows as CP437 character graphics
   instead of Font 3.
-- **v6 graphical stories** — babelmap boots and plays graphical v6 titles
-  (*Zork Zero*, *Shogun*, *Journey*, and other Infocom v6 releases). On an
-  image-capable terminal (Kitty / iTerm2 / Sixel) the game's chrome — the
-  decorative frame and status line — renders as one scaled, **pixel-aspect-accurate**
-  image (uniform scaling, letterboxed, never stretched), and the story text is
-  drawn into the clear interior *inside* that frame — below the banner and between
-  the border columns — so nothing overpaints the artwork. The `v6_render` setting
-  (see Customization) picks how the story text is drawn: `raster` bakes it into the
-  pixel image as a bitmap font. Without an image protocol, v6 falls back to a
-  character-cell rendering. (v6's menu and mouse opcodes are not yet wired up.)
+- **v6 graphical stories** — babelmap boots and plays graphical v6 titles,
+  verified against *Zork Zero*'s full frame. On an image-capable terminal
+  (Kitty / iTerm2 / Sixel) the game's chrome — the decorative frame, status
+  line, and per-room compass — renders as one scaled, **pixel-aspect-accurate**
+  image (uniform scaling, letterboxed, never stretched); the game itself lays
+  this out by querying invisible "placement" pictures, which babelmap answers
+  from the Blorb's own dimension data. The `v6_render` setting (see
+  Customization) picks how the story text is drawn: the default `hybrid` mode
+  keeps it as real, crisp terminal text inside the chrome; `raster` bakes it
+  into the pixel image instead, bitmap-font style. Without an image protocol,
+  v6 falls back to a character-cell rendering. Full depth — the three render
+  modes, inline drop-caps, pixel-positioned status text and colour — is in
+  [Graphical v6](v6-graphics.md). (v6's menu and mouse opcodes are not yet
+  wired up.)
 
 ## Glulx
 

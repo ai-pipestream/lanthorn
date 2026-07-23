@@ -66,6 +66,21 @@ against their own I/O models and converge with Glulx only at the neutral
   they'd never use, so they stay zero-dependency and easy to reason about; Glk
   code lives in exactly one place (`app`'s Glulx backend).
 
+## Graphical v6: a fourth window kind on the same model
+
+Graphical Z-machine **v6** stories (*Zork Zero* and kin) don't fit the plain
+window tree — pictures and text share one pixel-addressed screen. Rather than
+build a second renderer, v6 gets one more `ScreenModel` node,
+`WinNode::Layered`, carrying the game's windows z-ordered background-first:
+`session.rs`'s `v6_screen_model` builds it from `zvm`'s native v6 window
+state; `render/screen.rs`'s `Layered` arm composites it — per-cell without an
+image protocol, or (with one) as one native-pixel-space canvas assembled by
+`render/v6_layout.rs`'s classification/geometry helpers and drawn by
+`render/graphics.rs::draw_v6_canvas`. Same generic renderer, same neutral
+model — v6 is a fourth leaf kind, not a parallel pipeline. See [Graphical
+v6](features/v6-graphics.md) for what that composite looks like from the
+player's side.
+
 ## Input: a suspend/resume handshake
 
 Input is engine-neutral too. A VM's `step()` returns a request —
