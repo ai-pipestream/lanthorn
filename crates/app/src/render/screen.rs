@@ -401,9 +401,42 @@ fn render_node(
                 let native = v6::native_extent(items);
                 let layout = v6::classify_windows(items);
                 let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, &state.colors);
-                // Raster mode (and, until Phase B, Hybrid): rasterize the story text into the
-                // clear interior of the native canvas, then draw the whole thing scaled.
-                // Phase B will branch on `state.config.v6_render` here for the Hybrid terminal path.
+
+                // Hybrid mode (Lane H): draw the chrome as a scaled pixel RING
+                // around a terminal story viewport, then render the story window as
+                // real terminal text (crisp, selectable, scrollable) inside it — the
+                // existing primary-Buffer transcript path, with inline images as
+                // bands. Needs a story window; without one, fall through to raster.
+                if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
+                    if let Some(story) = layout.story {
+                        let fs = picker.font_size();
+                        let cell_px = (fs.width, fs.height);
+                        let pane_dev = (
+                            area.width as u32 * fs.width.max(1) as u32,
+                            area.height as u32 * fs.height.max(1) as u32,
+                        );
+                        let scale = v6::uniform_scale(native, pane_dev);
+                        let vp = v6::story_viewport_box(Some(story), &scale, (area.width, area.height), cell_px);
+                        // The viewport in the pane's absolute cell coordinates.
+                        let viewport = Rect::new(area.x + vp.x, area.y + vp.y, vp.width, vp.height);
+                        let bands = v6::chrome_bands(area, viewport);
+                        {
+                            let mut gr = state.graphics_render.borrow_mut();
+                            let live: std::collections::HashSet<_> =
+                                bands.iter().map(|b| (b.x, b.y, b.width, b.height)).collect();
+                            gr.retain_chrome_bands(&live);
+                            for band in &bands {
+                                gr.draw_chrome_band(picker, &canvas, &scale, area, *band, buf);
+                            }
+                        }
+                        // The story window as real terminal text (primary-Buffer path).
+                        return render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors);
+                    }
+                }
+
+                // Raster mode (or Hybrid with no story window): rasterize the story
+                // text into the clear interior of the native canvas, then draw the
+                // whole thing scaled.
                 if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
                     // Window-0 inline pictures (drop-caps, room icons) arrive as
                     // transcript-anchored floats (`transcript_images` sidecar):
@@ -2176,5 +2209,85 @@ mod tests {
             Some(Color::Rgb(10, 20, 30)),
             "blank grid cell is transparent — graphics layer shows through"
         );
+    }
+
+    /// A synthetic v6 `Layered` model (native 320×200: a full-area opaque chrome
+    /// graphics window + a primary story `Buffer` at Zork0's win0 box), for the
+    /// Lane H hybrid-branch tests.
+    fn hybrid_v6_model() -> ScreenModel {
+        // Native-sized opaque chrome so build_chrome_canvas yields a real ring.
+        let chrome_img = image::RgbaImage::from_pixel(320, 200, image::Rgba([40, 30, 20, 255]));
+        let chrome = PositionedWindow {
+            x: 0, y: 0, w: 40, h: 25, x_px: 0, y_px: 0, w_px: 320, h_px: 200,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(crate::engine::GraphicsWindow {
+                win: 7, canvas: std::sync::Arc::new(chrome_img), version: 1, upscale: false,
+            }),
+        };
+        // Story: the primary buffer at the win0 box (43,39,234,160).
+        let story = PositionedWindow {
+            x: 5, y: 4, w: 29, h: 20, x_px: 43, y_px: 39, w_px: 234, h_px: 160,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+        };
+        ScreenModel {
+            root: WinNode::Layered(vec![chrome, story]),
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (40, 25),
+        }
+    }
+
+    #[test]
+    fn hybrid_renders_story_as_terminal_text_in_an_inset_viewport() {
+        // Hybrid + a picker: the Layered arm draws the chrome ring and renders the
+        // story window as REAL terminal text (via render_transcript) into an inset
+        // viewport — so render_node returns Some(metrics) and the transcript
+        // publishes its geometry inside (strictly smaller than) the full pane.
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = crate::config::V6RenderMode::Hybrid;
+        state.push_transcript("HELLO STORY WORLD");
+
+        let model = hybrid_v6_model();
+        let area = Rect::new(0, 0, 40, 25);
+        let mut buf = Buffer::empty(area);
+        let mut links = Vec::new();
+        let m = render_node(
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+        );
+        let m = m.expect("hybrid story viewport returns primary-buffer metrics");
+        assert!(m.viewport_rows > 0, "story viewport has rows");
+
+        // The transcript rendered as terminal cells into an inset viewport.
+        let geom = state.transcript_geom.get().expect("hybrid renders the transcript as terminal cells");
+        let vp = geom.area;
+        assert!(vp.width < area.width && vp.height < area.height, "viewport is inset inside the chrome ring: {vp:?}");
+        assert!(vp.x >= area.x && vp.y >= area.y && vp.right() <= area.right() && vp.bottom() <= area.bottom(),
+            "viewport stays inside the pane: {vp:?}");
+    }
+
+    #[test]
+    fn raster_mode_does_not_render_terminal_transcript() {
+        // Raster mode with a picker keeps today's behavior: the whole pane is one
+        // rasterized pixel image (draw_v6_canvas), NOT a terminal transcript — so
+        // render_node returns None and no transcript geometry is published.
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = crate::config::V6RenderMode::Raster;
+        state.push_transcript("HELLO STORY WORLD");
+
+        let model = hybrid_v6_model();
+        let area = Rect::new(0, 0, 40, 25);
+        let mut buf = Buffer::empty(area);
+        let mut links = Vec::new();
+        let m = render_node(
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+        );
+        assert!(m.is_none(), "raster path returns no primary-buffer metrics (rasterized image)");
+        assert!(state.transcript_geom.get().is_none(), "raster mode publishes no terminal transcript geometry");
     }
 }

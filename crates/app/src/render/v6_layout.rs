@@ -348,6 +348,84 @@ pub fn story_viewport(
     ratatui::layout::Rect { x: cell_left, y: cell_top, width, height }
 }
 
+/// The story viewport cell rect (relative to the pane's top-left cell) for the
+/// HYBRID render mode: the win0 box (`story` x_px/y_px/w_px/h_px, native game
+/// pixels) mapped through the letterbox [`Scale`] to device pixels, then quantized
+/// to whole cells rounding INWARD (ceil the top-left, floor the bottom-right) so
+/// no surrounding chrome cell overlaps the terminal story region. Unlike
+/// [`story_viewport`], this does NOT inset around opaque chrome pixels — the raw
+/// window box is the viewport, and the chrome ring is drawn around it. Falls back
+/// to the full pane when there is no story window.
+pub fn story_viewport_box(
+    story: Option<&PositionedWindow>,
+    scale: &Scale,
+    pane_cells: (u16, u16),
+    cell_px: (u16, u16),
+) -> ratatui::layout::Rect {
+    let Some(story) = story else {
+        return ratatui::layout::Rect { x: 0, y: 0, width: pane_cells.0, height: pane_cells.1 };
+    };
+    let left = story.x_px as f32;
+    let top = story.y_px as f32;
+    let right = (story.x_px as u32 + story.w_px as u32) as f32;
+    let bottom = (story.y_px as u32 + story.h_px as u32) as f32;
+
+    let dev_left = scale.off_x as f32 + left * scale.s;
+    let dev_top = scale.off_y as f32 + top * scale.s;
+    let dev_right = scale.off_x as f32 + right * scale.s;
+    let dev_bottom = scale.off_y as f32 + bottom * scale.s;
+
+    let cw_px = if cell_px.0 == 0 { 1 } else { cell_px.0 } as f32;
+    let ch_px = if cell_px.1 == 0 { 1 } else { cell_px.1 } as f32;
+
+    // Round INWARD: ceil the top-left, floor the bottom-right, so the viewport is
+    // the largest whole-cell rect fully inside the win0 box.
+    let cell_left = (dev_left / cw_px).ceil() as u16;
+    let cell_top = (dev_top / ch_px).ceil() as u16;
+    let cell_right = (dev_right / cw_px).floor() as u16;
+    let cell_bottom = (dev_bottom / ch_px).floor() as u16;
+
+    let width = cell_right.saturating_sub(cell_left).max(1);
+    let height = cell_bottom.saturating_sub(cell_top).max(1);
+
+    let cell_left = cell_left.min(pane_cells.0.saturating_sub(1));
+    let cell_top = cell_top.min(pane_cells.1.saturating_sub(1));
+    let width = width.min(pane_cells.0.saturating_sub(cell_left));
+    let height = height.min(pane_cells.1.saturating_sub(cell_top));
+
+    ratatui::layout::Rect { x: cell_left, y: cell_top, width, height }
+}
+
+/// The chrome RING cell rects around a story `viewport` inside a `pane`: up to
+/// four non-overlapping rects (top, bottom, left, right) that exactly tile
+/// `pane − viewport`. The top and bottom bands span the pane's full width (and so
+/// own the corners); the left and right bands span only the viewport's vertical
+/// extent. An edge-flush viewport omits that side's band; `viewport == pane`
+/// yields an empty list. `viewport` is assumed to lie within `pane`; it is clamped
+/// defensively. Both rects share one coordinate space (both absolute, or both
+/// pane-relative).
+pub fn chrome_bands(pane: ratatui::layout::Rect, viewport: ratatui::layout::Rect) -> Vec<ratatui::layout::Rect> {
+    use ratatui::layout::Rect;
+    // Clamp the viewport within the pane so the band arithmetic can't underflow.
+    let vx = viewport.x.clamp(pane.x, pane.right());
+    let vy = viewport.y.clamp(pane.y, pane.bottom());
+    let vr = viewport.right().clamp(vx, pane.right());
+    let vb = viewport.bottom().clamp(vy, pane.bottom());
+
+    let mut out = vec![
+        // Top band: full pane width, from the pane top down to the viewport top.
+        Rect::new(pane.x, pane.y, pane.width, vy - pane.y),
+        // Bottom band: full pane width, from the viewport bottom to the pane bottom.
+        Rect::new(pane.x, vb, pane.width, pane.bottom() - vb),
+        // Left band: the viewport's vertical span, from the pane left to the viewport left.
+        Rect::new(pane.x, vy, vx - pane.x, vb - vy),
+        // Right band: the viewport's vertical span, from the viewport right to the pane right.
+        Rect::new(vr, vy, pane.right() - vr, vb - vy),
+    ];
+    out.retain(|r| r.width > 0 && r.height > 0);
+    out
+}
+
 /// Rasterize `main`'s wrapped lines (then the input line + block cursor when
 /// `main.awaiting`) into `canvas` starting at native px `(ox, oy)`, one glyph per
 /// FONT×FONT cell, transparent glyph bg (draws over chrome/background art).
@@ -667,5 +745,90 @@ mod tests {
         let scale = uniform_scale((40, 40), (40, 40));
         let rect = story_viewport(None, &canvas, &scale, (40, 40), (1, 1));
         assert_eq!(rect, ratatui::layout::Rect { x: 0, y: 0, width: 40, height: 40 });
+    }
+
+    // ── Hybrid render mode: story_viewport_box + chrome_bands ──────────────────
+
+    #[test]
+    fn story_viewport_box_maps_win0_box_inward_to_cells() {
+        // Native 320×200 game, win0 box (43,39,234,160). Scale 1:1 (native px ==
+        // device px), 8 px/cell. Rounding INWARD: left ceil(43/8)=6, top
+        // ceil(39/8)=5, right floor((43+234)/8)=floor(277/8)=34,
+        // bottom floor((39+160)/8)=floor(199/8)=24 → 28×19 cells at (6,5).
+        let story = PositionedWindow { x_px: 43, y_px: 39, w_px: 234, h_px: 160, ..buffer_item(0, true) };
+        let scale = uniform_scale((320, 200), (320, 200)); // s = 1.0, no offset
+        assert_eq!(scale.s, 1.0);
+        let rect = story_viewport_box(Some(&story), &scale, (40, 25), (8, 8));
+        assert_eq!(rect, ratatui::layout::Rect { x: 6, y: 5, width: 28, height: 19 });
+    }
+
+    #[test]
+    fn story_viewport_box_no_story_is_full_pane() {
+        let scale = uniform_scale((320, 200), (320, 200));
+        let rect = story_viewport_box(None, &scale, (40, 25), (8, 8));
+        assert_eq!(rect, ratatui::layout::Rect { x: 0, y: 0, width: 40, height: 25 });
+    }
+
+    #[test]
+    fn chrome_bands_tile_pane_minus_viewport_without_overlap() {
+        use ratatui::layout::Rect;
+        let pane = Rect::new(0, 0, 40, 25);
+        let viewport = Rect::new(6, 5, 28, 19); // interior, all four edges inset
+        let bands = chrome_bands(pane, viewport);
+        assert_eq!(bands.len(), 4, "all four edges produce a band");
+        // Non-overlap + exact tiling: every pane cell OUTSIDE the viewport is
+        // covered exactly once; every viewport cell is covered zero times.
+        let mut cover = vec![0u8; (pane.width as usize) * (pane.height as usize)];
+        for b in &bands {
+            for y in b.y..b.bottom() {
+                for x in b.x..b.right() {
+                    cover[y as usize * pane.width as usize + x as usize] += 1;
+                }
+            }
+        }
+        for y in 0..pane.height {
+            for x in 0..pane.width {
+                let inside_vp = (viewport.x..viewport.right()).contains(&x) && (viewport.y..viewport.bottom()).contains(&y);
+                let c = cover[y as usize * pane.width as usize + x as usize];
+                if inside_vp {
+                    assert_eq!(c, 0, "viewport cell ({x},{y}) untouched by chrome bands");
+                } else {
+                    assert_eq!(c, 1, "chrome cell ({x},{y}) covered exactly once");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chrome_bands_omit_flush_edges() {
+        use ratatui::layout::Rect;
+        let pane = Rect::new(0, 0, 40, 25);
+        // Viewport flush to the left and top edges → only bottom + right bands.
+        let viewport = Rect::new(0, 0, 30, 20);
+        let bands = chrome_bands(pane, viewport);
+        assert_eq!(bands.len(), 2, "left+top flush → those bands omitted");
+        assert!(bands.iter().all(|b| b.x >= 30 || b.y >= 20), "remaining bands are the right/bottom ring");
+    }
+
+    #[test]
+    fn chrome_bands_full_viewport_is_empty() {
+        use ratatui::layout::Rect;
+        let pane = Rect::new(0, 0, 40, 25);
+        assert!(chrome_bands(pane, pane).is_empty(), "viewport == pane → no chrome");
+    }
+
+    #[test]
+    fn chrome_bands_absolute_coords_offset_pane() {
+        use ratatui::layout::Rect;
+        // A pane not anchored at the origin: bands must tile pane − viewport in the
+        // same absolute space (the hybrid path passes absolute rects).
+        let pane = Rect::new(10, 4, 20, 12);
+        let viewport = Rect::new(13, 6, 12, 6);
+        let bands = chrome_bands(pane, viewport);
+        assert_eq!(bands.len(), 4);
+        for b in &bands {
+            assert!(b.x >= pane.x && b.right() <= pane.right() && b.y >= pane.y && b.bottom() <= pane.bottom(),
+                "band {b:?} stays inside the pane");
+        }
     }
 }

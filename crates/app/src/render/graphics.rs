@@ -127,6 +127,11 @@ pub struct GraphicsRender {
     /// One-image cache for the v6 pixel composite (Phase 1c), keyed on a content
     /// hash + area so unchanged frames reuse the uploaded protocol.
     v6: Option<(u64, u16, u16, Protocol)>,
+    /// Per-band cache for the v6 HYBRID chrome ring (Lane H): one uploaded
+    /// protocol per band cell rect, keyed on the band rect with a stored
+    /// content+scale hash so an unchanged frame reuses the upload. Pruned each
+    /// frame to the live band set by [`GraphicsRender::retain_chrome_bands`].
+    chrome_bands: std::collections::HashMap<(u16, u16, u16, u16), (u64, Protocol)>,
 }
 
 impl std::fmt::Debug for GraphicsRender {
@@ -212,6 +217,91 @@ impl GraphicsRender {
             let w = sz.width.min(area.width);
             let ht = sz.height.min(area.height);
             let dest = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - ht) / 2, w, ht);
+            Image::new(proto).render(dest, buf);
+        }
+    }
+
+    /// Drop cached chrome-band protocols whose band rect is not in `live` — called
+    /// once per hybrid frame so a resize/layout change can't leave stale band
+    /// uploads accumulating.
+    pub fn retain_chrome_bands(&mut self, live: &std::collections::HashSet<(u16, u16, u16, u16)>) {
+        self.chrome_bands.retain(|k, _| live.contains(k));
+    }
+
+    /// Draw ONE chrome ring band (Lane H hybrid mode): the crop of the letterbox-
+    /// scaled `chrome_canvas` lying under `band`'s device region, placed as a
+    /// single image at the band's cell rect. `chrome_canvas` is the native
+    /// game-pixel chrome composite; `scale` is the same [`uniform_scale`] the story
+    /// viewport was mapped through, so the ring lines up pixel-exactly with the
+    /// terminal story region it surrounds. `pane` is the whole v6 pane's cell rect
+    /// (the band's coordinate origin). Cached per band on a content+scale hash.
+    pub fn draw_chrome_band(
+        &mut self,
+        picker: &Picker,
+        chrome_canvas: &image::RgbaImage,
+        scale: &crate::render::v6_layout::Scale,
+        pane: Rect,
+        band: Rect,
+        buf: &mut Buffer,
+    ) {
+        if band.width == 0 || band.height == 0 || chrome_canvas.width() == 0 || chrome_canvas.height() == 0 {
+            return;
+        }
+        let fs = picker.font_size();
+        let (cw, ch) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+        // The band's device-pixel region, measured from the pane's top-left pixel.
+        let rel_x0 = band.x.saturating_sub(pane.x) as u32 * cw;
+        let rel_y0 = band.y.saturating_sub(pane.y) as u32 * ch;
+        let bw = band.width as u32 * cw;
+        let bh = band.height as u32 * ch;
+        // The scaled chrome canvas occupies [off_x, off_x + native_w·s) ×
+        // [off_y, off_y + native_h·s) in that same pane-relative device space.
+        let (nw, nh) = (chrome_canvas.width(), chrome_canvas.height());
+        let sw = ((nw as f32 * scale.s).round() as u32).max(1);
+        let sh = ((nh as f32 * scale.s).round() as u32).max(1);
+
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        chrome_canvas.as_raw().hash(&mut h);
+        scale.s.to_bits().hash(&mut h);
+        (scale.off_x, scale.off_y).hash(&mut h);
+        (cw, ch).hash(&mut h);
+        (rel_x0, rel_y0, bw, bh).hash(&mut h);
+        let hash = h.finish();
+        let key = (band.x, band.y, band.width, band.height);
+        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _)) if *v == hash);
+        if !fresh {
+            // Scale the whole native chrome once (Nearest → crisp), then copy the
+            // sub-rect under this band into a band-sized image (letterbox area
+            // outside the scaled chrome stays transparent).
+            let scaled = image::imageops::resize(chrome_canvas, sw, sh, image::imageops::FilterType::Nearest);
+            let mut band_img = image::RgbaImage::new(bw, bh);
+            for by in 0..bh {
+                let sy = rel_y0 as i64 + by as i64 - scale.off_y as i64;
+                if sy < 0 || sy as u32 >= sh {
+                    continue;
+                }
+                for bx in 0..bw {
+                    let sx = rel_x0 as i64 + bx as i64 - scale.off_x as i64;
+                    if sx < 0 || sx as u32 >= sw {
+                        continue;
+                    }
+                    band_img.put_pixel(bx, by, *scaled.get_pixel(sx as u32, sy as u32));
+                }
+            }
+            let img = image::DynamicImage::ImageRgba8(band_img);
+            match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
+                Ok(p) => { self.chrome_bands.insert(key, (hash, p)); }
+                Err(_) => return,
+            }
+        }
+        if let Some((_, proto)) = self.chrome_bands.get(&key) {
+            let sz = proto.size();
+            let w = sz.width.min(band.width);
+            let ht = sz.height.min(band.height);
+            // The band image is exactly band-sized, so it places at the band's
+            // top-left (no centering — the crop is already positioned).
+            let dest = Rect::new(band.x, band.y, w, ht);
             Image::new(proto).render(dest, buf);
         }
     }
@@ -375,6 +465,32 @@ mod tests {
         // Same content → same hash (no rebuild churn on identical frames).
         gr.draw_v6_canvas(&picker, &canvas, area, &mut buf);
         assert_eq!(gr.v6.as_ref().unwrap().0, hash0, "identical canvas keeps the cached entry");
+    }
+
+    #[test]
+    fn draw_chrome_band_caches_and_retain_prunes() {
+        use crate::render::v6_layout::uniform_scale;
+        let picker = Picker::halfblocks();
+        let mut gr = GraphicsRender::default();
+        // Native 32×20 chrome (opaque), scaled 1:1 into a 32×20-device pane.
+        let chrome = image::RgbaImage::from_pixel(32, 20, image::Rgba([10, 20, 30, 255]));
+        let fs = picker.font_size();
+        let pane = Rect::new(0, 0, 32 / fs.width.max(1), 20 / fs.height.max(1));
+        let scale = uniform_scale((32, 20), (pane.width as u32 * fs.width as u32, pane.height as u32 * fs.height as u32));
+        let band = Rect::new(pane.x, pane.y, pane.width, 1); // a top ring band
+        let mut buf = Buffer::empty(pane);
+
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        assert_eq!(gr.chrome_bands.len(), 1, "first draw uploads + caches the band protocol");
+        let key = (band.x, band.y, band.width, band.height);
+        let hash0 = gr.chrome_bands.get(&key).unwrap().0;
+        // Same content + band → cache hit, no rebuild.
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, band, &mut buf);
+        assert_eq!(gr.chrome_bands.get(&key).unwrap().0, hash0, "identical band keeps the cached upload");
+
+        // retain_chrome_bands drops any band not in the live set.
+        gr.retain_chrome_bands(&std::collections::HashSet::new());
+        assert!(gr.chrome_bands.is_empty(), "empty live set clears the band cache");
     }
 
     #[test]
