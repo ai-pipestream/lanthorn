@@ -82,6 +82,15 @@ impl Vm {
     /// Describes the starting room into `out` so the host can read the intro via
     /// `take_output()` before driving input.
     pub fn new(db: Database) -> Vm {
+        Vm::new_with_trace(db, false)
+    }
+
+    /// Like [`Vm::new`], but with fired-action tracing enabled from the very
+    /// first instruction — so the opening occurrence pass (run inside this
+    /// constructor, before any host code can call [`set_trace_fired`]) is
+    /// captured too. The app's `--debug` boot path uses this so a Scott story's
+    /// start-of-game auto-events show up as fired from the first frame.
+    pub fn new_with_trace(db: Database, trace_fired: bool) -> Vm {
         let item_loc = db.items.iter().map(|i| i.start_loc).collect();
         let player = db.start_room;
         let lamp = db.light_time;
@@ -103,7 +112,7 @@ impl Vm {
             pending_line: None,
             save_requested: false,
             pending_picture: None,
-            trace_fired: false,
+            trace_fired,
             fired_actions: Vec::new(),
             ever_fired: HashSet::new(),
             last_blocked: Vec::new(),
@@ -154,6 +163,20 @@ impl Vm {
     /// Value of the live current counter.
     pub fn counter(&self) -> i32 {
         self.current_counter
+    }
+    /// The parsed game database (rooms, items, actions, vocab, messages) — the
+    /// static tables the debug inspector decompiles and lists on demand.
+    pub fn database(&self) -> &Database {
+        &self.db
+    }
+    /// Remaining lamp fuel (light turns); `-1` means an infinite light source.
+    pub fn lamp(&self) -> i32 {
+        self.lamp
+    }
+    /// The op-80 saved-room register (the room swapped out by SWAP_ROOM), or 0
+    /// if nothing has been stashed there yet.
+    pub fn saved_room(&self) -> usize {
+        self.saved_room
     }
 
     /// Enable/disable fired-action tracing (off by default). While off, the

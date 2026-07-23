@@ -444,6 +444,7 @@ fn toggle_debug(state: &mut AppState, session: &mut dyn Engine) {
         }
         let dbg = session.debugger().expect("checked above");
         let mut panel = app::debug_panel::DebugPanelState::new(dbg.pc());
+        panel.apply_engine_layout(dbg);
         panel.refresh(dbg);
         state.debug = Some(panel);
         state.focus = Focus::Map;

@@ -26,7 +26,7 @@ pub const MEM_WINDOW: usize = 256;
 pub enum DisasmMode { Full, Basic, Raw }
 
 /// A displayable section (one tab's content).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Section { Disasm, Globals, Locals, Objects, Dict, CallStack, EvalStack, Memory }
 
 impl Section {
@@ -151,7 +151,15 @@ impl HoverTip {
 pub struct DebugPanelState {
     /// Focused window: 0 = left, 1 = right-top, 2 = right-bottom.
     pub focus: usize,
-    /// Active tab index per window (into `WINDOW_TABS[window]`).
+    /// The visible tabs per window, in order. Defaults to [`WINDOW_TABS`]; an
+    /// engine can replace it via [`apply_engine_layout`](Self::apply_engine_layout)
+    /// to hide inapplicable sections and reuse slots (Scott). Every navigation /
+    /// render site reads this, never the const, so a custom layout is honoured.
+    pub tabs: [Vec<Section>; 3],
+    /// Per-section tab-label overrides (empty = each section's own `label()`),
+    /// set alongside `tabs` for engines that relabel a reused slot.
+    labels: std::collections::HashMap<Section, &'static str>,
+    /// Active tab index per window (into `tabs[window]`).
     pub tab: [usize; 3],
     /// List-content scroll offset per window (reset on tab change).
     pub scroll: [usize; 3],
@@ -200,6 +208,8 @@ impl DebugPanelState {
         ];
         DebugPanelState {
             focus: 0,
+            tabs: [WINDOW_TABS[0].to_vec(), WINDOW_TABS[1].to_vec(), WINDOW_TABS[2].to_vec()],
+            labels: std::collections::HashMap::new(),
             tab,
             scroll: [0, 0, 0],
             disasm_addr: pc,
@@ -217,9 +227,46 @@ impl DebugPanelState {
         }
     }
 
-    /// The section the given window is currently showing.
+    /// The section the given window is currently showing (clamped, so an engine
+    /// layout with fewer tabs than a stale `tab` index can never index-panic).
     pub fn active_section(&self, window: usize) -> Section {
-        WINDOW_TABS[window][self.tab[window]]
+        let tabs = &self.tabs[window];
+        tabs[self.tab[window].min(tabs.len().saturating_sub(1))]
+    }
+
+    /// The label to draw on `section`'s tab (an engine override, else its own
+    /// `label()`).
+    pub fn tab_label(&self, section: Section) -> &'static str {
+        self.labels.get(&section).copied().unwrap_or_else(|| section.label())
+    }
+
+    /// Locate `section` within the LIVE `tabs` layout (not the const) so nav
+    /// works under a custom engine layout; `(0, 0)` if it isn't visible.
+    fn locate(&self, section: Section) -> (usize, usize) {
+        for (w, tabs) in self.tabs.iter().enumerate() {
+            if let Some(t) = tabs.iter().position(|&s| s == section) {
+                return (w, t);
+            }
+        }
+        (0, 0)
+    }
+
+    /// Adopt `dbg`'s inspector layout: replace `tabs`/`labels` and reset the
+    /// per-window tab/scroll/focus when the engine supplies a custom layout
+    /// (Scott). A no-op for engines that don't (the Z-machine), so its panel is
+    /// left byte-for-byte identical. Call once, right after `new`, at each open
+    /// site (the `/debug` toggle and the `--debug` auto-open).
+    pub fn apply_engine_layout(&mut self, dbg: &dyn Debugger) {
+        let Some(layout) = dbg.sections() else { return };
+        self.tabs = [layout[0].to_vec(), layout[1].to_vec(), layout[2].to_vec()];
+        self.tab = [0, 0, 0];
+        self.scroll = [0, 0, 0];
+        self.focus = 0;
+        self.labels = layout
+            .iter()
+            .flat_map(|w| w.iter())
+            .map(|&s| (s, dbg.section_label(s)))
+            .collect();
     }
 
     /// Recompute the whole snapshot for the current cursor positions.
@@ -303,7 +350,7 @@ impl DebugPanelState {
     /// `window`'s active tab index moves by `dir` (wrapping); its scroll resets.
     fn cycle_tab(&mut self, dir: i32) {
         let window = self.focus;
-        let n = WINDOW_TABS[window].len() as i32;
+        let n = self.tabs[window].len() as i32;
         self.tab[window] = (self.tab[window] as i32 + dir).rem_euclid(n) as usize;
         self.scroll[window] = 0;
         self.sel = None; // switching sections invalidates the selection (SQ-0420)
@@ -475,7 +522,7 @@ impl DebugPanelState {
     /// window index, so callers can address that window's per-window state
     /// (scroll, etc.) without hard-coding it.
     fn show_section(&mut self, section: Section) -> usize {
-        let (w, t) = locate_section(section);
+        let (w, t) = self.locate(section);
         self.focus = w;
         self.tab[w] = t;
         w

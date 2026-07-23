@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::engine::{
-    BufferWindow, Engine, EngineError, EngineSave, GraphicsWindow, LocationInfo, ScreenModel, Split,
-    StatusModel, WinNode,
+    BufferWindow, Debugger, Engine, EngineError, EngineSave, GraphicsWindow, LocationInfo,
+    ScreenModel, Split, StatusModel, WinNode,
 };
 use crate::graphics::PictSource;
 use crate::session::{InputKind, PendingIo, TurnResult};
@@ -77,10 +77,22 @@ impl ScottSession {
     /// the game's own Blorb when it is a `.blb` graphics container (carrying the
     /// room `Pict` images); `None` for a plain text `.dat`.
     pub fn new(bytes: Vec<u8>, pict_blorb: Option<blorb::Blorb>) -> Result<ScottSession, String> {
+        ScottSession::new_with_trace(bytes, pict_blorb, false)
+    }
+
+    /// Like [`ScottSession::new`], but starts the VM with fired-action tracing
+    /// on (the `--debug` boot path) so the opening occurrence pass — run inside
+    /// `Vm::new_with_trace`, before any host code can toggle tracing — is
+    /// captured as coverage from the first frame.
+    pub fn new_with_trace(
+        bytes: Vec<u8>,
+        pict_blorb: Option<blorb::Blorb>,
+        trace: bool,
+    ) -> Result<ScottSession, String> {
         let src = std::str::from_utf8(&bytes)
             .map_err(|_| "Scott .dat is not valid text".to_string())?;
         let db = scott::Database::parse(src).map_err(|e| format!("invalid Scott .dat: {e:?}"))?;
-        let mut vm = scott::Vm::new(db);
+        let mut vm = scott::Vm::new_with_trace(db, trace);
         let mut intro = vm.take_output();
         if !vm.has_quit() {
             intro.push_str(PROMPT);
@@ -283,6 +295,22 @@ impl Engine for ScottSession {
         self.snapshot_location()
     }
 
+    fn set_debug_trace(&mut self, on: bool) {
+        // Turning the inspector on enables fired-action tracing; off stops it.
+        // The cumulative `ever_fired` set (permanent colour + persisted coverage)
+        // is preserved either way — only the per-turn set stops updating.
+        self.vm.set_trace_fired(on);
+    }
+
+    fn seed_executed_pcs(&mut self, pcs: &std::collections::HashSet<u32>) {
+        // The PC-set sidecar stores Scott action indices as `u32`s (SQ-0449).
+        self.vm.seed_ever_fired(pcs);
+    }
+
+    fn debugger(&self) -> Option<&dyn Debugger> {
+        Some(&self.vm)
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -297,10 +325,53 @@ impl Engine for ScottSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::debug_panel::{DebugPanelState, Section};
     use crate::engine::Engine;
 
     fn dat() -> Vec<u8> {
         include_bytes!("../../scott/tests/tiny_cave.dat").to_vec()
+    }
+
+    #[test]
+    fn debug_inspector_wires_scott_sections_and_tracks_fired_actions() {
+        // End-to-end through the real session + panel: open the inspector, adopt
+        // the Scott layout, refresh, and confirm the sections are populated and
+        // Call Stack / Eval Stack / Memory are hidden. Then play a turn with
+        // tracing on and confirm coverage accrues.
+        let mut s = ScottSession::new_with_trace(dat(), None, true).unwrap();
+        assert!(s.debugger().is_some(), "Scott exposes a debugger");
+
+        let mut panel = {
+            let dbg = s.debugger().expect("debugger");
+            let mut p = DebugPanelState::new(dbg.pc());
+            p.apply_engine_layout(dbg);
+            p.refresh(dbg);
+            p
+        };
+
+        // The Scott layout hides the register-machine sections and relabels its
+        // three windows; every window still has at least one tab.
+        let all: Vec<Section> = panel.tabs.iter().flat_map(|w| w.iter().copied()).collect();
+        assert!(!all.contains(&Section::CallStack) && !all.contains(&Section::Memory));
+        assert!(panel.tabs.iter().all(|w| !w.is_empty()));
+        assert_eq!(panel.tab_label(Section::Disasm), "Actions");
+
+        // Sections carry real content pulled from the loaded game.
+        assert!(!panel.snapshot.disasm.is_empty(), "Actions list non-empty");
+        assert!(panel.snapshot.globals.iter().any(|l| l.starts_with("Room:")), "State shown");
+        assert!(panel.snapshot.objects.iter().any(|l| l.contains("lamp")), "Items shown");
+        assert!(!panel.snapshot.dict.is_empty(), "Vocab shown");
+        assert!(panel.snapshot.locals.iter().any(|l| l == "Rooms:"), "World shown");
+
+        // Play a turn that fires a table action (moving down runs an occurrence),
+        // then refresh: both the last-turn and cumulative fired sets grow.
+        s.submit("down");
+        {
+            let dbg = s.debugger().expect("debugger");
+            panel.refresh(dbg);
+        }
+        assert!(!panel.snapshot.executed.is_empty(), "an action fired this turn");
+        assert!(!panel.snapshot.executed_ever.is_empty(), "and was recorded cumulatively");
     }
 
     /// The top room-panel text (first buffer of the split), joined for matching.

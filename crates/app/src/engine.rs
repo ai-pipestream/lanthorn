@@ -492,6 +492,24 @@ pub trait Debugger {
     /// unavailable (no frame, empty stack, or no such local). Read-only peek —
     /// never pops. Lets the Memory jump box dereference a variable to an address.
     fn var_value(&self, var: u8) -> Option<u16>;
+
+    /// This engine's per-window inspector tab layout, or `None` to use the
+    /// panel's default [`WINDOW_TABS`](crate::debug_panel::WINDOW_TABS). Each
+    /// inner slice lists one window's tabs, in order; any [`Section`] not listed
+    /// is hidden. Lets an engine with no call stack / eval stack / linear memory
+    /// (e.g. Scott Adams) drop those tabs and reuse the plain-list slots for its
+    /// own content. Default `None` keeps the Z-machine panel byte-for-byte.
+    fn sections(&self) -> Option<[&'static [crate::debug_panel::Section]; 3]> {
+        None
+    }
+
+    /// The tab label to show for `s` under this engine. Default is the section's
+    /// own [`label`](crate::debug_panel::Section::label); an engine that reuses a
+    /// section slot for different content (Scott shows "Items" on the Objects
+    /// tab, "World" on the Locals tab) overrides this to relabel it.
+    fn section_label(&self, s: crate::debug_panel::Section) -> &'static str {
+        s.label()
+    }
 }
 
 // ── Engine-tagged save ──────────────────────────────────────────────────────

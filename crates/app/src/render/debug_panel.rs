@@ -6,7 +6,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
-use crate::debug_panel::{self, DebugPanelState, HoverTip, Section, WINDOW_TABS};
+use crate::debug_panel::{self, DebugPanelState, HoverTip, Section};
 use crate::engine::DisasmProvenance;
 use crate::render::draw_str_clipped;
 use crate::render::panel::{draw_panel, PanelSpec, PanelStrip};
@@ -106,9 +106,11 @@ fn draw_window(buf: &mut Buffer, area: Rect, window: usize, panel: &DebugPanelSt
     });
 
     // Tab strip: one bracketed segment per section, active = the window's tab.
-    let sections = WINDOW_TABS[window];
+    // Read the panel's LIVE layout + labels (not the const), so an engine that
+    // hides/relabels sections (Scott) renders its own tabs.
+    let sections = &panel.tabs[window];
     let segs: Vec<InsetSegment> = sections.iter().enumerate()
-        .map(|(i, s)| InsetSegment { text: s.label(), active: i == panel.tab[window] })
+        .map(|(i, s)| InsetSegment { text: panel.tab_label(*s), active: i == panel.tab[window] })
         .collect();
     let frame = draw_panel(buf, &PanelSpec {
         area,

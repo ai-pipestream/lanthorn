@@ -59,6 +59,32 @@ built-in debugger that follows the running story instruction by instruction.
 - Select-and-copy works inside the inspector exactly as it does in the
   transcript. `Esc` closes it and restores the map.
 
+### Scott Adams inspector
+
+`/debug` (and `--debug`) work for Scott Adams stories too — the inspector
+retargets itself to the way a Scott game actually thinks. There is no program
+counter here; a Scott game *is* its **action table**, so the inspector puts that
+table front and centre and drops the sections that only make sense for a
+register machine (no call stack, eval stack, or linear memory).
+
+- **Actions** (the left column) decompiles the action table one rule per line —
+  `VERB NOUN  if CONDITIONS -> COMMANDS`, with items, rooms, flags, and messages
+  resolved to their names. `r` still cycles Full → Basic (mnemonics, raw
+  operands) → Raw (the bare numeric verb/noun/condition/command tuples), and
+  hovering a rule expands it to the full `IF …` / `THEN …` listing.
+- **Coverage, Scott-style.** Instead of executed program counters, the blue tier
+  and `|` gutter mark **actions that have fired** — cumulatively (blue) and on
+  the last command (the bar). An action whose verb and noun matched your command
+  but was stopped by a failing guard is flagged inline with a `✗cond` suffix, and
+  its hover names the condition slot that blocked it — a quick answer to "why
+  didn't that work?". `--debug` traces from boot, so the opening auto-events are
+  captured, and coverage persists per story exactly as for the Z-machine.
+- **The right-hand tabs** carry Scott's world: **State** (current and saved room,
+  lamp fuel, darkness, the live counter, set flags, and what's carried),
+  **Items** (every object with its start location), **Vocab** (the verb and noun
+  vocabularies with their synonyms), and **World** (every room with its exits,
+  followed by the message table).
+
 ## Playing aids
 - **Verb/noun menu** — a two-pane token palette of common verbs and in-scope
   nouns; pick tokens to assemble a command (multi-noun sentences via

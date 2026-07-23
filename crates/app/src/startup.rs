@@ -352,9 +352,12 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                 }
             }
         }
-        app::hints::LoadedStory::Scott(bytes) => match app::scott_session::ScottSession::new(
+        app::hints::LoadedStory::Scott(bytes) => match app::scott_session::ScottSession::new_with_trace(
             bytes,
             resolve_pict_blorb(&story_path, cfg.images),
+            // `--debug` (SQ-0449/SQ-0464): trace from boot so the opening
+            // occurrence pass (run inside the VM constructor) is captured.
+            cli.debug,
         ) {
             Ok(s) => Box::new(s),
             Err(e) => {
@@ -682,6 +685,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
         session.set_debug_trace(true);
         let dbg = session.debugger().expect("checked above");
         let mut panel = app::debug_panel::DebugPanelState::new(dbg.pc());
+        panel.apply_engine_layout(dbg);
         panel.refresh(dbg);
         state.debug = Some(panel);
         state.focus = app::state::Focus::Map;
