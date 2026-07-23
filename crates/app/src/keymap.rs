@@ -219,12 +219,18 @@ impl Default for KeyMap {
         bind!(plain(F(9)), "nudge-room 0 1", Context::Global);
 
         // ── Map ───────────────────────────────────────────────────────────────
-        // Pan: plain arrows + hjkl (two sets; shift-arrows removed so all
-        // direct bindings remain modifier-free).
+        // Pan: plain arrows + hjkl + shift-arrows (three sets). Shift+Arrow pans
+        // in Map focus (SQ-0416): it mirrors the Game-focus shift-arrow pan so the
+        // same keystroke works whichever pane holds focus.
         bind!(plain(Left), "pan-map -1 0", Context::Map);
         bind!(plain(Right), "pan-map 1 0", Context::Map);
         bind!(plain(Up), "pan-map 0 -1", Context::Map);
         bind!(plain(Down), "pan-map 0 1", Context::Map);
+
+        bind!(g(Left, false, true), "pan-map -1 0", Context::Map);
+        bind!(g(Right, false, true), "pan-map 1 0", Context::Map);
+        bind!(g(Up, false, true), "pan-map 0 -1", Context::Map);
+        bind!(g(Down, false, true), "pan-map 0 1", Context::Map);
 
         bind!(plain(Char('h')), "pan-map -1 0", Context::Map);
         bind!(plain(Char('l')), "pan-map 1 0", Context::Map);
@@ -246,12 +252,18 @@ impl Default for KeyMap {
         bind!(plain(Esc), "toggle-focus", Context::Map);
 
         // ── Anim ──────────────────────────────────────────────────────────────
-        // Pan in anim: hjkl only (plain arrows are bound to step; shift-arrows
-        // removed so all direct bindings remain modifier-free).
+        // Pan in anim: hjkl + shift-arrows. Plain arrows step the animation stage,
+        // so shift+Arrow is the arrow-key path for panning during playback
+        // (SQ-0416), matching the Map-focus shift-arrow pan.
         bind!(plain(Char('h')), "pan-map -1 0", Context::Anim);
         bind!(plain(Char('l')), "pan-map 1 0", Context::Anim);
         bind!(plain(Char('k')), "pan-map 0 -1", Context::Anim);
         bind!(plain(Char('j')), "pan-map 0 1", Context::Anim);
+
+        bind!(g(Left, false, true), "pan-map -1 0", Context::Anim);
+        bind!(g(Right, false, true), "pan-map 1 0", Context::Anim);
+        bind!(g(Up, false, true), "pan-map 0 -1", Context::Anim);
+        bind!(g(Down, false, true), "pan-map 0 1", Context::Anim);
 
         // Zoom in anim
         bind!(plain(Char('+')), "zoom-map in", Context::Anim);
@@ -362,19 +374,18 @@ const DEFAULT_DIRECT_COMMANDS: &[&str] = &[
 ];
 
 /// Default groups for the hotkey dialog (title, authored leader-key + full command-string).
+///
+/// Mnemonic-first layout (SQ-0446, "Proposal B"): 15 frequent map-editing verbs,
+/// each on its natural letter, in five function-named groups. `q` is deliberately
+/// unassigned so a bare `q` closes the dialog (universal quit/close convention).
+/// The long tail (exports, rename-layer, toggle-map, toggle-inspector,
+/// toggle-alignment, pane sizing, …) is reachable through the `/` command palette.
 const DEFAULT_GROUPS: &[(&str, &[(char, &str)])] = &[
-    ("Layout", &[('t', "tidy-map"), ('a', "animate-tidy"), ('l', "toggle-map")]),
-    ("Layers", &[('p', "peel-layer"), ('m', "merge-layer"), ('c', "cycle-layer next"), ('n', "rename-layer")]),
-    ("Edit", &[('r', "rename-room"), ('o', "edit-notes"), ('d', "delete-connection"), ('e', "relabel-edge")]),
-    ("Files", &[
-        ('s', "restore-state"), ('h', "open-history"), ('x', "reset-game"),
-        ('v', "export-svg"), ('g', "export-dot"), ('u', "export-map"),
-    ]),
-    ("View", &[
-        ('i', "toggle-inspector"), ('b', "open-verb-menu"),
-        ('w', "open-config"), ('y', "toggle-inventory"), ('j', "toggle-alignment"),
-        ('q', "toggle-portal-labels"), ('z', "resize-panes"), ('k', "reset-pane-size"),
-    ]),
+    ("Layout", &[('t', "tidy-map"), ('a', "animate-tidy")]),
+    ("Layers", &[('p', "peel-layer"), ('m', "merge-layer"), ('c', "cycle-layer next")]),
+    ("Edit", &[('r', "rename-room"), ('n', "edit-notes"), ('d', "delete-connection"), ('e', "relabel-edge")]),
+    ("View", &[('i', "toggle-inventory"), ('l', "toggle-portal-labels"), ('v', "open-verb-menu")]),
+    ("Session", &[('s', "open-config"), ('h', "open-history"), ('g', "reset-game")]),
 ];
 
 /// Runtime layout for the hotkey dialog.
@@ -545,10 +556,10 @@ mod tests {
         assert_eq!(km.lookup(&g(Char('h'), false, false), Context::Map), Some("pan-map -1 0"));
         // Map falls through to Global:
         assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Map), Some("save-state"));
-        // shift-arrow pan aliases were removed; plain arrow still works:
+        // plain arrow pans:
         assert_eq!(km.lookup(&g(Left, false, false), Context::Map), Some("pan-map -1 0"));
-        // shift-arrow is no longer bound in map context:
-        assert_eq!(km.lookup(&g(Left, false, true), Context::Map), None);
+        // shift-arrow also pans in Map context (SQ-0416):
+        assert_eq!(km.lookup(&g(Left, false, true), Context::Map), Some("pan-map -1 0"));
     }
 
     // ── HotkeyLayout tests ────────────────────────────────────────────────────
@@ -674,19 +685,20 @@ mod tests {
         let km = KeyMap::default();
         let f4 = KeySpec { code: KeyCode::F(4), ctrl: false, shift: false, alt: false };
         assert_eq!(km.lookup(&f4, Context::Global), None);
-        // It still appears in the Files hotkey group (leader panel).
+        // It still appears in the Session hotkey group (leader panel) — SQ-0446.
         let layout = HotkeyLayout::default();
-        let files = layout.groups.iter().find(|(t, _)| t == "Files").expect("Files group");
-        assert!(files.1.iter().any(|c| c.1 == "open-history"), "open-history in Files group");
+        let session = layout.groups.iter().find(|(t, _)| t == "Session").expect("Session group");
+        assert!(session.1.iter().any(|c| c.1 == "open-history"), "open-history in Session group");
     }
 
     #[test]
-    fn reset_game_in_files_dialog_group() {
+    fn reset_game_in_session_dialog_group() {
+        // SQ-0446: reset-game moved from Files to the Session group, letter 'g'.
         let layout = HotkeyLayout::default();
-        let files_group = layout.groups.iter().find(|(title, _)| title == "Files");
-        assert!(files_group.is_some(), "Files group should exist");
-        let (_, cmds) = files_group.unwrap();
-        assert!(cmds.iter().any(|c| c.1 == "reset-game"), "reset-game should be in Files group");
+        let session_group = layout.groups.iter().find(|(title, _)| title == "Session");
+        assert!(session_group.is_some(), "Session group should exist");
+        let (_, cmds) = session_group.unwrap();
+        assert!(cmds.iter().any(|c| c.1 == "reset-game"), "reset-game should be in Session group");
     }
 
     #[test]
@@ -761,10 +773,14 @@ mod tests {
         assert!(matches!(state.zoom, Zoom::Boxes), "ZoomReset must restore Zoom::Boxes");
     }
 
-    /// Every default binding for a DIRECT command (excluding save-state and
-    /// restore-state, which intentionally use Ctrl) must have ctrl=false and
-    /// shift=false. This invariant ensures that direct commands are reachable
-    /// with plain (unmodified) keystrokes.
+    /// Every default binding for a DIRECT command must have ctrl=false and
+    /// shift=false, so direct commands stay reachable with plain (unmodified)
+    /// keystrokes. Two deliberate exceptions:
+    ///   - save-state / restore-state intentionally use Ctrl.
+    ///   - the Shift+Arrow pan aliases (SQ-0416): pan-map keeps its plain-arrow
+    ///     and hjkl bindings too, so the shift-arrow alias is additive, not the
+    ///     only way in. The invariant still meaningfully guards every other
+    ///     direct binding (and pan-map's non-shift forms).
     #[test]
     fn direct_default_bindings_have_no_modifiers() {
         let km = KeyMap::default();
@@ -773,6 +789,9 @@ mod tests {
         // Commands excluded from this invariant by design.
         let excluded = ["save-state", "restore-state"];
 
+        // Arrow key codes — used to allow the additive Shift+Arrow pan aliases.
+        let is_arrow = |c| matches!(c, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down);
+
         let mut violations: Vec<String> = Vec::new();
         for (spec, cmd_str, _ctx) in &km.bindings {
             let first = cmd_str.split_whitespace().next().unwrap_or("");
@@ -780,6 +799,10 @@ mod tests {
                 continue;
             }
             if !layout.is_direct_name(cmd_str) {
+                continue;
+            }
+            // The Shift+Arrow pan alias is an intentional, additive exception.
+            if first == "pan-map" && spec.shift && !spec.ctrl && is_arrow(spec.code) {
                 continue;
             }
             if spec.ctrl || spec.shift {
@@ -851,7 +874,7 @@ mod tests {
             .collect();
         let unique: std::collections::HashSet<char> = letters.iter().copied().collect();
         assert_eq!(letters.len(), unique.len(), "leader letters must be unique");
-        assert_eq!(letters.len(), 25, "expected 25 authored leader letters");
+        assert_eq!(letters.len(), 15, "expected 15 authored leader letters (SQ-0446 Proposal B)");
     }
 
     #[test]
@@ -859,8 +882,19 @@ mod tests {
         let layout = HotkeyLayout::default();
         assert_eq!(layout.leader_command('t'), Some("tidy-map"));
         assert_eq!(layout.leader_command('c'), Some("cycle-layer next"));
-        assert_eq!(layout.leader_command('z'), Some("resize-panes"));
-        assert_eq!(layout.leader_command('k'), Some("reset-pane-size"));
+        // SQ-0446 Proposal B mnemonics:
+        assert_eq!(layout.leader_command('n'), Some("edit-notes"));
+        assert_eq!(layout.leader_command('i'), Some("toggle-inventory"));
+        assert_eq!(layout.leader_command('l'), Some("toggle-portal-labels"));
+        assert_eq!(layout.leader_command('v'), Some("open-verb-menu"));
+        assert_eq!(layout.leader_command('s'), Some("open-config"));
+        assert_eq!(layout.leader_command('g'), Some("reset-game"));
+        // 'q' is deliberately unassigned (bare q closes the dialog):
+        assert_eq!(layout.leader_command('q'), None);
+        // moved to the '/' palette — no longer leader letters:
+        assert_eq!(layout.leader_command('z'), None); // resize-panes
+        assert_eq!(layout.leader_command('k'), None); // reset-pane-size
+        assert_eq!(layout.leader_command('x'), None); // reset-game moved to 'g'
         assert_eq!(layout.leader_command('1'), None);
     }
 

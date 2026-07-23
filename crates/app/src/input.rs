@@ -182,10 +182,10 @@ pub enum Action {
     ExportDot(Option<String>),
     /// Caller: write an annotatable text/ASCII map dump. `Some(dest)` is the optional `[file]` arg.
     ExportMap(Option<String>),
-    /// Toggle the in-box alignment code overlay (dialog-only, leader letter `j`).
+    /// Toggle the in-box alignment code overlay (palette-only since SQ-0446).
     ToggleAlignment,
     /// Toggle portal destination name labels beside in-room portal icons
-    /// (dialog-only, leader letter `q`).
+    /// (dialog-only, leader letter `l`).
     TogglePortalLabels,
     /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
     ToggleRoomNumbers,
@@ -198,7 +198,8 @@ pub enum Action {
     SetVolume(u8),
     /// Toggle the room-detection-method indicator in the map corner.
     ToggleLocMethod,
-    /// Toggle the per-room diagnostics inspector overlay (map focus, `i` key).
+    /// Toggle the per-room diagnostics inspector overlay (palette-only since
+    /// SQ-0446 gave `i` to toggle-inventory).
     ToggleInspector,
     /// Caller: exit the application.
     Quit,
@@ -1225,8 +1226,9 @@ fn filebrowser_key_to_action(key: KeyEvent) -> Action {
 /// through and is handled by the always-live story input).
 fn verb_menu_intercept(key: KeyEvent, state: &AppState) -> Option<Action> {
     // The hotkey-dialog leader prefix is never swallowed by the dock: it must
-    // fall through so the player can open the leader palette (and reach
-    // resize-panes → 'z') while the verb menu is open (SQ-0238). This guard is
+    // fall through so the player can open the leader palette (and reach the
+    // '/' command palette, home of resize-panes and the rest of the long tail)
+    // while the verb menu is open (SQ-0238). This guard is
     // first so it wins even if the prefix is bound to a key the dock would
     // otherwise consume (Tab/Esc/an arrow).
     if KeySpec::from_key_event(key) == state.hotkeys.prefix {
@@ -3133,9 +3135,9 @@ mod tests {
         // Plain arrows pan in map focus.
         assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::Pan(0, 1)));
-        // Shift+Arrows no longer bound in map context.
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::None));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::None));
+        // Shift+Arrows also pan in map context (SQ-0416).
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
         // Nudge via plain F6-F9 (direct, via Map->Global fallthrough).
         assert!(matches!(key_to_action(&s, key(KeyCode::F(6))), Action::NudgeSelected(-1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::F(7))), Action::NudgeSelected(1, 0)));
@@ -3155,16 +3157,18 @@ mod tests {
     }
 
     #[test]
-    fn shift_n_starts_layer_rename_in_map_focus() {
+    fn n_starts_edit_notes_in_map_focus() {
+        // SQ-0446: 'n' is the Edit-group leader letter for edit-notes now
+        // (rename-layer moved to the '/' palette). With the dialog closed, plain
+        // 'n' is the direct select-room-next; Shift+N is not a leader letter.
         let mut s = AppState::default();
         s.focus = Focus::Map;
-        // RenameLayer is dialog-only: returns None when dialog is closed.
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::None));
-        // Open dialog: Shift+N is not an authored leader letter, so it now closes
-        // the dialog instead; the authored leader letter 'n' fires RenameLayer.
+        // Open dialog: Shift+N is not an authored leader letter, so it closes the
+        // dialog; the authored leader letter 'n' fires EditNotes.
         s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::CloseHotkeyDialog));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::RenameLayer));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::EditNotes));
     }
 
     #[test]
@@ -3181,13 +3185,16 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::None));
         // Ctrl-combos always close the dialog now (never fire); the underlying
-        // commands fire via their authored leader letters instead.
+        // commands fire via their authored leader letters instead (SQ-0446 layout).
         s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::CloseHotkeyDialog));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::ExportSvg(_)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('g'))), Action::ExportDot(_)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::ExportMap(_)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::ToggleMap));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::OpenVerbMenu));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::TogglePortalLabels));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
+        // 'u' (export-map) and 'x' (reset-game's old letter) are now palette-only:
+        // unbound leader letters close the dialog.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::CloseHotkeyDialog));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('x'))), Action::CloseHotkeyDialog));
     }
 
     #[test]
@@ -3212,10 +3219,11 @@ mod tests {
 
     #[test]
     fn leader_unbound_letter_closes() {
-        // All 26 letters are authored leader letters (SQ-0237 claimed the last
-        // two, 'z' and 'k'), so use a digit to exercise the "unbound" path.
+        // SQ-0446 curated the leader to 15 letters, so most letters are unbound
+        // and close the dialog. 'q' is deliberately unbound (quit convention).
         let mut s = AppState::default();
         s.overlays.hotkey_dialog = true;
+        assert!(matches!(key_to_command(&s, key(KeyCode::Char('q'))), KeyResolve::Action(Action::CloseHotkeyDialog)));
         assert!(matches!(key_to_command(&s, key(KeyCode::Char('1'))), KeyResolve::Action(Action::CloseHotkeyDialog)));
     }
 
@@ -3574,10 +3582,11 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::AnimStep(1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char(' '))), Action::AnimTogglePlay));
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::AnimExit));
-        // The map stays scrollable during playback: hjkl pan (shift-arrows removed), +/- zoom.
+        // The map stays scrollable during playback: hjkl + shift-arrows pan (SQ-0416),
+        // +/- zoom. (Plain arrows step stages, so shift+Arrow is the arrow pan path.)
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::None));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('+'))), Action::ZoomIn));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('-'))), Action::ZoomOut));
         // Exit clears playback.
@@ -3677,10 +3686,10 @@ mod tests {
 
     #[test]
     fn ctrl_a_toggles_alignment_overlay() {
-        // toggle_alignment is dialog-only (leader letter 'j'); it has never had a
-        // direct key. Ctrl+A is now the readline "move to start" shortcut at a
-        // live story prompt (SQ-0447), so it resolves to CursorHome there instead
-        // of None.
+        // toggle_alignment is palette-only now (SQ-0446 dropped its leader letter);
+        // it has never had a direct key. Ctrl+A is the readline "move to start"
+        // shortcut at a live story prompt (SQ-0447), so it resolves to CursorHome
+        // there instead of None.
         let s = AppState::default();
         assert!(!s.show_alignment, "off by default");
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::CursorHome));
@@ -3699,9 +3708,9 @@ mod tests {
 
     #[test]
     fn ctrl_p_toggles_portal_labels() {
-        // toggle_portal_labels is dialog-only (leader letter 'q'); it has never
-        // had a direct key. Ctrl+P is now the leader-dialog prefix itself (moved
-        // from Ctrl+K, SQ-0447), so pressing it opens the hotkey dialog.
+        // toggle_portal_labels is dialog-only (leader letter 'l' after SQ-0446);
+        // it has never had a direct key. Ctrl+P is now the leader-dialog prefix
+        // itself (moved from Ctrl+K, SQ-0447), so pressing it opens the hotkey dialog.
         let s = AppState::default();
         assert!(matches!(
             key_to_action(&s, ctrl(KeyCode::Char('p'))),
@@ -4000,21 +4009,23 @@ mod tests {
         assert!(s.suggestions.iter().any(|w| w.starts_with("nor")));
     }
 
-    // ── Inspector toggle tests ─────────────────────────────────────────────────
+    // ── Leader-letter 'i' toggle tests ────────────────────────────────────────
 
     #[test]
-    fn i_in_map_focus_yields_toggle_inspector() {
+    fn i_in_map_focus_yields_toggle_inventory() {
+        // SQ-0446: 'i' is the View-group leader letter for toggle-inventory now
+        // (toggle-inspector moved to the '/' palette).
         let mut s = AppState::default();
         s.focus = Focus::Map;
-        // ToggleInspector is dialog-only: returns None when dialog is closed.
+        // toggle-inventory is dialog-only: returns None when dialog is closed.
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::None));
         // Returns the action when dialog is open.
         s.overlays.hotkey_dialog = true;
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
     }
 
     #[test]
-    fn i_in_game_focus_is_input_char_not_inspector() {
+    fn i_in_game_focus_is_input_char_not_leader() {
         let s = AppState::default(); // game focus
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::InputChar('i')));
     }
@@ -4113,11 +4124,11 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::Pan(1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::Pan(0, -1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::Pan(0, 1)));
-        // Shift+Arrows no longer bound in map context.
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::None));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::None));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Up)), Action::None));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::None));
+        // Shift+Arrows also pan in Map focus (SQ-0416).
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Up)), Action::Pan(0, -1)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
         // hjkl pan (direct)
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
@@ -4157,23 +4168,24 @@ mod tests {
 
         // ── Map focus (dialog open) ───────────────────────────────────────────
         s.overlays.hotkey_dialog = true;
-        // Dialog-only commands now fire via their authored leader letters.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::RenameLayer));
+        // Dialog-only commands now fire via their authored leader letters (SQ-0446).
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::EditNotes));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::PeelLayer(None)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('m'))), Action::MergeLayer));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
-        // Unauthored keys (shift-modified letters, brackets) close the dialog
-        // instead of firing.
+        // Unauthored keys (shift-modified letters, brackets, dropped letters)
+        // close the dialog instead of firing.
         assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::RenameRoom));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('o'))), Action::EditNotes));
+        // 'o' (old edit-notes letter) is now unbound → closes the dialog.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('o'))), Action::CloseHotkeyDialog));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('d'))), Action::DeleteSelectedConnection));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('e'))), Action::RelabelSelectedEdge));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
-        // 'q' is authored to toggle-portal-labels; it no longer closes the dialog.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::TogglePortalLabels));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
+        // 'q' is deliberately unassigned → it closes the dialog (quit convention).
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseHotkeyDialog));
         s.overlays.hotkey_dialog = false;
 
         // ── Anim sub-mode ─────────────────────────────────────────────────────
@@ -4189,9 +4201,12 @@ mod tests {
         // Exit
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::AnimExit));
         assert!(matches!(key_to_action(&s, key(KeyCode::Enter)), Action::AnimExit));
-        // Pan in anim: hjkl only (shift-arrows removed from Anim keymap).
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::None));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::None));
+        // Pan in anim: hjkl + shift-arrows (SQ-0416). Plain arrows step stages, so
+        // shift+Arrow is the arrow-key pan path during playback.
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Up)), Action::Pan(0, -1)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
         // Zoom in anim
@@ -4298,10 +4313,11 @@ mod tests {
         s.toggle_focus();
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::None));
         s.overlays.hotkey_dialog = true;
-        // Ctrl-combos always close the dialog now (never fire); it fires via
-        // the authored leader letter 's' instead.
+        // Ctrl-combos always close the dialog now (never fire). open-saves has no
+        // leader letter; the SQ-0446 leader letter 's' opens the settings screen
+        // (open-config), reached via the saves dialog / Ctrl+R otherwise.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('o'))), Action::CloseHotkeyDialog));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('s'))), Action::OpenSaves));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('s'))), Action::OpenConfig));
     }
 
     #[test]
@@ -4461,7 +4477,7 @@ mod tests {
             key_to_action(&s, shift(KeyCode::Char('R'))),
             Action::None
         ));
-        // ToggleInspector ('i') is also dialog-only.
+        // toggle-inventory ('i') is also dialog-only (SQ-0446).
         assert!(matches!(
             key_to_action(&s, key(KeyCode::Char('i'))),
             Action::None
@@ -4526,16 +4542,15 @@ mod tests {
     }
 
     #[test]
-    fn q_no_longer_closes_hotkey_dialog() {
-        // q-close removed from hotkey dialog; q now falls through to keymap lookup.
+    fn q_closes_hotkey_dialog_as_unbound_leader() {
+        // SQ-0446 deliberately leaves 'q' unassigned so it restores the universal
+        // quit/close convention: an unbound leader letter closes the dialog.
         let mut s = AppState::default();
         s.overlays.hotkey_dialog = true;
-        // 'q' is not bound to any command in the keymap, so it should produce None
-        // (not CloseHotkeyDialog).
         let action = key_to_action(&s, key(KeyCode::Char('q')));
         assert!(
-            !matches!(action, Action::CloseHotkeyDialog),
-            "q should no longer close the hotkey dialog"
+            matches!(action, Action::CloseHotkeyDialog),
+            "bare 'q' (unbound leader letter) should close the hotkey dialog"
         );
     }
 
@@ -4546,8 +4561,8 @@ mod tests {
         s.focus = Focus::Map;
         s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
-        // ToggleInspector fires too.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInspector));
+        // toggle-inventory fires too (SQ-0446 gave 'i' to inventory).
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
     }
 
     #[test]

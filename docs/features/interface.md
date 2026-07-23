@@ -76,6 +76,12 @@ built-in debugger that follows the running story instruction by instruction.
   forward to the end, and `Ctrl+W` deletes the word behind the caret — the same
   shortcuts your shell uses. Only live while you're actually typing a command
   (not mid-`read_char` prompt), so they never steal a keystroke the game expects.
+- **Keyboard map navigation** — arrow keys and `hjkl` pan the map (and `+`/`-`/`0`
+  zoom, `c` center) when it holds focus. **Shift+Arrow pans the map from either
+  focus** — story or map — and keeps panning *during the tidy animation*, where
+  the plain arrows step through the layout stages instead. During that animation
+  `Ctrl+←`/`Ctrl+→` jump a whole stage at a time. `Ctrl+Q` (or `Ctrl+C`) quits
+  from anywhere, even mid-prompt.
 - **Inventory strip** — a toggleable strip of your carried items along the
   bottom of the story pane.
 - **Notification toasts** — status messages slide in at the top-right and fade

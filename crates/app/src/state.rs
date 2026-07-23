@@ -1411,13 +1411,13 @@ pub struct AppState {
     /// modal button-focus index. Grouped off `AppState` in SQ-0307.
     pub overlays: OverlayState,
     /// When true, draw each chained room's alignment code (`R{id}` / `C{id}`) in
-    /// its box interior (Boxes zoom only). Dialog-only; toggled via the leader
-    /// panel (default group "View", letter `j`) — `Ctrl+A` is a readline caret
-    /// shortcut at the story prompt now, not this toggle's direct key.
+    /// its box interior (Boxes zoom only). Palette-only since SQ-0446 (reached
+    /// through the `/` command palette) — `Ctrl+A` is a readline caret shortcut
+    /// at the story prompt now, not this toggle's direct key.
     pub show_alignment: bool,
     /// When true, portal icons additionally show their destination room name (Boxes zoom only).
     /// Dialog-only; toggled via the leader panel (default group "View", letter
-    /// `q`) — `Ctrl+P` is the leader-dialog prefix now, not this toggle's direct key.
+    /// `l`) — `Ctrl+P` is the leader-dialog prefix now, not this toggle's direct key.
     pub show_portal_labels: bool,
     /// Active tidy-animation playback, if any. While `Some`, the map renders the current
     /// captured stage instead of the live graph. Started by `Ctrl+Y`, cleared by `Esc`.
