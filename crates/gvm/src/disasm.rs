@@ -267,106 +267,510 @@ fn opcode_info(opcode: u32) -> Option<OpInfo> {
     })
 }
 
-/// One-to-two line description of an opcode for a hover tip. Covers the common
-/// opcodes; exotic ones fall back to `None` (the caller shows "no description").
-pub fn opcode_help(opcode: u32) -> Option<&'static str> {
+/// Structured per-opcode help for the debug inspector's instruction hover
+/// tooltip, keyed by opcode NUMBER (Glulx opcode numbers are already
+/// encoding-unambiguous, unlike Z-machine mnemonics which need a version to
+/// resolve — see `zvm::cpu::opcode_help`, whose depth this mirrors). Grounded
+/// in the Glulx Specification AS IMPLEMENTED by `exec::Machine::execute` —
+/// where the two disagree, the executor wins (see the discrepancy notes on
+/// the double-precision (`0x200..=0x239`) entries below).
+pub struct OpcodeHelp {
+    /// One-sentence description of what the opcode does. May reference
+    /// operand role names (`a`, `b`, …) in prose, matching `roles` below.
+    pub summary: &'static str,
+    /// Role text for each operand, in ENCODING order — index `i` here
+    /// describes `ins.operands[i]` (parallel to `opcode_info`/`decode_instr`'s
+    /// operand list). A load operand's text reads standalone ("the addend");
+    /// a store operand's text reads after "stores" ("the sum a + b"). The
+    /// branch-offset operand of a branching/`catch` opcode (always the LAST
+    /// operand — see `OpInfo::branch_index`) has no entry here; its phrasing
+    /// comes from `branch` (or, for `catch`, fixed text in `describe`).
+    pub roles: &'static [&'static str],
+    /// Branch condition, phrased to read after "branches if" — opcodes with
+    /// `Special::Branch` only. `None` means an unconditional jump (`jump`);
+    /// unused by `Special::Catch`, whose jump is always unconditional.
+    pub branch: Option<&'static str>,
+}
+
+macro_rules! h {
+    ($summary:literal) => {
+        OpcodeHelp { summary: $summary, roles: &[], branch: None }
+    };
+    ($summary:literal, $roles:expr) => {
+        OpcodeHelp { summary: $summary, roles: $roles, branch: None }
+    };
+    ($summary:literal, $roles:expr, branch: $branch:literal) => {
+        OpcodeHelp { summary: $summary, roles: $roles, branch: Some($branch) }
+    };
+}
+
+/// Per-opcode help, keyed by opcode number. The coverage test
+/// `opcode_help_covers_every_implemented_opcode` asserts every opcode
+/// `opcode_info` recognizes — itself transcribed from, and round-trip tested
+/// against, `exec::Machine::execute` (see `decode_round_trips_with_executor` /
+/// `real_image_decode_round_trip` below) — has an entry here, so the tables
+/// can't silently drift apart.
+pub fn opcode_help(opcode: u32) -> Option<OpcodeHelp> {
     Some(match opcode {
-        0x00 => "nop — do nothing.",
-        0x10 => "add L1 L2 S1 — S1 = L1 + L2 (32-bit wraparound).",
-        0x11 => "sub L1 L2 S1 — S1 = L1 - L2.",
-        0x12 => "mul L1 L2 S1 — S1 = L1 * L2 (low 32 bits).",
-        0x13 => "div L1 L2 S1 — S1 = L1 / L2 (signed, toward zero).",
-        0x14 => "mod L1 L2 S1 — S1 = L1 mod L2 (signed remainder).",
-        0x15 => "neg L1 S1 — S1 = -L1.",
-        0x18 => "bitand L1 L2 S1 — S1 = L1 & L2.",
-        0x19 => "bitor L1 L2 S1 — S1 = L1 | L2.",
-        0x1A => "bitxor L1 L2 S1 — S1 = L1 ^ L2.",
-        0x1B => "bitnot L1 S1 — S1 = ~L1.",
-        0x1C => "shiftl L1 L2 S1 — S1 = L1 << L2 (0 if L2>=32).",
-        0x1D => "sshiftr L1 L2 S1 — arithmetic right shift.",
-        0x1E => "ushiftr L1 L2 S1 — logical right shift.",
-        0x20 => "jump L1 — branch by offset L1.",
-        0x22 => "jz L1 off — branch if L1 == 0.",
-        0x23 => "jnz L1 off — branch if L1 != 0.",
-        0x24 => "jeq L1 L2 off — branch if L1 == L2.",
-        0x25 => "jne L1 L2 off — branch if L1 != L2.",
-        0x26 => "jlt L1 L2 off — branch if L1 < L2 (signed).",
-        0x27 => "jge L1 L2 off — branch if L1 >= L2 (signed).",
-        0x28 => "jgt L1 L2 off — branch if L1 > L2 (signed).",
-        0x29 => "jle L1 L2 off — branch if L1 <= L2 (signed).",
-        0x2A => "jltu L1 L2 off — branch if L1 < L2 (unsigned).",
-        0x2B => "jgeu L1 L2 off — branch if L1 >= L2 (unsigned).",
-        0x2C => "jgtu L1 L2 off — branch if L1 > L2 (unsigned).",
-        0x2D => "jleu L1 L2 off — branch if L1 <= L2 (unsigned).",
-        0x30 => "call L1 L2 S1 — call fn L1 with L2 args popped from stack; result to S1.",
-        0x31 => "return L1 — return value L1 from the current function.",
-        0x32 => "catch S1 off — push a catch token to S1, then branch.",
-        0x33 => "throw L1 L2 — throw value L1 to catch token L2.",
-        0x34 => "tailcall L1 L2 — replace this frame with a call to fn L1 (L2 args).",
-        0x40 => "copy L1 S1 — S1 = L1 (32-bit).",
-        0x41 => "copys L1 S1 — copy the low 16 bits.",
-        0x42 => "copyb L1 S1 — copy the low 8 bits.",
-        0x44 => "sexs L1 S1 — sign-extend from 16 bits.",
-        0x45 => "sexb L1 S1 — sign-extend from 8 bits.",
-        0x48 => "aload L1 L2 S1 — S1 = memory word at L1 + 4*L2.",
-        0x49 => "aloads L1 L2 S1 — S1 = 16-bit value at L1 + 2*L2.",
-        0x4A => "aloadb L1 L2 S1 — S1 = byte at L1 + L2.",
-        0x4B => "aloadbit L1 L2 S1 — S1 = bit L2 of the bitstring at L1.",
-        0x4C => "astore L1 L2 L3 — store word L3 at L1 + 4*L2.",
-        0x4D => "astores L1 L2 L3 — store 16-bit L3 at L1 + 2*L2.",
-        0x4E => "astoreb L1 L2 L3 — store byte L3 at L1 + L2.",
-        0x4F => "astorebit L1 L2 L3 — set/clear bit L2 of the bitstring at L1.",
-        0x50 => "stkcount S1 — S1 = number of values on the stack.",
-        0x51 => "stkpeek L1 S1 — S1 = the L1'th value from the top (0 = top).",
-        0x52 => "stkswap — swap the top two stack values.",
-        0x53 => "stkroll L1 L2 — rotate the top L1 values by L2 places.",
-        0x54 => "stkcopy L1 — duplicate the top L1 values.",
-        0x70 => "streamchar L1 — output the low byte of L1 as a Latin-1 char.",
-        0x71 => "streamnum L1 — output L1 as a signed decimal number.",
-        0x72 => "streamstr L1 — print the string/function object at L1.",
-        0x73 => "streamunichar L1 — output L1 as a Unicode char.",
-        0x100 => "gestalt L1 L2 S1 — query interpreter capability L1 (arg L2).",
-        0x101 => "debugtrap L1 — signal a debug trap with value L1.",
-        0x102 => "getmemsize S1 — S1 = current memory size in bytes.",
-        0x103 => "setmemsize L1 S1 — resize memory to L1; S1 = 0 on success.",
-        0x104 => "jumpabs L1 — jump to absolute address L1.",
-        0x110 => "random L1 S1 — S1 = random number in [0,L1) (or full range if 0).",
-        0x111 => "setrandom L1 — seed the RNG with L1 (0 = unpredictable).",
-        0x120 => "quit — stop the program.",
-        0x121 => "verify S1 — S1 = 0 if the image checksum is intact.",
-        0x122 => "restart — reset the program to its initial state.",
-        0x123 => "save L1 S1 — save game state to stream L1; S1 = result.",
-        0x124 => "restore L1 S1 — restore game state from stream L1; S1 = result.",
-        0x125 => "saveundo S1 — snapshot state for undo; S1 = result.",
-        0x126 => "restoreundo S1 — restore the last undo snapshot; S1 = result.",
-        0x127 => "protect L1 L2 — protect L2 bytes at L1 across restore.",
-        0x128 => "hasundo S1 — S1 = 0 if an undo state is available.",
-        0x129 => "discardundo — drop the most recent undo snapshot.",
-        0x130 => "glk L1 L2 S1 — call Glk selector L1 with L2 args; result to S1.",
-        0x140 => "getstringtbl S1 — S1 = the current string-decoding table.",
-        0x141 => "setstringtbl L1 — set the string-decoding table to L1.",
-        0x148 => "getiosys S1 S2 — S1 = I/O system mode, S2 = rock.",
-        0x149 => "setiosys L1 L2 — set the I/O system to mode L1, rock L2.",
-        0x150 => "linearsearch — linear search of a key array (7 args, S1 result).",
-        0x151 => "binarysearch — binary search of a sorted key array (7 args).",
-        0x152 => "linkedsearch — search a linked list by key (6 args).",
-        0x160 => "callf L1 S1 — call fn L1 with no args; result to S1.",
-        0x161 => "callfi L1 L2 S1 — call fn L1 with 1 arg L2.",
-        0x162 => "callfii L1 L2 L3 S1 — call fn L1 with 2 args.",
-        0x163 => "callfiii L1 L2 L3 L4 S1 — call fn L1 with 3 args.",
-        0x170 => "mzero L1 L2 — zero L1 bytes starting at L2.",
-        0x171 => "mcopy L1 L2 L3 — copy L1 bytes from L2 to L3.",
-        0x178 => "malloc L1 S1 — allocate L1 bytes; S1 = address (0 = fail).",
-        0x179 => "mfree L1 — free the block at L1.",
-        0x180 => "accelfunc L1 L2 — accelerate fn at L2 with accel #L1.",
-        0x181 => "accelparam L1 L2 — set acceleration parameter L1 = L2.",
-        0x190 => "numtof L1 S1 — S1 = L1 converted to float.",
-        0x191 => "ftonumz L1 S1 — float L1 to int, toward zero.",
-        0x192 => "ftonumn L1 S1 — float L1 to int, rounded.",
-        0x1A0 => "fadd L1 L2 S1 — float add.",
-        0x1A1 => "fsub L1 L2 S1 — float subtract.",
-        0x1A2 => "fmul L1 L2 S1 — float multiply.",
-        0x1A3 => "fdiv L1 L2 S1 — float divide.",
+        // ── integer arithmetic ──────────────────────────────────────────────
+        0x00 => h!("Do nothing."),
+        0x10 => h!("Add two 32-bit values.", &["a", "b", "a + b, with 32-bit wraparound"]),
+        0x11 => h!("Subtract two 32-bit values.", &["a", "b", "a − b, with 32-bit wraparound"]),
+        0x12 => h!("Multiply two 32-bit values.", &["a", "b", "a × b, the low 32 bits of the product"]),
+        0x13 => h!(
+            "Signed integer division, truncated toward zero (a zero divisor faults the interpreter).",
+            &["dividend", "divisor (nonzero)", "the quotient"]
+        ),
+        0x14 => h!(
+            "Signed integer remainder (a zero divisor faults the interpreter).",
+            &["dividend", "divisor (nonzero)", "the remainder"]
+        ),
+        0x15 => h!("Negate a 32-bit value.", &["a", "−a"]),
+        0x18 => h!("Bitwise AND.", &["a", "b", "a & b"]),
+        0x19 => h!("Bitwise OR.", &["a", "b", "a | b"]),
+        0x1A => h!("Bitwise XOR.", &["a", "b", "a ^ b"]),
+        0x1B => h!("Bitwise complement (one's complement NOT).", &["a", "~a"]),
+        0x1C => h!(
+            "Shift left, zero-filling.",
+            &["value", "shift amount", "value shifted left (0 if the shift is ≥ 32)"]
+        ),
+        0x1D => h!(
+            "Arithmetic (sign-preserving) shift right.",
+            &["value", "shift amount", "value shifted right, sign-extending (0/-1 fill if the shift is ≥ 32)"]
+        ),
+        0x1E => h!(
+            "Logical (zero-filling) shift right.",
+            &["value", "shift amount", "value shifted right, zero-filling (0 if the shift is ≥ 32)"]
+        ),
+        // ── branches ─────────────────────────────────────────────────────────
+        0x20 => h!("Jump unconditionally by a relative offset."),
+        0x22 => h!("Branch if a value is zero.", &["value"], branch: "value == 0"),
+        0x23 => h!("Branch if a value is nonzero.", &["value"], branch: "value != 0"),
+        0x24 => h!("Branch if two values are equal.", &["a", "b"], branch: "a == b"),
+        0x25 => h!("Branch if two values differ.", &["a", "b"], branch: "a != b"),
+        0x26 => h!("Branch if a is less than b (signed).", &["a", "b"], branch: "a < b (signed 32-bit compare)"),
+        0x27 => h!("Branch if a is at least b (signed).", &["a", "b"], branch: "a >= b (signed 32-bit compare)"),
+        0x28 => h!("Branch if a is greater than b (signed).", &["a", "b"], branch: "a > b (signed 32-bit compare)"),
+        0x29 => h!("Branch if a is at most b (signed).", &["a", "b"], branch: "a <= b (signed 32-bit compare)"),
+        0x2A => h!("Branch if a is less than b, an UNSIGNED comparison.", &["a", "b"], branch: "a < b (UNSIGNED 32-bit compare)"),
+        0x2B => h!("Branch if a is at least b, an UNSIGNED comparison.", &["a", "b"], branch: "a >= b (UNSIGNED 32-bit compare)"),
+        0x2C => h!("Branch if a is greater than b, an UNSIGNED comparison.", &["a", "b"], branch: "a > b (UNSIGNED 32-bit compare)"),
+        0x2D => h!("Branch if a is at most b, an UNSIGNED comparison.", &["a", "b"], branch: "a <= b (UNSIGNED 32-bit compare)"),
+        // ── calls / return ───────────────────────────────────────────────────
+        0x30 => h!(
+            "Call a function.",
+            &["the function to call", "the number of stack values to pop as arguments", "the function's return value"]
+        ),
+        0x31 => h!("Return from the current function to its caller.", &["the value to return"]),
+        0x32 => h!(
+            "Push a call-frame token (usable by @throw to unwind back here), then unconditionally jump — a landing pad @throw resumes at.",
+            &["a token identifying this call frame, for a later @throw"]
+        ),
+        0x33 => h!(
+            "Unwind the stack back to a @catch point and resume there as if it had just returned this value.",
+            &["the value to deliver to the catch point", "the frame token captured by a matching @catch"]
+        ),
+        0x34 => h!(
+            "Replace the current call frame with a call to another function (a true tail call — no stack growth).",
+            &["the function to call", "the number of stack values to pop as arguments"]
+        ),
+        // ── copy / sign-extend ───────────────────────────────────────────────
+        0x40 => h!("Copy a 32-bit value.", &["the value", "a copy of the value"]),
+        0x41 => h!(
+            "Copy the low 16 bits of a value.",
+            &["the value", "the value's low 16 bits, zero-extended (not sign-extended)"]
+        ),
+        0x42 => h!(
+            "Copy the low 8 bits of a value.",
+            &["the value", "the value's low 8 bits, zero-extended (not sign-extended)"]
+        ),
+        0x44 => h!(
+            "Sign-extend a 16-bit value to 32 bits.",
+            &["the value", "the value's low 16 bits, sign-extended"]
+        ),
+        0x45 => h!(
+            "Sign-extend an 8-bit value to 32 bits.",
+            &["the value", "the value's low 8 bits, sign-extended"]
+        ),
+        // ── memory-array load/store ──────────────────────────────────────────
+        0x48 => h!(
+            "Load a 32-bit word from a word-indexed array.",
+            &["array base address", "word index (signed; 4-byte elements)", "the word at base + 4×index"]
+        ),
+        0x49 => h!(
+            "Load a 16-bit value from a halfword-indexed array.",
+            &["array base address", "index (signed; 2-byte elements)", "the 16-bit value at base + 2×index, zero-extended"]
+        ),
+        0x4A => h!(
+            "Load a byte from a byte-indexed array.",
+            &["array base address", "index (signed; 1-byte elements)", "the byte at base + index, zero-extended"]
+        ),
+        0x4B => h!(
+            "Load one bit from a bit array.",
+            &["bit-array base address", "bit index (signed — negative indexes extend backward from the base)", "the bit's value, 0 or 1"]
+        ),
+        0x4C => h!(
+            "Store a 32-bit word into a word-indexed array.",
+            &["array base address", "word index (signed; 4-byte elements)", "value to write at base + 4×index"]
+        ),
+        0x4D => h!(
+            "Store a 16-bit value into a halfword-indexed array.",
+            &["array base address", "index (signed; 2-byte elements)", "16-bit value to write at base + 2×index"]
+        ),
+        0x4E => h!(
+            "Store a byte into a byte-indexed array.",
+            &["array base address", "index (signed; 1-byte elements)", "byte value to write at base + index"]
+        ),
+        0x4F => h!(
+            "Set or clear one bit in a bit array.",
+            &["bit-array base address", "bit index (signed)", "new bit value — 0 clears it, any nonzero value sets it"]
+        ),
+        // ── stack manipulation ───────────────────────────────────────────────
+        0x50 => h!("Count the values on the stack.", &["the number of 32-bit values currently on the stack"]),
+        0x51 => h!(
+            "Peek at a stack value without removing it.",
+            &["depth from the top of the stack (0 = the top value)", "the value at that depth"]
+        ),
+        0x52 => h!("Swap the top two values on the stack."),
+        0x53 => h!(
+            "Rotate the top N stack values.",
+            &["number of values to rotate (counting from the top)", "rotate amount (positive rotates toward the top; wraps modulo the count)"]
+        ),
+        0x54 => h!(
+            "Push a duplicate of the top N stack values, in their original order.",
+            &["number of values to duplicate (counting from the top)"]
+        ),
+        // ── stream output ────────────────────────────────────────────────────
+        0x70 => h!("Print one character to the current output stream.", &["character code (its low byte prints as Latin-1)"]),
+        0x71 => h!("Print a signed decimal number to the current output stream.", &["the number to print"]),
+        0x72 => h!(
+            "Print a string (E0/E1/E2 object) — or invoke a function-as-string-source (C0/C1 object) — to the current output stream.",
+            &["the string or function object to print"]
+        ),
+        0x73 => h!("Print one Unicode character to the current output stream.", &["the code point to print (U+FFFD if invalid)"]),
+        // ── machine / memory ─────────────────────────────────────────────────
+        0x100 => h!(
+            "Query an interpreter capability or limit.",
+            &["gestalt selector number", "a selector-specific argument (often unused)", "the query result — meaning depends on the selector"]
+        ),
+        0x101 => h!(
+            "Signal a debug trap. This interpreter has no attached debugger to trap into — it logs the code and continues.",
+            &["a diagnostic code, logged verbatim"]
+        ),
+        0x102 => h!("Read the current memory size.", &["the current extent of memory, in bytes"]),
+        0x103 => h!(
+            "Resize memory (always fails while the acceleration heap is active).",
+            &["the new memory size, in bytes", "the result: 0 on success, nonzero on failure"]
+        ),
+        0x104 => h!("Jump to an absolute byte address — NOT the 0/1 return shortcut other branches use.", &["the absolute address to jump to"]),
+        0x110 => h!(
+            "Draw a random number.",
+            &["range: 0 = any 32-bit value; N>0 = uniform in [0,N); N<0 = uniform in (N,0]", "the random value"]
+        ),
+        0x111 => h!(
+            "(Re)seed the random-number generator.",
+            &["seed (0 reseeds unpredictably from OS entropy; nonzero seeds deterministically)"]
+        ),
+        0x120 => h!("Stop the program."),
+        0x121 => h!("Check the story file's checksum against its header.", &["0 if the checksum matches, nonzero if it doesn't"]),
+        0x122 => h!("Reset all state to the story's initial condition and re-enter the start function (the Glk display is not cleared)."),
+        0x123 => h!(
+            "Suspend for the host to write a standard Glulx-Quetzal save file, then resume.",
+            &["a Glk stream open on the destination save file", "the result: 0 on success, 1 on failure"]
+        ),
+        0x124 => h!(
+            "Suspend for the host to read a save file. On success, resumes inside the matching @save's call stub instead (which then stores -1); on failure, stores here.",
+            &["a Glk stream open on the source save file", "the result on failure: 1 (never written on success)"]
+        ),
+        0x125 => h!(
+            "Snapshot the VM state for a later @restoreundo. On a later restore, this same destination receives -1 instead.",
+            &["the result: 0 on success"]
+        ),
+        0x126 => h!(
+            "Restore the most recent @saveundo snapshot. On success, execution resumes at the matching @saveundo (which then receives -1) — this destination is never written.",
+            &["the result on failure (no snapshot to restore): 1"]
+        ),
+        0x127 => h!(
+            "Protect a RAM range from being overwritten by @restore/@restoreundo.",
+            &["start address of the range to protect", "length in bytes (0 clears the protection)"]
+        ),
+        0x128 => h!("Check whether an undo snapshot is available.", &["0 if a @restoreundo would succeed right now, nonzero if none is saved"]),
+        0x129 => h!("Discard the most recently saved undo snapshot (a no-op if there is none)."),
+        0x130 => h!(
+            "Call a Glk API function.",
+            &["the Glk selector number to call", "the number of stack values to pop as arguments", "the call's return value"]
+        ),
+        0x140 => h!("Read the current string-decoding table.", &["address of the current Huffman table (0 = the built-in default)"]),
+        0x141 => h!("Set the string-decoding table.", &["address of the new table (0 selects the built-in default)"]),
+        0x148 => h!(
+            "Read the current I/O system.",
+            &["current I/O system mode (0 = null, 1 = filter, 2 = Glk)", "current I/O system rock value"]
+        ),
+        0x149 => h!(
+            "Select the I/O system output goes through.",
+            &["mode to select (0 = null — discard output; 1 = filter — call a function; 2 = Glk — normal output)", "rock (in filter mode, the filter function's address)"]
+        ),
+        0x150 => h!(
+            "Linearly search an array of fixed-size records for one with a matching key.",
+            &[
+                "the search key", "key size, in bytes", "start address of the array", "size of each record, in bytes",
+                "number of records to scan (0xffffffff = unbounded)", "byte offset of the key field within each record",
+                "option flags (bit0 = return the index instead of the address; bit1 = stop at an all-zero key)",
+                "the matching record's address (or index); 0 (or -1) if not found",
+            ]
+        ),
+        0x151 => h!(
+            "Binary-search a key-sorted array of fixed-size records for one with a matching key.",
+            &[
+                "the search key", "key size, in bytes", "start address of the (key-sorted) array", "size of each record, in bytes",
+                "number of records", "byte offset of the key field within each record",
+                "option flags (bit0 = return the index instead of the address)",
+                "the matching record's address (or index); 0 (or -1) if not found",
+            ]
+        ),
+        0x152 => h!(
+            "Search a singly-linked list of nodes for one with a matching key.",
+            &[
+                "the search key", "key size, in bytes", "address of the first node",
+                "byte offset of the key field within each node", "byte offset of the 'next node' pointer within each node",
+                "option flags (bit1 = stop at an all-zero key)", "the matching node's address; 0 if not found",
+            ]
+        ),
+        // ── call-with-fixed-args ─────────────────────────────────────────────
+        0x160 => h!("Call a function with no arguments.", &["the function to call", "the function's return value"]),
+        0x161 => h!(
+            "Call a function with 1 fixed argument.",
+            &["the function to call", "argument 1", "the function's return value"]
+        ),
+        0x162 => h!(
+            "Call a function with 2 fixed arguments.",
+            &["the function to call", "argument 1", "argument 2", "the function's return value"]
+        ),
+        0x163 => h!(
+            "Call a function with 3 fixed arguments.",
+            &["the function to call", "argument 1", "argument 2", "argument 3", "the function's return value"]
+        ),
+        // ── block copy / heap / accel ────────────────────────────────────────
+        0x170 => h!("Zero a block of memory.", &["number of bytes to zero", "start address"]),
+        0x171 => h!("Copy a block of memory (source/destination may overlap).", &["number of bytes to copy", "source address", "destination address"]),
+        0x178 => h!("Allocate a block from the acceleration heap.", &["number of bytes to allocate", "address of the new block (0 on failure)"]),
+        0x179 => h!("Free a block allocated by @malloc.", &["address of a block returned by @malloc"]),
+        0x180 => h!(
+            "Mark a function as natively accelerated (or remove that marking) — GLULX_NOTES §17.",
+            &["accelerated-function number to assign (0 removes acceleration at the address)", "address of the function to (de)accelerate"]
+        ),
+        0x181 => h!(
+            "Set a parameter used by the accelerated functions.",
+            &["acceleration parameter number", "value to assign to that parameter"]
+        ),
+        // ── single-precision float (GLULX_NOTES §13.1) ───────────────────────
+        0x190 => h!("Convert a signed integer to the nearest float32.", &["a signed 32-bit integer", "the value, as a float32 bit pattern"]),
+        0x191 => h!(
+            "Convert a float32 to an integer, truncating toward zero.",
+            &["a float32 bit pattern", "the value as an integer, truncated toward zero (0x7fffffff if NaN)"]
+        ),
+        0x192 => h!(
+            "Convert a float32 to an integer, rounding to nearest (ties away from zero).",
+            &["a float32 bit pattern", "the value as an integer, rounded to nearest (0x7fffffff if NaN)"]
+        ),
+        0x198 => h!("Round a float32 up to the nearest integer value.", &["a float32 bit pattern", "its ceiling, as a float32 bit pattern"]),
+        0x199 => h!("Round a float32 down to the nearest integer value.", &["a float32 bit pattern", "its floor, as a float32 bit pattern"]),
+        0x1A0 => h!("Add two float32 values.", &["a", "b", "a + b, as a float32 bit pattern"]),
+        0x1A1 => h!("Subtract two float32 values.", &["a", "b", "a − b, as a float32 bit pattern"]),
+        0x1A2 => h!("Multiply two float32 values.", &["a", "b", "a × b, as a float32 bit pattern"]),
+        0x1A3 => h!("Divide two float32 values.", &["a", "b", "a ÷ b, as a float32 bit pattern"]),
+        0x1A4 => h!(
+            "Float32 division, returning both the remainder and the quotient.",
+            &["a (dividend)", "b (divisor)", "the remainder, sign of a, as a float32 bit pattern", "the quotient, truncated toward zero, as a float32 bit pattern"]
+        ),
+        0x1A8 => h!("Square root of a float32 value.", &["a float32 bit pattern", "its square root, as a float32 bit pattern"]),
+        0x1A9 => h!("e raised to a float32 power.", &["a float32 bit pattern", "e^value, as a float32 bit pattern"]),
+        0x1AA => h!("Natural logarithm of a float32 value.", &["a float32 bit pattern", "its natural log, as a float32 bit pattern"]),
+        0x1AB => h!("Raise a float32 to a float32 power.", &["base", "exponent", "base^exponent, as a float32 bit pattern"]),
+        0x1B0 => h!("Sine of a float32 angle in radians.", &["angle in radians (float32)", "its sine, as a float32 bit pattern"]),
+        0x1B1 => h!("Cosine of a float32 angle in radians.", &["angle in radians (float32)", "its cosine, as a float32 bit pattern"]),
+        0x1B2 => h!("Tangent of a float32 angle in radians.", &["angle in radians (float32)", "its tangent, as a float32 bit pattern"]),
+        0x1B3 => h!("Arcsine, result in radians.", &["a float32 bit pattern", "its arcsine in radians, as a float32 bit pattern"]),
+        0x1B4 => h!("Arccosine, result in radians.", &["a float32 bit pattern", "its arccosine in radians, as a float32 bit pattern"]),
+        0x1B5 => h!("Arctangent, result in radians.", &["a float32 bit pattern", "its arctangent in radians, as a float32 bit pattern"]),
+        0x1B6 => h!(
+            "Two-argument arctangent (atan2), result in radians.",
+            &["y", "x", "atan2(y, x) in radians, as a float32 bit pattern"]
+        ),
+        // ── float branches ───────────────────────────────────────────────────
+        0x1C0 => h!(
+            "Branch if two float32 values are equal within a tolerance (\"fuzzy\" equality).",
+            &["a", "b", "tolerance"],
+            branch: "|a − b| ≤ |tolerance| — false if any operand is NaN, true if a and b are the same infinity"
+        ),
+        0x1C1 => h!(
+            "Branch unless two float32 values are equal within a tolerance — unlike jfeq, this DOES branch on NaN.",
+            &["a", "b", "tolerance"],
+            branch: "NOT(|a − b| ≤ |tolerance|) — true (branches) if any operand is NaN"
+        ),
+        0x1C2 => h!("Branch if a is less than b (float32).", &["a", "b"], branch: "a < b"),
+        0x1C3 => h!("Branch if a is at most b (float32).", &["a", "b"], branch: "a <= b"),
+        0x1C4 => h!("Branch if a is greater than b (float32).", &["a", "b"], branch: "a > b"),
+        0x1C5 => h!("Branch if a is at least b (float32).", &["a", "b"], branch: "a >= b"),
+        0x1C8 => h!("Branch if a float32 value is NaN.", &["a float32 bit pattern"], branch: "the value is NaN"),
+        0x1C9 => h!("Branch if a float32 value is infinite.", &["a float32 bit pattern"], branch: "the value is +/-infinity"),
+        // ── double-precision float (GLULX_NOTES §13.1 / spec 3.1.3 §2.13) ────
+        // DISCREPANCY vs. the spec's usual "high word first" convention: this
+        // executor's `store64` writes the LOW word first (S1), high word
+        // second (S2) — while every double LOAD (`dec64`) reads the HIGH word
+        // first (L1), low word second (L2). See exec.rs lines ~1290-1293's own
+        // comment ("reads take the high word first, stores write the low word
+        // first") — an intentional, but spec-atypical and easy-to-miss,
+        // asymmetry. Roles below describe the executor's actual behavior.
+        0x200 => h!(
+            "Convert a signed integer to the nearest double.",
+            &["a signed 32-bit integer", "the double's LOW 32 bits", "the double's HIGH 32 bits"]
+        ),
+        0x201 => h!(
+            "Convert a double to an integer, truncating toward zero.",
+            &["HIGH 32 bits of the double", "LOW 32 bits of the double", "the value as an integer, truncated toward zero (0x7fffffff if NaN)"]
+        ),
+        0x202 => h!(
+            "Convert a double to an integer, rounding to nearest (ties away from zero).",
+            &["HIGH 32 bits of the double", "LOW 32 bits of the double", "the value as an integer, rounded to nearest (0x7fffffff if NaN)"]
+        ),
+        0x203 => h!(
+            "Widen a float32 to a double (exact — no precision loss).",
+            &["a float32 bit pattern", "the double's LOW 32 bits", "the double's HIGH 32 bits"]
+        ),
+        0x204 => h!(
+            "Narrow a double to a float32, rounding to nearest.",
+            &["HIGH 32 bits of the double", "LOW 32 bits of the double", "the value, as a float32 bit pattern"]
+        ),
+        0x208 => h!(
+            "Round a double up to the nearest integer value.",
+            &["HIGH 32 bits of the operand", "LOW 32 bits of the operand", "LOW 32 bits of the ceiling", "HIGH 32 bits of the ceiling"]
+        ),
+        0x209 => h!(
+            "Round a double down to the nearest integer value.",
+            &["HIGH 32 bits of the operand", "LOW 32 bits of the operand", "LOW 32 bits of the floor", "HIGH 32 bits of the floor"]
+        ),
+        0x210 => h!(
+            "Add two doubles.",
+            &["HIGH 32 bits of a", "LOW 32 bits of a", "HIGH 32 bits of b", "LOW 32 bits of b", "LOW 32 bits of a + b", "HIGH 32 bits of a + b"]
+        ),
+        0x211 => h!(
+            "Subtract two doubles.",
+            &["HIGH 32 bits of a", "LOW 32 bits of a", "HIGH 32 bits of b", "LOW 32 bits of b", "LOW 32 bits of a − b", "HIGH 32 bits of a − b"]
+        ),
+        0x212 => h!(
+            "Multiply two doubles.",
+            &["HIGH 32 bits of a", "LOW 32 bits of a", "HIGH 32 bits of b", "LOW 32 bits of b", "LOW 32 bits of a × b", "HIGH 32 bits of a × b"]
+        ),
+        0x213 => h!(
+            "Divide two doubles.",
+            &["HIGH 32 bits of a", "LOW 32 bits of a", "HIGH 32 bits of b", "LOW 32 bits of b", "LOW 32 bits of a ÷ b", "HIGH 32 bits of a ÷ b"]
+        ),
+        0x214 => h!(
+            "Double division, remainder only (sign of the dividend).",
+            &[
+                "HIGH 32 bits of the dividend", "LOW 32 bits of the dividend", "HIGH 32 bits of the divisor", "LOW 32 bits of the divisor",
+                "LOW 32 bits of the remainder", "HIGH 32 bits of the remainder",
+            ]
+        ),
+        0x215 => h!(
+            "Double division, quotient only (truncated toward zero).",
+            &[
+                "HIGH 32 bits of the dividend", "LOW 32 bits of the dividend", "HIGH 32 bits of the divisor", "LOW 32 bits of the divisor",
+                "LOW 32 bits of the quotient", "HIGH 32 bits of the quotient",
+            ]
+        ),
+        0x218 => h!(
+            "Square root of a double.",
+            &["HIGH 32 bits of the operand", "LOW 32 bits of the operand", "LOW 32 bits of the square root", "HIGH 32 bits of the square root"]
+        ),
+        0x219 => h!(
+            "e raised to a double power.",
+            &["HIGH 32 bits of the operand", "LOW 32 bits of the operand", "LOW 32 bits of e^value", "HIGH 32 bits of e^value"]
+        ),
+        0x21A => h!(
+            "Natural logarithm of a double.",
+            &["HIGH 32 bits of the operand", "LOW 32 bits of the operand", "LOW 32 bits of the log", "HIGH 32 bits of the log"]
+        ),
+        0x21B => h!(
+            "Raise a double to a double power.",
+            &[
+                "HIGH 32 bits of the base", "LOW 32 bits of the base", "HIGH 32 bits of the exponent", "LOW 32 bits of the exponent",
+                "LOW 32 bits of base^exponent", "HIGH 32 bits of base^exponent",
+            ]
+        ),
+        0x220 => h!(
+            "Sine of a double angle in radians.",
+            &["HIGH 32 bits of the angle", "LOW 32 bits of the angle", "LOW 32 bits of the sine", "HIGH 32 bits of the sine"]
+        ),
+        0x221 => h!(
+            "Cosine of a double angle in radians.",
+            &["HIGH 32 bits of the angle", "LOW 32 bits of the angle", "LOW 32 bits of the cosine", "HIGH 32 bits of the cosine"]
+        ),
+        0x222 => h!(
+            "Tangent of a double angle in radians.",
+            &["HIGH 32 bits of the angle", "LOW 32 bits of the angle", "LOW 32 bits of the tangent", "HIGH 32 bits of the tangent"]
+        ),
+        0x223 => h!(
+            "Arcsine, result in radians (double).",
+            &["HIGH 32 bits of the operand", "LOW 32 bits of the operand", "LOW 32 bits of the arcsine", "HIGH 32 bits of the arcsine"]
+        ),
+        0x224 => h!(
+            "Arccosine, result in radians (double).",
+            &["HIGH 32 bits of the operand", "LOW 32 bits of the operand", "LOW 32 bits of the arccosine", "HIGH 32 bits of the arccosine"]
+        ),
+        0x225 => h!(
+            "Arctangent, result in radians (double).",
+            &["HIGH 32 bits of the operand", "LOW 32 bits of the operand", "LOW 32 bits of the arctangent", "HIGH 32 bits of the arctangent"]
+        ),
+        0x226 => h!(
+            "Two-argument arctangent (atan2), result in radians (double).",
+            &[
+                "HIGH 32 bits of y", "LOW 32 bits of y", "HIGH 32 bits of x", "LOW 32 bits of x",
+                "LOW 32 bits of atan2(y, x)", "HIGH 32 bits of atan2(y, x)",
+            ]
+        ),
+        // ── double branches ──────────────────────────────────────────────────
+        0x230 => h!(
+            "Branch if two doubles are equal within a tolerance (\"fuzzy\" equality).",
+            &["HIGH 32 bits of a", "LOW 32 bits of a", "HIGH 32 bits of b", "LOW 32 bits of b", "HIGH 32 bits of the tolerance", "LOW 32 bits of the tolerance"],
+            branch: "|a − b| ≤ |tolerance| — false if any operand is NaN, true if a and b are the same infinity"
+        ),
+        0x231 => h!(
+            "Branch unless two doubles are equal within a tolerance — unlike jdeq, this DOES branch on NaN.",
+            &["HIGH 32 bits of a", "LOW 32 bits of a", "HIGH 32 bits of b", "LOW 32 bits of b", "HIGH 32 bits of the tolerance", "LOW 32 bits of the tolerance"],
+            branch: "NOT(|a − b| ≤ |tolerance|) — true (branches) if any operand is NaN"
+        ),
+        0x232 => h!(
+            "Branch if a is less than b (double).",
+            &["HIGH 32 bits of a", "LOW 32 bits of a", "HIGH 32 bits of b", "LOW 32 bits of b"],
+            branch: "a < b"
+        ),
+        0x233 => h!(
+            "Branch if a is at most b (double).",
+            &["HIGH 32 bits of a", "LOW 32 bits of a", "HIGH 32 bits of b", "LOW 32 bits of b"],
+            branch: "a <= b"
+        ),
+        0x234 => h!(
+            "Branch if a is greater than b (double).",
+            &["HIGH 32 bits of a", "LOW 32 bits of a", "HIGH 32 bits of b", "LOW 32 bits of b"],
+            branch: "a > b"
+        ),
+        0x235 => h!(
+            "Branch if a is at least b (double).",
+            &["HIGH 32 bits of a", "LOW 32 bits of a", "HIGH 32 bits of b", "LOW 32 bits of b"],
+            branch: "a >= b"
+        ),
+        0x238 => h!(
+            "Branch if a double value is NaN.",
+            &["HIGH 32 bits of the value", "LOW 32 bits of the value"],
+            branch: "the value is NaN"
+        ),
+        0x239 => h!(
+            "Branch if a double value is infinite.",
+            &["HIGH 32 bits of the value", "LOW 32 bits of the value"],
+            branch: "the value is +/-infinity"
+        ),
         _ => return None,
     })
 }
@@ -454,6 +858,62 @@ fn signed_const(mode: u8, value: u32) -> i64 {
         0x1 => value as u8 as i8 as i64,
         0x2 => value as u16 as i16 as i64,
         _ => value as i32 as i64,
+    }
+}
+
+/// This operand's value, if it's a constant — the only operands whose value
+/// is known at disassembly time without executing the program (local/stack
+/// operands carry no resolvable value; direct/RAM-relative address modes name
+/// a location to read from, not a value in hand). Mode 0x0 counts as the
+/// constant 0 for a LOAD (its documented meaning — `resolve_load`/
+/// `resolve_load_sized` in exec.rs read it as a literal zero with no data
+/// bytes); for a STORE, 0x0 means discard, not a value, so it's excluded.
+/// Modes 0x1-0x3 are always constants regardless of load/store.
+fn const_operand(o: &Operand) -> Option<u32> {
+    match o.mode & 0x0F {
+        0x0 if !o.is_store => Some(0),
+        0x1..=0x3 => Some(o.value),
+        _ => None,
+    }
+}
+
+/// Where a branch/catch offset operand sends control, applying the shared
+/// Glulx branch convention (`exec::Machine::branch`): offset 0/1 return that
+/// value from the function instead of jumping; any other constant computes a
+/// fixed target; a non-constant offset is only known at runtime.
+enum BranchTarget {
+    Addr(u32),
+    Return(u32),
+    Runtime,
+}
+
+/// Resolve a branch-offset operand's target per [`BranchTarget`]. `next` is
+/// the instruction's `next` address (the branch bias in `exec::Machine::branch`
+/// is relative to the PC just past the operands, which `next` always is here —
+/// Glulx instructions carry no inline text/data after their operands).
+fn resolve_branch_target(o: &Operand, next: u32) -> BranchTarget {
+    let Some(v) = const_operand(o) else { return BranchTarget::Runtime };
+    match signed_const(o.mode, v) {
+        0 => BranchTarget::Return(0),
+        1 => BranchTarget::Return(1),
+        off => BranchTarget::Addr((next as i64 + off - 2) as u32),
+    }
+}
+
+/// Spelled-out meaning of an operand's addressing mode, for the hover tooltip
+/// (the compact disasm line already conveys this tersely via the `#`/`@`/`L`/`sp`
+/// sigils `format_operand` uses).
+fn mode_desc(mode: u8, is_store: bool) -> &'static str {
+    match (mode & 0x0F, is_store) {
+        (0x0, true) => "discard — the result is not kept",
+        (0x0, false) => "constant 0",
+        (0x1..=0x3, _) => "constant",
+        (0x5..=0x7, _) => "direct memory address",
+        (0x8, true) => "push onto the stack",
+        (0x8, false) => "pop from the stack",
+        (0x9..=0xB, _) => "local-variable frame offset",
+        (0xD..=0xF, _) => "RAM-relative address (RAMSTART + offset)",
+        _ => "unknown addressing mode",
     }
 }
 
@@ -841,16 +1301,118 @@ impl DisasmCache {
     }
 
     /// A hover/help description for the instruction at `addr`: the opcode's
-    /// `opcode_help` text, or a "no description" fallback naming the mnemonic.
-    pub fn describe(&self, mem: &Memory, addr: u32) -> Option<String> {
-        let ins = decode_instr(mem, addr).ok()?;
-        Some(match opcode_help(ins.opcode) {
-            Some(h) => h.to_string(),
-            None => {
-                let mn = opcode_info(ins.opcode).map(|i| i.mnemonic).unwrap_or("?");
-                format!("{mn} ({:#x}) — no description available.", ins.opcode)
+    /// one-sentence summary, then a line per operand — its resolved value,
+    /// spelled-out addressing mode (constant/local offset/stack/RAM address),
+    /// and named role — with store operands phrased as "stores … in Sn" and
+    /// the branch/catch offset resolved to a concrete target (or the 0/1
+    /// return-instead-of-branch shortcut, spelled out) rather than shown as a
+    /// plain operand. A constant operand that happens to address a string
+    /// object gets its decoded preview appended (reusing `string_preview`),
+    /// and a `call`-family target that resolves to an accelerated function
+    /// gets its accelerated name appended (reusing the same lookup `annotate`
+    /// badges function headers with). Never empty: an address that fails to
+    /// decode as an instruction gets a one-line diagnostic.
+    pub fn describe(&self, mem: &Memory, accel: &HashMap<u32, u32>, addr: u32) -> Vec<String> {
+        let Ok(ins) = decode_instr(mem, addr) else {
+            return vec![format!("{addr:#010x}: does not decode as an instruction")];
+        };
+        let info = opcode_info(ins.opcode);
+        let mnemonic = info.map(|i| i.mnemonic).unwrap_or("?");
+        let help = opcode_help(ins.opcode);
+
+        let mut lines = Vec::new();
+        match &help {
+            Some(h) => lines.push(format!("{mnemonic} — {}", h.summary)),
+            None => lines.push(format!("{mnemonic} ({:#x}) — no description available.", ins.opcode)),
+        }
+
+        // Decode always implies a recognized opcode (decode_instr requires
+        // `opcode_info` to succeed), but stay defensive rather than assume it.
+        let Some(info) = info else { return lines };
+        let branch_idx = info.branch_index();
+
+        let mut load_n = 0usize;
+        let mut store_n = 0usize;
+        for (i, op) in ins.operands.iter().enumerate() {
+            if Some(i) == branch_idx {
+                continue; // described by the branch/jump line below instead
             }
-        })
+            let role = help.as_ref().and_then(|h| h.roles.get(i)).copied().unwrap_or("");
+            let val = self.format_operand(op);
+            let mode = mode_desc(op.mode, op.is_store);
+            let mut line = if info.is_store(i) {
+                store_n += 1;
+                let what = if role.is_empty() { "the result" } else { role };
+                format!("  → S{store_n} stores {what} — writes to {val} ({mode})")
+            } else {
+                load_n += 1;
+                if role.is_empty() {
+                    format!("  L{load_n} = {val} ({mode})")
+                } else {
+                    format!("  L{load_n} = {val} ({mode}): {role}")
+                }
+            };
+            if let Some(s) = const_operand(op).and_then(|a| self.string_preview(mem, a)) {
+                line.push_str(&format!("  [string: \"{}\"]", escape(&s)));
+            }
+            lines.push(line);
+        }
+
+        if let Some(idx) = branch_idx {
+            if let Some(op) = ins.operands.get(idx) {
+                let target = resolve_branch_target(op, ins.next);
+                match info.special {
+                    Special::Catch => {
+                        let where_ = match target {
+                            BranchTarget::Return(v) => format!("returning {v} from the function"),
+                            BranchTarget::Addr(a) => format!("{a:#010x}"),
+                            BranchTarget::Runtime => "a runtime-computed address".to_string(),
+                        };
+                        lines.push(format!(
+                            "  → after storing the frame token, unconditionally jumps to {where_} \
+                             (this jump is not itself a branch — @throw is what later returns here)"
+                        ));
+                    }
+                    Special::Branch => {
+                        let cond = help.as_ref().and_then(|h| h.branch);
+                        let line = match (cond, target) {
+                            (Some(c), BranchTarget::Addr(a)) => format!("  → branches to {a:#010x} if {c}"),
+                            (Some(c), BranchTarget::Return(v)) => format!(
+                                "  → if {c}, returns {v} from the function instead of jumping (the 0/1 shortcut convention)"
+                            ),
+                            (Some(c), BranchTarget::Runtime) => format!("  → branches to a runtime-computed address if {c}"),
+                            (None, BranchTarget::Addr(a)) => format!("  → unconditionally jumps to {a:#010x}"),
+                            (None, BranchTarget::Return(v)) => format!(
+                                "  → unconditionally returns {v} from the function (the 0/1 shortcut convention)"
+                            ),
+                            (None, BranchTarget::Runtime) => "  → unconditionally jumps to a runtime-computed address".to_string(),
+                        };
+                        lines.push(line);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if matches!(info.special, Special::Call) {
+            if let Some(t) = ins.operands.first().and_then(const_operand) {
+                if let Some(&num) = accel.get(&t) {
+                    lines.push(format!("  → target {t:#010x} is accelerated: {}", crate::accel::accel_name(num)));
+                }
+            }
+        }
+        if matches!(info.special, Special::JumpAbs) {
+            if let Some(t) = ins.operands.first().and_then(const_operand) {
+                lines.push(format!("  → jumps to {t:#010x} (no branch bias, and NOT the 0/1 return shortcut)"));
+            }
+        }
+        if matches!(info.special, Special::Glk) {
+            if let Some(sel) = ins.operands.first().and_then(const_operand) {
+                lines.push(format!("  → selector: {}", crate::exec::glk_selector_name(sel)));
+            }
+        }
+
+        lines
     }
 
     /// Start address of the instruction after the one at `addr`.
@@ -1124,44 +1686,38 @@ impl DisasmCache {
     fn annotate(
         &self,
         mem: &Memory,
-        _accel: &HashMap<u32, u32>,
+        accel: &HashMap<u32, u32>,
         ins: &Instr,
         info: Option<OpInfo>,
     ) -> Option<String> {
         let info = info?;
-        let const_op = |o: &Operand| -> Option<u32> {
-            matches!(o.mode & 0x0F, 0x1..=0x3).then_some(o.value)
-        };
         match info.special {
             Special::Call => {
-                let t = const_op(ins.operands.first()?)?;
-                Some(format!("-> fn@{t:#x}"))
+                let t = const_operand(ins.operands.first()?)?;
+                match accel.get(&t) {
+                    Some(&num) => Some(format!("-> fn@{t:#x} [accel: {}]", crate::accel::accel_name(num))),
+                    None => Some(format!("-> fn@{t:#x}")),
+                }
             }
             Special::JumpAbs => {
-                let t = const_op(ins.operands.first()?)?;
+                let t = const_operand(ins.operands.first()?)?;
                 Some(format!("-> {t:#x}"))
             }
             Special::Glk => {
-                let sel = const_op(ins.operands.first()?)?;
+                let sel = const_operand(ins.operands.first()?)?;
                 Some(crate::exec::glk_selector_name(sel))
             }
             Special::StreamStr => {
-                let a = const_op(ins.operands.first()?)?;
+                let a = const_operand(ins.operands.first()?)?;
                 self.string_preview(mem, a).map(|p| format!("\"{}\"", escape(&p)))
             }
             Special::Branch | Special::Catch => {
                 let idx = info.branch_index()?;
                 let o = ins.operands.get(idx)?;
-                // Only a constant offset resolves to a fixed target.
-                if !matches!(o.mode & 0x0F, 0x1..=0x3) {
-                    return None;
-                }
-                let off = signed_const(o.mode, o.value);
-                match off {
-                    0 => Some("-> return 0".to_string()),
-                    1 => Some("-> return 1".to_string()),
-                    // Branch bias (exec::branch): pc = next_pc + offset - 2.
-                    _ => Some(format!("-> {:#x}", (ins.next as i64 + off - 2) as u32)),
+                match resolve_branch_target(o, ins.next) {
+                    BranchTarget::Return(v) => Some(format!("-> return {v}")),
+                    BranchTarget::Addr(a) => Some(format!("-> {a:#x}")),
+                    BranchTarget::Runtime => None,
                 }
             }
             Special::None => None,
@@ -1384,21 +1940,24 @@ mod tests {
 
     #[test]
     fn describe_reports_opcode_help() {
-        let (mem, addrs) = mem_of(&[straight_line()], 0);
+        let (mem, _addrs) = mem_of(&[straight_line()], 0);
         let cache = DisasmCache::build(&mem);
-        // first_instr = header end; decode from the function entry's boundaries.
-        let first = cache.next_instr(&mem, addrs[0]); // header byte 0 → first instr? No.
-        // Walk to the first instruction (skip the header via a known boundary).
-        let _ = first;
-        // The copy is the first instruction; find it by disassembling.
+        // The copy is the first instruction; find it by stepping the executor.
         let mut m = machine(&[straight_line()], 0);
         let copy_pc = m.pc;
         m.step(); // execute copy
         let add_pc = m.pc;
-        let d_copy = cache.describe(&mem, copy_pc).unwrap();
-        assert!(d_copy.starts_with("copy"), "got: {d_copy}");
-        let d_add = cache.describe(&mem, add_pc).unwrap();
-        assert!(d_add.starts_with("add"), "got: {d_add}");
+        let d_copy = cache.describe(&mem, &HashMap::new(), copy_pc);
+        assert!(d_copy[0].starts_with("copy — "), "got: {d_copy:?}");
+        let d_add = cache.describe(&mem, &HashMap::new(), add_pc);
+        assert!(d_add[0].starts_with("add — "), "got: {d_add:?}");
+        // Named operand roles + the stored-in-Sn phrasing (SQ-0476).
+        assert!(d_add.iter().any(|l| l.contains(": a")), "missing role for L1: {d_add:?}");
+        assert!(d_add.iter().any(|l| l.contains(": b")), "missing role for L2: {d_add:?}");
+        assert!(
+            d_add.iter().any(|l| l.contains("→ S1 stores") && l.contains("a + b")),
+            "missing S1 store phrasing: {d_add:?}"
+        );
     }
 
     #[test]
@@ -1461,6 +2020,141 @@ mod tests {
             "{} executor PCs failed to decode (first: {:?})",
             bad.len(),
             bad.first().map(|a| format!("{a:#x}"))
+        );
+    }
+
+    // ── SQ-0476: opcode-help / describe() coverage & quality ──────────────────
+
+    #[test]
+    fn opcode_help_covers_every_implemented_opcode() {
+        // `opcode_info` is transcribed from — and round-trip tested against, via
+        // `decode_round_trips_with_executor` / `real_image_decode_round_trip`
+        // above — `exec::Machine::execute`'s dispatch, the authoritative set of
+        // opcodes this VM implements. Every one of them must have a help entry,
+        // or the hover tooltip silently falls back to "no description available."
+        // The range comfortably covers the current max opcode number (0x239)
+        // with headroom for opcodes added later.
+        let missing: Vec<u32> =
+            (0u32..=0x1000).filter(|&op| opcode_info(op).is_some() && opcode_help(op).is_none()).collect();
+        assert!(
+            missing.is_empty(),
+            "opcode_help missing entries for: {:?}",
+            missing.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn describe_branch_resolves_target_and_names_the_unsigned_sense() {
+        // jltu #3 #5 -> +9, then two `return`s (the second is the branch target).
+        let body = [
+            asm::ins(0x2A, &[C32(3), C32(5), C16(9)]), // jltu #3 #5 +9
+            asm::ins(0x31, &[C8(0)]),                   // return 0 (fallthrough)
+            asm::ins(0x31, &[C8(1)]),                   // return 1 (branch target)
+        ]
+        .concat();
+        let (mem, addrs) = mem_of(&[asm::func(0xC1, &[], &body)], 0);
+        let cache = DisasmCache::build(&mem);
+        // Header with no locals: type byte + immediate (0,0) terminator = 3 bytes.
+        let jltu_pc = addrs[0] + 3;
+        let lines = cache.describe(&mem, &HashMap::new(), jltu_pc);
+        assert!(lines[0].starts_with("jltu — "), "got: {lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("  L1 = ") && l.contains(": a")), "missing a: {lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("  L2 = ") && l.contains(": b")), "missing b: {lines:?}");
+        let branch_line = lines
+            .iter()
+            .find(|l| l.contains("branches to"))
+            .unwrap_or_else(|| panic!("no resolved branch line: {lines:?}"));
+        assert!(branch_line.contains("UNSIGNED"), "missing unsigned-compare note: {branch_line}");
+        assert!(branch_line.contains("0x"), "target address not resolved: {branch_line}");
+    }
+
+    #[test]
+    fn describe_names_the_glk_selector_on_a_glk_call() {
+        // glk #0x2A (glk_window_clear) #0 -> _.
+        let body = [asm::ins(0x130, &[C16(0x2A), C8(0), Zero]), asm::ins(0x31, &[C8(0)])].concat();
+        let (mem, addrs) = mem_of(&[asm::func(0xC1, &[], &body)], 0);
+        let cache = DisasmCache::build(&mem);
+        let glk_pc = addrs[0] + 3;
+        let lines = cache.describe(&mem, &HashMap::new(), glk_pc).join("\n");
+        assert!(lines.starts_with("glk — "), "got:\n{lines}");
+        assert!(lines.contains("glk_window_clear"), "selector not named:\n{lines}");
+        assert!(lines.contains("→ S1 stores"), "missing S1 store phrasing:\n{lines}");
+    }
+
+    #[test]
+    fn describe_catch_shows_store_first_then_the_unconditional_jump() {
+        // catch S1 -> +9 (store-first operand order: S1 in the encoding, THEN
+        // the branch offset — GLULX_NOTES's documented quirk), then two returns.
+        let body = [
+            asm::ins(0x32, &[Local8(0), C16(9)]), // catch local0, +9
+            asm::ins(0x31, &[C8(0)]),               // return 0 (fallthrough)
+            asm::ins(0x31, &[C8(1)]),               // return 1 (catch's jump target)
+        ]
+        .concat();
+        let (mem, addrs) = mem_of(&[asm::func(0xC1, &[(4, 1)], &body)], 0);
+        let cache = DisasmCache::build(&mem);
+        // Header: type byte + one (4,1) locals pair + (0,0) terminator = 5 bytes.
+        let catch_pc = addrs[0] + 5;
+        let lines = cache.describe(&mem, &HashMap::new(), catch_pc);
+        assert!(lines[0].starts_with("catch — "), "got: {lines:?}");
+        // The store (the frame token, S1) is described before the jump line —
+        // catch's store-first encoding order, correctly reflected.
+        let store_idx = lines.iter().position(|l| l.starts_with("  → S1 stores")).expect("no S1 store line");
+        let jump_idx = lines.iter().position(|l| l.contains("unconditionally jumps")).expect("no jump line");
+        assert!(store_idx < jump_idx, "catch must describe its store before its jump: {lines:?}");
+        assert!(lines[jump_idx].contains("0x"), "catch's jump target not resolved: {lines:?}");
+    }
+
+    #[test]
+    fn describe_previews_a_string_operand() {
+        // streamstr pointing at an E0 C-string written into RAM. Two-pass: the
+        // operand embeds RAMSTART's address, which isn't known until the image
+        // is built — but a function's byte length (and thus RAMSTART) doesn't
+        // depend on a C32 operand's VALUE, only its fixed 4-byte width, so the
+        // first pass's RAMSTART is exactly the second pass's too.
+        let placeholder = asm::func(0xC1, &[], &asm::ins(0x72, &[C32(0)]));
+        let (mem0, _) = mem_of(&[placeholder], 0);
+        let rs = mem0.ramstart();
+
+        let body = asm::ins(0x72, &[C32(rs)]); // streamstr @ramstart
+        let (mut mem, addrs) = mem_of(&[asm::func(0xC1, &[], &body)], 0);
+        assert_eq!(mem.ramstart(), rs, "RAMSTART must be stable across the two passes");
+        mem.write8(rs, 0xE0).unwrap();
+        for (i, b) in b"Hi!".iter().enumerate() {
+            mem.write8(rs + 1 + i as u32, *b as u32).unwrap();
+        }
+        mem.write8(rs + 4, 0).unwrap();
+
+        let cache = DisasmCache::build(&mem);
+        let streamstr_pc = addrs[0] + 3;
+        let lines = cache.describe(&mem, &HashMap::new(), streamstr_pc);
+        assert!(lines[0].starts_with("streamstr — "), "got: {lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("[string: \"Hi!\"]")),
+            "missing decoded string preview: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn describe_spells_out_the_offset_0_1_return_convention() {
+        // jz L1 offset=0 (returns 0 instead of branching), and a second
+        // instruction with offset=1 (returns 1).
+        let body0 = asm::ins(0x22, &[C32(0), Zero]); // jz #0, offset 0 -> "return 0"
+        let (mem0, addrs0) = mem_of(&[asm::func(0xC1, &[], &body0)], 0);
+        let cache0 = DisasmCache::build(&mem0);
+        let lines0 = cache0.describe(&mem0, &HashMap::new(), addrs0[0] + 3);
+        assert!(
+            lines0.iter().any(|l| l.contains("returns 0") && l.contains("0/1 shortcut")),
+            "missing offset-0 return convention: {lines0:?}"
+        );
+
+        let body1 = asm::ins(0x22, &[C32(0), C8(1)]); // jz #0, offset 1 -> "return 1"
+        let (mem1, addrs1) = mem_of(&[asm::func(0xC1, &[], &body1)], 0);
+        let cache1 = DisasmCache::build(&mem1);
+        let lines1 = cache1.describe(&mem1, &HashMap::new(), addrs1[0] + 3);
+        assert!(
+            lines1.iter().any(|l| l.contains("returns 1") && l.contains("0/1 shortcut")),
+            "missing offset-1 return convention: {lines1:?}"
         );
     }
 }

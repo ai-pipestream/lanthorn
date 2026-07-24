@@ -117,7 +117,7 @@ impl Debugger for GlulxSession {
     }
 
     fn describe_line(&self, addr: u32) -> Option<Vec<String>> {
-        self.with_disasm_cache(|c| c.describe(self.machine.mem(), addr)).map(|s| vec![s])
+        Some(self.with_disasm_cache(|c| c.describe(self.machine.mem(), self.machine.accel_funcs(), addr)))
     }
 
     fn executed_pcs(&self) -> HashSet<u32> {
