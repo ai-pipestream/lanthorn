@@ -414,7 +414,26 @@ fn render_node(
             // pictures there (the primary-Buffer transcript path blits them at
             // native scale, `v6_image_scale` == 1.0 set just above).
             let frameless = state.config.v6_render == crate::config::V6RenderMode::Frameless;
-            if !state.any_overlay_open() && !frameless {
+            // A painted MENU screen carries DEEP paint runs (a chrome grid printing
+            // text at native row ≥ STATUS_BAND_ROWS, below the status band — Shogun's
+            // boot menu at rows 21–23). In HYBRID mode such a screen must NOT take the
+            // pixel chrome ring: the ring path splits the menu across the raster ring
+            // (items mapping above the terminal viewport) and the terminal overlay
+            // (items inside it), the exact mixed raster/text defect (SQ-0484). Routing
+            // it to the cell path below instead renders it as a coherent all-text
+            // screen — the story transcript plus the menu painted over it — identical
+            // to the frameless path (which the user has not complained about). Normal
+            // gameplay paints only the rows 0–3 status band, so this never fires
+            // there and the ring path is kept. RASTER mode deliberately keeps its
+            // pixel composite for menus (the reverse-video selection block is fixed in
+            // `build_chrome_canvas` instead, SQ-0487) — a raster-mode user wants the
+            // pixel aesthetic even on menus.
+            let hybrid = state.config.v6_render == crate::config::V6RenderMode::Hybrid;
+            let has_menu = items.iter().any(|pw| {
+                matches!(&pw.node, WinNode::Grid(g)
+                    if g.px_texts.iter().any(|t| !t.text.trim().is_empty() && (t.y.max(1) - 1) / 16 >= STATUS_BAND_ROWS))
+            });
+            if !state.any_overlay_open() && !frameless && !(has_menu && hybrid) {
             if let Some(picker) = state.game_picker.as_ref() {
                 let theme_bg = state.colors.theme.get("transcript").style;
                 let default_fg = style_fg_rgba(theme_bg, image::Rgba([220, 220, 220, 255]));
@@ -1251,7 +1270,13 @@ fn draw_painted_screen(
     base: ratatui::style::Style,
 ) {
     for t in runs {
-        if t.text.trim().is_empty() {
+        // A whitespace-only run is normally skipped (nothing to draw), EXCEPT a
+        // reverse-video one: the game paints the spaces BETWEEN a highlighted
+        // menu item's words as separate reverse runs, and dropping them left the
+        // selection bar moth-eaten — reversed behind the glyphs but not the gaps
+        // (SQ-0484). Stamping the reversed space fills the gap cell, so the bar
+        // reads as one solid block. A non-reverse blank stays a no-op.
+        if t.text.trim().is_empty() && t.style & 1 == 0 {
             continue;
         }
         // 8×16 v6 cell (SQ-0479): quantize Y by FONT_H(16), X by FONT_W(8).
@@ -2906,40 +2931,38 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_overlays_chrome_text_runs_inside_the_story_box() {
-        // Shogun paints its boot-menu items (window-2 pixel runs) INSIDE the
-        // story window's box; the terminal transcript viewport covers that
-        // area, so the runs must overlay ON TOP of the terminal text — one
-        // menu item visible under the transcript was the live report.
+    fn hybrid_menu_screen_renders_coherent_all_text_with_transcript() {
+        // SQ-0484: Shogun's boot menu keeps window 0 (the story buffer) open AND
+        // paints its three menu items as DEEP chrome runs (native rows ≥
+        // STATUS_BAND_ROWS). The old ring+viewport path split that menu across the
+        // raster pixel ring (items mapping above the terminal viewport → rendered
+        // as pixel art) and the terminal overlay (items inside it → terminal text),
+        // giving the mixed "first option raster, rest terminal text" screen. A menu
+        // screen must instead route to the cell path — the story transcript plus the
+        // menu painted over it as ONE coherent all-text screen, matching the
+        // frameless path — so all three items are terminal cells and the transcript
+        // ("You may choose to:") is preserved.
         let mut state = AppState::default();
         state.colors = crate::colors::ColorScheme::terminal_default();
-        // A 16x16 cell over a 40x25 pane gives scale s = 2.0 (like a real
-        // terminal, which upscales the 320x200 native raster), so the items'
-        // 8-px native line spacing lands on DISTINCT terminal rows.
-        // `from_fontsize` is deprecated in favor of `from_query_stdio` (queries the
-        // real terminal — unusable headless) and `halfblocks` (fixed at 10x20, not
-        // the 16x16 this test needs); it's the only ctor left for a fixed test font size.
-        #[allow(deprecated)]
-        {
-            state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize((16, 16).into()));
-        }
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
         state.config.v6_render = crate::config::V6RenderMode::Hybrid;
         state.push_transcript("You may choose to:");
 
         let mut model = hybrid_v6_model();
-        // A chrome grid whose pixel runs sit INSIDE the story box
-        // (story native box: x 43..277, y 39..199).
+        // A chrome grid whose pixel runs sit DEEP (native rows 8/9/10, ≥
+        // STATUS_BAND_ROWS) inside the story box (native y 39..199 → the 8×16 cell
+        // rows land at (y-1)/16). Distinct rows, like Shogun's real 21/22/23.
         let menu = PositionedWindow {
-            x: 12, y: 6, w: 1, h: 3, x_px: 100, y_px: 50, w_px: 1, h_px: 24,
+            x: 12, y: 8, w: 1, h: 3, x_px: 100, y_px: 129, w_px: 1, h_px: 48,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
                 cols: 1, rows: 3, cells: vec![], active_rows: 3, cursor: (1, 1),
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
                 bg: None, fg: None, reverse: false,
                 px_texts: vec![
-                    crate::engine::PxText { y: 51, x: 101, text: "START the game".into(), style: 0, fg: 0, bg: 0 },
-                    crate::engine::PxText { y: 59, x: 101, text: "RESTORE a saved game".into(), style: 0, fg: 0, bg: 0 },
-                    crate::engine::PxText { y: 67, x: 101, text: "QUIT the game".into(), style: 0, fg: 0, bg: 0 },
+                    crate::engine::PxText { y: 129, x: 101, text: "START the game".into(), style: 0, fg: 0, bg: 0 },
+                    crate::engine::PxText { y: 145, x: 101, text: "RESTORE a saved game".into(), style: 0, fg: 0, bg: 0 },
+                    crate::engine::PxText { y: 161, x: 101, text: "QUIT the game".into(), style: 0, fg: 0, bg: 0 },
                 ],
             }),
         };
@@ -2952,15 +2975,18 @@ mod tests {
         let _ = render_node(
             &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
         );
-        let screen: String = (0..area.height)
-            .map(|y| (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect::<String>() + "\n")
-            .collect();
-        for item in ["START the game", "RESTORE a saved game", "QUIT the game"] {
-            assert!(
-                screen.contains(item),
-                "menu item {item:?} must overlay the terminal viewport, screen:\n{screen}"
-            );
-        }
+        // A menu screen publishes a full terminal transcript geometry (the cell
+        // path), NOT a raster/hybrid image — so the transcript renders as real cells.
+        let row_text = |y: u16| -> String {
+            (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+        };
+        let screen: String = (0..area.height).map(|y| row_text(y) + "\n").collect();
+        // The transcript prompt is preserved (dropped by a painted-only path).
+        assert!(screen.contains("You may choose to:"), "transcript prompt preserved, screen:\n{screen}");
+        // All three items render as terminal text on their distinct deep rows.
+        assert_eq!(row_text(8).trim(), "START the game", "row 8 is the START item, screen:\n{screen}");
+        assert_eq!(row_text(9).trim(), "RESTORE a saved game", "row 9 is the RESTORE item");
+        assert_eq!(row_text(10).trim(), "QUIT the game", "row 10 is the QUIT item");
     }
 
     /// A v6 Layered model whose chrome is fully TRANSPARENT, leaving the story
@@ -3301,6 +3327,50 @@ mod tests {
             let runs = vec![run(1, 1, "Loc"), run(281, 1, "Moves: 1")];
             let (_row, _) = band_row(&runs, 40, w);
         }
+    }
+
+    /// A reverse-video px-run at native pixel `(x, y)` (1-based) carrying `text`.
+    fn rev_run(x: u16, y: u16, text: &str) -> crate::engine::PxText {
+        crate::engine::PxText { y, x, text: text.into(), style: 1, fg: 0, bg: 0 }
+    }
+
+    #[test]
+    fn painted_screen_fills_reverse_video_gaps_between_words() {
+        use ratatui::style::Modifier;
+        // SQ-0484 defect 2: a highlighted (reverse-video) menu item paints each
+        // word AND each inter-word space as a SEPARATE run. Dropping the blank
+        // runs left the selection bar reversed behind the glyphs but not the gaps
+        // ("moth-eaten"). The reversed blank runs must now be stamped, so the whole
+        // bar reads as one solid reverse block. A NON-reverse blank stays a no-op.
+        //
+        // Row 1 (native y=17 → cell row 1): "GO" at cols 0..2, a reverse space at
+        // col 2, "IN" at cols 3..5 — the gap cell (2) must carry REVERSED.
+        let runs = vec![
+            rev_run(1, 17, "GO"),
+            rev_run(17, 17, " "),
+            rev_run(25, 17, "IN"),
+        ];
+        let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buf = Buffer::empty(area);
+        draw_painted_screen(&refs, 0, area, &mut buf, ratatui::style::Style::default());
+        // Every cell of the bar (cols 0..5) is REVERSED — including the gap at col 2.
+        for x in 0..5u16 {
+            assert!(
+                buf.cell((x, 1)).unwrap().modifier.contains(Modifier::REVERSED),
+                "col {x} of the reverse selection bar is reversed (gap included)"
+            );
+        }
+        // A plain (non-reverse) whitespace run stays a no-op: it does not stamp a
+        // reversed blank over an untouched cell.
+        let plain = vec![crate::engine::PxText { y: 33, x: 1, text: "   ".into(), style: 0, fg: 0, bg: 0 }];
+        let prefs: Vec<&crate::engine::PxText> = plain.iter().collect();
+        let mut buf2 = Buffer::empty(area);
+        draw_painted_screen(&prefs, 0, area, &mut buf2, ratatui::style::Style::default());
+        assert!(
+            !buf2.cell((0, 2)).unwrap().modifier.contains(Modifier::REVERSED),
+            "a non-reverse blank run is not painted"
+        );
     }
 
     /// TEMP measurement harness (SQ-0469). Times the three raster phases —

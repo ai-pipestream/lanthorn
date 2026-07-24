@@ -215,6 +215,22 @@ pub fn story_bg_rgba(story: Option<&PositionedWindow>, colors: &ColorScheme) -> 
     Some(packed_to_rgba(b.bg?, Rgba([0, 0, 0, 255]), colors))
 }
 
+/// Whether any pixel in the `w × h` box at `(px, py)` of `canvas` is opaque
+/// (alpha ≥ 128). Used to tell a reverse-video run sitting ON frame art from one
+/// over a clear background, so the art is preserved but a bare selection bar still
+/// gets its highlight block (SQ-0487). Out-of-bounds pixels count as transparent.
+pub(crate) fn region_has_opaque(canvas: &RgbaImage, px: u32, py: u32, w: u32, h: u32) -> bool {
+    let (cw, ch) = (canvas.width(), canvas.height());
+    for y in py..(py + h).min(ch) {
+        for x in px..(px + w).min(cw) {
+            if canvas.get_pixel(x, y)[3] >= 128 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn fill_cell(canvas: &mut RgbaImage, px: u32, py: u32, cw: u32, ch: u32, color: Rgba<u8>) {
     let (w, h) = (canvas.width(), canvas.height());
     for y in py..(py + ch).min(h) {
@@ -282,13 +298,31 @@ pub fn build_chrome_canvas(
                 // painted only when the game explicitly chose colours.
                 let explicit = |packed: u32| packed != 0 && !((packed >> 24) == 1 && (packed & 0xFF) <= 1);
                 for t in &g.px_texts {
+                    let px0 = t.x.max(1) as u32 - 1;
+                    let py = t.y.max(1) as u32 - 1;
                     let (fg, bg) = if t.style & 1 != 0 {
                         if explicit(t.fg) || explicit(t.bg) {
                             // Real colour pair: swap and paint the block.
                             (packed_to_rgba(t.bg, default_bg, colors), Some(packed_to_rgba(t.fg, default_fg, colors)))
                         } else {
-                            // Inherited colours: dark ink on the art, no block.
-                            (default_bg, None)
+                            // Inherited colours + reverse: whether to paint a block
+                            // depends on what's BEHIND the run (SQ-0487). Over opaque
+                            // frame art (Zork0's ribbon labels) a block would erase the
+                            // art, so draw dark ink (default_bg) directly on it, no
+                            // block. Over a CLEAR background (Shogun's boot-menu
+                            // selection bar — no art behind it) the highlight must be
+                            // visible, so paint the swapped block: a solid default_fg
+                            // bar with default_bg ink, INCLUDING the blank gap runs the
+                            // game paints between the item's words (a reversed space
+                            // then fills its cell — no more moth-eaten bar). Pass 1
+                            // already blitted every graphics window, so the canvas
+                            // shows the real art (or transparency) under this run.
+                            let span_w = t.text.chars().count().max(1) as u32 * FONT_W;
+                            if region_has_opaque(&canvas, px0, py, span_w, FONT_H) {
+                                (default_bg, None)
+                            } else {
+                                (default_bg, Some(default_fg))
+                            }
                         }
                     } else {
                         (
@@ -300,9 +334,8 @@ pub fn build_chrome_canvas(
                     // paint time (v6 paint semantics) — no window-origin
                     // offset: the window may have moved/shrunk since (Shogun
                     // turns its menu window into a 1-px caret after printing).
-                    let py = t.y.max(1) as u32 - 1;
                     for (i, ch) in t.text.chars().enumerate() {
-                        let px = (t.x.max(1) as u32 - 1) + i as u32 * FONT_W;
+                        let px = px0 + i as u32 * FONT_W;
                         crate::render::bitfont::blit_glyph(&mut canvas, ch, px, py, FONT_W, FONT_H, fg, bg);
                     }
                 }
@@ -949,25 +982,62 @@ mod tests {
     }
 
     #[test]
-    fn px_text_reverse_with_inherited_colours_draws_dark_ink_no_block() {
-        // The run never chose an explicit colour (fg=bg=0/Default): reverse
-        // over frame art must NOT paint an opaque block — Zork0's ribbon
-        // labels print in reverse with inherited colours and the original
-        // shows dark ink directly ON the banner art (a block would erase it,
-        // the black-box regression the user hit). A blank glyph therefore
-        // leaves the canvas transparent; an inked glyph draws in default_bg.
-        let win = px_text_grid_item(" ", 1, 0, 0);
-        let chrome: Vec<&PositionedWindow> = vec![&win];
+    fn px_text_reverse_inherited_over_art_draws_dark_ink_no_block() {
+        // The run never chose an explicit colour (fg=bg=0/Default) and sits OVER
+        // opaque frame art: reverse video must NOT paint a block — Zork0's ribbon
+        // labels print in reverse with inherited colours and the original shows dark
+        // ink directly ON the banner art (a block would erase it, the black-box
+        // regression the user hit). A blank glyph therefore leaves the art
+        // untouched; an inked glyph draws in default_bg (dark) on the art. (SQ-0487
+        // keeps this by testing the canvas is opaque behind the run.)
         let default_fg = Rgba([10, 20, 30, 255]);
         let default_bg = Rgba([40, 50, 60, 255]);
+        let art_color = Rgba([200, 150, 100, 255]);
+        // An opaque 8×8 art window behind the run (pass 1), then the reverse run.
+        let art = graphics_window(0, 0, 8, 8, image::RgbaImage::from_pixel(8, 8, art_color));
+        let blank = px_text_grid_item(" ", 1, 0, 0);
+        let chrome: Vec<&PositionedWindow> = vec![&art, &blank];
         let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors());
-        assert_eq!(c.get_pixel(4, 4)[3], 0, "no block behind a blank reverse glyph with inherited colours");
-        let win = px_text_grid_item("X", 1, 0, 0);
-        let chrome: Vec<&PositionedWindow> = vec![&win];
+        assert_eq!(*c.get_pixel(4, 4), art_color, "blank reverse glyph over art leaves the art (no block)");
+        let inked = px_text_grid_item("X", 1, 0, 0);
+        let chrome: Vec<&PositionedWindow> = vec![&art, &inked];
         let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors());
         assert!(
             (0..8).any(|x| (0..8).any(|y| *c.get_pixel(x, y) == default_bg)),
-            "reverse ink with inherited colours draws in the themed default_bg (dark on the art)"
+            "reverse ink over art draws in the themed default_bg (dark on the art)"
+        );
+    }
+
+    #[test]
+    fn px_text_reverse_inherited_over_clear_bg_paints_the_highlight_block() {
+        // SQ-0487: the same inherited-colour reverse run over a CLEAR background
+        // (Shogun's boot-menu selection bar — no frame art behind it) MUST paint the
+        // swapped highlight block: a solid default_fg bar with default_bg ink. A
+        // blank gap run between words fills its whole cell with the bar colour, so
+        // the selection bar reads solid (not moth-eaten).
+        let default_fg = Rgba([210, 210, 210, 255]);
+        let default_bg = Rgba([12, 12, 12, 255]);
+        // A blank reverse run (an inter-word gap) over the transparent canvas fills
+        // its cell with the bar colour (default_fg).
+        let gap = px_text_grid_item(" ", 1, 0, 0);
+        let chrome: Vec<&PositionedWindow> = vec![&gap];
+        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors());
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(*c.get_pixel(x, y), default_fg, "gap cell filled with the bar colour at ({x},{y})");
+            }
+        }
+        // An inked reverse glyph paints the bar (default_fg) with dark (default_bg) ink.
+        let glyph = px_text_grid_item("X", 1, 0, 0);
+        let chrome: Vec<&PositionedWindow> = vec![&glyph];
+        let c = build_chrome_canvas(&chrome, (8, 8), default_fg, default_bg, &colors());
+        assert!(
+            (0..8).any(|x| (0..8).any(|y| *c.get_pixel(x, y) == default_fg)),
+            "the highlight bar (default_fg) is painted behind the glyph"
+        );
+        assert!(
+            (0..8).any(|x| (0..8).any(|y| *c.get_pixel(x, y) == default_bg)),
+            "the glyph ink is drawn in default_bg (dark on the bright bar)"
         );
     }
 

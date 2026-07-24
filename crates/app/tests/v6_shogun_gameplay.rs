@@ -215,6 +215,75 @@ fn shogun_frameless_boot_menu_paints_items_and_caret() {
     assert!(!buf.cell((restore_col, 22)).unwrap().modifier.contains(Modifier::REVERSED), "RESTORE is not reversed");
 }
 
+/// SQ-0484: Shogun's boot menu in HYBRID render mode. The menu keeps window 0
+/// (the story buffer) open AND paints its three items as DEEP chrome runs (native
+/// rows 21–23). The old ring+viewport hybrid path split that menu across the raster
+/// pixel ring (items mapping above the terminal viewport) and the terminal overlay
+/// (items inside it) — the "first option raster, rest terminal text" defect. It must
+/// now render as one coherent all-text screen (like frameless): all three items are
+/// terminal cells on distinct rows, and the SELECTED item's reverse-video bar is
+/// solid across the inter-word gaps (the game paints those gaps as separate reverse
+/// space runs that were being dropped — the "moth-eaten" selection defect).
+#[test]
+fn shogun_hybrid_boot_menu_is_coherent_text_with_solid_reverse_bar() {
+    use ratatui::style::Modifier;
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+    let result = session.submit_char(b' ');
+    assert!(result.transcript.contains("You may choose to:"), "menu prompt missing");
+
+    let model = session.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect()
+    };
+    // Native rows 21/22/23 carry the three items — as terminal cells, NOT a raster
+    // stamp (the whole menu is one coherent all-text screen).
+    let r21 = row_text(21);
+    let r22 = row_text(22);
+    let r23 = row_text(23);
+    assert!(r21.contains("START the game"), "row 21 shows the START item: {r21:?}");
+    assert!(r22.contains("RESTORE a saved game"), "row 22 shows the RESTORE item: {r22:?}");
+    assert!(r23.contains("QUIT the game"), "row 23 shows the QUIT item: {r23:?}");
+
+    // The selected item (START, reverse-video) is a SOLID reverse bar: every cell
+    // from the first glyph to the last — INCLUDING the gap cells between "START",
+    // "the", and "game" — carries the REVERSED modifier. The old per-run stamp left
+    // the gaps unreversed (moth-eaten).
+    let start = r21.find("START").unwrap() as u16;
+    let end = (r21.rfind("game").unwrap() + "game".len()) as u16; // exclusive
+    for x in start..end {
+        assert!(
+            buf.cell((x, 21)).unwrap().modifier.contains(Modifier::REVERSED),
+            "START selection bar cell {x} is reversed (incl. inter-word gaps): {r21:?}"
+        );
+    }
+    // An UNSELECTED item (RESTORE, normal video) is NOT reversed.
+    let restore = r22.find("RESTORE").unwrap() as u16;
+    assert!(
+        !buf.cell((restore, 22)).unwrap().modifier.contains(Modifier::REVERSED),
+        "RESTORE (unselected) is not reverse-video"
+    );
+}
+
 /// SQ-0467 follow-up: the frameless status band fills its ENTIRE row(s) with the
 /// upper_window background, not just the cells behind glyphs — the gaps between
 /// the anchored groups read as one solid bar. Asserts a gap cell on the band row
