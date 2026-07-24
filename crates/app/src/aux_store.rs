@@ -44,7 +44,13 @@ pub fn decode_aux(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
 /// Parse the current `ZAUX` format (little-endian, u32 name length). Tolerant.
 fn decode_zaux(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
     let mut out = BTreeMap::new();
-    let mut p = 5usize; // skip 4-byte MAGIC + 1-byte VERSION
+    // Reject an unknown version (matches zvm-cli's reference decoder): a future
+    // format bump yields an empty table rather than a v1 mis-parse. Freeze policy
+    // (docs/release/save-format-policy.md) — a bump is deliberate, never silent.
+    if bytes.get(4) != Some(&VERSION) {
+        return out;
+    }
+    let mut p = 5usize; // MAGIC (4) + VERSION (1), already validated
     let take = |p: &mut usize, n: usize| -> Option<&[u8]> {
         let end = p.checked_add(n)?;
         let s = bytes.get(*p..end)?;
@@ -152,6 +158,24 @@ mod tests {
     fn codec_round_trips() {
         let m = sample();
         assert_eq!(decode_aux(&encode_aux(&m)), m);
+    }
+
+    // ── format freeze (docs/release/save-format-policy.md) ──
+    // The ZAUX version is frozen at 1. Changing this constant must be a
+    // deliberate format bump (update this pin + a migration/release note), never
+    // an accidental drift — the assert forces the decision to be conscious.
+    #[test]
+    fn version_constant_is_frozen() {
+        assert_eq!(VERSION, 1, "ZAUX version changed — see docs/release/save-format-policy.md");
+    }
+
+    #[test]
+    fn decode_rejects_bumped_version() {
+        // A future (v2) ZAUX file is rejected by today's reader (empty table),
+        // never mis-parsed as v1. Symmetric with zvm-cli's reference decoder.
+        let mut v2 = ZAUX_BYTES.to_vec();
+        v2[4] = 0x02; // bump the version byte
+        assert!(decode_aux(&v2).is_empty(), "a bumped-version ZAUX must not decode as v1");
     }
 
     #[test]

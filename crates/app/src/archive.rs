@@ -1357,6 +1357,14 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // format freeze (docs/release/save-format-policy.md): the .babelmap archive
+    // version is frozen at 4. Changing this constant must be a deliberate bump
+    // (update this pin + a migration/release note), never accidental drift.
+    #[test]
+    fn format_version_constant_is_frozen() {
+        assert_eq!(CURRENT_FORMAT_VERSION, 4, "archive format_version changed — see docs/release/save-format-policy.md");
+    }
+
     // unknown format_version -> Err
     // -------------------------------------------------------------------------
     #[test]

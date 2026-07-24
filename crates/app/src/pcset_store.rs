@@ -32,7 +32,12 @@ pub fn decode(bytes: &[u8]) -> HashSet<u32> {
     if bytes.len() < 4 || &bytes[..4] != MAGIC {
         return out;
     }
-    let mut p = 5usize; // skip 4-byte MAGIC + 1-byte VERSION
+    // Reject an unknown version (freeze policy, docs/release/save-format-policy.md):
+    // a future format bump yields an empty set rather than a v1 mis-parse.
+    if bytes.get(4) != Some(&VERSION) {
+        return out;
+    }
+    let mut p = 5usize; // MAGIC (4) + VERSION (1), already validated
     let take = |p: &mut usize, n: usize| -> Option<&[u8]> {
         let end = p.checked_add(n)?;
         let s = bytes.get(*p..end)?;
@@ -88,6 +93,21 @@ mod tests {
     fn empty_round_trips() {
         let empty = HashSet::new();
         assert_eq!(decode(&encode(&empty)), empty);
+    }
+
+    // ── format freeze (docs/release/save-format-policy.md) ──
+    #[test]
+    fn version_constant_is_frozen() {
+        assert_eq!(VERSION, 1, "ZPCS version changed — see docs/release/save-format-policy.md");
+    }
+
+    #[test]
+    fn decode_rejects_bumped_version() {
+        // A future (v2) ZPCS file is rejected by today's reader (empty set),
+        // never mis-parsed as v1.
+        let mut b = encode(&sample());
+        b[4] = 0x02; // bump the version byte
+        assert!(decode(&b).is_empty(), "a bumped-version ZPCS must not decode as v1");
     }
 
     #[test]

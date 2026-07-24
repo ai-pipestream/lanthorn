@@ -3696,6 +3696,47 @@ mod layout_snap_tests {
         assert_eq!(grid_border, Some(Some(false)), "NoBorder split hints an unframed grid leaf");
     }
 
+    // ── format freeze (docs/release/save-format-policy.md) ──
+    // The Glk host-snapshot version is frozen at 6. Changing this constant must
+    // be a deliberate format bump (update this pin + a migration/release note),
+    // never accidental drift — the assert forces the decision to be conscious.
+    #[test]
+    fn snapshot_version_constant_is_frozen() {
+        assert_eq!(GLK_SNAPSHOT_VERSION, 6, "Glk snapshot version changed — see docs/release/save-format-policy.md");
+    }
+
+    #[test]
+    fn serialize_stamps_current_snapshot_version() {
+        let bytes = Model::new().serialize();
+        assert_eq!(
+            &bytes[0..4],
+            &GLK_SNAPSHOT_VERSION.to_be_bytes(),
+            "serialize must stamp the current snapshot version",
+        );
+    }
+
+    #[test]
+    fn deserialize_rejects_future_snapshot_version() {
+        // A snapshot from a future (v7) format is rejected cleanly (error string,
+        // never a panic or mis-read); restore_state maps this to GError::BadSave.
+        let bytes = (GLK_SNAPSHOT_VERSION + 1).to_be_bytes();
+        match Model::deserialize(&bytes) {
+            Ok(_) => panic!("a future snapshot version must be rejected"),
+            Err(err) => assert!(err.contains("unsupported Glk snapshot version"), "got: {err}"),
+        }
+    }
+
+    #[test]
+    fn decode_files_rejects_bumped_gvfs_version() {
+        // The .glkvfs sidecar header pins version 1: a future (v2) sidecar is
+        // rejected (empty map), never mis-parsed. Freeze policy.
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("save".to_string(), vec![1, 2, 3]);
+        let mut blob = encode_files(&m);
+        blob[7] = 0x02; // bump the big-endian u32 version (byte 4..8) from 1 to 2
+        assert!(decode_files(&blob).is_empty(), "a bumped-version GVFS must not decode as v1");
+    }
+
     // A live mouse request must survive a Glk-chunk save/restore, exactly like a
     // char request.
     #[test]
