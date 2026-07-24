@@ -175,6 +175,33 @@ impl V6ClickMap {
     }
 }
 
+/// Largest integer upscale the v6 raster composite is encoded at (SQ-0469). A
+/// native 320×200 game therefore encodes at most 1280×800 instead of the full
+/// pane device resolution (which could be ~1920×1200 = 9 MB and cost hundreds of
+/// ms to resize+PNG-encode). The protocol still fits/centres the smaller image in
+/// the pane, so the only visible effect is that pixel art stops growing past 4×
+/// its native size — crisp Nearest scaling either way.
+const MAX_V6_UPSCALE: f64 = 4.0;
+
+/// A completed v6 raster encode (SQ-0469): the uploaded protocol plus the key it
+/// was built for (`gen` + pane cell size) and the native canvas extent (for the
+/// click map). Always rendered once present — a stale entry is shown until a
+/// fresher encode lands, so the pane never flickers to blank on a change.
+struct V6Ready {
+    gen: u64,
+    area_w: u16,
+    area_h: u16,
+    proto: Protocol,
+    native_w: u16,
+    native_h: u16,
+}
+
+/// The worker-thread handle for an in-flight v6 raster encode (SQ-0469). The
+/// heavy resize + PNG/protocol encode (tens–hundreds of ms) runs off the UI
+/// thread and yields a ready-to-render [`V6Ready`]. Coalesced: only one runs at a
+/// time, and `poll_v6_job` installs its result (see `spawn_v6_encode`).
+type V6Job = std::thread::JoinHandle<Option<V6Ready>>;
+
 #[derive(Default)]
 pub struct GraphicsRender {
     cache: std::collections::HashMap<u32, (u64, u16, u16, Protocol)>,
@@ -182,9 +209,11 @@ pub struct GraphicsRender {
     /// terminal click back to a game pixel (Lane M mouse input). `None` until a
     /// v6 frame has been drawn.
     pub last_v6_map: Option<V6ClickMap>,
-    /// One-image cache for the v6 pixel composite (Phase 1c), keyed on a content
-    /// hash + area so unchanged frames reuse the uploaded protocol.
-    v6: Option<(u64, u16, u16, Protocol)>,
+    /// Last-ready v6 pixel composite (Phase 1c / SQ-0469), keyed on a change
+    /// generation + area rather than a full-buffer pixel hash. Built off-thread.
+    v6: Option<V6Ready>,
+    /// The in-flight background encode, if any (SQ-0469).
+    v6_job: Option<V6Job>,
     /// Per-band cache for the v6 HYBRID chrome ring (Lane H): one uploaded
     /// protocol per band cell rect, keyed on the band rect with a stored
     /// content+scale hash so an unchanged frame reuses the upload. Pruned each
@@ -238,63 +267,116 @@ impl GraphicsRender {
         self.cache.retain(|win, _| live.contains(win));
     }
 
-    /// Draw a pre-composited v6 canvas as ONE terminal image, upscaled to fill
-    /// `area`. The canvas is in the game's native pixel space (e.g. 320×200); we
-    /// explicitly upscale it (Nearest → crisp pixel art) to the pane's device
-    /// pixels, preserving aspect, then hand it to the image protocol at native
-    /// size. (Relying on the protocol's own `Resize::Scale` left it at native
-    /// size — small in a large pane.) Cached on a content hash + area so
-    /// identical frames don't re-encode/upload.
-    pub fn draw_v6_canvas(&mut self, picker: &Picker, canvas: &image::RgbaImage, area: Rect, buf: &mut Buffer) {
+    /// Resize + encode a native v6 canvas into a terminal image protocol,
+    /// upscaled (Nearest → crisp pixel art) to fill `area`'s device pixels with
+    /// aspect preserved, capped at [`MAX_V6_UPSCALE`]. Pure/self-contained so it
+    /// can run on a worker thread (SQ-0469). Returns `None` if the protocol
+    /// encode fails.
+    fn encode_v6(picker: &Picker, canvas: &image::RgbaImage, gen: u64, area: Rect) -> Option<V6Ready> {
+        let fs = picker.font_size();
+        let box_w = area.width as u32 * fs.width.max(1) as u32;
+        let box_h = area.height as u32 * fs.height.max(1) as u32;
+        let (cw, ch) = (canvas.width(), canvas.height());
+        let scale = ((box_w as f64 / cw as f64).min(box_h as f64 / ch as f64))
+            .max(1.0)
+            .min(MAX_V6_UPSCALE);
+        let (tw, th) = ((cw as f64 * scale) as u32, (ch as f64 * scale) as u32);
+        let scaled = image::imageops::resize(canvas, tw.max(cw), th.max(ch), image::imageops::FilterType::Nearest);
+        let img = image::DynamicImage::ImageRgba8(scaled);
+        match picker.new_protocol(img, Size::new(area.width, area.height), Resize::Fit(None)) {
+            Ok(proto) => Some(V6Ready {
+                gen,
+                area_w: area.width,
+                area_h: area.height,
+                proto,
+                native_w: canvas.width() as u16,
+                native_h: canvas.height() as u16,
+            }),
+            Err(_) => None,
+        }
+    }
+
+    /// Whether the caller should (re)build the native v6 canvas and spawn an
+    /// encode for `(gen, area)` this frame (SQ-0469). False when the last-ready
+    /// encode already matches (nothing changed) OR a background encode is already
+    /// in flight (coalesced — one at a time; the next frame after it lands
+    /// respawns for the current generation). The expensive canvas BUILD is thus
+    /// skipped entirely on an unchanged frame — no rebuild, no pixel hash.
+    pub fn v6_wants_build(&self, gen: u64, area: Rect) -> bool {
+        if area.width == 0 || area.height == 0 {
+            return false;
+        }
+        if self.v6_job.is_some() {
+            return false;
+        }
+        !matches!(&self.v6, Some(r) if r.gen == gen && r.area_w == area.width && r.area_h == area.height)
+    }
+
+    /// Spawn the background resize+encode for a freshly built native `canvas`
+    /// (SQ-0469). Caller must have checked [`v6_wants_build`]; this replaces any
+    /// (already-absent) job. The UI thread never blocks on the encode — the
+    /// worker's result is installed by [`poll_v6_job`].
+    pub fn spawn_v6_encode(&mut self, picker: &Picker, canvas: image::RgbaImage, gen: u64, area: Rect) {
         if area.width == 0 || area.height == 0 || canvas.width() == 0 || canvas.height() == 0 {
             return;
         }
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        canvas.as_raw().hash(&mut h);
-        let hash = h.finish();
-        let fresh = matches!(&self.v6, Some((v, w, ht, _)) if *v == hash && *w == area.width && *ht == area.height);
-        if !fresh {
-            // Target device-pixel box for the pane, then the largest integer-ish
-            // uniform upscale that fits it (aspect preserved).
-            let fs = picker.font_size();
-            let box_w = area.width as u32 * fs.width.max(1) as u32;
-            let box_h = area.height as u32 * fs.height.max(1) as u32;
-            let (cw, ch) = (canvas.width(), canvas.height());
-            let scale = ((box_w as f64 / cw as f64).min(box_h as f64 / ch as f64)).max(1.0);
-            let (tw, th) = ((cw as f64 * scale) as u32, (ch as f64 * scale) as u32);
-            let scaled = image::imageops::resize(canvas, tw.max(cw), th.max(ch), image::imageops::FilterType::Nearest);
-            let img = image::DynamicImage::ImageRgba8(scaled);
-            match picker.new_protocol(img, Size::new(area.width, area.height), Resize::Fit(None)) {
-                Ok(p) => self.v6 = Some((hash, area.width, area.height, p)),
-                Err(_) => return,
-            }
+        let picker = picker.clone();
+        self.v6_job = Some(std::thread::spawn(move || Self::encode_v6(&picker, &canvas, gen, area)));
+    }
+
+    /// Poll the background v6 encode: if it finished, install its protocol as the
+    /// new last-ready composite and return true (the caller should redraw). The
+    /// result is always installed (even if the generation has since advanced) so
+    /// the display keeps converging to the latest encoded frame during a burst;
+    /// an out-of-date entry is still rendered until the next encode lands, so the
+    /// pane never blanks. (SQ-0469)
+    pub fn poll_v6_job(&mut self) -> bool {
+        let done = self.v6_job.as_ref().is_some_and(|j| j.is_finished());
+        if !done {
+            return false;
         }
-        if let Some((_, _, _, proto)) = &self.v6 {
-            let sz = proto.size();
-            let w = sz.width.min(area.width);
-            let ht = sz.height.min(area.height);
-            let dest = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - ht) / 2, w, ht);
-            Image::new(proto).render(dest, buf);
-            // Record the letterbox geometry so a click in the pane can be mapped
-            // back to a game pixel (Lane M). The image fills `dest`'s cells
-            // aspect-preserved, so the click map's image rect is `dest` in
-            // device pixels and its native extent is the canvas dimensions.
-            let fs = picker.font_size();
-            let (cw, ch) = (fs.width.max(1), fs.height.max(1));
-            self.last_v6_map = Some(V6ClickMap {
-                pane_x: area.x,
-                pane_y: area.y,
-                cell_w: cw,
-                cell_h: ch,
-                img_x: (dest.x - area.x) as f32 * cw as f32,
-                img_y: (dest.y - area.y) as f32 * ch as f32,
-                img_w: dest.width as f32 * cw as f32,
-                img_h: dest.height as f32 * ch as f32,
-                native_w: canvas.width() as u16,
-                native_h: canvas.height() as u16,
-            });
+        let job = self.v6_job.take().expect("checked above");
+        if let Ok(Some(ready)) = job.join() {
+            self.v6 = Some(ready);
         }
+        true
+    }
+
+    /// True while a background v6 encode is in flight (SQ-0469).
+    pub fn v6_encode_in_flight(&self) -> bool {
+        self.v6_job.is_some()
+    }
+
+    /// Render the last-ready v6 composite into `area`, centred/letterboxed, and
+    /// record the click map (SQ-0469). No-op (leaves the pane blank) until the
+    /// first encode has landed. Never re-encodes — the heavy work happened on the
+    /// worker.
+    pub fn redraw_v6(&mut self, picker: &Picker, area: Rect, buf: &mut Buffer) {
+        let Some(ready) = &self.v6 else { return };
+        let proto = &ready.proto;
+        let sz = proto.size();
+        let w = sz.width.min(area.width);
+        let ht = sz.height.min(area.height);
+        let dest = Rect::new(area.x + (area.width - w) / 2, area.y + (area.height - ht) / 2, w, ht);
+        Image::new(proto).render(dest, buf);
+        // Record the letterbox geometry so a click in the pane can be mapped
+        // back to a game pixel (Lane M). The image fills `dest`'s cells
+        // aspect-preserved, so the click map's image rect is `dest` in device
+        // pixels and its native extent is the canvas dimensions.
+        let fs = picker.font_size();
+        let (cw, ch) = (fs.width.max(1), fs.height.max(1));
+        self.last_v6_map = Some(V6ClickMap {
+            pane_x: area.x,
+            pane_y: area.y,
+            cell_w: cw,
+            cell_h: ch,
+            img_x: (dest.x - area.x) as f32 * cw as f32,
+            img_y: (dest.y - area.y) as f32 * ch as f32,
+            img_w: dest.width as f32 * cw as f32,
+            img_h: dest.height as f32 * ch as f32,
+            native_w: ready.native_w,
+            native_h: ready.native_h,
+        });
     }
 
     /// Record the letterbox click map for the HYBRID draw path (Lane H), where the
@@ -616,20 +698,56 @@ mod tests {
         assert_eq!(buf.cell((5, 5)).unwrap().style().bg, Some(Color::Rgb(1, 2, 3)), "blank → underlying kept");
     }
 
+    /// Drive the background v6 encode to completion (test helper, SQ-0469).
+    fn drain_v6_job(gr: &mut GraphicsRender) {
+        while gr.v6_encode_in_flight() {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            gr.poll_v6_job();
+        }
+    }
+
     #[test]
-    fn draw_v6_canvas_caches_on_content_hash() {
+    fn v6_encode_gates_on_generation_off_thread() {
         let picker = Picker::halfblocks();
         let mut gr = GraphicsRender::default();
         let area = Rect::new(0, 0, 4, 2);
-        let mut buf = Buffer::empty(area);
         let canvas = image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]));
-        gr.draw_v6_canvas(&picker, &canvas, area, &mut buf);
-        assert!(gr.v6.is_some(), "first draw builds + caches the protocol");
-        let (hash0, _, _, _) = gr.v6.as_ref().unwrap();
-        let hash0 = *hash0;
-        // Same content → same hash (no rebuild churn on identical frames).
-        gr.draw_v6_canvas(&picker, &canvas, area, &mut buf);
-        assert_eq!(gr.v6.as_ref().unwrap().0, hash0, "identical canvas keeps the cached entry");
+
+        // First frame for gen 7: nothing ready, no job → wants a build.
+        assert!(gr.v6_wants_build(7, area), "cold start wants the first build");
+        gr.spawn_v6_encode(&picker, canvas.clone(), 7, area);
+        // While the encode is in flight, no second build is requested — coalesced,
+        // even for a NEWER generation (newest wins: the in-flight one finishes,
+        // then the next frame builds whatever the current generation is).
+        assert!(!gr.v6_wants_build(7, area), "an in-flight encode suppresses a rebuild");
+        assert!(!gr.v6_wants_build(8, area), "an in-flight encode suppresses even a newer generation");
+        drain_v6_job(&mut gr);
+        assert!(gr.v6.is_some(), "the worker installed the encoded protocol");
+        assert_eq!(gr.v6.as_ref().unwrap().gen, 7);
+
+        // Same generation → no rebuild (the gate is the win: idle frames skip
+        // build + encode entirely).
+        assert!(!gr.v6_wants_build(7, area), "unchanged generation reuses the ready encode");
+        // A new generation → wants a rebuild.
+        assert!(gr.v6_wants_build(9, area), "a changed generation wants a fresh build");
+        // A pane resize → wants a rebuild even at the same generation.
+        assert!(gr.v6_wants_build(7, Rect::new(0, 0, 5, 2)), "a resize wants a fresh build");
+    }
+
+    #[test]
+    fn v6_encode_caps_upscale_at_4x() {
+        // A 32×32 native canvas in a huge pane must encode at 4× (128×128), not
+        // the full device box. Halfblocks font is 10×20 px; a 200×100-cell pane
+        // is 2000×2000 device, which would otherwise scale ~62×.
+        let picker = Picker::halfblocks();
+        let area = Rect::new(0, 0, 200, 100);
+        let canvas = image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]));
+        let ready = GraphicsRender::encode_v6(&picker, &canvas, 1, area).expect("encode");
+        // The encoded protocol reports its device size; 4× of 32 = 128 px = at
+        // most ceil(128/20)=7 cells tall / ceil(128/10)=13 wide. Assert it is far
+        // smaller than the pane (the cap engaged), not the full 200×100.
+        let sz = ready.proto.size();
+        assert!(sz.width <= 14 && sz.height <= 8, "capped image is ~4× native, got {sz:?}");
     }
 
     #[test]

@@ -422,7 +422,8 @@ fn render_node(
                 use crate::render::v6_layout as v6;
                 let native = v6::native_extent(items);
                 let layout = v6::classify_windows(items);
-                let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+                // The native chrome canvas is built per-branch below (SQ-0469):
+                // the raster arm skips the build entirely on an unchanged frame.
 
                 // Hybrid mode (Lane H): draw the chrome as a scaled pixel RING
                 // around a terminal story viewport, then render the story window as
@@ -431,6 +432,7 @@ fn render_node(
                 // bands. Needs a story window; without one, fall through to raster.
                 if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
                     if let Some(story) = layout.story {
+                        let canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
                         let fs = picker.font_size();
                         let cell_px = (fs.width, fs.height);
                         let pane_dev = (
@@ -509,46 +511,62 @@ fn render_node(
                 // Raster mode (or Hybrid with no story window): rasterize the story
                 // text into the clear interior of the native canvas, then draw the
                 // whole thing scaled.
-                let mut raster_metrics: Option<RasterMetrics> = None;
-                if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
-                    // The story window's own background colour (set by the game
-                    // via set_colour), when it set one — paints the page instead
-                    // of leaving it transparent over the theme backdrop. No
-                    // colour set ⇒ unchanged (transparent) behaviour.
-                    if let Some(color) = v6::story_bg_rgba(layout.story, &state.colors) {
-                        v6::fill_cell(&mut canvas, sx, sy, sw, sh, color);
-                    }
-                    // Window-0 inline pictures (drop-caps, room icons) arrive as
-                    // transcript-anchored floats (`transcript_images` sidecar):
-                    // build_main_text wraps text beside them and draw_story_text
-                    // blits each at its anchored row — they scroll with the text.
-                    let cols = (sw / 8).max(1) as u16;
-                    let rows = (sh / 8).max(1) as u16;
-                    let (main, rm) = build_main_text(state, cols, rows);
-                    v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
-                    // [more] pager indicator (SQ-0455): when a single turn's output
-                    // overflowed the story box the shared pager (SQ-0404) parks the
-                    // scroll and shows a `[more]` prompt. The raster path can't reserve
-                    // a terminal row, so draw the prompt as a text run bottom-right of
-                    // the story box, themed via the `more_prompt` selector (drawn as a
-                    // reverse-video block, matching the terminal bar).
-                    if state.pager.active {
-                        let mp = state.colors.theme.get("more_prompt").style;
-                        let block = style_fg_rgba(mp, image::Rgba([220, 220, 220, 255]));
-                        let ink = style_bg_rgba(mp, image::Rgba([0, 0, 0, 255]));
-                        let label = "[more]";
-                        let n = label.chars().count() as u32;
-                        let last_row = rows.saturating_sub(1) as u32;
-                        let start_col = (cols as u32).saturating_sub(n);
-                        for (i, ch) in label.chars().enumerate() {
-                            crate::render::bitfont::blit_glyph(
-                                &mut canvas, ch, sx + (start_col + i as u32) * 8, sy + last_row * 8, 8, 8, ink, Some(block),
-                            );
+                //
+                // Generation gate (SQ-0469): the whole canvas rebuild + resize +
+                // encode is skipped when nothing that affects the raster changed.
+                // `v6_raster_gen` folds every such input into one cheap key; when
+                // it matches the last-ready encode we reuse the uploaded protocol
+                // and republish the cached scroll metrics — no rebuild, no hash.
+                let gen = v6_raster_gen(items, state, area, picker);
+                if state.graphics_render.borrow().v6_wants_build(gen, area) {
+                    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+                    let mut raster_metrics: Option<RasterMetrics> = None;
+                    if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
+                        // The story window's own background colour (set by the game
+                        // via set_colour), when it set one — paints the page instead
+                        // of leaving it transparent over the theme backdrop. No
+                        // colour set ⇒ unchanged (transparent) behaviour.
+                        if let Some(color) = v6::story_bg_rgba(layout.story, &state.colors) {
+                            v6::fill_cell(&mut canvas, sx, sy, sw, sh, color);
                         }
+                        // Window-0 inline pictures (drop-caps, room icons) arrive as
+                        // transcript-anchored floats (`transcript_images` sidecar):
+                        // build_main_text wraps text beside them and draw_story_text
+                        // blits each at its anchored row — they scroll with the text.
+                        let cols = (sw / 8).max(1) as u16;
+                        let rows = (sh / 8).max(1) as u16;
+                        let (main, rm) = build_main_text(state, cols, rows);
+                        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
+                        // [more] pager indicator (SQ-0455): when a single turn's output
+                        // overflowed the story box the shared pager (SQ-0404) parks the
+                        // scroll and shows a `[more]` prompt. The raster path can't reserve
+                        // a terminal row, so draw the prompt as a text run bottom-right of
+                        // the story box, themed via the `more_prompt` selector (drawn as a
+                        // reverse-video block, matching the terminal bar).
+                        if state.pager.active {
+                            let mp = state.colors.theme.get("more_prompt").style;
+                            let block = style_fg_rgba(mp, image::Rgba([220, 220, 220, 255]));
+                            let ink = style_bg_rgba(mp, image::Rgba([0, 0, 0, 255]));
+                            let label = "[more]";
+                            let n = label.chars().count() as u32;
+                            let last_row = rows.saturating_sub(1) as u32;
+                            let start_col = (cols as u32).saturating_sub(n);
+                            for (i, ch) in label.chars().enumerate() {
+                                crate::render::bitfont::blit_glyph(
+                                    &mut canvas, ch, sx + (start_col + i as u32) * 8, sy + last_row * 8, 8, 8, ink, Some(block),
+                                );
+                            }
+                        }
+                        raster_metrics = Some(rm);
                     }
-                    raster_metrics = Some(rm);
+                    // Cache the fresh metrics for skipped frames, then hand the
+                    // built canvas to the off-thread resize+encode worker.
+                    state.v6_raster_metrics.set(raster_metrics);
+                    state.graphics_render.borrow_mut().spawn_v6_encode(picker, canvas, gen, area);
                 }
-                state.graphics_render.borrow_mut().draw_v6_canvas(picker, &canvas, area, buf);
+                // Draw the last-ready encode (this frame's, or the previous one
+                // until the worker lands — never blanks to avoid flicker).
+                state.graphics_render.borrow_mut().redraw_v6(picker, area, buf);
                 // Publish the raster viewport geometry so the shared scroll
                 // keybindings, the [more] pager, and mouse routing engage exactly as
                 // in the hybrid/terminal paths (SQ-0455). The rasterized text is a
@@ -557,7 +575,7 @@ fn render_node(
                 // approximate; the scroll/pager math is exact via the returned
                 // `StoryPaneMetrics`. Without a story window (`raster_metrics` unset)
                 // there is nothing to scroll — fall through to `None`.
-                if let Some(rm) = raster_metrics {
+                if let Some(rm) = state.v6_raster_metrics.get() {
                     state.transcript_geom.set(Some(crate::clipboard::TranscriptGeom {
                         area,
                         first_abs_row: rm.first_visible_row as usize,
@@ -948,6 +966,66 @@ fn style_bg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> ima
         Some(ratatui::style::Color::Rgb(r, g, b)) => image::Rgba([r, g, b, 255]),
         _ => fallback,
     }
+}
+
+/// A cheap change key for the whole v6 raster composite (SQ-0469). It folds
+/// EVERY input the raster branch reads to build the native canvas — the v6 window
+/// model, the transcript, the live input line, scroll/pager/caret state, the pane
+/// size + font, and the themed colours — into one `u64`. When the key is
+/// unchanged the entire rebuild + resize + encode is skipped, so idle and
+/// keystroke frames cost only this hash (microseconds) instead of milliseconds.
+///
+/// A missed input here is a stale-frame bug, so the coverage is deliberately
+/// generous (it hashes the built model's render fields rather than trusting a
+/// hand-maintained zvm mutation counter — the model is observed, so no v6 paint
+/// or erase can slip past). The inputs are audited in the SQ-0469 report.
+pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, picker: &ratatui_image::picker::Picker) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    // Pane geometry + font size (drive the story cols/rows and the encode target).
+    (area.width, area.height).hash(&mut h);
+    let fs = picker.font_size();
+    (fs.width, fs.height).hash(&mut h);
+    // The v6 window model: each window's box geometry plus its render content —
+    // graphics by version stamp (not pixels), text by its positioned runs and
+    // colours. This observes the composited output, so any paint/erase/scroll or
+    // colour change on the zvm side is captured without a bespoke counter.
+    for pw in items {
+        (pw.x, pw.y, pw.w, pw.h, pw.x_px, pw.y_px, pw.w_px, pw.h_px, pw.left_margin, pw.right_margin).hash(&mut h);
+        match &pw.node {
+            WinNode::Graphics(g) => {
+                g.win.hash(&mut h);
+                g.version.hash(&mut h);
+            }
+            WinNode::Grid(g) => {
+                (g.bg, g.fg, g.cursor, g.cursor_active).hash(&mut h);
+                for t in &g.px_texts {
+                    (t.x, t.y, t.style, t.fg, t.bg).hash(&mut h);
+                    t.text.hash(&mut h);
+                }
+            }
+            WinNode::Buffer(b) => {
+                (b.bg, b.fg, b.primary).hash(&mut h);
+            }
+            _ => {}
+        }
+    }
+    // App-side inputs to build_main_text + the pager/caret.
+    state.transcript_gen.hash(&mut h);
+    state.transcript_images.len().hash(&mut h);
+    state.input.value.hash(&mut h);
+    state.effective_transcript_scroll().hash(&mut h);
+    matches!(state.focus, crate::state::Focus::Game).hash(&mut h);
+    state.pager.active.hash(&mut h);
+    // The themed colours the raster resolves (default fg/bg + the [more] prompt);
+    // a theme switch changes these even when the model is byte-identical.
+    let tbg = state.colors.theme.get("transcript").style;
+    style_fg_rgba(tbg, image::Rgba([220, 220, 220, 255])).0.hash(&mut h);
+    style_bg_rgba(tbg, image::Rgba([0, 0, 0, 255])).0.hash(&mut h);
+    let mp = state.colors.theme.get("more_prompt").style;
+    style_fg_rgba(mp, image::Rgba([220, 220, 220, 255])).0.hash(&mut h);
+    style_bg_rgba(mp, image::Rgba([0, 0, 0, 255])).0.hash(&mut h);
+    h.finish()
 }
 
 /// Build the main-window text block for the pixel composite: the newest visible
@@ -2782,6 +2860,54 @@ mod tests {
         assert_eq!(geom.first_abs_row, 21, "offset 0 → newest body at the bottom (40 - 19)");
     }
 
+    #[test]
+    fn v6_raster_gen_stable_when_idle_bumps_on_change() {
+        // SQ-0469: the generation gate skips the whole rebuild+encode when nothing
+        // changed, so an idle frame must produce an identical key while every real
+        // input change must alter it.
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        state.push_transcript("You are in a maze.");
+        let area = Rect::new(0, 0, 40, 25);
+
+        let model = raster_v6_model();
+        let items = match model.root {
+            WinNode::Layered(v) => v,
+            other => panic!("expected Layered, got {other:?}"),
+        };
+
+        let base = v6_raster_gen(&items, &state, area, &picker);
+        // Idle: recomputing with no change is identical → the gate skips the frame.
+        assert_eq!(base, v6_raster_gen(&items, &state, area, &picker), "idle frame → same key");
+
+        // A v6 run change (here a picture repaint bumps its version stamp).
+        let mut mutated = items.clone();
+        if let WinNode::Graphics(g) = &mut mutated[0].node {
+            g.version = g.version.wrapping_add(1);
+        }
+        assert_ne!(base, v6_raster_gen(&mutated, &state, area, &picker), "a v6 window change bumps the key");
+
+        // A transcript append.
+        let mut s2 = AppState::default();
+        s2.colors = crate::colors::ColorScheme::terminal_default();
+        s2.push_transcript("You are in a maze.");
+        s2.push_transcript("A grue lurks nearby.");
+        assert_ne!(base, v6_raster_gen(&items, &s2, area, &picker), "new transcript output bumps the key");
+
+        // A keystroke on the live input line.
+        state.input.value.push('x');
+        assert_ne!(base, v6_raster_gen(&items, &state, area, &picker), "an input-line keystroke bumps the key");
+        state.input.value.clear();
+
+        // A pane resize.
+        assert_ne!(base, v6_raster_gen(&items, &state, Rect::new(0, 0, 41, 25), &picker), "a resize bumps the key");
+
+        // Scrolling the transcript back.
+        state.transcript_scroll = 3;
+        assert_ne!(base, v6_raster_gen(&items, &state, area, &picker), "a scroll change bumps the key");
+    }
+
     /// A synthetic v6 `Layered` model for the frameless-mode tests: a chrome
     /// `Grid` carrying one status px-run at native (1,1) → cell (0,0), plus a
     /// primary story `Buffer`. No decorative graphics window.
@@ -3008,6 +3134,139 @@ mod tests {
         for w in [1u16, 2] {
             let runs = vec![run(1, 1, "Loc"), run(281, 1, "Moves: 1")];
             let (_row, _) = band_row(&runs, 40, w);
+        }
+    }
+
+    /// TEMP measurement harness (SQ-0469). Times the three raster phases —
+    /// canvas BUILD (chrome + wrap + glyph blit), content HASH, and
+    /// RESIZE+ENCODE — for a real v6 story at a large pane. Run with:
+    ///   cargo test -p app bench_v6_raster_phases -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_v6_raster_phases() {
+        use crate::engine::Engine;
+        use std::hash::{Hash, Hasher};
+        use std::time::Instant;
+        let fg = image::Rgba([220u8, 220, 220, 255]);
+        let bg = image::Rgba([0u8, 0, 0, 255]);
+        for path in ["stories/zork0-r393-s890714.z6", "stories/shogun-r322-s890706.z6"] {
+            let full = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../")
+                .join(path);
+            let Ok(bytes) = std::fs::read(&full) else {
+                println!("SKIP {path}: not found");
+                continue;
+            };
+            let mut sess = match crate::session::GameSession::new(bytes, true, false, None) {
+                Ok(s) => s,
+                Err(e) => {
+                    println!("SKIP {path}: {e:?}");
+                    continue;
+                }
+            };
+            for cmd in ["look", "open mailbox", "look"] {
+                let _ = sess.submit(cmd);
+            }
+            let model = sess.screen();
+            let items = match &model.root {
+                WinNode::Layered(v) => v.clone(),
+                other => {
+                    println!("SKIP {path}: root is {other:?}, not Layered");
+                    continue;
+                }
+            };
+            let native = crate::render::v6_layout::native_extent(&items);
+
+            let mut state = AppState::default();
+            state.colors = crate::colors::ColorScheme::terminal_default();
+            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            for i in 0..2000 {
+                state
+                    .transcript
+                    .push(format!("The quick brown fox line {i} jumps over the lazy dog by the white house door."));
+            }
+            state.transcript_styles.resize(state.transcript.len(), None);
+            state.transcript_runs.resize(state.transcript.len(), Vec::new());
+            state.transcript_para.resize(state.transcript.len(), crate::state::ParaFmt::default());
+            state.transcript_images.resize(state.transcript.len(), None);
+
+            // A large pane: 220x64 cells at halfblocks 10x20 px = 2200x1280 device.
+            let picker = state.game_picker.clone().unwrap();
+            let area = Rect::new(0, 0, 220, 64);
+
+            // Build closure: replicate the raster branch's canvas construction.
+            let build = || {
+                let layout = crate::render::v6_layout::classify_windows(&items);
+                let mut canvas = crate::render::v6_layout::build_chrome_canvas(&layout.chrome, native, fg, bg, &state.colors);
+                if let Some((sx, sy, sw, sh)) = crate::render::v6_layout::story_clear_native(layout.story, &canvas) {
+                    let cols = (sw / 8).max(1) as u16;
+                    let rows = (sh / 8).max(1) as u16;
+                    let (main, _) = build_main_text(&state, cols, rows);
+                    crate::render::v6_layout::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, fg);
+                }
+                canvas
+            };
+
+            const N: u32 = 30;
+            // Phase GEN (SQ-0469): the whole cost of an idle/unchanged frame after
+            // the gate — no build, no hash, no encode.
+            let t = Instant::now();
+            let mut gsum = 0u64;
+            for _ in 0..N {
+                gsum ^= v6_raster_gen(&items, &state, area, &picker);
+            }
+            let gen_us = t.elapsed().as_micros() as f64 / N as f64;
+            std::hint::black_box(gsum);
+
+            // Phase BUILD.
+            let t = Instant::now();
+            let mut canvas = build();
+            for _ in 1..N {
+                canvas = build();
+            }
+            let build_us = t.elapsed().as_micros() as f64 / N as f64;
+
+            // Phase HASH.
+            let t = Instant::now();
+            let mut hsum = 0u64;
+            for _ in 0..N {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                canvas.as_raw().hash(&mut h);
+                hsum ^= h.finish();
+            }
+            let hash_us = t.elapsed().as_micros() as f64 / N as f64;
+            std::hint::black_box(hsum);
+
+            // Phase RESIZE+ENCODE (uncapped, as shipped).
+            let fs = picker.font_size();
+            let box_w = area.width as u32 * fs.width.max(1) as u32;
+            let box_h = area.height as u32 * fs.height.max(1) as u32;
+            let (cw, ch) = (canvas.width(), canvas.height());
+            let encode = |cap: f64| {
+                let scale = ((box_w as f64 / cw as f64).min(box_h as f64 / ch as f64)).max(1.0).min(cap);
+                let (tw, th) = ((cw as f64 * scale) as u32, (ch as f64 * scale) as u32);
+                let scaled = image::imageops::resize(&canvas, tw.max(cw), th.max(ch), image::imageops::FilterType::Nearest);
+                let img = image::DynamicImage::ImageRgba8(scaled);
+                let _ = picker.new_protocol(img, ratatui::layout::Size::new(area.width, area.height), ratatui_image::Resize::Fit(None));
+            };
+            let t = Instant::now();
+            for _ in 0..N {
+                encode(f64::INFINITY);
+            }
+            let enc_us = t.elapsed().as_micros() as f64 / N as f64;
+            let t = Instant::now();
+            for _ in 0..N {
+                encode(4.0);
+            }
+            let enc4_us = t.elapsed().as_micros() as f64 / N as f64;
+
+            println!(
+                "\n=== {path} ===\n native canvas: {}x{}  pane device: {}x{}\n GEN (idle key):   {gen_us:>9.1} us/frame\n BUILD:            {build_us:>9.1} us/frame\n HASH:             {hash_us:>9.1} us/frame\n ENCODE (uncap):   {enc_us:>9.1} us/frame\n ENCODE (cap 4x):  {enc4_us:>9.1} us/frame\n --- BEFORE (no gate; build+hash every frame) ---\n IDLE / keystroke frame  = {:.1} us (build+hash on main)\n CHANGED frame           = {:.1} us (build+hash+encode on main)\n --- AFTER (SQ-0469 gate + cap + worker) ---\n IDLE frame              = {gen_us:.1} us (gen key only)\n KEYSTROKE/CHANGED frame = {:.1} us on main (gen+build; capped encode {enc4_us:.1} us OFF-thread)",
+                native.0, native.1, box_w, box_h,
+                build_us + hash_us,
+                build_us + hash_us + enc_us,
+                gen_us + build_us,
+            );
         }
     }
 }

@@ -1496,6 +1496,11 @@ pub struct AppState {
     /// arm so inline story pictures scale to match the chrome frame (see
     /// `render_transcript`). 0.0 (the Default) and 1.0 both mean "no scaling".
     pub v6_image_scale: std::cell::Cell<f32>,
+    /// Last v6 raster story metrics (SQ-0469), cached so a frame that skips the
+    /// canvas rebuild (unchanged generation) can still republish the scroll/pager
+    /// geometry the render arm returns. Valid across skipped frames because every
+    /// input that alters these metrics also bumps the v6 raster generation.
+    pub v6_raster_metrics: std::cell::Cell<Option<crate::render::screen::RasterMetrics>>,
     /// Horizontal text margin actually inset on each side of the story text this
     /// frame (SQ-0345), published by `reserve_text_margin` so `render_middle` can
     /// draw the scrollbar flush against the pane border rather than inside the
@@ -1830,6 +1835,7 @@ impl Default for AppState {
             selection_edge: 0,
             transcript_geom: std::cell::Cell::new(None),
             v6_image_scale: std::cell::Cell::new(1.0),
+            v6_raster_metrics: std::cell::Cell::new(None),
             text_margin_applied: std::cell::Cell::new(0),
             selection_text: std::cell::RefCell::new(None),
             char_pan: (0, 0),
@@ -2331,6 +2337,13 @@ impl AppState {
     /// True while the background map-render worker (SQ-0379) is in flight.
     pub fn map_render_in_flight(&self) -> bool {
         self.render_job.borrow().is_some()
+    }
+
+    /// Poll the background v6 raster encode (SQ-0469): install a completed
+    /// protocol and report whether a redraw is warranted. Called once per loop
+    /// tick so an off-thread encode surfaces within a poll interval.
+    pub fn poll_v6_encode_job(&self) -> bool {
+        self.graphics_render.borrow_mut().poll_v6_job()
     }
 
     /// How long the in-flight background map job (tidy relayout or render worker)
