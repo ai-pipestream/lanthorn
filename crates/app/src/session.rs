@@ -566,6 +566,13 @@ impl GameSession {
         self.pict_source = src;
     }
 
+    /// The v6 Pict resolver, for inspection (its adaptive-palette state and
+    /// decoded pictures). Used by the adaptive-palette headless oracle to decode
+    /// a compass overlay with the Current Palette the real boot established.
+    pub fn pict_source_mut(&mut self) -> Option<&mut crate::graphics::PictSource> {
+        self.pict_source.as_mut()
+    }
+
     /// Drain and apply any `draw_picture`/`erase_picture` events the VM queued
     /// during boot (`Machine::pending_pictures`, populated inside
     /// `new_with_trace` before this method can ever run). A v6 game like

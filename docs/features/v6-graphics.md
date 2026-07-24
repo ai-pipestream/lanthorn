@@ -137,6 +137,28 @@ The story page itself fills with the window's own background colour (when
 the game set one) rather than leaving the terminal's theme backdrop showing
 through.
 
+## Adaptive palettes: overlays that borrow their colours
+
+Some of Zork Zero's pictures — the compass rose overlays, the little scene
+tiles — don't carry a real palette of their own. They ship with a placeholder
+(the stock 16-colour EGA table) and are flagged in the Blorb's `APal` chunk as
+*adaptive*: the interpreter is meant to draw them with the "Current Palette"
+established by the last ordinary picture it plotted (Blorb spec §11.3). Zork
+Zero leans on this hard — it paints a base illustration to set the mood's
+colours, then stamps adaptive overlays on top expecting them to inherit that
+mood. Decode each one with its own placeholder instead and the compass comes
+out in garish primary EGA, clashing with everything around it.
+
+babelmap now tracks that Current Palette as it draws, and when an adaptive
+picture comes up it splices the current colours into the picture before
+decoding — keeping the overlay's own transparency intact, so the arrow still
+cuts a clean hole in the rose. Because the *same* overlay can legally be drawn
+under different base palettes as a game moves between scenes, the decoded result
+is cached per palette, not just per picture, so a palette change re-tints it
+rather than serving a stale copy. All the v6 render modes — ring, raster,
+frameless inline, cell fallback — share this decode path, so the fix lands
+everywhere at once.
+
 ## Arrow keys: movement or map panning, your call
 
 Several v6 titles bind the arrow keys straight to movement — press ↑ and your

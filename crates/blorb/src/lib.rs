@@ -69,6 +69,12 @@ pub struct Blorb {
     /// A v6 interpreter advertises this as the screen size so the game's
     /// hardcoded pixel layout lines up with its art (e.g. Zork0 → 320×200).
     reso_std: Option<(u16, u16)>,
+    /// Picture resource numbers listed in the top-level `APal` (adaptive
+    /// palette) chunk — Blorb spec §11.3. Each such picture carries a
+    /// PLACEHOLDER palette; the interpreter must plot it with the "Current
+    /// Palette" (the palette of the most recently drawn non-adaptive picture)
+    /// rather than its own. Empty when the container has no `APal` chunk.
+    apal: Vec<u32>,
 }
 
 fn be_u32(b: &[u8], off: usize) -> Result<u32, BlorbError> {
@@ -102,6 +108,7 @@ impl Blorb {
         let mut fspc: Option<u32> = None;
         let mut ifmd: Option<(usize, usize)> = None;
         let mut reso_std: Option<(u16, u16)> = None;
+        let mut apal: Vec<u32> = Vec::new();
         let mut pos = 12;
         while pos + 8 <= end {
             let ctype = [bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]];
@@ -125,6 +132,20 @@ impl Blorb {
                 if w > 0 && h > 0 {
                     reso_std = Some((w.min(u16::MAX as u32) as u16, h.min(u16::MAX as u32) as u16));
                 }
+            } else if &ctype == b"APal" {
+                // Blorb spec §11.3 (Adaptive Palettes): the body is `num*4`
+                // bytes, each a big-endian picture resource number. Every listed
+                // picture's own palette is a placeholder to be ignored at plot
+                // time in favour of the Current Palette. A malformed length (not
+                // a multiple of 4) degrades to "no adaptive set" — a corrupt
+                // chunk must never fail the whole load. (`BPal`, seen beside
+                // `APal` in Infocom's own blorbs, is a converter extension NOT
+                // in the Blorb spec and is ignored here.)
+                if clen % 4 == 0 {
+                    apal = (0..clen / 4)
+                        .filter_map(|i| be_u32(&bytes, data_start + i * 4).ok())
+                        .collect();
+                }
             }
             pos = data_start + clen + (clen & 1);
         }
@@ -145,7 +166,7 @@ impl Blorb {
             index.push(ResourceEntry { usage, number, start, chunk_type, len });
             p += 12;
         }
-        Ok(Blorb { bytes, index, fspc, ifmd, reso_std })
+        Ok(Blorb { bytes, index, fspc, ifmd, reso_std, apal })
     }
 
     /// The parsed resource index (for enumeration).
@@ -174,6 +195,21 @@ impl Blorb {
     /// carries no `Reso` chunk.
     pub fn std_window(&self) -> Option<(u16, u16)> {
         self.reso_std
+    }
+
+    /// The picture resource numbers declared adaptive-palette by the top-level
+    /// `APal` chunk (Blorb spec §11.3). These pictures carry a placeholder
+    /// palette; an interpreter must plot them with the Current Palette (the
+    /// palette of the most recently drawn non-adaptive picture) instead of
+    /// their own. Empty when the container has no `APal` chunk.
+    pub fn adaptive_pictures(&self) -> &[u32] {
+        &self.apal
+    }
+
+    /// Whether Pict resource `number` is listed in the `APal` chunk (Blorb spec
+    /// §11.3) — i.e. its palette is a placeholder to be replaced at plot time.
+    pub fn is_adaptive_picture(&self, number: u32) -> bool {
+        self.apal.contains(&number)
     }
 
     fn chunk_data(&self, e: &ResourceEntry) -> &[u8] {
@@ -1014,6 +1050,44 @@ mod tests {
         std::fs::write(&story, b"not a blorb").unwrap();
 
         assert!(resolve_resource_blorb(&story).is_none());
+    }
+
+    /// A well-formed `APal` chunk (Blorb §11.3) lists picture numbers as
+    /// big-endian u32s; they surface via `adaptive_pictures`/`is_adaptive_picture`.
+    #[test]
+    fn apal_lists_adaptive_picture_numbers() {
+        let mut apal = Vec::new();
+        for n in [9u32, 24, 216] {
+            apal.extend_from_slice(&n.to_be_bytes());
+        }
+        let b = Blorb::parse(build_blorb_with_top(
+            &[(b"Pict", 9, b"PNG ", b"x"), (b"Pict", 216, b"PNG ", b"y")],
+            &[(b"APal", &apal)],
+        ))
+        .unwrap();
+        assert_eq!(b.adaptive_pictures(), &[9, 24, 216]);
+        assert!(b.is_adaptive_picture(9) && b.is_adaptive_picture(216));
+        assert!(!b.is_adaptive_picture(1), "a picture not in APal is not adaptive");
+    }
+
+    /// No `APal` chunk → empty adaptive set (the common case for non-v6 blorbs).
+    #[test]
+    fn no_apal_means_no_adaptive_pictures() {
+        let b = Blorb::parse(build_blorb(&[(b"Pict", 1, b"PNG ", b"x")])).unwrap();
+        assert!(b.adaptive_pictures().is_empty());
+        assert!(!b.is_adaptive_picture(1));
+    }
+
+    /// A malformed `APal` whose length is not a multiple of 4 must degrade to
+    /// "no adaptive set" rather than fail the load (error-tolerant parsing).
+    #[test]
+    fn malformed_apal_degrades_to_empty() {
+        let b = Blorb::parse(build_blorb_with_top(
+            &[(b"Pict", 1, b"PNG ", b"x")],
+            &[(b"APal", &[0, 0, 0, 9, 0xFF])], // 5 bytes: not a multiple of 4
+        ))
+        .expect("a corrupt APal must not fail the whole parse");
+        assert!(b.adaptive_pictures().is_empty(), "corrupt APal → no adaptive set");
     }
 
     #[test]
