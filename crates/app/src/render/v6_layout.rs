@@ -178,6 +178,20 @@ pub fn native_extent(items: &[PositionedWindow]) -> (u16, u16) {
         if resolved(it.h_px) {
             h = h.max(it.y_px.saturating_add(it.h_px));
         }
+        // A window sized to zero can still hold painted text runs at their
+        // screen-absolute pixel positions (Journey's height-0 command menu,
+        // SQ-0492): its w_px/h_px don't reach the runs, so grow the extent to
+        // cover them directly, or the chrome canvas clips the menu off the
+        // bottom. Runs carry 1-based top-left coords; a glyph spans FONT×FONT.
+        if let WinNode::Grid(g) = &it.node {
+            for t in &g.px_texts {
+                let n = t.text.chars().count() as u32;
+                let right = (t.x.max(1) as u32 - 1) + n * FONT_W;
+                let bottom = (t.y.max(1) as u32 - 1) + FONT_H;
+                w = w.max(right.min(u16::MAX as u32) as u16);
+                h = h.max(bottom.min(u16::MAX as u32) as u16);
+            }
+        }
     }
     (w, h)
 }

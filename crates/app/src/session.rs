@@ -1061,7 +1061,15 @@ impl GameSession {
         let mut graphics_entries: Vec<(u64, PositionedWindow)> = Vec::new();
         let mut text_entries = Vec::new();
         for (i, win) in v6.windows.iter().enumerate() {
-            if win.x_size == 0 || win.y_size == 0 {
+            // A zero-pixel-size window is normally inactive and skipped — UNLESS
+            // it still holds painted text runs. v6 text is PAINT: a run persists
+            // at its screen-absolute pixel position even after the window is
+            // resized to zero (ZMSD §15, "window_size does not change the current
+            // display"). Journey's bottom command menu is a full-width window
+            // sized to HEIGHT 0 that paints "Proceed/Back/Game" plus the party
+            // and verb columns via absolute runs at native rows 19–24; dropping
+            // the window here loses the entire menu (SQ-0492).
+            if (win.x_size == 0 || win.y_size == 0) && win.texts.is_empty() {
                 continue;
             }
             // ZMSD §8.8.1: window coords are 1-based ((1,1) = screen top-left);
