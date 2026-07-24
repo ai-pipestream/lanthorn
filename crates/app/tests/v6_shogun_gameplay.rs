@@ -158,6 +158,112 @@ fn shogun_boot_menu_items_paint_horizontally_and_splash_clears() {
     );
 }
 
+/// SQ-0478: in frameless mode Shogun's BOOT MENU is a painted text screen — its
+/// three items are absolutely positioned at native rows 21–23 through window 2,
+/// DEEP below the status band. The painted-screen renderer must stamp them as
+/// positioned terminal text (the old anchored-band path dropped every run below
+/// row 4, leaving "nothing after 'You may choose to:'"), and the selected item's
+/// reverse-video run must carry the REVERSED modifier (the visible caret).
+#[test]
+fn shogun_frameless_boot_menu_paints_items_and_caret() {
+    use ratatui::style::Modifier;
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    // Any key leaves the title splash; the boot menu draws.
+    let _ = session.take_transcript();
+    let result = session.submit_char(b' ');
+    assert!(result.transcript.contains("You may choose to:"), "menu prompt missing");
+
+    use app::engine::Engine;
+    let model = session.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Frameless;
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect()
+    };
+    // Native rows 21/22/23 (px y=169/177/185 → (y-1)/8) carry the three items.
+    let r21 = row_text(21);
+    let r22 = row_text(22);
+    let r23 = row_text(23);
+    eprintln!("21|{r21}|\n22|{r22}|\n23|{r23}|");
+    assert!(r21.contains("START the game"), "row 21 shows the START item: {r21:?}");
+    assert!(r22.contains("RESTORE a saved game"), "row 22 shows the RESTORE item: {r22:?}");
+    assert!(r23.contains("QUIT the game"), "row 23 shows the QUIT item: {r23:?}");
+    // The selected item (START, style bit 0 = reverse) carries the REVERSED
+    // modifier — the visible selection caret.
+    let start_col = r21.find("START").unwrap() as u16;
+    let cell = buf.cell((start_col, 21)).unwrap();
+    assert!(cell.modifier.contains(Modifier::REVERSED), "START item is reverse-video (the selection caret)");
+    // RESTORE (style 0) is NOT reversed.
+    let restore_col = r22.find("RESTORE").unwrap() as u16;
+    assert!(!buf.cell((restore_col, 22)).unwrap().modifier.contains(Modifier::REVERSED), "RESTORE is not reversed");
+}
+
+/// SQ-0467 follow-up: the frameless status band fills its ENTIRE row(s) with the
+/// upper_window background, not just the cells behind glyphs — the gaps between
+/// the anchored groups read as one solid bar. Asserts a gap cell on the band row
+/// carries a space with the band's background style (not a leftover/default cell).
+#[test]
+fn shogun_frameless_status_band_fills_row_background() {
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    for _turn in 0..6 {
+        match session.pending_input() {
+            InputKind::Line => { session.submit("look"); }
+            InputKind::Char => { session.submit_char(13); }
+            InputKind::Event => { session.submit(""); }
+        }
+    }
+    let model = session.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Frameless;
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+    // Pre-dirty every cell with a sentinel glyph: a band that fills its whole
+    // row(s) first overwrites the gaps between the anchored groups; the old
+    // per-glyph stamp left them showing the sentinel.
+    for y in 0..area.height {
+        for x in 0..area.width {
+            buf.cell_mut((x, y)).unwrap().set_symbol("X");
+        }
+    }
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    // Row 0 is a band row (Erasmus/SHOGUN/Score with gaps between). Every cell on
+    // it must have been overwritten — no sentinel 'X' survives in the gaps.
+    let row0: String = (0..area.width).map(|x| buf.cell((x, 0)).unwrap().symbol().chars().next().unwrap_or(' ')).collect();
+    assert!(row0.contains("SHOGUN"), "row 0 is the band row: {row0:?}");
+    assert!(!row0.contains('X'), "band row fully filled — no sentinel left in the gaps: {row0:?}");
+}
+
 /// SQ-0467: in frameless mode Shogun's in-game status band lays out as a classic
 /// full-width status line — the character/location runs anchored flush LEFT, the
 /// "SHOGUN" title CENTERED, and the Score/Moves runs flush RIGHT across the whole

@@ -506,6 +506,27 @@ fn render_node(
                         }
                         return metrics;
                     }
+                    // Hint menu open (no streaming story window, SQ-0477): present
+                    // the painted screen as positioned terminal text rather than
+                    // falling through to the raster composite (an absolutely-
+                    // positioned menu rasterizes to an unreadable stamp). The
+                    // chrome ring is dropped for this screen — a coherent full-pane
+                    // menu. Only when there ARE painted runs; a pure-graphics
+                    // no-story frame still falls through to the raster composite.
+                    let status_style = state.colors.theme.get("upper_window").style;
+                    let runs: Vec<&crate::engine::PxText> = layout
+                        .chrome
+                        .iter()
+                        .filter_map(|it| match &it.node {
+                            WinNode::Grid(g) => Some(g.px_texts.iter()),
+                            _ => None,
+                        })
+                        .flatten()
+                        .collect();
+                    if runs.iter().any(|t| !t.text.trim().is_empty()) {
+                        draw_painted_screen(&runs, 0, area, buf, status_style);
+                        return None;
+                    }
                 }
 
                 // Raster mode (or Hybrid with no story window): rasterize the story
@@ -606,21 +627,25 @@ fn render_node(
             // metrics/scrollback. (SQ-0186)
             {
                 let layout = crate::render::v6_layout::classify_windows(items);
+                let status_style = state.colors.theme.get("upper_window").style;
+                // Native screen width in cells (v6 screens vary — Zork0 is
+                // 320px/40 cells, others differ) sets the anchor thresholds.
+                let (native_w, _) = crate::render::v6_layout::native_extent(items);
+                let ncols = (native_w as u32).div_ceil(8).max(1);
+                // Painted text runs across ALL grid windows: the chrome grids
+                // carry the status band AND (on a menu/hint screen) the deep
+                // absolutely-positioned menu items (Shogun's boot menu paints
+                // its three items at native rows 21–23 through window 2).
+                let runs: Vec<&crate::engine::PxText> = layout
+                    .chrome
+                    .iter()
+                    .filter_map(|it| match &it.node {
+                        WinNode::Grid(g) => Some(g.px_texts.iter()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
                 if let Some(story) = layout.story {
-                    let status_style = state.colors.theme.get("upper_window").style;
-                    // Native screen width in cells (v6 screens vary — Zork0 is
-                    // 320px/40 cells, others differ) sets the anchor thresholds.
-                    let (native_w, _) = crate::render::v6_layout::native_extent(items);
-                    let ncols = (native_w as u32).div_ceil(8).max(1);
-                    let runs: Vec<&crate::engine::PxText> = layout
-                        .chrome
-                        .iter()
-                        .filter_map(|it| match &it.node {
-                            WinNode::Grid(g) => Some(g.px_texts.iter()),
-                            _ => None,
-                        })
-                        .flatten()
-                        .collect();
                     let rows_used = draw_anchored_status_band(&runs, ncols, area, buf, status_style);
                     let story_area = Rect::new(
                         area.x,
@@ -628,7 +653,24 @@ fn render_node(
                         area.width,
                         area.height.saturating_sub(rows_used),
                     );
-                    return render_node(&story.node, status, char_mode, introspect, state, story_area, buf, game_input, links, grid_colors);
+                    let m = render_node(&story.node, status, char_mode, introspect, state, story_area, buf, game_input, links, grid_colors);
+                    // Painted-screen overlay (SQ-0478): stamp any DEEP paint runs
+                    // (native row ≥ 4, below the status band) as absolutely-
+                    // positioned terminal text on TOP of the story transcript.
+                    // A no-op in normal gameplay (chrome grids carry only the
+                    // top status runs); on a menu screen it draws the items +
+                    // the reverse-video selection caret the anchored band drops.
+                    draw_painted_screen(&runs, STATUS_BAND_ROWS, area, buf, status_style);
+                    return m;
+                }
+                // No streaming story window (a painted menu with win0 in paint
+                // mode, or none open): the whole pane IS a painted text screen —
+                // stamp every run absolutely rather than falling through to the
+                // z-ordered cell composite, which renders the native geometry as
+                // an unreadable postage stamp (SQ-0478).
+                if runs.iter().any(|t| !t.text.trim().is_empty()) {
+                    draw_painted_screen(&runs, 0, area, buf, status_style);
+                    return None;
                 }
             }
             // v6 z-ordered composite (Phase 1b): draw each item in list order —
@@ -1160,6 +1202,51 @@ pub struct RasterMetrics {
     pub first_visible_row: u16,
 }
 
+/// The number of native cell rows the top status band owns (rows 0..N). Paint
+/// runs at or below this row are the DEEP menu/hint content the painted-screen
+/// overlay handles; rows above it are the anchored status line. (SQ-0478)
+const STATUS_BAND_ROWS: u16 = 4;
+
+/// Render a v6 PAINTED text screen (menus, hints — SQ-0477/0478) as absolutely-
+/// positioned terminal text. Each run is quantized to its native cell
+/// (`col = (x-1)/8`, `row = (y-1)/8`) and stamped at that pane-relative cell,
+/// honoring reverse video — Shogun's boot-menu selection is a reverse-video run,
+/// so this is what makes the selection caret visible. Menus are absolutely
+/// positioned (NOT left/center/right anchor groups like the status band).
+///
+/// Only runs at native `row >= min_row` are drawn: the frameless path overlays
+/// the DEEP runs (`min_row = STATUS_BAND_ROWS`) above the anchored status band
+/// which owns the top rows, while a story-less menu screen passes `min_row = 0`
+/// to stamp the whole pane. Shared by the frameless and hybrid (no story window)
+/// paths so both present a painted screen identically.
+fn draw_painted_screen(
+    runs: &[&crate::engine::PxText],
+    min_row: u16,
+    area: Rect,
+    buf: &mut Buffer,
+    base: ratatui::style::Style,
+) {
+    for t in runs {
+        if t.text.trim().is_empty() {
+            continue;
+        }
+        let row = ((t.y.max(1) - 1) / 8) as u16;
+        if row < min_row {
+            continue;
+        }
+        let col = ((t.x.max(1) - 1) / 8) as u16;
+        if area.y + row >= area.bottom() || area.x + col >= area.right() {
+            continue;
+        }
+        let mut style = base;
+        if t.style & 1 != 0 {
+            style = style.add_modifier(ratatui::style::Modifier::REVERSED);
+        }
+        let max_w = (area.right() - (area.x + col)) as usize;
+        buf.set_stringn(area.x + col, area.y + row, &t.text, max_w, style);
+    }
+}
+
 /// Render the v6 frameless status band as a classic full-width status line
 /// ("anchored bar", SQ-0467). `runs` are all the chrome grids' pixel-text runs;
 /// `ncols` is the native screen width in cells (so anchor thresholds scale to the
@@ -1239,6 +1326,16 @@ fn place_anchored_row(
         return false;
     }
     let mut painted = false;
+
+    // Fill the WHOLE band row with the status style's background first, so the
+    // band reads as one solid bar (the upper_window bg fills the gaps between
+    // the anchored groups), not just coloured cells behind the glyphs (SQ-0467
+    // follow-up: fill first, stamp runs after).
+    for x in area.x..area.right() {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_symbol(" ").set_style(style);
+        }
+    }
 
     // LEFT — flush at col 0, truncated to the pane width.
     let left_len = left.chars().count().min(w);

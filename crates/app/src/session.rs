@@ -173,6 +173,21 @@ fn is_content_art(pic_w: u32, pic_h: u32, screen_w: u32, screen_h: u32) -> bool 
     pic_w * 100 >= screen_w * 60 && pic_h * 100 >= screen_h * 30
 }
 
+/// The float alignment for a window-0 picture. A window-0 draw is normally a
+/// drop-cap / room icon floated at the left margin with text flowing beside it
+/// (`MarginLeft`) — but Shogun draws its large opening SHIP illustration into
+/// window 0 too, and a content-art-sized image must render as a big inline
+/// picture in its own band (`InlineUp`), not a 3–4-row drop-cap (SQ-0471).
+/// Genuine drop-caps (Zork Zero's initial letter, small tiles) fail
+/// [`is_content_art`] and keep `MarginLeft`.
+fn win0_pic_align(iw: u32, ih: u32, screen_w: u32, screen_h: u32) -> crate::inline_image::ImageAlign {
+    if is_content_art(iw, ih, screen_w, screen_h) {
+        crate::inline_image::ImageAlign::InlineUp
+    } else {
+        crate::inline_image::ImageAlign::MarginLeft
+    }
+}
+
 fn interleave_story_pics(
     text: &str,
     runs: &[(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)],
@@ -815,11 +830,26 @@ impl GameSession {
                 return; // no canvas to erase; a win0 erase_picture is a no-op here
             }
             if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
+                // A window-0 picture is normally a drop-cap / room icon floated at
+                // the left margin (text flows beside it). But Shogun draws its
+                // large opening SHIP illustration into window 0 too — a
+                // content-art-sized image must render as a big inline picture, not
+                // a 3–4-row left-margin drop-cap (SQ-0471). Classify by size: a
+                // content-art image (Shogun's ship) aligns InlineUp (full-size,
+                // its own band); a genuine drop-cap (Zork Zero's initial letter,
+                // a small tile) keeps MarginLeft.
+                let (iw, ih) = (img.width(), img.height());
+                let (screen_w, screen_h) = self.v6_screen_px();
+                let align = win0_pic_align(iw, ih, screen_w, screen_h);
+                let margin_px = match align {
+                    crate::inline_image::ImageAlign::MarginLeft => ev.margin_after.map(|m| m as u32),
+                    _ => None,
+                };
                 let float = crate::inline_image::InlineImage {
                     pixels: std::sync::Arc::new(img.to_rgba8()),
-                    align: crate::inline_image::ImageAlign::MarginLeft,
+                    align,
                     scaled: None,
-                    margin_px: ev.margin_after.map(|m| m as u32),
+                    margin_px,
                     source: crate::inline_image::ImageSource::Story,
                 };
                 self.story_pics.push((ev.out_chars, float));
@@ -2269,6 +2299,19 @@ mod tests {
     fn content_art_shogun_title_splash_is_content() {
         // Shogun's title: a full 320×200 splash on a 320×200 screen → 100% area.
         assert!(is_content_art(320, 200, 320, 200));
+    }
+
+    #[test]
+    fn win0_ship_splash_is_inline_but_dropcap_stays_margin() {
+        use crate::inline_image::ImageAlign;
+        // SQ-0471: Shogun's large opening ship illustration, drawn into window 0,
+        // must render as a full-size inline band — NOT a left-margin drop-cap.
+        assert_eq!(win0_pic_align(320, 200, 320, 200), ImageAlign::InlineUp, "ship splash → inline");
+        assert_eq!(win0_pic_align(288, 176, 320, 200), ImageAlign::InlineUp, "big room illustration → inline");
+        // A genuine drop-cap (Zork Zero's initial letter / a small tile) stays a
+        // left-margin float — the existing drop-cap behaviour is preserved.
+        assert_eq!(win0_pic_align(24, 32, 320, 200), ImageAlign::MarginLeft, "small drop-cap stays margin");
+        assert_eq!(win0_pic_align(40, 48, 320, 200), ImageAlign::MarginLeft, "small icon stays margin");
     }
 
     #[test]

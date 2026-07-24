@@ -28,10 +28,40 @@ pub(crate) fn packed_to_rgba(packed: u32, fallback: Rgba<u8>, colors: &ColorSche
         2 => zvm::screen::ZColour::True((packed & 0xFFFF) as u16),
         _ => return fallback,
     };
-    match crate::render::resolve_zcolour(z, colors) {
-        ratatui::style::Color::Rgb(r, g, b) => Rgba([r, g, b, 255]),
-        _ => fallback,
-    }
+    color_to_rgba(crate::render::resolve_zcolour(z, colors), fallback)
+}
+
+/// Resolve a ratatui [`Color`] to an opaque RGBA for the pixel canvas. The cell
+/// path renders NAMED ANSI colours (the terminal_default palette maps Standard
+/// 2–9 to `Color::Red`/`Color::Blue`/… — the terminal draws them directly), but
+/// the raster canvas needs concrete bytes: mapping only `Color::Rgb` dropped
+/// every palette colour to the fallback, so Zork Zero's compass-direction
+/// letters blitted in the default ink instead of their own colour (SQ-0480). The
+/// 16 base ANSI colours resolve to the standard VGA RGB values; `Reset` and
+/// `Indexed` (no canonical RGB here) fall back.
+pub(crate) fn color_to_rgba(c: ratatui::style::Color, fallback: Rgba<u8>) -> Rgba<u8> {
+    use ratatui::style::Color;
+    let (r, g, b) = match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Black => (0, 0, 0),
+        Color::Red => (170, 0, 0),
+        Color::Green => (0, 170, 0),
+        Color::Yellow => (170, 85, 0),
+        Color::Blue => (0, 0, 170),
+        Color::Magenta => (170, 0, 170),
+        Color::Cyan => (0, 170, 170),
+        Color::Gray => (170, 170, 170),
+        Color::DarkGray => (85, 85, 85),
+        Color::LightRed => (255, 85, 85),
+        Color::LightGreen => (85, 255, 85),
+        Color::LightYellow => (255, 255, 85),
+        Color::LightBlue => (85, 85, 255),
+        Color::LightMagenta => (255, 85, 255),
+        Color::LightCyan => (85, 255, 255),
+        Color::White => (255, 255, 255),
+        Color::Reset | Color::Indexed(_) => return fallback,
+    };
+    Rgba([r, g, b, 255])
 }
 
 /// 1:1 opaque-over blit of `src` into `dst` at `(dx, dy)`, clipped to the
@@ -112,12 +142,26 @@ pub struct MainText {
 }
 
 /// The native screen extent (max window bottom-right) in game pixels; min 1×1.
+///
+/// A window whose `w_px`/`h_px` is an unresolved size sentinel — a small
+/// negative value stored as a large `u16` (Shogun leaks `0xFFFE` ≈ −2 into a
+/// window's `x_size`, ballooning the extent to 65534×200 and the raster canvas
+/// allocation with it, SQ-0481) — must not drive the extent. Any dimension with
+/// the high bit set (`>= 0x8000`, i.e. negative as `i16`) is far past any real
+/// v6 screen (~640 px) so it's treated as unresolved and skipped for that axis;
+/// clamping here (presentation) keeps zvm storing window props verbatim for the
+/// game to read back (ZMSD §8.8.3.2).
 pub fn native_extent(items: &[PositionedWindow]) -> (u16, u16) {
     let mut w = 1u16;
     let mut h = 1u16;
+    let resolved = |px: u16| (px as i16) >= 0; // high bit clear ⇒ a real size
     for it in items {
-        w = w.max(it.x_px.saturating_add(it.w_px));
-        h = h.max(it.y_px.saturating_add(it.h_px));
+        if resolved(it.w_px) {
+            w = w.max(it.x_px.saturating_add(it.w_px));
+        }
+        if resolved(it.h_px) {
+            h = h.max(it.y_px.saturating_add(it.h_px));
+        }
     }
     (w, h)
 }
@@ -498,22 +542,40 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
             .unwrap_or(0)
     };
     let mut row = 0u32;
+    let mut last_row_end = 0u32; // (indent + text len) of the last drawn line
     for line in &main.lines {
         if row >= rows as u32 {
             return;
         }
         let indent = indent_at(row);
         let avail = (cols as u32).saturating_sub(indent);
+        let mut drawn = 0u32;
         for (col, glyph) in line.chars().take(avail as usize).enumerate() {
             crate::render::bitfont::blit_glyph(canvas, glyph, ox + (indent + col as u32) * FONT, oy + row * FONT, FONT, FONT, fg, None);
+            drawn = col as u32 + 1;
         }
+        last_row_end = indent + drawn;
         row += 1;
     }
-    if main.awaiting && row < rows as u32 {
-        for (col, glyph) in main.input.chars().take(cols as usize).enumerate() {
-            crate::render::bitfont::blit_glyph(canvas, glyph, ox + col as u32 * FONT, oy + row * FONT, FONT, FONT, fg, None);
+    if main.awaiting {
+        // The live input continues the game's kept prompt line (the last drawn
+        // row — Zork Zero's "…HINT): >"), NOT a fresh row below it (SQ-0470a):
+        // the caret sits right after the prompt. When the transcript ended on a
+        // newline the last line is empty (`last_row_end == 0`) so the input
+        // starts a clean row of its own, matching the terminal inline prompt.
+        let input_row = row.saturating_sub(1);
+        let start = last_row_end;
+        if input_row < rows as u32 {
+            for (i, glyph) in main.input.chars().enumerate() {
+                let col = start + i as u32;
+                if col >= cols as u32 {
+                    break;
+                }
+                crate::render::bitfont::blit_glyph(canvas, glyph, ox + col * FONT, oy + input_row * FONT, FONT, FONT, fg, None);
+            }
+            let caret = (start + main.cursor_col as u32).min(cols.saturating_sub(1) as u32);
+            fill_cell(canvas, ox + caret * FONT, oy + input_row * FONT, FONT, FONT, fg);
         }
-        fill_cell(canvas, ox + (main.cursor_col as u32).min(cols.saturating_sub(1) as u32) * FONT, oy + row * FONT, FONT, FONT, fg);
     }
 }
 
@@ -618,6 +680,90 @@ mod tests {
         assert!(cell_has_ink(&canvas, 3, 1), "row 1 col 3 inked (text beside the float)");
         // Row 2 (past the float): ink flush left.
         assert!(cell_has_ink(&canvas, 0, 2), "row 2 col 0 inked (flush left below float)");
+    }
+
+    #[test]
+    fn packed_standard_palette_colour_blits_its_own_rgb_not_default() {
+        // SQ-0480: a run coloured with a Standard palette colour (the compass
+        // letters) must blit in that colour, not the default ink. terminal_default
+        // maps Standard(3) → Color::Red (a NAMED colour); packed_to_rgba must
+        // resolve it to concrete RGB rather than dropping to the fallback.
+        let colors = ColorScheme::terminal_default();
+        let fallback = Rgba([1, 2, 3, 255]);
+        // Standard(3): packed tag 1, value 3 (see state::pack_zcolour).
+        let packed_std3 = (1u32 << 24) | 3;
+        let got = packed_to_rgba(packed_std3, fallback, &colors);
+        assert_ne!(got, fallback, "a palette colour must NOT fall back to the default ink");
+        assert_eq!(got, Rgba([170, 0, 0, 255]), "Standard(3) → red resolves to concrete RGB");
+        // And the full blit through build_chrome_canvas carries it: a space-only
+        // run has no ink, so probe an inked glyph's fg by asserting SOME cell pixel
+        // is the run's red.
+        let win = px_text_grid_item("N", 0, packed_std3, 0);
+        let c = build_chrome_canvas(&[&win], (8, 8), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors);
+        assert!(
+            (0..8).any(|x| (0..8).any(|y| *c.get_pixel(x, y) == Rgba([170, 0, 0, 255]))),
+            "the compass glyph blits in its own red, not the default fg"
+        );
+    }
+
+    #[test]
+    fn native_extent_ignores_unresolved_size_sentinel() {
+        // SQ-0481: a real 320×200 window plus a bogus window whose x_size leaked
+        // the -2 sentinel (0xFFFE ≈ 65534). The sentinel must NOT balloon the
+        // native extent (and thus the raster canvas allocation) — the real
+        // 320×200 screen size stands.
+        let real = || PositionedWindow { x_px: 0, y_px: 0, w_px: 320, h_px: 200, ..buffer_item(0, true) };
+        let bogus = PositionedWindow { x_px: 0, y_px: 0, w_px: 0xFFFE, h_px: 200, ..grid_item(0) };
+        assert_eq!(native_extent(&[real(), bogus]), (320, 200), "sentinel width excluded");
+        // A sentinel HEIGHT is likewise ignored on its axis.
+        let bogus_h = PositionedWindow { x_px: 0, y_px: 0, w_px: 320, h_px: 0xFFFD, ..grid_item(0) };
+        assert_eq!(native_extent(&[real(), bogus_h]), (320, 200), "sentinel height excluded");
+    }
+
+    #[test]
+    fn story_text_input_continues_the_prompt_row() {
+        // SQ-0470a: the live input sits on the game's kept ">" prompt row,
+        // appended right after it — NOT a fresh row below it.
+        let cell_has_ink = |c: &RgbaImage, col: u32, row: u32| -> bool {
+            (0..FONT).any(|dy| (0..FONT).any(|dx| c.get_pixel(col * FONT + dx, row * FONT + dy)[3] > 0))
+        };
+        let main = MainText {
+            lines: vec!["Room desc.".into(), ">".into()],
+            input: "go".into(),
+            cursor_col: 2,
+            awaiting: true,
+            floats: vec![],
+        };
+        let mut canvas = RgbaImage::new(20 * FONT, 5 * FONT);
+        draw_story_text(&mut canvas, &main, 0, 0, 20, 5, Rgba([255, 255, 255, 255]));
+        // ">" is on row 1; input "go" appends after it at cols 1 and 2.
+        assert!(cell_has_ink(&canvas, 1, 1), "input 'g' on the prompt row, after '>'");
+        assert!(cell_has_ink(&canvas, 2, 1), "input 'o' on the prompt row");
+        // Caret block after the input: col = 1 (\">\".len) + 2 (cursor) = 3.
+        assert!(cell_has_ink(&canvas, 3, 1), "caret after the input on the prompt row");
+        // The row BELOW the prompt is empty — input no longer drops a row.
+        assert!(!(0..20).any(|col| cell_has_ink(&canvas, col, 2)), "nothing on the row below the prompt");
+    }
+
+    #[test]
+    fn story_text_input_after_newline_starts_a_clean_row() {
+        // When the transcript ended on a newline the last line is empty, so the
+        // input starts a clean row of its own (col 0) — the universal rule that
+        // makes SQ-0470a correct for both prompt and non-prompt endings.
+        let cell_has_ink = |c: &RgbaImage, col: u32, row: u32| -> bool {
+            (0..FONT).any(|dy| (0..FONT).any(|dx| c.get_pixel(col * FONT + dx, row * FONT + dy)[3] > 0))
+        };
+        let main = MainText {
+            lines: vec!["Prose line.".into(), String::new()],
+            input: "x".into(),
+            cursor_col: 1,
+            awaiting: true,
+            floats: vec![],
+        };
+        let mut canvas = RgbaImage::new(20 * FONT, 5 * FONT);
+        draw_story_text(&mut canvas, &main, 0, 0, 20, 5, Rgba([255, 255, 255, 255]));
+        assert!(cell_has_ink(&canvas, 0, 1), "input on the empty last row at col 0");
+        assert!(!(0..20).any(|col| cell_has_ink(&canvas, col, 2)), "not the row below");
     }
 
     #[test]
