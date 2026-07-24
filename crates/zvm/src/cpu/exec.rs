@@ -260,6 +260,10 @@ pub struct Machine {
     /// a hang-safety belt for a spec-violating routine that both prints and re-arms
     /// prop 9. See [`newline_interrupt`](Machine::newline_interrupt).
     newline_interrupt_active: bool,
+    /// Set by [`restart`](Machine::restart) so the host can drop app-side chrome
+    /// (e.g. a v6 picture-canvas cache) that the VM's own screen reset cannot
+    /// reach. Cleared by the host when observed. Not part of saved state.
+    pub just_restarted: bool,
 }
 
 /// Context captured when the `save` opcode fires, needed by `complete_save`.
@@ -276,6 +280,58 @@ enum SaveDest {
     Store(u8),
 }
 
+/// Build the freshly-booted execution and screen state for `mem`'s version.
+///
+/// v3–8: header 0x06 is a direct instruction address; execution begins there
+/// with an empty frame stack. v6: header 0x06 is the *packed address of `main`*,
+/// which the interpreter enters with no args/result when the game starts up
+/// (ZMSD §5.4) — `call_routine` pushes main's frame; when main returns, `step`
+/// sees an empty v6 frame stack and quits (returning from main is illegal per
+/// §5.4, so that only happens on a real `@quit`). The v6 window model is seeded
+/// to Frotz's `restart_screen` defaults.
+///
+/// Shared by [`Machine::with_output`] (boot) and [`Machine::restart`] (@restart
+/// re-boot) so both land in byte-identical initial state.
+fn boot_state_and_screen(mem: &mut Memory) -> (State, ScreenState) {
+    let mut state = State::new(mem.initial_pc());
+    let mut screen = ScreenState::default();
+    if mem.version() == 6 {
+        state = State::new(0);
+        let main_packed = mem.read_word(0x06);
+        call_routine(&mut state, mem, main_packed, &[], None);
+        // ZMSD §8.8.1: coordinates are 1-based with (1,1) top-left, and "all
+        // eight windows begin at (1,1)"; each window's cursor likewise starts at
+        // its own (1,1). Frotz restart_screen also seeds every window's font
+        // props: font = TEXT_FONT (1) and font_size = (font_height << 8) |
+        // font_width — games read the width back out of prop 13 for layout math
+        // (Shogun sizes its READ input buffer with it; 0 there means zero-length
+        // input forever).
+        let mut v6 = V6Windows::default();
+        for w in v6.windows.iter_mut() {
+            w.y_coord = 1;
+            w.x_coord = 1;
+            w.y_cursor = 1;
+            w.x_cursor = 1;
+            w.font_number = 1;
+            w.font_size =
+                (crate::screen::V6_FONT_HEIGHT << 8) | crate::screen::V6_FONT_WIDTH;
+            // frotz restart_screen: attribute 8 (buffered) everywhere...
+            w.attributes = 8;
+        }
+        // ...and 15 (wrapping+scrolling+scripting+buffering) on window 0.
+        v6.windows[0].attributes = 15;
+        // Frotz restart_screen also gives windows 0 and 1 the full screen width
+        // (pixels in v6) — games read it back via get_wind_prop before ever
+        // calling window_size. Reseeded with the real screen size by
+        // `set_screen_dims` when the host reports it.
+        let width = crate::screen::DEFAULT_SCREEN_COLS as u16 * crate::screen::V6_FONT_WIDTH;
+        v6.windows[0].x_size = width;
+        v6.windows[1].x_size = width;
+        screen.v6 = Some(v6);
+    }
+    (state, screen)
+}
+
 impl Machine {
     /// Create a new `Machine` from story memory, using a `BufferOutput` sink.
     /// `state.pc` is set to the header's `initial_pc` field (direct instruction
@@ -290,47 +346,9 @@ impl Machine {
         let dyn_len = mem.static_mem_base() as usize;
         let original_dynamic = mem.raw_bytes()[..dyn_len].to_vec();
 
-        // v3–8: header 0x06 is a direct instruction address; execution begins
-        // there. v6: header 0x06 is the *packed address of `main`*, which the
-        // interpreter calls with no args/result (ZMSD §5.5). Reuse call_routine
-        // to push main's frame; when main returns, step() sees an empty v6 frame
-        // stack and quits.
-        let mut state = State::new(mem.initial_pc());
-        let mut screen = ScreenState::default();
-        if mem.version() == 6 {
-            state = State::new(0);
-            let main_packed = mem.read_word(0x06);
-            call_routine(&mut state, &mut mem, main_packed, &[], None);
-            // ZMSD §8.8.1: coordinates are 1-based with (1,1) top-left, and
-            // "all eight windows begin at (1,1)"; each window's cursor likewise
-            // starts at its own (1,1). Frotz restart_screen also seeds every
-            // window's font props: font = TEXT_FONT (1) and font_size =
-            // (font_height << 8) | font_width — games read the width back out
-            // of prop 13 for layout math (Shogun sizes its READ input buffer
-            // with it; 0 there means zero-length input forever).
-            let mut v6 = V6Windows::default();
-            for w in v6.windows.iter_mut() {
-                w.y_coord = 1;
-                w.x_coord = 1;
-                w.y_cursor = 1;
-                w.x_cursor = 1;
-                w.font_number = 1;
-                w.font_size =
-                    (crate::screen::V6_FONT_HEIGHT << 8) | crate::screen::V6_FONT_WIDTH;
-                // frotz restart_screen: attribute 8 (buffered) everywhere...
-                w.attributes = 8;
-            }
-            // ...and 15 (wrapping+scrolling+scripting+buffering) on window 0.
-            v6.windows[0].attributes = 15;
-            // Frotz restart_screen also gives windows 0 and 1 the full screen
-            // width (pixels in v6) — games read it back via get_wind_prop
-            // before ever calling window_size. Reseeded with the real screen
-            // size by `set_screen_dims` when the host reports it.
-            let width = crate::screen::DEFAULT_SCREEN_COLS as u16 * crate::screen::V6_FONT_WIDTH;
-            v6.windows[0].x_size = width;
-            v6.windows[1].x_size = width;
-            screen.v6 = Some(v6);
-        }
+        // Freshly-booted execution + screen state (v6 enters `main`; v1–5 start
+        // at the initial PC). Shared with `restart` so @restart re-boots identically.
+        let (state, screen) = boot_state_and_screen(&mut mem);
 
         Machine {
             state,
@@ -371,6 +389,7 @@ impl Machine {
             mouse_buttons: 0,
             mouse_window: 1,
             newline_interrupt_active: false,
+            just_restarted: false,
         }
     }
 
@@ -389,6 +408,67 @@ impl Machine {
         init_header_caps(&mut self.mem, self.honor_game_colours, self.sound_available, self.interpreter_number);
         // Communicate the initial buffer_mode state (false = off) to the sink.
         self.out.set_buffer_mode(self.screen.buffer_mode);
+    }
+
+    /// Re-boot the machine in place for the `@restart` opcode (ZMSD §6.1.3):
+    /// "the entire state is restored from the original story file, and the stack
+    /// is emptied; but 'Flags 2' is preserved".
+    ///
+    /// Concretely: dynamic memory is reloaded from the pristine boot image, the
+    /// call/eval stack is emptied, and execution resumes exactly as at boot —
+    /// the initial PC (v3–5/7/8) or by re-entering the packed `main` routine
+    /// (v6, §5.4). Per §6.1.3 the two game-writable `Flags 2` bits — transcription
+    /// (bit 0) and fixed-pitch (bit 1) — survive; the interpreter re-stamps the
+    /// rest of the header capability bits (`init_caps`) and re-applies the
+    /// host-reported screen size so the reboot lands where boot did (v6's 640×400
+    /// unit screen). This mirrors Frotz `z_restart`, which rereads dynamic memory
+    /// then calls `restart_header`/`restart_screen`, preserving only those two
+    /// bits. The v6 window model and all queued picture/sound events are reset to
+    /// boot defaults so no pre-restart screen chrome carries over, and the undo
+    /// stack is discarded. Interpreter configuration (colour/sound/interpreter
+    /// number/picture dims) and persistent aux data are unchanged, exactly as at
+    /// boot.
+    pub fn restart(&mut self) {
+        // Preserve the two game-set Flags 2 bits that outlive a restart, and the
+        // host screen size (init_caps below re-seeds only the generic default).
+        let preserved_flags2 = self.mem.read_word(0x10) & 0b11;
+        let rows = self.mem.read_byte(0x20);
+        let cols = self.mem.read_byte(0x21);
+
+        // Reload dynamic memory to its pristine boot image.
+        for (i, &b) in self.original_dynamic.iter().enumerate() {
+            self.mem.write_byte(i as u32, b);
+        }
+
+        // Fresh execution + screen model, identical to a cold boot.
+        let (state, screen) = boot_state_and_screen(&mut self.mem);
+        self.state = state;
+        self.screen = screen;
+
+        // Empty the stack and drop everything transient so no stale chrome or
+        // half-finished I/O survives the reboot.
+        self.streams = StreamState::new();
+        self.undo_stack.clear();
+        self.pending_input = None;
+        self.pending_save = None;
+        self.pending_restore_store = None;
+        self.pending_sounds.clear();
+        self.pending_pictures.clear();
+        self.buffer_screen_mode = 0;
+        self.v6_win0_out_chars = 0;
+        self.newline_interrupt_active = false;
+
+        // Re-stamp the interpreter capability bits over the pristine header, then
+        // restore the preserved Flags 2 bits and the host screen dimensions.
+        self.init_caps();
+        let f2 = (self.mem.read_word(0x10) & !0b11) | preserved_flags2;
+        self.mem.write_word(0x10, f2);
+        if rows > 0 && cols > 0 {
+            self.set_screen_dims(rows, cols);
+        }
+
+        // Tell the host to drop app-side chrome the VM reset cannot reach.
+        self.just_restarted = true;
     }
 
     /// Resolve a v6 window operand: `-3` (0xFFFD) means the CURRENTLY selected
@@ -3454,6 +3534,71 @@ pub(crate) mod tests {
     fn non_v6_boot_is_frameless() {
         let m = Machine::new(Memory::new(crate::header::tests_support::sample_story(5)).unwrap());
         assert!(m.state.frames.is_empty(), "v5 starts frameless at initial_pc");
+    }
+
+    #[test]
+    fn v6_restart_reenters_main_reloads_dynmem_and_preserves_flags2() {
+        // @restart (ZMSD §6.1.3 / §5.4): a v6 story must re-boot by re-entering
+        // the packed `main` routine with a fresh frame, its dynamic memory reset
+        // to the original story image, but the transcription + fixed-pitch bits
+        // of Flags 2 preserved.
+        let mut m = Machine::new(Memory::new(v6_boot_story(&[0xB0])).unwrap());
+        // Snapshot pristine state, then dirty the machine as a mid-game run would.
+        let orig_100 = m.mem.read_byte(0x100);
+        let pristine_f2 = m.mem.read_word(0x10);
+        m.mem.write_byte(0x100, orig_100 ^ 0xFF);       // mutate dynamic memory
+        m.mem.write_word(0x10, pristine_f2 ^ 0b11);      // flip transcription+fixed-pitch
+        m.state.frames.clear();                          // simulate stack unwound mid-run
+        m.state.eval_stack.push(0xDEAD);
+        m.undo_stack.push(UndoSnapshot { blob: Vec::new(), store: None });
+        m.pending_pictures.push(PictureEvent { number: 1, window: 0, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None });
+
+        m.restart();
+
+        assert_eq!(m.state.frames.len(), 1, "@restart re-enters v6 main → one base frame");
+        assert_eq!(m.state.pc, 0x41, "PC resumes at main's first instruction");
+        assert!(m.state.eval_stack.is_empty(), "the eval stack is emptied");
+        assert!(m.undo_stack.is_empty(), "the undo stack is discarded (§6.1.3)");
+        assert!(m.pending_pictures.is_empty(), "no pre-restart picture chrome carries over");
+        assert_eq!(m.mem.read_byte(0x100), orig_100, "dynamic memory reloaded from the story image");
+        assert_eq!(
+            m.mem.read_word(0x10) & 0b11,
+            (pristine_f2 ^ 0b11) & 0b11,
+            "transcription (bit 0) + fixed-pitch (bit 1) preserved across @restart",
+        );
+        assert_eq!(
+            m.screen.v6.as_ref().unwrap().windows[0].attributes, 15,
+            "the v6 window model is re-seeded to boot defaults",
+        );
+        assert!(m.just_restarted, "restart signals the host to drop app-side chrome");
+    }
+
+    #[test]
+    fn v1to5_restart_resets_to_initial_pc_and_reloads_dynmem() {
+        // In v3–5, @restart resumes frameless at the header's initial PC with
+        // dynamic memory reloaded and Flags 2's game bits preserved.
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        let initial_pc = m.mem.initial_pc();
+        let orig_100 = m.mem.read_byte(0x100);
+        let pristine_f2 = m.mem.read_word(0x10);
+        m.mem.write_byte(0x100, orig_100 ^ 0xFF);
+        m.mem.write_word(0x10, pristine_f2 ^ 0b11);
+        m.state.pc = 0x1234;                             // wander off mid-run
+        m.state.frames.push(crate::cpu::state::Frame {
+            return_pc: 0, locals: vec![0; 2], eval_base: 0,
+            store_var: None, arg_count: 0, func_addr: 0,
+        });
+
+        m.restart();
+
+        assert!(m.state.frames.is_empty(), "v1–5 @restart resumes frameless");
+        assert_eq!(m.state.pc, initial_pc, "PC resumes at the header initial PC");
+        assert_eq!(m.mem.read_byte(0x100), orig_100, "dynamic memory reloaded");
+        assert_eq!(
+            m.mem.read_word(0x10) & 0b11,
+            (pristine_f2 ^ 0b11) & 0b11,
+            "transcription + fixed-pitch bits preserved across @restart",
+        );
     }
 
     #[test]

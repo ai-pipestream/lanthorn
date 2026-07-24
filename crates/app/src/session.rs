@@ -819,6 +819,17 @@ impl GameSession {
         pending_io: Option<PendingIo>,
         timed_out: bool,
     ) -> TurnResult {
+        // A mid-turn @restart re-booted the VM: drop the app-side v6 chrome the
+        // VM's own screen reset cannot reach — the rasterized picture-canvas
+        // cache and the window-0 char counters — so the reboot's fresh boot art
+        // and text aren't offset against pre-restart state. The reboot's own
+        // pictures/text are drained below onto the now-clean canvas.
+        if std::mem::take(&mut self.machine.just_restarted) {
+            self.pictures_canvas.clear();
+            self.story_pics.clear();
+            self.last_content_pic.clear();
+            self.v6_win0_chars_seen = 0;
+        }
         let win0_base = self.v6_win0_chars_seen;
         let (raw, raw_runs) = sink_mut(&mut self.machine).take_styled();
         self.v6_win0_chars_seen = self.machine.v6_win0_out_chars;
@@ -1314,7 +1325,8 @@ fn is_death_relocation(transcript: &str) -> bool {
 enum RunStop {
     /// VM is waiting for player input of this kind.
     Input(InputKind),
-    /// VM ended (Quit/Restart).
+    /// VM ended via `@quit` (a mid-run `@restart` re-boots in place and keeps
+    /// running, so it never surfaces here).
     Quit,
     /// VM suspended on its own `@save` — host must `resume_save`.
     SavePending,
@@ -1334,7 +1346,12 @@ fn run_until_input(machine: &mut Machine) -> RunStop {
             StepResult::NeedChar => return RunStop::Input(InputKind::Char),
             StepResult::SaveRequest => return RunStop::SavePending,
             StepResult::RestoreRequest => return RunStop::RestorePending,
-            StepResult::Restart => return RunStop::Quit, // not supported headless; treat as quit
+            // @restart (ZMSD §6.1.3): re-boot the machine in place and keep
+            // stepping — the game re-runs from its opening (v6 re-enters `main`),
+            // so the turn returns a normal input request, NOT a quit. The
+            // `just_restarted` flag lets the session drop stale v6 chrome in
+            // `drain_turn`.
+            StepResult::Restart => machine.restart(),
             StepResult::Continue => {}
         }
     }
