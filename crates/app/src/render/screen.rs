@@ -1270,15 +1270,12 @@ fn draw_painted_screen(
     base: ratatui::style::Style,
 ) {
     for t in runs {
-        // A whitespace-only run is normally skipped (nothing to draw), EXCEPT a
-        // reverse-video one: the game paints the spaces BETWEEN a highlighted
-        // menu item's words as separate reverse runs, and dropping them left the
-        // selection bar moth-eaten — reversed behind the glyphs but not the gaps
-        // (SQ-0484). Stamping the reversed space fills the gap cell, so the bar
-        // reads as one solid block. A non-reverse blank stays a no-op.
-        if t.text.trim().is_empty() && t.style & 1 == 0 {
-            continue;
-        }
+        // Every run stamps, whitespace included — painter semantics. A reversed
+        // space fills its cell of the selection bar (SQ-0484), and a NORMAL
+        // space must equally repaint over an earlier reversed one: when the
+        // menu selection moves, the game repaints the old row's gaps as plain
+        // spaces, and skipping those left the stale reversed cells behind
+        // (SQ-0490).
         // 8×16 v6 cell (SQ-0479): quantize Y by FONT_H(16), X by FONT_W(8).
         let row = (t.y.max(1) - 1) / 16;
         if row < min_row {
@@ -1288,10 +1285,14 @@ fn draw_painted_screen(
         if area.y + row >= area.bottom() || area.x + col >= area.right() {
             continue;
         }
-        let mut style = base;
-        if t.style & 1 != 0 {
-            style = style.add_modifier(ratatui::style::Modifier::REVERSED);
-        }
+        // Cell styles PATCH — a repaint must explicitly clear the reverse bit,
+        // or a cell once reversed stays reversed after the game repaints it
+        // plain (SQ-0490).
+        let style = if t.style & 1 != 0 {
+            base.add_modifier(ratatui::style::Modifier::REVERSED)
+        } else {
+            base.remove_modifier(ratatui::style::Modifier::REVERSED)
+        };
         let max_w = (area.right() - (area.x + col)) as usize;
         buf.set_stringn(area.x + col, area.y + row, &t.text, max_w, style);
     }
@@ -3361,15 +3362,19 @@ mod tests {
                 "col {x} of the reverse selection bar is reversed (gap included)"
             );
         }
-        // A plain (non-reverse) whitespace run stays a no-op: it does not stamp a
-        // reversed blank over an untouched cell.
-        let plain = vec![crate::engine::PxText { y: 33, x: 1, text: "   ".into(), style: 0, fg: 0, bg: 0 }];
+        // SQ-0490: when the selection moves away the game repaints the row's gaps
+        // as PLAIN spaces. Those must stamp too (painter semantics) — repainting
+        // over the earlier reversed cells — or the old bar's gap cells stay
+        // reversed forever. Same runs re-painted plain, in the same buffer:
+        let plain: Vec<crate::engine::PxText> = runs
+            .iter()
+            .map(|t| crate::engine::PxText { style: 0, ..t.clone() })
+            .collect();
         let prefs: Vec<&crate::engine::PxText> = plain.iter().collect();
-        let mut buf2 = Buffer::empty(area);
-        draw_painted_screen(&prefs, 0, area, &mut buf2, ratatui::style::Style::default());
+        draw_painted_screen(&prefs, 0, area, &mut buf, ratatui::style::Style::default());
         assert!(
-            !buf2.cell((0, 2)).unwrap().modifier.contains(Modifier::REVERSED),
-            "a non-reverse blank run is not painted"
+            !buf.cell((2, 1)).unwrap().modifier.contains(Modifier::REVERSED),
+            "the gap cell is repainted plain once the selection moves away (SQ-0490)"
         );
     }
 
