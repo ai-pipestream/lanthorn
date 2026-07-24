@@ -7,7 +7,7 @@
 //! 3. Tidy-anim sub-mode → KeyMap lookup in Anim context; no fallthrough.
 //! 4. Saves-manager sub-mode → saves_key_to_action.
 //! 6. Hotkey dialog open → hotkey_dialog_key_to_action.
-//! 6.7. Ctrl+A/E/U/K/W at a live story prompt (Game focus, not char_mode/event_wait)
+//!    6.7. Ctrl+A/E/U/K/W at a live story prompt (Game focus, not char_mode/event_wait)
 //!    → readline caret/delete ops on the input line.
 //! 7. Key == hotkeys.prefix → OpenHotkeyDialog.
 //! 8. Tab (no modifiers) → autocomplete-or-ToggleFocus special case.
@@ -407,7 +407,7 @@ pub enum KeyResolve {
 /// 3. Tidy-anim active → Anim context lookup (Ctrl+Left/Right stage-jump hardwired).
 ///    4-6. Modal sub-modes (saves/replay/file-browser/verb-menu/
 ///    config-screen/hotkey-dialog/room-panel) → their handlers (hardwired Actions).
-/// 6.7. Ctrl+A/E/U/K/W in Game focus with the line prompt live (not char_mode/
+///    6.7. Ctrl+A/E/U/K/W in Game focus with the line prompt live (not char_mode/
 ///    event_wait) → readline caret/delete ops on the input line.
 /// 7. Key == hotkeys.prefix → OpenHotkeyDialog.
 /// 8. Tab (no modifiers) → autocomplete-or-ToggleFocus.

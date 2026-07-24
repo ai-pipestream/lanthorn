@@ -1255,11 +1255,11 @@ fn draw_painted_screen(
             continue;
         }
         // 8×16 v6 cell (SQ-0479): quantize Y by FONT_H(16), X by FONT_W(8).
-        let row = ((t.y.max(1) - 1) / 16) as u16;
+        let row = (t.y.max(1) - 1) / 16;
         if row < min_row {
             continue;
         }
-        let col = ((t.x.max(1) - 1) / 8) as u16;
+        let col = (t.x.max(1) - 1) / 8;
         if area.y + row >= area.bottom() || area.x + col >= area.right() {
             continue;
         }
@@ -2916,7 +2916,13 @@ mod tests {
         // A 16x16 cell over a 40x25 pane gives scale s = 2.0 (like a real
         // terminal, which upscales the 320x200 native raster), so the items'
         // 8-px native line spacing lands on DISTINCT terminal rows.
-        state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize((16, 16).into()));
+        // `from_fontsize` is deprecated in favor of `from_query_stdio` (queries the
+        // real terminal — unusable headless) and `halfblocks` (fixed at 10x20, not
+        // the 16x16 this test needs); it's the only ctor left for a fixed test font size.
+        #[allow(deprecated)]
+        {
+            state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize((16, 16).into()));
+        }
         state.config.v6_render = crate::config::V6RenderMode::Hybrid;
         state.push_transcript("You may choose to:");
 
@@ -3256,7 +3262,7 @@ mod tests {
     fn anchored_band_multi_row() {
         // Runs on native rows 0 and 1 (y=1 and y=17, one 16px cell apart) each
         // render on their own band row, and rows_used reports 2.
-        let runs = vec![run(1, 1, "Row0Left"), run(233, 1, "Score: 0"), run(1, 17, "Row1Left")];
+        let runs = [run(1, 1, "Row0Left"), run(233, 1, "Score: 0"), run(1, 17, "Row1Left")];
         let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);

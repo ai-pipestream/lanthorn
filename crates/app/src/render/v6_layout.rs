@@ -880,7 +880,8 @@ mod tests {
     #[test]
     fn status_grid_glyph_paints_fg_in_its_native_pixel_cell() {
         let mut cells = vec![GridCell { ch: ' ', style: 0, fg: 0, bg: 0, link: 0, glk_style: 0 }; 6];
-        cells[1 * 3 + 2] = GridCell { ch: 'A', style: 0, fg: 0, bg: 0, link: 0, glk_style: 0 };
+        // row 1, col 2 in a 3-col grid.
+        cells[3 + 2] = GridCell { ch: 'A', style: 0, fg: 0, bg: 0, link: 0, glk_style: 0 };
         let win = PositionedWindow {
             x: 0, y: 0, w: 3, h: 2, x_px: 10, y_px: 4, w_px: 24, h_px: 32, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
@@ -1052,7 +1053,7 @@ mod tests {
         for y in 0..40u32 {
             for x in 0..40u32 {
                 let in_band = y < 8;
-                let in_side = x < 8 || x >= 32;
+                let in_side = !(8..32).contains(&x);
                 if in_band || in_side {
                     canvas.put_pixel(x, y, opaque);
                 }

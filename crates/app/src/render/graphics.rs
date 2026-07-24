@@ -281,9 +281,8 @@ impl GraphicsRender {
         let box_w = area.width as u32 * fs.width.max(1) as u32;
         let box_h = area.height as u32 * fs.height.max(1) as u32;
         let (cw, ch) = (canvas.width(), canvas.height());
-        let scale = ((box_w as f64 / cw as f64).min(box_h as f64 / ch as f64))
-            .max(1.0)
-            .min(MAX_V6_UPSCALE);
+        let scale =
+            ((box_w as f64 / cw as f64).min(box_h as f64 / ch as f64)).clamp(1.0, MAX_V6_UPSCALE);
         let (tw, th) = ((cw as f64 * scale) as u32, (ch as f64 * scale) as u32);
         let scaled = image::imageops::resize(canvas, tw.max(cw), th.max(ch), image::imageops::FilterType::Nearest);
         let img = image::DynamicImage::ImageRgba8(scaled);

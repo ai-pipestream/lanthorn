@@ -2300,7 +2300,7 @@ mod tests {
         // prose at 40-3=37; rows past the picture reclaim full width.
         let para = "word ".repeat(30);
         let transcript = vec![para.trim_end().to_string()];
-        let images = vec![Some(left_img(16, 24, None))];
+        let images = [Some(left_img(16, 24, None))];
         // The image is a SEPARATE transcript unit before the prose.
         let mut full_transcript = vec![String::new()];
         full_transcript.extend(transcript);

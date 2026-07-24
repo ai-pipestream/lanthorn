@@ -285,13 +285,9 @@ mod tests {
         // Sanity check that the hand-drawn runic placeholders don't collapse
         // onto duplicate bitmaps (which would make two different in-game
         // codepoints look identical).
-        for i in 0..EXTRA_GLYPHS.len() {
-            for j in (i + 1)..EXTRA_GLYPHS.len() {
-                assert_ne!(
-                    EXTRA_GLYPHS[i].1, EXTRA_GLYPHS[j].1,
-                    "{:?} and {:?} render identically",
-                    EXTRA_GLYPHS[i].0, EXTRA_GLYPHS[j].0
-                );
+        for (i, (ci, gi)) in EXTRA_GLYPHS.iter().enumerate() {
+            for (cj, gj) in EXTRA_GLYPHS.iter().skip(i + 1) {
+                assert_ne!(gi, gj, "{:?} and {:?} render identically", ci, cj);
             }
         }
     }
