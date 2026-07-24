@@ -157,6 +157,16 @@ The story page itself fills with the window's own background colour (when
 the game set one) rather than leaving the terminal's theme backdrop showing
 through.
 
+This colour honoring now spans *every* v6 presentation, not just the pixel
+raster: the frameless classic status band, the painted menu/hint overlays,
+the hybrid story-strip overlay, and the plain cell fallback all resolve a
+run's game colours the same way. The rule is the shared one every engine
+follows — a channel the game explicitly set (a real palette entry or a true
+colour) wins; a "current"/"default" sentinel is inheritance, so the theme
+keeps that channel — and it's gated on `honor_game_colours` like the rest.
+A game that sets no colours (Shogun) is untouched: its runs stay theme-styled
+in every mode.
+
 ## Adaptive palettes: overlays that borrow their colours
 
 Some of Zork Zero's pictures — the compass rose overlays, the little scene

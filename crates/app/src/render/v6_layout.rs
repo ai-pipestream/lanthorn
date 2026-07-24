@@ -12,6 +12,16 @@ use crate::engine::{PositionedWindow, WinNode};
 /// RGBA. `0` (Default) → `fallback`. True24 → its RGB. Palette/standard colours
 /// resolve through the theme; anything that doesn't reduce to a concrete RGB
 /// falls back (v1 — richer palette handling is SQ-0450).
+/// A packed z-colour (see [`crate::state::pack_zcolour`]) is EXPLICIT only when
+/// the game named a real colour. `ZColour::Default` (0) and Standard 0/1
+/// ("current"/"default", ZMSD §8.3.1) are not choices — they're inheritance —
+/// so they are NOT explicit and the theme keeps the channel. Standard 2-9 and
+/// every True/True24 value ARE explicit. Shared by the raster block-paint
+/// decision and the cell colour paths so both gate identically. (SQ-0487/0488)
+pub(crate) fn packed_explicit(packed: u32) -> bool {
+    packed != 0 && !((packed >> 24) == 1 && (packed & 0xFF) <= 1)
+}
+
 pub(crate) fn packed_to_rgba(packed: u32, fallback: Rgba<u8>, colors: &ColorScheme) -> Rgba<u8> {
     if packed == 0 {
         return fallback;
@@ -316,13 +326,11 @@ pub fn build_chrome_canvas(
             let oy = it.y_px as u32;
             if !g.px_texts.is_empty() {
                 // A packed colour is EXPLICIT only when the game named a real
-                // colour: ZColour::Default (0) and Standard 0/1 ("current"/
-                // "default", ZMSD §8.3.1) are not choices, they're inheritance.
-                // Reverse video over frame art (Zork0's ribbon labels) with
-                // only inherited colours must NOT paint an opaque block — the
-                // original renders dark ink directly ON the art. A block is
-                // painted only when the game explicitly chose colours.
-                let explicit = |packed: u32| packed != 0 && !((packed >> 24) == 1 && (packed & 0xFF) <= 1);
+                // colour (see `packed_explicit`): inherited colours + reverse
+                // over frame art (Zork0's ribbon labels) must NOT paint an
+                // opaque block — the original renders dark ink directly ON the
+                // art. A block is painted only when the game chose colours.
+                let explicit = packed_explicit;
                 for t in &g.px_texts {
                     let px0 = t.x.max(1) as u32 - 1;
                     let py = t.y.max(1) as u32 - 1;

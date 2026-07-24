@@ -526,10 +526,10 @@ fn render_node(
                                     {
                                         continue;
                                     }
-                                    let mut style = base;
-                                    if t.style & 1 != 0 {
-                                        style = style.add_modifier(ratatui::style::Modifier::REVERSED);
-                                    }
+                                    // Explicit game colours on the run replace the
+                                    // theme base per channel; inherited channels
+                                    // keep it, reverse toggles (SQ-0488).
+                                    let style = v6_run_style(base, t.fg, t.bg, t.style, state.config.honor_game_colours, &state.colors);
                                     let max_w = viewport.right() as usize - col as usize;
                                     if max_w > 0 {
                                         buf.set_stringn(col as u16, row as u16, &t.text, max_w, style);
@@ -557,7 +557,7 @@ fn render_node(
                         .flatten()
                         .collect();
                     if runs.iter().any(|t| !t.text.trim().is_empty()) {
-                        draw_painted_screen(&runs, 0, area, buf, status_style);
+                        draw_painted_screen(&runs, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors);
                         return None;
                     }
                 }
@@ -682,7 +682,7 @@ fn render_node(
                     .flatten()
                     .collect();
                 if let Some(story) = layout.story {
-                    let rows_used = draw_anchored_status_band(&runs, ncols, area, buf, status_style);
+                    let rows_used = draw_anchored_status_band(&runs, ncols, area, buf, status_style, state.config.honor_game_colours, &state.colors);
                     let story_area = Rect::new(
                         area.x,
                         area.y + rows_used,
@@ -696,7 +696,7 @@ fn render_node(
                     // A no-op in normal gameplay (chrome grids carry only the
                     // top status runs); on a menu screen it draws the items +
                     // the reverse-video selection caret the anchored band drops.
-                    draw_painted_screen(&runs, STATUS_BAND_ROWS, area, buf, status_style);
+                    draw_painted_screen(&runs, STATUS_BAND_ROWS, area, buf, status_style, state.config.honor_game_colours, &state.colors);
                     return m;
                 }
                 // No streaming story window (a painted menu with win0 in paint
@@ -705,7 +705,7 @@ fn render_node(
                 // z-ordered cell composite, which renders the native geometry as
                 // an unreadable postage stamp (SQ-0478).
                 if runs.iter().any(|t| !t.text.trim().is_empty()) {
-                    draw_painted_screen(&runs, 0, area, buf, status_style);
+                    draw_painted_screen(&runs, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors);
                     return None;
                 }
             }
@@ -1314,12 +1314,49 @@ const STATUS_BAND_ROWS: u16 = 4;
 /// which owns the top rows, while a story-less menu screen passes `min_row = 0`
 /// to stamp the whole pane. Shared by the frameless and hybrid (no story window)
 /// paths so both present a painted screen identically.
+/// Resolve a v6 painted run's packed fg/bg (see [`crate::engine::PxText`]) plus
+/// its reverse bit onto a `base` theme [`Style`], for the CELL render paths (the
+/// frameless status band, the painted-screen overlay, and the hybrid story-strip
+/// overlay). Mirrors the v1-5 / Glulx cell rule (`cell_style`): a run whose
+/// channel carries an EXPLICIT game colour (see [`v6_layout::packed_explicit`])
+/// replaces that channel; a Default or Standard-0/1 sentinel is inheritance, so
+/// the theme keeps the channel. Gated on `honor` exactly like every other
+/// engine's colour path — colours OFF ⇒ the theme `base` is returned untouched.
+/// The reverse bit toggles REVERSED (the terminal performs the fg/bg swap), so
+/// an explicit pair under reverse shows swapped and Shogun's Default/Default,
+/// non-reversed runs collapse to exactly `base`. (SQ-0488)
+fn v6_run_style(
+    base: ratatui::style::Style,
+    fg: u32,
+    bg: u32,
+    style_bits: u8,
+    honor: bool,
+    colors: &ColorScheme,
+) -> ratatui::style::Style {
+    let mut s = base;
+    if honor {
+        if crate::render::v6_layout::packed_explicit(fg) {
+            s = s.fg(crate::render::resolve_zcolour(crate::state::unpack_zcolour(fg), colors));
+        }
+        if crate::render::v6_layout::packed_explicit(bg) {
+            s = s.bg(crate::render::resolve_zcolour(crate::state::unpack_zcolour(bg), colors));
+        }
+    }
+    if style_bits & 1 != 0 {
+        s.add_modifier(ratatui::style::Modifier::REVERSED)
+    } else {
+        s.remove_modifier(ratatui::style::Modifier::REVERSED)
+    }
+}
+
 fn draw_painted_screen(
     runs: &[&crate::engine::PxText],
     min_row: u16,
     area: Rect,
     buf: &mut Buffer,
     base: ratatui::style::Style,
+    honor: bool,
+    colors: &ColorScheme,
 ) {
     for t in runs {
         // Every run stamps, whitespace included — painter semantics. A reversed
@@ -1339,12 +1376,9 @@ fn draw_painted_screen(
         }
         // Cell styles PATCH — a repaint must explicitly clear the reverse bit,
         // or a cell once reversed stays reversed after the game repaints it
-        // plain (SQ-0490).
-        let style = if t.style & 1 != 0 {
-            base.add_modifier(ratatui::style::Modifier::REVERSED)
-        } else {
-            base.remove_modifier(ratatui::style::Modifier::REVERSED)
-        };
+        // plain (SQ-0490). Explicit game colours on the run replace the theme
+        // base per channel; inherited/Default channels keep it (SQ-0488).
+        let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
         let max_w = (area.right() - (area.x + col)) as usize;
         buf.set_stringn(area.x + col, area.y + row, &t.text, max_w, style);
     }
@@ -1362,6 +1396,8 @@ fn draw_anchored_status_band(
     area: Rect,
     buf: &mut Buffer,
     style: ratatui::style::Style,
+    honor: bool,
+    colors: &ColorScheme,
 ) -> u16 {
     let left_bound = ncols / 3; // left-third boundary (cells)
     let right_bound = ncols * 2 / 3; // right two-thirds boundary (cells)
@@ -1402,7 +1438,18 @@ fn draw_anchored_status_band(
         let left_str = left.join("  ");
         let center_str = center.join("  ");
         let right_str = right.join("  ");
-        if place_anchored_row(buf, area, area.y + row, &left_str, &center_str, &right_str, style) {
+        // Resolve this band row's style from its runs (SQ-0488): the first run
+        // that set an explicit game colour contributes that channel over the
+        // themed base, and any reversed run flips the row — so Zork0's dark-on-
+        // tan ribbon labels keep their colours while Shogun's Default/Default
+        // runs stay exactly the theme style. The band collapses multiple runs
+        // into left/center/right strings painted with one style, so per-channel
+        // is first-explicit-wins across the row rather than per-substring.
+        let row_fg = row_runs.iter().map(|t| t.fg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
+        let row_bg = row_runs.iter().map(|t| t.bg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
+        let row_rev = row_runs.iter().any(|t| t.style & 1 != 0) as u8;
+        let row_style = v6_run_style(style, row_fg, row_bg, row_rev, honor, colors);
+        if place_anchored_row(buf, area, area.y + row, &left_str, &center_str, &right_str, row_style) {
             rows_used = rows_used.max(row + 1);
         }
     }
@@ -3369,7 +3416,8 @@ mod tests {
         let area = Rect::new(0, 0, w, 6);
         let mut buf = Buffer::empty(area);
         let style = ratatui::style::Style::default();
-        let rows_used = draw_anchored_status_band(&refs, ncols, area, &mut buf, style);
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let rows_used = draw_anchored_status_band(&refs, ncols, area, &mut buf, style, true, &colors);
         let text: String = (0..w).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
         (text, rows_used)
     }
@@ -3442,7 +3490,8 @@ mod tests {
         let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
-        let rows_used = draw_anchored_status_band(&refs, 40, area, &mut buf, ratatui::style::Style::default());
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let rows_used = draw_anchored_status_band(&refs, 40, area, &mut buf, ratatui::style::Style::default(), true, &colors);
         assert_eq!(rows_used, 2, "two native rows populated");
         let r0: String = (0..80).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
         let r1: String = (0..80).map(|x| buf.cell((x, 1)).unwrap().symbol().to_string()).collect();
@@ -3503,7 +3552,8 @@ mod tests {
         let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
         let area = Rect::new(0, 0, 20, 6);
         let mut buf = Buffer::empty(area);
-        draw_painted_screen(&refs, 0, area, &mut buf, ratatui::style::Style::default());
+        let colors = crate::colors::ColorScheme::terminal_default();
+        draw_painted_screen(&refs, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors);
         // Every cell of the bar (cols 0..5) is REVERSED — including the gap at col 2.
         for x in 0..5u16 {
             assert!(
@@ -3520,11 +3570,131 @@ mod tests {
             .map(|t| crate::engine::PxText { style: 0, ..t.clone() })
             .collect();
         let prefs: Vec<&crate::engine::PxText> = plain.iter().collect();
-        draw_painted_screen(&prefs, 0, area, &mut buf, ratatui::style::Style::default());
+        draw_painted_screen(&prefs, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors);
         assert!(
             !buf.cell((2, 1)).unwrap().modifier.contains(Modifier::REVERSED),
             "the gap cell is repainted plain once the selection moves away (SQ-0490)"
         );
+    }
+
+    // ── v6 run → cell Style resolution (SQ-0488) ────────────────────────────────
+
+    #[test]
+    fn v6_run_style_explicit_standard_sets_channel() {
+        // A run with an explicit Standard-palette fg resolves that channel to the
+        // palette colour (Zork0's compass letters carry Standard colours), leaving
+        // the themed bg intact. Standard(3) is a real palette choice.
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let base = colors.theme.get("upper_window").style;
+        let fg = crate::state::pack_zcolour(zvm::screen::ZColour::Standard(3));
+        let s = v6_run_style(base, fg, 0, 0, true, &colors);
+        assert_eq!(s.fg, Some(crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(3), &colors)));
+        assert_eq!(s.bg, base.bg, "unset bg keeps the theme background");
+    }
+
+    #[test]
+    fn v6_run_style_true_colour_sets_rgb() {
+        // A True24 (24-bit) run resolves to the exact RGB.
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let base = colors.theme.get("upper_window").style;
+        let bg = crate::state::pack_zcolour(zvm::screen::ZColour::True24(0x40_2010));
+        let s = v6_run_style(base, 0, bg, 0, true, &colors);
+        assert_eq!(s.bg, Some(ratatui::style::Color::Rgb(0x40, 0x20, 0x10)));
+        assert_eq!(s.fg, base.fg, "unset fg keeps the theme foreground");
+    }
+
+    #[test]
+    fn v6_run_style_unset_and_default_sentinels_keep_theme() {
+        // Default (0) and Standard 0/1 ("current"/"default") are inheritance, not
+        // choices — every channel keeps the theme base. Shogun sets no colours, so
+        // its Default/Default runs must land here.
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let base = colors.theme.get("upper_window").style;
+        for packed in [
+            0u32,
+            crate::state::pack_zcolour(zvm::screen::ZColour::Standard(0)),
+            crate::state::pack_zcolour(zvm::screen::ZColour::Standard(1)),
+        ] {
+            let s = v6_run_style(base, packed, packed, 0, true, &colors);
+            assert_eq!(s.fg, base.fg, "sentinel {packed:#x} keeps theme fg");
+            assert_eq!(s.bg, base.bg, "sentinel {packed:#x} keeps theme bg");
+            assert!(!s.add_modifier.contains(ratatui::style::Modifier::REVERSED));
+        }
+    }
+
+    #[test]
+    fn v6_run_style_reverse_bit_toggles_modifier() {
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let base = colors.theme.get("upper_window").style;
+        let rev = v6_run_style(base, 0, 0, 1, true, &colors);
+        assert!(rev.add_modifier.contains(ratatui::style::Modifier::REVERSED), "reverse bit adds REVERSED");
+        let plain = v6_run_style(base.add_modifier(ratatui::style::Modifier::REVERSED), 0, 0, 0, true, &colors);
+        assert!(plain.sub_modifier.contains(ratatui::style::Modifier::REVERSED), "no reverse bit removes REVERSED");
+    }
+
+    #[test]
+    fn v6_run_style_colours_off_returns_theme_base() {
+        // honor=false ⇒ explicit colours are ignored, matching every other engine's
+        // honor_game_colours gate (Glulx cell_style, the v1-5 grid).
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let base = colors.theme.get("upper_window").style;
+        let fg = crate::state::pack_zcolour(zvm::screen::ZColour::Standard(3));
+        let bg = crate::state::pack_zcolour(zvm::screen::ZColour::True24(0x123456));
+        let s = v6_run_style(base, fg, bg, 0, false, &colors);
+        assert_eq!(s.fg, base.fg);
+        assert_eq!(s.bg, base.bg);
+    }
+
+    #[test]
+    fn v6_painted_screen_explicit_run_paints_game_colour() {
+        // End-to-end through draw_painted_screen: an explicit Standard-3 fg run
+        // stamps with the palette colour, while a Default/Default run keeps the
+        // theme base (Shogun's regression pin — its runs are all Default/Default).
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let base = colors.theme.get("upper_window").style;
+        let coloured = crate::engine::PxText {
+            y: 1, x: 1, text: "N".into(), style: 0,
+            fg: crate::state::pack_zcolour(zvm::screen::ZColour::Standard(3)), bg: 0,
+        };
+        let plain = crate::engine::PxText { y: 1, x: 25, text: "X".into(), style: 0, fg: 0, bg: 0 };
+        let refs: Vec<&crate::engine::PxText> = vec![&coloured, &plain];
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buf = Buffer::empty(area);
+        draw_painted_screen(&refs, 0, area, &mut buf, base, true, &colors);
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().fg,
+            crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(3), &colors),
+            "explicit game colour reaches the buffer cell"
+        );
+        // The plain run at col 3 (x=25 → (25-1)/8 = 3) keeps the theme fg.
+        assert_eq!(buf.cell((3, 0)).unwrap().fg, base.fg.unwrap_or(ratatui::style::Color::Reset), "Default run stays theme-styled");
+    }
+
+    #[test]
+    fn v6_anchored_band_honours_explicit_run_colour() {
+        // The frameless status band resolves an explicit run's colour for its row
+        // (Zork0's ribbon labels), while Shogun's Default/Default band keeps theme.
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let base = colors.theme.get("upper_window").style;
+        let coloured = crate::engine::PxText {
+            y: 1, x: 1, text: "West of House".into(), style: 0,
+            fg: crate::state::pack_zcolour(zvm::screen::ZColour::Standard(4)), bg: 0,
+        };
+        let refs: Vec<&crate::engine::PxText> = vec![&coloured];
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buf = Buffer::empty(area);
+        draw_anchored_status_band(&refs, 40, area, &mut buf, base, true, &colors);
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().fg,
+            crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(4), &colors),
+            "band row adopts the explicit run colour"
+        );
+        // Shogun regression: a Default/Default run yields exactly the theme fg.
+        let plain = crate::engine::PxText { y: 1, x: 1, text: "Shogun".into(), style: 0, fg: 0, bg: 0 };
+        let prefs: Vec<&crate::engine::PxText> = vec![&plain];
+        let mut buf2 = Buffer::empty(area);
+        draw_anchored_status_band(&prefs, 40, area, &mut buf2, base, true, &colors);
+        assert_eq!(buf2.cell((0, 0)).unwrap().fg, base.fg.unwrap_or(ratatui::style::Color::Reset), "Default band stays theme-styled");
     }
 
     /// TEMP measurement harness (SQ-0469). Times the three raster phases —
