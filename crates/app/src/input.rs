@@ -2924,6 +2924,7 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         18 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.record_turn_history = !cs.working.record_turn_history; } }
         21 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hint_skip_screen_warning = !cs.working.hint_skip_screen_warning; } }
         24 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_v6_render(&mut cs.working.v6_render, 1); } }
+        25 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_arrow_keys = !cs.working.v6_arrow_keys; } }
         _ => {}
     }
 }
@@ -2983,6 +2984,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
             working.interpreter_number = if pos == 0 { None } else { Some(pos as u8) };
         }
         21 => working.hint_skip_screen_warning = !working.hint_skip_screen_warning,
+        25 => working.v6_arrow_keys = !working.v6_arrow_keys,
         22 => working.text_margin_x = (working.text_margin_x as i32 + delta).clamp(0, 8) as u16,
         23 => working.text_margin_y = (working.text_margin_y as i32 + delta).clamp(0, 8) as u16,
         24 => config_cycle_v6_render(&mut working.v6_render, delta),

@@ -38,6 +38,7 @@ pub(crate) const CONFIG_ROWS: &[(&str, ConfigRowKind, &str)] = &[
     ("text_margin_x",        ConfigRowKind::Num,  "Blank columns reserved on each side inside the story text pane. Imported from garglk tmarginx. Use ← / → to adjust."),
     ("text_margin_y",        ConfigRowKind::Num,  "Blank rows reserved above and below the story text. Imported from garglk tmarginy. Use ← / → to adjust."),
     ("v6_render",            ConfigRowKind::Enum, "How v6 graphical games (Zork Zero) render: hybrid (crisp terminal story in a scaled pixel frame), raster (whole pane as one pixel image), or frameless (no frame — full-pane text transcript with a status band and inline pictures)."),
+    ("v6_arrow_keys",        ConfigRowKind::Bool, "Forward arrow keypresses to v6 stories (some bind them to movement); off = arrows drive babelmap's scrollback and map panning instead."),
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -244,6 +245,7 @@ fn config_row_value(cfg: &crate::config::Config, i: usize) -> String {
             crate::config::V6RenderMode::Raster => "raster".to_string(),
             crate::config::V6RenderMode::Frameless => "frameless".to_string(),
         },
+        25 => bool_str(cfg.v6_arrow_keys),
         _ => String::new(),
     }
 }

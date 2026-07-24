@@ -119,8 +119,8 @@ through.
 Several v6 titles bind the arrow keys straight to movement — press ↑ and your
 character walks north. That's authentic, but it collides with babelmap's own
 use of arrows for scrollback recall and map panning, which some players would
-rather keep. Set `v6_arrow_keys = false` in the config (or launch with
-`--no-v6-arrows`) and arrows are withheld from v6 stories specifically:
+rather keep. Set `v6_arrow_keys = false` in the config (or flip it right in
+the settings screen) and arrows are withheld from v6 stories specifically:
 instead of being delivered as a ZSCII cursor code, the keypress falls through
 to whatever babelmap would do with it if no game input were pending —
 command-history recall or map panning, depending on focus. Enter and every
