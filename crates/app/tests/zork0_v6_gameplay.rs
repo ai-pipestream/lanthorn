@@ -4,7 +4,7 @@
 //! Drives `stories/zork0-r393-s890714.z6` headlessly past boot and asserts:
 //! no fault; the banner **compass overlay** — Zork0 draws 8 direction-
 //! indicator tiles (picture numbers in `9..=24`) into window 1 at the
-//! Rect-derived banner centre `x=139, y=1` — fires correctly for the initial
+//! Rect-derived banner centre `x=277, y=1` — fires correctly for the initial
 //! room; a single safe movement command doesn't fault and leaves window 0's
 //! box unchanged. Mirrors the skip-if-missing / Pict-source setup pattern in
 //! `zork0_v6_windows.rs`.
@@ -30,12 +30,12 @@ const COMPASS_PICS: std::ops::RangeInclusive<u16> = 9..=24;
 
 /// A `@draw_picture(...)` trace line is a compass-overlay redraw iff its
 /// picture number falls in `COMPASS_PICS` AND it targets window 1 at the
-/// banner centre (y=1, x=139).
+/// banner centre (y=1, x=277).
 fn is_compass_draw(line: &str) -> bool {
     if !line.starts_with("@draw_picture(") {
         return false;
     }
-    if !(line.contains("window=1") && line.contains("x=139") && line.contains("y=1")) {
+    if !(line.contains("window=1") && line.contains("x=277") && line.contains("y=1")) {
         return false;
     }
     let Some(rest) = line.strip_prefix("@draw_picture(number=") else { return false };
@@ -90,7 +90,7 @@ fn zork0_v6_gameplay_smoke_boot_compass_and_one_safe_move() {
     assert_eq!(
         boot_compass_draws.len(),
         8,
-        "expected 8 compass-overlay draw_picture events (number in 9..=24, window=1, y=1, x=139) at boot, got: {boot_trace:?}"
+        "expected 8 compass-overlay draw_picture events (number in 9..=24, window=1, y=1, x=277) at boot, got: {boot_trace:?}"
     );
     for l in &boot_compass_draws {
         // Every compass tile's picture number must be in the direction-tile range.

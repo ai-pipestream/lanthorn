@@ -145,6 +145,32 @@ pub(crate) fn clamp_runs(
 /// The line separator consumed by a split is dropped from the emitted text
 /// (the element boundary itself is the break) and its style-chunk char is
 /// consumed in lockstep.
+/// The factor by which Infocom v6 artwork (320×200 MCGA) is scaled into the
+/// presentation UNIT space. Reference interpreters (Frotz DOS/Amiga, `bcpic.c`
+/// `scaler = 2`; SDL `m_v6scale = 2`) present v6 on a 640×400 screen and blit
+/// each 320×200 picture at 2×, returning the doubled dimensions to the game so
+/// its layout math lands on the 640-wide screen (SQ-0479). Both the screen
+/// seeding (2×Reso) and every picture crossing into unit space use this one
+/// factor, so screen and picture dimensions scale together — the `is_content_art`
+/// ratios (below) stay valid because both numerator and denominator double.
+pub(crate) const V6_ART_SCALE: u32 = 2;
+
+/// Scale a native-resolution v6 picture into UNIT space (×[`V6_ART_SCALE`],
+/// nearest-neighbour — the DOS-authentic crisp pixel double). Every picture that
+/// crosses from PictSource's art-native pixels into the 640×400 unit screen goes
+/// through here exactly once, so window canvases, inline floats and the
+/// `is_content_art` classification all see one consistent unit-space size.
+fn v6_scaled_art(img: &image::DynamicImage) -> image::DynamicImage {
+    use image::GenericImageView;
+    let (w, h) = img.dimensions();
+    image::DynamicImage::ImageRgba8(image::imageops::resize(
+        img,
+        w * V6_ART_SCALE,
+        h * V6_ART_SCALE,
+        image::imageops::FilterType::Nearest,
+    ))
+}
+
 /// Classify a graphics-window picture as CONTENT art (worth an inline band in
 /// frameless mode) versus decorative FRAME art (borders/tiles — left canvas-only).
 /// (SQ-0461 decision 3)
@@ -154,10 +180,13 @@ pub(crate) fn clamp_runs(
 /// screen width** — Shogun's 23px side borders) are always FRAME, as is anything
 /// that doesn't clearly meet a content rule (short bands, small compass tiles).
 ///
-/// Worked examples (screen 320×200):
-/// - Shogun title splash 320×200 → area 100% ⇒ **content**.
-/// - Shogun side border 23×200 → width 23 ≤ 48 (15%) ⇒ **frame**.
-/// - Zork Zero compass tile ~24×24 → width 24 < 60% and area ~0.9% ⇒ **frame**.
+/// Worked examples (screen 640×400 unit space; picture dims are the native
+/// 320×200 art scaled by [`V6_ART_SCALE`] before the ratio, so both sides of
+/// every comparison are in unit space and the ratios are unchanged from the
+/// pre-SQ-0479 320×200-everywhere world):
+/// - Shogun title splash 320×200 →×2 640×400 → area 100% ⇒ **content**.
+/// - Shogun side border 23×200 →×2 46×400 → width 46 ≤ 96 (15% of 640) ⇒ **frame**.
+/// - Zork Zero compass tile ~24×24 →×2 48×48 → width 48 < 60% and area ~0.9% ⇒ **frame**.
 fn is_content_art(pic_w: u32, pic_h: u32, screen_w: u32, screen_h: u32) -> bool {
     let screen_w = screen_w.max(1);
     let screen_h = screen_h.max(1);
@@ -469,18 +498,33 @@ impl GameSession {
         let mut machine = Machine::with_output(mem, sink);
         machine.set_honor_game_colours(honor_game_colours);
         machine.set_sound_available(sound_available);
+        // v6 (SQ-0479): the game lays out on the 640×400 UNIT screen, so
+        // `picture_data` must report the doubled (unit-space) picture sizes —
+        // Frotz's Amiga/DOS interpreter returns `scaler * size` for every pic.
+        // PictSource keeps the raw art-native dims; only the game-facing table
+        // is scaled here (one crossing into unit space).
+        let picture_dims = if machine.mem.version() == 6 {
+            picture_dims
+                .into_iter()
+                .map(|(n, w, h)| (n, w * V6_ART_SCALE as u16, h * V6_ART_SCALE as u16))
+                .collect()
+        } else {
+            picture_dims
+        };
         machine.set_picture_dims(picture_dims);
         machine.set_interpreter_number(interpreter_number);
         machine.init_caps();
-        // v6: advertise the game's NATIVE picture resolution (the Blorb `Reso`
-        // standard window, default 320×200) as the screen size BEFORE the boot
-        // loop below. A v6 game lays out its windows AND its hardcoded pixel art
-        // during boot against the reported screen dims; reporting the terminal's
-        // cell×8 size instead made the windows stretch while the art stayed at
-        // its native coords (SQ-0186). init_caps seeded the v1–5 default; this
+        // v6 (SQ-0479): present the reference-authentic 640×400 UNIT screen —
+        // the Blorb `Reso` standard window (the ART resolution, default 320×200)
+        // scaled by `V6_ART_SCALE`, matching Frotz's Amiga/DOS profile (640×400,
+        // 8×16 cell → 80×25). The screen and the picture dims (above) double
+        // together, so the game's window/art layout math and our `is_content_art`
+        // ratios stay consistent. init_caps seeded the v1–5 default; this
         // overrides it for v6 only, before the game can read it.
         if machine.mem.version() == 6 {
-            let (w, h) = v6_screen_px.unwrap_or((320, 200));
+            let (art_w, art_h) = v6_screen_px.unwrap_or((320, 200));
+            let w = art_w.saturating_mul(V6_ART_SCALE as u16);
+            let h = art_h.saturating_mul(V6_ART_SCALE as u16);
             let cols = (w / zvm::screen::V6_FONT_WIDTH).clamp(1, 255) as u8;
             let rows = (h / zvm::screen::V6_FONT_HEIGHT).clamp(1, 255) as u8;
             machine.set_screen_dims(rows, cols);
@@ -838,6 +882,10 @@ impl GameSession {
                 // content-art image (Shogun's ship) aligns InlineUp (full-size,
                 // its own band); a genuine drop-cap (Zork Zero's initial letter,
                 // a small tile) keeps MarginLeft.
+                // Scale into unit space (SQ-0479) so the float renders at its
+                // authentic 2× size beside the 8×16 text and its reserved rows
+                // (height/16) stay consistent with the 16px grid.
+                let img = v6_scaled_art(&img);
                 let (iw, ih) = (img.width(), img.height());
                 let (screen_w, screen_h) = self.v6_screen_px();
                 let align = win0_pic_align(iw, ih, screen_w, screen_h);
@@ -876,13 +924,23 @@ impl GameSession {
         // (window_size "does not change the current display", ZMSD §15).
         canvas.grow_to(pw, ph);
         if ev.erase {
-            let dims = self.pict_source.as_mut().and_then(|s| s.dims(ev.number as u32));
+            // Picture dims are art-native; the canvas is unit space, so scale the
+            // erased footprint by V6_ART_SCALE to match the doubled draw (SQ-0479).
+            let dims = self
+                .pict_source
+                .as_mut()
+                .and_then(|s| s.dims(ev.number as u32))
+                .map(|(w, h)| (w * V6_ART_SCALE, h * V6_ART_SCALE));
             let (ew, eh) = dims.unwrap_or((pw, ph));
             // Clip the erase to the window box.
             let ew = ew.min(pw.saturating_sub(dx.max(0) as u32));
             let eh = eh.min(ph.saturating_sub(dy.max(0) as u32));
             canvas.erase_rect(dx, dy, ew, eh);
         } else if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
+            // Blit the art at 2× into the unit-space window canvas (SQ-0479): the
+            // game placed it at unit coords (dx,dy) expecting the Amiga/DOS
+            // doubled picture, so the scaled pixels fill the box the game reserved.
+            let img = v6_scaled_art(&img);
             canvas.draw_image_clipped(&img, dx, dy, (pw, ph));
             canvas.z_seq = crate::graphics::next_draw_seq();
             // SQ-0461 decision 3: a large CONTENT-art draw into a graphics window
@@ -2850,11 +2908,13 @@ mod tests {
         // boot run (picture_data is called during boot, which happens inside
         // new_with_trace itself — the Phase 0 boot-tracing lesson), so it must
         // be visible on the constructed session even for a story that quits
-        // immediately in its main routine.
+        // immediately in its main routine. For v6 the dims are scaled into unit
+        // space by V6_ART_SCALE (SQ-0479): `picture_data` reports the doubled
+        // sizes the game lays out on the 640×400 screen with.
         let dims = vec![(5u16, 100u16, 60u16), (9u16, 20u16, 30u16)];
         let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone(), None)
             .expect("v6 session");
-        assert_eq!(session.machine.picture_dims, dims);
+        assert_eq!(session.machine.picture_dims, vec![(5, 200, 120), (9, 40, 60)]);
     }
 
     /// Variant of `read_char_story_v5`: after the read_char completes, instead
@@ -3496,17 +3556,19 @@ mod tests {
         let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
 
         let mut windows: [ZWindow; 8] = Default::default();
-        // Window coords are the spec's 1-based pixels ((1,1) = top-left).
+        // Window coords are the spec's 1-based pixels ((1,1) = top-left). The v6
+        // cell is 8×16 (SQ-0479): X quantizes /8, Y /16 — so a window at cell
+        // ROW 1 starts at pixel y=17 (one 16px status row below the top).
         // Window 0: the main scrolling window, at (0, 1) cell, 80x20 cells.
         // attributes 15 = the boot default (wrapping on → transcript Buffer;
         // a cleared wrapping bit would mean positioned paint mode → Grid).
-        windows[0] = ZWindow { x_coord: 1, y_coord: 9, x_size: 640, y_size: 160, attributes: 15, ..Default::default() };
+        windows[0] = ZWindow { x_coord: 1, y_coord: 17, x_size: 640, y_size: 320, attributes: 15, ..Default::default() };
         windows[0].grid.resize(20, 80);
-        // Window 1: a one-row status strip along the top, at (0, 0) cell, 80x1 cells.
-        windows[1] = ZWindow { x_coord: 1, y_coord: 1, x_size: 640, y_size: 8, ..Default::default() };
+        // Window 1: a one-row (16px) status strip along the top, at (0, 0) cell, 80x1 cells.
+        windows[1] = ZWindow { x_coord: 1, y_coord: 1, x_size: 640, y_size: 16, ..Default::default() };
         windows[1].grid.resize(1, 80);
         // Window 7: a small picture window at (2, 1) cell, 8x6 cells.
-        windows[7] = ZWindow { x_coord: 17, y_coord: 9, x_size: 64, y_size: 48, ..Default::default() };
+        windows[7] = ZWindow { x_coord: 17, y_coord: 17, x_size: 64, y_size: 96, ..Default::default() };
         windows[7].grid.resize(6, 8);
         machine.screen.v6 = Some(V6Windows { windows, current: 1 });
 
@@ -3537,21 +3599,21 @@ mod tests {
         assert_eq!(items.len(), 4, "graphics(7) + buffer(0) + grid(1) + grid(7)");
 
         let g7 = &items[0];
-        assert_eq!((g7.x, g7.y, g7.w, g7.h), (2, 1, 8, 6), "window 7's absolute cell rect (pixel / 8)");
+        assert_eq!((g7.x, g7.y, g7.w, g7.h), (2, 1, 8, 6), "window 7's absolute cell rect (x px/8, y px/16)");
         match &g7.node {
             WinNode::Graphics(GraphicsWindow { win, .. }) => assert_eq!(*win, 7),
             other => panic!("expected window 7's Graphics leaf first (background), got {other:?}"),
         }
 
         let w0 = &items[1];
-        assert_eq!((w0.x, w0.y, w0.w, w0.h), (0, 1, 80, 20), "window 0's absolute cell rect (pixel / 8)");
+        assert_eq!((w0.x, w0.y, w0.w, w0.h), (0, 1, 80, 20), "window 0's absolute cell rect (x px/8, y px/16)");
         match &w0.node {
             WinNode::Buffer(b) => assert!(b.primary, "window 0 is the primary scrolling buffer"),
             other => panic!("expected window 0's Buffer leaf, got {other:?}"),
         }
 
         let w1 = &items[2];
-        assert_eq!((w1.x, w1.y, w1.w, w1.h), (0, 0, 80, 1), "window 1's absolute cell rect (pixel / 8)");
+        assert_eq!((w1.x, w1.y, w1.w, w1.h), (0, 0, 80, 1), "window 1's absolute cell rect (x px/8, y px/16)");
         match &w1.node {
             WinNode::Grid(g) => assert_eq!((g.cols, g.rows), (80, 1)),
             other => panic!("expected window 1's Grid leaf, got {other:?}"),

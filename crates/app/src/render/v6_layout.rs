@@ -112,8 +112,12 @@ pub(crate) fn blit_clipped_src(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy
     }
 }
 
-/// The v6 font cell size in game pixels — matches `zvm::screen::V6_FONT_WIDTH`.
-const FONT: u32 = 8;
+/// The v6 font cell size in game pixels — matches `zvm::screen::V6_FONT_WIDTH`
+/// / `V6_FONT_HEIGHT`. The cell is NON-SQUARE (8×16, SQ-0479): X quantizes by
+/// `FONT_W`, Y by `FONT_H`. Glyph masters are 8×8; `blit_glyph` fills the 8×16
+/// cell by nearest-neighbour vertical doubling (DOS-authentic).
+const FONT_W: u32 = 8;
+const FONT_H: u32 = 16;
 
 /// A window-0 inline picture (drop-cap, room icon) floated at the left margin
 /// of the story text: anchored to a wrapped display row, indenting the rows
@@ -298,8 +302,8 @@ pub fn build_chrome_canvas(
                     // turns its menu window into a 1-px caret after printing).
                     let py = t.y.max(1) as u32 - 1;
                     for (i, ch) in t.text.chars().enumerate() {
-                        let px = (t.x.max(1) as u32 - 1) + i as u32 * FONT;
-                        crate::render::bitfont::blit_glyph(&mut canvas, ch, px, py, FONT, FONT, fg, bg);
+                        let px = (t.x.max(1) as u32 - 1) + i as u32 * FONT_W;
+                        crate::render::bitfont::blit_glyph(&mut canvas, ch, px, py, FONT_W, FONT_H, fg, bg);
                     }
                 }
                 continue;
@@ -308,18 +312,18 @@ pub fn build_chrome_canvas(
                 for col in 0..g.cols {
                     let idx = row as usize * g.cols as usize + col as usize;
                     let Some(cell) = g.cells.get(idx) else { continue };
-                    let px = ox + col as u32 * FONT;
-                    let py = oy + row as u32 * FONT;
+                    let px = ox + col as u32 * FONT_W;
+                    let py = oy + row as u32 * FONT_H;
                     if cell.ch == '\0' || cell.ch == ' ' {
                         if cell.bg != 0 {
                             let b = packed_to_rgba(cell.bg, Rgba([0, 0, 0, 255]), colors);
-                            fill_cell(&mut canvas, px, py, FONT, FONT, b);
+                            fill_cell(&mut canvas, px, py, FONT_W, FONT_H, b);
                         }
                         continue;
                     }
                     let fg = packed_to_rgba(cell.fg, default_fg, colors);
                     let cellbg = (cell.bg != 0).then(|| packed_to_rgba(cell.bg, Rgba([0, 0, 0, 255]), colors));
-                    crate::render::bitfont::blit_glyph(&mut canvas, cell.ch, px, py, FONT, FONT, fg, cellbg);
+                    crate::render::bitfont::blit_glyph(&mut canvas, cell.ch, px, py, FONT_W, FONT_H, fg, cellbg);
                 }
             }
         }
@@ -520,18 +524,18 @@ pub fn chrome_bands(pane: ratatui::layout::Rect, viewport: ratatui::layout::Rect
 /// FONT×FONT cell, transparent glyph bg (draws over chrome/background art).
 /// Clipped to `rows` lines and `cols` columns.
 pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32, cols: u16, rows: u16, fg: Rgba<u8>) {
-    let region_h = rows as u32 * FONT;
+    let region_h = rows as u32 * FONT_H;
     // Floats first (text draws over/beside them). A float that has partially
     // scrolled off the top (row < 0) is drawn cropped from its own top.
     for f in &main.floats {
         let src = &*f.img;
-        let crop_top = if f.row < 0 { (-f.row) as u32 * FONT } else { 0 };
+        let crop_top = if f.row < 0 { (-f.row) as u32 * FONT_H } else { 0 };
         if crop_top >= src.height() {
             continue;
         }
-        let dy = oy + (f.row.max(0) as u32) * FONT;
+        let dy = oy + (f.row.max(0) as u32) * FONT_H;
         let max_h = region_h.saturating_sub(dy - oy);
-        blit_clipped_src(canvas, src, ox, dy, crop_top, cols as u32 * FONT, max_h);
+        blit_clipped_src(canvas, src, ox, dy, crop_top, cols as u32 * FONT_W, max_h);
     }
     let indent_at = |row: u32| -> u32 {
         main.floats
@@ -551,7 +555,7 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
         let avail = (cols as u32).saturating_sub(indent);
         let mut drawn = 0u32;
         for (col, glyph) in line.chars().take(avail as usize).enumerate() {
-            crate::render::bitfont::blit_glyph(canvas, glyph, ox + (indent + col as u32) * FONT, oy + row * FONT, FONT, FONT, fg, None);
+            crate::render::bitfont::blit_glyph(canvas, glyph, ox + (indent + col as u32) * FONT_W, oy + row * FONT_H, FONT_W, FONT_H, fg, None);
             drawn = col as u32 + 1;
         }
         last_row_end = indent + drawn;
@@ -571,10 +575,10 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
                 if col >= cols as u32 {
                     break;
                 }
-                crate::render::bitfont::blit_glyph(canvas, glyph, ox + col * FONT, oy + input_row * FONT, FONT, FONT, fg, None);
+                crate::render::bitfont::blit_glyph(canvas, glyph, ox + col * FONT_W, oy + input_row * FONT_H, FONT_W, FONT_H, fg, None);
             }
             let caret = (start + main.cursor_col as u32).min(cols.saturating_sub(1) as u32);
-            fill_cell(canvas, ox + caret * FONT, oy + input_row * FONT, FONT, FONT, fg);
+            fill_cell(canvas, ox + caret * FONT_W, oy + input_row * FONT_H, FONT_W, FONT_H, fg);
         }
     }
 }
@@ -662,20 +666,20 @@ mod tests {
         // picture); rows past it are flush left; the float's pixels are blitted
         // at its anchored row.
         let cell_has_ink = |c: &RgbaImage, col: u32, row: u32| -> bool {
-            (0..FONT).any(|dy| (0..FONT).any(|dx| c.get_pixel(col * FONT + dx, row * FONT + dy)[3] > 0))
+            (0..FONT_H).any(|dy| (0..FONT_W).any(|dx| c.get_pixel(col * FONT_W + dx, row * FONT_H + dy)[3] > 0))
         };
-        // A 16x16 opaque red image → float of 2 rows.
-        let img = RgbaImage::from_pixel(16, 16, Rgba([200, 20, 20, 255]));
+        // A 16×32 opaque red image → float of 2 rows (32px / FONT_H(16) = 2).
+        let img = RgbaImage::from_pixel(16, 32, Rgba([200, 20, 20, 255]));
         let main = MainText {
             lines: vec!["AAAA".into(), "BBBB".into(), "CCCC".into()],
             input: String::new(), cursor_col: 0, awaiting: false,
             floats: vec![RasterFloat { row: 0, rows: 2, indent_cols: 3, img: Arc::new(img) }],
         };
-        let mut canvas = RgbaImage::new(10 * FONT, 5 * FONT);
+        let mut canvas = RgbaImage::new(10 * FONT_W, 5 * FONT_H);
         draw_story_text(&mut canvas, &main, 0, 0, 10, 5, Rgba([255, 255, 255, 255]));
         // Rows 0-1 (beside float): glyph ink starts at column 3.
         assert!(cell_has_ink(&canvas, 0, 0), "float pixels occupy row 0 col 0");
-        assert_eq!(*canvas.get_pixel(4, 4), Rgba([200, 20, 20, 255]), "float blitted at its row");
+        assert_eq!(*canvas.get_pixel(4, 20), Rgba([200, 20, 20, 255]), "float blitted at its row (spans y 0..32)");
         assert!(cell_has_ink(&canvas, 3, 0), "row 0 col 3 inked (text beside the float)");
         assert!(cell_has_ink(&canvas, 3, 1), "row 1 col 3 inked (text beside the float)");
         // Row 2 (past the float): ink flush left.
@@ -725,7 +729,7 @@ mod tests {
         // SQ-0470a: the live input sits on the game's kept ">" prompt row,
         // appended right after it — NOT a fresh row below it.
         let cell_has_ink = |c: &RgbaImage, col: u32, row: u32| -> bool {
-            (0..FONT).any(|dy| (0..FONT).any(|dx| c.get_pixel(col * FONT + dx, row * FONT + dy)[3] > 0))
+            (0..FONT_H).any(|dy| (0..FONT_W).any(|dx| c.get_pixel(col * FONT_W + dx, row * FONT_H + dy)[3] > 0))
         };
         let main = MainText {
             lines: vec!["Room desc.".into(), ">".into()],
@@ -734,7 +738,7 @@ mod tests {
             awaiting: true,
             floats: vec![],
         };
-        let mut canvas = RgbaImage::new(20 * FONT, 5 * FONT);
+        let mut canvas = RgbaImage::new(20 * FONT_W, 5 * FONT_H);
         draw_story_text(&mut canvas, &main, 0, 0, 20, 5, Rgba([255, 255, 255, 255]));
         // ">" is on row 1; input "go" appends after it at cols 1 and 2.
         assert!(cell_has_ink(&canvas, 1, 1), "input 'g' on the prompt row, after '>'");
@@ -751,7 +755,7 @@ mod tests {
         // input starts a clean row of its own (col 0) — the universal rule that
         // makes SQ-0470a correct for both prompt and non-prompt endings.
         let cell_has_ink = |c: &RgbaImage, col: u32, row: u32| -> bool {
-            (0..FONT).any(|dy| (0..FONT).any(|dx| c.get_pixel(col * FONT + dx, row * FONT + dy)[3] > 0))
+            (0..FONT_H).any(|dy| (0..FONT_W).any(|dx| c.get_pixel(col * FONT_W + dx, row * FONT_H + dy)[3] > 0))
         };
         let main = MainText {
             lines: vec!["Prose line.".into(), String::new()],
@@ -760,7 +764,7 @@ mod tests {
             awaiting: true,
             floats: vec![],
         };
-        let mut canvas = RgbaImage::new(20 * FONT, 5 * FONT);
+        let mut canvas = RgbaImage::new(20 * FONT_W, 5 * FONT_H);
         draw_story_text(&mut canvas, &main, 0, 0, 20, 5, Rgba([255, 255, 255, 255]));
         assert!(cell_has_ink(&canvas, 0, 1), "input on the empty last row at col 0");
         assert!(!(0..20).any(|col| cell_has_ink(&canvas, col, 2)), "not the row below");
@@ -769,11 +773,12 @@ mod tests {
     #[test]
     fn story_text_scrolled_float_is_cropped_not_pinned() {
         // A float whose anchor scrolled above the view (row = -1) draws only its
-        // remaining rows, cropped from its own top.
-        let mut img = RgbaImage::new(8, 16);
-        for y in 0..16 {
-            // Top half green, bottom half blue — the visible part must be blue.
-            let c = if y < 8 { Rgba([0, 200, 0, 255]) } else { Rgba([0, 0, 200, 255]) };
+        // remaining rows, cropped from its own top (one FONT_H = 16px row).
+        let mut img = RgbaImage::new(8, 32);
+        for y in 0..32 {
+            // Top row (y<16) green, bottom row (y>=16) blue — the visible part,
+            // after cropping the scrolled-off top FONT_H row, must be blue.
+            let c = if y < 16 { Rgba([0, 200, 0, 255]) } else { Rgba([0, 0, 200, 255]) };
             for x in 0..8 { img.put_pixel(x, y, c); }
         }
         let main = MainText {
@@ -781,7 +786,7 @@ mod tests {
             input: String::new(), cursor_col: 0, awaiting: false,
             floats: vec![RasterFloat { row: -1, rows: 2, indent_cols: 2, img: Arc::new(img) }],
         };
-        let mut canvas = RgbaImage::new(10 * FONT, 3 * FONT);
+        let mut canvas = RgbaImage::new(10 * FONT_W, 3 * FONT_H);
         draw_story_text(&mut canvas, &main, 0, 0, 10, 3, Rgba([255, 255, 255, 255]));
         assert_eq!(*canvas.get_pixel(4, 4), Rgba([0, 0, 200, 255]), "visible slice is the float's BOTTOM half");
     }
@@ -877,7 +882,7 @@ mod tests {
         let mut cells = vec![GridCell { ch: ' ', style: 0, fg: 0, bg: 0, link: 0, glk_style: 0 }; 6];
         cells[1 * 3 + 2] = GridCell { ch: 'A', style: 0, fg: 0, bg: 0, link: 0, glk_style: 0 };
         let win = PositionedWindow {
-            x: 0, y: 0, w: 3, h: 2, x_px: 10, y_px: 4, w_px: 24, h_px: 16, left_margin: 0, right_margin: 0,
+            x: 0, y: 0, w: 3, h: 2, x_px: 10, y_px: 4, w_px: 24, h_px: 32, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
                 cols: 3, rows: 2, cells, active_rows: 2, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
@@ -886,10 +891,11 @@ mod tests {
         };
         let chrome: Vec<&PositionedWindow> = vec![&win];
         let fg = Rgba([0, 255, 255, 255]);
-        let c = build_chrome_canvas(&chrome, (40, 24), fg, Rgba([0, 0, 0, 255]), &colors());
-        // cell (col=2,row=1) native px box is (26,12)..(34,20).
+        let c = build_chrome_canvas(&chrome, (40, 40), fg, Rgba([0, 0, 0, 255]), &colors());
+        // cell (col=2,row=1) native px box: x = 10 + 2·FONT_W(8) = 26..34,
+        // y = 4 + 1·FONT_H(16) = 20..36 (non-square 8×16 cell, SQ-0479).
         assert!(
-            (26..34).any(|x| (12..20).any(|y| *c.get_pixel(x, y) == fg)),
+            (26..34).any(|x| (20..36).any(|y| *c.get_pixel(x, y) == fg)),
             "glyph fg pixels appear within the status cell's native box"
         );
     }

@@ -281,9 +281,10 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             );
             let picture_dims = picts.all_pict_dims();
             // v6: the Blorb `Reso` standard window (e.g. Zork0 → 320×200) is the
-            // game's native picture resolution; `new_with_trace` advertises it as
-            // the screen size before boot so windows + hardcoded art align
-            // (SQ-0186). `None` (no Reso / non-v6) falls back to 320×200 inside.
+            // game's native ART resolution. `new_with_trace` advertises 2× it —
+            // the reference-authentic 640×400 unit screen (SQ-0479) — before boot
+            // so windows + hardcoded art align. `None` (no Reso / non-v6) falls
+            // back to 320×200 art → 640×400 screen inside.
             let v6_screen_px = picts.std_window();
 
             // `--debug` (SQ-0449): trace from the first boot instruction so the

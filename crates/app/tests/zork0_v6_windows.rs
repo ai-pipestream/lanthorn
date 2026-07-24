@@ -99,15 +99,15 @@ fn zork0_v6_windows_smoke() {
             w.y_size
         );
     }
-    // With the Blorb `Reso` native resolution (320×200) advertised before boot
-    // AND the Rect placement pictures answering `picture_data` (SQ-0186), Zork0
-    // computes its real layout: the full-screen graphics window (7) is 320×200
-    // and the main text window (0) is inset to 234×160 inside the border art
-    // (split pseudo-picture #387 = 43×39 → win0 at (44,40), 320−2·43 wide,
-    // 200−40 tall).
-    assert_eq!((v6.windows[0].x_size, v6.windows[0].y_size), (234, 160), "window 0 geometry");
-    assert_eq!((v6.windows[0].x_coord, v6.windows[0].y_coord), (44, 40), "window 0 position (1-based)");
-    assert_eq!((v6.windows[7].x_size, v6.windows[7].y_size), (320, 200), "window 7 (graphics) geometry");
+    // With the reference-authentic 640×400 unit screen advertised before boot
+    // (SQ-0479: 2× the 320×200 Blorb `Reso`) AND the Rect placement pictures
+    // answering `picture_data` with DOUBLED dims, Zork0 computes its real layout:
+    // the full-screen graphics window (7) is 640×400 and the main text window (0)
+    // is inset to 468×320 inside the border art (split pseudo-picture #387 = 86×78
+    // — doubled from 43×39 — → win0 at (87,79), 640−2·86 wide, 400−78 tall).
+    assert_eq!((v6.windows[0].x_size, v6.windows[0].y_size), (468, 320), "window 0 geometry");
+    assert_eq!((v6.windows[0].x_coord, v6.windows[0].y_coord), (87, 79), "window 0 position (1-based)");
+    assert_eq!((v6.windows[7].x_size, v6.windows[7].y_size), (640, 400), "window 7 (graphics) geometry");
 
     // Thread the Pict source onto the session (Plan 1b Task 2), the same way
     // `startup.rs`'s ZCode arm does after construction: `drain_turn` uses it to
@@ -178,8 +178,9 @@ fn zork0_v6_windows_smoke() {
 /// Phase 1c Task 2: `PositionedWindow` now carries game-pixel rects alongside
 /// the existing cell rect. Boots Zork0 the same way `zork0_v6_windows_smoke`
 /// does, builds the initial v6 `ScreenModel`, and asserts every positioned
-/// window's pixel rect is consistent with its cell rect at 8 px/cell
-/// (`cell = px / 8`) and that live windows have a nonzero pixel size.
+/// window's pixel rect is consistent with its cell rect at the non-square 8×16
+/// v6 cell (`cell_x = px_x/8`, `cell_y = px_y/16`, SQ-0479) and that live windows
+/// have a nonzero pixel size.
 #[test]
 fn v6_positioned_windows_carry_game_pixel_rects() {
     let story_path = stories_dir().join("zork0-r393-s890714.z6");
@@ -207,7 +208,7 @@ fn v6_positioned_windows_carry_game_pixel_rects() {
     assert!(!items.is_empty(), "v6 model has positioned windows");
     for it in items {
         assert_eq!(it.x, it.x_px / 8, "cell x derived from px x");
-        assert_eq!(it.y, it.y_px / 8, "cell y derived from px y");
+        assert_eq!(it.y, it.y_px / 16, "cell y derived from px y (16px cell height)");
         assert!(it.w_px > 0 && it.h_px > 0, "live window has nonzero pixel size");
     }
 }
@@ -257,7 +258,7 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
     let main = v6::MainText { lines: vec!["X".repeat(30)], input: String::new(), cursor_col: 0, awaiting: false, floats: Vec::new() };
     let chrome_only = canvas.clone(); // snapshot BEFORE story text, to know which pixels are chrome
     if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
-        let (cols, rows) = ((sw / 8).max(1) as u16, (sh / 8).max(1) as u16);
+        let (cols, rows) = ((sw / 8).max(1) as u16, (sh / 16).max(1) as u16);
         v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
     }
     // non-empty
@@ -309,11 +310,11 @@ fn zork0_v6_story_classified_and_clear_interior_inside_frame() {
     let layout = v6::classify_windows(items);
 
     // Story is the primary buffer window (Zork0's window 0), inset inside the
-    // 320×200 frame at the Rect-derived position (1-based (44,40) → 0-based
-    // (43,39), 234×160 — see the geometry assertions in the smoke test).
+    // 640×400 frame (SQ-0479) at the Rect-derived position (1-based (87,79) →
+    // 0-based (86,78), 468×320 — see the geometry assertions in the smoke test).
     let story = layout.story.expect("Zork0 boot has a primary story buffer");
     assert!(matches!(&story.node, WinNode::Buffer(b) if b.primary));
-    assert_eq!((story.x_px, story.y_px, story.w_px, story.h_px), (43, 39, 234, 160));
+    assert_eq!((story.x_px, story.y_px, story.w_px, story.h_px), (86, 78, 468, 320));
 
     // Chrome carries the frame graphics + status grids (the full-screen bg + banner + grids).
     assert!(layout.chrome.iter().any(|w| matches!(&w.node, WinNode::Graphics(_))), "chrome has frame graphics");

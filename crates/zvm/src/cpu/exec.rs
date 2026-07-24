@@ -7617,9 +7617,11 @@ pub(crate) mod tests {
         v6_place_window(&mut m, 0, 17, 1, 160, 320);
         m.exec_var(0x0B, &[0], None, None); // set_window(0)
         m.exec_ext(0x12, &[0, 1, 2], None, None); // window_style(0, wrapping, CLEAR)
+        // Menu rows are one 16px cell apart (set_cursor y is in units/pixels):
+        // row 9 then row 25 so the two 16px-tall glyph rows don't overlap-trim.
         m.exec_var(0x0F, &[9, 1, 0], None, None); // set_cursor(row 9, col 1, win 0)
         m.print_text("PROLOGUE");
-        m.exec_var(0x0F, &[17, 1, 0], None, None);
+        m.exec_var(0x0F, &[25, 1, 0], None, None);
         m.print_text("EAST WING");
         {
             let w0 = &m.screen.v6.as_ref().unwrap().windows[0];
@@ -7628,7 +7630,7 @@ pub(crate) mod tests {
             runs.sort();
             assert_eq!(
                 runs,
-                vec![(25, 1, "PROLOGUE"), (33, 1, "EAST WING")],
+                vec![(25, 1, "PROLOGUE"), (41, 1, "EAST WING")],
                 "menu items are positioned paint runs (abs y = win 17 + cursor - 1)"
             );
         }
@@ -7805,7 +7807,8 @@ pub(crate) mod tests {
         let w1 = &m.screen.v6.as_ref().unwrap().windows[1];
         assert_eq!(w1.texts.len(), 2, "wrapped into two runs: {:?}", w1.texts);
         assert_eq!((w1.texts[0].y, w1.texts[0].x, w1.texts[0].text.as_str()), (1, 1, "ABCD"));
-        assert_eq!((w1.texts[1].y, w1.texts[1].x, w1.texts[1].text.as_str()), (9, 1, "EF"));
+        // The wrap advances the cursor one 16px cell down (was 8): y = 1 + 16.
+        assert_eq!((w1.texts[1].y, w1.texts[1].x, w1.texts[1].text.as_str()), (17, 1, "EF"));
     }
 
     #[test]
@@ -8062,7 +8065,7 @@ pub(crate) mod tests {
         let v6 = m.screen.v6.as_ref().unwrap();
         assert_eq!(v6.windows[1].y_size, 40);
         assert_eq!(v6.windows[1].x_size, 80);
-        assert_eq!(v6.windows[1].grid.rows, 5, "40 / V6_FONT_HEIGHT(8) = 5 rows");
+        assert_eq!(v6.windows[1].grid.rows, 2, "40 / V6_FONT_HEIGHT(16) = 2 rows");
         assert_eq!(v6.windows[1].grid.cols, 10, "80 / V6_FONT_WIDTH(8) = 10 cols");
     }
 

@@ -795,11 +795,16 @@ pub fn advertise_sound(mem: &mut Memory, on: bool) {
 pub const DEFAULT_SCREEN_ROWS: u8 = 24;
 pub const DEFAULT_SCREEN_COLS: u8 = 80;
 
-/// v6 font cell size in pixels — a tuning param (adjust in Plan 1b's TTY
-/// smoke if proportions look off). v6 addresses everything in pixels; the
-/// app quantizes to character cells by dividing by these.
+/// v6 font cell size in pixels. Reference interpreters present Infocom v6 on a
+/// **non-square 8×16 cell** — the Amiga/DOS profile Frotz uses for every v6 game
+/// (`src/dos/bcinit.c` mode table `{0x12, 640, 400, 8, 16}`; `restart_header`
+/// seeds `h_font_width=8, h_font_height=16`). 8 wide × 16 tall over a 640×400
+/// screen gives the authentic **80 cols × 25 rows** that makes text read at the
+/// period-screenshot size relative to the 2×-scaled 320×200 art (SQ-0479). v6
+/// addresses everything in pixels; the app quantizes to character cells by
+/// dividing X by WIDTH and Y by HEIGHT.
 pub const V6_FONT_WIDTH: u16 = 8;
-pub const V6_FONT_HEIGHT: u16 = 8;
+pub const V6_FONT_HEIGHT: u16 = 16;
 
 /// Write the screen-dimension header fields for the loaded story's version.
 ///
@@ -817,10 +822,17 @@ pub fn write_screen_dims(mem: &mut Memory, rows: u8, cols: u8) {
     if version == 6 {
         mem.write_byte(0x20, rows);
         mem.write_byte(0x21, cols);
+        // ZMSD §8.4.3: word $22 = screen width in units, word $24 = screen
+        // height in units. v6 units are pixels, so width = cols·8 (640) and
+        // height = rows·16 (400) — the ·16 is why a non-square cell needs this
+        // path (a square cell made $24 latently correct).
         mem.write_word(0x22, cols as u16 * V6_FONT_WIDTH); // screen width, pixels
         mem.write_word(0x24, rows as u16 * V6_FONT_HEIGHT); // screen height, pixels
-        // ZMSD §11: in V6 the font-size bytes are SWAPPED relative to V5 —
-        // $26 holds font HEIGHT in units, $27 font WIDTH (width of a '0').
+        // ZMSD §11.1 header table (verified against the spec): byte $26 = "Font
+        // width in V5, or font HEIGHT in V6"; byte $27 = "Font height in V5, or
+        // font WIDTH in V6" — the famous V5↔V6 swap (§8.1.1: "in Version 6 the
+        // width and height are stored the other way round"). So in V6:
+        // $26 = HEIGHT (16), $27 = WIDTH (8). Latent while square; load-bearing now.
         mem.write_byte(0x26, V6_FONT_HEIGHT as u8);
         mem.write_byte(0x27, V6_FONT_WIDTH as u8);
         return;
@@ -1027,8 +1039,11 @@ mod tests {
         assert_eq!(m.read_byte(0x21), 80, "cols");
         assert_eq!(m.read_word(0x22), 80 * V6_FONT_WIDTH, "screen width in pixels");
         assert_eq!(m.read_word(0x24), 24 * V6_FONT_HEIGHT, "screen height in pixels");
-        assert_eq!(m.read_byte(0x26), V6_FONT_WIDTH as u8, "font width");
-        assert_eq!(m.read_byte(0x27), V6_FONT_HEIGHT as u8, "font height");
+        // ZMSD §11.1/§8.1.1: in V6 the font-size bytes are the swap of V5 —
+        // $26 = font HEIGHT (16), $27 = font WIDTH (8). Non-square now exercises it.
+        assert_eq!(m.read_byte(0x26), V6_FONT_HEIGHT as u8, "$26 = font height in V6");
+        assert_eq!(m.read_byte(0x27), V6_FONT_WIDTH as u8, "$27 = font width in V6");
+        assert_eq!((m.read_byte(0x26), m.read_byte(0x27)), (16, 8), "8×16 non-square cell");
     }
 
     #[test]
@@ -1285,10 +1300,10 @@ mod tests {
         let mut w = ZWindow { y_size: 24, ..Default::default() };
         w.texts.push(V6Text { y: 9, x: 1, text: "far".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
         w.texts.push(V6Text { y: 1, x: 1, text: "near".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
-        // Scroll forward by 16px (two lines):
-        //   y=9  -> new_y=-7, bottom=-7+8-1=0  < 1 -> fully above, dropped.
-        //   y=1  -> new_y=-15, bottom=-15+8-1=-8 < 1 -> fully above, dropped.
-        w.scroll_pixels(16);
+        // Scroll forward by 32px (two 16px lines):
+        //   y=9  -> new_y=-23, bottom=-23+16-1=-8 < 1 -> fully above, dropped.
+        //   y=1  -> new_y=-31, bottom=-31+16-1=-16 < 1 -> fully above, dropped.
+        w.scroll_pixels(32);
         assert!(w.texts.is_empty(), "both runs fully scrolled above the window");
     }
 
@@ -1296,7 +1311,7 @@ mod tests {
     fn zwindow_scroll_pixels_keeps_run_still_partially_visible() {
         let mut w = ZWindow { y_size: 24, ..Default::default() };
         w.texts.push(V6Text { y: 9, x: 1, text: "keep".into(), style: 0, fg: ZColour::Default, bg: ZColour::Default });
-        // Scroll forward by 8px (one line): y=9 -> 1, bottom=1+8-1=8 >= 1, kept.
+        // Scroll forward by 8px: y=9 -> 1, bottom=1+16-1=16 >= 1, still kept.
         w.scroll_pixels(8);
         assert_eq!(w.texts.len(), 1, "run still overlapping the window is kept");
         assert_eq!(w.texts[0].y, 1, "kept run shifted by -pixels");

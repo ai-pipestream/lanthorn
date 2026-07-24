@@ -25,6 +25,29 @@ then height, big-endian) with no pixel data at all. babelmap recognizes a
 mechanism these games rely on — it isn't a general Blorb image feature, it's a
 placement protocol these specific titles speak.
 
+## The authentic screen: 640×400, an 8×16 cell, art doubled
+
+There's a subtlety in "how big is this thing" that decides whether the whole
+frame looks right. Infocom's v6 artwork is 320×200 MCGA, but the games were
+authored and tested against the Amiga/DOS interpreter, which presents them on a
+**640×400** screen with a **non-square 8×16 pixel font cell** — 80 columns × 25
+rows of text — and scales every picture **2×** on the way to the screen. That
+2× is the whole trick: 80 columns spread across 640px of doubled art make the
+text read at its period-screenshot size *relative to the picture*, instead of
+the oversized 40-columns-over-320px look you get if you take the art dimensions
+at face value.
+
+babelmap now does exactly that (matching Frotz's DOS/Amiga profile). The engine
+reports a 640×400 screen (2× the Blorb `Reso` standard window, or a plain
+640×400 when a story ships no `Reso`), an 8-wide-by-16-tall font cell, and
+answers `picture_data` with the **doubled** dimensions — so the game lays its
+banner, columns, and compass out on the same 640-wide grid the original did.
+The 320×200 pictures themselves stay art-native in storage and are blitted 2×
+(crisp nearest-neighbour, DOS-authentic) into the composite; the bitmap text is
+rendered by doubling the 8×8 glyph masters vertically to fill the 8×16 cell.
+Screen size and picture size double *together*, so the frame-vs-content picture
+classification (which is pure ratios) lands exactly where it did before.
+
 ## Render modes
 
 Set `v6_render` in the config (or cycle it from the settings screen) to pick

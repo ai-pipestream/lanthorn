@@ -179,9 +179,13 @@ impl V6ClickMap {
 /// native 320×200 game therefore encodes at most 1280×800 instead of the full
 /// pane device resolution (which could be ~1920×1200 = 9 MB and cost hundreds of
 /// ms to resize+PNG-encode). The protocol still fits/centres the smaller image in
-/// the pane, so the only visible effect is that pixel art stops growing past 4×
-/// its native size — crisp Nearest scaling either way.
-const MAX_V6_UPSCALE: f64 = 4.0;
+/// the pane, so the only visible effect is that pixel art stops growing past this
+/// multiple of its native size — crisp Nearest scaling either way.
+///
+/// SQ-0479 doubled the native canvas (320×200 → 640×400), so 2× here reaches the
+/// SAME 1280×800 output ceiling the old 4× cap gave over the 320×200 canvas — the
+/// encoded-pixel budget is unchanged, not quadrupled.
+const MAX_V6_UPSCALE: f64 = 2.0;
 
 /// A completed v6 raster encode (SQ-0469): the uploaded protocol plus the key it
 /// was built for (`gen` + pane cell size) and the native canvas extent (for the

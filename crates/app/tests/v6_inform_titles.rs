@@ -27,9 +27,11 @@ fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
 }
 
-/// Boot a v6 story headless; `screen_px` overrides the reported v6 screen
-/// size (None = the 320×200 default). Returns None (skip) if the story file
-/// is absent.
+/// Boot a v6 story headless; `screen_px` overrides the reported v6 Reso window
+/// — the ART resolution, which the engine doubles to the unit screen (SQ-0479).
+/// So `Some((160,100))` → a 320×200 screen, `Some((320,240))` → 640×480. `None`
+/// falls back to the Blorb Reso (or the 320×200 art → 640×400 screen default).
+/// Returns None (skip) if the story file is absent.
 fn boot(name: &str, screen_px: Option<(u16, u16)>) -> Option<GameSession> {
     let story_path = stories_dir().join(name);
     let story_bytes = std::fs::read(&story_path).ok()?;
@@ -105,10 +107,10 @@ fn advent_z6_boots_and_look_streams_room_to_transcript() {
 
 #[test]
 fn scopa_z6_screen_size_gate_respects_reported_dims() {
-    // At the 320×200 default, scopa itself refuses to run — proving the game
-    // reads the size we report. At 640×480 it boots past the gate to its
-    // (graphical) title, waiting on a key with no fault.
-    let Some(mut small) = boot("scopa.z6", None) else {
+    // Reporting a 320×200 screen (art 160×100 ×2), scopa itself refuses to run —
+    // proving the game reads the size we report. At 640×480 (art 320×240 ×2) it
+    // boots past the gate to its (graphical) title, waiting on a key with no fault.
+    let Some(mut small) = boot("scopa.z6", Some((160, 100))) else {
         eprintln!("SKIP: gitignored story missing");
         return;
     };
@@ -118,7 +120,7 @@ fn scopa_z6_screen_size_gate_respects_reported_dims() {
         "scopa should refuse a 320x200 screen with its own message, got: {refusal:?}"
     );
 
-    let mut big = boot("scopa.z6", Some((640, 480))).expect("story vanished between boots");
+    let mut big = boot("scopa.z6", Some((320, 240))).expect("story vanished between boots");
     let boot_text = big.take_transcript();
     assert!(
         !boot_text.contains("too small"),

@@ -157,29 +157,39 @@ fn centered_status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Opti
 // those paint runs and yields ordered room-name candidates for the SAME
 // validation ladder the grid path uses.
 //
-// Grounded in the four real v6 titles (see the SQ-0468 report / gameplay tests):
+// Grounded in the four real v6 titles at the 640×400 geometry (SQ-0479 re-trace;
+// coords roughly double the old 320×200 values):
 //   - Zork Zero: window 1 status band at y_coord=1. Room name is the LEFT run on
-//     the top text row (y≈6): "Banquet Hall" → "Scullery". Score/Moves on the
-//     next row (y≈14). The kingdom "Flatheadia" is a RIGHT-anchored field (x≈205).
-//   - Shogun: window 1, two rows. Row 1 (y≈1): "Erasmus:" (the ship, a LABELLED
-//     field — a ":" run abuts it) + "SHOGUN" (a CENTERED banner, x≈136) + Score.
-//     Row 2 (y≈9): "Bridge" (the room, left) + Moves. The avatar is NOT parented
-//     to the room object here, so only StatusName (resolve_room_object) recovers
-//     "Bridge"; "Erasmus" and "SHOGUN" must be rejected.
+//     the top text row (y=11, x=71 → dx=70): "Banquet Hall" → "Scullery".
+//     Score/Moves on the next row (y=27). The kingdom "Flatheadia" is a
+//     RIGHT-anchored field (x=489, dx=488).
+//   - Shogun: window 1 (x_coord=47), two rows. Row 1 (y=1): "Erasmus:" (the ship,
+//     a LABELLED field — a ":" run abuts it, x=49 dx=2) + "SHOGUN" (a CENTERED
+//     banner, x=296 dx=249) + Score (x=504 dx=457). Row 2 (y=17): "Bridge" (the
+//     room, left, x=49 dx=2) + Moves. The avatar is NOT parented to the room
+//     object here, so only StatusName (resolve_room_object) recovers "Bridge";
+//     "Erasmus" and "SHOGUN" must be rejected.
 //   - Arthur / Journey: no room-status text painted in the top band → no
 //     candidates → None (correct; Journey is menu-driven, Arthur's boot intro
 //     paints no status line).
 
 /// Top of the v6 status band: runs whose absolute screen `y` is within the first
-/// four native text rows (4 × `V6_FONT_HEIGHT` = 32px). Real v6 status text sits
-/// at y≈1–14; the frameless renderer caps the band at 4 rows for the same reason.
-const V6_STATUS_BAND_MAX_Y: u16 = 32;
+/// four native text rows (4 × `V6_FONT_HEIGHT` = 64px). Re-grounded on fresh
+/// 640×400 traces (SQ-0479): the status text now paints at 16px row pitch — Zork0
+/// room name y=11, Score/Moves y=27; Shogun room y=17, Score/banner y=1 — so the
+/// band spans rows 0–1 (y ≤ 32) with headroom to 4 rows. Journey's menu (y≥305)
+/// and any deeper content stay well outside.
+const V6_STATUS_BAND_MAX_Y: u16 = 64;
 
 /// A run is "left-anchored" (a classic room-name slot, eligible for the weaker
 /// StatusName path) when it starts within this many pixels of its window's left
-/// edge. Room names sit ≤~35px in (Zork0 x=36, Shogun x=26); centered banners and
-/// right-aligned Score/Moves sit ≥~112px in. 48px (6 cells) divides them safely.
-const V6_LEFT_ANCHOR_MAX_DX: u16 = 48;
+/// edge. Re-grounded on fresh 640×400 traces (SQ-0479): room names sit dx≤~70
+/// (Zork0 "Banquet Hall"/"Scullery" x=71 in a x_coord=1 window → dx=70; Shogun
+/// "Bridge" x=49 in a x_coord=47 window → dx=2); centered/right fields sit far
+/// out (Shogun "SHOGUN" banner dx=249, Score dx=457; Zork0 "Flatheadia" dx=488).
+/// 96px (12 cells) divides them with margin — above every room name, below every
+/// banner/score.
+const V6_LEFT_ANCHOR_MAX_DX: u16 = 96;
 
 /// One v6 status-band candidate: the cleaned room text and whether it was
 /// left-anchored. Left-anchored runs are tried for StatusName; centered/other
@@ -992,15 +1002,18 @@ mod tests {
         // Row 1: "Erasmus:" (label — ":" abuts) + "SHOGUN" (centered banner) +
         // Score. Row 2: "Bridge" (room, left) + Moves. Expect only the real
         // room-ish runs, left-anchored first: Bridge, then the centered SHOGUN.
+        // 640×400 coords (SQ-0479 re-trace, window x_coord=1): Erasmus label
+        // dx=2, ":" abuts, SHOGUN banner dx=249, Score dx=457; row 2 (y=17):
+        // Bridge dx=2, Moves dx=457.
         let v = v6_band(&[
-            (1, 26, "Erasmus"),
-            (1, 82, ":"),
-            (1, 136, "SHOGUN"),
-            (1, 207, "Score:"),
-            (1, 287, "0"),
-            (9, 26, "Bridge"),
-            (9, 207, "Moves:"),
-            (9, 287, "1"),
+            (1, 3, "Erasmus"),
+            (1, 59, ":"),
+            (1, 250, "SHOGUN"),
+            (1, 458, "Score:"),
+            (1, 538, "0"),
+            (17, 3, "Bridge"),
+            (17, 458, "Moves:"),
+            (17, 538, "1"),
         ]);
         let mut m = make_machine(build_v5_forests());
         m.screen.v6 = Some(v);
@@ -1011,11 +1024,13 @@ mod tests {
     fn v6_candidates_zork0_layout_room_left_kingdom_other() {
         // Zork0: room "Banquet Hall" left on the top row; kingdom "Flatheadia"
         // right-anchored; Score/Moves filtered. Left-anchored room comes first.
+        // 640×400 coords (SQ-0479 re-trace): room y=11 x=71 (dx=70, left);
+        // Flatheadia x=489 (dx=488, right); Score/Moves on the y=27 row.
         let v = v6_band(&[
-            (6, 36, "Banquet Hall"),
-            (6, 205, "Flatheadia"),
-            (14, 36, "Moves:"),
-            (14, 205, "Score:"),
+            (11, 71, "Banquet Hall"),
+            (11, 489, "Flatheadia"),
+            (27, 71, "Moves:"),
+            (27, 489, "Score:"),
         ]);
         let mut m = make_machine(build_v5_forests());
         m.screen.v6 = Some(v);
@@ -1027,9 +1042,10 @@ mod tests {
 
     #[test]
     fn v6_candidates_below_band_and_blanks_ignored() {
-        // Runs below the 32px band (Shogun's menu at y=169) and blank padding
-        // never become candidates → Journey/menu screens yield nothing.
-        let v = v6_band(&[(9, 121, " "), (169, 75, "START the game"), (33, 26, "TooLow")]);
+        // Runs below the 64px band (Journey's menu at y=305) and blank padding
+        // never become candidates → menu screens yield nothing. y=65 is one pixel
+        // past the 4-row (64px) band.
+        let v = v6_band(&[(9, 121, " "), (305, 75, "START the game"), (65, 26, "TooLow")]);
         let mut m = make_machine(build_v5_forests());
         m.screen.v6 = Some(v);
         assert!(v6_status_room_candidates(&m).is_empty());
@@ -1041,7 +1057,7 @@ mod tests {
         // left-anchored "forest" run must validate via the avatar's ancestor
         // chain → PlayerParent(#3), NOT the scenery "forest" #1.
         let mut m = machine_in_forest(3);
-        m.screen.v6 = Some(v6_band(&[(6, 36, "forest"), (14, 36, "Score: 0")]));
+        m.screen.v6 = Some(v6_band(&[(11, 71, "forest"), (27, 71, "Score: 0")]));
         let loc = detect_location(&m).expect("v6 left room should detect");
         assert_eq!(loc.method(), LocationMethod::PlayerParent);
         assert_eq!(loc.object().unwrap().number, 3, "true room #3, not scenery #1");
@@ -1054,7 +1070,7 @@ mod tests {
         // object falls back to StatusName. Here cretin #4 is parentless (0) so no
         // ancestor validates; "forest" resolves to the scenery object #1.
         let mut m = machine_in_forest(0);
-        m.screen.v6 = Some(v6_band(&[(9, 26, "forest"), (9, 207, "Moves: 1")]));
+        m.screen.v6 = Some(v6_band(&[(17, 71, "forest"), (17, 489, "Moves: 1")]));
         let loc = detect_location(&m).expect("left-anchored name resolves to an object");
         assert_eq!(loc.method(), LocationMethod::StatusName);
         assert_eq!(loc.object().unwrap().number, 1, "\"forest\" resolves to scenery #1");
@@ -1067,7 +1083,7 @@ mod tests {
         // REAL object (#1), a centered placement with a parentless avatar yields
         // None (StatusName is left-anchored-only).
         let mut m = machine_in_forest(0);
-        m.screen.v6 = Some(v6_band(&[(6, 140, "forest"), (6, 207, "Score: 0")]));
+        m.screen.v6 = Some(v6_band(&[(11, 250, "forest"), (11, 489, "Score: 0")]));
         assert_eq!(detect_location(&m), None, "centered object-name must not yield StatusName");
     }
 
@@ -1077,7 +1093,7 @@ mod tests {
         // None for v6 (NameOnly is dropped) — a title/character-sheet name must
         // never invent a room.
         let mut m = machine_in_forest(0);
-        m.screen.v6 = Some(v6_band(&[(6, 36, "Nowhere City"), (6, 207, "Score: 0")]));
+        m.screen.v6 = Some(v6_band(&[(11, 71, "Nowhere City"), (11, 489, "Score: 0")]));
         assert_eq!(detect_location(&m), None, "unknown v6 name must not become a NameOnly room");
     }
 

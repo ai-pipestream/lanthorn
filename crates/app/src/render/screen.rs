@@ -554,8 +554,10 @@ fn render_node(
                         // transcript-anchored floats (`transcript_images` sidecar):
                         // build_main_text wraps text beside them and draw_story_text
                         // blits each at its anchored row — they scroll with the text.
+                        // Non-square 8×16 v6 cell (SQ-0479): columns divide the
+                        // clear width by FONT_W(8), rows the height by FONT_H(16).
                         let cols = (sw / 8).max(1) as u16;
-                        let rows = (sh / 8).max(1) as u16;
+                        let rows = (sh / 16).max(1) as u16;
                         let (main, rm) = build_main_text(state, cols, rows);
                         v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
                         // [more] pager indicator (SQ-0455): when a single turn's output
@@ -573,8 +575,9 @@ fn render_node(
                             let last_row = rows.saturating_sub(1) as u32;
                             let start_col = (cols as u32).saturating_sub(n);
                             for (i, ch) in label.chars().enumerate() {
+                                // 8×16 cell: X by FONT_W(8), Y by FONT_H(16).
                                 crate::render::bitfont::blit_glyph(
-                                    &mut canvas, ch, sx + (start_col + i as u32) * 8, sy + last_row * 8, 8, 8, ink, Some(block),
+                                    &mut canvas, ch, sx + (start_col + i as u32) * 8, sy + last_row * 16, 8, 16, ink, Some(block),
                                 );
                             }
                         }
@@ -1084,7 +1087,11 @@ pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, p
 /// prose stops above it and resumes below, never beside or over it. Keeps the
 /// newest `rows-1` wrapped rows (one row is left for the input line).
 pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render::v6_layout::MainText, RasterMetrics) {
-    const FONT: u32 = 8;
+    // Non-square 8×16 v6 cell (SQ-0479). Picture pixels arriving here are already
+    // in unit space (session scales v6 art ×2 before storing), so a float spans
+    // height/FONT_H text rows and indents width/FONT_W columns.
+    const FONT_W: u32 = 8;
+    const FONT_H: u32 = 16;
     struct AbsFloat {
         row: usize,
         rows: u16,
@@ -1115,15 +1122,15 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
             // its bottom pixels. (Infocom's own countdown used floor and let
             // the overlap happen; with our whole-cell glyphs the ceil reads
             // far cleaner.)
-            let img_rows = (px.height().div_ceil(FONT) as u16).max(1);
+            let img_rows = (px.height().div_ceil(FONT_H) as u16).max(1);
             if img.align == crate::inline_image::ImageAlign::MarginLeft {
                 // A margin-left drop-cap floats: it occupies no text row of
                 // its own — the wrap below narrows the rows beside it.
-                let indent_px = img.margin_px.unwrap_or(px.width() + FONT);
+                let indent_px = img.margin_px.unwrap_or(px.width() + FONT_W);
                 floats.push(AbsFloat {
                     row: wrapped.len(),
                     rows: img_rows,
-                    indent: indent_px.div_ceil(FONT) as u16,
+                    indent: indent_px.div_ceil(FONT_W) as u16,
                     img: std::sync::Arc::clone(px),
                 });
             } else {
@@ -1226,7 +1233,7 @@ const STATUS_BAND_ROWS: u16 = 4;
 
 /// Render a v6 PAINTED text screen (menus, hints — SQ-0477/0478) as absolutely-
 /// positioned terminal text. Each run is quantized to its native cell
-/// (`col = (x-1)/8`, `row = (y-1)/8`) and stamped at that pane-relative cell,
+/// (`col = (x-1)/8`, `row = (y-1)/16` — the non-square 8×16 v6 cell) and stamped at that pane-relative cell,
 /// honoring reverse video — Shogun's boot-menu selection is a reverse-video run,
 /// so this is what makes the selection caret visible. Menus are absolutely
 /// positioned (NOT left/center/right anchor groups like the status band).
@@ -1247,7 +1254,8 @@ fn draw_painted_screen(
         if t.text.trim().is_empty() {
             continue;
         }
-        let row = ((t.y.max(1) - 1) / 8) as u16;
+        // 8×16 v6 cell (SQ-0479): quantize Y by FONT_H(16), X by FONT_W(8).
+        let row = ((t.y.max(1) - 1) / 16) as u16;
         if row < min_row {
             continue;
         }
@@ -1267,7 +1275,7 @@ fn draw_painted_screen(
 /// Render the v6 frameless status band as a classic full-width status line
 /// ("anchored bar", SQ-0467). `runs` are all the chrome grids' pixel-text runs;
 /// `ncols` is the native screen width in cells (so anchor thresholds scale to the
-/// game's own screen, not a hardcoded 40). Each native row (`(y-1)/8`, capped at
+/// game's own screen, not a hardcoded 40). Each native row (`(y-1)/16`, capped at
 /// 4) is classified into LEFT/CENTER/RIGHT anchor groups and painted across the
 /// full pane width. Returns the number of band rows used (for the story offset).
 fn draw_anchored_status_band(
@@ -1288,7 +1296,7 @@ fn draw_anchored_status_band(
         let mut row_runs: Vec<&crate::engine::PxText> = runs
             .iter()
             .copied()
-            .filter(|t| !t.text.trim().is_empty() && (t.y.max(1) - 1) / 8 == row)
+            .filter(|t| !t.text.trim().is_empty() && (t.y.max(1) - 1) / 16 == row)
             .collect();
         if row_runs.is_empty() {
             continue;
@@ -1419,13 +1427,13 @@ mod tests {
 
     #[test]
     fn build_main_text_floats_inline_image_and_narrows_beside_it() {
-        // A transcript-anchored inline image (32x32 → 4 rows, margin 40px → 5
-        // cols) becomes a float: it occupies no text row, the 4 rows beside it
-        // wrap narrower, and rows past it wrap at full width.
+        // A transcript-anchored inline image (32×64 → 4 rows at FONT_H 16, margin
+        // 40px → 5 cols) becomes a float: it occupies no text row, the 4 rows
+        // beside it wrap narrower, and rows past it wrap at full width.
         let mut state = crate::state::AppState::default();
         state.push_transcript_kind("before", crate::state::TranscriptKind::Story);
         state.push_transcript_image(crate::inline_image::InlineImage {
-            pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(32, 32, image::Rgba([9, 9, 9, 255]))),
+            pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(32, 64, image::Rgba([9, 9, 9, 255]))),
             align: crate::inline_image::ImageAlign::MarginLeft,
             scaled: None,
             margin_px: Some(40),
@@ -1436,7 +1444,7 @@ mod tests {
         let (main, _) = build_main_text(&state, 40, 30);
         assert_eq!(main.floats.len(), 1, "the image line became a float, not a text row");
         let f = &main.floats[0];
-        assert_eq!((f.row, f.rows, f.indent_cols), (1, 4, 5), "anchored after 'before', 32px/8 = 4 rows, 40px/8 = 5 cols");
+        assert_eq!((f.row, f.rows, f.indent_cols), (1, 4, 5), "anchored after 'before', 64px/16 = 4 rows, 40px/8 = 5 cols");
         assert_eq!(main.lines[0], "before");
         // Rows 1..5 (beside the float) wrap at 40-5=35 cols; later rows full width.
         for (i, row) in main.lines.iter().enumerate().skip(1) {
@@ -1460,7 +1468,7 @@ mod tests {
         let mut state = crate::state::AppState::default();
         state.push_transcript_kind("before", crate::state::TranscriptKind::Story);
         state.push_transcript_image(crate::inline_image::InlineImage {
-            pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(160, 32, image::Rgba([9, 9, 9, 255]))),
+            pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(160, 64, image::Rgba([9, 9, 9, 255]))),
             align: crate::inline_image::ImageAlign::InlineUp,
             scaled: None,
             margin_px: None,
@@ -1471,8 +1479,8 @@ mod tests {
         let (main, _) = build_main_text(&state, 40, 30);
         assert_eq!(main.floats.len(), 1, "the image still carries its pixels for the canvas blit");
         let f = &main.floats[0];
-        // 32px / 8 = 4 rows, anchored right after "before" (row 1).
-        assert_eq!((f.row, f.rows), (1, 4), "band anchored after 'before', 32px/8 = 4 rows");
+        // 64px / FONT_H(16) = 4 rows, anchored right after "before" (row 1).
+        assert_eq!((f.row, f.rows), (1, 4), "band anchored after 'before', 64px/16 = 4 rows");
         assert_eq!(main.lines[0], "before");
         // Every row the band spans is blank — no text row overlaps its rows.
         for (i, row) in main.lines.iter().enumerate() {
@@ -2954,16 +2962,18 @@ mod tests {
     /// insets `story_clear_native` to nothing). Story box native (43,39,234,160) →
     /// 29×20 raster cells (a 19-row body budget).
     fn raster_v6_model() -> ScreenModel {
-        let chrome_img = image::RgbaImage::new(320, 200); // all alpha 0 (transparent)
+        // Authentic 640×400 unit geometry (SQ-0479): the story window's 320px
+        // height quantizes to 320/FONT_H(16) = 20 raster rows.
+        let chrome_img = image::RgbaImage::new(640, 400); // all alpha 0 (transparent)
         let chrome = PositionedWindow {
-            x: 0, y: 0, w: 40, h: 25, x_px: 0, y_px: 0, w_px: 320, h_px: 200,
+            x: 0, y: 0, w: 80, h: 25, x_px: 0, y_px: 0, w_px: 640, h_px: 400,
             left_margin: 0, right_margin: 0,
             node: WinNode::Graphics(crate::engine::GraphicsWindow {
                 win: 7, canvas: std::sync::Arc::new(chrome_img), version: 1, upscale: false,
             }),
         };
         let story = PositionedWindow {
-            x: 5, y: 4, w: 29, h: 20, x_px: 43, y_px: 39, w_px: 234, h_px: 160,
+            x: 10, y: 4, w: 58, h: 20, x_px: 86, y_px: 78, w_px: 468, h_px: 320,
             left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
         };
@@ -2999,7 +3009,7 @@ mod tests {
             &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
         );
         let m = m.expect("raster path now reports story-box scroll metrics");
-        assert_eq!(m.viewport_rows, 19, "story box is 20 raster rows minus the input line");
+        assert_eq!(m.viewport_rows, 19, "story box is 20 raster rows (320px/FONT_H 16) minus the input line");
         assert_eq!(m.total_rows, 40, "all 40 wrapped transcript rows counted");
         assert_eq!(m.max_scroll, 21, "40 total - 19 body");
 
@@ -3244,9 +3254,9 @@ mod tests {
 
     #[test]
     fn anchored_band_multi_row() {
-        // Runs on native rows 0 and 1 (y=1 and y=9) each render on their own band
-        // row, and rows_used reports 2.
-        let runs = vec![run(1, 1, "Row0Left"), run(233, 1, "Score: 0"), run(1, 9, "Row1Left")];
+        // Runs on native rows 0 and 1 (y=1 and y=17, one 16px cell apart) each
+        // render on their own band row, and rows_used reports 2.
+        let runs = vec![run(1, 1, "Row0Left"), run(233, 1, "Score: 0"), run(1, 17, "Row1Left")];
         let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
