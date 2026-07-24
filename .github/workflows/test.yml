@@ -1,0 +1,70 @@
+name: Test
+
+# The push/PR gate this repo was missing — release.yml only builds on `v*`
+# tags. This runs the workspace test suite (+ clippy, one platform) on every
+# push to main and every pull request.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request: {}
+
+# A new run cancels an in-progress one for the same ref — e.g. re-pushing to a
+# PR branch. Distinct refs (different PRs, or PR vs. main) get their own
+# group, so they never cancel each other.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Linux audio (ALSA) is a build-time dependency of the default feature
+      # set (audio's default features pull in rodio) — same requirement as
+      # release.yml's Linux leg.
+      - name: Install ALSA dev headers (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # `--locked` requires Cargo.lock to be committed and in sync with
+      # Cargo.toml (it is) — this also guards against drift on Windows, where
+      # a regenerated lockfile can differ in ways CI shouldn't silently accept.
+      #
+      # Story-fixture-gated tests (real commercial games under the gitignored
+      # `stories/` dir) skip themselves cleanly when that directory/file is
+      # absent — which it always is in CI. Small fixtures actually needed by
+      # the suite (czech.z5, minizork.z3, tiny_cave.dat, glulxercise.ulx, etc.)
+      # are committed under each crate's `tests/fixtures/` and are present.
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+      # One job, Linux only — clippy's result doesn't vary meaningfully by OS
+      # for this codebase, so running it 3x would just burn minutes.
+      - name: cargo clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # NOTE: no `cargo fmt --check` step. The existing codebase isn't
+      # rustfmt-clean (verified locally: `cargo fmt --check` reports diffs
+      # across many pre-existing files), so adding the check now would fail
+      # on unrelated code rather than catch new drift. Revisit once the tree
+      # is formatted.
