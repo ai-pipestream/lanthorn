@@ -414,24 +414,38 @@ fn render_node(
             // pictures there (the primary-Buffer transcript path blits them at
             // native scale, `v6_image_scale` == 1.0 set just above).
             let frameless = state.config.v6_render == crate::config::V6RenderMode::Frameless;
-            // A painted MENU screen carries DEEP paint runs (a chrome grid printing
-            // text at native row ≥ STATUS_BAND_ROWS, below the status band — Shogun's
-            // boot menu at rows 21–23). In HYBRID mode such a screen must NOT take the
-            // pixel chrome ring: the ring path splits the menu across the raster ring
-            // (items mapping above the terminal viewport) and the terminal overlay
-            // (items inside it), the exact mixed raster/text defect (SQ-0484). Routing
-            // it to the cell path below instead renders it as a coherent all-text
-            // screen — the story transcript plus the menu painted over it — identical
-            // to the frameless path (which the user has not complained about). Normal
-            // gameplay paints only the rows 0–3 status band, so this never fires
-            // there and the ring path is kept. RASTER mode deliberately keeps its
-            // pixel composite for menus (the reverse-video selection block is fixed in
-            // `build_chrome_canvas` instead, SQ-0487) — a raster-mode user wants the
-            // pixel aesthetic even on menus.
+            // A painted MENU screen prints chrome text INSIDE the story window's
+            // box, below the status band — Shogun's boot menu paints rows 21–23
+            // over its story buffer (rows 21–25). In HYBRID mode such a takeover
+            // screen must NOT take the pixel chrome ring: the ring path splits the
+            // menu across the raster ring (items mapping above the terminal
+            // viewport) and the terminal overlay (items inside it), the exact
+            // mixed raster/text defect (SQ-0484). Routing it to the cell path
+            // below renders it as one coherent all-text screen, identical to
+            // frameless. BOTH conditions matter (SQ-0494): a grid run that is
+            // merely deep but sits OUTSIDE the story box is ordinary gameplay
+            // chrome — Arthur paints its status bar at row 12 above a story
+            // buffer starting at row 13, and classing that as a menu dropped
+            // Arthur's whole ring (top image panel + side bars). RASTER mode
+            // deliberately keeps its pixel composite for menus (the reverse-video
+            // selection block is fixed in `build_chrome_canvas` instead,
+            // SQ-0487) — a raster-mode user wants the pixel aesthetic even
+            // on menus.
             let hybrid = state.config.v6_render == crate::config::V6RenderMode::Hybrid;
+            let story_rows = items.iter().find_map(|pw| {
+                matches!(&pw.node, WinNode::Buffer(_)).then(|| {
+                    let top = pw.y_px / 16;
+                    (top, top + (pw.h_px.max(1) + 15) / 16)
+                })
+            });
             let has_menu = items.iter().any(|pw| {
                 matches!(&pw.node, WinNode::Grid(g)
-                    if g.px_texts.iter().any(|t| !t.text.trim().is_empty() && (t.y.max(1) - 1) / 16 >= STATUS_BAND_ROWS))
+                    if g.px_texts.iter().any(|t| {
+                        let row = (t.y.max(1) - 1) / 16;
+                        !t.text.trim().is_empty()
+                            && row >= STATUS_BAND_ROWS
+                            && story_rows.is_some_and(|(top, bot)| row >= top && row < bot)
+                    }))
             });
             if !state.any_overlay_open() && !frameless && !(has_menu && hybrid) {
             if let Some(picker) = state.game_picker.as_ref() {
@@ -2899,6 +2913,70 @@ mod tests {
             fg: 0,
             content_size: (40, 25),
         }
+    }
+
+    #[test]
+    fn hybrid_deep_status_outside_story_box_keeps_the_ring() {
+        // SQ-0494: Arthur paints its status bar as reverse px_text runs at a deep
+        // native row (12 on the real 640×400 screen) ABOVE its story buffer — with
+        // graphics windows carrying the top image panel and side borders. That is
+        // ordinary gameplay chrome, NOT a menu takeover: the ring path must be
+        // kept (the status text belongs to the pixel ring, so it must NOT be
+        // painted into the terminal cells the way a routed menu screen is).
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = crate::config::V6RenderMode::Hybrid;
+        state.push_transcript("HELLO STORY WORLD");
+
+        let chrome_img = image::RgbaImage::from_pixel(320, 200, image::Rgba([40, 30, 20, 255]));
+        let chrome = PositionedWindow {
+            x: 0, y: 0, w: 40, h: 25, x_px: 0, y_px: 0, w_px: 320, h_px: 200,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Graphics(crate::engine::GraphicsWindow {
+                win: 7, canvas: std::sync::Arc::new(chrome_img), version: 1, upscale: false,
+            }),
+        };
+        // Status grid: a non-blank run at native row 6 (deep, ≥ STATUS_BAND_ROWS)
+        // but ABOVE the story buffer, which starts at row 7 (y_px 112).
+        let status = PositionedWindow {
+            x: 0, y: 6, w: 40, h: 1, x_px: 0, y_px: 96, w_px: 320, h_px: 16,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(crate::engine::GridWindow {
+                cols: 40, rows: 1, cells: vec![], active_rows: 1, cursor: (1, 1),
+                cursor_active: false, border: crate::engine::BorderPref::Unspecified,
+                bg: None, fg: None, reverse: false,
+                px_texts: vec![crate::engine::PxText {
+                    y: 97, x: 1, text: "Score: 0".into(), style: 1, fg: 0, bg: 0,
+                }],
+            }),
+        };
+        let story = PositionedWindow {
+            x: 0, y: 7, w: 40, h: 10, x_px: 0, y_px: 112, w_px: 320, h_px: 80,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+        };
+        let model = ScreenModel {
+            root: WinNode::Layered(vec![chrome, status, story]),
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (40, 25),
+        };
+        let area = Rect::new(0, 0, 40, 25);
+        let mut buf = Buffer::empty(area);
+        let mut links = Vec::new();
+        let metrics = render_node(
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+        );
+        assert!(metrics.is_some(), "ring path taken (it returns inset metrics)");
+        let screen: String = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect::<String>() + "\n")
+            .collect();
+        assert!(
+            !screen.contains("Score: 0"),
+            "deep-but-outside-story status chrome stays in the pixel ring, not cells:\n{screen}"
+        );
     }
 
     #[test]
