@@ -470,8 +470,17 @@ pub(crate) fn run_story_picker(
     // fetcher; the modal is `Some` while open. The picker is always launched on
     // a directory (never a single file), so `dir` is always a valid download
     // target and the entry point is always available.
-    let search_worker =
-        app::ifdb_search::SearchWorker::new(Box::new(app::ifdb_search::IfdbSearchClient::new()));
+    //
+    // The worker also holds an `IfdbClient` as its `MetadataSource` (SQ-0474):
+    // after a download, it reuses that client's `fetch_cover` — never
+    // `fetch`/`fetch_by_id` — to populate the story's sidecar + cover from the
+    // iFiction record already resolved for the download, with zero extra
+    // metadata requests. See `ifdb_search.rs`'s module header.
+    let search_worker = app::ifdb_search::SearchWorker::new(
+        Box::new(app::ifdb_search::IfdbSearchClient::new()),
+        Box::new(app::ifdb::IfdbClient::new()),
+        data_base.to_path_buf(),
+    );
     let mut search_modal: Option<app::ifdb_search_modal::SearchModal> = None;
     let mut search_area = Rect::new(0, 0, 0, 0);
     let mut search_close_rect: Option<Rect> = None;
@@ -1660,7 +1669,12 @@ fn dispatch_search_action(
         ModalAction::Search(q) => worker.request(SearchJob::Search(q)),
         ModalAction::Resolve(tuid) => worker.request(SearchJob::Resolve(tuid)),
         ModalAction::Download(url) => {
-            worker.request(SearchJob::Download { url, dest: dir.to_path_buf() })
+            // SQ-0474: the iFiction record resolved alongside this game's
+            // download options rides along so the worker can populate the
+            // sidecar + cover once the file lands — taken here, once, so a
+            // later Resolve for a different game doesn't reuse it.
+            let record = modal.as_mut().and_then(|m| m.take_pending_record());
+            worker.request(SearchJob::Download { url, dest: dir.to_path_buf(), record })
         }
         ModalAction::OpenInBrowser(url) => open_url(&url),
         ModalAction::Seed => worker.request(SearchJob::Seed),

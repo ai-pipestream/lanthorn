@@ -28,6 +28,7 @@ use ratatui::style::{Modifier, Style};
 
 use crate::colors::ColorScheme;
 use crate::ifdb_search::{DownloadOption, SearchEvent, SearchHit};
+use crate::ifiction::IFiction;
 use crate::render::dialog::{
     draw_dialog, DialogField, DialogRects, DialogSpec, DialogStyle, Placement,
 };
@@ -94,6 +95,15 @@ pub struct SearchModal {
     showing_seed: bool,
     options: Vec<DownloadOption>,
     opt_sel: usize,
+    /// The iFiction record resolved alongside `options` (SQ-0474), if any —
+    /// carried from the last `SearchEvent::Options` through to whichever
+    /// `Download` action follows (immediately, for the one-option
+    /// auto-download; later, for a user's pick in `View::Choosing`), so the
+    /// picker can populate the download's sidecar + cover with zero extra
+    /// requests. Taken (not cloned) by [`Self::take_pending_record`] once
+    /// the picker dispatches that download. Boxed to match
+    /// [`crate::ifdb_search::ResolvedGame::record`].
+    pending_record: Option<Box<IFiction>>,
     /// A transient status/error line shown under the frame title.
     status: Option<String>,
 }
@@ -110,6 +120,7 @@ impl SearchModal {
             showing_seed: false,
             options: Vec::new(),
             opt_sel: 0,
+            pending_record: None,
             status: None,
         }
     }
@@ -134,6 +145,14 @@ impl SearchModal {
     /// progress line the picker shows on success.
     pub fn selected_hit_title(&self) -> Option<&str> {
         self.hits.get(self.hit_sel).map(|h| h.title.as_str())
+    }
+
+    /// Consume the iFiction record resolved for the game currently being
+    /// downloaded (SQ-0474). The picker calls this exactly once, when
+    /// dispatching a `ModalAction::Download` to the worker, so the download
+    /// job can populate the sidecar + cover — see `pending_record`.
+    pub fn take_pending_record(&mut self) -> Option<Box<IFiction>> {
+        self.pending_record.take()
     }
 
     // ── Key handling ──────────────────────────────────────────────────────
@@ -326,12 +345,17 @@ impl SearchModal {
                 }
                 _ => ModalAction::None, // stale (user backed out, or another job in flight)
             },
-            SearchEvent::Options(opts) => {
+            SearchEvent::Options(resolved) => {
                 if self.inflight != Some(Inflight::Resolve) {
                     return ModalAction::None; // stale
                 }
                 self.inflight = None;
-                match opts.len() {
+                // Cached regardless of how many options came back — a
+                // `Download` action, whether auto-fired below or from a
+                // later `View::Choosing` pick, always wants this game's
+                // record (SQ-0474).
+                self.pending_record = resolved.record.clone();
+                match resolved.options.len() {
                     0 => {
                         self.status =
                             Some("No directly-playable file — press o to open its IFDB page"
@@ -342,10 +366,10 @@ impl SearchModal {
                     1 => {
                         // Exactly one: download it straight away.
                         self.inflight = Some(Inflight::Download);
-                        ModalAction::Download(opts[0].url.clone())
+                        ModalAction::Download(resolved.options[0].url.clone())
                     }
                     _ => {
-                        self.options = opts.clone();
+                        self.options = resolved.options.clone();
                         self.opt_sel = 0;
                         self.view = View::Choosing;
                         ModalAction::None
@@ -623,7 +647,7 @@ fn put_str(buf: &mut Buffer, x: u16, y: u16, width: u16, s: &str, style: Style) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ifdb_search::{DownloadOption, SearchEvent, SearchHit};
+    use crate::ifdb_search::{DownloadOption, ResolvedGame, SearchEvent, SearchHit};
 
     fn hit(tuid: &str, title: &str) -> SearchHit {
         SearchHit {
@@ -644,6 +668,13 @@ mod tests {
             url: format!("https://x/{name}"),
             format: Some("zcode".into()),
         }
+    }
+
+    /// A resolved game with no iFiction record — the shape most existing
+    /// tests want (they're exercising the options/download plumbing, not
+    /// SQ-0474's metadata threading).
+    fn resolved(options: Vec<DownloadOption>) -> ResolvedGame {
+        ResolvedGame { options, record: None }
     }
 
     #[test]
@@ -702,9 +733,31 @@ mod tests {
         m.on_key(KeyCode::Enter);
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
         m.on_key(KeyCode::Enter); // Resolve
-        let action = m.on_event(&SearchEvent::Options(vec![opt("a.z5")]));
+        let action = m.on_event(&SearchEvent::Options(resolved(vec![opt("a.z5")])));
         assert_eq!(action, ModalAction::Download("https://x/a.z5".into()));
         assert!(m.busy());
+    }
+
+    /// SQ-0474: the iFiction record resolved alongside the options is cached
+    /// for whichever `Download` follows, and handed to the picker exactly
+    /// once — `take_pending_record` doesn't return it twice.
+    #[test]
+    fn resolved_record_is_cached_until_taken_once() {
+        let mut m = SearchModal::new();
+        m.on_key(KeyCode::Char('z'));
+        m.on_key(KeyCode::Enter);
+        m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
+        m.on_key(KeyCode::Enter); // Resolve
+        assert!(m.take_pending_record().is_none(), "nothing resolved yet");
+
+        let record = Box::new(IFiction { title: Some("Alpha".into()), ..Default::default() });
+        let action = m.on_event(&SearchEvent::Options(ResolvedGame {
+            options: vec![opt("a.z5"), opt("a.z8")], // >1: no auto-download, record still cached
+            record: Some(record.clone()),
+        }));
+        assert_eq!(action, ModalAction::None);
+        assert_eq!(m.take_pending_record(), Some(record));
+        assert!(m.take_pending_record().is_none(), "taken exactly once");
     }
 
     #[test]
@@ -714,7 +767,7 @@ mod tests {
         m.on_key(KeyCode::Enter);
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
         m.on_key(KeyCode::Enter);
-        let action = m.on_event(&SearchEvent::Options(vec![opt("a.z5"), opt("a.z8")]));
+        let action = m.on_event(&SearchEvent::Options(resolved(vec![opt("a.z5"), opt("a.z8")])));
         assert_eq!(action, ModalAction::None);
         assert!(!m.busy());
         // Choosing view: Enter downloads the selected option.
@@ -729,7 +782,7 @@ mod tests {
         m.on_key(KeyCode::Enter);
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
         m.on_key(KeyCode::Enter);
-        assert_eq!(m.on_event(&SearchEvent::Options(vec![])), ModalAction::None);
+        assert_eq!(m.on_event(&SearchEvent::Options(resolved(vec![]))), ModalAction::None);
         // 'o' opens the IFDB page.
         assert_eq!(
             m.on_key(KeyCode::Char('o')),

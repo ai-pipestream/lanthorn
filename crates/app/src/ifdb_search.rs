@@ -123,10 +123,26 @@
 //! Conclusion: the whole feature (search + metadata + downloading a chosen file
 //! via the documented APIs) is expressly a supported third-party-client use.
 //! No policy language requires HTML scraping or disallows what we do.
+//!
+//! SQ-0474 — auto-populating a download's sidecar + cover: the
+//! `viewgame?ifiction` response fetched for (1)'s download options ALREADY
+//! carries the game's full iFiction record (bibliographic data plus the
+//! `<ifdb><coverart><url>`, same shape [`crate::ifiction::parse`] reads for
+//! IFDB's other metadata path). [`IfdbSearchClient::download_options`] parses
+//! it once and threads it through [`SearchEvent::Options`] so a subsequent
+//! download can populate the picker's `info.json` sidecar and, at most once,
+//! its cover — ZERO extra `viewgame` requests. The cover byte fetch (if any)
+//! reuses [`crate::fetch_worker::maybe_fetch_cover`]'s existing one-request
+//! logic via a [`crate::ifdb::MetadataSource`] the [`SearchWorker`] holds
+//! alongside its [`SearchSource`], so a download never issues more than one
+//! `coverart` GET, and never one at all when the record has no `<coverart>`.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::ifdb::MetadataSource;
+use crate::ifiction::IFiction;
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_SEARCH_XML: u64 = 4 * 1024 * 1024; // 4 MiB — a ~100-game reply is well under this.
@@ -161,6 +177,18 @@ pub struct DownloadOption {
     pub url: String,
     /// IFDB's declared format (e.g. "zcode", "glulx"), for display.
     pub format: Option<String>,
+}
+
+/// A resolved game: its playable download options plus (SQ-0474) the
+/// iFiction record parsed from the SAME `viewgame?ifiction` response, for
+/// populating a chosen download's metadata sidecar + cover without a second
+/// request.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ResolvedGame {
+    pub options: Vec<DownloadOption>,
+    /// Boxed: `IFiction` is large enough that an unboxed `Option` here blows
+    /// up `SearchEvent`'s size (clippy's `large_enum_variant`).
+    pub record: Option<Box<IFiction>>,
 }
 
 #[derive(Debug)]
@@ -199,8 +227,9 @@ pub trait SearchSource: Send + Sync {
     /// (SQ-0473), before the user has typed a query — see the module header's
     /// "(1b)" note for the exact, live-verified request.
     fn hot(&self) -> Result<Vec<SearchHit>, SearchError>;
-    /// The playable download options for a game, by its IFDB tuid.
-    fn download_options(&self, tuid: &str) -> Result<Vec<DownloadOption>, SearchError>;
+    /// The playable download options for a game, by its IFDB tuid, plus
+    /// (SQ-0474) its iFiction record parsed from the same response.
+    fn download_options(&self, tuid: &str) -> Result<ResolvedGame, SearchError>;
     /// Download `url` into `dest_dir`, returning the written path.
     fn download(&self, url: &str, dest_dir: &Path) -> Result<PathBuf, SearchError>;
 }
@@ -251,9 +280,14 @@ impl SearchSource for IfdbSearchClient {
         parse_search(&self.fetch_xml(hot_url())?)
     }
 
-    fn download_options(&self, tuid: &str) -> Result<Vec<DownloadOption>, SearchError> {
+    fn download_options(&self, tuid: &str) -> Result<ResolvedGame, SearchError> {
         let bytes = self.fetch_xml(viewgame_ifiction_url(tuid))?;
-        Ok(parse_download_options(&bytes))
+        let options = parse_download_options(&bytes);
+        // Best-effort: a record that fails to parse (or isn't iFiction at
+        // all) just means no auto-populated metadata later — the download
+        // itself is unaffected.
+        let record = crate::ifiction::parse(&bytes).ok().map(Box::new);
+        Ok(ResolvedGame { options, record })
     }
 
     fn download(&self, url: &str, dest_dir: &Path) -> Result<PathBuf, SearchError> {
@@ -574,14 +608,18 @@ pub enum SearchJob {
     Search(String),
     /// Resolve a chosen game's playable download options, by IFDB tuid.
     Resolve(String),
-    /// Download a chosen file `url` into `dest`.
-    Download { url: String, dest: PathBuf },
+    /// Download a chosen file `url` into `dest`. `record` (SQ-0474) is the
+    /// iFiction record resolved alongside the options that produced this
+    /// download, if any — used to populate the sidecar + cover after the
+    /// file lands, with zero extra requests. Boxed for the same reason as
+    /// [`ResolvedGame::record`].
+    Download { url: String, dest: PathBuf, record: Option<Box<IFiction>> },
 }
 
 /// A completed job's result, drained by the picker each frame.
 pub enum SearchEvent {
     Results(Vec<SearchHit>),
-    Options(Vec<DownloadOption>),
+    Options(ResolvedGame),
     Downloaded(PathBuf),
     /// A friendly, already-formatted error line (never a raw transport dump).
     Failed(String),
@@ -597,14 +635,20 @@ pub struct SearchWorker {
 }
 
 impl SearchWorker {
-    pub fn new(source: Box<dyn SearchSource>) -> Self {
+    /// `covers` and `data_base` are SQ-0474's post-download metadata/cover
+    /// persistence: `covers` is only ever asked for a `fetch_cover` (never
+    /// `fetch`/`fetch_by_id`, which would be an extra metadata request —
+    /// see [`crate::ifdb::MetadataSource`]); `data_base` locates each
+    /// story's `info.json` sidecar the same way the picker/fetch worker do
+    /// (`crate::storage::game_dir`).
+    pub fn new(source: Box<dyn SearchSource>, covers: Box<dyn MetadataSource>, data_base: PathBuf) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<SearchJob>();
         let (res_tx, res_rx) = mpsc::channel::<SearchEvent>();
         let busy = Arc::new(AtomicBool::new(false));
         let worker_busy = Arc::clone(&busy);
         let worker = thread::spawn(move || {
             while let Ok(job) = req_rx.recv() {
-                let event = run_job(source.as_ref(), job);
+                let event = run_job(source.as_ref(), covers.as_ref(), &data_base, job);
                 worker_busy.store(false, Ordering::Relaxed);
                 if res_tx.send(event).is_err() {
                     return;
@@ -631,7 +675,7 @@ impl SearchWorker {
 }
 
 /// Run one job to an event, mapping every error to a friendly display string.
-fn run_job(source: &dyn SearchSource, job: SearchJob) -> SearchEvent {
+fn run_job(source: &dyn SearchSource, covers: &dyn MetadataSource, data_base: &Path, job: SearchJob) -> SearchEvent {
     match job {
         SearchJob::Seed => match source.hot() {
             Ok(hits) => SearchEvent::Results(hits),
@@ -642,14 +686,48 @@ fn run_job(source: &dyn SearchSource, job: SearchJob) -> SearchEvent {
             Err(e) => SearchEvent::Failed(e.to_string()),
         },
         SearchJob::Resolve(tuid) => match source.download_options(&tuid) {
-            Ok(opts) => SearchEvent::Options(opts),
+            Ok(resolved) => SearchEvent::Options(resolved),
             Err(e) => SearchEvent::Failed(e.to_string()),
         },
-        SearchJob::Download { url, dest } => match source.download(&url, &dest) {
-            Ok(path) => SearchEvent::Downloaded(path),
+        SearchJob::Download { url, dest, record } => match source.download(&url, &dest) {
+            Ok(path) => {
+                persist_metadata_and_cover(covers, data_base, &path, record.as_deref());
+                SearchEvent::Downloaded(path)
+            }
             Err(e) => SearchEvent::Failed(e.to_string()),
         },
     }
+}
+
+/// SQ-0474: after a successful download, populate its `info.json` sidecar
+/// (title/author/…) and, at most once, its cover — reusing the fetch
+/// worker's own writers (`write_fetched`/`found_meta`/`maybe_fetch_cover`)
+/// so the shape is byte-for-byte what the picker already reads. Best-effort
+/// and silent: no `record` (the game had no iFiction data, or the modal
+/// never resolved one) simply leaves nothing written, and the picker falls
+/// back to its normal lazy `f`/`r` fetch — this never turns a successful
+/// download into a failure.
+fn persist_metadata_and_cover(
+    covers: &dyn MetadataSource,
+    data_base: &Path,
+    story_path: &Path,
+    record: Option<&IFiction>,
+) {
+    let Some(iff) = record else { return };
+    let Ok(bytes) = std::fs::read(story_path) else { return };
+    // The record's own <ifid> list is only trustworthy when it names exactly
+    // one edition — IFDB commonly groups several under one game page (see
+    // the module header's "(2)" note), and none of them is guaranteed to be
+    // THIS particular downloaded file's exact release/serial. Ambiguous or
+    // absent falls back to the same IFID the picker itself computes from the
+    // bytes, so the sidecar is keyed under what `resolve_entry` will look up.
+    let ifid = match iff.ifids.as_slice() {
+        [only] => only.clone(),
+        _ => crate::ifid::compute_ifid(&bytes),
+    };
+    let game_dir = crate::storage::game_dir(data_base, &crate::storage::story_key(story_path));
+    let cover = crate::fetch_worker::maybe_fetch_cover(covers, &game_dir, story_path, iff);
+    crate::fetch_worker::write_fetched(&game_dir, &ifid, crate::fetch_worker::found_meta(iff, cover));
 }
 
 #[cfg(test)]
@@ -822,9 +900,13 @@ mod tests {
 
     // ── worker roundtrip (no network) ──────────────────────────────────────
 
+    use std::sync::Mutex;
+    use crate::ifdb::{FetchError, FetchOutcome};
+
     struct Fake {
         hits: Vec<SearchHit>,
         options: Vec<DownloadOption>,
+        record: Option<IFiction>,
         fail: bool,
     }
 
@@ -841,14 +923,41 @@ mod tests {
             }
             Ok(self.hits.clone())
         }
-        fn download_options(&self, _tuid: &str) -> Result<Vec<DownloadOption>, SearchError> {
-            Ok(self.options.clone())
+        fn download_options(&self, _tuid: &str) -> Result<ResolvedGame, SearchError> {
+            Ok(ResolvedGame { options: self.options.clone(), record: self.record.clone().map(Box::new) })
         }
         fn download(&self, _url: &str, dest: &Path) -> Result<PathBuf, SearchError> {
             let p = dest.join("downloaded.z5");
             std::fs::create_dir_all(dest).map_err(|e| SearchError::Io(e.to_string()))?;
             std::fs::write(&p, b"story").map_err(|e| SearchError::Io(e.to_string()))?;
             Ok(p)
+        }
+    }
+
+    /// A fake [`MetadataSource`] used ONLY for its `fetch_cover` — SQ-0474's
+    /// terms posture means a download must never call `fetch`/`fetch_by_id`
+    /// on it (that would be a second `viewgame` metadata request).
+    struct FakeCovers {
+        calls: Arc<Mutex<Vec<String>>>,
+        bytes: Vec<u8>,
+    }
+
+    impl FakeCovers {
+        fn new() -> Self {
+            FakeCovers { calls: Arc::new(Mutex::new(Vec::new())), bytes: vec![9, 9, 9, 9] }
+        }
+    }
+
+    impl MetadataSource for FakeCovers {
+        fn fetch(&self, _ifid: &str) -> Result<FetchOutcome, FetchError> {
+            unreachable!("SQ-0474: a download must never issue an extra metadata request")
+        }
+        fn fetch_by_id(&self, _tuid: &str) -> Result<FetchOutcome, FetchError> {
+            unreachable!("SQ-0474: a download must never issue an extra metadata request")
+        }
+        fn fetch_cover(&self, url: &str) -> Result<Vec<u8>, FetchError> {
+            self.calls.lock().unwrap().push(url.to_string());
+            Ok(self.bytes.clone())
         }
     }
 
@@ -880,8 +989,9 @@ mod tests {
             url: "https://x/test.z5".into(),
             format: Some("zcode".into()),
         };
-        let source = Fake { hits: vec![hit.clone()], options: vec![opt], fail: false };
-        let w = SearchWorker::new(Box::new(source));
+        let source = Fake { hits: vec![hit.clone()], options: vec![opt], record: None, fail: false };
+        let data_base = std::env::temp_dir().join(format!("bm_ifdb_worker_data_{}", std::process::id()));
+        let w = SearchWorker::new(Box::new(source), Box::new(FakeCovers::new()), data_base.clone());
 
         w.request(SearchJob::Search("test".into()));
         match drain_one(&w) {
@@ -891,17 +1001,18 @@ mod tests {
 
         w.request(SearchJob::Resolve("abc".into()));
         match drain_one(&w) {
-            SearchEvent::Options(o) => assert_eq!(o.len(), 1),
+            SearchEvent::Options(o) => assert_eq!(o.options.len(), 1),
             _ => panic!("expected Options"),
         }
 
         let dir = std::env::temp_dir().join(format!("bm_ifdb_worker_{}", std::process::id()));
-        w.request(SearchJob::Download { url: "https://x/test.z5".into(), dest: dir.clone() });
+        w.request(SearchJob::Download { url: "https://x/test.z5".into(), dest: dir.clone(), record: None });
         match drain_one(&w) {
             SearchEvent::Downloaded(p) => assert!(p.exists()),
             _ => panic!("expected Downloaded"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&data_base);
     }
 
     /// Live end-to-end smoke against the real IFDB (network; `--ignored` only).
@@ -914,9 +1025,13 @@ mod tests {
         let hits = client.search("Zork I").expect("search");
         assert!(!hits.is_empty(), "expected some hits for 'Zork I'");
         let zork = hits.iter().find(|h| h.title.starts_with("Zork")).expect("a Zork hit");
-        let opts = client.download_options(&zork.tuid).expect("resolve");
+        let resolved = client.download_options(&zork.tuid).expect("resolve");
         // Zork I has a raw .z5 on eblong.com; there should be a playable file.
-        assert!(!opts.is_empty(), "expected at least one playable download for {}", zork.title);
+        assert!(
+            !resolved.options.is_empty(),
+            "expected at least one playable download for {}",
+            zork.title
+        );
     }
 
     /// Live smoke for the seed query (network; `--ignored` only): every
@@ -935,12 +1050,199 @@ mod tests {
 
     #[test]
     fn worker_maps_a_transport_error_to_a_friendly_failed_event() {
-        let source = Fake { hits: vec![], options: vec![], fail: true };
-        let w = SearchWorker::new(Box::new(source));
+        let source = Fake { hits: vec![], options: vec![], record: None, fail: true };
+        let data_base = std::env::temp_dir().join(format!("bm_ifdb_worker_fail_{}", std::process::id()));
+        let w = SearchWorker::new(Box::new(source), Box::new(FakeCovers::new()), data_base);
         w.request(SearchJob::Search("x".into()));
         match drain_one(&w) {
             SearchEvent::Failed(msg) => assert_eq!(msg, "IFDB unreachable"),
             _ => panic!("expected Failed"),
         }
+    }
+
+    // ── SQ-0474: auto-populate the sidecar + cover after a download ─────────
+
+    /// A record carrying both metadata and a `<coverart>` URL: the sidecar
+    /// picks up title/author, the cover is fetched exactly once (never a
+    /// second `viewgame` request — the fake would panic on `fetch`), and the
+    /// cover bytes land beside the sidecar as `cover.png`.
+    #[test]
+    fn a_download_with_metadata_and_coverart_writes_the_sidecar_and_fetches_the_cover_once() {
+        let data_base = std::env::temp_dir().join(format!("bm_ifdb_meta_cover_{}", std::process::id()));
+        let dest = data_base.join("stories");
+        let covers = FakeCovers::new();
+        let cover_calls = Arc::clone(&covers.calls);
+        let source = Fake { hits: vec![], options: vec![], record: None, fail: false };
+        let w = SearchWorker::new(Box::new(source), Box::new(covers), data_base.clone());
+
+        let record = IFiction {
+            title: Some("Deep Space Drifter".into()),
+            author: Some("Michael J. Roberts".into()),
+            ifdb: Some(crate::ifiction::IfdbExt {
+                tuid: "k82q3libhff6ks8l".into(),
+                link: None,
+                cover_url: Some("https://ifdb.org/coverart?id=k82q3libhff6ks8l&version=1".into()),
+            }),
+            ..Default::default()
+        };
+        w.request(SearchJob::Download {
+            url: "https://x/game.z5".into(),
+            dest: dest.clone(),
+            record: Some(Box::new(record)),
+        });
+        let path = match drain_one(&w) {
+            SearchEvent::Downloaded(p) => p,
+            _ => panic!("expected Downloaded"),
+        };
+
+        let ifid = crate::ifid::compute_ifid(&std::fs::read(&path).unwrap());
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let info = crate::story_info::load(&game_dir, &ifid).expect("sidecar written");
+        let fetched = info.fetched.expect("a fetched block was written");
+        assert_eq!(fetched.title.as_deref(), Some("Deep Space Drifter"));
+        assert_eq!(fetched.author.as_deref(), Some("Michael J. Roberts"));
+        assert_eq!(fetched.cover.as_deref(), Some("cover.png"));
+        assert!(game_dir.join("cover.png").exists());
+        assert_eq!(
+            cover_calls.lock().unwrap().as_slice(),
+            &["https://ifdb.org/coverart?id=k82q3libhff6ks8l&version=1".to_string()],
+            "exactly one cover request, at the record's own URL"
+        );
+
+        let _ = std::fs::remove_dir_all(&data_base);
+    }
+
+    /// A record with metadata but no `<coverart>`: the sidecar still picks
+    /// up title/author, but no cover request is ever attempted.
+    #[test]
+    fn a_download_with_metadata_but_no_coverart_writes_metadata_only() {
+        let data_base = std::env::temp_dir().join(format!("bm_ifdb_meta_only_{}", std::process::id()));
+        let dest = data_base.join("stories");
+        let covers = FakeCovers::new();
+        let cover_calls = Arc::clone(&covers.calls);
+        let source = Fake { hits: vec![], options: vec![], record: None, fail: false };
+        let w = SearchWorker::new(Box::new(source), Box::new(covers), data_base.clone());
+
+        let record = IFiction { title: Some("No Cover Game".into()), ..Default::default() };
+        w.request(SearchJob::Download {
+            url: "https://x/game.z5".into(),
+            dest: dest.clone(),
+            record: Some(Box::new(record)),
+        });
+        let path = match drain_one(&w) {
+            SearchEvent::Downloaded(p) => p,
+            _ => panic!("expected Downloaded"),
+        };
+
+        let ifid = crate::ifid::compute_ifid(&std::fs::read(&path).unwrap());
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        let fetched =
+            crate::story_info::load(&game_dir, &ifid).and_then(|i| i.fetched).expect("sidecar written");
+        assert_eq!(fetched.title.as_deref(), Some("No Cover Game"));
+        assert!(fetched.cover.is_none());
+        assert!(!game_dir.join("cover.png").exists());
+        assert!(cover_calls.lock().unwrap().is_empty(), "no <coverart> → zero cover requests");
+
+        let _ = std::fs::remove_dir_all(&data_base);
+    }
+
+    /// IFDB groups several editions under one game page (see the module
+    /// header's "(2)" note) — an ambiguous (here: more than one) `<ifid>`
+    /// list can't be trusted to name this exact downloaded file, so the
+    /// sidecar falls back to the same IFID `resolve_entry` computes from the
+    /// bytes, which is what makes the write visible to the picker at all.
+    #[test]
+    fn a_download_with_an_ambiguous_record_ifid_falls_back_to_the_computed_one() {
+        let data_base = std::env::temp_dir().join(format!("bm_ifdb_ifid_fallback_{}", std::process::id()));
+        let dest = data_base.join("stories");
+        let source = Fake { hits: vec![], options: vec![], record: None, fail: false };
+        let w = SearchWorker::new(Box::new(source), Box::new(FakeCovers::new()), data_base.clone());
+
+        let record = IFiction {
+            title: Some("Grouped Editions".into()),
+            ifids: vec!["ZCODE-1-000001".into(), "ZCODE-2-000002".into()],
+            ..Default::default()
+        };
+        w.request(SearchJob::Download {
+            url: "https://x/game.z5".into(),
+            dest: dest.clone(),
+            record: Some(Box::new(record)),
+        });
+        let path = match drain_one(&w) {
+            SearchEvent::Downloaded(p) => p,
+            _ => panic!("expected Downloaded"),
+        };
+
+        let computed = crate::ifid::compute_ifid(&std::fs::read(&path).unwrap());
+        assert!(!["ZCODE-1-000001", "ZCODE-2-000002"].contains(&computed.as_str()));
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        assert!(
+            crate::story_info::load(&game_dir, &computed).and_then(|i| i.fetched).is_some(),
+            "sidecar keyed by the computed IFID, which is what resolve_entry will look up"
+        );
+        assert!(
+            crate::story_info::load(&game_dir, "ZCODE-1-000001").is_none(),
+            "neither ambiguous record IFID was used as the key"
+        );
+
+        let _ = std::fs::remove_dir_all(&data_base);
+    }
+
+    /// A record naming exactly one edition IS trusted directly — no need to
+    /// fall back when there is nothing ambiguous about it.
+    #[test]
+    fn a_download_with_exactly_one_record_ifid_uses_it_directly() {
+        let data_base = std::env::temp_dir().join(format!("bm_ifdb_ifid_single_{}", std::process::id()));
+        let dest = data_base.join("stories");
+        let source = Fake { hits: vec![], options: vec![], record: None, fail: false };
+        let w = SearchWorker::new(Box::new(source), Box::new(FakeCovers::new()), data_base.clone());
+
+        let record = IFiction {
+            title: Some("Single Edition".into()),
+            ifids: vec!["ZCODE-9-999999-ABCD".into()],
+            ..Default::default()
+        };
+        w.request(SearchJob::Download {
+            url: "https://x/game.z5".into(),
+            dest: dest.clone(),
+            record: Some(Box::new(record)),
+        });
+        let path = match drain_one(&w) {
+            SearchEvent::Downloaded(p) => p,
+            _ => panic!("expected Downloaded"),
+        };
+
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        assert!(
+            crate::story_info::load(&game_dir, "ZCODE-9-999999-ABCD").and_then(|i| i.fetched).is_some(),
+            "the sole record IFID is used directly"
+        );
+
+        let _ = std::fs::remove_dir_all(&data_base);
+    }
+
+    /// No resolved record at all (e.g. the game had no iFiction data): the
+    /// download still succeeds, but nothing is written — no crash, no stray
+    /// sidecar, no cover request.
+    #[test]
+    fn a_download_with_no_record_writes_nothing() {
+        let data_base = std::env::temp_dir().join(format!("bm_ifdb_no_record_{}", std::process::id()));
+        let dest = data_base.join("stories");
+        let covers = FakeCovers::new();
+        let cover_calls = Arc::clone(&covers.calls);
+        let source = Fake { hits: vec![], options: vec![], record: None, fail: false };
+        let w = SearchWorker::new(Box::new(source), Box::new(covers), data_base.clone());
+
+        w.request(SearchJob::Download { url: "https://x/game.z5".into(), dest: dest.clone(), record: None });
+        let path = match drain_one(&w) {
+            SearchEvent::Downloaded(p) => p,
+            _ => panic!("expected Downloaded"),
+        };
+
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+        assert!(!game_dir.join("info.json").exists());
+        assert!(cover_calls.lock().unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&data_base);
     }
 }

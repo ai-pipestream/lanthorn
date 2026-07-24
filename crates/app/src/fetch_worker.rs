@@ -208,7 +208,11 @@ fn fetch_one(
 
 /// Load the sidecar (or start a fresh one), set `.fetched`, and save —
 /// preserving any existing `.probe` block (SQ-0276's slot).
-fn write_fetched(game_dir: &Path, ifid: &str, fetched: FetchedMeta) {
+///
+/// `pub(crate)`: also called directly by `ifdb_search.rs` after an IFDB
+/// download (SQ-0474), reusing this writer so both paths produce an
+/// identical sidecar shape.
+pub(crate) fn write_fetched(game_dir: &Path, ifid: &str, fetched: FetchedMeta) {
     let mut info = story_info::load(game_dir, ifid).unwrap_or_else(|| StoryInfo {
         format_version: story_info::FORMAT_VERSION,
         ifid: ifid.to_string(),
@@ -219,7 +223,9 @@ fn write_fetched(game_dir: &Path, ifid: &str, fetched: FetchedMeta) {
     let _ = story_info::save(game_dir, &info);
 }
 
-fn found_meta(iff: &IFiction, cover: Option<String>) -> FetchedMeta {
+/// `pub(crate)`: also called by `ifdb_search.rs` (SQ-0474) — see
+/// [`write_fetched`].
+pub(crate) fn found_meta(iff: &IFiction, cover: Option<String>) -> FetchedMeta {
     FetchedMeta {
         scanned_at: now_rfc3339(),
         fetch_version: story_info::FETCH_VERSION,
@@ -261,7 +267,11 @@ fn not_found_meta() -> FetchedMeta {
 /// local cover already present, a transport error, a write error) simply
 /// leaves the field `None` — it never turns a successful metadata fetch into
 /// a failed one.
-fn maybe_fetch_cover(
+///
+/// `pub(crate)`: also called by `ifdb_search.rs` after an IFDB download
+/// (SQ-0474), reusing this exact one-request-max logic rather than
+/// duplicating it.
+pub(crate) fn maybe_fetch_cover(
     source: &dyn MetadataSource,
     game_dir: &Path,
     path: &Path,
