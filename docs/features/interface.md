@@ -239,6 +239,25 @@ active sort column), `story_author`, `story_year`, `story_no_metadata` (the
 cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
 `:cover`) style selectors.
 
+- **Search & download from IFDB.** Press `/` to open the **IFDB search** modal,
+  type a title or author, and hit `Enter`. babelmap queries IFDB's public search
+  API (in the background — the picker never freezes) and lists the matching
+  games with their author, rating, and year. `↑`/`↓` (or `j`/`k`) move, `Esc`
+  steps back to edit the query, and `Enter` on a game fetches its download
+  links: if there's a single directly-playable story file it downloads at once,
+  and if there are several a small chooser lets you pick one. The file lands in
+  the current library directory, the list refreshes, and the cursor jumps to
+  your new story with a "Downloaded …" note. Only files babelmap can actually
+  open are offered (`.z3`–`.z8`, `.ulx`, `.gblorb`/`.zblorb`/`.blorb`/`.blb`,
+  `.dat`); zips and executables are skipped — press `o` on a game with no direct
+  story file to open its IFDB page in your browser instead. Downloads are capped
+  at 16 MiB, filenames are sanitised, and an existing file is never overwritten
+  (a `-2`, `-3`, … suffix is added). A "Results from IFDB" line credits the
+  source, and every request carries babelmap's User-Agent, honouring IFDB's
+  low-volume, user-driven API terms (search and downloads happen only when you
+  ask, one at a time). The modal reuses the themeable `dialog.*` chrome plus the
+  `ifdb_result`/`ifdb_result:selected`/`ifdb_result_meta`/`ifdb_download_marker`/
+  `ifdb_attribution` style selectors.
 - **Metadata fetch (IFDB).** Press `f` to fetch author/year/genre/description/
   cover art for the highlighted story from IFDB, or `r` to sweep the whole
   library (skipping any story already at the current fetch version); `Esc`

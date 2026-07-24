@@ -89,7 +89,7 @@ const STORY_EXTS: &[&str] = &[
     "z3", "z4", "z5", "z6", "z7", "z8", "zblorb", "blorb", "zlb", "dat", "ulx", "gblorb", "blb",
 ];
 
-fn has_story_ext(path: &Path) -> bool {
+pub(crate) fn has_story_ext(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| STORY_EXTS.contains(&e.to_ascii_lowercase().as_str()))

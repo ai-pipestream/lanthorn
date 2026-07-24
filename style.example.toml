@@ -80,6 +80,11 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # palette_match = { parent = "accent", bold = true }
 # palette_desc = { parent = "muted" }
 # palette_selected = { parent = "accent", reversed = true }
+# ifdb_result = { parent = "text" }
+# ifdb_result_selected = { parent = "accent", bold = true, reversed = true }
+# ifdb_result_meta = { parent = "muted" }
+# ifdb_download_marker = { parent = "accent" }
+# ifdb_attribution = { parent = "muted", italic = true }
 
 # ── The 11 Glk styles for text-buffer windows (base: text).
 [glk.buffer]

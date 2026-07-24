@@ -91,7 +91,12 @@ still reach in and override any single selector by name.
   frame, `title`, `button` / `button:active`, `shadow`); `[tooltip]` styles every
   hover tooltip (`background` + an optional `border`, borderless by default). Keys
   in these sections are bare (`title = { parent = "accent" }`), like `[panel]`
-  keys.
+  keys. The story picker's **IFDB search** modal (`/`) reuses this `[dialog]`
+  chrome and adds five `[elements]` selectors for its contents: `ifdb_result` (a
+  game/file row), `ifdb_result_selected` (the highlighted row, accent + bold +
+  reversed), `ifdb_result_meta` (the rating/year tail and hint line),
+  `ifdb_download_marker` (the ⭳ glyph on a download option), and
+  `ifdb_attribution` (the "Results from IFDB" credit line).
 
 ### Everyday customization
 Below the full role system sit the knobs most people actually touch — the small

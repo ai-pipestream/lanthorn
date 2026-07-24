@@ -306,6 +306,13 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("palette_match", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
     row("palette_desc", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     row("palette_selected", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    // ── IFDB search modal (SQ-0413) — reuses the dialog chrome; these style its
+    // result/file rows, the rating tail, the download glyph, and the attribution. ──
+    row("ifdb_result", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("ifdb_result_selected", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, true)),
+    row("ifdb_result_meta", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("ifdb_download_marker", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("ifdb_attribution", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
 ]);
 
 #[cfg(test)]
@@ -443,6 +450,11 @@ mod tests {
         "palette_match",
         "palette_desc",
         "palette_selected",
+        "ifdb_result",
+        "ifdb_result_selected",
+        "ifdb_result_meta",
+        "ifdb_download_marker",
+        "ifdb_attribution",
     ];
 
     #[test]

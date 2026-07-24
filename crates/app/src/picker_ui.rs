@@ -240,8 +240,8 @@ fn header_label(name: &str, key: app::picker::SortKey, sort: app::picker::Sort) 
 /// core hints; the rest are dropped — `PgUp/PgDn` goes first since it's a
 /// standard convention nobody needs told, `f`/`r` survive narrowest since
 /// they name behavior no key convention predicts.
-const FOOTER_OPTIONAL: [&str; 8] =
-    ["g: covers", "f: fetch", "r: refresh", "u: IFDB url", "H: get hints", "s: sort", "d: reverse", "PgUp/PgDn"];
+const FOOTER_OPTIONAL: [&str; 9] =
+    ["/: IFDB search", "g: covers", "f: fetch", "r: refresh", "u: IFDB url", "H: get hints", "s: sort", "d: reverse", "PgUp/PgDn"];
 
 fn build_footer(width: u16) -> String {
     const CORE_LEFT: &str = " ↑/↓ or j/k: move";
@@ -464,6 +464,18 @@ pub(crate) fn run_story_picker(
     // submits a fetch-by-id, Esc cancels.
     let mut manual_ifdb: Option<app::text_field::TextField> = None;
 
+    // IFDB story search (SQ-0413): `/` opens a modal to search IFDB, browse
+    // results, and download a chosen story file into `dir`. Network runs on its
+    // own serial worker (one request at a time), drained per frame like the
+    // fetcher; the modal is `Some` while open. The picker is always launched on
+    // a directory (never a single file), so `dir` is always a valid download
+    // target and the entry point is always available.
+    let search_worker =
+        app::ifdb_search::SearchWorker::new(Box::new(app::ifdb_search::IfdbSearchClient::new()));
+    let mut search_modal: Option<app::ifdb_search_modal::SearchModal> = None;
+    let mut search_area = Rect::new(0, 0, 0, 0);
+    let mut search_close_rect: Option<Rect> = None;
+
     // Info panel: always starts closed each launch (session-only state).
     let mut slide = PanelSlide::closed();
     let mut aux_cache: Vec<Option<app::picker::StoryAux>> =
@@ -620,6 +632,14 @@ pub(crate) fn run_story_picker(
                 preview_close_rect = rects.close;
                 preview_button_rects = rects.buttons;
             }
+
+            // IFDB search modal (SQ-0413): also drawn last (never with the
+            // preview open — the two entry points are mutually exclusive).
+            if let Some(sm) = &search_modal {
+                let rects = app::ifdb_search_modal::draw_search_modal(sm, area, &cs, buf);
+                search_area = rects.area;
+                search_close_rect = rects.close;
+            }
         });
 
         // Housekeeping (runs every iteration, before the poll gate below, so a
@@ -752,11 +772,45 @@ pub(crate) fn run_story_picker(
             }
         }
 
+        // Drain IFDB search worker events (SQ-0413). A downloaded file lands in
+        // `dir`, so rescan the directory, honour the active sort, and land the
+        // cursor on the new story; other events (search results, download
+        // options, errors) update the modal's own state machine, which may hand
+        // back a follow-up action (e.g. auto-download the sole playable file).
+        let mut search_arrived = false;
+        for ev in search_worker.drain() {
+            search_arrived = true;
+            if let app::ifdb_search::SearchEvent::Downloaded(new_path) = &ev {
+                let name = new_path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("story")
+                    .to_string();
+                stories = app::picker::scan_stories(dir, data_base);
+                app::picker::resort_preserving_selection(&mut stories, 0, sort);
+                row_badges = stories
+                    .iter()
+                    .map(|e| app::picker::compute_row_badges(e, data_base, &hint_index))
+                    .collect();
+                aux_cache = (0..stories.len()).map(|_| None).collect();
+                list.len(stories.len());
+                let idx = stories.iter().position(|e| &e.path == new_path).unwrap_or(0);
+                list.select(idx, viewport, anim);
+                progress_line = Some(format!("Downloaded {name}"));
+                search_modal = None;
+                continue;
+            }
+            if search_modal.is_some() {
+                let action = search_modal.as_mut().unwrap().on_event(&ev);
+                dispatch_search_action(action, &search_worker, dir, &mut search_modal);
+            }
+        }
+
         // A decode just landed: loop back to redraw so the cover paints now. The
         // draw is at the top of the loop, and once the result is cached
         // `cover_busy` goes false — without this the loop would block on `read()`
         // and the new cover wouldn't appear until the next input event.
-        if cover_arrived || fetch_arrived || hint_arrived {
+        if cover_arrived || fetch_arrived || hint_arrived || search_arrived {
             list.finalize_if_done();
             continue;
         }
@@ -772,7 +826,8 @@ pub(crate) fn run_story_picker(
         // grid fills in without needing a keypress.
         let gallery_busy = matches!(view, PickerView::Gallery) && !requested.is_empty();
         let cover_busy = panel_busy || gallery_busy;
-        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy() || hint_dl.busy())
+        let search_busy = search_modal.as_ref().is_some_and(|m| m.busy()) || search_worker.busy();
+        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy() || hint_dl.busy() || search_busy)
             && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
         {
             list.finalize_if_done();
@@ -797,9 +852,15 @@ pub(crate) fn run_story_picker(
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                 use crossterm::event::KeyCode::*;
                 let shift = k.modifiers.contains(crossterm::event::KeyModifiers::SHIFT);
+                // The IFDB search modal (SQ-0413) captures all keys while open;
+                // its state machine decides what each does (Esc backs out a
+                // level, Enter activates, ↑/↓/j/k navigate).
+                if search_modal.is_some() {
+                    let action = search_modal.as_mut().unwrap().on_key(k.code);
+                    dispatch_search_action(action, &search_worker, dir, &mut search_modal);
                 // The resource-preview modal (SQ-0347) captures all keys while
                 // open: any of Esc/Enter/q/Space dismisses it (and stops a sound).
-                if preview.is_some() {
+                } else if preview.is_some() {
                     if matches!(k.code, Esc | Enter | Char('q') | Char(' ')) {
                         preview = None;
                         if let Some(a) = audio.as_mut() {
@@ -1003,6 +1064,13 @@ pub(crate) fn run_story_picker(
                             manual_ifdb = Some(app::text_field::TextField::new(""));
                             progress_line = None;
                         }
+                        // `/`: open the IFDB search modal (SQ-0413) — search by
+                        // title/author, browse results, and download a story file
+                        // into this directory. `/` is the conventional search key.
+                        Char('/') => {
+                            search_modal = Some(app::ifdb_search_modal::SearchModal::new());
+                            progress_line = None;
+                        }
                         // `H`: download a matching InvisiClues hint file for the
                         // selected story (SQ-0445) when it has none locally — SLAG
                         // (IF Archive) preferred, else the Internet Archive izm set.
@@ -1061,7 +1129,15 @@ pub(crate) fn run_story_picker(
                 use crossterm::event::{MouseButton, MouseEventKind};
                 if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
-                    if preview.is_some() {
+                    if search_modal.is_some() {
+                        // IFDB search modal (SQ-0413): the ✕ or a click outside the
+                        // dialog closes it; a click inside is swallowed (its lists
+                        // are keyboard-driven).
+                        let on_close = search_close_rect.is_some_and(|r| r.contains(pt));
+                        if on_close || !search_area.contains(pt) {
+                            search_modal = None;
+                        }
+                    } else if preview.is_some() {
                         // Modal open (SQ-0347): the ✕, the Close button, or a click
                         // outside the dialog all dismiss it (and stop a sound); a
                         // click inside is swallowed.
@@ -1559,6 +1635,30 @@ fn draw_story_gallery(
     draw_str_clipped(buf, area.x, grid_bottom, &footer_txt, fstyle, area);
 
     (tile_rects, cols, vis)
+}
+
+/// Carry out a [`ModalAction`] from the IFDB search modal (SQ-0413): translate
+/// it into a worker job (search/resolve/download), open a browser page, or close
+/// the modal. The picker owns the worker and the download directory, so the
+/// modal itself stays network- and filesystem-free.
+fn dispatch_search_action(
+    action: app::ifdb_search_modal::ModalAction,
+    worker: &app::ifdb_search::SearchWorker,
+    dir: &std::path::Path,
+    modal: &mut Option<app::ifdb_search_modal::SearchModal>,
+) {
+    use app::ifdb_search::SearchJob;
+    use app::ifdb_search_modal::ModalAction;
+    match action {
+        ModalAction::None => {}
+        ModalAction::Close => *modal = None,
+        ModalAction::Search(q) => worker.request(SearchJob::Search(q)),
+        ModalAction::Resolve(tuid) => worker.request(SearchJob::Resolve(tuid)),
+        ModalAction::Download(url) => {
+            worker.request(SearchJob::Download { url, dest: dir.to_path_buf() })
+        }
+        ModalAction::OpenInBrowser(url) => open_url(&url),
+    }
 }
 
 /// Open a URL in the user's default browser. The picker holds mouse capture

@@ -29,6 +29,8 @@ pub mod export_svg;
 pub mod fetch_worker;
 pub mod cover_gallery;
 pub mod ifdb;
+pub mod ifdb_search;
+pub mod ifdb_search_modal;
 pub mod ifiction;
 pub mod ifid;
 pub mod input;

@@ -103,7 +103,10 @@ modes — a sortable, badged **list** or a `g` **cover-gallery grid** (shown in 
 banner at the top of this page) — each paired with a live **info panel**: the
 selected game's cover art, full metadata (author, year, genre, blurb), format,
 and IFID, fetched on demand from IFDB and cached per game. The type badges even
-tell the three engines apart at a glance (`Z5`, `Scott`, `G3.1.2`).
+tell the three engines apart at a glance (`Z5`, `Scott`, `G3.1.2`). Don't have a
+game yet? Press `/` to **search IFDB by title or author and download a story
+file** straight into your library — babelmap grabs it in the background and drops
+you right on it.
 
 ![The story picker's list view: a sortable, badged catalogue beside the info panel — the cover art here is drawn with the universal Unicode half-block fallback renderer](docs/story-list.png)
 
@@ -163,7 +166,8 @@ tell the three engines apart at a glance (`Z5`, `Scott`, `G3.1.2`).
   auto-reload on save). → [customization](docs/features/customization.md)
 - **Story picker** — browse a directory with type/artifact badges, a sortable
   author/year list or a `g` cover-gallery grid, an info side-panel with full
-  metadata and cover art, and on-demand IFDB metadata fetch, cached per game.
+  metadata and cover art, on-demand IFDB metadata fetch cached per game, and a
+  `/` **IFDB search** that downloads a new story file straight into your library.
   → [interface](docs/features/interface.md)
 - **Robust** — a faulting story halts with a call-frame stack trace (written to
   `~/.babelmap/crash.log`) while the app stays interactive, instead of taking the

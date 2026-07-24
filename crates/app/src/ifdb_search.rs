@@ -1,0 +1,875 @@
+//! IFDB story search + download for the story picker (SQ-0413).
+//!
+//! Network only — every request is driven by an explicit user action (a typed
+//! search, a chosen download). One request in flight at a time (the picker's
+//! [`SearchWorker`] is a single serial thread); nothing here prefetches,
+//! crawls, or bulk-enumerates. All requests carry babelmap's descriptive
+//! User-Agent, which is also required to get past IFDB's Cloudflare bot filter
+//! (see the terms notes below).
+//!
+//! ─────────────────────────────────────────────────────────────────────────
+//! ENDPOINTS — all verified live 2026-07-23 with curl, using ONLY the two
+//! documented public IFDB APIs (search + viewgame). No HTML scraping.
+//!
+//! (1) Search (documented at https://ifdb.org/api/search):
+//!      GET https://ifdb.org/search?xml&game&searchfor=<query>
+//!    The `xml` flag selects the "legacy" XML variant of the same search
+//!    engine the website uses (JSON is IFDB's recommended default, but this
+//!    repo parses XML with roxmltree for iFiction already, so XML reuses that
+//!    toolchain rather than adding a JSON dependency). `game` restricts the
+//!    object type to game listings. Response shape (namespace
+//!    `http://ifdb.org/api/xmlns`), verified live for `searchfor=Deep+Space+Drifter`:
+//!      <searchReply xmlns="http://ifdb.org/api/xmlns"><games>
+//!        <game>
+//!          <tuid>k82q3libhff6ks8l</tuid>
+//!          <title>Deep Space Drifter</title>
+//!          <link>https://ifdb.org/viewgame?id=k82q3libhff6ks8l</link>
+//!          <author>Michael J. Roberts and Steve McAdams</author>
+//!          <hasCoverArt/>                     (empty element; absent if no art)
+//!          <devsys>TADS 2</devsys>
+//!          <published><machine>1990</machine><printable>1990</printable></published>
+//!          <averageRating>2.428571428</averageRating>   (may be EMPTY: <averageRating></averageRating>)
+//!          <numRatings>7</numRatings>
+//!          <starRating>2.5</starRating>                  (rounded ½-star; may be EMPTY)
+//!          <starSort>2.16…</starSort>
+//!          <coverArtLink>…?id=…&amp;version=5</coverArtLink>  (absent if no art)
+//!        </game> … up to ~100 games …
+//!      </games></searchReply>
+//!    Zero results (verified with a nonsense query): a well-formed reply with
+//!    an EMPTY group — `<searchReply …><games></games></searchReply>` — NOT an
+//!    error. Error shape (documented): `<searchReply><error>message</error></searchReply>`.
+//!    Omitting the `game` object-type flag still defaults to a game search
+//!    (verified: `?xml&searchfor=zork` returned `<games>`).
+//!
+//! (2) Download links (documented at https://ifdb.org/api/viewgame):
+//!      GET https://ifdb.org/viewgame?ifiction&id=<tuid>
+//!    This is the SAME iFiction XML endpoint `ifdb.rs` already uses for
+//!    metadata; its `<story>` carries a `<downloads><links>` block (verified
+//!    live for Deep Space Drifter and present in tests/fixtures/ifdb-zork1.xml):
+//!      <downloads><links>
+//!        <link>
+//!          <url>https://ifarchive.org/if-archive/games/tads/deepspace.zip</url>
+//!          <title>deepspace.zip</title>
+//!          <desc>…</desc>
+//!          <isGame/>                          (empty element; a playable version)
+//!          <format>tads2</format>             (from IFDB's File Format list)
+//!          <compression>zip</compression>     (absent for a raw story file)
+//!          <compressedPrimary>deep.gam</compressedPrimary>
+//!        </link> …
+//!      </links></downloads>
+//!    Direct, uncompressed story files (e.g. Zork's
+//!    `https://eblong.com/infocom/gamefiles/zork1-invclues-r52-s871125.z5`,
+//!    `<isGame/>`, `<format>zcode</format>`, NO `<compression>`) are what this
+//!    module offers to download. See [`is_playable_download`].
+//!
+//! (3) File hosts — links point at ifarchive.org, eblong.com, etc. Verified
+//!    `curl -I` on both an eblong.com `.z5` and an ifarchive.org `.z5`:
+//!    HTTP 200, `content-type: application/x-zmachine`, no redirect, honest
+//!    `content-length`. ifarchive.org has no `robots.txt` and serves via
+//!    Cloudflare with `access-control-allow-origin: *`.
+//!
+//! ─────────────────────────────────────────────────────────────────────────
+//! TERMS OF USE — verified live 2026-07-23; this feature complies by construction.
+//!
+//! IFDB API docs (https://ifdb.org/api/) explicitly invite this use:
+//!   "IFDB offers a few Application Program Interfaces (APIs) that let third
+//!    parties create Web-based or client-side software that accesses IFDB's
+//!    data." … "viewgame: … This allows client programs, such as IF browsers
+//!    or 'jukeboxes', to take advantage of IFDB's structured data."
+//!   Caveats: "designed primarily for low-volume, user-driven applications,
+//!    rather than big batches of automated requests. They're not really meant
+//!    for constantly crawling the database, high-speed mirroring, etc." and
+//!    "Beware HTTP Error 403 … Cloudflare … To circumvent it, you must set a
+//!    custom user-agent header on your HTTP request."
+//!   → We are user-driven and low-volume: one request per keystroke-completed
+//!     search / per chosen download, one in flight at a time, no crawling or
+//!     prefetch. We send a descriptive User-Agent (see [`user_agent`]).
+//!
+//! IFDB Code of Conduct — Game and Link Policy (https://ifdb.org/code-of-conduct):
+//!   prohibits "Automated creation of game entries without moderator permission"
+//!   and "Posting spam, malware, or misleading links". We are strictly
+//!   READ-ONLY (search + fetch); we never create or edit listings.
+//!
+//! IFDB Copyright (https://ifdb.org/copyright): user-contributed metadata is
+//!   licensed CC-BY 3.0 US. "IFDB doesn't store any games - just metadata about
+//!   the games". Each game's own copyright is set by its author; download links
+//!   point to the IF Archive / author sites, not IFDB. → We show a "Results from
+//!   IFDB" attribution line in the search modal (honours CC-BY; cheap either way).
+//!
+//! Conclusion: the whole feature (search + metadata + downloading a chosen file
+//! via the documented APIs) is expressly a supported third-party-client use.
+//! No policy language requires HTML scraping or disallows what we do.
+
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+const TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_SEARCH_XML: u64 = 4 * 1024 * 1024; // 4 MiB — a ~100-game reply is well under this.
+/// Story files are small; a real Z-code/Glulx/blorb rarely exceeds a few MiB.
+/// 16 MiB is a generous ceiling that still guards against a mislabelled link
+/// pointing at something huge.
+pub const MAX_DOWNLOAD: u64 = 16 * 1024 * 1024;
+
+/// One game listing from an IFDB search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchHit {
+    pub tuid: String,
+    pub title: String,
+    pub author: Option<String>,
+    /// The game's IFDB listing page (for the "open in browser" fallback).
+    pub link: Option<String>,
+    /// Publication year/date, as IFDB's machine form (e.g. "1990").
+    pub published: Option<String>,
+    /// Rounded ½-star rating, if the game has ratings.
+    pub star_rating: Option<f32>,
+    pub num_ratings: Option<u32>,
+    pub has_cover: bool,
+}
+
+/// A single downloadable file resolved from a game's viewgame record. Only
+/// entries the app can actually open are produced (see [`is_playable_download`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DownloadOption {
+    /// A sanitized suggested filename (from the URL basename), always ending in
+    /// an accepted story extension.
+    pub filename: String,
+    pub url: String,
+    /// IFDB's declared format (e.g. "zcode", "glulx"), for display.
+    pub format: Option<String>,
+}
+
+#[derive(Debug)]
+pub enum SearchError {
+    /// Any transport/HTTP failure (offline, DNS, 5xx, timeout, Cloudflare 403).
+    Transport(String),
+    /// IFDB returned a well-formed `<error>` reply.
+    Remote(String),
+    /// The download exceeded [`MAX_DOWNLOAD`].
+    TooLarge,
+    /// The URL yielded no usable, accepted-extension filename.
+    NoFilename,
+    /// A local filesystem error writing the download.
+    Io(String),
+}
+
+impl std::fmt::Display for SearchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SearchError::Transport(_) => write!(f, "IFDB unreachable"),
+            SearchError::Remote(m) => write!(f, "IFDB: {m}"),
+            SearchError::TooLarge => {
+                write!(f, "file exceeds {} MiB cap", MAX_DOWNLOAD / (1024 * 1024))
+            }
+            SearchError::NoFilename => write!(f, "no downloadable story file"),
+            SearchError::Io(m) => write!(f, "could not save file: {m}"),
+        }
+    }
+}
+
+/// The network surface, abstracted so the picker's worker and its tests share
+/// one interface (a `Fake` in tests never touches the network).
+pub trait SearchSource: Send + Sync {
+    fn search(&self, query: &str) -> Result<Vec<SearchHit>, SearchError>;
+    /// The playable download options for a game, by its IFDB tuid.
+    fn download_options(&self, tuid: &str) -> Result<Vec<DownloadOption>, SearchError>;
+    /// Download `url` into `dest_dir`, returning the written path.
+    fn download(&self, url: &str, dest_dir: &Path) -> Result<PathBuf, SearchError>;
+}
+
+/// ureq-backed [`SearchSource`] hitting the live IFDB + file-host endpoints.
+pub struct IfdbSearchClient {
+    agent: ureq::Agent,
+}
+
+impl IfdbSearchClient {
+    pub fn new() -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(TIMEOUT))
+            .user_agent(user_agent())
+            .build();
+        Self { agent: ureq::Agent::new_with_config(config) }
+    }
+}
+
+impl Default for IfdbSearchClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SearchSource for IfdbSearchClient {
+    fn search(&self, query: &str) -> Result<Vec<SearchHit>, SearchError> {
+        let url = search_url(query);
+        let bytes = self
+            .agent
+            .get(url)
+            .call()
+            .map_err(|e| SearchError::Transport(e.to_string()))?
+            .body_mut()
+            .with_config()
+            .limit(MAX_SEARCH_XML)
+            .read_to_vec()
+            .map_err(|e| SearchError::Transport(e.to_string()))?;
+        parse_search(&bytes)
+    }
+
+    fn download_options(&self, tuid: &str) -> Result<Vec<DownloadOption>, SearchError> {
+        let url = viewgame_ifiction_url(tuid);
+        let bytes = self
+            .agent
+            .get(url)
+            .call()
+            .map_err(|e| SearchError::Transport(e.to_string()))?
+            .body_mut()
+            .with_config()
+            .limit(MAX_SEARCH_XML)
+            .read_to_vec()
+            .map_err(|e| SearchError::Transport(e.to_string()))?;
+        Ok(parse_download_options(&bytes))
+    }
+
+    fn download(&self, url: &str, dest_dir: &Path) -> Result<PathBuf, SearchError> {
+        let mut resp =
+            self.agent.get(url).call().map_err(|e| SearchError::Transport(e.to_string()))?;
+
+        // Fast reject on an honest Content-Length before reading a byte.
+        if let Some(len) = resp
+            .headers()
+            .get("content-length")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            if len > MAX_DOWNLOAD {
+                return Err(SearchError::TooLarge);
+            }
+        }
+
+        // Derive the filename from Content-Disposition if the host offers one,
+        // else the URL basename. Never trusted blindly — see `sanitize_filename`.
+        let disposition = resp
+            .headers()
+            .get("content-disposition")
+            .and_then(|v| v.to_str().ok())
+            .and_then(filename_from_disposition);
+        let name = disposition
+            .or_else(|| basename_from_url(url))
+            .and_then(|n| sanitize_filename(&n))
+            .ok_or(SearchError::NoFilename)?;
+
+        let bytes = read_capped(resp.body_mut().as_reader(), MAX_DOWNLOAD)?;
+
+        std::fs::create_dir_all(dest_dir).map_err(|e| SearchError::Io(e.to_string()))?;
+        let dest = unique_dest(dest_dir, &name);
+        std::fs::write(&dest, &bytes).map_err(|e| SearchError::Io(e.to_string()))?;
+        Ok(dest)
+    }
+}
+
+/// babelmap's descriptive User-Agent — identifies the client and its repo, and
+/// (per IFDB's docs) is required to clear Cloudflare's bot filter.
+fn user_agent() -> String {
+    format!("babelmap/{} (+https://github.com/sharkusk/babelmap)", env!("CARGO_PKG_VERSION"))
+}
+
+fn search_url(query: &str) -> String {
+    format!("https://ifdb.org/search?xml&game&searchfor={}", percent_encode(query))
+}
+
+fn viewgame_ifiction_url(tuid: &str) -> String {
+    format!("https://ifdb.org/viewgame?ifiction&id={}", percent_encode(tuid))
+}
+
+/// Parse an IFDB `<searchReply>` game search into hits. A `<error>` reply
+/// becomes [`SearchError::Remote`]; an empty `<games>` group is zero hits, not
+/// an error. Reuses the same namespace-tolerant, hand-verified discipline as
+/// `ifiction.rs`.
+pub fn parse_search(xml: &[u8]) -> Result<Vec<SearchHit>, SearchError> {
+    let text = std::str::from_utf8(xml)
+        .map_err(|_| SearchError::Remote("reply was not valid UTF-8".into()))?;
+    let doc = roxmltree::Document::parse(text)
+        .map_err(|e| SearchError::Remote(format!("malformed reply: {e}")))?;
+
+    // A top-level <error> is IFDB's failure shape.
+    if let Some(err) = doc
+        .descendants()
+        .find(|n| n.is_element() && n.tag_name().name() == "error")
+        .and_then(|n| n.text())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Err(SearchError::Remote(err.to_string()));
+    }
+
+    let hits = doc
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "game")
+        .filter_map(parse_game)
+        .collect();
+    Ok(hits)
+}
+
+/// One `<game>` element → a `SearchHit`. Requires at least a tuid and title;
+/// anything less is skipped rather than surfaced as a broken row.
+fn parse_game(game: roxmltree::Node) -> Option<SearchHit> {
+    let tuid = child_text(game, "tuid")?;
+    let title = child_text(game, "title")?;
+    let published = game
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == "published")
+        .and_then(|p| child_text(p, "machine"));
+    let has_cover = game
+        .children()
+        .any(|n| n.is_element() && matches!(n.tag_name().name(), "hasCoverArt" | "coverArtLink"));
+    Some(SearchHit {
+        tuid,
+        title,
+        author: child_text(game, "author"),
+        link: child_text(game, "link"),
+        published,
+        star_rating: child_text(game, "starRating").and_then(|s| s.parse().ok()),
+        num_ratings: child_text(game, "numRatings").and_then(|s| s.parse().ok()),
+        has_cover,
+    })
+}
+
+/// Parse the `<downloads><links>` block of a viewgame iFiction record into the
+/// playable download options (see [`is_playable_download`]). A record with no
+/// downloads, or only compressed/foreign entries, yields an empty vec.
+pub fn parse_download_options(xml: &[u8]) -> Vec<DownloadOption> {
+    let Ok(text) = std::str::from_utf8(xml) else { return Vec::new() };
+    let Ok(doc) = roxmltree::Document::parse(text) else { return Vec::new() };
+    doc.descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "link")
+        .filter_map(|link| {
+            let url = child_text(link, "url")?;
+            let compressed = link
+                .children()
+                .any(|n| n.is_element() && n.tag_name().name() == "compression");
+            if !is_playable_download(&url, compressed) {
+                return None;
+            }
+            let filename = basename_from_url(&url).and_then(|n| sanitize_filename(&n))?;
+            Some(DownloadOption { filename, url, format: child_text(link, "format") })
+        })
+        .collect()
+}
+
+/// A download link is offered iff it is uncompressed AND its URL basename has
+/// an extension the app can actually open (`crate::picker::has_story_ext`:
+/// `.z3`–`.z8`, `.ulx`, `.gblorb`, `.zblorb`, `.blorb`, `.blb`, `.dat`, …).
+/// Compressed archives (`.zip`, `.hqx`), executables, source, and documents
+/// are deliberately skipped — the picker can't open them directly, and we do
+/// NOT unzip. IFDB's `<isGame/>` flag is a hint but not the gate: the
+/// extension is authoritative (a `.zip` marked `isGame` is still unopenable).
+pub fn is_playable_download(url: &str, compressed: bool) -> bool {
+    if compressed {
+        return false;
+    }
+    match basename_from_url(url) {
+        Some(name) => crate::picker::has_story_ext(Path::new(&name)),
+        None => false,
+    }
+}
+
+/// Read at most `cap` bytes from `r`; error with [`SearchError::TooLarge`] if
+/// the source has more. Reads `cap + 1` so a source of exactly `cap` bytes is
+/// accepted while one byte more is rejected — never buffering the whole of an
+/// over-cap response.
+pub fn read_capped<R: Read>(r: R, cap: u64) -> Result<Vec<u8>, SearchError> {
+    let mut buf = Vec::new();
+    r.take(cap + 1).read_to_end(&mut buf).map_err(|e| SearchError::Transport(e.to_string()))?;
+    if buf.len() as u64 > cap {
+        return Err(SearchError::TooLarge);
+    }
+    Ok(buf)
+}
+
+/// The last path segment of a URL, percent-decoded, with any query/fragment
+/// stripped. `None` if empty. Not yet sanitized — pass through [`sanitize_filename`].
+fn basename_from_url(url: &str) -> Option<String> {
+    let no_frag = url.split('#').next().unwrap_or(url);
+    let no_query = no_frag.split('?').next().unwrap_or(no_frag);
+    let last = no_query.rsplit('/').next().unwrap_or(no_query);
+    let decoded = percent_decode(last);
+    (!decoded.is_empty()).then_some(decoded)
+}
+
+/// Pull a `filename` out of a `Content-Disposition` header value. Handles both
+/// `filename="x"` and bare `filename=x`; the value is returned raw for
+/// [`sanitize_filename`] to clean.
+fn filename_from_disposition(value: &str) -> Option<String> {
+    let idx = value.to_ascii_lowercase().find("filename=")?;
+    let after = &value[idx + "filename=".len()..];
+    let after = after.trim_start();
+    let name = if let Some(rest) = after.strip_prefix('"') {
+        rest.split('"').next().unwrap_or(rest)
+    } else {
+        after.split(';').next().unwrap_or(after).trim()
+    };
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Reduce an untrusted filename to a safe basename: take only the final path
+/// component (defeating `../` and absolute paths from either separator), drop
+/// control chars and anything path-significant, and require it to still end in
+/// an accepted story extension. `None` if nothing safe/openable remains.
+pub fn sanitize_filename(raw: &str) -> Option<String> {
+    // Final component under BOTH separators — `a/../b`, `..\\evil`, `/etc/x`.
+    let base = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
+    // A lone/leading-dot name (".", "..", ".z5") is never a real story file.
+    if base.is_empty() || base.starts_with('.') {
+        return None;
+    }
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | '\0'))
+        .collect();
+    let cleaned = cleaned.trim().to_string();
+    if cleaned.is_empty() || cleaned == ".." {
+        return None;
+    }
+    crate::picker::has_story_ext(Path::new(&cleaned)).then_some(cleaned)
+}
+
+/// A non-colliding path in `dir` for `filename`: returns `dir/filename` if free,
+/// else `dir/stem-2.ext`, `-3`, … Never overwrites an existing file.
+pub fn unique_dest(dir: &Path, filename: &str) -> PathBuf {
+    let first = dir.join(filename);
+    if !first.exists() {
+        return first;
+    }
+    let path = Path::new(filename);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(filename);
+    let ext = path.extension().and_then(|s| s.to_str());
+    for n in 2..10_000 {
+        let candidate = match ext {
+            Some(e) => dir.join(format!("{stem}-{n}.{e}")),
+            None => dir.join(format!("{stem}-{n}")),
+        };
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    // Astronomically unlikely; fall back to the original (write may then fail).
+    first
+}
+
+/// Percent-encode a query value (hand-rolled — matches `ifdb.rs`, avoids a
+/// `percent-encoding` dependency for the one place we build a query string).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'~' | b'-' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Decode `%xx` escapes (and `+` → space) in a URL path segment. Invalid
+/// escapes are left verbatim. Bytes are decoded then re-interpreted as UTF-8,
+/// falling back to the raw string if the result isn't valid UTF-8.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+                match hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                    Some(b) => {
+                        out.push(b);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(b'%');
+                        i += 1;
+                    }
+                }
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// Find a direct child element named `name` and return its trimmed text.
+fn child_text<'a>(parent: roxmltree::Node<'a, 'a>, name: &str) -> Option<String> {
+    parent
+        .children()
+        .find(|n| n.is_element() && n.tag_name().name() == name)
+        .and_then(|n| n.text())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+// ── Background worker ──────────────────────────────────────────────────────
+//
+// The picker's search modal never blocks the UI thread on the network. A single
+// long-lived worker thread serves one job at a time (search → resolve →
+// download), draining results non-blocking — the same shape as `fetch_worker`
+// and `cover::CoverDecoder`. One in-flight request honours IFDB's low-volume
+// guidance by construction.
+
+use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+
+/// A unit of work for the [`SearchWorker`].
+pub enum SearchJob {
+    /// Full-text game search for a typed query.
+    Search(String),
+    /// Resolve a chosen game's playable download options, by IFDB tuid.
+    Resolve(String),
+    /// Download a chosen file `url` into `dest`.
+    Download { url: String, dest: PathBuf },
+}
+
+/// A completed job's result, drained by the picker each frame.
+pub enum SearchEvent {
+    Results(Vec<SearchHit>),
+    Options(Vec<DownloadOption>),
+    Downloaded(PathBuf),
+    /// A friendly, already-formatted error line (never a raw transport dump).
+    Failed(String),
+}
+
+/// One serial background worker for the search modal. Dropping it ends the
+/// thread (the request channel closes).
+pub struct SearchWorker {
+    req_tx: mpsc::Sender<SearchJob>,
+    res_rx: mpsc::Receiver<SearchEvent>,
+    busy: Arc<AtomicBool>,
+    _worker: thread::JoinHandle<()>,
+}
+
+impl SearchWorker {
+    pub fn new(source: Box<dyn SearchSource>) -> Self {
+        let (req_tx, req_rx) = mpsc::channel::<SearchJob>();
+        let (res_tx, res_rx) = mpsc::channel::<SearchEvent>();
+        let busy = Arc::new(AtomicBool::new(false));
+        let worker_busy = Arc::clone(&busy);
+        let worker = thread::spawn(move || {
+            while let Ok(job) = req_rx.recv() {
+                let event = run_job(source.as_ref(), job);
+                worker_busy.store(false, Ordering::Relaxed);
+                if res_tx.send(event).is_err() {
+                    return;
+                }
+            }
+        });
+        Self { req_tx, res_rx, busy, _worker: worker }
+    }
+
+    /// Queue a job. The modal only ever has one outstanding at a time.
+    pub fn request(&self, job: SearchJob) {
+        self.busy.store(true, Ordering::Relaxed);
+        let _ = self.req_tx.send(job);
+    }
+
+    /// Non-blocking drain of all events ready so far.
+    pub fn drain(&self) -> Vec<SearchEvent> {
+        self.res_rx.try_iter().collect()
+    }
+
+    pub fn busy(&self) -> bool {
+        self.busy.load(Ordering::Relaxed)
+    }
+}
+
+/// Run one job to an event, mapping every error to a friendly display string.
+fn run_job(source: &dyn SearchSource, job: SearchJob) -> SearchEvent {
+    match job {
+        SearchJob::Search(q) => match source.search(&q) {
+            Ok(hits) => SearchEvent::Results(hits),
+            Err(e) => SearchEvent::Failed(e.to_string()),
+        },
+        SearchJob::Resolve(tuid) => match source.download_options(&tuid) {
+            Ok(opts) => SearchEvent::Options(opts),
+            Err(e) => SearchEvent::Failed(e.to_string()),
+        },
+        SearchJob::Download { url, dest } => match source.download(&url, &dest) {
+            Ok(path) => SearchEvent::Downloaded(path),
+            Err(e) => SearchEvent::Failed(e.to_string()),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SEARCH: &[u8] = include_bytes!("../tests/fixtures/ifdb-search-games.xml");
+    const ZORK: &[u8] = include_bytes!("../tests/fixtures/ifdb-zork1.xml");
+
+    #[test]
+    fn parses_a_live_search_reply() {
+        let hits = parse_search(SEARCH).unwrap();
+        assert_eq!(hits.len(), 3);
+        let dsd = &hits[0];
+        assert_eq!(dsd.tuid, "k82q3libhff6ks8l");
+        assert_eq!(dsd.title, "Deep Space Drifter");
+        assert_eq!(dsd.author.as_deref(), Some("Michael J. Roberts and Steve McAdams"));
+        assert_eq!(dsd.published.as_deref(), Some("1990"));
+        assert_eq!(dsd.star_rating, Some(2.5));
+        assert_eq!(dsd.num_ratings, Some(7));
+        assert!(dsd.has_cover, "hasCoverArt + coverArtLink → has_cover");
+    }
+
+    #[test]
+    fn a_game_without_cover_or_ratings_parses_with_none() {
+        let hits = parse_search(SEARCH).unwrap();
+        // "The Initial State" — has ratings but no cover art.
+        let initial = hits.iter().find(|h| h.title == "The Initial State").unwrap();
+        assert!(!initial.has_cover);
+        // "Eclipse" — empty <starRating></starRating>/<numRatings>0 → None/0.
+        let eclipse = hits.iter().find(|h| h.title == "Eclipse").unwrap();
+        assert_eq!(eclipse.star_rating, None, "an empty rating element is None, not 0.0");
+        assert!(!eclipse.has_cover);
+    }
+
+    #[test]
+    fn zero_results_is_empty_not_an_error() {
+        let xml = br#"<?xml version="1.0" encoding="UTF-8"?><searchReply xmlns="http://ifdb.org/api/xmlns"><games></games></searchReply>"#;
+        let hits = parse_search(xml).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn an_error_reply_is_surfaced_as_remote() {
+        let xml = br#"<?xml version="1.0"?><searchReply xmlns="http://ifdb.org/api/xmlns"><error>Bad search</error></searchReply>"#;
+        match parse_search(xml) {
+            Err(SearchError::Remote(m)) => assert_eq!(m, "Bad search"),
+            other => panic!("expected Remote error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_reply_never_panics() {
+        assert!(parse_search(b"<searchReply>").is_err());
+        assert!(parse_search(b"").is_err());
+        assert!(parse_search(b"\xff\xfe garbage").is_err());
+    }
+
+    #[test]
+    fn download_options_keep_only_uncompressed_openable_files() {
+        // Zork's fixture has many links: exactly one is a raw, uncompressed
+        // `.z5` story file; the rest are .zip/.hqx/.html/etc.
+        let opts = parse_download_options(ZORK);
+        assert_eq!(opts.len(), 1, "only the raw .z5 is offered: {opts:?}");
+        let o = &opts[0];
+        assert_eq!(o.url, "https://eblong.com/infocom/gamefiles/zork1-invclues-r52-s871125.z5");
+        assert_eq!(o.filename, "zork1-invclues-r52-s871125.z5");
+        assert_eq!(o.format.as_deref(), Some("zcode"));
+    }
+
+    #[test]
+    fn is_playable_download_filters_by_extension_and_compression() {
+        assert!(is_playable_download("https://x/y/game.z5", false));
+        assert!(is_playable_download("https://x/game.gblorb", false));
+        assert!(is_playable_download("https://x/game.ulx?dl=1", false));
+        // Compressed → never, even with a story extension inside the name.
+        assert!(!is_playable_download("https://x/game.z5", true));
+        assert!(!is_playable_download("https://x/zorkvms.zip", false));
+        assert!(!is_playable_download("https://x/game.exe", false));
+        assert!(!is_playable_download("https://x/readme.txt", false));
+    }
+
+    #[test]
+    fn sanitize_filename_defeats_path_traversal() {
+        assert_eq!(sanitize_filename("game.z5").as_deref(), Some("game.z5"));
+        // Path components stripped to the basename.
+        assert_eq!(sanitize_filename("../../etc/evil.z5").as_deref(), Some("evil.z5"));
+        assert_eq!(sanitize_filename("/abs/path/story.ulx").as_deref(), Some("story.ulx"));
+        assert_eq!(sanitize_filename(r"..\\windows\\thing.gblorb").as_deref(), Some("thing.gblorb"));
+        // No accepted extension → rejected.
+        assert_eq!(sanitize_filename("payload.exe"), None);
+        assert_eq!(sanitize_filename("archive.zip"), None);
+        // Dotfiles / traversal atoms → rejected.
+        assert_eq!(sanitize_filename(".."), None);
+        assert_eq!(sanitize_filename(".z5"), None);
+        assert_eq!(sanitize_filename(""), None);
+    }
+
+    #[test]
+    fn basename_from_url_strips_query_and_decodes() {
+        assert_eq!(basename_from_url("https://x/a/b/c.z5").as_deref(), Some("c.z5"));
+        assert_eq!(basename_from_url("https://x/c.z5?ver=2#frag").as_deref(), Some("c.z5"));
+        assert_eq!(basename_from_url("https://x/My%20Game.z5").as_deref(), Some("My Game.z5"));
+        assert_eq!(basename_from_url("https://x/").as_deref(), None);
+    }
+
+    #[test]
+    fn filename_from_disposition_quoted_and_bare() {
+        assert_eq!(
+            filename_from_disposition(r#"attachment; filename="zork.z5""#).as_deref(),
+            Some("zork.z5")
+        );
+        assert_eq!(
+            filename_from_disposition("inline; filename=game.ulx").as_deref(),
+            Some("game.ulx")
+        );
+        assert_eq!(filename_from_disposition("attachment").as_deref(), None);
+    }
+
+    #[test]
+    fn read_capped_accepts_up_to_cap_and_rejects_beyond() {
+        // Exactly cap: accepted.
+        let ok = read_capped(&[7u8; 8][..], 8).unwrap();
+        assert_eq!(ok.len(), 8);
+        // cap + 1: rejected as TooLarge.
+        match read_capped(&[7u8; 9][..], 8) {
+            Err(SearchError::TooLarge) => {}
+            other => panic!("expected TooLarge, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unique_dest_appends_a_suffix_on_collision() {
+        let dir = std::env::temp_dir().join(format!("bm_ifdb_dl_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let a = unique_dest(&dir, "game.z5");
+        assert_eq!(a.file_name().unwrap(), "game.z5");
+        std::fs::write(&a, b"x").unwrap();
+        let b = unique_dest(&dir, "game.z5");
+        assert_eq!(b.file_name().unwrap(), "game-2.z5", "collision → -2 suffix");
+        std::fs::write(&b, b"x").unwrap();
+        let c = unique_dest(&dir, "game.z5");
+        assert_eq!(c.file_name().unwrap(), "game-3.z5");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_url_encodes_the_query_and_targets_the_xml_game_endpoint() {
+        assert_eq!(
+            search_url("Deep Space Drifter"),
+            "https://ifdb.org/search?xml&game&searchfor=Deep%20Space%20Drifter"
+        );
+        assert!(search_url("A&B").ends_with("searchfor=A%26B"));
+    }
+
+    #[test]
+    fn user_agent_identifies_babelmap() {
+        let ua = user_agent();
+        assert!(ua.starts_with("babelmap/"));
+        assert!(ua.contains("github.com/sharkusk/babelmap"));
+    }
+
+    // ── worker roundtrip (no network) ──────────────────────────────────────
+
+    struct Fake {
+        hits: Vec<SearchHit>,
+        options: Vec<DownloadOption>,
+        fail: bool,
+    }
+
+    impl SearchSource for Fake {
+        fn search(&self, _q: &str) -> Result<Vec<SearchHit>, SearchError> {
+            if self.fail {
+                return Err(SearchError::Transport("offline".into()));
+            }
+            Ok(self.hits.clone())
+        }
+        fn download_options(&self, _tuid: &str) -> Result<Vec<DownloadOption>, SearchError> {
+            Ok(self.options.clone())
+        }
+        fn download(&self, _url: &str, dest: &Path) -> Result<PathBuf, SearchError> {
+            let p = dest.join("downloaded.z5");
+            std::fs::create_dir_all(dest).map_err(|e| SearchError::Io(e.to_string()))?;
+            std::fs::write(&p, b"story").map_err(|e| SearchError::Io(e.to_string()))?;
+            Ok(p)
+        }
+    }
+
+    fn drain_one(w: &SearchWorker) -> SearchEvent {
+        for _ in 0..2000 {
+            let mut evs = w.drain();
+            if !evs.is_empty() {
+                return evs.remove(0);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("no event arrived");
+    }
+
+    #[test]
+    fn worker_runs_search_resolve_download_serially() {
+        let hit = SearchHit {
+            tuid: "abc".into(),
+            title: "Test".into(),
+            author: None,
+            link: None,
+            published: None,
+            star_rating: None,
+            num_ratings: None,
+            has_cover: false,
+        };
+        let opt = DownloadOption {
+            filename: "test.z5".into(),
+            url: "https://x/test.z5".into(),
+            format: Some("zcode".into()),
+        };
+        let source = Fake { hits: vec![hit.clone()], options: vec![opt], fail: false };
+        let w = SearchWorker::new(Box::new(source));
+
+        w.request(SearchJob::Search("test".into()));
+        match drain_one(&w) {
+            SearchEvent::Results(hits) => assert_eq!(hits, vec![hit]),
+            _ => panic!("expected Results"),
+        }
+
+        w.request(SearchJob::Resolve("abc".into()));
+        match drain_one(&w) {
+            SearchEvent::Options(o) => assert_eq!(o.len(), 1),
+            _ => panic!("expected Options"),
+        }
+
+        let dir = std::env::temp_dir().join(format!("bm_ifdb_worker_{}", std::process::id()));
+        w.request(SearchJob::Download { url: "https://x/test.z5".into(), dest: dir.clone() });
+        match drain_one(&w) {
+            SearchEvent::Downloaded(p) => assert!(p.exists()),
+            _ => panic!("expected Downloaded"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Live end-to-end smoke against the real IFDB (network; `--ignored` only).
+    /// Documents the contract verified during development: a title search
+    /// returns hits, and a hit resolves to at least one playable download.
+    #[test]
+    #[ignore = "hits the live IFDB network"]
+    fn live_search_and_resolve_smoke() {
+        let client = IfdbSearchClient::new();
+        let hits = client.search("Zork I").expect("search");
+        assert!(!hits.is_empty(), "expected some hits for 'Zork I'");
+        let zork = hits.iter().find(|h| h.title.starts_with("Zork")).expect("a Zork hit");
+        let opts = client.download_options(&zork.tuid).expect("resolve");
+        // Zork I has a raw .z5 on eblong.com; there should be a playable file.
+        assert!(!opts.is_empty(), "expected at least one playable download for {}", zork.title);
+    }
+
+    #[test]
+    fn worker_maps_a_transport_error_to_a_friendly_failed_event() {
+        let source = Fake { hits: vec![], options: vec![], fail: true };
+        let w = SearchWorker::new(Box::new(source));
+        w.request(SearchJob::Search("x".into()));
+        match drain_one(&w) {
+            SearchEvent::Failed(msg) => assert_eq!(msg, "IFDB unreachable"),
+            _ => panic!("expected Failed"),
+        }
+    }
+}
