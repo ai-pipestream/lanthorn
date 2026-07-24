@@ -1057,7 +1057,7 @@ mod tests {
         b.extend(enc(0x40, &[LocLoad(0), Push])); // fref
         b.extend(enc(0x130, &[Imm(0x42), Imm(3), LocStore(4)]));
         // put_char_stream(str=local1, ch): reverse order push ch, str
-        for ch in [b'H', b'i'] {
+        for ch in *b"Hi" {
             b.extend(enc(0x40, &[Imm(ch as u32), Push]));
             b.extend(enc(0x40, &[LocLoad(4), Push]));
             b.extend(enc(0x130, &[Imm(0x81), Imm(2), Discard]));
