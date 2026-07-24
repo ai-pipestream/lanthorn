@@ -149,7 +149,7 @@ which, so you rarely set anything. Full pixel graphics reach **all three OSes**:
 
 | Graphics protocol | Terminals | Platforms |
 |---|---|---|
-| **Kitty graphics** | kitty, WezTerm | Linux · macOS · Windows |
+| **Kitty graphics** | kitty, Ghostty, WezTerm | Linux · macOS · Windows |
 | **iTerm2 inline images** | iTerm2 | macOS |
 | **Sixel** | Windows Terminal **1.22+**, foot, xterm (+ others) | Windows 11 · Linux · macOS |
 | *Unicode half-blocks* (automatic fallback) | any terminal, incl. SSH / tmux / plain | everywhere |
