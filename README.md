@@ -104,9 +104,9 @@ banner at the top of this page) — each paired with a live **info panel**: the
 selected game's cover art, full metadata (author, year, genre, blurb), format,
 and IFID, fetched on demand from IFDB and cached per game. The type badges even
 tell the three engines apart at a glance (`Z5`, `Scott`, `G3.1.2`). Don't have a
-game yet? Press `/` to **search IFDB by title or author and download a story
-file** straight into your library — babelmap grabs it in the background and drops
-you right on it.
+game yet? Press `/` to **browse IFDB's popular list or search by title/author,
+then download a story file** straight into your library — babelmap grabs it in
+the background and drops you right on it.
 
 ![The story picker's list view: a sortable, badged catalogue beside the info panel — the cover art here is drawn with the universal Unicode half-block fallback renderer](docs/story-list.png)
 

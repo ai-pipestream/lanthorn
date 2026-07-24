@@ -5,15 +5,26 @@
 //! picker drives it by feeding keys/events in and dispatching the [`ModalAction`]s
 //! it hands back. Every state transition is unit-tested without a network.
 //!
-//! Standing modal conventions (matching the picker's other modals): Esc backs
-//! out one level (results → query → close), Enter activates, Up/Down (and j/k)
-//! navigate lists. While a request is in flight the modal is "busy": keystrokes
-//! are ignored except Esc, which abandons the pending result.
+//! Standing modal conventions (matching the picker's other modals): Enter
+//! activates, Up/Down (and j/k) navigate lists. While a request is in flight
+//! the modal is "busy": keystrokes are ignored except Esc, which abandons the
+//! pending result.
+//!
+//! SQ-0473: the modal opens showing a "Popular on IFDB" seed list instead of
+//! an empty query box — see [`SearchModal::open`] and the module's Esc-ladder
+//! note below.
+//!
+//! Esc ladder (results → query → close), with SQ-0473's one twist: Esc from
+//! the seed list closes the modal outright (one level shorter than before,
+//! since there's no "empty query" screen behind it worth a stop); Esc from a
+//! *typed* search's results returns to the seed list, cached from modal-open,
+//! rather than to an empty box; Esc while typing (query box active) still
+//! closes, unchanged. See `results_key` below.
 
 use crossterm::event::KeyCode;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 
 use crate::colors::ColorScheme;
 use crate::ifdb_search::{DownloadOption, SearchEvent, SearchHit};
@@ -37,6 +48,8 @@ enum View {
 /// result being applied after the user backed out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Inflight {
+    /// The "Popular on IFDB" seed query (SQ-0473), fetched once on open.
+    Seed,
     Search,
     Resolve,
     Download,
@@ -58,6 +71,9 @@ pub enum ModalAction {
     Download(String),
     /// Open this IFDB page URL in the browser (the "no playable file" fallback).
     OpenInBrowser(String),
+    /// Dispatch the "Popular on IFDB" seed query (SQ-0473) — returned once by
+    /// [`SearchModal::open`], right after construction.
+    Seed,
 }
 
 /// The modal's full state.
@@ -67,6 +83,15 @@ pub struct SearchModal {
     inflight: Option<Inflight>,
     hits: Vec<SearchHit>,
     hit_sel: usize,
+    /// The "Popular on IFDB" seed list (SQ-0473), cached for this modal
+    /// instance's lifetime once it arrives — reused when Esc backs out of a
+    /// typed search rather than re-fetching. NOT persisted across separate
+    /// modal opens (each `/` press builds a fresh `SearchModal`, so a second
+    /// open re-fetches); see the module header.
+    seed_hits: Vec<SearchHit>,
+    /// True while `hits` holds the seed list rather than a typed search's
+    /// results — governs the Esc ladder and the "Popular on IFDB" hint label.
+    showing_seed: bool,
     options: Vec<DownloadOption>,
     opt_sel: usize,
     /// A transient status/error line shown under the frame title.
@@ -81,10 +106,22 @@ impl SearchModal {
             inflight: None,
             hits: Vec::new(),
             hit_sel: 0,
+            seed_hits: Vec::new(),
+            showing_seed: false,
             options: Vec::new(),
             opt_sel: 0,
             status: None,
         }
+    }
+
+    /// Kick off the "Popular on IFDB" seed query (SQ-0473). Call once, right
+    /// after construction; marks the modal busy (its normal "Searching…"
+    /// state) and returns the action for the picker to dispatch to the
+    /// worker. A failed or empty seed just leaves the modal on its ordinary
+    /// empty query box (see `on_event`) — it never blocks opening.
+    pub fn open(&mut self) -> ModalAction {
+        self.inflight = Some(Inflight::Seed);
+        ModalAction::Seed
     }
 
     /// True while a request is in flight (used to keep the picker's redraw loop
@@ -165,9 +202,21 @@ impl SearchModal {
 
     fn results_key(&mut self, code: KeyCode) -> ModalAction {
         match code {
-            // Back to editing the query (keeps the hits until a new search).
+            // SQ-0473 Esc ladder: from the seed list, close outright (nothing
+            // useful behind it); from a typed search's results, return to the
+            // cached seed list if there is one, else fall back to the old
+            // empty-query behaviour (no seed ever loaded/loaded empty).
             KeyCode::Esc => {
-                self.view = View::Input;
+                if self.showing_seed {
+                    return ModalAction::Close;
+                }
+                if !self.seed_hits.is_empty() {
+                    self.hits = self.seed_hits.clone();
+                    self.hit_sel = 0;
+                    self.showing_seed = true;
+                } else {
+                    self.view = View::Input;
+                }
                 ModalAction::None
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -192,6 +241,18 @@ impl SearchModal {
                 Some(link) => ModalAction::OpenInBrowser(link),
                 None => ModalAction::None,
             },
+            // SQ-0473: typing over the list (seed or typed-search results)
+            // starts a fresh query edit — the list stays visible underneath
+            // (see render_body's View::Input arm) until Enter runs the real
+            // search, same as typing always has. 'j'/'k'/'o' stay reserved for
+            // nav/open as the *first* keystroke (matching this view's existing
+            // bindings above); IFDB search is case-insensitive, so a query that
+            // starts with one of those letters can still be typed by starting
+            // with its capital (e.g. "Jigsaw").
+            KeyCode::Char(c) => {
+                self.view = View::Input;
+                self.input_key(KeyCode::Char(c))
+            }
             _ => ModalAction::None,
         }
     }
@@ -234,21 +295,37 @@ impl SearchModal {
     /// and the list refresh) and then closes the modal.
     pub fn on_event(&mut self, ev: &SearchEvent) -> ModalAction {
         match ev {
-            SearchEvent::Results(hits) => {
-                if self.inflight != Some(Inflight::Search) {
-                    return ModalAction::None; // stale (user backed out)
+            SearchEvent::Results(hits) => match self.inflight {
+                Some(Inflight::Search) => {
+                    self.inflight = None;
+                    self.hits = hits.clone();
+                    self.hit_sel = 0;
+                    self.showing_seed = false;
+                    if hits.is_empty() {
+                        self.status = Some("No games found".to_string());
+                        self.view = View::Input;
+                    } else {
+                        self.view = View::Results;
+                    }
+                    ModalAction::None
                 }
-                self.inflight = None;
-                self.hits = hits.clone();
-                self.hit_sel = 0;
-                if hits.is_empty() {
-                    self.status = Some("No games found".to_string());
-                    self.view = View::Input;
-                } else {
-                    self.view = View::Results;
+                Some(Inflight::Seed) => {
+                    // SQ-0473: cache the seed list; an empty reply just leaves
+                    // the modal on its ordinary empty query box (View::Input,
+                    // already the starting state) rather than forcing a status
+                    // line for what's an automatic, non-user-initiated load.
+                    self.inflight = None;
+                    self.seed_hits = hits.clone();
+                    if !hits.is_empty() {
+                        self.hits = hits.clone();
+                        self.hit_sel = 0;
+                        self.showing_seed = true;
+                        self.view = View::Results;
+                    }
+                    ModalAction::None
                 }
-                ModalAction::None
-            }
+                _ => ModalAction::None, // stale (user backed out, or another job in flight)
+            },
             SearchEvent::Options(opts) => {
                 if self.inflight != Some(Inflight::Resolve) {
                     return ModalAction::None; // stale
@@ -307,7 +384,10 @@ pub fn draw_search_modal(modal: &SearchModal, area: Rect, cs: &ColorScheme, buf:
     let st = DialogStyle::from_colors(cs);
     let text = cs.theme.get("story_info_value").style;
     let dim = cs.theme.get("story_info_label").style;
-    let caret = cs.theme.get("story_header_active").style;
+    // Reversed, same idiom as every other caret text field in the app (the
+    // save-name/text-entry dialogs, the command palette): a plain style with
+    // no REVERSED modifier renders no visible caret block at all.
+    let caret = st.frame.add_modifier(Modifier::REVERSED);
 
     let title = match modal.view {
         View::Choosing => "IFDB — choose a file",
@@ -368,10 +448,18 @@ fn render_body(modal: &SearchModal, area: Rect, cs: &ColorScheme, buf: &mut Buff
         }
     }
 
-    // Hint line describing the current view's actions.
+    // Hint line describing the current view's actions. SQ-0473: the "Popular
+    // on IFDB" label doubles as the browse-list's own header (reusing the
+    // existing meta style — no new selector) and documents the Esc ladder.
     let hint = match modal.view {
         View::Input => "Type a title or author, Enter to search.",
         View::Results if modal.busy() => "Fetching download options…",
+        View::Results if modal.showing_seed => {
+            "Popular on IFDB · ↑/↓ move · Enter download · o open page · Esc close"
+        }
+        View::Results if !modal.seed_hits.is_empty() => {
+            "↑/↓ move · Enter download · o open page · Esc back to popular"
+        }
         View::Results => "↑/↓ move · Enter download · o open page · Esc edit query",
         View::Choosing => "↑/↓ move · Enter download this file · Esc back",
     };
@@ -382,24 +470,15 @@ fn render_body(modal: &SearchModal, area: Rect, cs: &ColorScheme, buf: &mut Buff
     }
 
     match modal.view {
-        View::Input => {}
-        View::Results => {
+        // SQ-0473: typing over a list keeps it visible underneath (the modal
+        // stays on View::Input, editing `query`, while `hits` still holds
+        // whatever list — seed or a prior search — was showing).
+        View::Input | View::Results => {
             let rows = list_bottom.saturating_sub(y) as usize;
             let start = scroll_start(modal.hit_sel, modal.hits.len(), rows);
             for (i, hit) in modal.hits.iter().enumerate().skip(start).take(rows) {
                 let selected = i == modal.hit_sel;
-                let base = if selected { sel_style } else { row_style };
-                let line = format_hit(hit);
-                put_str(buf, area.x, y, area.width, &line, base);
-                // A rating/year tail in the meta style, right-aligned (only when
-                // the row isn't selected, so the reversed selection stays clean).
-                if !selected {
-                    if let Some(tail) = hit_rating(hit) {
-                        let w = tail.chars().count() as u16 + 1;
-                        let tail_x = area.x + area.width.saturating_sub(w);
-                        put_str(buf, tail_x, y, w, &tail, meta_style);
-                    }
-                }
+                render_hit_row(buf, area, y, hit, selected, row_style, sel_style, meta_style);
                 y += 1;
             }
         }
@@ -421,6 +500,83 @@ fn render_body(modal: &SearchModal, area: Rect, cs: &ColorScheme, buf: &mut Buff
 
     // Attribution footer (honours IFDB's CC-BY metadata license).
     put_str(buf, area.x, list_bottom, area.width, "Results from IFDB (ifdb.org)", attrib_style);
+}
+
+/// Right-hand gutter reserved so a row's content never touches the dialog's
+/// border column.
+const ROW_MARGIN: u16 = 1;
+
+/// One result row: "Title — Author", clipped with an ellipsis to leave room for
+/// a right-aligned "★rating (year)" tail. The tail's width is reserved FIRST
+/// and kept clear of the border gutter, then the title/author span is clipped
+/// to end at least one space before it — so long text is truncated, never
+/// overdrawn by the tail or bled into the margin. A tail that wouldn't leave
+/// room for any title text is dropped rather than overflowing the row.
+///
+/// Selected rows fill their full width with `base` first (so the highlight
+/// reaches both edges, matching the picker's other selected-row lists) and
+/// draw the tail in that same style — otherwise it's invisible against the
+/// reversed background.
+fn render_hit_row(
+    buf: &mut Buffer,
+    area: Rect,
+    y: u16,
+    hit: &SearchHit,
+    selected: bool,
+    row_style: Style,
+    sel_style: Style,
+    meta_style: Style,
+) {
+    let base = if selected { sel_style } else { row_style };
+    if selected {
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(" ").set_style(base);
+            }
+        }
+    }
+
+    let content_right = area.right().saturating_sub(ROW_MARGIN);
+    let content_w = content_right.saturating_sub(area.x);
+
+    let tail = hit_rating(hit);
+    let tail_w = tail.as_ref().map(|t| t.chars().count() as u16).unwrap_or(0);
+    // Need the tail's width plus a 1-space gap before it; otherwise the row's
+    // too narrow for both — drop the tail (never overflow).
+    let (title_w, tail) = if tail_w > 0 && tail_w + 1 < content_w {
+        (content_w - tail_w - 1, tail)
+    } else {
+        (content_w, None)
+    };
+
+    let line = format_hit(hit);
+    let clipped = clip_with_ellipsis(&line, title_w);
+    put_str(buf, area.x, y, title_w, &clipped, base);
+
+    if let Some(t) = tail {
+        let tail_style = if selected { base } else { meta_style };
+        let tail_x = content_right - tail_w;
+        put_str(buf, tail_x, y, tail_w, &t, tail_style);
+    }
+}
+
+/// Clip `s` to at most `width` characters, appending an ellipsis if it had to
+/// be shortened (the ellipsis itself counts against `width`).
+fn clip_with_ellipsis(s: &str, width: u16) -> String {
+    let width = width as usize;
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= width {
+        return s.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return "…".to_string();
+    }
+    let mut out: String = chars[..width - 1].iter().collect();
+    out.push('…');
+    out
 }
 
 /// "Title — Author" for a hit row.
@@ -635,5 +791,250 @@ mod tests {
         assert_eq!(scroll_start(5, 10, 5), 1);
         assert_eq!(scroll_start(9, 10, 5), 5);
         assert_eq!(scroll_start(3, 3, 5), 0, "list shorter than window starts at 0");
+    }
+
+    // ── SQ-0473: seed list on open ──────────────────────────────────────────
+
+    #[test]
+    fn open_marks_the_modal_busy_and_asks_for_the_seed() {
+        let mut m = SearchModal::new();
+        assert!(!m.busy());
+        assert_eq!(m.open(), ModalAction::Seed);
+        assert!(m.busy(), "open() marks the modal busy, same as a dispatched search");
+        assert_eq!(m.view, View::Input, "no seed rows yet — still the empty query box");
+    }
+
+    #[test]
+    fn seed_results_land_on_the_browsable_seed_list() {
+        let mut m = SearchModal::new();
+        m.open();
+        let seed = vec![hit("pop1", "Popular One"), hit("pop2", "Popular Two")];
+        assert_eq!(m.on_event(&SearchEvent::Results(seed.clone())), ModalAction::None);
+        assert!(!m.busy());
+        assert_eq!(m.view, View::Results);
+        assert!(m.showing_seed, "results view starts on the seed list");
+        assert_eq!(m.selected_hit_title(), Some("Popular One"));
+        // Download/resolve/open-in-browser work the same as any other hit row.
+        assert_eq!(m.on_key(KeyCode::Enter), ModalAction::Resolve("pop1".into()));
+    }
+
+    #[test]
+    fn empty_seed_result_degrades_to_the_plain_empty_query_box() {
+        let mut m = SearchModal::new();
+        m.open();
+        assert_eq!(m.on_event(&SearchEvent::Results(vec![])), ModalAction::None);
+        assert!(!m.busy());
+        assert_eq!(m.view, View::Input, "nothing to browse — falls back silently");
+        assert!(m.status.is_none(), "an empty seed isn't a user-facing error");
+    }
+
+    #[test]
+    fn seed_fetch_failure_degrades_to_the_empty_query_box_with_a_status() {
+        let mut m = SearchModal::new();
+        m.open();
+        assert_eq!(m.on_event(&SearchEvent::Failed("IFDB unreachable".into())), ModalAction::None);
+        assert!(!m.busy());
+        assert_eq!(m.view, View::Input, "never blocks opening the modal");
+        assert_eq!(m.status.as_deref(), Some("IFDB unreachable"));
+    }
+
+    #[test]
+    fn esc_from_the_seed_list_closes_the_modal() {
+        let mut m = SearchModal::new();
+        m.open();
+        m.on_event(&SearchEvent::Results(vec![hit("pop1", "Popular One")]));
+        assert!(m.showing_seed);
+        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::Close, "one level shorter than before");
+    }
+
+    #[test]
+    fn typing_over_the_seed_list_keeps_it_visible_until_enter_searches() {
+        let mut m = SearchModal::new();
+        m.open();
+        m.on_event(&SearchEvent::Results(vec![hit("pop1", "Popular One")]));
+        assert_eq!(m.view, View::Results);
+
+        // The first typed character starts editing the query, but the seed
+        // rows stay put underneath (still readable off `hits`/`hit_sel`).
+        assert_eq!(m.on_key(KeyCode::Char('z')), ModalAction::None);
+        assert_eq!(m.view, View::Input);
+        assert_eq!(m.hits.len(), 1, "seed rows are not cleared by typing");
+        assert_eq!(m.query.as_str(), "z");
+
+        // Enter still runs a real search, same as ever.
+        assert_eq!(m.on_key(KeyCode::Enter), ModalAction::Search("z".into()));
+        assert!(m.busy());
+    }
+
+    #[test]
+    fn a_typed_search_replaces_the_seed_list_and_esc_returns_to_it() {
+        let mut m = SearchModal::new();
+        m.open();
+        let seed = vec![hit("pop1", "Popular One")];
+        m.on_event(&SearchEvent::Results(seed.clone()));
+        m.on_key(KeyCode::Char('z'));
+        m.on_key(KeyCode::Enter); // busy, inflight = Search
+
+        let searched = vec![hit("zzz", "Zork I"), hit("yyy", "Zork II")];
+        assert_eq!(m.on_event(&SearchEvent::Results(searched.clone())), ModalAction::None);
+        assert!(!m.showing_seed, "typed results replace the seed list");
+        assert_eq!(m.selected_hit_title(), Some("Zork I"));
+
+        // Esc from typed results goes back to the seed list, not an empty box.
+        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::None);
+        assert!(m.showing_seed);
+        assert_eq!(m.view, View::Results);
+        assert_eq!(m.selected_hit_title(), Some("Popular One"));
+
+        // A second Esc, now back on the seed list, closes.
+        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::Close);
+    }
+
+    #[test]
+    fn esc_from_typed_results_with_no_cached_seed_falls_back_to_empty_query() {
+        // The seed never loaded (e.g. it failed) — Esc from a typed search's
+        // results has nothing to return to, so it falls back to the old
+        // pre-SQ-0473 behaviour instead of a phantom "seed" screen.
+        let mut m = SearchModal::new();
+        m.on_key(KeyCode::Char('z'));
+        m.on_key(KeyCode::Enter);
+        m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
+        assert!(!m.showing_seed);
+        assert!(m.seed_hits.is_empty());
+        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::None);
+        assert_eq!(m.view, View::Input);
+        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::Close);
+    }
+
+    // ── Render: caret, selected-row meta, long-title layout ─────────────────
+
+    #[test]
+    fn query_caret_renders_reversed_mid_string_and_at_end() {
+        let mut m = SearchModal::new();
+        for c in "zork".chars() {
+            m.on_key(KeyCode::Char(c));
+        }
+        m.on_key(KeyCode::Left); // cursor now mid-string, before the final 'k'
+
+        let cs = ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, MODAL_W, MODAL_H);
+        let mut buf = Buffer::empty(area);
+        let rects = draw_search_modal(&m, area, &cs, &mut buf);
+        let fr = rects.field.expect("field rect recorded");
+
+        let label_len = "Search: ".chars().count() as u16;
+        let mid_x = fr.x + label_len + 3; // cursor sits at char index 3 ("zor|k")
+        assert!(
+            buf.cell((mid_x, fr.y)).unwrap().style().add_modifier.contains(Modifier::REVERSED),
+            "mid-string caret cell should be reversed"
+        );
+
+        m.on_key(KeyCode::Right); // back to end-of-text
+        let mut buf2 = Buffer::empty(area);
+        draw_search_modal(&m, area, &cs, &mut buf2);
+        let end_x = fr.x + label_len + 4;
+        assert!(
+            buf2.cell((end_x, fr.y)).unwrap().style().add_modifier.contains(Modifier::REVERSED),
+            "end-of-text caret cell should be reversed"
+        );
+    }
+
+    #[test]
+    fn selected_result_row_keeps_its_rating_tail_visible() {
+        let mut m = SearchModal::new();
+        m.open();
+        m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha"), hit("bbb", "Beta")]));
+        assert_eq!(m.hit_sel, 0);
+
+        let cs = ColorScheme::terminal_default();
+        let sel_style = cs.theme.get("ifdb_result_selected").style;
+        let area = Rect::new(0, 0, MODAL_W, MODAL_H);
+        let mut buf = Buffer::empty(area);
+        let rects = draw_search_modal(&m, area, &cs, &mut buf);
+
+        // Row 0 (selected: "Alpha") is on the first body row under the field +
+        // hint line, i.e. content.y + 2 in buffer coordinates. Find it by
+        // scanning for the reversed title cell, then check a rating glyph
+        // still appears further right on the same row.
+        let title_row_y = (0..area.height)
+            .find(|&y| {
+                (0..area.width).any(|x| {
+                    buf.cell((x, y))
+                        .is_some_and(|c| c.symbol() == "A" && c.style().add_modifier.contains(Modifier::REVERSED))
+                })
+            })
+            .expect("selected 'Alpha' row found");
+        let row_text: String = (0..area.width)
+            .filter_map(|x| buf.cell((x, title_row_y)).map(|c| c.symbol().to_string()))
+            .collect();
+        assert!(row_text.contains("Alpha"), "selected row still shows its title: {row_text:?}");
+        assert!(row_text.contains('★'), "selected row keeps its rating tail: {row_text:?}");
+        // The row is highlighted edge-to-edge (the fill loop, not just the
+        // glyphs) — checked at the content area's left edge, not the buffer's
+        // (which would land on the dialog's own border column).
+        // `Cell::set_style` patches onto the dialog's opaque background fill
+        // rather than replacing it outright, so check the selected style's own
+        // fg/modifiers landed rather than exact equality with the whole cell.
+        let fill_style = buf.cell((rects.content.x, title_row_y)).unwrap().style();
+        assert_eq!(fill_style.fg, sel_style.fg, "row fill uses the selected style's colour");
+        assert!(
+            fill_style.add_modifier.contains(Modifier::REVERSED),
+            "row fill uses the selected style's reversed video"
+        );
+    }
+
+    #[test]
+    fn long_title_row_ellipsizes_leaves_a_gap_and_keeps_the_tail_off_the_border() {
+        let long = hit("aaa", &"A very very very long story title indeed".repeat(3));
+        let cs = ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, MODAL_W, MODAL_H);
+        let mut buf = Buffer::empty(area);
+        // Row width available to render_hit_row: MODAL_W minus the dialog's own
+        // border/inset. Drive render_hit_row directly — it's the unit under
+        // test for the layout fix, independent of the dialog chrome's exact inset.
+        let row_area = Rect::new(2, 5, 40, 1);
+        let row_style = cs.theme.get("ifdb_result").style;
+        let sel_style = cs.theme.get("ifdb_result_selected").style;
+        let meta_style = cs.theme.get("ifdb_result_meta").style;
+        render_hit_row(&mut buf, row_area, row_area.y, &long, false, row_style, sel_style, meta_style);
+
+        // The reserved right-margin gutter column (border-adjacent) stays
+        // blank; everything else is the row's actual content.
+        let gutter_x = row_area.right() - 1;
+        let content_text: String = (row_area.x..gutter_x)
+            .filter_map(|x| buf.cell((x, row_area.y)).map(|c| c.symbol().to_string()))
+            .collect();
+        let gutter_symbol = buf.cell((gutter_x, row_area.y)).unwrap().symbol().to_string();
+        assert_eq!(gutter_symbol, " ", "border-margin column stays blank: {content_text:?}");
+
+        assert!(content_text.contains('…'), "long title is ellipsized: {content_text:?}");
+        let tail = hit_rating(&long).expect("rated hit has a tail");
+        assert!(
+            content_text.ends_with(&tail),
+            "tail sits flush at the row's content edge: {content_text:?}"
+        );
+        let ellipsis_i = content_text.find('…').unwrap();
+        let tail_i = content_text.find(&tail).unwrap();
+        assert!(
+            tail_i > ellipsis_i + 1,
+            "at least one space between the ellipsis and the tail: {content_text:?}"
+        );
+    }
+
+    #[test]
+    fn narrow_row_drops_the_tail_instead_of_overflowing() {
+        let h = hit("aaa", "Zork");
+        let cs = ColorScheme::terminal_default();
+        for w in 0..4u16 {
+            let area = Rect::new(0, 0, w.max(1), 1);
+            let mut buf = Buffer::empty(area);
+            let row_area = Rect::new(0, 0, w, 1);
+            let row_style = cs.theme.get("ifdb_result").style;
+            let sel_style = cs.theme.get("ifdb_result_selected").style;
+            let meta_style = cs.theme.get("ifdb_result_meta").style;
+            // Must not panic for any degenerate width, selected or not.
+            render_hit_row(&mut buf, row_area, 0, &h, false, row_style, sel_style, meta_style);
+            render_hit_row(&mut buf, row_area, 0, &h, true, row_style, sel_style, meta_style);
+        }
     }
 }

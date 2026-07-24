@@ -41,6 +41,30 @@
 //!    Omitting the `game` object-type flag still defaults to a game search
 //!    (verified: `?xml&searchfor=zork` returned `<games>`).
 //!
+//! (1b) "Popular on IFDB" seed list (SQ-0473) — shown when the search modal
+//!    opens, before the user types anything. The documented search API has no
+//!    `sort`/`sortby` parameter of its own; the *site's* regular search UI
+//!    does (reverse-engineered from `https://ifdb.org/search?browse`'s HTML,
+//!    which lists `sortby=ratu` as "Highest Rated First" among others), and it
+//!    composes with the same `xml` endpoint — verified live 2026-07-23:
+//!      GET https://ifdb.org/search?xml&game&searchfor=rating%3A4-%20%23ratings%3A10-&sortby=ratu
+//!    i.e. `searchfor=rating:4- #ratings:10-` (both documented search
+//!    operators: 4+ average stars, 10+ total ratings — see
+//!    `https://ifdb.org/search?searchhelp`) plus `&sortby=ratu`. Same
+//!    `<searchReply><games><game>…` shape as a normal search (confirmed live;
+//!    no new parser needed). `sortby=ratu` was verified to order by `starSort`
+//!    (the Evan Miller confidence score already in every reply, see above), NOT
+//!    raw `averageRating` — e.g. a live reply had averageRating 4.638/4.683 in
+//!    the opposite order their starSort (4.561/4.484) puts them. That makes it
+//!    IFDB's own confidence-weighted "Top" ranking, not a naive rating sort —
+//!    the closest documented-API approximation of "hot" IFDB offers, and the
+//!    reason this module picks it over a plain `rating:` sort or a "newest"
+//!    list. The `rating:4- #ratings:10-` floor keeps out one-rating flukes;
+//!    `sortby=ratu` alone (with an empty `searchfor`) returns zero results, so
+//!    the floor is load-bearing, not just cosmetic. One request, issued once
+//!    per modal *instance* (not persisted across separate `/` opens — see
+//!    [`SearchModal::open`]); no polling, no extra pages.
+//!
 //! (2) Download links (documented at https://ifdb.org/api/viewgame):
 //!      GET https://ifdb.org/viewgame?ifiction&id=<tuid>
 //!    This is the SAME iFiction XML endpoint `ifdb.rs` already uses for
@@ -171,6 +195,10 @@ impl std::fmt::Display for SearchError {
 /// one interface (a `Fake` in tests never touches the network).
 pub trait SearchSource: Send + Sync {
     fn search(&self, query: &str) -> Result<Vec<SearchHit>, SearchError>;
+    /// The "Popular on IFDB" seed list shown when the search modal opens
+    /// (SQ-0473), before the user has typed a query — see the module header's
+    /// "(1b)" note for the exact, live-verified request.
+    fn hot(&self) -> Result<Vec<SearchHit>, SearchError>;
     /// The playable download options for a game, by its IFDB tuid.
     fn download_options(&self, tuid: &str) -> Result<Vec<DownloadOption>, SearchError>;
     /// Download `url` into `dest_dir`, returning the written path.
@@ -198,11 +226,11 @@ impl Default for IfdbSearchClient {
     }
 }
 
-impl SearchSource for IfdbSearchClient {
-    fn search(&self, query: &str) -> Result<Vec<SearchHit>, SearchError> {
-        let url = search_url(query);
-        let bytes = self
-            .agent
+impl IfdbSearchClient {
+    /// GET `url` and read its body, capped at [`MAX_SEARCH_XML`]. Shared by
+    /// every XML endpoint this client hits (search, hot, viewgame).
+    fn fetch_xml(&self, url: String) -> Result<Vec<u8>, SearchError> {
+        self.agent
             .get(url)
             .call()
             .map_err(|e| SearchError::Transport(e.to_string()))?
@@ -210,22 +238,21 @@ impl SearchSource for IfdbSearchClient {
             .with_config()
             .limit(MAX_SEARCH_XML)
             .read_to_vec()
-            .map_err(|e| SearchError::Transport(e.to_string()))?;
-        parse_search(&bytes)
+            .map_err(|e| SearchError::Transport(e.to_string()))
+    }
+}
+
+impl SearchSource for IfdbSearchClient {
+    fn search(&self, query: &str) -> Result<Vec<SearchHit>, SearchError> {
+        parse_search(&self.fetch_xml(search_url(query))?)
+    }
+
+    fn hot(&self) -> Result<Vec<SearchHit>, SearchError> {
+        parse_search(&self.fetch_xml(hot_url())?)
     }
 
     fn download_options(&self, tuid: &str) -> Result<Vec<DownloadOption>, SearchError> {
-        let url = viewgame_ifiction_url(tuid);
-        let bytes = self
-            .agent
-            .get(url)
-            .call()
-            .map_err(|e| SearchError::Transport(e.to_string()))?
-            .body_mut()
-            .with_config()
-            .limit(MAX_SEARCH_XML)
-            .read_to_vec()
-            .map_err(|e| SearchError::Transport(e.to_string()))?;
+        let bytes = self.fetch_xml(viewgame_ifiction_url(tuid))?;
         Ok(parse_download_options(&bytes))
     }
 
@@ -274,6 +301,15 @@ fn user_agent() -> String {
 
 fn search_url(query: &str) -> String {
     format!("https://ifdb.org/search?xml&game&searchfor={}", percent_encode(query))
+}
+
+/// The "Popular on IFDB" seed query (SQ-0473) — see the module header's "(1b)"
+/// note for how this was chosen and verified.
+fn hot_url() -> String {
+    format!(
+        "https://ifdb.org/search?xml&game&searchfor={}&sortby=ratu",
+        percent_encode("rating:4- #ratings:10-")
+    )
 }
 
 fn viewgame_ifiction_url(tuid: &str) -> String {
@@ -531,6 +567,9 @@ use std::thread;
 
 /// A unit of work for the [`SearchWorker`].
 pub enum SearchJob {
+    /// Fetch the "Popular on IFDB" seed list (SQ-0473), issued once when the
+    /// search modal opens.
+    Seed,
     /// Full-text game search for a typed query.
     Search(String),
     /// Resolve a chosen game's playable download options, by IFDB tuid.
@@ -594,6 +633,10 @@ impl SearchWorker {
 /// Run one job to an event, mapping every error to a friendly display string.
 fn run_job(source: &dyn SearchSource, job: SearchJob) -> SearchEvent {
     match job {
+        SearchJob::Seed => match source.hot() {
+            Ok(hits) => SearchEvent::Results(hits),
+            Err(e) => SearchEvent::Failed(e.to_string()),
+        },
         SearchJob::Search(q) => match source.search(&q) {
             Ok(hits) => SearchEvent::Results(hits),
             Err(e) => SearchEvent::Failed(e.to_string()),
@@ -763,6 +806,14 @@ mod tests {
     }
 
     #[test]
+    fn hot_url_uses_the_verified_rating_floor_and_browse_sort() {
+        assert_eq!(
+            hot_url(),
+            "https://ifdb.org/search?xml&game&searchfor=rating%3A4-%20%23ratings%3A10-&sortby=ratu"
+        );
+    }
+
+    #[test]
     fn user_agent_identifies_babelmap() {
         let ua = user_agent();
         assert!(ua.starts_with("babelmap/"));
@@ -779,6 +830,12 @@ mod tests {
 
     impl SearchSource for Fake {
         fn search(&self, _q: &str) -> Result<Vec<SearchHit>, SearchError> {
+            if self.fail {
+                return Err(SearchError::Transport("offline".into()));
+            }
+            Ok(self.hits.clone())
+        }
+        fn hot(&self) -> Result<Vec<SearchHit>, SearchError> {
             if self.fail {
                 return Err(SearchError::Transport("offline".into()));
             }
@@ -860,6 +917,20 @@ mod tests {
         let opts = client.download_options(&zork.tuid).expect("resolve");
         // Zork I has a raw .z5 on eblong.com; there should be a playable file.
         assert!(!opts.is_empty(), "expected at least one playable download for {}", zork.title);
+    }
+
+    /// Live smoke for the seed query (network; `--ignored` only): every
+    /// returned hit should meet the documented `rating:4- #ratings:10-` floor.
+    #[test]
+    #[ignore = "hits the live IFDB network"]
+    fn live_hot_smoke() {
+        let client = IfdbSearchClient::new();
+        let hits = client.hot().expect("hot");
+        assert!(!hits.is_empty(), "expected some popular games");
+        for h in &hits {
+            assert!(h.star_rating.unwrap_or(0.0) >= 4.0, "seed row below the rating floor: {h:?}");
+            assert!(h.num_ratings.unwrap_or(0) >= 10, "seed row below the ratings-count floor: {h:?}");
+        }
     }
 
     #[test]

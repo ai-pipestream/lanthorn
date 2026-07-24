@@ -1067,8 +1067,13 @@ pub(crate) fn run_story_picker(
                         // `/`: open the IFDB search modal (SQ-0413) — search by
                         // title/author, browse results, and download a story file
                         // into this directory. `/` is the conventional search key.
+                        // Opens on a "Popular on IFDB" seed list (SQ-0473),
+                        // fetched non-blocking through the same worker.
                         Char('/') => {
-                            search_modal = Some(app::ifdb_search_modal::SearchModal::new());
+                            let mut sm = app::ifdb_search_modal::SearchModal::new();
+                            let seed_action = sm.open();
+                            search_modal = Some(sm);
+                            dispatch_search_action(seed_action, &search_worker, dir, &mut search_modal);
                             progress_line = None;
                         }
                         // `H`: download a matching InvisiClues hint file for the
@@ -1658,6 +1663,7 @@ fn dispatch_search_action(
             worker.request(SearchJob::Download { url, dest: dir.to_path_buf() })
         }
         ModalAction::OpenInBrowser(url) => open_url(&url),
+        ModalAction::Seed => worker.request(SearchJob::Seed),
     }
 }
 
