@@ -961,16 +961,27 @@ pub fn clickable_at(region: Rect, panel: &DebugPanelState, col: u16, row: u16) -
             // on it jumps the Memory pane (a click elsewhere on the row falls
             // through to `objects_click_at`'s expand/collapse). The frame text
             // draws past a 2-col "▶ " marker, like the Call Stack.
+            //
+            // Glulx repurposes this same slot for its Functions list (SQ-0472):
+            // there, the entry address should jump the Disassembly instead — the
+            // panel's relabelled tab (`tab_label`) is the mechanical signal, not
+            // the clicked token's text, so a real Objects tree (still labelled
+            // "Objects") keeps its Memory jump unchanged.
             (1, Section::Objects) => {
                 let r = (row - content.y) as usize;
                 let rows = objects_rows(&panel.snapshot.objects, &panel.expanded_objects,
                                         &panel.snapshot.object_details, panel.scroll[1], content.height as usize);
+                let functions_mode = panel.tab_label(Section::Objects) == "Functions";
                 match rows.get(r)? {
                     ObjRow::Tree { line_idx, .. } => {
                         let line = panel.snapshot.objects.get(*line_idx)?;
                         let off = (col.checked_sub(content.x + 2))? as usize; // +2 for the "▶ " marker
                         clickable_spans(section, line).into_iter()
-                            .find(|(range, _)| range.contains(&off)).map(|(_, t)| t)
+                            .find(|(range, _)| range.contains(&off))
+                            .map(|(_, t)| match t {
+                                ClickTarget::Memory(a) if functions_mode => ClickTarget::Code(a),
+                                other => other,
+                            })
                     }
                     ObjRow::Detail { .. } => None,
                 }
@@ -1609,6 +1620,25 @@ mod tests {
     }
 
     #[test]
+    fn clickable_at_resolves_a_functions_row_entry_address_click_to_a_disasm_jump() {
+        // Glulx relabels the Objects slot "Functions" (SQ-0472); a click on a
+        // Functions row's entry address should jump the Disassembly, not Memory
+        // — driven mechanically by the relabelled tab, same row/column geometry
+        // as the plain Objects case above.
+        let region = Rect::new(0, 0, 61, 40);
+        let mut p = DebugPanelState::new(0x1000);
+        let (ow, ot) = locate_section(Section::Objects);
+        p.focus = ow;
+        p.tab[ow] = ot;
+        p.labels.insert(Section::Objects, "Functions");
+        p.snapshot.objects = vec!["@0x004a00  C0  2 locals  [Rd]".to_string()];
+        let wrect = window_rects(region)[ow];
+        let content = Rect::new(wrect.x + 1, wrect.y + 1, wrect.width.saturating_sub(2), wrect.height.saturating_sub(2));
+        let col = content.x + 2 + p.snapshot.objects[0].find("@0x").unwrap() as u16;
+        assert_eq!(clickable_at(region, &p, col, content.y), Some(ClickTarget::Code(0x4a00)));
+    }
+
+    #[test]
     fn clickable_at_resolves_a_dict_entry_address_click_to_a_memory_jump() {
         let region = Rect::new(0, 0, 61, 40);
         let mut p = DebugPanelState::new(0x1000);
@@ -1715,6 +1745,26 @@ mod tests {
     }
 
     #[test]
+    fn clickable_at_resolves_a_call_stack_return_address_click_to_a_disasm_jump() {
+        // The `ret=` token (the frame's return PC) is clickable separately from
+        // `fn@` (the frame's entry) — both are Code targets, but this exercises
+        // `ret=` specifically (SQ-0472).
+        let region = Rect::new(0, 0, 61, 40);
+        let p = {
+            let mut p = DebugPanelState::new(0x1000);
+            p.snapshot.stack = vec!["#0  fn@004a00  ret=004a35  args=2".to_string()];
+            p
+        };
+        let [_, _, bot] = window_rects(region);
+        let content = Rect::new(bot.x + 1, bot.y + 1, bot.width.saturating_sub(2), bot.height.saturating_sub(2));
+        let line = &p.snapshot.stack[0];
+        let off = line.find("ret=").unwrap();
+        // +2 for the "▶ " disclosure marker prefixing the frame text.
+        let col = content.x + 2 + off as u16;
+        assert_eq!(clickable_at(region, &p, col, content.y), Some(ClickTarget::Code(0x4a35)));
+    }
+
+    #[test]
     fn goto_navigates_disasm_without_touching_pc_or_calling_refresh() {
         let mut p = DebugPanelState::new(0x1000);
         p.pc = 0x1000;
@@ -1725,6 +1775,20 @@ mod tests {
         assert_eq!(p.tab[0], 0);
         assert_eq!(p.pc, 0x1000, "goto must not re-anchor to PC (that's refresh's job)");
         assert_eq!(p.snapshot.disasm[0], format!("{:06x}  add", 0x2000));
+    }
+
+    #[test]
+    fn g_recenters_the_disasm_on_the_live_pc_after_a_jump() {
+        // The existing 'g' hotkey (hint bar: "g: PC") is the back-to-PC
+        // affordance for a jump landed via a Functions/Call-Stack click —
+        // verify it round-trips after `goto` moves `disasm_addr` away from `pc`.
+        let mut p = DebugPanelState::new(0x1000);
+        p.pc = 0x1000;
+        p.goto(0x4a00, &MockDbg);
+        assert_eq!(p.disasm_addr, 0x4a00);
+        p.handle_key(KeyCode::Char('g'), &MockDbg);
+        assert_eq!(p.disasm_addr, 0x1000, "'g' must recenter on the live PC");
+        assert_eq!(p.snapshot.disasm[0], format!("{:06x}  add", 0x1000));
     }
 
     // ── Memory address-input line ───────────────────────────────────────────

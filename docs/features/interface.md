@@ -109,8 +109,10 @@ know which side you're on).
   accelerated routines the VM shortcuts natively — an `[accel: Z__Region]` badge.
   **Strings** lists the discovered string objects (plain, compressed, or Unicode)
   with a decoded preview. **Glk** shows the live window tree, the same snapshot
-  `/dump-windows` prints. Each Functions/Strings row leads with a clickable
-  address that jumps the Memory pane straight there.
+  `/dump-windows` prints. Each row leads with a clickable address: a Functions
+  row jumps straight to that routine in the Disassembly; a Strings row jumps the
+  Memory pane. Call Stack return addresses (`ret=……`) are click-to-jump too, for
+  the same Disassembly target.
 - **Coverage and boot tracing** work exactly as elsewhere: the blue tier marks
   instructions ever executed, the `|` gutter marks the last turn, and `--debug`
   traces from the very first boot instruction (so an I7 game's lengthy startup is
