@@ -141,7 +141,7 @@ impl Blorb {
                 // chunk must never fail the whole load. (`BPal`, seen beside
                 // `APal` in Infocom's own blorbs, is a converter extension NOT
                 // in the Blorb spec and is ignored here.)
-                if clen % 4 == 0 {
+                if clen.is_multiple_of(4) {
                     apal = (0..clen / 4)
                         .filter_map(|i| be_u32(&bytes, data_start + i * 4).ok())
                         .collect();

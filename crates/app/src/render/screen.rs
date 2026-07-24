@@ -435,7 +435,7 @@ fn render_node(
             let story_rows = items.iter().find_map(|pw| {
                 matches!(&pw.node, WinNode::Buffer(_)).then(|| {
                     let top = pw.y_px / 16;
-                    (top, top + (pw.h_px.max(1) + 15) / 16)
+                    (top, top + pw.h_px.max(1).div_ceil(16))
                 })
             });
             let has_menu = items.iter().any(|pw| {
@@ -3544,7 +3544,7 @@ mod tests {
         //
         // Row 1 (native y=17 → cell row 1): "GO" at cols 0..2, a reverse space at
         // col 2, "IN" at cols 3..5 — the gap cell (2) must carry REVERSED.
-        let runs = vec![
+        let runs = [
             rev_run(1, 17, "GO"),
             rev_run(17, 17, " "),
             rev_run(25, 17, "IN"),

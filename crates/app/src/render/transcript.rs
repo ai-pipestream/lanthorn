@@ -613,6 +613,7 @@ const FLOAT_MIN_TEXT_COLS: u16 = 8;
 ///   the picture, `x_off == 0` blits it at the left.
 /// - RIGHT float (Shogun's opening picture, ZMSD §15 margin picture): `pad == 0`
 ///   keeps text flush left, `x_off` blits the picture at the right edge.
+///
 /// Either way the wrap width on covered rows is `width - reserve`. (SQ-0454/0489)
 struct FloatState {
     image: crate::inline_image::InlineImage,
