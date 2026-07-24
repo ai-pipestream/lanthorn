@@ -1074,11 +1074,15 @@ pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, p
 /// wrapped transcript lines that fit the primary window's rows, plus the live
 /// input line and caret column.
 /// Build the v6 raster story text: wrap the transcript to the window width,
-/// float window-0 inline pictures (the `transcript_images` sidecar) at the left
-/// margin — each occupies no text row, anchors at the next wrapped row, and
+/// then place window-0 inline pictures (the `transcript_images` sidecar)
+/// according to their `ImageAlign` (SQ-0470 follow-up). A `MarginLeft` image
+/// floats — it occupies no text row, anchors at the next wrapped row, and
 /// indents the `pic_height/8` rows beside it (Zork Zero's drop-cap idiom; the
-/// indent comes from the game's own `set_margins` when it was captured). Keeps
-/// the newest `rows-1` wrapped rows (one row is left for the input line).
+/// indent comes from the game's own `set_margins` when it was captured). Every
+/// other alignment (InlineUp/Down/Center, MarginRight — e.g. Shogun's ship
+/// splash) is a full-width band: it reserves `pic_height/8` blank text rows so
+/// prose stops above it and resumes below, never beside or over it. Keeps the
+/// newest `rows-1` wrapped rows (one row is left for the input line).
 pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render::v6_layout::MainText, RasterMetrics) {
     const FONT: u32 = 8;
     struct AbsFloat {
@@ -1105,20 +1109,33 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
             if img.source == crate::inline_image::ImageSource::ContentSplash {
                 continue;
             }
-            // An image line is a float, not a text row.
             let px = &img.pixels;
-            let indent_px = img.margin_px.unwrap_or(px.width() + FONT);
-            floats.push(AbsFloat {
-                row: wrapped.len(),
-                // Rows beside the picture: ceil(h/FONT), so a picture whose
-                // height isn't a cell multiple never has the next full-width
-                // line drawn across its bottom pixels. (Infocom's own countdown
-                // used floor and let the overlap happen; with our whole-cell
-                // glyphs the ceil reads far cleaner.)
-                rows: (px.height().div_ceil(FONT) as u16).max(1),
-                indent: indent_px.div_ceil(FONT) as u16,
-                img: std::sync::Arc::clone(px),
-            });
+            // Rows the picture spans: ceil(h/FONT), so a picture whose height
+            // isn't a cell multiple never has a full-width line drawn across
+            // its bottom pixels. (Infocom's own countdown used floor and let
+            // the overlap happen; with our whole-cell glyphs the ceil reads
+            // far cleaner.)
+            let img_rows = (px.height().div_ceil(FONT) as u16).max(1);
+            if img.align == crate::inline_image::ImageAlign::MarginLeft {
+                // A margin-left drop-cap floats: it occupies no text row of
+                // its own — the wrap below narrows the rows beside it.
+                let indent_px = img.margin_px.unwrap_or(px.width() + FONT);
+                floats.push(AbsFloat {
+                    row: wrapped.len(),
+                    rows: img_rows,
+                    indent: indent_px.div_ceil(FONT) as u16,
+                    img: std::sync::Arc::clone(px),
+                });
+            } else {
+                // Every other alignment is a full-width band (matches the
+                // frameless transcript's band fallback in `wrap_lines_kinded`):
+                // reserve blank text rows so the wrap below can't place prose
+                // beside or over the picture.
+                floats.push(AbsFloat { row: wrapped.len(), rows: img_rows, indent: 0, img: std::sync::Arc::clone(px) });
+                for _ in 0..img_rows {
+                    wrapped.push(String::new());
+                }
+            }
             continue;
         }
         if line.is_empty() {
@@ -1431,6 +1448,42 @@ mod tests {
             }
         }
         assert!(main.lines[5..].iter().any(|r| r.chars().count() > 35), "rows past the float use full width");
+    }
+
+    #[test]
+    fn build_main_text_bands_inline_up_content_art_full_width() {
+        // Shogun's opening ship illustration is a window-0 picture classified
+        // InlineUp by `win0_pic_align` (content-art sized, SQ-0471) — unlike a
+        // MarginLeft drop-cap it must NOT float with text wrapped beside it: it
+        // reserves full-width blank rows, text stops above and resumes below,
+        // never over it (SQ-0470 follow-up).
+        let mut state = crate::state::AppState::default();
+        state.push_transcript_kind("before", crate::state::TranscriptKind::Story);
+        state.push_transcript_image(crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(160, 32, image::Rgba([9, 9, 9, 255]))),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None,
+            margin_px: None,
+            source: crate::inline_image::ImageSource::Story,
+        });
+        let para = "word ".repeat(40);
+        state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
+        let (main, _) = build_main_text(&state, 40, 30);
+        assert_eq!(main.floats.len(), 1, "the image still carries its pixels for the canvas blit");
+        let f = &main.floats[0];
+        // 32px / 8 = 4 rows, anchored right after "before" (row 1).
+        assert_eq!((f.row, f.rows), (1, 4), "band anchored after 'before', 32px/8 = 4 rows");
+        assert_eq!(main.lines[0], "before");
+        // Every row the band spans is blank — no text row overlaps its rows.
+        for (i, row) in main.lines.iter().enumerate() {
+            if (f.row as usize..f.row as usize + f.rows as usize).contains(&i) {
+                assert!(row.is_empty(), "row {i} is inside the band and must carry no text, got {row:?}");
+            }
+        }
+        // Text resumes below the band, at full (unindented) width — long enough
+        // to prove it isn't narrowed the way a MarginLeft float would narrow it.
+        assert!(!main.lines[5].is_empty(), "text resumes right after the band");
+        assert!(main.lines[5].chars().count() > 35, "row 5 is full width, got {:?}", main.lines[5]);
     }
 
     #[test]
