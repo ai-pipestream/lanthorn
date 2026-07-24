@@ -14,6 +14,11 @@
 /unit_tests/*.gblorb
 /unit_tests/*.blb
 /unit_tests/*.z5
+# ...and the files those test games WRITE when the suite drives them
+# (Glk external files, autosave/save-state dirs, generated blorbs)
+/unit_tests/*.glkdata
+/unit_tests/*.save/
+/unit_tests/*.blorb
 
 # Internal tooling / agent workspaces (machine-local, never committed)
 /.claude/
