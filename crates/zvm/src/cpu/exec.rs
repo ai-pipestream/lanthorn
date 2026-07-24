@@ -2266,10 +2266,16 @@ impl Machine {
                     if let Some(w) = v6.windows.get_mut(win as usize) {
                         w.left_margin = left;
                         w.right_margin = right;
-                        // ZMSD §15: if the cursor now lies outside the margins,
-                        // move it back to the left margin of the current line
-                        // (cursor and margin are both in pixels).
-                        if w.x_cursor <= left {
+                        // ZMSD §15: "If the cursor is overtaken and now lies
+                        // outside the margins altogether, move it back to the
+                        // left margin of the current line." Outside means past
+                        // EITHER edge — left of the left margin, or right of the
+                        // text column's right edge (x_size - right). Frotz snaps
+                        // on the same two-sided test (`x_cursor <= left ||
+                        // x_cursor > x_size - right`); cursor and margins are
+                        // pixels.
+                        let text_right = w.x_size.saturating_sub(right);
+                        if w.x_cursor <= left || w.x_cursor > text_right {
                             w.x_cursor = left + 1;
                         }
                     }
@@ -7558,6 +7564,23 @@ pub(crate) mod tests {
         assert_eq!(w.left_margin, 20, "left margin stored (prop 6)");
         assert_eq!(w.right_margin, 8, "right margin stored (prop 7)");
         assert_eq!(w.x_cursor, 21, "cursor snapped forward to the new left margin (px)");
+    }
+
+    #[test]
+    fn v6_set_margins_snaps_cursor_past_right_edge() {
+        // ZMSD §15: the cursor is snapped back to the left margin when it lies
+        // outside the margins on EITHER side. Shogun's opening flows text past a
+        // right-placed picture with a large right margin; a cursor left beyond the
+        // new text column (x_size - right) must snap home. (matches Frotz's
+        // two-sided `x_cursor <= left || x_cursor > x_size - right`.)
+        let mut m = v6_exec_machine();
+        m.screen.v6.as_mut().unwrap().windows[0].x_size = 548;
+        // Cursor at pixel 300 — past the new text column (548 - 328 = 220).
+        m.screen.v6.as_mut().unwrap().windows[0].x_cursor = 300;
+        m.exec_ext(0x08, &[2, 328, 0], None, None); // set_margins(left=2, right=328, win=0)
+        let w = &m.screen.v6.as_ref().unwrap().windows[0];
+        assert_eq!(w.right_margin, 328, "right margin stored (prop 7)");
+        assert_eq!(w.x_cursor, 3, "cursor past the right edge snapped to left margin+1 (px)");
     }
 
     #[test]

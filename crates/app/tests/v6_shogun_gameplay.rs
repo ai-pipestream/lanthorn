@@ -107,6 +107,91 @@ fn shogun_boots_plays_and_emits_no_control_chars() {
     );
 }
 
+/// SQ-0489: Shogun's opening scene is a v6 margin picture (ZMSD §15). The game
+/// draws picture 7 at the RIGHT of window 0 and issues `set_margins(left=2,
+/// right=328)` on the 548px window, so prose flows in the LEFT column beside the
+/// art, then full width once it scrolls past. Pinned end-to-end from the real
+/// game: (a) the engine stores the asymmetric margins (small left, large right),
+/// (b) the session classifies the window-0 picture as a `MarginRight` story
+/// float, and (c) `build_main_text` lays it out as a RIGHT float — prose flush
+/// left in a narrowed column, the picture pinned near the right edge.
+#[test]
+fn shogun_opening_is_a_right_margin_float() {
+    use app::inline_image::ImageAlign;
+    use app::session::TranscriptElem;
+
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+
+    // Leave the title splash (any key) and select START (Enter) — the opening
+    // scene draws picture 7 into window 0 and issues set_margins(2, 328). Sample
+    // immediately: the game later resets the margins via a newline interrupt as
+    // the prose scrolls past the art, so the asymmetric state is transient. The
+    // window-0 picture rides the turn's ordered `transcript_elems`.
+    session.submit_char(b' ');
+    let mut elems: Vec<TranscriptElem> = session.submit_char(13).transcript_elems;
+    // A couple of settling steps in case the draw lands a step later — but stop
+    // the moment the margin picture appears so a later reset can't erase it.
+    for _ in 0..3 {
+        if elems.iter().any(|e| matches!(e, TranscriptElem::Image(img) if img.align == ImageAlign::MarginRight)) {
+            break;
+        }
+        let r = match session.pending_input() {
+            InputKind::Char => session.submit_char(13),
+            InputKind::Line => session.submit(""),
+            InputKind::Event => session.submit(""),
+        };
+        elems.extend(r.transcript_elems);
+    }
+
+    // (a) The engine honoured the game's `set_margins`: an asymmetric right margin
+    // that leaves a prose column on the left (the ZMSD §15 margin picture).
+    let w0 = &session.machine.screen.v6.as_ref().expect("v6 screen").windows[0];
+    assert!(
+        w0.right_margin > w0.left_margin && w0.right_margin >= 64,
+        "window 0 carries the opening's large right margin (L={}, R={})",
+        w0.left_margin, w0.right_margin
+    );
+    let text_col = w0.x_size.saturating_sub(w0.right_margin).saturating_sub(w0.left_margin);
+    assert!(text_col >= 64, "a prose-wide left text column survives the margin (px {text_col})");
+
+    // (b) The session classified the window-0 picture as a MarginRight story float.
+    let img = elems.iter().find_map(|e| match e {
+        TranscriptElem::Image(img) if img.align == ImageAlign::MarginRight => Some(img.clone()),
+        _ => None,
+    }).expect("the opening picture is classified as a MarginRight float");
+
+    // (c) build_main_text lays it out as a right float: prose flush left in a
+    // narrowed column, the picture pinned near the right edge.
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    app::state::apply_transcript_elems(&mut state, &elems);
+    let cols = 68u16; // ~548px / 8px cell — Shogun's window-0 width in cells
+    let (main, _) = app::render::screen::build_main_text(&state, cols, 40);
+    let f = main.floats.iter().find(|f| {
+        std::sync::Arc::ptr_eq(&f.img, &img.pixels)
+    }).expect("the margin picture became a right float (not a full-width band)");
+    // build_main_text reserves the picture's own cell width (+1 gutter) on the
+    // right and pins the art there; prose stays flush left in the remainder.
+    let img_cols = (img.pixels.width().div_ceil(8)) as u16; // FONT_W = 8
+    assert_eq!(f.text_col, 0, "prose stays flush left beside a right float");
+    assert_eq!(f.reserve_cols, (img_cols + 1).min(cols), "reserve = picture cell width + gutter");
+    assert_eq!(f.img_col, cols.saturating_sub(img_cols), "picture pinned flush to the right edge");
+    assert!(f.img_col > 0, "the picture floats to the right, not at the left margin");
+    assert!(cols.saturating_sub(f.reserve_cols) >= 8, "a prose column survives beside the picture");
+}
+
 /// Shogun's boot menu prints its items through a 1-px-wide caret window with
 /// wrapping OFF — three horizontal runs on distinct pixel rows, NOT a vertical
 /// column of glyphs (the live "nothing after 'You may choose to:'" report),

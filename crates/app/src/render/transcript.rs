@@ -537,20 +537,23 @@ pub(crate) fn wrap_lines_kinded(
             }
             TranscriptKind::Story | TranscriptKind::Input if float.is_some() => {
                 // Wrap this prose line beside the active float: the first `rem`
-                // output rows are narrowed by the float `indent` and carry the
-                // next image strip; rows past the picture reclaim full width.
+                // output rows are narrowed by the float's `reserve` and carry the
+                // next image strip; rows past the picture reclaim full width. The
+                // rows are padded by `pad` (nonzero for a LEFT float, pushing text
+                // right past the picture; zero for a RIGHT float, flush left) and
+                // the strip blits at the float's `x_off`.
                 // Copy the geometry up front so the row loop borrows nothing.
-                let (image, cols, total, indent, start_strip, rem) = {
+                let (image, cols, total, reserve, pad, x_off, start_strip, rem) = {
                     let fl = float.as_ref().unwrap();
-                    (fl.image.clone(), fl.cols, fl.rows, fl.indent, fl.next_strip, fl.remaining() as usize)
+                    (fl.image.clone(), fl.cols, fl.rows, fl.reserve, fl.pad, fl.x_off, fl.next_strip, fl.remaining() as usize)
                 };
-                let narrow = width.saturating_sub(indent).max(1);
+                let narrow = width.saturating_sub(reserve).max(1);
                 let ranges = wrap_line_ranges_var(line, |k| if k < rem { narrow } else { width });
                 let nrows = ranges.len();
                 for (k, (text, start, end)) in ranges.into_iter().enumerate() {
                     let (pad, float_band) = if k < rem {
-                        let band = ImageBand { image: image.clone(), cols, rows: total, row: start_strip + k as u16, x_off: 0 };
-                        (indent, Some(band))
+                        let band = ImageBand { image: image.clone(), cols, rows: total, row: start_strip + k as u16, x_off };
+                        (pad, Some(band))
                     } else {
                         (0, None)
                     };
@@ -598,40 +601,65 @@ pub(crate) fn wrap_lines_kinded(
     out
 }
 
-/// An in-progress left-margin float while `wrap_lines_kinded` walks the
-/// transcript: the source `image`, its cell footprint (`cols` wide × `rows`
-/// tall), the text `indent` (≥ `cols`, so prose never overlaps the picture), and
-/// the next strip row to place. (SQ-0454)
+/// The minimum prose column (cells) worth floating a picture beside; a narrower
+/// column falls back to a full-width band.
+const FLOAT_MIN_TEXT_COLS: u16 = 8;
+
+/// An in-progress margin float while `wrap_lines_kinded` walks the transcript:
+/// the source `image`, its cell footprint (`cols` wide × `rows` tall), and how
+/// its rows lay out. The float side is expressed by three geometry fields rather
+/// than an enum:
+/// - LEFT float (Zork Zero's drop-cap): `pad == reserve` pushes text right past
+///   the picture, `x_off == 0` blits it at the left.
+/// - RIGHT float (Shogun's opening picture, ZMSD §15 margin picture): `pad == 0`
+///   keeps text flush left, `x_off` blits the picture at the right edge.
+/// Either way the wrap width on covered rows is `width - reserve`. (SQ-0454/0489)
 struct FloatState {
     image: crate::inline_image::InlineImage,
     cols: u16,
     rows: u16,
-    indent: u16,
+    /// Columns removed from the text width on covered rows.
+    reserve: u16,
+    /// Leading pad added to covered rows' text (left float pushes text right).
+    pad: u16,
+    /// Image band x offset (right float right-aligns the picture).
+    x_off: u16,
     next_strip: u16,
 }
 
 impl FloatState {
-    /// Begin a float for a `MarginLeft` image, or `None` to fall back to a band:
-    /// non-left aligns, a picture wider than ~half the viewport, or one whose
-    /// text indent would leave no room for prose.
+    /// Begin a float for a `MarginLeft` or `MarginRight` image, or `None` to fall
+    /// back to a band: any other align, or a picture that leaves no prose column.
     fn start(img: &crate::inline_image::InlineImage, char_px: (u16, u16), width: u16) -> Option<FloatState> {
-        if img.align != crate::inline_image::ImageAlign::MarginLeft {
-            return None;
-        }
         let (cols, rows) = img.fitted_cells(width, char_px);
         if cols == 0 || rows == 0 {
             return None;
         }
-        // Fall back to a full-width band when the picture is wider than ~half the
-        // viewport — floating it would starve the prose column.
-        if cols.saturating_mul(2) > width {
-            return None;
+        match img.align {
+            crate::inline_image::ImageAlign::MarginLeft => {
+                // Starve-guard: a left drop-cap wider than ~half the viewport
+                // falls back to a band (the historic SQ-0454 rule).
+                if cols.saturating_mul(2) > width {
+                    return None;
+                }
+                let indent = float_text_indent(img, char_px.0, cols);
+                if width.saturating_sub(indent) < FLOAT_MIN_TEXT_COLS {
+                    return None; // no room for text beside the picture
+                }
+                Some(FloatState { image: img.clone(), cols, rows, reserve: indent, pad: indent, x_off: 0, next_strip: 0 })
+            }
+            crate::inline_image::ImageAlign::MarginRight => {
+                // Reserve the picture's own cell width plus a one-column gutter;
+                // the picture right-aligns and text stays flush left. Fall back to
+                // a band when that leaves no usable prose column.
+                let reserve = (cols + 1).min(width);
+                if width.saturating_sub(reserve) < FLOAT_MIN_TEXT_COLS {
+                    return None;
+                }
+                Some(FloatState { image: img.clone(), cols, rows, reserve, pad: 0, x_off: width.saturating_sub(cols), next_strip: 0 })
+            }
+            _ => None,
         }
-        let indent = float_text_indent(img, char_px.0, cols);
-        if indent >= width {
-            return None; // no room for text beside the picture
-        }
-        Some(FloatState { image: img.clone(), cols, rows, indent, next_strip: 0 })
     }
 
     /// Strip rows not yet placed.
@@ -639,10 +667,9 @@ impl FloatState {
         self.rows.saturating_sub(self.next_strip)
     }
 
-    /// The band geometry for strip `row` of this float (blitted at the left
-    /// margin, `x_off == 0`).
+    /// The band geometry for strip `row` of this float, blitted at its `x_off`.
     fn strip(&self, row: u16) -> ImageBand {
-        ImageBand { image: self.image.clone(), cols: self.cols, rows: self.rows, row, x_off: 0 }
+        ImageBand { image: self.image.clone(), cols: self.cols, rows: self.rows, row, x_off: self.x_off }
     }
 }
 
@@ -2281,15 +2308,23 @@ mod tests {
     }
 
     #[test]
-    fn float_start_falls_back_to_band_for_non_left_or_wide() {
-        // Non-left alignment never floats.
-        assert!(FloatState::start(&dummy_img(16, 24, crate::inline_image::ImageAlign::MarginRight), (8, 8), 40).is_none());
-        // Wider than ~half the viewport (25 cols of 40) → band.
+    fn float_start_falls_back_to_band_for_unsupported_or_wide() {
+        // Inline (non-margin) alignment never floats.
+        assert!(FloatState::start(&dummy_img(16, 24, crate::inline_image::ImageAlign::InlineUp), (8, 8), 40).is_none());
+        // A left picture wider than ~half the viewport (25 cols of 40) → band.
         assert!(FloatState::start(&left_img(200, 8, None), (8, 8), 40).is_none());
+        // A right picture that leaves no prose column (34 cols of 40 → reserve 35,
+        // only 5 cols of text < the 8-col floor) → band.
+        assert!(FloatState::start(&dummy_img(272, 8, crate::inline_image::ImageAlign::MarginRight), (8, 8), 40).is_none());
         // A normal left-margin picture floats: 16x24 px at cell 8x8 → 2x3 cells,
-        // indent 3 (cols + gutter), starting at strip 0.
+        // reserve 3 (cols + gutter), text pushed right (pad 3), image at x_off 0.
         let fs = FloatState::start(&left_img(16, 24, None), (8, 8), 40).unwrap();
-        assert_eq!((fs.cols, fs.rows, fs.indent, fs.next_strip), (2, 3, 3, 0));
+        assert_eq!((fs.cols, fs.rows, fs.reserve, fs.pad, fs.x_off, fs.next_strip), (2, 3, 3, 3, 0, 0));
+        // A right-margin picture (Shogun's opening) floats at the RIGHT: 16x24 →
+        // 2x3 cells, reserve 3, text flush left (pad 0), image right-aligned
+        // (x_off = 40 - 2 = 38).
+        let fr = FloatState::start(&dummy_img(16, 24, crate::inline_image::ImageAlign::MarginRight), (8, 8), 40).unwrap();
+        assert_eq!((fr.cols, fr.rows, fr.reserve, fr.pad, fr.x_off, fr.next_strip), (2, 3, 3, 0, 38, 0));
     }
 
     #[test]
@@ -2327,6 +2362,39 @@ mod tests {
         // Rows past the 3-row picture reclaim full width (no forced float indent).
         assert!(
             rows.iter().skip(3).any(|r| r.float.is_none() && !r.text.is_empty()),
+            "prose past the picture flows full-width"
+        );
+    }
+
+    #[test]
+    fn right_float_wraps_prose_flush_left_and_pins_picture_right() {
+        // SQ-0489: a MarginRight picture (Shogun's opening) followed by a long
+        // paragraph. The image emits NO band rows of its own; the covered rows
+        // keep prose FLUSH LEFT (no pad) but narrowed to width - reserve, and each
+        // carries the picture strip pinned to the RIGHT (x_off = width - cols);
+        // rows past the picture reclaim full width. (16x24 px → 2x3 cells,
+        // reserve 3, x_off 38 in a 40-col viewport.)
+        let para = "word ".repeat(30);
+        let transcript = vec![String::new(), para.trim_end().to_string()];
+        let images = vec![Some(dummy_img(16, 24, crate::inline_image::ImageAlign::MarginRight)), None];
+        let kinds = vec![TranscriptKind::Story; 2];
+        let styles = vec![Style::default(); 2];
+        let runs = vec![Vec::new(); 2];
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, true, 40);
+
+        assert!(rows.iter().all(|r| r.band.is_none()), "a floated image emits no bands");
+        let float_rows: Vec<&WrappedRow> = rows.iter().filter(|r| r.float.is_some()).collect();
+        assert_eq!(float_rows.len(), 3, "one float strip per image cell-row");
+        for (k, r) in float_rows.iter().enumerate() {
+            let fb = r.float.as_ref().unwrap();
+            assert_eq!((fb.row, fb.cols, fb.rows, fb.x_off), (k as u16, 2, 3, 38), "strip pinned to the right edge");
+            // Prose is flush left (no leading pad) and narrowed to 40 - 3 = 37.
+            assert!(!r.text.starts_with(' '), "right-float prose stays flush left: {:?}", r.text);
+            assert!(r.text.chars().count() <= 37, "right-float prose narrowed to width - reserve");
+        }
+        // Rows past the 3-row picture reclaim full width.
+        assert!(
+            rows.iter().skip(3).any(|r| r.float.is_none() && r.text.chars().count() > 37),
             "prose past the picture flows full-width"
         );
     }

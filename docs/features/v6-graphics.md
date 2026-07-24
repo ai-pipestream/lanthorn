@@ -103,6 +103,21 @@ at the left margin of the story text and wraps the surrounding lines beside
 them, so they scroll naturally with the transcript instead of sitting in a
 fixed frame.
 
+## Margin pictures — text that flows past the art
+
+Some v6 scenes put the picture on one side and let the prose flow past it.
+Shogun's opening is the classic: the game draws its harbour illustration at the
+**right** of window 0 and calls `set_margins` to shrink the text's right edge
+back past the art (that's the Z-Machine Standard's margin-picture idiom — a
+picture parked at a window edge with the margins pulled in around it). The story
+text fills the narrower **left** column beside the picture, then reclaims the
+full width the moment it scrolls below the art. babelmap honours the game's own
+margins: the engine records them (and snaps the cursor home on either edge, per
+§15), and both `raster` and `hybrid` float the picture to its placed side —
+right for Shogun, left for a drop-cap — wrapping the prose in the column the game
+left for it. A picture too wide to leave a readable column falls back to a
+full-width band.
+
 ## Splash art, inline (frameless mode)
 
 Some v6 titles paint a big picture straight into a graphics window: Shogun's

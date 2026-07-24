@@ -119,15 +119,27 @@ pub(crate) fn blit_clipped_src(dst: &mut RgbaImage, src: &RgbaImage, dx: u32, dy
 const FONT_W: u32 = 8;
 const FONT_H: u32 = 16;
 
-/// A window-0 inline picture (drop-cap, room icon) floated at the left margin
-/// of the story text: anchored to a wrapped display row, indenting the rows
+/// A window-0 inline picture floated beside the story text: anchored to a
+/// wrapped display row, reserving columns for the picture and narrowing the rows
 /// beside it. `row` is relative to the visible window and may be negative when
 /// the float has partially scrolled off the top.
+///
+/// The float side is expressed by the column fields (not an enum): a LEFT float
+/// (Zork Zero's drop-cap) blits at `img_col == 0` with text pushed right
+/// (`text_col == reserve_cols`); a RIGHT float (Shogun's opening picture, ZMSD
+/// §15 margin picture) blits at `img_col` near the right edge with text flush
+/// left (`text_col == 0`). Either way the wrap width on covered rows is
+/// `cols - reserve_cols`.
 #[derive(Debug, Clone)]
 pub struct RasterFloat {
     pub row: i32,
     pub rows: u16,
-    pub indent_cols: u16,
+    /// Columns removed from the text width on the rows this float covers.
+    pub reserve_cols: u16,
+    /// Column where each covered row's text begins.
+    pub text_col: u16,
+    /// Column where the picture is blitted.
+    pub img_col: u16,
     pub img: std::sync::Arc<RgbaImage>,
 }
 
@@ -559,7 +571,9 @@ pub fn chrome_bands(pane: ratatui::layout::Rect, viewport: ratatui::layout::Rect
 pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32, cols: u16, rows: u16, fg: Rgba<u8>) {
     let region_h = rows as u32 * FONT_H;
     // Floats first (text draws over/beside them). A float that has partially
-    // scrolled off the top (row < 0) is drawn cropped from its own top.
+    // scrolled off the top (row < 0) is drawn cropped from its own top. Blitted
+    // at `img_col` (0 = left float; near the right edge = right float), clamped
+    // to the columns from there to the region's right edge.
     for f in &main.floats {
         let src = &*f.img;
         let crop_top = if f.row < 0 { (-f.row) as u32 * FONT_H } else { 0 };
@@ -568,30 +582,34 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
         }
         let dy = oy + (f.row.max(0) as u32) * FONT_H;
         let max_h = region_h.saturating_sub(dy - oy);
-        blit_clipped_src(canvas, src, ox, dy, crop_top, cols as u32 * FONT_W, max_h);
+        let img_x = ox + f.img_col as u32 * FONT_W;
+        let max_w = (cols as u32).saturating_sub(f.img_col as u32) * FONT_W;
+        blit_clipped_src(canvas, src, img_x, dy, crop_top, max_w, max_h);
     }
-    let indent_at = |row: u32| -> u32 {
+    // The active float's (reserved cols, text start col) for a given row — one
+    // float is active at a time; when several overlap take the widest reserve.
+    let float_at = |row: u32| -> (u32, u32) {
         main.floats
             .iter()
             .filter(|f| f.row <= row as i32 && (row as i32) < f.row + f.rows as i32)
-            .map(|f| f.indent_cols as u32)
-            .max()
-            .unwrap_or(0)
+            .map(|f| (f.reserve_cols as u32, f.text_col as u32))
+            .max_by_key(|(reserve, _)| *reserve)
+            .unwrap_or((0, 0))
     };
     let mut row = 0u32;
-    let mut last_row_end = 0u32; // (indent + text len) of the last drawn line
+    let mut last_row_end = 0u32; // (text_col + text len) of the last drawn line
     for line in &main.lines {
         if row >= rows as u32 {
             return;
         }
-        let indent = indent_at(row);
-        let avail = (cols as u32).saturating_sub(indent);
+        let (reserve, text_col) = float_at(row);
+        let avail = (cols as u32).saturating_sub(reserve);
         let mut drawn = 0u32;
         for (col, glyph) in line.chars().take(avail as usize).enumerate() {
-            crate::render::bitfont::blit_glyph(canvas, glyph, ox + (indent + col as u32) * FONT_W, oy + row * FONT_H, FONT_W, FONT_H, fg, None);
+            crate::render::bitfont::blit_glyph(canvas, glyph, ox + (text_col + col as u32) * FONT_W, oy + row * FONT_H, FONT_W, FONT_H, fg, None);
             drawn = col as u32 + 1;
         }
-        last_row_end = indent + drawn;
+        last_row_end = text_col + drawn;
         row += 1;
     }
     if main.awaiting {
@@ -706,7 +724,7 @@ mod tests {
         let main = MainText {
             lines: vec!["AAAA".into(), "BBBB".into(), "CCCC".into()],
             input: String::new(), cursor_col: 0, awaiting: false,
-            floats: vec![RasterFloat { row: 0, rows: 2, indent_cols: 3, img: Arc::new(img) }],
+            floats: vec![RasterFloat { row: 0, rows: 2, reserve_cols: 3, text_col: 3, img_col: 0, img: Arc::new(img) }],
         };
         let mut canvas = RgbaImage::new(10 * FONT_W, 5 * FONT_H);
         draw_story_text(&mut canvas, &main, 0, 0, 10, 5, Rgba([255, 255, 255, 255]));
@@ -717,6 +735,33 @@ mod tests {
         assert!(cell_has_ink(&canvas, 3, 1), "row 1 col 3 inked (text beside the float)");
         // Row 2 (past the float): ink flush left.
         assert!(cell_has_ink(&canvas, 0, 2), "row 2 col 0 inked (flush left below float)");
+    }
+
+    #[test]
+    fn story_text_wraps_left_of_right_float_and_blits_it_right() {
+        // A RIGHT float (Shogun's opening picture): text stays flush LEFT and is
+        // narrowed to `cols - reserve_cols`; the picture blits at `img_col` near
+        // the right edge; rows past the picture reclaim full width.
+        let cell_has_ink = |c: &RgbaImage, col: u32, row: u32| -> bool {
+            (0..FONT_H).any(|dy| (0..FONT_W).any(|dx| c.get_pixel(col * FONT_W + dx, row * FONT_H + dy)[3] > 0))
+        };
+        // 10-col region; a 32×32 image → 4 cols wide, 2 rows tall; reserve 5 cols
+        // (image + gutter), text confined to cols 0..5, image blits at col 6.
+        let img = RgbaImage::from_pixel(32, 32, Rgba([20, 200, 20, 255]));
+        let main = MainText {
+            lines: vec!["AAAAAAAA".into(), "BBBB".into(), "CCCCCCCC".into()],
+            input: String::new(), cursor_col: 0, awaiting: false,
+            floats: vec![RasterFloat { row: 0, rows: 2, reserve_cols: 5, text_col: 0, img_col: 6, img: Arc::new(img) }],
+        };
+        let mut canvas = RgbaImage::new(10 * FONT_W, 5 * FONT_H);
+        draw_story_text(&mut canvas, &main, 0, 0, 10, 5, Rgba([255, 255, 255, 255]));
+        // Row 0 text is flush left but clipped to the narrowed column (cols 0..5).
+        assert!(cell_has_ink(&canvas, 0, 0), "row 0 col 0 inked (text flush left)");
+        assert!(!cell_has_ink(&canvas, 5, 0), "row 0 col 5 blank (text narrowed away from the picture)");
+        // The picture blits at col 6 (img_col), on the right.
+        assert_eq!(*canvas.get_pixel(6 * FONT_W, 0), Rgba([20, 200, 20, 255]), "float blitted at img_col 6");
+        // Row 2 (past the float) reclaims full width.
+        assert!(cell_has_ink(&canvas, 6, 2), "row 2 col 6 inked (full width below the float)");
     }
 
     #[test]
@@ -817,7 +862,7 @@ mod tests {
         let main = MainText {
             lines: vec!["XXXX".into()],
             input: String::new(), cursor_col: 0, awaiting: false,
-            floats: vec![RasterFloat { row: -1, rows: 2, indent_cols: 2, img: Arc::new(img) }],
+            floats: vec![RasterFloat { row: -1, rows: 2, reserve_cols: 2, text_col: 2, img_col: 0, img: Arc::new(img) }],
         };
         let mut canvas = RgbaImage::new(10 * FONT_W, 3 * FONT_H);
         draw_story_text(&mut canvas, &main, 0, 0, 10, 3, Rgba([255, 255, 255, 255]));

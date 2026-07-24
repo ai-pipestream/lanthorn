@@ -202,14 +202,47 @@ fn is_content_art(pic_w: u32, pic_h: u32, screen_w: u32, screen_h: u32) -> bool 
     pic_w * 100 >= screen_w * 60 && pic_h * 100 >= screen_h * 30
 }
 
-/// The float alignment for a window-0 picture. A window-0 draw is normally a
-/// drop-cap / room icon floated at the left margin with text flowing beside it
-/// (`MarginLeft`) — but Shogun draws its large opening SHIP illustration into
-/// window 0 too, and a content-art-sized image must render as a big inline
-/// picture in its own band (`InlineUp`), not a 3–4-row drop-cap (SQ-0471).
-/// Genuine drop-caps (Zork Zero's initial letter, small tiles) fail
-/// [`is_content_art`] and keep `MarginLeft`.
-fn win0_pic_align(iw: u32, ih: u32, screen_w: u32, screen_h: u32) -> crate::inline_image::ImageAlign {
+/// The float alignment for a window-0 picture, given the picture's pixel size,
+/// the screen size, the picture's draw x, and window 0's `set_margins` state
+/// (all in the game's window pixel space).
+///
+/// Priority:
+/// 1. **Right-margin picture** (`MarginRight`) — Shogun's opening: the game drew
+///    the picture at the window's right edge and set a large RIGHT margin so its
+///    prose flows in the LEFT column beside it, then full width once the text
+///    scrolls past (ZMSD §15). Signature: an asymmetric right margin, a
+///    prose-wide left text column (`x_size - right - left`), and the picture
+///    beginning at/after that column's right edge.
+/// 2. **Content art** (`InlineUp`) — a large centred illustration with no margin
+///    reservation renders as a full-width band, not a drop-cap (SQ-0471).
+/// 3. **Drop-cap / room icon** (`MarginLeft`) — Zork Zero's initial letter and
+///    small tiles float at the left margin with text beside them.
+fn win0_pic_align(
+    iw: u32,
+    ih: u32,
+    screen_w: u32,
+    screen_h: u32,
+    pic_x: u16,
+    left_margin: u16,
+    right_margin: u16,
+    win_w: u16,
+) -> crate::inline_image::ImageAlign {
+    // Minimum reservations (game pixels): a real right margin (not a thin frame
+    // inset), and a prose-wide left column (~6 cells at the 8px v6 cell).
+    const MIN_RIGHT_MARGIN_PX: u16 = 48;
+    const MIN_TEXT_COL_PX: u16 = 48;
+    // Slack for the gap the game leaves between the text column and the picture.
+    const PIC_START_TOL: u16 = 48;
+    let text_right = win_w.saturating_sub(right_margin); // text column's right edge
+    let text_col = text_right.saturating_sub(left_margin); // left text column width
+    let is_margin_right = right_margin > left_margin
+        && right_margin >= MIN_RIGHT_MARGIN_PX
+        && text_col >= MIN_TEXT_COL_PX
+        && pic_x as u32 + iw >= win_w as u32 / 2 // picture predominantly on the right
+        && pic_x.saturating_add(PIC_START_TOL) >= text_right; // begins at/after the column
+    if is_margin_right {
+        return crate::inline_image::ImageAlign::MarginRight;
+    }
     if is_content_art(iw, ih, screen_w, screen_h) {
         crate::inline_image::ImageAlign::InlineUp
     } else {
@@ -870,6 +903,13 @@ impl GameSession {
         }
         let Some(v6) = self.machine.screen.v6.as_ref() else { return };
         let Some(w) = v6.windows.get(ev.window as usize) else { return };
+        // Snapshot window 0's margin/size state (pixels) so the win0-picture
+        // classifier below can detect a right-margin float without holding a
+        // borrow across the `pict_source` mutable borrow. The margins reflect the
+        // `set_margins` the game issued right after the draw (ZMSD §15 margin
+        // picture) — captured here at drain time.
+        let (win0_left_margin, win0_right_margin, win0_x_size) =
+            (w.left_margin, w.right_margin, w.x_size);
         // Window 0 is the main scrolling text window: its pictures are INLINE
         // story content (Zork Zero's drop-caps and room icons, drawn at the
         // text cursor with a margin set for the text to flow beside them).
@@ -895,8 +935,14 @@ impl GameSession {
                 let img = v6_scaled_art(&img);
                 let (iw, ih) = (img.width(), img.height());
                 let (screen_w, screen_h) = self.v6_screen_px();
-                let align = win0_pic_align(iw, ih, screen_w, screen_h);
+                let align = win0_pic_align(
+                    iw, ih, screen_w, screen_h,
+                    ev.x, win0_left_margin, win0_right_margin, win0_x_size,
+                );
                 let margin_px = match align {
+                    // MarginLeft carries the game's own left `set_margins` value
+                    // (text-start x); MarginRight reserves the picture's own cell
+                    // width on the right (no cross-space margin scaling needed).
                     crate::inline_image::ImageAlign::MarginLeft => ev.margin_after.map(|m| m as u32),
                     _ => None,
                 };
@@ -2369,14 +2415,37 @@ mod tests {
     #[test]
     fn win0_ship_splash_is_inline_but_dropcap_stays_margin() {
         use crate::inline_image::ImageAlign;
-        // SQ-0471: Shogun's large opening ship illustration, drawn into window 0,
-        // must render as a full-size inline band — NOT a left-margin drop-cap.
-        assert_eq!(win0_pic_align(320, 200, 320, 200), ImageAlign::InlineUp, "ship splash → inline");
-        assert_eq!(win0_pic_align(288, 176, 320, 200), ImageAlign::InlineUp, "big room illustration → inline");
+        // No margin reservation (left=right=0, picture at the left): a large
+        // centred illustration is a full-size inline band — NOT a drop-cap
+        // (SQ-0471) and NOT a right-margin float.
+        let noma = |iw, ih, sw: u32, sh| win0_pic_align(iw, ih, sw, sh, 1, 0, 0, sw as u16);
+        assert_eq!(noma(320, 200, 320, 200), ImageAlign::InlineUp, "ship splash → inline");
+        assert_eq!(noma(288, 176, 320, 200), ImageAlign::InlineUp, "big room illustration → inline");
         // A genuine drop-cap (Zork Zero's initial letter / a small tile) stays a
         // left-margin float — the existing drop-cap behaviour is preserved.
-        assert_eq!(win0_pic_align(24, 32, 320, 200), ImageAlign::MarginLeft, "small drop-cap stays margin");
-        assert_eq!(win0_pic_align(40, 48, 320, 200), ImageAlign::MarginLeft, "small icon stays margin");
+        assert_eq!(noma(24, 32, 320, 200), ImageAlign::MarginLeft, "small drop-cap stays margin");
+        assert_eq!(noma(40, 48, 320, 200), ImageAlign::MarginLeft, "small icon stays margin");
+    }
+
+    #[test]
+    fn win0_shogun_opening_is_a_right_margin_float() {
+        use crate::inline_image::ImageAlign;
+        // SQ-0489: Shogun's opening — draw_picture(7) at window-x 229 in the 548px
+        // window, then set_margins(left=2, right=328). Text flows in the left
+        // ~220px column, the picture sits on the right → MarginRight float, NOT the
+        // old full-width InlineUp band.
+        assert_eq!(
+            win0_pic_align(320, 368, 640, 400, 229, 2, 328, 548),
+            ImageAlign::MarginRight,
+            "right-margin picture floats right with prose beside it"
+        );
+        // A thin symmetric frame inset (Zork Zero's ~36px side columns) is NOT a
+        // right float — a small drop-cap there keeps MarginLeft.
+        assert_eq!(
+            win0_pic_align(40, 48, 512, 400, 40, 36, 36, 512),
+            ImageAlign::MarginLeft,
+            "symmetric frame inset is not a right float"
+        );
     }
 
     #[test]

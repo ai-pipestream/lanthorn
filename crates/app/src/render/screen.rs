@@ -1125,17 +1125,26 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
     // height/FONT_H text rows and indents width/FONT_W columns.
     const FONT_W: u32 = 8;
     const FONT_H: u32 = 16;
+    // A prose column narrower than this (cells) isn't worth floating a picture
+    // beside — fall back to a full-width band.
+    const MIN_TEXT_COLS: u16 = 8;
     struct AbsFloat {
         row: usize,
         rows: u16,
-        indent: u16,
+        /// Columns removed from the text width on the covered rows.
+        reserve: u16,
+        /// Column where covered rows' text begins.
+        text_col: u16,
+        /// Column where the picture blits.
+        img_col: u16,
         img: std::sync::Arc<image::RgbaImage>,
     }
-    let indent_at = |floats: &[AbsFloat], row: usize| -> u16 {
+    // Columns reserved (subtracted from wrap width) by any float covering `row`.
+    let reserve_at = |floats: &[AbsFloat], row: usize| -> u16 {
         floats
             .iter()
             .filter(|f| f.row <= row && row < f.row + f.rows as usize)
-            .map(|f| f.indent)
+            .map(|f| f.reserve)
             .max()
             .unwrap_or(0)
     };
@@ -1156,25 +1165,52 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
             // the overlap happen; with our whole-cell glyphs the ceil reads
             // far cleaner.)
             let img_rows = (px.height().div_ceil(FONT_H) as u16).max(1);
-            if img.align == crate::inline_image::ImageAlign::MarginLeft {
-                // A margin-left drop-cap floats: it occupies no text row of
-                // its own — the wrap below narrows the rows beside it.
-                let indent_px = img.margin_px.unwrap_or(px.width() + FONT_W);
-                floats.push(AbsFloat {
-                    row: wrapped.len(),
-                    rows: img_rows,
-                    indent: indent_px.div_ceil(FONT_W) as u16,
-                    img: std::sync::Arc::clone(px),
-                });
-            } else {
-                // Every other alignment is a full-width band (matches the
-                // frameless transcript's band fallback in `wrap_lines_kinded`):
-                // reserve blank text rows so the wrap below can't place prose
-                // beside or over the picture.
-                floats.push(AbsFloat { row: wrapped.len(), rows: img_rows, indent: 0, img: std::sync::Arc::clone(px) });
+            let img_cols = (px.width().div_ceil(FONT_W) as u16).max(1);
+            let band = |floats: &mut Vec<AbsFloat>, wrapped: &mut Vec<String>| {
+                // A full-width band: reserve blank text rows so the wrap below
+                // can't place prose beside or over the picture.
+                floats.push(AbsFloat { row: wrapped.len(), rows: img_rows, reserve: 0, text_col: 0, img_col: 0, img: std::sync::Arc::clone(px) });
                 for _ in 0..img_rows {
                     wrapped.push(String::new());
                 }
+            };
+            match img.align {
+                crate::inline_image::ImageAlign::MarginLeft => {
+                    // A drop-cap floats at the LEFT: it occupies no text row of
+                    // its own — the wrap below narrows the rows beside it, and the
+                    // text is pushed right past the picture.
+                    let indent_px = img.margin_px.unwrap_or(px.width() + FONT_W);
+                    let reserve = indent_px.div_ceil(FONT_W) as u16;
+                    floats.push(AbsFloat {
+                        row: wrapped.len(),
+                        rows: img_rows,
+                        reserve,
+                        text_col: reserve,
+                        img_col: 0,
+                        img: std::sync::Arc::clone(px),
+                    });
+                }
+                crate::inline_image::ImageAlign::MarginRight => {
+                    // A right-margin picture (Shogun's opening, ZMSD §15) floats at
+                    // the RIGHT edge: text stays flush left and wraps in the
+                    // narrowed column, then reclaims full width once the picture
+                    // ends. Reserve the picture's own cell width plus a gutter; if
+                    // that leaves no prose column, fall back to a full-width band.
+                    let reserve = (img_cols + 1).min(cols);
+                    if cols.saturating_sub(reserve) >= MIN_TEXT_COLS {
+                        floats.push(AbsFloat {
+                            row: wrapped.len(),
+                            rows: img_rows,
+                            reserve,
+                            text_col: 0,
+                            img_col: cols.saturating_sub(img_cols),
+                            img: std::sync::Arc::clone(px),
+                        });
+                    } else {
+                        band(&mut floats, &mut wrapped);
+                    }
+                }
+                _ => band(&mut floats, &mut wrapped),
             }
             continue;
         }
@@ -1185,7 +1221,7 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
         // Word-wrap with per-row width: rows beside an active float are narrower.
         let mut cur = String::new();
         for word in line.split(' ') {
-            let width = cols.saturating_sub(indent_at(&floats, wrapped.len())).max(1) as usize;
+            let width = cols.saturating_sub(reserve_at(&floats, wrapped.len())).max(1) as usize;
             if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > width {
                 wrapped.push(std::mem::take(&mut cur));
             }
@@ -1220,7 +1256,9 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
             (rel + f.rows as i64 > 0 && rel < visible_len as i64).then_some(crate::render::v6_layout::RasterFloat {
                 row: rel as i32,
                 rows: f.rows,
-                indent_cols: f.indent,
+                reserve_cols: f.reserve,
+                text_col: f.text_col,
+                img_col: f.img_col,
                 img: f.img,
             })
         })
@@ -1484,7 +1522,7 @@ mod tests {
         let (main, _) = build_main_text(&state, 40, 30);
         assert_eq!(main.floats.len(), 1, "the image line became a float, not a text row");
         let f = &main.floats[0];
-        assert_eq!((f.row, f.rows, f.indent_cols), (1, 4, 5), "anchored after 'before', 64px/16 = 4 rows, 40px/8 = 5 cols");
+        assert_eq!((f.row, f.rows, f.reserve_cols, f.text_col, f.img_col), (1, 4, 5, 5, 0), "anchored after 'before', 64px/16 = 4 rows, 40px/8 = 5 cols, left float");
         assert_eq!(main.lines[0], "before");
         // Rows 1..5 (beside the float) wrap at 40-5=35 cols; later rows full width.
         for (i, row) in main.lines.iter().enumerate().skip(1) {
@@ -1532,6 +1570,39 @@ mod tests {
         // to prove it isn't narrowed the way a MarginLeft float would narrow it.
         assert!(!main.lines[5].is_empty(), "text resumes right after the band");
         assert!(main.lines[5].chars().count() > 35, "row 5 is full width, got {:?}", main.lines[5]);
+    }
+
+    #[test]
+    fn build_main_text_right_float_narrows_left_and_places_picture_right() {
+        // SQ-0489: Shogun's opening — a MarginRight window-0 picture floats at the
+        // RIGHT edge; the prose rows beside it stay flush LEFT but narrow, and rows
+        // past the picture reclaim full width. (160px → 20 cols; reserve 21; in a
+        // 40-col box the text column is 19 cols.)
+        let mut state = crate::state::AppState::default();
+        state.push_transcript_kind("before", crate::state::TranscriptKind::Story);
+        state.push_transcript_image(crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(image::RgbaImage::from_pixel(160, 64, image::Rgba([9, 9, 9, 255]))),
+            align: crate::inline_image::ImageAlign::MarginRight,
+            scaled: None,
+            margin_px: None,
+            source: crate::inline_image::ImageSource::Story,
+        });
+        let para = "word ".repeat(40);
+        state.push_transcript_kind(para.trim_end(), crate::state::TranscriptKind::Story);
+        let (main, _) = build_main_text(&state, 40, 30);
+        assert_eq!(main.floats.len(), 1, "the image became a right float");
+        let f = &main.floats[0];
+        // 64px/16 = 4 rows; 160px/8 = 20 img cols; reserve = 21; img_col = 40-20 = 20.
+        assert_eq!((f.row, f.rows, f.reserve_cols, f.text_col, f.img_col), (1, 4, 21, 0, 20), "right float geometry");
+        assert_eq!(main.lines[0], "before");
+        // Rows 1..5 (beside the float) wrap at 40-21 = 19 cols; later rows widen.
+        for (i, row) in main.lines.iter().enumerate().skip(1) {
+            let w = row.chars().count();
+            if (1..5).contains(&i) {
+                assert!(w <= 19, "row {i} beside the right float is narrow, got {w}");
+            }
+        }
+        assert!(main.lines[5..].iter().any(|r| r.chars().count() > 19), "rows past the float use full width");
     }
 
     #[test]
