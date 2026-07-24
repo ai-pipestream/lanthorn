@@ -143,12 +143,20 @@ Several v6 titles bind the arrow keys straight to movement — press ↑ and you
 character walks north. That's authentic, but it collides with babelmap's own
 use of arrows for scrollback recall and map panning, which some players would
 rather keep. Set `v6_arrow_keys = false` in the config (or flip it right in
-the settings screen) and arrows are withheld from v6 stories specifically:
-instead of being delivered as a ZSCII cursor code, the keypress falls through
-to whatever babelmap would do with it if no game input were pending —
-command-history recall or map panning, depending on focus. Enter and every
-other key are untouched, and v1–v5/Glulx stories keep getting arrows
-regardless of this setting; it only ever withholds them from v6.
+the settings screen) and arrows are withheld from v6 stories — but only at the
+`>` prompt, where the movement-vs-panning clash actually happens. There, instead
+of being delivered as a ZSCII cursor code, the keypress falls through to whatever
+babelmap would do with it if no game input were pending — command-history recall
+or map panning, depending on focus.
+
+Menus are the deliberate exception. Whenever a v6 story is waiting on a single
+keypress rather than a line — Shogun's startup menu, hint menus, a "press any
+key" pause — arrows always reach the game, setting or no setting, because those
+screens are unnavigable without them. So the rule is simply: arrows drive
+babelmap at the prompt, and drive the game everywhere else.
+
+Enter and every other key are untouched, and v1–v5/Glulx stories keep getting
+arrows regardless of this setting; it only ever withholds them from a v6 prompt.
 
 ## Not yet there
 
