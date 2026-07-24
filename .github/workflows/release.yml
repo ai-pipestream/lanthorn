@@ -168,8 +168,11 @@ jobs:
             Download the archive for your platform, extract it, and run `babelmap`
             (or one of the no-map CLI players `zvm-cli` / `gvm-cli` / `scott-cli`).
 
-            > ⚠️ **Alpha** — the `config.toml` / `style.toml` schemas and on-disk
-            > save data may change between versions.
+            > **Beta** — on-disk save formats are version-pinned and any change
+            > is a deliberate, release-noted bump (see
+            > `docs/release/save-format-policy.md`); across 0.x versions the
+            > frozen-tier formats may still break, never silently. The
+            > `config.toml` / `style.toml` schemas remain tolerant.
 
             ### Platform notes
             - **Linux** (`x86_64`, glibc, built on Ubuntu 22.04) requires

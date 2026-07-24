@@ -1,0 +1,187 @@
+# Changelog
+
+All notable changes to babelmap are recorded here.
+
+**Tag convention.** A release is cut by pushing a `v*` tag (see
+[`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
+name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
+**pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
+version in `Cargo.toml` (currently `0.1.0`) versions every crate and every
+binary's `--version` at once.
+
+---
+
+## v0.1.0-beta.1 — first public beta
+
+The first public build of babelmap: a terminal interactive-fiction interpreter
+that draws you a live map as you play. This entry is an inventory of what the
+beta ships, not a diff — there's no prior release to diff against.
+
+Everything below has been built and exercised in-repo. Where a claim is scoped
+("verified against *Zork Zero*"), that scope is the honest extent of testing — it
+is not a promise that every game in a format works.
+
+### Engines
+
+- **Z-machine** (`zvm`, clean-room, zero-dependency) — story-file versions
+  **v3–v8**, the Infocom canon and decades of Inform 6. Standard Quetzal
+  save/restore (interoperable with Frotz, down to v3 branch-form `@save`), the
+  v4+ cursor-addressed upper-window screen model, timed/interrupt input,
+  configurable interpreter number, story-dictionary autocomplete, and
+  `set_colour` / `set_true_colour` honored at 24-bit RGB.
+- **Graphical Z-machine v6** — boots and plays graphical v6 titles, verified in
+  depth against ***Zork Zero*** (full banner, side columns, per-room compass,
+  illuminated drop-caps), with the same engine and opcode set targeting the wider
+  v6 catalogue (*Shogun*, *Journey*, *Arthur*) and Inform-compiled v6 titles.
+  Rendered at an **authentic 640×400 screen with an 8×16 cell and 2×-scaled
+  art**, matching the DOS/Amiga profile. Three render modes — `hybrid` (crisp
+  terminal story text inside a pixel chrome ring, the default), `raster` (the
+  whole pane as one pixel image), and `frameless` (no frame; full-pane text with
+  inline pictures).
+- **Glulx** (`gvm`, clean-room, zero-dependency) — modern Inform 7, targeting
+  Glulx spec 3.1.3 with a complete **Glk 0.7.6** layer verified against the
+  standard Glulx/Glk test suites. Accelerated-function interception (the Inform
+  veneer runs natively, so heavyweights like Counterfeit Monkey skip their long
+  startup), the full single- and double-precision float opcode set, external-file
+  persistence, line-input terminators, and honest `gestalt` reporting.
+- **Scott Adams** (`scott`, ScottFree `.dat`) — the classic 8-bit text
+  adventures (*Adventureland*, *Pirate Adventure*, …), played through the same
+  TUI and automap. Blorb-bundled PNG artwork renders; the original SAGA
+  line-draw format is not decoded.
+
+### Automapping
+
+- **Live, engine-agnostic mapper** — consumes a plain stream of locations and
+  movements (never a VM opcode), so one map builder charts all three engines.
+  Rooms boxed, exits routed through a lane system with crossing-elimination and
+  overlap removal, then continuously re-tidied (configurable eagerness).
+- **Room detection across engines** — status-variable (v3), status-line +
+  object resolution (v4/v5, including centered custom titles like Beyond Zork /
+  Trinity), Inform room-heading parsing (Glulx), and graphical v6. A hideable
+  indicator shows *how* the current room was resolved.
+- **Layered multi-level areas** — switchable named layer tabs; peel/merge
+  regions by hand.
+- **Awkward cases understood** — vertical up/down connections (dotted, never
+  "distorted"), nautical fore/aft/port/starboard, and redundant multi-direction
+  paths collapsed into one shared connector.
+- **Hand edits & export** — select / nudge / rename rooms and layers, edit notes,
+  delete connections, relabel edges; export the map as **SVG**, **Graphviz DOT**,
+  or an annotatable text dump; `animate-tidy` steps through the whole layout
+  assembly stage by stage.
+
+### Interface
+
+- **Story picker & IFDB** — browse a library as a sortable, badged **list** or a
+  `g` cover-gallery **grid**, each with a live info panel (metadata, cover art,
+  IFID, resources, saves). On-demand IFDB metadata fetch cached per game, and a
+  `/` **IFDB search / browse / download** modal that drops a new story file
+  straight into your library.
+- **Full TUI cockpit** — mouse support (click a room for info, middle-drag to
+  pan, wheel to scroll everything), select-and-copy to the system clipboard via
+  OSC 52 (clean even over SSH), a verb/noun menu, dictionary autocomplete,
+  readline-style line editing, command history, an inventory strip, and
+  notification toasts.
+- **Command palette & leader keymap** — a `/`-summoned fuzzy command palette over
+  *every* command (reachable even inside modals), plus a tmux-style `Ctrl+P`
+  leader panel of mnemonic single-letter map-editing verbs.
+- **Transcript tools** — search / filter (story · meta · both) / export, with
+  every line category independently themeable.
+- **In-game hints** — auto-detected *InvisiClues* files boot in a second
+  Z-machine over the story pane; ~50 Infocom titles can fetch a hint file on
+  demand with `H`.
+- **Sound** — Z-machine bleeps + Blorb sampled audio (AIFF/Ogg/MOD) and Glulx Glk
+  sound channels with per-channel volume and finish events, plus a themeable
+  border-flash accessibility cue; audio can be routed back from a remote/SSH
+  session.
+- **Deep theming** — a 7-role palette the whole UI derives from, first-class
+  styling for all 11 standard Glk styles, per-game looks, a templated status bar,
+  and a fully configurable keymap, all in an auto-seeded, live-reloadable
+  `style.toml` (`style.example.toml` mirrors the registry).
+
+### Debugging
+
+- **Built-in debug inspector** (`/debug`, or `--debug` to trace from boot) turns
+  the map pane into a live disassembler, retargeted to each engine's model:
+  - **Z-machine** — live PC-tracking disassembly; Globals / Locals / Objects /
+    Dictionary / Call-Stack / Stack / Memory tabs; opcode hover help;
+    click-to-jump operands; execution coverage that persists per story.
+  - **Glulx** — routine-discovery disassembly (call-graph + linear scan, tinted
+    by confidence, promoted to certain on execution); Functions / Strings / Glk
+    tabs; a real call/eval stack and absolute-address memory view with a `<RAM>`
+    marker.
+  - **Scott Adams** — the action table decompiled one rule per line, fired-action
+    coverage, and `✗cond` flags naming the guard that blocked a matched action;
+    State / Items / Vocab / World tabs.
+
+### Formats & persistence
+
+- **`.babelmap` Save States** — one self-contained file freezing the whole
+  session (VM state + map + on-screen windows + transcript), with named slots,
+  auto-save/auto-load, and an optional per-turn **rewind/replay** history.
+- **Standard interchange, in and out** — game-written `@save` produces a portable
+  Quetzal `.qzl` (Z-machine, golden-tested against `dfrotz` both directions) and
+  a standard Glulx-Quetzal in-game save; other interpreters' saves import through
+  the saves manager.
+- **Everything else just persists** — Glulx external files (Glk file streams)
+  auto-persist per story across sessions; a Glulx game's own fixed-name saves
+  (init cache, autosave, undo) are read/written silently so it skips its long
+  startup on relaunch.
+- **Frozen formats.** For the beta, every persisted byte format is enumerated,
+  version-stamped, and pinned by a round-trip freeze test, under three guarantee
+  tiers — **Public spec** (Quetzal / Glulx-Quetzal, kept spec-clean and
+  interoperable), **Frozen (0.x)** (private binary formats and the `.babelmap`
+  archive: they may only change via a deliberate bump-and-note ritual, and reject
+  a newer version marker cleanly), and **Tolerant** (TOML/JSON config &
+  metadata: missing fields default, unknown fields ignored). Full inventory and
+  policy in [`docs/release/save-format-policy.md`](docs/release/save-format-policy.md).
+
+### Platforms
+
+Runs on **Linux, macOS, and Windows**. Release archives ship four binaries
+(`babelmap` + `zvm-cli` / `gvm-cli` / `scott-cli`) per platform: Linux x86_64
+(glibc, needs `libasound2` at runtime), a macOS universal binary (Apple Silicon +
+Intel, ad-hoc signed, not notarized), and Windows x86_64 (unsigned).
+
+### Known issues
+
+Honest gaps in the beta. Each is scoped, and carries a workaround where one
+exists.
+
+- **Inform-compiled v6 status lines don't paint in `raster` mode.** Inform 6's v6
+  library leaves its windows at height 0 and streams prose through the
+  transcript; `raster` synthesises a single full-pane buffer for that shape, so
+  the game's cursor-positioned status line isn't drawn there. Its prose still
+  reads correctly. *Workaround:* play Inform v6 titles in `hybrid` or `frameless`
+  mode (Infocom's own v6 titles keep real windows and are unaffected).
+- **Rasterized v6 text isn't selectable.** In `raster` mode the story text is
+  baked into the pixel image, so mouse select-and-copy can't pick out cells over
+  it. *Workaround:* `hybrid` (the default) and `frameless` keep the story as real
+  terminal text you can select and copy normally.
+- **Sixel encode latency on very large panes.** Sixel is the slowest of the three
+  pixel protocols to encode, and the v6 `raster` mode is the heaviest producer;
+  encoding runs off the UI thread so input stays responsive, but a full-screen
+  raster refresh over sixel can visibly lag. *Workaround:* prefer a
+  Kitty/iTerm2 terminal for v6 raster, use `hybrid`/`frameless`, or shrink the
+  story pane.
+- **Justified text doesn't combine with margin floats, and fully-justified
+  ("fill") Glk text falls back to left-flush.** Centered and right-flush
+  paragraph layout is honored; the `LeftRight` fill mode currently renders
+  left-flush, and justification isn't applied to lines wrapping beside a
+  left-margin inline image. Cosmetic — text is never lost.
+- **v6 compass-click movement isn't wired end to end.** A mouse click over the v6
+  banner compass is mapped to a game pixel and delivered to the VM, but clicking
+  a compass spoke doesn't yet reliably issue the corresponding move. *Workaround:*
+  type movement commands (the arrow-key and text paths work).
+- **v6 proportional fonts aren't honored** — status and chrome text use
+  fixed-width metrics, so proportional-font layout is approximated.
+- **v6 Save State restore isn't render-verified.** The host Save State captures
+  the underlying machine as for any Z-machine game; whether the v6-specific
+  render state (window geometry, floats, pictures) comes back pixel-identical
+  across a restore isn't verified yet. Standard in-game `@save`/`@restore`
+  follows the normal Z-machine path.
+- **Glulx cross-interpreter save interop isn't golden-tested.** The Glulx in-game
+  save round-trips internally and follows the Glulx-Quetzal spec, but reading our
+  Glulx saves in another interpreter (and vice versa) isn't yet pinned by a
+  golden test the way the Z-machine `.qzl` interop is (tracked in SQ-0229).
+- **v6 menu opcodes are stubs** — `print_form` / `make_menu` are recognized but
+  not implemented (tracked in SQ-0457).

@@ -1,243 +1,179 @@
 # babelmap
 
+[![Test](https://github.com/sharkusk/babelmap/actions/workflows/test.yml/badge.svg)](https://github.com/sharkusk/babelmap/actions/workflows/test.yml)
 [![Made with Side-Quest](https://img.shields.io/badge/Made%20with-Side--Quest-f97316)](https://github.com/sharkusk/side-quest)
 
 **Play interactive fiction in your terminal while babelmap draws the map for you — live, as you explore.**
 
-> ⚠️ **Alpha software.** babelmap is under active development and considered
-> **alpha** — expect rough edges and breaking changes. Formats are not yet
-> stable: the `config.toml` and `style.toml` schemas (and on-disk save data) may
-> change between versions.
+babelmap is a terminal interactive-fiction interpreter with a built-in
+*automapper*. Point it at a story — the Infocom canon and Z-machine classics
+like *Zork*, modern Inform 7 / Glulx games, graphical *Zork Zero*, or a classic
+Scott Adams text adventure — play it in a clean, mouse-driven TUI, and watch a
+room-and-connection map assemble itself from your movements. No graph paper, no
+manual annotation: every room you enter and every exit you take is placed,
+routed, and de-overlapped automatically, then continuously tidied into a
+readable layout. Three from-scratch, zero-dependency virtual machines under one
+roof; one engine-agnostic mapper that charts them all.
+
+> **Beta software.** babelmap is cutting its first public beta. The formats that
+> live on your disk between sessions — saves, the `.babelmap` archive, the
+> sidecars — are now **frozen and version-pinned**, so a future change can't
+> silently corrupt them (see the [save-format policy](docs/release/save-format-policy.md)).
+> The `config.toml` / `style.toml` schemas stay tolerant but may still gain
+> fields. Expect rough edges; report the sharp ones.
+
+---
+
+## See it
+
+<!-- DEMO: drop a terminal-recording GIF/VHS cast of a play-through + live map here -->
+<!-- e.g. ![babelmap in motion](docs/demo.gif) -->
 
 ![babelmap's cover-gallery view: a grid of story covers beside a metadata info panel](docs/cover-gallery.png)
 
-babelmap is a terminal interactive-fiction interpreter with a built-in *automapper*.
-Load a story — the Infocom catalog and Z-machine classics like *Zork*, modern
-Inform 7 / Glulx games, or a classic Scott Adams text adventure — play it in a
-clean TUI, and watch a room-and-connection map assemble itself from your
-movements. No graph paper, no manual annotation: every room you enter and every
-exit you take is placed, routed, and de-overlapped automatically, then
-continuously tidied into a readable layout.
-
-```
-babelmap path/to/story.z5
-```
-
----
-
-## A quick tour
-
-### Three engines, one player
-
-Point babelmap at any supported story and it detects the format and picks the
-right engine — you never choose. Under the hood are **three brand-new, clean-room
-virtual machines written from scratch in pure Rust** — no forks of Frotz or
-Glulxe, no C bindings, zero runtime dependencies:
-
-- **Z-machine** (v3/v4/v5/v6/v7/v8) — the Infocom canon and decades of Inform 6
-  games, including the v4+ cursor-addressed upper window, timed/interrupt input,
-  and per-title header tuning. Graphical **v6** stories run too — *Zork Zero*
-  boots and plays with its full banner, columns, and per-room compass rendered
-  faithfully, chrome and story text composited together on image-capable
-  terminals (or split, by default, into a crisp real terminal viewport ringed
-  by an image frame), with a character-cell fallback elsewhere.
-- **Glulx** — modern Inform 7 games, with an accelerated Inform veneer, full
-  float opcodes, and a complete **Glk 0.7.6** layer verified against the standard
-  Glulx/Glk test suites.
-- **Scott Adams** (ScottFree `.dat`) — the classic 8-bit text adventures. When a
-  game is packaged as a **Blorb with PNG artwork**, its illustrations render too
-  (via the image pipeline below); babelmap plays the `.dat` text engine and shows
-  the bundled images — it doesn't decode the original SAGA line-draw format.
-
-![A Scott Adams text adventure with its Blorb-bundled PNG artwork, playing beside its live map](docs/scott-adams-graphics.png)
-
-### Live automapping
-
-The mapper watches the stream of locations and movements and turns it into a
-spatial graph — rooms boxed, exits routed, overlaps removed, multi-level areas
-split into switchable **layers** (the `Main / Cellar / Maze` tabs across the top
-of the map). The current room glows; the whole layout re-tidies itself as you
-discover more. It's completely engine-agnostic: the same map grows whether you're
-playing *Zork*, *Counterfeit Monkey*, or *Adventureland*.
-
 ![babelmap playing Zork I with a live automap of the Great Underground Empire](docs/automapping.png)
 
-### Pictures in your terminal
+<details>
+<summary>More screenshots</summary>
 
-Cover art, in-game Glulx graphics windows, and inline images in the text render
-with your terminal's best protocol — **Kitty, iTerm2, or Sixel** — and fall back
-to a universal Unicode half-block renderer everywhere else. Graphical
-**Z-machine v6** stories go a step further: by default, the decorative chrome —
-banner, borders, the compass — renders as a pixel-accurate image ring around
-the story text, while the story itself stays real, selectable terminal text
-with its own inline drop-caps and room icons. Prefer the whole pane baked into
-one pixel image instead? Switch `v6_render` to `raster`. Either way, a
-character-cell rendering is the fallback on terminals without an image
-protocol.
+<!-- SCREENSHOTS: additional stills / GIFs can be dropped in below -->
 
 ![In-game graphics rendered with the Kitty graphics protocol](docs/kitty-graphics.png)
 
-### Multi-window games, faithfully
-
-Games that split the screen into multiple Glk windows — status panes, quote
-boxes, side-by-side layouts — are laid out as the author intended, right in the
-terminal. **Glulx story colours are fully supported**, too: a game's `garglk`
-window and text colours (like the coloured panes in the screenshot below) render
-faithfully at 24-bit RGB.
-
 ![A Glulx game using a multi-window Glk layout with story-set colours](docs/multi-window-layout.png)
-
-### A Z-machine debugger, built in
-
-Type `/debug` and the map pane becomes a live **debug inspector**: a running
-disassembly that tracks the PC, tabbed views of Globals, Locals, Objects,
-Dictionary, the Call Stack, and Memory — plus **hover help** that decodes the
-opcode under your cursor and clickable operands that jump to their address.
 
 ![The built-in Z-machine debug inspector: live disassembly, call stack, and opcode hover help](docs/debug-inspector.png)
 
-### Browse your library
+![A Scott Adams text adventure with its Blorb-bundled PNG artwork, playing beside its live map](docs/scott-adams-graphics.png)
 
-Launch a directory instead of a file to open the **story picker**. Two view
-modes — a sortable, badged **list** or a `g` **cover-gallery grid** (shown in the
-banner at the top of this page) — each paired with a live **info panel**: the
-selected game's cover art, full metadata (author, year, genre, blurb), format,
-and IFID, fetched on demand from IFDB and cached per game. The type badges even
-tell the three engines apart at a glance (`Z5`, `Scott`, `G3.1.2`). Don't have a
-game yet? Press `/` to **browse IFDB's popular list or search by title/author,
-then download a story file** straight into your library — babelmap grabs it in
-the background and drops you right on it.
+![The story picker's list view: a sortable, badged catalogue beside the info panel](docs/story-list.png)
 
-![The story picker's list view: a sortable, badged catalogue beside the info panel — the cover art here is drawn with the universal Unicode half-block fallback renderer](docs/story-list.png)
+</details>
 
 ---
 
-## Every headline feature
+## Quick start
 
-- **Three engines** — Z-machine (v3/v4/v5/v6/v7/v8), Glulx (Inform 7), and Scott
-  Adams (ScottFree), auto-detected from the file. Full Glk 0.7.6 support for
-  Glulx: file/resource streams, date/time with real local timezones, sound
-  channels with pause and volume ramps, echo streams, and Unicode normalization.
-  → [interpreter](docs/features/interpreter.md)
-- **Graphical Z-machine v6** — *Zork Zero*'s full illustrated frame (banner,
-  columns, per-room compass, illuminated drop-caps) renders faithfully; by
-  default the chrome composites as one pixel image around real, crisp
-  terminal story text. → [v6 graphics](docs/features/v6-graphics.md)
-- **Live automapping** — rooms and connections placed, routed, and de-overlapped
-  as you explore, across layered multi-level areas, and continuously re-tidied.
-  Works for every engine. → [mapping](docs/features/mapping.md)
-- **Built-in debug inspector** — a live Z-machine disassembler with PC tracking,
-  Globals/Locals/Objects/Dictionary/Call-Stack/Memory tabs, opcode hover help,
-  and click-to-jump operands. Open it with `/debug`.
-  → [interface](docs/features/interface.md)
-- **Graphics** — cover art, in-game Glulx graphics windows, and inline images,
-  rendered with the terminal's best protocol (Kitty / iTerm2 / Sixel) and a
-  universal half-block fallback. → [interface](docs/features/interface.md)
-- **Sound** — Z-machine `sound_effect` bleeps and Blorb sampled audio, plus Glulx
-  Glk sound channels with per-channel volume and finish events (AIFF/Ogg/MOD).
-  → [interpreter](docs/features/interpreter.md) · [remote audio](docs/remote-sound.md)
-- **Game-driven colour & text styling** — `set_colour` / `set_true_colour` and Glk
-  style hints honored at 24-bit RGB, with per-span bold/italic/reverse emphasis.
-  → [interpreter](docs/features/interpreter.md) · [customization](docs/features/customization.md)
-- **Rewind & replay** — step back through a recorded per-turn history with the map
-  reconstructed at each moment, and resume from any earlier turn. → [saves](docs/features/saves.md)
-- **A full TUI** — mouse support, select-and-copy, verb/noun menu, dictionary
-  autocomplete, a `/`-summoned fuzzy **command palette** over every command,
-  inventory strip, command history,
-  animated top-right notification toasts (with a `dump-notifications` recall), and
-  transcript search / filter / export. → [interface](docs/features/interface.md)
-- **In-game hints** — open a matching *InvisiClues* hint file and babelmap boots
-  it in a second Z-machine right over the story pane, rendering its split-screen
-  topic menu and forwarding your keystrokes so you drive it exactly as intended,
-  revealing clues one line at a time. The hint file is auto-detected beside the
-  story, matched to *that* game by name, hidden from the picker, and flagged with
-  a Hint badge. Don't have one? A lowercase badge marks the ~50 Infocom titles
-  whose *InvisiClues* babelmap can fetch on demand — press `H` in the picker to
-  download one from the IF Archive (or the Internet Archive) right next to the
-  story. → [interface](docs/features/interface.md)
-- **Saves & persistence** — self-contained `.babelmap` Save States (map + VM
-  state + metadata), named slots, Quetzal import/export, auto-save/auto-load, and
-  Glulx games' external file storage (Glk file streams) auto-persisting across
-  sessions. → [saves](docs/features/saves.md) · [persistence model](docs/persistence.md)
-- **Deeply themeable** — a small role palette (7 roots) that the whole UI derives
-  from, first-class styling for all 11 standard Glk styles, per-game looks, a
-  templated status bar, and a fully configurable keymap. Edit a fully-commented,
-  auto-seeded `style.toml` and apply changes live with `reload-style` (or
-  auto-reload on save). → [customization](docs/features/customization.md)
-- **Story picker** — browse a directory with type/artifact badges, a sortable
-  author/year list or a `g` cover-gallery grid, an info side-panel with full
-  metadata and cover art, on-demand IFDB metadata fetch cached per game, and a
-  `/` **IFDB search** that downloads a new story file straight into your library.
-  → [interface](docs/features/interface.md)
-- **Robust** — a faulting story halts with a call-frame stack trace (written to
-  `~/.babelmap/crash.log`) while the app stays interactive, instead of taking the
-  interpreter down. → [interpreter](docs/features/interpreter.md)
-
-For the full, exhaustive feature list, see **[`docs/features/`](docs/features/)**. For the
-interactive-fiction standards babelmap implements (Z-Machine, Glulx, Glk, Quetzal, Blorb,
-Treaty of Babel), see **[`docs/standards.md`](docs/standards.md)**.
-
-**Supported story formats:** Z-machine v3, v4, v5, v6, v7, and v8; Glulx; and Scott
-Adams (ScottFree `.dat`). (v1/v2 are not supported.) Story files load raw, from a
-`.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
-
----
-
-## Under the hood
-
-babelmap is a Rust workspace of three from-scratch, zero-dependency virtual
-machines — Z-machine, Glulx, and Scott Adams — plus a VM-agnostic automapper, all
-tied together by a terminal UI. The interpreter and the mapper are deliberately
-decoupled (a VM reports *where you are*; the mapper builds the map), and every
-engine renders through one neutral screen model so a single renderer draws them
-all.
-
-For the crate layout, the **"Glk only for Glulx, native for Z-machine and Scott"**
-I/O decision and why it was made, and how the engines converge on one renderer,
-see **[`docs/architecture.md`](docs/architecture.md)**.
-
----
-
-## Installation & usage
-
-Requires a Rust toolchain. On Linux, the `playback` audio feature (on by
-default) needs ALSA development headers to build: `libasound2-dev`
-(Debian/Ubuntu) or `alsa-lib-devel` (Fedora).
+babelmap builds with a Rust toolchain. On Linux, the default `playback` audio
+feature needs ALSA headers: `libasound2-dev` (Debian/Ubuntu) or `alsa-lib-devel`
+(Fedora).
 
 ```bash
 # Build
 cargo build --release
 
-# Run a story
-cargo run --release -p app -- path/to/story.z5
-# or, after building:
+# Play a story
 ./target/release/babelmap path/to/story.z5
 
 # Point it at a directory to open the story picker instead
 ./target/release/babelmap ~/if-games/
 ```
 
-You type commands at the story's own inline `>` prompt in the transcript, the
-way a classic terminal interpreter works. Prefer a dedicated input line pinned
-to the bottom instead? Set `command_bar = true` in the config (or toggle it on
-the Settings screen).
+Don't have a story yet? Launch the picker and press **`/`** to browse IFDB's
+popular list or search by title/author, then **download a playable story file
+straight into your library** — babelmap grabs it in the background and drops you
+right on it.
 
-Press the leader key (default `Ctrl+P`) in-app to pop up a reference panel of
-every command; press the single letter shown beside one to run it and return to
-play (tmux-style). A few essentials (Tab, `Ctrl+S`/`Ctrl+R`, quit) and map
-navigation stay always-active and are listed in the bottom bar.
+Set a `default_story_dir` (babelmap offers to remember the first directory you
+open) and a bare **`babelmap`** opens your library there. You type at the
+story's own inline `>` prompt, the way a classic terminal interpreter works;
+press the leader key (default **`Ctrl+P`**) for a pop-up reference of every
+command.
 
-### Configuration
+Supported formats: **Z-machine v3–v8** (incl. graphical v6), **Glulx**, and
+**Scott Adams** (ScottFree `.dat`) — auto-detected from the file, loaded raw,
+from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
+(v1/v2 are not supported.)
 
-babelmap reads `~/.babelmap/config.toml` (override the directory with
-`--user-dir`, or point at a specific file with `--config`). Every setting has a
-default, so the file is optional. Command-line flags take precedence over the
-config file, which takes precedence over built-in defaults. See
-[customization & configuration](docs/features/customization.md) for the settings.
+---
 
-Saves and sidecars live under `~/.babelmap/saves/<story-filename>.save/` by
-default; pass `--data-dir <path>` to store them elsewhere. → [persistence
-model](docs/persistence.md)
+## Highlights
+
+- **Three engines, one player** — a clean-room **Z-machine** (v3–v8, incl.
+  graphical v6), **Glulx** (Inform 7, with an accelerated veneer and full Glk
+  0.7.6), and **Scott Adams** (ScottFree), auto-detected from the file. Pure
+  Rust, no C bindings, zero runtime deps. → [interpreter](docs/features/interpreter.md)
+- **Live automapping** — rooms and connections placed, routed, and de-overlapped
+  as you explore, split across switchable multi-level **layers**, and
+  continuously re-tidied. Engine-agnostic: the same map grows for *Zork*,
+  *Counterfeit Monkey*, or *Adventureland*. → [mapping](docs/features/mapping.md)
+- **Graphical Z-machine v6** — *Zork Zero*'s full illustrated frame (banner,
+  columns, per-room compass, illuminated drop-caps) rendered faithfully at an
+  authentic 640×400 with a `hybrid` / `raster` / `frameless` render choice.
+  → [v6 graphics](docs/features/v6-graphics.md)
+- **Pictures in your terminal** — cover art, in-game Glulx graphics windows, and
+  inline images render with your terminal's best protocol (Kitty / iTerm2 /
+  Sixel) and a universal half-block fallback. → [interface](docs/features/interface.md)
+- **Built-in debug inspector** — `/debug` turns the map pane into a live
+  disassembler with PC tracking, opcode hover help, and click-to-jump operands —
+  retargeted per engine (Z-machine registers, Glulx routine discovery, Scott
+  Adams' action table). → [interface](docs/features/interface.md)
+- **A full TUI** — mouse support, select-and-copy (over SSH via OSC 52), a
+  verb/noun menu, dictionary autocomplete, a `/`-summoned fuzzy **command
+  palette**, an inventory strip, command history, notification toasts, and
+  transcript search / filter / export. → [interface](docs/features/interface.md)
+- **Story picker & IFDB** — browse a library as a badged **list** or `g`
+  cover-gallery **grid**, with a live metadata info panel, on-demand IFDB fetch
+  cached per game, and `/` **IFDB search + download** into your library.
+  → [interface](docs/features/interface.md)
+- **In-game hints** — open a matching *InvisiClues* file and babelmap boots it in
+  a second Z-machine over the story pane; ~50 Infocom titles can fetch one on
+  demand with `H`. → [interface](docs/features/interface.md)
+- **Sound & colour** — Z-machine bleeps + Blorb sampled audio and Glulx Glk sound
+  channels (AIFF/Ogg/MOD, per-channel volume), plus game-driven `set_colour` /
+  Glk style hints honored at 24-bit RGB. → [interpreter](docs/features/interpreter.md) · [remote audio](docs/remote-sound.md)
+- **Saves & rewind** — self-contained `.babelmap` Save States (map + VM + screen
+  + transcript), named slots, standard Quetzal import/export, auto-save/load, and
+  a per-turn **rewind/replay** history with the map reconstructed at each moment.
+  → [saves](docs/features/saves.md) · [persistence model](docs/persistence.md)
+- **Deeply themeable** — a 7-role palette the whole UI derives from, first-class
+  styling for all 11 Glk styles, per-game looks, a templated status bar, and a
+  fully configurable keymap in an auto-seeded, live-reloadable `style.toml`.
+  → [customization](docs/features/customization.md)
+- **Crash-proof** — a faulting story halts with a call-frame stack trace (saved
+  to `~/.babelmap/crash.log`) while the app stays interactive, instead of taking
+  the interpreter down. → [interpreter](docs/features/interpreter.md)
+
+For the full, exhaustive feature list see **[`docs/features/`](docs/features/)**;
+for the standards babelmap implements (Z-Machine, Glulx, Glk, Quetzal, Blorb,
+Treaty of Babel) see **[`docs/standards.md`](docs/standards.md)**; for the crate
+layout and I/O design see **[`docs/architecture.md`](docs/architecture.md)**.
+
+---
+
+## Terminal support
+
+Cover art, in-game graphics, and v6's illustrated frame render with real pixels
+wherever the terminal supports a graphics protocol — and babelmap auto-detects
+which, so you rarely set anything. Full pixel graphics reach **all three OSes**:
+
+| Graphics protocol | Terminals | Platforms |
+|---|---|---|
+| **Kitty graphics** | kitty, WezTerm | Linux · macOS · Windows |
+| **iTerm2 inline images** | iTerm2 | macOS |
+| **Sixel** | Windows Terminal **1.22+**, foot, xterm (+ others) | Windows 11 · Linux · macOS |
+| *Unicode half-blocks* (automatic fallback) | any terminal, incl. SSH / tmux / plain | everywhere |
+
+Anything without a pixel protocol — a remote session, a bare console — degrades
+to the universal half-block renderer automatically, so a story always stays
+playable and the map always draws. Sixel has the heaviest **encode** cost of the
+three (the v6 `raster` mode leans on it hardest); babelmap encodes off the UI
+thread so playing stays responsive, but on a very large pane Kitty or iTerm2 will
+feel snappier. Force a specific path with
+`--image-protocol <auto|halfblocks|kitty|sixel|iterm2>`, or turn image rendering
+off entirely with `--no-images`.
+
+---
+
+## Configuration
+
+babelmap reads `~/.babelmap/config.toml` (override with `--user-dir`, or point at
+a file with `--config`); every setting has a default, so the file is optional.
+CLI flags beat the config file, which beats built-in defaults. Saves and sidecars
+live under `~/.babelmap/saves/<story-filename>.save/` by default; `--data-dir
+<path>` relocates just those. See
+[customization & configuration](docs/features/customization.md) and the
+[persistence model](docs/persistence.md).
 
 ---
 
@@ -246,39 +182,29 @@ model](docs/persistence.md)
 ```bash
 cargo build --workspace          # build everything
 cargo test --workspace           # fast suite (a few slow tests are skipped)
-cargo test --workspace -- --include-ignored  # everything, incl. slow tests
-cargo run -p zvm-cli -- story.z5   # DOS-style CLI player (no map)
-cargo run -p gvm-cli -- story.ulx  # DOS-style Glulx CLI player (no map)
-cargo run -p scott-cli -- story.dat # DOS-style Scott Adams CLI player (no map)
+cargo test --workspace -- --include-ignored  # everything, incl. slow full-game walkthroughs
+cargo run -p zvm-cli   -- story.z5    # DOS-style CLI player (no map)
+cargo run -p gvm-cli   -- story.ulx   # DOS-style Glulx CLI player (no map)
+cargo run -p scott-cli -- story.dat   # DOS-style Scott Adams CLI player (no map)
 ```
 
-A few slow full-game Glulx walkthroughs (Kerkerkruip, Counterfeit Monkey) are
-marked `#[ignore]` so the default `cargo test` stays quick; pass
-`--include-ignored` to run them (CI should). Doctests are disabled workspace-wide
-(`doctest = false`) — there are none, and the rustdoc pass cost seconds.
-
-`zvm-cli` / `gvm-cli` / `scott-cli` render a basic DOS-style screen (pinned status
-line / upper window via ANSI when interactive, clearing the screen on start) and
-degrade to a clean line stream when piped. Interactively they do single-key input
-(arrow/function keys decoded for `read_char` menus) and `[MORE]` paging on long
-output; saves and aux/VFS sidecars persist per game under
-`<story-dir>/<story-filename>.save/` by default (`--data-dir <path>` overrides the
-base). A bare filename typed at the **player's** SAVE/RESTORE prompt (e.g. `quick`)
-lands in that per-game directory; a path-bearing value (e.g. `/tmp/x.qzl`) is
-honored verbatim. A Glulx game's *own* fixed-name saves (its init cache, autosave,
-undo) are written and read there **silently** — no prompt — so e.g. Counterfeit
-Monkey auto-restores its startup cache on relaunch and skips its long init. On
-piped stdin, a `read_char` menu exits cleanly at true EOF instead of spinning.
-The flags `--no-status` (byte-identical lower-stream output), `--no-aux`, and
-`--no-more` keep the headless test harness deterministic; `--no-sound`
-disables audio and `--volume <0-100>` sets the master volume.
+The workspace is four shipped binaries — the mapping TUI (`babelmap`, in the
+`app` crate) plus three no-map CLI players — over a set of library crates: the
+three VMs (`zvm` / `gvm` / `scott`), the VM-agnostic `mapper`, and supporting
+`blorb` / `audio` crates. CI runs the full suite on Linux, macOS, and Windows,
+plus clippy, on every push and PR. A few slow full-game Glulx walkthroughs
+(Kerkerkruip, Counterfeit Monkey) are marked `#[ignore]`; pass `--include-ignored`
+to run them.
 
 The `audio` crate carries two default-on features: `playback` (real output via
-`rodio`) and `mod-music` (ProTracker `.mod` playback via `mod_player`, requires
-`playback`). Build with `--no-default-features` to get a compile-time no-op
-backend for headless/CI environments; `--no-default-features --features
-playback` keeps AIFF/Ogg sample playback without MOD support. With `playback`
-on, a missing audio device at runtime degrades to silence rather than erroring.
+`rodio`) and `mod-music` (ProTracker `.mod` playback). Build with
+`--no-default-features` for a compile-time no-op backend (headless/CI); with
+`playback` on, a missing audio device degrades to silence rather than erroring.
+
+Cut a release by pushing a version tag (`git tag v0.1.0-beta.1 && git push origin
+v0.1.0-beta.1`) — the release workflow builds every platform and opens a draft
+GitHub Release; a hyphenated suffix marks it a pre-release. See
+[`CHANGELOG.md`](CHANGELOG.md) for what's in each release.
 
 ---
 
