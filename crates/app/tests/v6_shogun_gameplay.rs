@@ -179,7 +179,7 @@ fn shogun_frameless_status_band_anchors_left_center_right() {
     session.flush_boot_pictures();
     // Select START on the boot menu and settle into gameplay (Bridge), so the
     // status band carries the location + Score/Moves runs.
-    for turn in 0..6 {
+    for _turn in 0..6 {
         match session.pending_input() {
             InputKind::Line => { session.submit("look"); }
             InputKind::Char => { session.submit_char(13); }
