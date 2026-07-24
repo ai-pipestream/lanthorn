@@ -143,10 +143,7 @@ pub fn fuzzy_match(query: &str, candidate: &str) -> Option<FuzzyMatch> {
                 break;
             }
         }
-        match hit {
-            Some(p) => positions.push(p),
-            None => return None,
-        }
+        positions.push(hit?);
     }
 
     let is_boundary = |i: usize| i == 0 || !cand[i - 1].is_alphanumeric();

@@ -1,0 +1,7 @@
+# Check out text files with LF on every platform. Windows git defaults to
+# autocrlf, which rewrites files like style.example.toml to CRLF and breaks
+# tests that byte-compare a checked-in file against generated output.
+* text=auto eol=lf
+
+# Captured IFDB API response — its CRLF bytes are part of the fixture.
+crates/app/tests/fixtures/ifdb-zork1.xml -text
