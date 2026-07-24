@@ -128,3 +128,41 @@ fn zork0_raster_mode_publishes_scroll_geometry() {
         metrics.viewport_rows
     );
 }
+
+/// SQ-0467: frameless mode lays the v6 status band out as a classic full-width
+/// status line (the "anchored bar"), not a 40-cell postage stamp squatting in the
+/// left half of an 80-col pane. Zork0's banner (native 320px / 40 cells) carries a
+/// left location run and right-side Score/Moves runs, so on an 80-col pane the
+/// location must sit flush at col 0 and the Score/Moves must land flush right — not
+/// bunched mid-pane as the old per-run cell-quantization produced.
+#[test]
+fn zork0_frameless_status_band_is_anchored_full_width() {
+    let Some(session) = boot_zork0() else { return };
+    let model = session.screen();
+
+    let state = render_state(app::config::V6RenderMode::Frameless);
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    // The band occupies the top rows; capture them as text.
+    let band: Vec<String> = (0..4)
+        .map(|y| (0..area.width).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect())
+        .collect();
+    eprintln!("--- Zork0 FRAMELESS status band (80 cols) ---");
+    for (y, r) in band.iter().enumerate() {
+        eprintln!("{y}|{r}|");
+    }
+
+    // Location is flush LEFT: row 0 begins with a printed glyph at col 0.
+    assert_ne!(band[0].chars().next(), Some(' '), "location run is flush at col 0, not indented: {:?}", band[0]);
+
+    // Score/Moves are anchored flush RIGHT: the row carrying "Score:" ends its
+    // painted text within the last two columns of the 80-col pane (old quantized
+    // layout left them mid-pane with dead space to the right).
+    let score_row = band.iter().find(|r| r.contains("Score:")).expect("a status row carries the Score label");
+    let last_glyph = score_row.rfind(|c: char| c != ' ').expect("score row has printed text");
+    assert!(last_glyph >= area.width as usize - 2, "Score/Moves flush right (last glyph at col {last_glyph} of {}): {score_row:?}", area.width - 1);
+    // And it did NOT squat in the left 40 columns (the reported bug).
+    assert!(!score_row[41..].trim().is_empty(), "right-side status reaches past the old 40-cell stamp: {score_row:?}");
+}

@@ -581,33 +581,29 @@ fn render_node(
             // 40x25-cell postage stamp on a real terminal and pixel art can't
             // render at all, so render like a classic two-window Z-machine
             // game instead — the status window's text rows across the top of
-            // the pane (from the chrome grids' pixel runs, quantized to
-            // cells), and the story transcript filling everything below at
-            // full size, with working metrics/scrollback. (SQ-0186)
+            // the pane (from the chrome grids' pixel runs, classified into
+            // left/center/right anchor groups and laid out as a classic
+            // full-width status line — SQ-0467), and the story transcript
+            // filling everything below at full size, with working
+            // metrics/scrollback. (SQ-0186)
             {
                 let layout = crate::render::v6_layout::classify_windows(items);
                 if let Some(story) = layout.story {
                     let status_style = state.colors.theme.get("upper_window").style;
-                    let mut rows_used = 0u16;
-                    for it in &layout.chrome {
-                        if let WinNode::Grid(g) = &it.node {
-                            for t in &g.px_texts {
-                                let row = (t.y.max(1) - 1) / 8;
-                                let col = (t.x.max(1) - 1) / 8;
-                                if row >= 4 || area.y + row >= area.bottom() || col >= area.width {
-                                    continue; // status band is at most 4 rows
-                                }
-                                rows_used = rows_used.max(row + 1);
-                                buf.set_stringn(
-                                    area.x + col,
-                                    area.y + row,
-                                    &t.text,
-                                    (area.width - col) as usize,
-                                    status_style,
-                                );
-                            }
-                        }
-                    }
+                    // Native screen width in cells (v6 screens vary — Zork0 is
+                    // 320px/40 cells, others differ) sets the anchor thresholds.
+                    let (native_w, _) = crate::render::v6_layout::native_extent(items);
+                    let ncols = (native_w as u32).div_ceil(8).max(1);
+                    let runs: Vec<&crate::engine::PxText> = layout
+                        .chrome
+                        .iter()
+                        .filter_map(|it| match &it.node {
+                            WinNode::Grid(g) => Some(g.px_texts.iter()),
+                            _ => None,
+                        })
+                        .flatten()
+                        .collect();
+                    let rows_used = draw_anchored_status_band(&runs, ncols, area, buf, status_style);
                     let story_area = Rect::new(
                         area.x,
                         area.y + rows_used,
@@ -1084,6 +1080,130 @@ pub struct RasterMetrics {
     /// Absolute wrapped-row index drawn at the top of the visible slice (for the
     /// published `TranscriptGeom`).
     pub first_visible_row: u16,
+}
+
+/// Render the v6 frameless status band as a classic full-width status line
+/// ("anchored bar", SQ-0467). `runs` are all the chrome grids' pixel-text runs;
+/// `ncols` is the native screen width in cells (so anchor thresholds scale to the
+/// game's own screen, not a hardcoded 40). Each native row (`(y-1)/8`, capped at
+/// 4) is classified into LEFT/CENTER/RIGHT anchor groups and painted across the
+/// full pane width. Returns the number of band rows used (for the story offset).
+fn draw_anchored_status_band(
+    runs: &[&crate::engine::PxText],
+    ncols: u32,
+    area: Rect,
+    buf: &mut Buffer,
+    style: ratatui::style::Style,
+) -> u16 {
+    let left_bound = ncols / 3; // left-third boundary (cells)
+    let right_bound = ncols * 2 / 3; // right two-thirds boundary (cells)
+    let mut rows_used = 0u16;
+    for row in 0..4u16 {
+        if area.y + row >= area.bottom() {
+            break; // status band is at most 4 rows and must stay in-pane
+        }
+        // This native row's non-blank runs, across ALL chrome grids, left→right.
+        let mut row_runs: Vec<&crate::engine::PxText> = runs
+            .iter()
+            .copied()
+            .filter(|t| !t.text.trim().is_empty() && (t.y.max(1) - 1) / 8 == row)
+            .collect();
+        if row_runs.is_empty() {
+            continue;
+        }
+        row_runs.sort_by_key(|t| t.x);
+        // Classify each run into an anchor group by its native position. A run
+        // spanning most of the row (a full-width bar) counts LEFT; otherwise a
+        // start in the left third is LEFT, an end past the right two-thirds is
+        // RIGHT, and everything between is CENTER. Within a group, run order is
+        // preserved and the native gaps collapse to a two-space join.
+        let (mut left, mut center, mut right): (Vec<&str>, Vec<&str>, Vec<&str>) =
+            (Vec::new(), Vec::new(), Vec::new());
+        for t in &row_runs {
+            let start = ((t.x.max(1) - 1) / 8) as u32;
+            let len = t.text.chars().count() as u32;
+            let end = start + len;
+            if len * 3 >= ncols * 2 || start < left_bound {
+                left.push(&t.text);
+            } else if end > right_bound {
+                right.push(&t.text);
+            } else {
+                center.push(&t.text);
+            }
+        }
+        let left_str = left.join("  ");
+        let center_str = center.join("  ");
+        let right_str = right.join("  ");
+        if place_anchored_row(buf, area, area.y + row, &left_str, &center_str, &right_str, style) {
+            rows_used = rows_used.max(row + 1);
+        }
+    }
+    rows_used
+}
+
+/// Paint one anchored status row across the full pane width: LEFT flush at col 0,
+/// RIGHT flush to the last column, CENTER centered. Overlap priority (narrow
+/// panes): LEFT wins; RIGHT truncates from its left edge to keep ≥1 space from
+/// LEFT; CENTER drops entirely if it can't fit between them with a space each
+/// side. Never overwrites one group with another; never panics on width 1–2.
+/// Returns whether anything was painted.
+fn place_anchored_row(
+    buf: &mut Buffer,
+    area: Rect,
+    y: u16,
+    left: &str,
+    center: &str,
+    right: &str,
+    style: ratatui::style::Style,
+) -> bool {
+    let w = area.width as usize;
+    if w == 0 {
+        return false;
+    }
+    let mut painted = false;
+
+    // LEFT — flush at col 0, truncated to the pane width.
+    let left_len = left.chars().count().min(w);
+    if left_len > 0 {
+        buf.set_stringn(area.x, y, left, w, style);
+        painted = true;
+    }
+
+    // RIGHT — flush to the last column; truncate leading chars if it would collide
+    // with LEFT (keeping ≥1 space between). Truncating from the left keeps the end
+    // flush right.
+    let min_right_start = if left_len > 0 { left_len + 1 } else { 0 };
+    let mut right_str: String = right.to_string();
+    let mut right_len = right_str.chars().count();
+    if right_len > 0 {
+        let avail = w.saturating_sub(min_right_start);
+        if right_len > avail {
+            let drop = right_len - avail;
+            right_str = right_str.chars().skip(drop).collect();
+            right_len = right_str.chars().count();
+        }
+        if right_len > 0 {
+            let right_start = w - right_len;
+            buf.set_stringn(area.x + right_start as u16, y, &right_str, right_len, style);
+            painted = true;
+        }
+    }
+
+    // CENTER — centered, but only if it fits in the gap between LEFT and RIGHT with
+    // a space on each side; otherwise dropped entirely.
+    let center_len = center.chars().count();
+    if center_len > 0 {
+        let gap_lo = if left_len > 0 { left_len + 1 } else { 0 };
+        let gap_hi = if right_len > 0 { (w - right_len).saturating_sub(1) } else { w };
+        if gap_hi > gap_lo && center_len <= gap_hi - gap_lo {
+            let natural = w.saturating_sub(center_len) / 2;
+            let start = natural.clamp(gap_lo, gap_hi - center_len);
+            buf.set_stringn(area.x + start as u16, y, center, center_len, style);
+            painted = true;
+        }
+    }
+
+    painted
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
@@ -2764,5 +2884,130 @@ mod tests {
             render(crate::config::V6RenderMode::Frameless),
             "with no picker, frameless equals the classic cell fallback"
         );
+    }
+
+    // ── Anchored status band (SQ-0467) ──────────────────────────────────────────
+
+    /// One px-run at native pixel `(x, y)` (1-based) carrying `text`.
+    fn run(x: u16, y: u16, text: &str) -> crate::engine::PxText {
+        crate::engine::PxText { y, x, text: text.into(), style: 0, fg: 0, bg: 0 }
+    }
+
+    /// Render `runs` as an anchored band over a `w`-cell pane at native width
+    /// `ncols` cells, returning the top row's text (trailing spaces trimmed off
+    /// the right only via the caller) plus the raw buffer for column probing.
+    fn band_row(runs: &[crate::engine::PxText], ncols: u32, w: u16) -> (String, u16) {
+        let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
+        let area = Rect::new(0, 0, w, 6);
+        let mut buf = Buffer::empty(area);
+        let style = ratatui::style::Style::default();
+        let rows_used = draw_anchored_status_band(&refs, ncols, area, &mut buf, style);
+        let text: String = (0..w).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
+        (text, rows_used)
+    }
+
+    #[test]
+    fn anchored_band_shogun_shape_left_center_right() {
+        // Native 40-cell screen: a location/name run at the far left, a centered
+        // title, and two right-side status runs. Left flush col 0, title centered,
+        // the two right runs two-space joined and ending flush at the last column.
+        let runs = vec![
+            run(1, 1, "Shogun"),           // start col 0 → LEFT
+            run(129, 1, "The Tale"),       // start col 16, end col 24 → CENTER
+            run(233, 1, "Score: 0"),       // start col 29, end col 37 → RIGHT
+            run(281, 1, "Moves: 1"),       // start col 35, end col 43 → RIGHT
+        ];
+        let (row, rows_used) = band_row(&runs, 40, 80);
+        assert_eq!(rows_used, 1);
+        assert!(row.starts_with("Shogun"), "left run flush at col 0: {row:?}");
+        // Right group: two runs joined by exactly two spaces, ending flush right.
+        assert!(row.trim_end().ends_with("Score: 0  Moves: 1"), "right group joined + flush: {row:?}");
+        assert_eq!(row.chars().count(), 80);
+        assert_eq!(&row[row.len() - "Moves: 1".len()..], "Moves: 1", "right group ends at the last column");
+        // Title centered within ±1 of the pane centre.
+        let title_start = row.find("The Tale").expect("centered title present");
+        let expected = (80 - "The Tale".chars().count()) / 2;
+        assert!((title_start as i32 - expected as i32).abs() <= 1, "title centered (at {title_start}, want ~{expected})");
+    }
+
+    #[test]
+    fn anchored_band_zork0_shape_location_and_right_status() {
+        // Location at the left, score/moves at the right — no centre group.
+        let runs = vec![
+            run(9, 1, "West of House"),   // start col 1 → LEFT
+            run(241, 1, "Score: 0"),      // → RIGHT
+            run(297, 1, "Moves: 3"),      // → RIGHT
+        ];
+        let (row, _) = band_row(&runs, 40, 80);
+        assert!(row.starts_with("West of House"), "location flush left: {row:?}");
+        assert!(row.trim_end().ends_with("Score: 0  Moves: 3"), "score/moves joined + flush right: {row:?}");
+        assert_eq!(&row[row.len() - "Moves: 3".len()..], "Moves: 3");
+    }
+
+    #[test]
+    fn anchored_band_narrow_pane_priority_and_truncation() {
+        // A 28-col pane: LEFT stays intact, RIGHT truncates from its left edge to
+        // keep a space from LEFT, CENTER drops because it can't fit between them.
+        let runs = vec![
+            run(1, 1, "A Fairly Long Location"), // 22 chars → LEFT (col 0)
+            run(129, 1, "Title"),                // CENTER (dropped, no room)
+            run(281, 1, "Moves: 100"),           // RIGHT (10 chars, must truncate)
+        ];
+        let (row, _) = band_row(&runs, 40, 28);
+        assert_eq!(row.chars().count(), 28);
+        assert!(row.starts_with("A Fairly Long Location"), "LEFT intact: {row:?}");
+        assert!(!row.contains("Title"), "CENTER dropped when it can't fit: {row:?}");
+        // RIGHT truncated from the left, still flush to the last column, and never
+        // overwriting LEFT: a space separates them.
+        assert_eq!(row.chars().nth(22), Some(' '), "≥1 space between LEFT and RIGHT");
+        assert!(row.ends_with(|c: char| c != ' '), "RIGHT still flush at the last column: {row:?}");
+        // Only the last 5 cols hold RIGHT's tail (28 - 22 - 1 = 5 chars survive).
+        let tail: String = row.chars().skip(23).collect();
+        assert_eq!(tail, ": 100", "RIGHT truncated from its left edge to the fitting tail");
+    }
+
+    #[test]
+    fn anchored_band_multi_row() {
+        // Runs on native rows 0 and 1 (y=1 and y=9) each render on their own band
+        // row, and rows_used reports 2.
+        let runs = vec![run(1, 1, "Row0Left"), run(233, 1, "Score: 0"), run(1, 9, "Row1Left")];
+        let refs: Vec<&crate::engine::PxText> = runs.iter().collect();
+        let area = Rect::new(0, 0, 80, 6);
+        let mut buf = Buffer::empty(area);
+        let rows_used = draw_anchored_status_band(&refs, 40, area, &mut buf, ratatui::style::Style::default());
+        assert_eq!(rows_used, 2, "two native rows populated");
+        let r0: String = (0..80).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
+        let r1: String = (0..80).map(|x| buf.cell((x, 1)).unwrap().symbol().to_string()).collect();
+        assert!(r0.starts_with("Row0Left"), "row 0 left: {r0:?}");
+        assert!(r0.trim_end().ends_with("Score: 0"), "row 0 right flush: {r0:?}");
+        assert!(r1.starts_with("Row1Left"), "row 1 left: {r1:?}");
+    }
+
+    #[test]
+    fn anchored_band_wide_run_counts_left_not_stretched() {
+        // A full-width bar (spans most of the row) anchors LEFT at col 0 rather
+        // than being treated as a centred title.
+        let bar = "=".repeat(36);
+        let runs = vec![run(1, 1, &bar)];
+        let (row, _) = band_row(&runs, 40, 80);
+        assert!(row.starts_with(&bar), "wide bar flush at col 0, not centred: {row:?}");
+    }
+
+    #[test]
+    fn anchored_band_skips_blank_runs() {
+        // A whitespace-only run must not drag a group around or count as painted.
+        let runs = vec![run(129, 1, "   ")];
+        let (row, rows_used) = band_row(&runs, 40, 80);
+        assert_eq!(rows_used, 0, "blank-only band paints nothing");
+        assert!(row.trim().is_empty(), "no text painted: {row:?}");
+    }
+
+    #[test]
+    fn anchored_band_tiny_pane_no_panic() {
+        // Width 1 and 2 must not panic and LEFT still wins.
+        for w in [1u16, 2] {
+            let runs = vec![run(1, 1, "Loc"), run(281, 1, "Moves: 1")];
+            let (_row, _) = band_row(&runs, 40, w);
+        }
     }
 }

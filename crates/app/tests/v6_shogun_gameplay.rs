@@ -12,8 +12,12 @@
 
 use std::path::PathBuf;
 
+use app::engine::Engine;
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind};
+
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 fn stories_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
@@ -152,4 +156,63 @@ fn shogun_boot_menu_items_paint_horizontally_and_splash_clears() {
         vec!["START the game", "RESTORE a saved game", "QUIT the game"],
         "menu items must paint as horizontal per-row bands, got {lines:?}"
     );
+}
+
+/// SQ-0467: in frameless mode Shogun's in-game status band lays out as a classic
+/// full-width status line — the character/location runs anchored flush LEFT, the
+/// "SHOGUN" title CENTERED, and the Score/Moves runs flush RIGHT across the whole
+/// 80-col pane — instead of the old per-run cell-quantization that bunched every
+/// run into the left 40 columns.
+#[test]
+fn shogun_frameless_status_band_anchors_left_center_right() {
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    // Select START on the boot menu and settle into gameplay (Bridge), so the
+    // status band carries the location + Score/Moves runs.
+    for turn in 0..6 {
+        match session.pending_input() {
+            InputKind::Line => { session.submit("look"); }
+            InputKind::Char => { session.submit_char(13); }
+            InputKind::Event => { session.submit(""); }
+        }
+    }
+
+    let model = session.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Frameless;
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let band: Vec<String> = (0..4)
+        .map(|y| (0..area.width).map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' ')).collect())
+        .collect();
+    eprintln!("--- Shogun FRAMELESS status band (80 cols) ---");
+    for (y, r) in band.iter().enumerate() {
+        eprintln!("{y}|{r}|");
+    }
+
+    // Location/character run flush LEFT (col 0 printed).
+    assert_ne!(band[0].chars().next(), Some(' '), "left run flush at col 0: {:?}", band[0]);
+    // "SHOGUN" title CENTERED (±1 of the pane centre).
+    let title_row = band.iter().find(|r| r.contains("SHOGUN")).expect("a band row carries the SHOGUN title");
+    let start = title_row.find("SHOGUN").unwrap();
+    let expected = (area.width as usize - "SHOGUN".len()) / 2;
+    assert!((start as i32 - expected as i32).abs() <= 1, "SHOGUN centered (at {start}, want ~{expected}): {title_row:?}");
+    // Score anchored flush RIGHT (last glyph within the final two columns).
+    let score_row = band.iter().find(|r| r.contains("Score:")).expect("a band row carries the Score label");
+    let last_glyph = score_row.rfind(|c: char| c != ' ').expect("score row has text");
+    assert!(last_glyph >= area.width as usize - 2, "Score flush right (last glyph col {last_glyph}): {score_row:?}");
 }
