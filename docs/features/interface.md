@@ -292,7 +292,11 @@ cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
   and sound (`Snd`) rows are links — click one to pop a dismissible modal: an
   image renders fitted and centred; a sound plays once. Close it with `Esc`/
   `Enter`/`q`, the ✕, the Close button, or a click outside. Undecodable images
-  and a missing audio device show a short status line instead.
+  and a missing audio device show a short status line instead. On an image,
+  `+`/`=` and `-` (or the wheel) step an integer zoom in/out — 1×, 2×, 3×, …,
+  nearest-neighbour scaled so old low-res art stays crisp instead of blurring;
+  `0` resets to fit. Past-native zoom centre-crops rather than shrinking back
+  down, so postage-stamp 320×200-era art can be blown up to fill the modal.
 - **Cover gallery.** Press `g` to trade the metadata list for a grid of cover
   thumbnails — as many ~16-column tiles as the pane is wide, each captioned with
   its title and the selected cover highlighted. Arrow keys or `h`/`j`/`k`/`l`

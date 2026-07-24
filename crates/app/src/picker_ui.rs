@@ -61,10 +61,71 @@ struct ResourcePreview {
     title: String,
     /// The decoded image, when this is a renderable Pict.
     image: Option<image::DynamicImage>,
-    /// Fitted protocol cached by the content rect `(w, h)` it was built for.
-    proto: Option<(u16, u16, ratatui_image::protocol::Protocol)>,
+    /// Cached protocol, keyed by the content rect `(w, h)` and zoom it was
+    /// built for, so a resize or a zoom step invalidates it.
+    proto: Option<(u16, u16, PreviewZoom, ratatui_image::protocol::Protocol)>,
     /// A status line shown instead of (or below) an image.
     status: Option<String>,
+    /// Current zoom (SQ-0486): `Fit` on open; `+`/`-`/wheel step it.
+    zoom: PreviewZoom,
+}
+
+/// Image-preview zoom (SQ-0486). `Fit` scales the image (up or down, at
+/// whatever ratio) to fill the content rect — today's default on open.
+/// `Factor(n)` renders at an exact integer multiple of the image's native
+/// pixel size, nearest-neighbour scaled so pixel art stays crisp; when the
+/// scaled result overflows the content rect it is centre-cropped rather than
+/// shrunk back down (zooming small art up past "fit" is the whole point).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PreviewZoom {
+    Fit,
+    Factor(u32),
+}
+
+/// Largest integer zoom factor the modal allows: generous enough to blow up
+/// postage-stamp 320×200-era art, capped so it can't allocate an absurd bitmap.
+const MAX_ZOOM_FACTOR: u32 = 16;
+
+impl PreviewZoom {
+    /// One zoom-in step (`+`/`=`, wheel up): `Fit` jumps to native size (1×),
+    /// then each step adds one factor up to `MAX_ZOOM_FACTOR`.
+    fn step_in(self) -> Self {
+        match self {
+            PreviewZoom::Fit => PreviewZoom::Factor(1),
+            PreviewZoom::Factor(n) => PreviewZoom::Factor((n + 1).min(MAX_ZOOM_FACTOR)),
+        }
+    }
+
+    /// One zoom-out step (`-`, wheel down): 1× drops back to `Fit`; `Fit`
+    /// stays `Fit` (there's nothing below the default).
+    fn step_out(self) -> Self {
+        match self {
+            PreviewZoom::Fit => PreviewZoom::Fit,
+            PreviewZoom::Factor(1) => PreviewZoom::Fit,
+            PreviewZoom::Factor(n) => PreviewZoom::Factor(n - 1),
+        }
+    }
+
+    /// Chrome label, e.g. `"Fit"` / `"3×"`.
+    fn label(self) -> String {
+        match self {
+            PreviewZoom::Fit => "Fit".to_string(),
+            PreviewZoom::Factor(n) => format!("{n}\u{d7}"),
+        }
+    }
+}
+
+/// The rect (in the *scaled* image's own pixel space) to pull from a
+/// `native × factor`-scaled image so the result fits within `budget` pixels —
+/// the centre-crop math backing `PreviewZoom::Factor` overflow (SQ-0486, req
+/// 2). `w`/`h` never exceed `budget` or `scaled`; a `scaled` already smaller
+/// than `budget` crops nothing (`x == y == 0`, full image).
+fn center_crop_rect(scaled: (u32, u32), budget: (u32, u32)) -> (u32, u32, u32, u32) {
+    let w = scaled.0.min(budget.0.max(1));
+    let h = scaled.1.min(budget.1.max(1));
+    let x = (scaled.0.saturating_sub(w)) / 2;
+    let y = (scaled.1.saturating_sub(h)) / 2;
+    (x, y, w, h)
 }
 
 /// Story-list row layout: the selection-marker glyph column, the gap between
@@ -868,13 +929,27 @@ pub(crate) fn run_story_picker(
                     let action = search_modal.as_mut().unwrap().on_key(k.code);
                     dispatch_search_action(action, &search_worker, dir, &mut search_modal);
                 // The resource-preview modal (SQ-0347) captures all keys while
-                // open: any of Esc/Enter/q/Space dismisses it (and stops a sound).
+                // open: `+`/`=`/`-`/`0` step the zoom (SQ-0486, intercepted
+                // ahead of dismissal); any of Esc/Enter/q/Space dismisses it
+                // (and stops a sound).
                 } else if preview.is_some() {
-                    if matches!(k.code, Esc | Enter | Char('q') | Char(' ')) {
-                        preview = None;
-                        if let Some(a) = audio.as_mut() {
-                            a.stop_all();
+                    match k.code {
+                        Char('+') | Char('=') => {
+                            preview.as_mut().unwrap().zoom = preview.as_ref().unwrap().zoom.step_in();
                         }
+                        Char('-') => {
+                            preview.as_mut().unwrap().zoom = preview.as_ref().unwrap().zoom.step_out();
+                        }
+                        Char('0') => {
+                            preview.as_mut().unwrap().zoom = PreviewZoom::Fit;
+                        }
+                        Esc | Enter | Char('q') | Char(' ') => {
+                            preview = None;
+                            if let Some(a) = audio.as_mut() {
+                                a.stop_all();
+                            }
+                        }
+                        _ => {}
                     }
                 } else if let Some(field) = manual_ifdb.as_mut() {
                     match k.code {
@@ -1204,10 +1279,11 @@ pub(crate) fn run_story_picker(
                         );
                     }
                 } else if let Some(d) = app::input::wheel_delta(m.kind, cfg.mouse_wheel_invert) {
-                    // The preview modal swallows the wheel so the list behind it
-                    // doesn't scroll (SQ-0347).
-                    if preview.is_some() {
-                        // no-op while the modal is open
+                    // Over the preview modal, the wheel zooms instead of
+                    // scrolling the list behind it (SQ-0486; a no-op prior to
+                    // that, per SQ-0347): up zooms in, down zooms out.
+                    if let Some(pv) = preview.as_mut() {
+                        pv.zoom = if d < 0 { pv.zoom.step_in() } else { pv.zoom.step_out() };
                     } else {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
                     if slide.open && last_panel_area.contains(pt) {
@@ -2111,11 +2187,14 @@ fn open_resource_preview(
             let status = image
                 .is_none()
                 .then(|| "Can't preview this image (unsupported format).".to_string());
-            ResourcePreview { title: rref.label.clone(), image, proto: None, status }
+            ResourcePreview { title: rref.label.clone(), image, proto: None, status, zoom: PreviewZoom::Fit }
         }
         PreviewKind::Sound => {
             let status = play_preview_sound(blorb.as_ref(), rref.number, audio, volume);
-            ResourcePreview { title: rref.label.clone(), image: None, proto: None, status: Some(status) }
+            ResourcePreview {
+                title: rref.label.clone(), image: None, proto: None, status: Some(status),
+                zoom: PreviewZoom::Fit,
+            }
         }
     }
 }
@@ -2145,8 +2224,9 @@ fn play_preview_sound(
 }
 
 /// Draw the resource-preview modal (SQ-0347) centred over `area`: dialog chrome
-/// (border, title, ✕ close, a Close button) with the fitted image — or a status
-/// line — in its content rect. Returns the dialog's hit rects for dismissal.
+/// (border, title, ✕ close, a Close button) with the fitted-or-zoomed image
+/// (SQ-0486) — or a status line — in its content rect. Returns the dialog's hit
+/// rects for dismissal.
 fn draw_resource_preview(
     pv: &mut ResourcePreview,
     area: Rect,
@@ -2161,8 +2241,15 @@ fn draw_resource_preview(
     let h = ((area.height as u32 * 4 / 5) as u16).clamp(6, area.height).max(1);
     let st = DialogStyle::from_colors(cs);
     let buttons = [DialogButton { id: ButtonId::Close, label: "Close" }];
+    // The zoom label rides the title line (SQ-0486, req 1) — images only; a
+    // sound preview has no zoom to show.
+    let title = if pv.image.is_some() {
+        format!("{}  ({})", pv.title, pv.zoom.label())
+    } else {
+        pv.title.clone()
+    };
     let spec = DialogSpec {
-        title: &pv.title,
+        title: &title,
         placement: Placement::Centered { w, h },
         buttons: &buttons,
         show_close: true,
@@ -2173,21 +2260,41 @@ fn draw_resource_preview(
     let rects = draw_dialog(buf, area, &spec, &st);
 
     let content = rects.content;
-    // Render the image fitted + centred, else the status line centred.
+    // Render the image fitted (or zoomed) + centred, else the status line centred.
     let mut drew_image = false;
     if let (Some(picker), Some(img)) = (picker, pv.image.as_ref()) {
         if content.width >= 1 && content.height >= 1 {
-            let fresh = matches!(&pv.proto, Some((w, h, _)) if *w == content.width && *h == content.height);
+            let fresh = matches!(&pv.proto, Some((w, h, z, _))
+                if *w == content.width && *h == content.height && *z == pv.zoom);
             if !fresh {
-                if let Ok(built) = picker.new_protocol(
-                    img.clone(),
-                    ratatui::layout::Size::new(content.width, content.height),
-                    ratatui_image::Resize::Fit(None),
-                ) {
-                    pv.proto = Some((content.width, content.height, built));
+                let target = ratatui::layout::Size::new(content.width, content.height);
+                let built = match pv.zoom {
+                    PreviewZoom::Fit => {
+                        picker.new_protocol(img.clone(), target, ratatui_image::Resize::Fit(None))
+                    }
+                    PreviewZoom::Factor(n) => {
+                        // Scale to an exact integer multiple of the native pixel
+                        // size (nearest-neighbour, so pixel art stays crisp),
+                        // then centre-crop to the available pixel budget rather
+                        // than letting `Resize::Fit` shrink it back down.
+                        let font = picker.font_size();
+                        let budget = (
+                            content.width as u32 * font.width as u32,
+                            content.height as u32 * font.height as u32,
+                        );
+                        let scaled_w = img.width().saturating_mul(n).max(1);
+                        let scaled_h = img.height().saturating_mul(n).max(1);
+                        let scaled = img.resize_exact(scaled_w, scaled_h, image::imageops::FilterType::Nearest);
+                        let (cx, cy, cw, ch) = center_crop_rect((scaled_w, scaled_h), budget);
+                        let cropped = scaled.crop_imm(cx, cy, cw, ch);
+                        picker.new_protocol(cropped, target, ratatui_image::Resize::Fit(None))
+                    }
+                };
+                if let Ok(built) = built {
+                    pv.proto = Some((content.width, content.height, pv.zoom, built));
                 }
             }
-            if let Some((_, _, proto)) = &pv.proto {
+            if let Some((_, _, _, proto)) = &pv.proto {
                 let sz = proto.size();
                 let uw = sz.width.min(content.width);
                 let uh = sz.height.min(content.height);
@@ -3718,6 +3825,92 @@ mod tests {
         let pv = super::open_resource_preview(&rref, &mut audio, 100);
         assert!(pv.image.is_none());
         assert!(pv.status.is_some(), "an unreadable blorb surfaces a status line");
+    }
+
+    // ── Image-preview zoom (SQ-0486) ────────────────────────────────────────
+
+    #[test]
+    fn open_resource_preview_starts_at_fit_zoom() {
+        let rref = super::ResourceRef {
+            blorb_path: std::path::PathBuf::from("/no/such/file.blb"),
+            kind: super::PreviewKind::Image,
+            number: 1,
+            label: "Image #1".into(),
+        };
+        let mut audio = None;
+        let pv = super::open_resource_preview(&rref, &mut audio, 100);
+        assert_eq!(pv.zoom, super::PreviewZoom::Fit, "default on open is the fitted view");
+    }
+
+    #[test]
+    fn zoom_step_in_from_fit_lands_on_native_size() {
+        assert_eq!(super::PreviewZoom::Fit.step_in(), super::PreviewZoom::Factor(1));
+    }
+
+    #[test]
+    fn zoom_step_in_increments_the_factor() {
+        assert_eq!(super::PreviewZoom::Factor(1).step_in(), super::PreviewZoom::Factor(2));
+        assert_eq!(super::PreviewZoom::Factor(5).step_in(), super::PreviewZoom::Factor(6));
+    }
+
+    #[test]
+    fn zoom_step_in_clamps_at_the_max_factor() {
+        let maxed = super::PreviewZoom::Factor(super::MAX_ZOOM_FACTOR);
+        assert_eq!(maxed.step_in(), maxed, "already at the cap: another zoom-in is a no-op");
+    }
+
+    #[test]
+    fn zoom_step_out_from_native_size_returns_to_fit() {
+        assert_eq!(super::PreviewZoom::Factor(1).step_out(), super::PreviewZoom::Fit);
+    }
+
+    #[test]
+    fn zoom_step_out_decrements_the_factor() {
+        assert_eq!(super::PreviewZoom::Factor(3).step_out(), super::PreviewZoom::Factor(2));
+    }
+
+    #[test]
+    fn zoom_step_out_at_fit_is_a_no_op() {
+        assert_eq!(super::PreviewZoom::Fit.step_out(), super::PreviewZoom::Fit, "1× is the floor");
+    }
+
+    #[test]
+    fn zoom_step_in_then_out_round_trips() {
+        let z = super::PreviewZoom::Fit;
+        assert_eq!(z.step_in().step_in().step_out(), super::PreviewZoom::Factor(1));
+    }
+
+    #[test]
+    fn zoom_label_formats_fit_and_factor() {
+        assert_eq!(super::PreviewZoom::Fit.label(), "Fit");
+        assert_eq!(super::PreviewZoom::Factor(1).label(), "1\u{d7}");
+        assert_eq!(super::PreviewZoom::Factor(4).label(), "4\u{d7}");
+    }
+
+    #[test]
+    fn center_crop_rect_is_a_no_op_when_the_scaled_image_already_fits() {
+        // 100x80 scaled image inside a roomier 200x150 budget: nothing to crop.
+        let (x, y, w, h) = super::center_crop_rect((100, 80), (200, 150));
+        assert_eq!((x, y, w, h), (0, 0, 100, 80));
+    }
+
+    #[test]
+    fn center_crop_rect_clamps_to_the_budget_and_centres_the_crop() {
+        // A 300x200 scaled image over a 100x50 budget crops to the budget size,
+        // offset so the crop is centred (not anchored to a corner).
+        let (x, y, w, h) = super::center_crop_rect((300, 200), (100, 50));
+        assert_eq!((w, h), (100, 50));
+        assert_eq!(x, (300 - 100) / 2);
+        assert_eq!(y, (200 - 50) / 2);
+    }
+
+    #[test]
+    fn center_crop_rect_only_clamps_the_overflowing_axis() {
+        // Wide budget but short: width fits untouched, height gets cropped.
+        let (x, y, w, h) = super::center_crop_rect((100, 200), (500, 50));
+        assert_eq!((x, w), (0, 100), "width already fits: no horizontal crop");
+        assert_eq!(h, 50);
+        assert_eq!(y, (200 - 50) / 2);
     }
 
     #[test]
