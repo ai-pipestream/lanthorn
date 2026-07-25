@@ -2241,10 +2241,10 @@ fn draw_resource_preview(
     let h = ((area.height as u32 * 4 / 5) as u16).clamp(6, area.height).max(1);
     let st = DialogStyle::from_colors(cs);
     let buttons = [DialogButton { id: ButtonId::Close, label: "Close" }];
-    // The zoom label rides the title line (SQ-0486, req 1) — images only; a
+    // The zoom label + key hint ride the title line (SQ-0486) — images only; a
     // sound preview has no zoom to show.
     let title = if pv.image.is_some() {
-        format!("{}  ({})", pv.title, pv.zoom.label())
+        format!("{}  ({} · +/- zoom · 0 fit)", pv.title, pv.zoom.label())
     } else {
         pv.title.clone()
     };
