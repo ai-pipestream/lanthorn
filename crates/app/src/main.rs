@@ -151,10 +151,46 @@ fn install_termination_handlers() {
         // controlling terminal closing.
         for sig in [SIGTERM, SIGHUP, SIGINT, SIGQUIT] {
             let _ = signal_hook::flag::register(sig, std::sync::Arc::clone(&flag));
+            // Also record which signal fired so the process exits with the
+            // conventional 128 + signum. An atomic store is async-signal-safe.
+            let _ = unsafe {
+                signal_hook::low_level::register(sig, move || {
+                    TERM_SIGNUM.store(sig, std::sync::atomic::Ordering::SeqCst);
+                })
+            };
         }
+        // Watchdog backstop (SQ-0502). The interactive loops observe the flag at
+        // safe points and run the clean save + restore + exit — but that only works
+        // if the loop keeps turning. When the controlling terminal closes, macOS
+        // leaves `crossterm::event::poll()` (mio/kqueue) blocked forever on the dead
+        // pty fd: the SIGHUP fires and sets the flag, yet the loop never returns from
+        // `poll` to see it, so the process would linger after its terminal is gone.
+        // This thread force-exits after a grace period so that can never happen. The
+        // grace lets a responsive loop (a plain kill/SIGTERM, or Linux where `poll`
+        // wakes on HUP) finish its auto-save first; only a genuinely wedged loop
+        // reaches the timeout, and then a prompt exit matters more than the
+        // best-effort save the wedged loop cannot run anyway.
+        let wflag = std::sync::Arc::clone(&flag);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            if wflag.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_millis(TERM_WATCHDOG_GRACE_MS));
+                restore_terminal();
+                std::process::exit(term_exit_code());
+            }
+        });
     }
     let _ = TERMINATE.set(flag);
 }
+
+/// Grace period the termination watchdog waits after the flag is set before it
+/// force-exits, giving a responsive interactive loop time to run its auto-save and
+/// exit cleanly first.
+const TERM_WATCHDOG_GRACE_MS: u64 = 600;
+
+/// The signal number of the external termination signal that fired (0 until one
+/// does). Drives the conventional `128 + signum` exit code.
+static TERM_SIGNUM: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// True once an external termination signal has been received.
 fn termination_requested() -> bool {
@@ -163,13 +199,50 @@ fn termination_requested() -> bool {
         .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// If an external termination signal arrived, restore the terminal and exit.
-/// Called at the top of each interactive loop so a signal never leaves the
-/// terminal wrecked.
+/// Conventional shell exit code for a signal-terminated process: `128 + signum`.
+/// Falls back to 130 (128 + SIGINT) if the number wasn't captured.
+fn term_exit_code() -> i32 {
+    let s = TERM_SIGNUM.load(std::sync::atomic::Ordering::SeqCst);
+    if s > 0 {
+        128 + s
+    } else {
+        130
+    }
+}
+
+/// If an external termination signal arrived, restore the terminal and exit with
+/// the conventional `128 + signum` code. Used at safe points in the story picker,
+/// which has no game state to persist; the game loop uses
+/// [`exit_if_terminated_saving`] so progress is auto-saved first.
 fn exit_if_terminated() {
     if termination_requested() {
         restore_terminal();
-        std::process::exit(130);
+        std::process::exit(term_exit_code());
+    }
+}
+
+/// Game-loop termination check: if an external signal arrived, run the same exit
+/// auto-save the clean-quit path performs — sequenced HERE on the main loop, never
+/// inside the async-signal handler — then restore the terminal and exit
+/// `128 + signum`.
+///
+/// Called both at the loop top AND immediately before the blocking `read()`: when
+/// the controlling terminal closes (SIGHUP), the dead pty fd reports HUP so `poll`
+/// returns "ready" and the loop heads into `read()`, which then blocks forever on
+/// the dead tty — so the loop never returns to the top to observe the flag. The
+/// signal handler runs (and sets the flag) before that `poll` returns, so a
+/// pre-`read()` check reliably catches it. (SQ-0502)
+fn exit_if_terminated_saving(
+    session: &dyn Engine,
+    mapper: &Mapper,
+    state: &app::state::AppState,
+    ifid: &str,
+    arc_file: &std::path::Path,
+) {
+    if termination_requested() {
+        restore_terminal();
+        lifecycle::exit_auto_save(session, mapper, state, ifid, arc_file);
+        std::process::exit(term_exit_code());
     }
 }
 
@@ -981,10 +1054,10 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
     let mut needs_redraw = true;
 
     let outcome: RunOutcome = 'event_loop: loop {
-        // Restore the terminal + exit if an external termination signal arrived
-        // (SIGTERM/SIGHUP/out-of-band SIGINT); the poll below wakes at least every
-        // ~50ms, so this is checked promptly.
-        exit_if_terminated();
+        // Restore the terminal + auto-save + exit if an external termination signal
+        // arrived (SIGTERM/SIGHUP/out-of-band SIGINT); the poll below wakes at least
+        // every ~50ms, so this is checked promptly.
+        exit_if_terminated_saving(&*session, &mapper, &state, &ifid, &arc_file);
 
         // ── Pre-input pollers (SQ-0306) ───────────────────────────────────────
         // The per-iteration housekeeping that runs BEFORE the draw/poll: each
@@ -1108,6 +1181,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         let event_ready = match poll(Duration::from_millis(poll_ms)) {
             Ok(r) => r,
             Err(e) => {
+                // A closed controlling terminal can surface here as a poll error
+                // (e.g. on Linux). If a termination signal is what killed the tty,
+                // take the auto-save + conventional signal exit rather than the
+                // bare error exit below. (SQ-0502)
+                exit_if_terminated_saving(&*session, &mapper, &state, &ifid, &arc_file);
                 restore_terminal();
                 eprintln!("babelmap: poll error: {}", e);
                 std::process::exit(1);
@@ -1286,6 +1364,13 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             needs_redraw |= state.verb_dock.finalize_if_done();
             continue;
         }
+
+        // A closed controlling terminal makes `poll` above report "ready" (HUP) on
+        // the dead fd, so we arrive here — but `read()` would then block forever on
+        // that fd, never returning to the loop top where termination is checked. The
+        // signal handler has already set the flag by now, so catch it here first.
+        // (SQ-0502)
+        exit_if_terminated_saving(&*session, &mapper, &state, &ifid, &arc_file);
 
         let event = match read() {
             Ok(e) => e,
@@ -3104,6 +3189,23 @@ mod tests {
 
     use super::{dim_area, is_slash, scroll_for_match, should_prompt_save_on_quit};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetCaps, InsetSegment, PaneGlyphs};
+
+    // ── SQ-0502: termination-signal exit code ──────────────────────────────────
+
+    #[test]
+    fn term_exit_code_is_128_plus_signum() {
+        use std::sync::atomic::Ordering;
+        // No signal captured yet → fall back to 130 (128 + SIGINT).
+        super::TERM_SIGNUM.store(0, Ordering::SeqCst);
+        assert_eq!(super::term_exit_code(), 130);
+        // Each captured signal maps to the conventional 128 + signum exit code.
+        super::TERM_SIGNUM.store(signal_hook::consts::SIGHUP, Ordering::SeqCst);
+        assert_eq!(super::term_exit_code(), 128 + signal_hook::consts::SIGHUP);
+        super::TERM_SIGNUM.store(signal_hook::consts::SIGTERM, Ordering::SeqCst);
+        assert_eq!(super::term_exit_code(), 128 + signal_hook::consts::SIGTERM);
+        // Leave the global back at its default so no other test observes a stray value.
+        super::TERM_SIGNUM.store(0, Ordering::SeqCst);
+    }
 
     // ── SQ-0460: withhold arrow keys from v6 stories ───────────────────────────
 

@@ -918,6 +918,12 @@ pub(crate) fn run_story_picker(
             }
         }
 
+        // A closed controlling terminal makes the poll above report "ready" (HUP)
+        // on the dead fd, breaking the loop — but `read()` would then block forever
+        // on that fd, never re-checking the flag. The signal handler has already set
+        // it by now, so catch it here before the blocking read. (SQ-0502)
+        exit_if_terminated();
+
         match read() {
             Ok(Event::Key(k)) if k.kind == KeyEventKind::Press => {
                 use crossterm::event::KeyCode::*;
