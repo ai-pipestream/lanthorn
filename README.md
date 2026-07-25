@@ -40,6 +40,8 @@ roof; one engine-agnostic mapper that charts them all.
 
 ![In-game graphics rendered with the Kitty graphics protocol](docs/kitty-graphics.png)
 
+![Zork Zero with hybrid rendering mode](docs/zork-zero.png)
+
 ![A Glulx game using a multi-window Glk layout with story-set colours](docs/multi-window-layout.png)
 
 ![The built-in Z-machine debug inspector: live disassembly, call stack, and opcode hover help](docs/debug-inspector.png)
