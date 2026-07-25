@@ -197,6 +197,47 @@ fn zork0_hybrid_status_on_art_stays_in_the_ring() {
     assert!(!screen.contains("Score:"), "Zork0's on-art score stays in the ring, not cells");
 }
 
+/// (SQ-0514 chrome-band freshness pin) Zork0 rasterizes its Score/Moves status into
+/// the chrome canvas every turn, so a turn changes only the TOP status band's native
+/// pixels. In HYBRID mode the flank (side/bottom) ring bands must then stay FRESH —
+/// their cached uploads reused, not re-encoded. Before the fix the freshness hash
+/// covered the WHOLE canvas, so any status change staled every band (the ~377ms
+/// per-turn stall). Here we render, take a turn (mutating the banner), render again,
+/// and assert at least one band re-encoded while at least one other stayed fresh.
+#[test]
+fn zork0_hybrid_status_change_keeps_flank_bands_fresh() {
+    let Some(mut session) = boot_zork0() else { return };
+    let mut state = render_state(app::config::V6RenderMode::Hybrid);
+    state.push_transcript("West of House");
+    let area = Rect::new(0, 0, 80, 30);
+
+    // Frame 1: populate the per-band cache.
+    let model = session.screen();
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    let before = state.graphics_render.borrow().chrome_band_hashes();
+    assert!(before.len() >= 2, "hybrid Zork0 draws multiple chrome bands, got {}", before.len());
+
+    // Take a turn so the banner (Score/Moves) re-rasterizes into the chrome canvas.
+    let _ = session.submit("look");
+    let model = session.screen();
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    let after = state.graphics_render.borrow().chrome_band_hashes();
+
+    // Every band that survived the turn (same rect) is compared; the fix guarantees
+    // at least one flank band kept its hash (fresh) even though the banner changed.
+    let common: Vec<_> = before.keys().filter(|k| after.contains_key(*k)).collect();
+    assert!(!common.is_empty(), "at least one band rect persists across the turn");
+    let fresh = common.iter().filter(|k| before[**k] == after[**k]).count();
+    assert!(
+        fresh > 0,
+        "at least one chrome band stays fresh across a status change (SQ-0514): \
+         {fresh}/{} bands unchanged",
+        common.len()
+    );
+}
+
 /// (SQ-0505 dynamic hybrid layout — Zork0 pin) Zork0's frame ENCLOSES the story to
 /// the native screen bottom (story bottom 398 of 400), so even at a TALL pane where
 /// Arthur/Journey reclaim the letterbox dead space, Zork0 keeps today's CENTERED

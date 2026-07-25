@@ -16,6 +16,16 @@ fn close(a: image::Rgba<u8>, b: image::Rgba<u8>) -> bool {
     (0..4).all(|i| a[i].abs_diff(b[i]) <= 8)
 }
 
+/// The native source pixel a scaled-canvas pixel `sp` samples under the `image`
+/// crate's Nearest resize from `np` native pixels to `sp_max` scaled pixels:
+/// `floor((sp + 0.5) · np / sp_max)`, clamped into `[0, np)`. Used only to bound
+/// a band's native footprint for its freshness hash (SQ-0514); it mirrors, and
+/// never replaces, the crate's own resize.
+fn scaled_to_native(sp: u32, np: u32, sp_max: u32) -> u32 {
+    let v = ((sp as f32 + 0.5) * np as f32 / sp_max.max(1) as f32).floor() as i64;
+    v.clamp(0, np as i64 - 1) as u32
+}
+
 /// Render a graphics window directly as per-cell background colours when it is a
 /// solid fill or a thin strip — the shape games use for chrome: panel dividers,
 /// colour bars, backgrounds (e.g. Kerkerkruip draws its rules as 1×N / N×1 solid
@@ -220,9 +230,17 @@ pub struct GraphicsRender {
     v6_job: Option<V6Job>,
     /// Per-band cache for the v6 HYBRID chrome ring (Lane H): one uploaded
     /// protocol per band cell rect, keyed on the band rect with a stored
-    /// content+scale hash so an unchanged frame reuses the upload. Pruned each
-    /// frame to the live band set by [`GraphicsRender::retain_chrome_bands`].
+    /// hash of ONLY that band's own native sub-rect (plus scale/offset/cell/rect)
+    /// so a change confined to one band leaves the other bands' uploads fresh
+    /// (SQ-0514). Pruned each frame to the live band set by
+    /// [`GraphicsRender::retain_chrome_bands`].
     chrome_bands: std::collections::HashMap<(u16, u16, u16, u16), (u64, Protocol)>,
+    /// The whole native chrome canvas scaled to device pixels, shared across all
+    /// bands of a frame so the expensive Nearest resize runs at most ONCE per
+    /// changed frame instead of once per band (SQ-0514). Keyed on the canvas
+    /// content + scale + scaled dimensions; each band crops its sub-rect from it,
+    /// so band output stays byte-identical to a per-band whole-canvas resize.
+    chrome_scaled: Option<(u64, image::RgbaImage)>,
 }
 
 impl std::fmt::Debug for GraphicsRender {
@@ -417,6 +435,35 @@ impl GraphicsRender {
         self.chrome_bands.retain(|k, _| live.contains(k));
     }
 
+    /// Snapshot the current chrome-band freshness hashes, keyed by band cell rect
+    /// (observability hook, SQ-0514). A band whose hash is unchanged across two
+    /// frames did NOT re-encode — used to confirm that a change confined to one
+    /// band leaves the other bands' uploads fresh.
+    pub fn chrome_band_hashes(&self) -> std::collections::HashMap<(u16, u16, u16, u16), u64> {
+        self.chrome_bands.iter().map(|(k, (h, _))| (*k, *h)).collect()
+    }
+
+    /// The whole native `chrome_canvas` scaled to `sw × sh` device pixels
+    /// (Nearest → crisp), memoised and shared across every band of a frame
+    /// (SQ-0514). Rebuilt only when the canvas content or the scaled size
+    /// changes, so the heavy resize runs at most once per changed frame; each
+    /// band then crops its sub-rect from the returned image. The cropped pixels
+    /// are byte-identical to resizing the whole canvas per band (it IS the same
+    /// resize) — the only change is that the resize is no longer repeated.
+    fn scaled_chrome(&mut self, chrome_canvas: &image::RgbaImage, s: f32, sw: u32, sh: u32) -> &image::RgbaImage {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        chrome_canvas.as_raw().hash(&mut h);
+        s.to_bits().hash(&mut h);
+        (sw, sh).hash(&mut h);
+        let key = h.finish();
+        if !matches!(&self.chrome_scaled, Some((k, _)) if *k == key) {
+            let scaled = image::imageops::resize(chrome_canvas, sw, sh, image::imageops::FilterType::Nearest);
+            self.chrome_scaled = Some((key, scaled));
+        }
+        &self.chrome_scaled.as_ref().expect("just inserted").1
+    }
+
     /// Draw ONE chrome ring band (Lane H hybrid mode): the crop of the letterbox-
     /// scaled `chrome_canvas` lying under `band`'s device region, placed as a
     /// single image at the band's cell rect. `chrome_canvas` is the native
@@ -449,9 +496,36 @@ impl GraphicsRender {
         let sw = ((nw as f32 * scale.s).round() as u32).max(1);
         let sh = ((nh as f32 * scale.s).round() as u32).max(1);
 
+        // The band reads scaled-canvas pixels [sx_lo, sx_hi) × [sy_lo, sy_hi)
+        // (the crop loop below only touches sx/sy in-bounds of the scaled canvas).
+        let sx_lo = (rel_x0 as i64 - scale.off_x as i64).clamp(0, sw as i64);
+        let sx_hi = (rel_x0 as i64 + bw as i64 - scale.off_x as i64).clamp(sx_lo, sw as i64);
+        let sy_lo = (rel_y0 as i64 - scale.off_y as i64).clamp(0, sh as i64);
+        let sy_hi = (rel_y0 as i64 + bh as i64 - scale.off_y as i64).clamp(sy_lo, sh as i64);
+
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        chrome_canvas.as_raw().hash(&mut h);
+        // Hash ONLY the band's own native footprint (not the whole canvas): a
+        // change confined to another band's native pixels then leaves this band's
+        // hash — and its cached upload — untouched (SQ-0514). The footprint is the
+        // native bounding box of the scaled pixels this band samples; the Nearest
+        // scaled→native map is monotone, so it covers exactly the native pixels
+        // that can alter the band.
+        if sx_lo < sx_hi && sy_lo < sy_hi {
+            let nx0 = scaled_to_native(sx_lo as u32, nw, sw);
+            let nx1 = scaled_to_native(sx_hi as u32 - 1, nw, sw) + 1;
+            let ny0 = scaled_to_native(sy_lo as u32, nh, sh);
+            let ny1 = scaled_to_native(sy_hi as u32 - 1, nh, sh) + 1;
+            (nx0, nx1, ny0, ny1).hash(&mut h);
+            for ny in ny0..ny1 {
+                for nx in nx0..nx1 {
+                    chrome_canvas.get_pixel(nx, ny).0.hash(&mut h);
+                }
+            }
+        } else {
+            // Fully in the letterbox margin — no native pixels feed it.
+            0u8.hash(&mut h);
+        }
         scale.s.to_bits().hash(&mut h);
         (scale.off_x, scale.off_y).hash(&mut h);
         (cw, ch).hash(&mut h);
@@ -460,24 +534,28 @@ impl GraphicsRender {
         let key = (band.x, band.y, band.width, band.height);
         let fresh = matches!(self.chrome_bands.get(&key), Some((v, _)) if *v == hash);
         if !fresh {
-            // Scale the whole native chrome once (Nearest → crisp), then copy the
-            // sub-rect under this band into a band-sized image (letterbox area
-            // outside the scaled chrome stays transparent).
-            let scaled = image::imageops::resize(chrome_canvas, sw, sh, image::imageops::FilterType::Nearest);
-            let mut band_img = image::RgbaImage::new(bw, bh);
-            for by in 0..bh {
-                let sy = rel_y0 as i64 + by as i64 - scale.off_y as i64;
-                if sy < 0 || sy as u32 >= sh {
-                    continue;
-                }
-                for bx in 0..bw {
-                    let sx = rel_x0 as i64 + bx as i64 - scale.off_x as i64;
-                    if sx < 0 || sx as u32 >= sw {
+            // Copy the sub-rect under this band out of the frame-shared scaled
+            // chrome into a band-sized image (letterbox area outside the scaled
+            // chrome stays transparent). The whole-canvas resize happens at most
+            // once per changed frame (cached in `chrome_scaled`), not per band.
+            let band_img = {
+                let scaled = self.scaled_chrome(chrome_canvas, scale.s, sw, sh);
+                let mut band_img = image::RgbaImage::new(bw, bh);
+                for by in 0..bh {
+                    let sy = rel_y0 as i64 + by as i64 - scale.off_y as i64;
+                    if sy < 0 || sy as u32 >= sh {
                         continue;
                     }
-                    band_img.put_pixel(bx, by, *scaled.get_pixel(sx as u32, sy as u32));
+                    for bx in 0..bw {
+                        let sx = rel_x0 as i64 + bx as i64 - scale.off_x as i64;
+                        if sx < 0 || sx as u32 >= sw {
+                            continue;
+                        }
+                        band_img.put_pixel(bx, by, *scaled.get_pixel(sx as u32, sy as u32));
+                    }
                 }
-            }
+                band_img
+            };
             let img = image::DynamicImage::ImageRgba8(band_img);
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
                 Ok(p) => { self.chrome_bands.insert(key, (hash, p)); }
@@ -777,6 +855,73 @@ mod tests {
         // retain_chrome_bands drops any band not in the live set.
         gr.retain_chrome_bands(&std::collections::HashSet::new());
         assert!(gr.chrome_bands.is_empty(), "empty live set clears the band cache");
+    }
+
+    #[test]
+    fn draw_chrome_band_isolates_bands_by_native_footprint() {
+        // SQ-0514: a change confined to the TOP band's native rows must re-encode
+        // only that band; a disjoint BOTTOM band stays fresh (its stored hash and
+        // cached upload unchanged). Before the fix, the freshness hash covered the
+        // WHOLE canvas, so any pixel change staled every band.
+        use crate::render::v6_layout::uniform_scale;
+        let picker = Picker::halfblocks();
+        let fs = picker.font_size();
+        let (cw, ch) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+        let mut gr = GraphicsRender::default();
+        // Native canvas exactly the pane's device size → scale 1:1 (s=1, off=0),
+        // so a band's native footprint equals its device rows (no letterbox slop).
+        let (cols, rows) = (2u16, 4u16);
+        let (nw, nh) = (cols as u32 * cw, rows as u32 * ch);
+        let mut chrome = image::RgbaImage::from_pixel(nw, nh, image::Rgba([10, 20, 30, 255]));
+        let pane = Rect::new(0, 0, cols, rows);
+        let scale = uniform_scale((nw as u16, nh as u16), (nw, nh));
+        assert_eq!((scale.s, scale.off_x, scale.off_y), (1.0, 0, 0), "test canvas must map 1:1");
+        let top = Rect::new(0, 0, cols, 1); // device rows [0, ch)
+        let bottom = Rect::new(0, rows - 1, cols, 1); // device rows [nh-ch, nh)
+        let mut buf = Buffer::empty(pane);
+
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, top, &mut buf);
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, bottom, &mut buf);
+        let before = gr.chrome_band_hashes();
+        let top_key = (top.x, top.y, top.width, top.height);
+        let bot_key = (bottom.x, bottom.y, bottom.width, bottom.height);
+        assert!(before.contains_key(&top_key) && before.contains_key(&bot_key), "both bands cached");
+
+        // Change a pixel that lives ONLY in the top band's native footprint.
+        chrome.put_pixel(0, 1, image::Rgba([200, 0, 0, 255]));
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, top, &mut buf);
+        gr.draw_chrome_band(&picker, &chrome, &scale, pane, bottom, &mut buf);
+        let after = gr.chrome_band_hashes();
+
+        assert_ne!(before[&top_key], after[&top_key], "the changed top band re-encodes (hash changed)");
+        assert_eq!(before[&bot_key], after[&bot_key], "the disjoint bottom band stays fresh (hash unchanged)");
+    }
+
+    #[test]
+    fn scaled_chrome_shares_one_resize_and_matches_direct_resize() {
+        // SQ-0514: the shared scaled-canvas cache returns pixels byte-identical to
+        // a direct whole-canvas Nearest resize (so band output is unchanged), and
+        // it memoises — reused for the same content/scale, rebuilt on a change.
+        let mut gr = GraphicsRender::default();
+        // A detailed (non-uniform) canvas so the resize actually samples pixels.
+        let mut canvas = image::RgbaImage::new(17, 11);
+        for (x, y, p) in canvas.enumerate_pixels_mut() {
+            *p = image::Rgba([(x * 13) as u8, (y * 7) as u8, ((x + y) * 5) as u8, 255]);
+        }
+        let (s, sw, sh) = (2.5f32, 42u32, 27u32); // fractional scale → floor-map matters
+        let expected = image::imageops::resize(&canvas, sw, sh, image::imageops::FilterType::Nearest);
+        {
+            let got = gr.scaled_chrome(&canvas, s, sw, sh);
+            assert_eq!(got.as_raw(), expected.as_raw(), "shared scaled == direct whole-canvas resize");
+        }
+        let key0 = gr.chrome_scaled.as_ref().unwrap().0;
+        // Same args → same cached key (memoised, no rebuild).
+        let _ = gr.scaled_chrome(&canvas, s, sw, sh);
+        assert_eq!(gr.chrome_scaled.as_ref().unwrap().0, key0, "identical content/scale reuses the cache");
+        // A content change → rebuilt (key changes).
+        canvas.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+        let _ = gr.scaled_chrome(&canvas, s, sw, sh);
+        assert_ne!(gr.chrome_scaled.as_ref().unwrap().0, key0, "a content change rebuilds the shared scaled canvas");
     }
 
     #[test]
