@@ -5,7 +5,10 @@
 //! The built per-row protocol is cached, keyed by
 //! `(Arc::as_ptr(&band.image.pixels) as usize, band.cols, band.rows, band.row)`,
 //! so a stable band (unchanged image/geometry/row) reuses the resized strip
-//! across frames instead of rebuilding it every time.
+//! across frames instead of rebuilding it every time. The full image is also
+//! fit-resized only ONCE per band (keyed by `(ptr, cols, rows)`) and shared by
+//! every row's crop, so the first scroll that reveals a tall image doesn't
+//! resample the whole picture once per band row (SQ-0513).
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Rect, Size};
@@ -91,6 +94,15 @@ pub struct InlineImageRender {
     /// pointer-based key can never collide with a later image that reuses a
     /// freed address (the ABA bug). Same shared allocation the live image holds.
     cache: std::collections::HashMap<BandCacheKey, (std::sync::Arc<image::RgbaImage>, Protocol)>,
+    /// The whole source image fitted to a band's cell box, cached per
+    /// `(source-arc-ptr, cols, rows)` and SHARED by every row of that band. The
+    /// fit `resize_exact` is by far the expensive step (a full-image resample);
+    /// doing it once per band instead of once per row is what keeps the first
+    /// scroll that brings a tall image into view smooth — otherwise all N band
+    /// rows resample the whole image in a single paint frame (SQ-0513). The
+    /// paired `Arc` pins the SOURCE buffer so the pointer key can't ABA-collide,
+    /// mirroring `cache`.
+    fitted: std::collections::HashMap<(usize, u16, u16), (std::sync::Arc<image::RgbaImage>, image::DynamicImage)>,
 }
 
 impl std::fmt::Debug for InlineImageRender {
@@ -113,8 +125,9 @@ impl InlineImageRender {
                 }
             }
         }
-        let key: BandCacheKey = (std::sync::Arc::as_ptr(&band.image.pixels) as usize, band.cols, band.rows, band.row);
-        if let std::collections::hash_map::Entry::Vacant(e) = self.cache.entry(key) {
+        let src_ptr = std::sync::Arc::as_ptr(&band.image.pixels) as usize;
+        let key: BandCacheKey = (src_ptr, band.cols, band.rows, band.row);
+        if !self.cache.contains_key(&key) {
             // Fit the whole image to the band's cell box in pixels, then crop
             // the strip for this row. Cell pixel size comes from the picker font.
             let fs = picker.font_size();
@@ -124,16 +137,24 @@ impl InlineImageRender {
             if box_w == 0 || box_h == 0 {
                 return;
             }
-            let full = image::DynamicImage::ImageRgba8((*band.image.pixels).clone())
-                .resize_exact(box_w, box_h, image::imageops::FilterType::Triangle);
             let strip_y = band.row as u32 * fh;
             if strip_y >= box_h {
                 return;
             }
             let strip_h = fh.min(box_h - strip_y);
-            let strip = full.crop_imm(0, strip_y, box_w, strip_h);
+            // Build (or reuse) the band's fitted full image ONCE, then crop this
+            // row's strip from it. Sharing the resample across the band's rows is
+            // the SQ-0513 fix — the crop is cheap; the resize is not.
+            let strip = {
+                let (_pin, full) = self.fitted.entry((src_ptr, band.cols, band.rows)).or_insert_with(|| {
+                    let fitted = image::DynamicImage::ImageRgba8((*band.image.pixels).clone())
+                        .resize_exact(box_w, box_h, image::imageops::FilterType::Triangle);
+                    (band.image.pixels.clone(), fitted)
+                });
+                full.crop_imm(0, strip_y, box_w, strip_h)
+            };
             if let Ok(proto) = picker.new_protocol(strip, Size::new(band.cols, 1), Resize::Fit(None)) {
-                e.insert((band.image.pixels.clone(), proto));
+                self.cache.insert(key, (band.image.pixels.clone(), proto));
             }
         }
         if let Some((_, proto)) = self.cache.get(&key) {
@@ -146,6 +167,7 @@ impl InlineImageRender {
     /// with the pinned Arc in the value, releases addresses only once truly gone.
     pub fn retain_live(&mut self, live: &std::collections::HashSet<usize>) {
         self.cache.retain(|key, _| live.contains(&key.0));
+        self.fitted.retain(|key, _| live.contains(&key.0));
     }
 }
 
@@ -198,6 +220,35 @@ mod tests {
         let band_row1 = crate::render::transcript::ImageBand { row: 1, ..band };
         r.render_row(&picker, &band_row1, Rect::new(0, 0, 2, 1), ratatui::style::Style::default(), &mut buf);
         assert_eq!(r.cache.len(), 2);
+    }
+
+    #[test]
+    fn fit_resize_is_shared_across_a_bands_rows() {
+        // SQ-0513: the first scroll that reveals a tall image paints every band
+        // row in one frame. The expensive full-image fit-resize must happen ONCE
+        // per band, not once per row — so rendering all N rows leaves exactly one
+        // `fitted` entry while producing N per-row protocol entries. (A per-row
+        // resize is what froze the first scroll for ~N× the single-resize cost.)
+        let px = image::RgbaImage::new(64, 64);
+        let img = crate::inline_image::InlineImage {
+            pixels: std::sync::Arc::new(px),
+            align: crate::inline_image::ImageAlign::InlineUp,
+            scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
+        };
+        let picker = Picker::halfblocks();
+        let (cols, rows) = (6u16, 8u16);
+        let mut buf = Buffer::empty(Rect::new(0, 0, cols + 2, rows + 2));
+        let mut r = InlineImageRender::default();
+        for row in 0..rows {
+            let band = crate::render::transcript::ImageBand { image: img.clone(), cols, rows, row, x_off: 0 };
+            r.render_row(&picker, &band, Rect::new(0, row, cols, 1), ratatui::style::Style::default(), &mut buf);
+        }
+        assert_eq!(r.fitted.len(), 1, "the whole image is fit-resized once per band, shared by every row");
+        assert_eq!(r.cache.len(), rows as usize, "each row still gets its own cheap cropped protocol");
+        // Eviction of the band releases BOTH the protocols and the shared fit.
+        r.retain_live(&std::collections::HashSet::new());
+        assert_eq!(r.fitted.len(), 0, "retain_live evicts the fitted-image cache too");
+        assert_eq!(r.cache.len(), 0);
     }
 
     fn band_for(pixels: std::sync::Arc<image::RgbaImage>) -> crate::render::transcript::ImageBand {
