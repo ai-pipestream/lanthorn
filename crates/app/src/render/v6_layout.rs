@@ -340,6 +340,7 @@ fn fill_reverse_row_gaps(
     colors: &ColorScheme,
 ) {
     use std::collections::BTreeMap;
+    let full_w = canvas.width();
     let mut rows: BTreeMap<u32, Vec<&PxText>> = BTreeMap::new();
     for t in texts {
         rows.entry(t.y.max(1) as u32 - 1).or_default().push(t);
@@ -349,10 +350,11 @@ fn fill_reverse_row_gaps(
         if runs.is_empty() || runs.iter().any(|t| t.style & 1 == 0) {
             continue;
         }
-        // The pixel spans the runs already painted, sorted and merged — the gaps
-        // BETWEEN them are what's bare. A row that named real colours fills its
-        // gaps with the swapped block unconditionally; an inherited row defers to
-        // the over-art rule per gap.
+        // A pure reverse-video row is a bar the game draws edge to edge, so the
+        // fill spans the ENTIRE screen width (SQ-0504): the runs the game painted,
+        // plus every bare cell around AND between them. A row that named real
+        // colours fills unconditionally; an inherited row defers to the over-art
+        // rule per gap (so Zork0's ribbon labels on the banner never gain a bar).
         let mut explicit_block: Option<Rgba<u8>> = None;
         let mut spans: Vec<(u32, u32)> = runs
             .iter()
@@ -365,25 +367,55 @@ fn fill_reverse_row_gaps(
             })
             .collect();
         spans.sort_unstable();
-        // Fill each gap at its EXACT pixel extent (not cell-quantized): a run's
-        // start is `x - 1`, rarely 8-aligned, so a quantized fill cell would bleed
-        // a pixel into the next run and make its own over-art test (SQ-0487) see
-        // the fill as artwork — dropping that run's block. Exact gaps never touch
-        // a run's pixels.
-        let mut cursor = spans.first().map(|&(s, _)| s).unwrap_or(0);
+        // The bare stretches: from x=0 to the first run, between the runs, and from
+        // the last run to the screen edge. Filled at EXACT pixel extent (not cell-
+        // quantized): a run's start is `x - 1`, rarely 8-aligned, so a quantized
+        // fill cell would bleed a pixel into the next run and make its own over-art
+        // test (SQ-0487) see the fill as artwork — dropping that run's block.
+        let mut gaps: Vec<(u32, u32)> = Vec::new();
+        let mut cursor = 0u32;
         for &(s, e) in &spans {
             if s > cursor {
-                let (gs, ge) = (cursor, s);
-                let block = match explicit_block {
-                    Some(b) => Some(b),
-                    None if region_has_opaque(canvas, gs, py, ge - gs, FONT_H) => None,
-                    None => Some(default_fg),
-                };
-                if let Some(b) = block {
-                    fill_cell(canvas, gs, py, ge - gs, FONT_H, b);
-                }
+                gaps.push((cursor, s));
             }
             cursor = cursor.max(e);
+        }
+        if cursor < full_w {
+            gaps.push((cursor, full_w));
+        }
+        for (gs, ge) in gaps {
+            let block = match explicit_block {
+                Some(b) => Some(b),
+                None if region_has_opaque(canvas, gs, py, ge - gs, FONT_H) => None,
+                None => Some(default_fg),
+            };
+            if let Some(b) = block {
+                fill_cell(canvas, gs, py, ge - gs, FONT_H, b);
+            }
+        }
+    }
+}
+
+/// SQ-0504: carve the native rows occupied by pure-TEXT chrome runs out of `canvas`
+/// (make them fully transparent). Those rows render as crisp terminal CELLS in the
+/// hybrid path, so their rasterized ink must not survive into the pixel bands built
+/// from this canvas: a sub-cell letterbox-scale boundary otherwise samples the top
+/// slice of a status/menu glyph into the neighbouring ART band and shows the raster
+/// bar BEHIND the cells. Clearing them also decouples each art band's content hash
+/// from the menu text, so navigating the menu re-encodes only genuinely changed art
+/// (picture column, status panel), not every band. `run_tops` are each cleared run's
+/// native top-y (`y - 1`); every run spans `FONT_H`. On-art status (Zork0's banner
+/// ribbon) is an art strip, never a text run, so it is never passed here and stays
+/// imaged.
+pub fn clear_text_rows(canvas: &mut RgbaImage, run_tops: &[u16]) {
+    let (w, h) = (canvas.width(), canvas.height());
+    for &top in run_tops {
+        let y0 = top as u32;
+        let y1 = (y0 + FONT_H).min(h);
+        for y in y0..y1 {
+            for x in 0..w {
+                canvas.put_pixel(x, y, Rgba([0, 0, 0, 0]));
+            }
         }
     }
 }

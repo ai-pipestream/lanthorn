@@ -217,11 +217,12 @@ fn journey_hybrid_menu_is_terminal_cells_picture_stays_ring() {
     assert!(pic_ink > 0, "the left picture column stays imaged in the pixel ring (got {pic_ink} image cells)");
 }
 
-/// (e, SQ-0499 raster) In the pixel canvas Raster mode uploads, the menu header
+/// (e, SQ-0504 raster) In the pixel canvas Raster mode uploads, the menu header
 /// ("The Party" | "Individual Commands", both reverse-video) reads as ONE solid
-/// bar — the wide gap between the two labels fills with the reverse block. The
-/// menu BODY row (reversed column dividers among NON-reversed verb text) is left
-/// alone: the cells between its dividers stay bare, not a full-width bar.
+/// bar spanning the ENTIRE screen width — the reverse block fills from the left
+/// edge, between the two labels, and out to the right edge, not just the span
+/// between them. The menu BODY row (reversed column dividers among NON-reversed
+/// verb text) is left alone: the cells between its dividers stay bare, not a bar.
 #[test]
 fn journey_raster_reverse_header_bar_is_solid_body_untouched() {
     use app::render::v6_layout as v6;
@@ -234,6 +235,7 @@ fn journey_raster_reverse_header_bar_is_solid_body_untouched() {
     let canvas = v6::build_chrome_canvas(
         &layout.chrome, native, image::Rgba([220, 220, 220, 255]), image::Rgba([0, 0, 0, 255]), &colors,
     );
+    let ncols = (canvas.width() / 8) as u32;
     // A whole 8-px cell is "filled" when every pixel column has opaque ink.
     let cell_filled = |cx: u32, row: u32| -> bool {
         let (x0, y0) = (cx * 8, row * 16);
@@ -241,10 +243,12 @@ fn journey_raster_reverse_header_bar_is_solid_body_untouched() {
             (y0..(y0 + 16).min(canvas.height())).any(|y| canvas.get_pixel(x, y)[3] >= 128)
         })
     };
-    // Header row 19: "The Party" ends ~col28, "Individual Commands" starts ~col47.
-    // Every cell between them (the old bare gap) must now be a filled block.
-    let header_gap_solid = (30..46).all(|cx| cell_filled(cx, 19));
-    assert!(header_gap_solid, "row-19 header gap between the two labels fills into one solid reverse bar");
+    // Header row 19 is a pure reverse bar: EVERY cell from the left edge to the
+    // right edge is a filled block — the leading gap (cols 0.., before "The
+    // Party"), the gap between the labels, and the trailing gap (past "Individual
+    // Commands") all fill, so the whole native row is solid.
+    let header_full_width = (0..ncols).all(|cx| cell_filled(cx, 19));
+    assert!(header_full_width, "row-19 header fills into ONE solid reverse bar across the full screen width");
     // Body row 20 has reversed dividers at cols ~15/31/47/63 with normal verb text
     // between — the cells mid-column (e.g. 35..46, between two dividers, no text)
     // must NOT be block-filled (that row is mixed, not a pure reverse bar).
@@ -274,4 +278,94 @@ fn journey_menu_is_live_through_the_app_layer() {
     assert!(!r.quit, "an arrow keypress must not quit the game");
     assert_eq!(session.pending_input(), InputKind::Char, "still on the menu after the arrow");
     assert_ne!(before, sig(&session), "the arrow moved the selection — the painted runs changed");
+}
+
+/// (f, SQ-0504 hybrid) The menu header reverse bar spans the ENTIRE pane width in
+/// the hybrid cell path: on the terminal row carrying "The Party", every cell from
+/// the left edge to the right edge is reverse-video — the bar reads edge to edge,
+/// not just between the two labels.
+#[test]
+fn journey_hybrid_header_bar_spans_full_pane_width() {
+    use ratatui::style::Modifier;
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let area = Rect::new(0, 0, 80, 25);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    let header_y = (0..area.height).find(|&y| row_text(y).contains("The Party")).expect("header row present");
+    let holes: Vec<u16> = (0..area.width)
+        .filter(|&x| !buf.cell((x, header_y)).unwrap().modifier.contains(Modifier::REVERSED))
+        .collect();
+    assert!(
+        holes.is_empty(),
+        "the header reverse bar spans the full pane [0,{}) with no gaps; non-reversed cols {holes:?}\nrow: {:?}",
+        area.width,
+        row_text(header_y)
+    );
+}
+
+/// (g, SQ-0504) The pixel-band canvas EXCLUDES the pure-text menu rows: after the
+/// text-strip rows are carved out (exactly what the hybrid path feeds its bands),
+/// the menu's native rows carry NO ink — so the rasterized menu can never appear
+/// behind the terminal cells — while Journey's authentic vertical picture/text
+/// divider (reversed runs at native x≈233, beside the story box, NOT a text strip)
+/// stays inked and thus keeps rendering in the left picture-column ring.
+#[test]
+fn journey_pixel_band_canvas_excludes_menu_keeps_divider() {
+    use app::render::v6_layout as v6;
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = v6::native_extent(items);
+    let layout = v6::classify_windows(items);
+    let story = layout.story.expect("story window");
+    let story_bottom = (story.y_px + story.h_px) as u32;
+    let colors = app::colors::ColorScheme::terminal_default();
+    let mut canvas = v6::build_chrome_canvas(
+        &layout.chrome, native, image::Rgba([220, 220, 220, 255]), image::Rgba([0, 0, 0, 255]), &colors,
+    );
+
+    // The menu runs sit BELOW the story box; collect their native tops.
+    let menu_tops: Vec<u16> = layout
+        .chrome
+        .iter()
+        .filter_map(|it| match &it.node {
+            WinNode::Grid(g) => Some(g.px_texts.iter()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|t| (t.y.max(1) - 1) as u32 >= story_bottom)
+        .map(|t| t.y.max(1) - 1)
+        .collect();
+    assert!(!menu_tops.is_empty(), "menu runs below the story box present");
+
+    let row_has_ink = |c: &image::RgbaImage, y: u32| (0..c.width()).any(|x| c.get_pixel(x, y)[3] >= 128);
+    // Before carving: the menu rows are inked (rasterized text).
+    let a_menu_row = menu_tops.iter().map(|&t| t as u32 + 4).min().unwrap();
+    assert!(row_has_ink(&canvas, a_menu_row), "menu row {a_menu_row} is rasterized before carving");
+    // The divider column (native x≈233) has ink across the story rows.
+    let divider_ink_before = (0..story_bottom).filter(|&y| canvas.get_pixel(233, y)[3] >= 128).count();
+    assert!(divider_ink_before > 200, "the vertical divider is inked before carving ({divider_ink_before} rows)");
+
+    // Carve the menu rows out — exactly what screen.rs feeds the pixel bands.
+    v6::clear_text_rows(&mut canvas, &menu_tops);
+
+    // Every carved menu row is now fully transparent.
+    for &top in &menu_tops {
+        for y in top as u32..(top as u32 + 16).min(canvas.height()) {
+            assert!(!row_has_ink(&canvas, y), "menu native row {y} must be carved out of the band canvas");
+        }
+    }
+    // The divider is UNTOUCHED — it is beside the story, not a text strip.
+    let divider_ink_after = (0..story_bottom).filter(|&y| canvas.get_pixel(233, y)[3] >= 128).count();
+    assert_eq!(divider_ink_before, divider_ink_after, "the picture/text divider survives the carve (stays in the ring)");
 }

@@ -465,7 +465,7 @@ fn render_node(
                 // bands. Needs a story window; without one, fall through to raster.
                 if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
                     if let Some(story) = layout.story {
-                        let canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+                        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
                         let fs = picker.font_size();
                         let cell_px = (fs.width, fs.height);
                         let pane_dev = (
@@ -503,6 +503,24 @@ fn render_node(
                             .flatten()
                             .collect();
                         let strips = decompose_chrome_strips(&bands, area, &scale, cell_px, story, &gfx, &chrome_runs);
+                        // SQ-0504: rows drawn as terminal CELLS (pure-text strips)
+                        // must not ALSO reach the pixel bands. Carve every text-strip
+                        // run's native rows out of the band canvas: excludes the
+                        // rasterized menu/status from every uploaded band image (a
+                        // sub-cell letterbox boundary otherwise bleeds the raster bar
+                        // behind the cells) and decouples each art band's hash from
+                        // the menu text (navigating the menu re-encodes only changed
+                        // art, not every band). Beside-story runs — Journey's vertical
+                        // picture/text divider — are NOT text strips, so they stay in
+                        // the side band's ring untouched.
+                        let text_run_tops: Vec<u16> = strips
+                            .iter()
+                            .flat_map(|s| match s {
+                                ChromeStrip::Text(_, runs) => runs.iter().map(|t| t.y.max(1) - 1).collect::<Vec<_>>(),
+                                ChromeStrip::Art(_) => Vec::new(),
+                            })
+                            .collect();
+                        v6::clear_text_rows(&mut canvas, &text_run_tops);
                         let base = state.colors.theme.get("upper_window").style;
                         {
                             let mut gr = state.graphics_render.borrow_mut();
@@ -1543,7 +1561,10 @@ fn draw_chrome_text_strip(
         if *row < rect.y as i32 || *row >= rect.bottom() as i32 {
             continue;
         }
-        // Pure reverse-video row: fill the intervening cells reversed (SQ-0499).
+        // Pure reverse-video row: a bar the game draws edge to edge, so fill the
+        // ENTIRE strip width reversed around AND between the runs (SQ-0504) — a
+        // full-width band spans the whole pane. Mixed rows (Journey's menu body)
+        // are left alone by the guard above.
         if !row_runs.is_empty() && row_runs.iter().all(|t| t.style & 1 != 0) {
             let spans: Vec<(i32, i32)> = row_runs
                 .iter()
@@ -1552,13 +1573,8 @@ fn draw_chrome_text_strip(
                     (c, c + t.text.chars().count().max(1) as i32)
                 })
                 .collect();
-            let min_c = spans.iter().map(|&(s, _)| s).min().unwrap_or(0);
-            let max_c = spans.iter().map(|&(_, e)| e).max().unwrap_or(0);
             let rev = v6_run_style(base, 0, 0, 1, honor, colors);
-            for c in min_c..max_c {
-                if c < rect.x as i32 || c >= rect.right() as i32 {
-                    continue;
-                }
+            for c in rect.x as i32..rect.right() as i32 {
                 if !spans.iter().any(|&(s, e)| c >= s && c < e) {
                     buf.set_stringn(c as u16, *row as u16, " ", 1, rev);
                 }

@@ -1,4 +1,4 @@
-//! Arthur (Infocom v6) top status bar — SQ-0500 / SQ-0499.
+//! Arthur (Infocom v6) top status bar — SQ-0500 / SQ-0499 / SQ-0504.
 //!
 //! Arthur paints a reverse-video status bar (location + "St Anne's Day, Compline"
 //! date) as pixel-positioned runs at native row 12, ABOVE the story buffer (which
@@ -9,8 +9,8 @@
 //!
 //! HYBRID mode (SQ-0500): the status row decomposes into its own terminal-CELL
 //! strip (crisp reverse bar) while the graphics panel above stays the pixel ring.
-//! The bar reads SOLID across its painted extent — no lone unreversed cell where
-//! the game left a gap between its runs (SQ-0499 cell path).
+//! The bar reads solid across the FULL pane width (SQ-0504) — the game paints its
+//! runs only from col ~4 to ~75, but a pure reverse-video row fills edge to edge.
 //!
 //! Skip-if-missing pattern per the other gitignored-story smokes.
 
@@ -84,10 +84,10 @@ fn arthur_status_reaches_the_model() {
     assert!(reversed, "status bar is reverse-video");
 }
 
-/// (SQ-0500 + SQ-0499) HYBRID: the status row renders as terminal CELLS — the
-/// "St Anne's Day, Compline" date is real buffer text — and its reverse bar is
-/// SOLID across the painted extent (no lone unreversed cell). The graphics panel
-/// above the status row stays the pixel ring (half-block image cells).
+/// (SQ-0500 + SQ-0499 + SQ-0504) HYBRID: the status row renders as terminal CELLS
+/// — the "St Anne's Day, Compline" date is real buffer text — and its reverse bar
+/// spans the FULL pane width (no unreversed gap anywhere on the row). The graphics
+/// panel above the status row stays the pixel ring (half-block image cells).
 #[test]
 fn arthur_hybrid_status_row_is_solid_terminal_bar() {
     let Some(session) = arthur_at_status() else { return };
@@ -109,20 +109,17 @@ fn arthur_hybrid_status_row_is_solid_terminal_bar() {
         .find(|&y| row_text(y).contains("Anne"))
         .expect("status date renders as terminal cells");
 
-    // The reverse bar is solid: from the first to the last reversed cell on that
-    // row, EVERY cell is reversed — the old lone unreversed gap before the date is
-    // gone (SQ-0499 cell path).
-    let reversed: Vec<u16> = (0..area.width)
-        .filter(|&x| buf.cell((x, status_y)).unwrap().modifier.contains(Modifier::REVERSED))
-        .collect();
-    assert!(!reversed.is_empty(), "status row {status_y} is a reverse bar");
-    let (first, last) = (reversed[0], *reversed.last().unwrap());
-    let holes: Vec<u16> = (first..=last)
+    // The reverse bar spans the FULL pane width (SQ-0504): the game paints its
+    // status runs only from col ~4 to ~75, but the bar reads edge to edge — every
+    // cell on the row is reverse-video, including the leading/trailing cells the
+    // game left bare and the lone gap before the date (old SQ-0499 hole).
+    let holes: Vec<u16> = (0..area.width)
         .filter(|&x| !buf.cell((x, status_y)).unwrap().modifier.contains(Modifier::REVERSED))
         .collect();
     assert!(
         holes.is_empty(),
-        "the reverse status bar is solid across [{first},{last}] with no unreversed gap; holes at {holes:?}\nrow: {:?}",
+        "the reverse status bar spans the full pane [0,{}) with no unreversed gap; holes at {holes:?}\nrow: {:?}",
+        area.width,
         row_text(status_y)
     );
 

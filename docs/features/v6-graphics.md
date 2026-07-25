@@ -68,12 +68,18 @@ Sixel):
   bars), while a strip that sits over actual artwork keeps the scaled pixel
   image. So Journey's bottom command menu ("Proceed / Back / Game", the party
   column, the verb columns — a full-width window sized to zero height that paints
-  fixed pixel runs) becomes terminal text while its left picture column stays
+  fixed pixel runs) becomes terminal text while its left picture column (and the
+  reversed vertical divider the game paints between picture and text) stays
   imaged; Arthur's location/date status row becomes a crisp reverse bar sitting
   between the graphics panel above it and the story below; and Zork Zero's
-  status, painted directly *onto* its banner art, stays in the ring. Where a
-  reverse-video bar is drawn as separate runs with bare cells between them, the
-  gaps fill so it reads as one solid block.
+  status, painted directly *onto* its banner art, stays in the ring. A pure
+  reverse-video row (a status/menu bar) fills **edge to edge across the full pane
+  width**, so a bar the game drew as separate runs with bare cells between and
+  around them reads as one solid block. The rows that become cells are carved out
+  of the pixel bands entirely — their rasterized ink never reaches an uploaded
+  band image (no raster bar showing through behind the cells), and because a
+  band's image no longer depends on that text, navigating the menu re-encodes only
+  the genuinely changed artwork rather than every band.
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
   engine drew it natively.
