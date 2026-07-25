@@ -91,6 +91,18 @@ Sixel):
   one word stamped from a single cell (so "Churchyard" stays whole instead of
   scattering into "Chu rch yard"), while runs held apart by a real pixel gap (menu
   items, column dividers) keep their spacing and never fuse.
+  The ring layout is also **dynamic**: on a pane taller than the game's native
+  aspect there is vertical letterbox dead space, and hybrid mode reclaims it rather
+  than centring the frame in it. When nothing sits below the story — header art,
+  side borders, a status bar on top, but an open bottom (Arthur) — the ring is
+  anchored to the pane top and the story viewport grows all the way to the pane
+  bottom at its exact inset width; where the side art ends, the flanks below it are
+  the theme backdrop (no stretching, no tiling). When the game has a bottom text
+  chrome instead (Journey's command menu), that strip is anchored to the pane
+  *bottom* edge and the story fills the space between the top chrome and the menu.
+  A game whose frame *encloses* the story to the screen bottom (Zork Zero's full
+  frame) keeps the centred letterbox untouched, and a pane at or below the scaled
+  native height (no dead space) degrades to that same centred layout.
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
   engine drew it natively.

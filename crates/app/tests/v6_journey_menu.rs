@@ -470,3 +470,38 @@ fn journey_pixel_band_canvas_excludes_menu_keeps_divider() {
     let divider_ink_after = (0..story_bottom).filter(|&y| canvas.get_pixel(233, y)[3] >= 128).count();
     assert_eq!(divider_ink_before, divider_ink_after, "the picture/text divider survives the carve (stays in the ring)");
 }
+
+/// (SQ-0505 dynamic hybrid layout) At a TALL pane (90×40 — vertical letterbox
+/// slack below the native 8:5 frame) Journey has BOTTOM TEXT CHROME: the command
+/// menu. The menu strip anchors to the pane BOTTOM edge and the story viewport
+/// fills the space between the top-anchored chrome and the menu at constant width.
+#[test]
+fn journey_hybrid_tall_pane_menu_pinned_to_bottom() {
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let area = Rect::new(0, 0, 90, 40);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    // The command menu renders as terminal CELLS pinned at the pane bottom: the
+    // "Proceed" verb sits in the last few rows, and the menu reaches the very
+    // bottom row (its dead space below the letterboxed menu is reclaimed).
+    let proceed_y = (0..area.height).find(|&y| row_text(y).contains("Proceed")).expect("'Proceed' renders as terminal cells");
+    assert!(proceed_y >= area.height - 8, "the menu is anchored to the pane bottom (Proceed at row {proceed_y} of {})", area.height);
+    let last_text_y = (0..area.height).filter(|&y| !row_text(y).trim().is_empty()).max().unwrap();
+    assert!(last_text_y >= area.height - 2, "the menu strip reaches the pane bottom edge (last text row {last_text_y})");
+
+    // The story viewport fills the space ABOVE the menu, from near the pane top.
+    let vp = state.transcript_geom.get().expect("hybrid renders the story as a transcript").area;
+    assert!(vp.y <= 2, "the story is top-anchored (viewport top {} near the pane top)", vp.y);
+    assert!(vp.bottom() <= proceed_y, "the story viewport stops above the bottom-anchored menu (vp bottom {}, menu at {proceed_y})", vp.bottom());
+    assert!(vp.x > 0 && vp.right() < area.right(), "the story keeps its constant inset beside the picture column; got {vp:?}");
+}

@@ -172,3 +172,46 @@ fn arthur_hybrid_status_churchyard_is_one_word_date_right() {
     assert!(date_at > loc_at + "Churchyard".len(), "the date stays to the right of the location");
     assert!(date_at * 2 > area.width as usize, "the date sits in the right half of the {}-col bar (at {date_at})", area.width);
 }
+
+/// (SQ-0505 dynamic hybrid layout) At a TALL pane (90×40 — taller than the 8:5
+/// native aspect, so there is vertical letterbox dead space), Arthur has NO bottom
+/// chrome: header art + status bar on top, side borders, nothing below the story.
+/// The ring is top-anchored (no vertical centering) and the story text viewport
+/// extends all the way to the pane BOTTOM at its constant inset width. Where the
+/// side art ends, the flanks below it are the theme backdrop — no stretched art.
+#[test]
+fn arthur_hybrid_tall_pane_extends_story_to_bottom() {
+    use ratatui::style::Color;
+    let Some(session) = arthur_at_status() else { return };
+    let model = session.screen();
+
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    // 90×40 → scale 1.40625 (width-limited), ~238 px of vertical letterbox slack.
+    let area = Rect::new(0, 0, 90, 40);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let vp = state.transcript_geom.get().expect("hybrid renders the story as a transcript").area;
+    // The story viewport reaches the pane bottom (dead space reclaimed).
+    assert_eq!(vp.bottom(), area.bottom(), "story viewport extends to the pane bottom; got {vp:?}");
+    // It keeps its side insets — the story column did NOT reflow to full width.
+    assert!(vp.x > 0 && vp.right() < area.right(), "story keeps its constant inset width beside the side borders; got {vp:?}");
+    // The top chrome ring (header art + status bar) is still imaged above the story.
+    let is_image = |x: u16, y: u16| -> bool {
+        let c = buf.cell((x, y)).unwrap();
+        let s = c.symbol();
+        s == "\u{2580}" || s == "\u{2584}" || c.bg != Color::Reset
+    };
+    let top_ring = (0..vp.y).flat_map(|y| (0..area.width).map(move |x| (x, y))).filter(|&(x, y)| is_image(x, y)).count();
+    assert!(top_ring > 0, "the header/status ring stays imaged above the top-anchored story ({top_ring} cells)");
+    // A flank cell in a LEFT-band row above the story-native bottom carries side
+    // art; a flank cell deep below it is the theme backdrop (Reset), proving the
+    // art is not stretched or tiled into the reclaimed space.
+    let flank_art = (vp.y..vp.y + 6).any(|y| buf.cell((vp.x - 1, y)).unwrap().bg != Color::Reset);
+    assert!(flank_art, "the side border art shows in the flank beside the top of the story");
+    let deep = buf.cell((vp.x - 1, area.height - 2)).unwrap();
+    assert_eq!(deep.bg, Color::Reset, "the flank below the side art is the theme backdrop, not stretched art: {deep:?}");
+}

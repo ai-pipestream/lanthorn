@@ -472,14 +472,67 @@ fn render_node(
                             area.width as u32 * fs.width.max(1) as u32,
                             area.height as u32 * fs.height.max(1) as u32,
                         );
-                        let scale = v6::uniform_scale(native, pane_dev);
+                        let scale_center = v6::uniform_scale(native, pane_dev);
                         // Publish the letterbox factor so inline story pictures
                         // (drop-caps, room icons) scale to match the chrome ring.
-                        state.v6_image_scale.set(scale.s);
-                        let vp = v6::story_viewport_box(Some(story), &scale, (area.width, area.height), cell_px);
-                        // The viewport in the pane's absolute cell coordinates.
-                        let viewport = Rect::new(area.x + vp.x, area.y + vp.y, vp.width, vp.height);
-                        let bands = v6::chrome_bands(area, viewport);
+                        // The scale FACTOR is unchanged by the SQ-0505 anchoring
+                        // below (only the vertical offset moves), so publish it now.
+                        state.v6_image_scale.set(scale_center.s);
+                        let gfx = v6::build_graphics_canvas(&layout.chrome, native);
+                        let chrome_runs: Vec<&crate::engine::PxText> = layout
+                            .chrome
+                            .iter()
+                            .filter_map(|it| match &it.node {
+                                WinNode::Grid(g) => Some(g.px_texts.iter()),
+                                _ => None,
+                            })
+                            .flatten()
+                            .collect();
+                        // SQ-0505 dynamic hybrid layout: reclaim the letterbox dead
+                        // space below the story when the bottom edge is text-only
+                        // (Journey's command menu) or empty (Arthur — header art +
+                        // side borders, open below). A game whose frame encloses the
+                        // story to the native bottom (Zork0) keeps today's centred
+                        // letterbox. `slack` is the vertical letterbox margin in
+                        // device pixels (zero when the pane is at/below the scaled
+                        // native height — nothing to reclaim, degrade to centred).
+                        let scaled_h = (native.1 as f32 * scale_center.s).round() as u32;
+                        let slack = pane_dev.1.saturating_sub(scaled_h);
+                        let plan = hybrid_bottom_plan(story, &gfx, &chrome_runs, native, slack);
+                        let reclaim = !matches!(plan, BottomPlan::Letterbox);
+                        // Resolve the story scale, the story viewport, and an
+                        // optional bottom-anchored menu scale.
+                        //   Letterbox → centred (today's behaviour, unchanged).
+                        //   Extend    → top-anchor (off_y = 0), story grows to the
+                        //               pane bottom; flanks below the side art blank.
+                        //   Menu      → top-anchor the story + chrome, bottom-anchor
+                        //               the command strip to the pane bottom, story
+                        //               fills between at constant width.
+                        let top_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: 0 };
+                        let (scale, viewport, menu) = match plan {
+                            BottomPlan::Letterbox => {
+                                let vp = v6::story_viewport_box(Some(story), &scale_center, (area.width, area.height), cell_px);
+                                (scale_center, Rect::new(area.x + vp.x, area.y + vp.y, vp.width, vp.height), None)
+                            }
+                            BottomPlan::Extend => {
+                                let vp = v6::story_viewport_box(Some(story), &top_scale, (area.width, area.height), cell_px);
+                                let (x, y) = (area.x + vp.x, area.y + vp.y);
+                                (top_scale, Rect::new(x, y, vp.width, area.bottom().saturating_sub(y)), None)
+                            }
+                            BottomPlan::Menu => {
+                                let menu_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: slack };
+                                let vp = v6::story_viewport_box(Some(story), &top_scale, (area.width, area.height), cell_px);
+                                let (x, y) = (area.x + vp.x, area.y + vp.y);
+                                // The menu strip's top cell: the story's native bottom
+                                // mapped through the bottom-anchored menu scale (whose
+                                // native bottom lands exactly on the pane bottom).
+                                let story_bottom = story.y_px as u32 + story.h_px as u32;
+                                let menu_top_dev = slack as f32 + story_bottom as f32 * scale_center.s;
+                                let menu_top = (menu_top_dev / cell_px.1.max(1) as f32).floor() as u16;
+                                let menu_top = menu_top.clamp(y + 1, area.bottom());
+                                (top_scale, Rect::new(x, y, vp.width, menu_top.saturating_sub(y)), Some(menu_scale))
+                            }
+                        };
                         // SQ-0500: a full-width chrome band (top/bottom) is carved
                         // into horizontal strips — an ART strip (opaque frame
                         // graphics behind it) keeps the scaled pixel RING; a
@@ -492,17 +545,51 @@ fn render_node(
                         // stays ring. The graphics-only canvas answers "art behind
                         // this strip?" — the full chrome canvas can't, since its
                         // rasterized text is itself opaque.
-                        let gfx = v6::build_graphics_canvas(&layout.chrome, native);
-                        let chrome_runs: Vec<&crate::engine::PxText> = layout
-                            .chrome
-                            .iter()
-                            .filter_map(|it| match &it.node {
-                                WinNode::Grid(g) => Some(g.px_texts.iter()),
-                                _ => None,
-                            })
-                            .flatten()
-                            .collect();
-                        let strips = decompose_chrome_strips(&bands, area, &scale, cell_px, story, &gfx, &chrome_runs);
+                        let bands = v6::chrome_bands(area, viewport);
+                        // SQ-0505: in the Menu plan the bottom band IS the command
+                        // strip — decompose it through the bottom-anchored `menu`
+                        // scale, and the top+side ring bands through the story
+                        // `scale`. Each strip is later drawn through the scale it was
+                        // classified with, so the menu lands at the pane bottom while
+                        // the story/top/sides stay top-anchored.
+                        let mut ring_bands = bands;
+                        let menu_bands: Vec<Rect> = if menu.is_some() {
+                            let vb = viewport.bottom();
+                            let m: Vec<Rect> = ring_bands.iter().copied().filter(|b| b.width == area.width && b.y == vb).collect();
+                            ring_bands.retain(|b| !(b.width == area.width && b.y == vb));
+                            m
+                        } else {
+                            Vec::new()
+                        };
+                        // SQ-0505: when reclaiming the dead space, clip the ring
+                        // bands to the chrome art's actual vertical extent (its
+                        // lowest opaque native row, mapped through the story scale).
+                        // The flanks BELOW the side art then stay the theme backdrop
+                        // rather than an opaque transparent-crop block — no art
+                        // stretching or tiling into the reclaimed space. Letterbox is
+                        // untouched (its bands lie within the scaled canvas anyway).
+                        if reclaim {
+                            let ch = cell_px.1.max(1) as f32;
+                            let art_bottom_px =
+                                (0..gfx.height()).rev().find(|&y| (0..gfx.width()).any(|x| gfx.get_pixel(x, y)[3] >= 128));
+                            let clip_row = match art_bottom_px {
+                                Some(y) => area.y + ((scale.off_y as f32 + (y + 1) as f32 * scale.s) / ch).ceil() as u16,
+                                None => area.y,
+                            };
+                            for b in &mut ring_bands {
+                                if b.y >= clip_row {
+                                    b.height = 0;
+                                } else {
+                                    b.height = b.height.min(clip_row - b.y);
+                                }
+                            }
+                            ring_bands.retain(|b| b.height > 0 && b.width > 0);
+                        }
+                        let strips = decompose_chrome_strips(&ring_bands, area, &scale, cell_px, story, &gfx, &chrome_runs);
+                        let menu_strips = match &menu {
+                            Some(ms) => decompose_chrome_strips(&menu_bands, area, ms, cell_px, story, &gfx, &chrome_runs),
+                            None => Vec::new(),
+                        };
                         // SQ-0504: rows drawn as terminal CELLS (pure-text strips)
                         // must not ALSO reach the pixel bands. Carve every text-strip
                         // run's native rows out of the band canvas: excludes the
@@ -515,6 +602,7 @@ fn render_node(
                         // the side band's ring untouched.
                         let text_run_tops: Vec<u16> = strips
                             .iter()
+                            .chain(menu_strips.iter())
                             .flat_map(|s| match s {
                                 ChromeStrip::Text(_, runs) => runs.iter().map(|t| t.y.max(1) - 1).collect::<Vec<_>>(),
                                 ChromeStrip::Art(_) => Vec::new(),
@@ -526,6 +614,7 @@ fn render_node(
                             let mut gr = state.graphics_render.borrow_mut();
                             let live: std::collections::HashSet<_> = strips
                                 .iter()
+                                .chain(menu_strips.iter())
                                 .filter_map(|s| match s {
                                     ChromeStrip::Art(r) => Some((r.x, r.y, r.width, r.height)),
                                     ChromeStrip::Text(..) => None,
@@ -540,9 +629,26 @@ fn render_node(
                                     ),
                                 }
                             }
+                            if let Some(ms) = &menu {
+                                for strip in &menu_strips {
+                                    match strip {
+                                        ChromeStrip::Art(r) => gr.draw_chrome_band(picker, &canvas, ms, area, *r, buf),
+                                        ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
+                                            runs, *r, ms, cell_px, area, base, state.config.honor_game_colours, &state.colors, buf,
+                                        ),
+                                    }
+                                }
+                            }
                             // Record the letterbox geometry for click→game-pixel
-                            // mapping (Lane M): the chrome ring shares this scale.
-                            gr.record_hybrid_click_map(area, &scale, native, cell_px);
+                            // mapping (Lane M): the chrome ring shares this scale. In
+                            // the Menu plan the interactive read_char region IS the
+                            // bottom-anchored command strip, so record ITS scale — a
+                            // single V6ClickMap is one linear transform, and the menu
+                            // is where clicks are meaningful (story-region clicks map
+                            // through the menu offset, but the game reads only the
+                            // menu pixels). Extend/Letterbox use one scale everywhere.
+                            let click_scale = menu.as_ref().unwrap_or(&scale);
+                            gr.record_hybrid_click_map(area, click_scale, native, cell_px);
                         }
                         // The story window as real terminal text (primary-Buffer path).
                         let metrics = render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors);
@@ -1442,6 +1548,67 @@ fn draw_painted_screen(
 enum ChromeStrip<'a> {
     Art(Rect),
     Text(Rect, Vec<&'a crate::engine::PxText>),
+}
+
+/// SQ-0505 dynamic hybrid layout: how the vertical letterbox slack below the
+/// story window is reclaimed.
+///   `Letterbox` — keep today's centred frame (Zork0's enclosed full frame, or a
+///                 pane with no slack to reclaim).
+///   `Extend`    — top-anchor the ring and grow the story viewport to the pane
+///                 bottom (Arthur: header art + side borders, open below).
+///   `Menu`      — top-anchor the story/chrome and bottom-anchor a text command
+///                 strip; the story fills between (Journey's command menu).
+enum BottomPlan {
+    Letterbox,
+    Extend,
+    Menu,
+}
+
+/// Classify what sits below the story window natively, to pick the [`BottomPlan`]
+/// (SQ-0505). `slack` is the vertical letterbox margin in device pixels.
+///
+/// Keeps the centred letterbox when there is no slack to reclaim, when the story
+/// already reaches the native screen bottom (its frame encloses it — Zork0's story
+/// bottom is 398 of 400), or when a real ART band spans the story columns below it
+/// (rule 4). Otherwise the below-story region is text-only (→ `Menu`) or empty
+/// (→ `Extend`). The art test is restricted to the STORY COLUMNS so full-height
+/// side borders (which flank, not floor, the story) never read as a bottom band.
+fn hybrid_bottom_plan(
+    story: &crate::engine::PositionedWindow,
+    gfx: &image::RgbaImage,
+    chrome_runs: &[&crate::engine::PxText],
+    native: (u16, u16),
+    slack: u32,
+) -> BottomPlan {
+    if slack == 0 {
+        return BottomPlan::Letterbox;
+    }
+    let story_bottom = story.y_px as u32 + story.h_px as u32;
+    // Story fills to (within one native row of) the screen bottom → enclosed
+    // frame, nothing to reclaim in-frame; keep the centred letterbox.
+    if native.1 as u32 <= story_bottom + 16 {
+        return BottomPlan::Letterbox;
+    }
+    let sx0 = story.x_px as u32;
+    let sx1 = (story.x_px as u32 + story.w_px as u32).min(gfx.width());
+    let colw = sx1.saturating_sub(sx0);
+    // A genuine bottom ART band covers most of the story columns below the window.
+    let art_band = colw > 0
+        && (story_bottom..native.1 as u32).any(|y| {
+            let cnt = (sx0..sx1).filter(|&x| gfx.get_pixel(x, y)[3] >= 128).count() as u32;
+            cnt * 2 >= colw
+        });
+    if art_band {
+        return BottomPlan::Letterbox;
+    }
+    let text_below = chrome_runs
+        .iter()
+        .any(|t| !t.text.trim().is_empty() && (t.y.max(1) as u32 - 1) >= story_bottom);
+    if text_below {
+        BottomPlan::Menu
+    } else {
+        BottomPlan::Extend
+    }
 }
 
 /// Map a chrome run's native top-left game pixel to its pane-absolute terminal

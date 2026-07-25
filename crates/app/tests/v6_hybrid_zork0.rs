@@ -196,3 +196,33 @@ fn zork0_hybrid_status_on_art_stays_in_the_ring() {
     assert!(!screen.contains("Moves:"), "Zork0's on-art status stays in the ring, not cells:\n{screen}");
     assert!(!screen.contains("Score:"), "Zork0's on-art score stays in the ring, not cells");
 }
+
+/// (SQ-0505 dynamic hybrid layout — Zork0 pin) Zork0's frame ENCLOSES the story to
+/// the native screen bottom (story bottom 398 of 400), so even at a TALL pane where
+/// Arthur/Journey reclaim the letterbox dead space, Zork0 keeps today's CENTERED
+/// letterbox untouched. The rendered story viewport must equal the viewport the
+/// pre-SQ-0505 centered path computes — no top-anchoring, no bottom extension.
+#[test]
+fn zork0_hybrid_tall_pane_stays_letterboxed() {
+    let Some(session) = boot_zork0() else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+
+    let mut state = render_state(app::config::V6RenderMode::Hybrid);
+    state.push_transcript("West of House");
+    let area = Rect::new(0, 0, 90, 40);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    let vp = state.transcript_geom.get().expect("hybrid renders the story as a transcript").area;
+    let _ = items;
+
+    // The plan is Letterbox (Zork0's story reaches native y=398 of 400 → enclosed
+    // frame), so the viewport is the centered-letterbox box the pre-SQ-0505 path
+    // produced at 90×40 — pinned exactly (halfblocks 10×20 cells, native 640×400,
+    // scale 1.40625, off_y 118). One column is reserved for the scrollbar.
+    assert_eq!(vp, Rect::new(13, 12, 63, 21), "Zork0 keeps the centered letterbox viewport at a tall pane (no reclaim)");
+    // It IS centered — dead space above AND below the story (not top-anchored, not
+    // extended to the pane bottom), unlike the Arthur/Journey reclaim plans.
+    assert!(vp.y > 0, "letterbox leaves top margin (story not top-anchored): {vp:?}");
+    assert!(vp.bottom() < area.bottom(), "letterbox leaves bottom margin (story not extended): {vp:?}");
+}
