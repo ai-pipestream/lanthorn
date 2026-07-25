@@ -3192,6 +3192,7 @@ mod tests {
 
     // ── SQ-0502: termination-signal exit code ──────────────────────────────────
 
+    #[cfg(unix)] // signal_hook's SIGHUP/SIGTERM consts don't exist on Windows
     #[test]
     fn term_exit_code_is_128_plus_signum() {
         use std::sync::atomic::Ordering;
