@@ -759,6 +759,22 @@ pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, sound_availa
     // `write_screen_dims` once known (and on resize).
     write_screen_dims(mem, DEFAULT_SCREEN_ROWS, DEFAULT_SCREEN_COLS);
 
+    // Default colours (ZMSD §8.3.2/§8.3.3). Bytes $2C (default background) and
+    // $2D (default foreground) exist in V5+. §8.3.3: a colour-capable interpreter
+    // "should ... write its default background and foreground colours into bytes
+    // $2c and $2d"; §8.3.2: a non-colour interpreter should "write colours 2 and
+    // 9 (black and white) ... into the default background and foreground". Both
+    // cases are satisfied by black-background / white-foreground, our default
+    // presentation. Infocom's own V6 games ship $2C/$2D = 0 (an invalid "current"
+    // sentinel); games that read the header defaults to build a colour scheme —
+    // Beyond Zork (V5) among them — compute garbage colour numbers from 0/0 and
+    // their set_colour calls get ignored, leaving the game monochrome. Seeding
+    // valid numbers here makes such games colour correctly.
+    if version >= 5 {
+        mem.write_byte(0x2C, 2); // default background = black
+        mem.write_byte(0x2D, 9); // default foreground = white
+    }
+
     advertise_colour(mem, honor_game_colours);
     advertise_sound(mem, sound_available);
 }
@@ -1141,6 +1157,33 @@ mod tests {
         assert_eq!(mem.read_byte(0x01) & 1, 1, "colour bit set when honor=true");
         advertise_colour(&mut mem, false);
         assert_eq!(mem.read_byte(0x01) & 1, 0, "advertise_colour clears it again");
+    }
+
+    #[test]
+    fn default_colours_seeded_in_header_v5plus() {
+        // ZMSD §8.3.2/§8.3.3: the interpreter writes default bg/fg into $2C/$2D.
+        // Infocom stories ship 0/0 (invalid "current"); we overwrite with black
+        // (2) bg / white (9) fg so games that read the header defaults compute
+        // valid colour numbers.
+        for v in [5u8, 6, 7, 8] {
+            let mut mem = Memory::new(sample_story(v)).unwrap();
+            mem.write_byte(0x2C, 0); // simulate Infocom's 0/0
+            mem.write_byte(0x2D, 0);
+            init_header_caps(&mut mem, true, false, None);
+            assert_eq!(mem.read_byte(0x2C), 2, "v{v} default background = black(2)");
+            assert_eq!(mem.read_byte(0x2D), 9, "v{v} default foreground = white(9)");
+        }
+    }
+
+    #[test]
+    fn default_colours_not_written_pre_v5() {
+        // $2C/$2D are not colour-default bytes before V5; leave them alone.
+        let mut mem = Memory::new(sample_story(3)).unwrap();
+        mem.write_byte(0x2C, 0x11);
+        mem.write_byte(0x2D, 0x22);
+        init_header_caps(&mut mem, true, false, None);
+        assert_eq!(mem.read_byte(0x2C), 0x11, "v3 $2C untouched");
+        assert_eq!(mem.read_byte(0x2D), 0x22, "v3 $2D untouched");
     }
 
     #[test]

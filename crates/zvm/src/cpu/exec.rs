@@ -3452,13 +3452,24 @@ fn decode_set_colour_v6(v: u16) -> Option<crate::screen::ZColour> {
 }
 
 /// Decode a `set_true_colour` operand (signed). Returns `None` for "keep".
+///
+/// ZMSD §8.3.7 special values: (-1) = default, (-2) = current, (-3) = colour
+/// under the cursor (V6 only), (-4) = transparent (V6 only). We map -1 to the
+/// `Default` sentinel and -2 to "keep" (current channel, unchanged). -3 (pixel
+/// under the cursor) needs render feedback we don't have headless, so it is a
+/// no-op keep. -4 (transparent) is a background-only V6 feature we don't model
+/// as a distinct state; §8.3.6 says "Interpreters not supporting transparency
+/// must ignore any attempt to select colour 15", so ignoring (keep) is
+/// conformant. Non-negative values are 15-bit true RGB (bit 15 is always 0).
 fn decode_true_colour(v: u16) -> Option<crate::screen::ZColour> {
     use crate::screen::ZColour;
     match v as i16 {
-        -2 => None,                        // keep current channel
-        -1 => Some(ZColour::Default),      // default
+        -1 => Some(ZColour::Default),      // default setting
+        -2 => None,                        // current setting → keep channel
+        -3 => None,                        // colour under cursor (V6) → keep (no render feedback)
+        -4 => None,                        // transparent (V6) → ignore per §8.3.6 (keep)
         n if n >= 0 => Some(ZColour::True((n as u16) & 0x7FFF)),
-        _ => None,                         // -3 transparent / other → keep
+        _ => None,                         // other negatives (bit15 set / invalid) → keep
     }
 }
 
@@ -7015,6 +7026,20 @@ pub(crate) mod tests {
         m.step(); m.step();
         assert_eq!(m.screen.current_fg, ZColour::Standard(3), "-2 kept fg");
         assert_eq!(m.screen.current_bg, ZColour::Default, "-1 set bg default");
+    }
+
+    #[test]
+    fn decode_true_colour_spec_sentinels() {
+        // ZMSD §8.3.7: (-1) default, (-2) current, (-3) under cursor (V6),
+        // (-4) transparent (V6). -1 → Default; -2/-3/-4 → keep (None). -3 (no
+        // render feedback) and -4 (transparency unsupported, §8.3.6 says ignore)
+        // are conformant no-ops. Non-negative = 15-bit RGB (bit15 masked off).
+        assert_eq!(decode_true_colour((-1i16) as u16), Some(ZColour::Default));
+        assert_eq!(decode_true_colour((-2i16) as u16), None, "-2 current → keep");
+        assert_eq!(decode_true_colour((-3i16) as u16), None, "-3 under-cursor → keep");
+        assert_eq!(decode_true_colour((-4i16) as u16), None, "-4 transparent → ignore/keep");
+        assert_eq!(decode_true_colour(0x0000), Some(ZColour::True(0x0000)), "black");
+        assert_eq!(decode_true_colour(0x7FFF), Some(ZColour::True(0x7FFF)), "white");
     }
 
     // -----------------------------------------------------------------------
