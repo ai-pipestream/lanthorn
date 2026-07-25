@@ -313,6 +313,107 @@ fn journey_hybrid_header_bar_spans_full_pane_width() {
     );
 }
 
+/// (h, SQ-0508) At a pane size whose letterbox scale spreads the menu's native rows
+/// across MORE terminal rows (100×30 → scale 1.2, so native rows 19–24 map to
+/// terminal rows 23,24,25,26,gap-27,28,29), the whole menu panel reads as ONE solid
+/// black block and the reversed vertical column dividers stay CONTINUOUS through the
+/// scale-introduced gap row — no broken lines, no theme backdrop through the gaps.
+#[test]
+fn journey_hybrid_menu_full_black_panel_dividers_continuous() {
+    use ratatui::style::{Color, Modifier};
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    // 100×30 → pane_dev 800×480, native 640×400, scale = min(1.25, 1.2) = 1.2:
+    // the menu's six native rows spread to seven terminal rows (one is a gap).
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    let reversed = |x: u16, y: u16| buf.cell((x, y)).unwrap().modifier.contains(Modifier::REVERSED);
+
+    let header_y = (0..area.height).find(|&y| row_text(y).contains("The Party")).expect("header row");
+    let game_y = (header_y..area.height).find(|&y| row_text(y).contains("Game")).expect("last menu row (Game)");
+    assert!(game_y > header_y + 4, "the menu spans several rows (header {header_y}, Game {game_y})");
+
+    // (a) The ENTIRE menu panel is a black background — every cell in the strip
+    // (reversed or not, the stored bg stays black under the REVERSED modifier) is
+    // Color::Black, so no theme backdrop shows through the gaps between the runs.
+    for y in header_y..=game_y {
+        for x in 0..area.width {
+            assert_eq!(
+                buf.cell((x, y)).unwrap().bg,
+                Color::Black,
+                "menu cell ({x},{y}) must be on the black panel bg; row: {:?}",
+                row_text(y)
+            );
+        }
+    }
+
+    // (b) Divider continuity. Collect the reversed column dividers from a body row
+    // (the "Proceed" row), then assert EVERY menu body row — including the blank
+    // scale-introduced gap row — is reversed at each of those columns.
+    let proceed_y = (header_y..=game_y).find(|&y| row_text(y).contains("Proceed")).expect("Proceed row");
+    let dividers: Vec<u16> = (0..area.width)
+        .filter(|&x| reversed(x, proceed_y) && row_text(proceed_y).chars().nth(x as usize) == Some(' '))
+        .collect();
+    assert!(dividers.len() >= 4, "the menu body has ≥4 reversed column dividers; got {dividers:?}");
+    // The gap row: a menu body row whose text is entirely blank (no verb text) — it
+    // exists only because the scale spread the rows. It MUST still carry the dividers.
+    let gap_y = ((header_y + 1)..game_y).find(|&y| row_text(y).trim().is_empty());
+    assert!(gap_y.is_some(), "the scale-spread menu has a blank gap row between body rows");
+    for y in (header_y + 1)..=game_y {
+        for &x in &dividers {
+            assert!(
+                reversed(x, y),
+                "column divider at col {x} must stay reversed on row {y} (continuous vertical line); row: {:?}",
+                row_text(y)
+            );
+        }
+    }
+}
+
+/// (i, SQ-0509 regression guard) The menu items are SEPARATE runs with real pixel
+/// gaps + reversed dividers between them — the SQ-0509 fragment-merging must NOT
+/// blob them into one word. Even at scale 1.2 the body row still reads its verbs as
+/// distinct, space-separated tokens ("Praxix", "Cast", "Examine"), and the dividers
+/// keep them apart.
+#[test]
+fn journey_hybrid_menu_items_not_merged() {
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    let body: String = (0..area.height).map(|y| row_text(y) + "\n").collect();
+    // Each verb is present as its own token, and adjacent items never fuse.
+    for verb in ["Proceed", "Bergon", "Praxix", "Cast", "Examine", "Inventory"] {
+        assert!(body.contains(verb), "menu verb {verb:?} present as its own run; got:\n{body}");
+    }
+    assert!(!body.contains("PraxixCast") && !body.contains("CastExamine"), "adjacent menu items must NOT merge:\n{body}");
+    // The Praxix row keeps its items spaced apart (a divider/space between them).
+    let prow = (0..area.height).map(row_text).find(|r| r.contains("Praxix")).expect("Praxix row");
+    let pi = prow.find("Praxix").unwrap();
+    let ci = prow.find("Cast").unwrap();
+    assert!(ci > pi + "Praxix".len() + 1, "Praxix and Cast stay separated by a gap; row: {prow:?}");
+}
+
 /// (g, SQ-0504) The pixel-band canvas EXCLUDES the pure-text menu rows: after the
 /// text-strip rows are carved out (exactly what the hybrid path feeds its bands),
 /// the menu's native rows carry NO ink — so the rasterized menu can never appear

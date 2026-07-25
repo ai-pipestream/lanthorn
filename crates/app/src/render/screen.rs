@@ -1491,6 +1491,19 @@ fn decompose_chrome_strips<'a>(
         let py = t.y.max(1) as i32 - 1;
         py >= story_bottom || py + 16 <= story_top
     };
+    let row_runs_at = |row: u16| -> Vec<&'a crate::engine::PxText> {
+        runs.iter()
+            .copied()
+            .filter(|t| below_or_above(t) && run_cell(t, scale, cell_px, pane).1 == row as i32)
+            .collect()
+    };
+    // One terminal row's class within a full-width band.
+    enum RowClass<'b> {
+        Text(Vec<&'b crate::engine::PxText>),
+        Art,
+        /// No runs and no opaque frame art behind — bare background.
+        Empty,
+    }
     let mut out = Vec::new();
     for band in bands {
         // Side bands (narrower than the pane) are never text — one Art strip.
@@ -1499,33 +1512,54 @@ fn decompose_chrome_strips<'a>(
             continue;
         }
         // Classify each terminal row of this full-width band.
-        let mut row = band.y;
-        while row < band.bottom() {
-            let row_runs: Vec<&crate::engine::PxText> = runs
-                .iter()
-                .copied()
-                .filter(|t| below_or_above(t) && run_cell(t, scale, cell_px, pane).1 == row as i32)
-                .collect();
-            let is_text = !row_runs.is_empty() && !row_runs.iter().any(|t| over_art(t));
-            // Extend the strip over the run of same-class rows.
-            let mut end = row + 1;
-            let mut text_runs = row_runs;
-            while end < band.bottom() {
-                let next_runs: Vec<&crate::engine::PxText> = runs
-                    .iter()
-                    .copied()
-                    .filter(|t| below_or_above(t) && run_cell(t, scale, cell_px, pane).1 == end as i32)
-                    .collect();
-                let next_text = !next_runs.is_empty() && !next_runs.iter().any(|t| over_art(t));
-                if next_text != is_text {
-                    break;
-                }
-                text_runs.extend(next_runs);
-                end += 1;
+        let mut classes: Vec<RowClass> = Vec::new();
+        for row in band.y..band.bottom() {
+            let rr = row_runs_at(row);
+            classes.push(if rr.is_empty() {
+                RowClass::Empty
+            } else if rr.iter().any(|t| over_art(t)) {
+                RowClass::Art
+            } else {
+                RowClass::Text(rr)
+            });
+        }
+        // SQ-0508: bridge a scale-introduced interior gap row into the menu panel.
+        // When the letterbox scale spreads N native menu rows across N+ terminal
+        // rows, a bare terminal row can fall BETWEEN two menu rows (Journey's
+        // command menu: a blank row below the header, and one above "Tag"), breaking
+        // the reversed vertical column dividers. An Empty row whose nearest non-Empty
+        // neighbour above AND below are both Text is part of that panel → mark it Text
+        // so the whole menu is one strip (continuous background + dividers). Empty
+        // rows at an art boundary (Arthur's panel over the status) stay Art, so the
+        // pixel ring keeps showing through there.
+        let n = classes.len();
+        let is_text = |c: &RowClass| matches!(c, RowClass::Text(_));
+        let mut bridge = vec![false; n];
+        for i in 0..n {
+            if !matches!(classes[i], RowClass::Empty) {
+                continue;
             }
-            let rect = Rect::new(band.x, row, band.width, end - row);
-            out.push(if is_text { ChromeStrip::Text(rect, text_runs) } else { ChromeStrip::Art(rect) });
-            row = end;
+            let above = (0..i).rev().find(|&j| !matches!(classes[j], RowClass::Empty));
+            let below = (i + 1..n).find(|&j| !matches!(classes[j], RowClass::Empty));
+            if above.is_some_and(|j| is_text(&classes[j])) && below.is_some_and(|j| is_text(&classes[j])) {
+                bridge[i] = true;
+            }
+        }
+        // Coalesce consecutive same-class (Text|bridged vs. not) rows into strips.
+        let mut i = 0usize;
+        while i < n {
+            let text = matches!(classes[i], RowClass::Text(_)) || bridge[i];
+            let mut j = i;
+            let mut text_runs: Vec<&crate::engine::PxText> = Vec::new();
+            while j < n && (matches!(classes[j], RowClass::Text(_)) || bridge[j]) == text {
+                if let RowClass::Text(rr) = &classes[j] {
+                    text_runs.extend(rr.iter().copied());
+                }
+                j += 1;
+            }
+            let rect = Rect::new(band.x, band.y + i as u16, band.width, (j - i) as u16);
+            out.push(if text { ChromeStrip::Text(rect, text_runs) } else { ChromeStrip::Art(rect) });
+            i = j;
         }
     }
     out
@@ -1551,12 +1585,93 @@ fn draw_chrome_text_strip(
     colors: &ColorScheme,
     buf: &mut Buffer,
 ) {
+    use crate::engine::PxText;
     use std::collections::BTreeMap;
-    let mut by_row: BTreeMap<i32, Vec<&crate::engine::PxText>> = BTreeMap::new();
+
+    // SQ-0508(a): fill the WHOLE strip with the base window background first, so the
+    // menu/status panel reads as one solid block — the cells around and between the
+    // runs no longer show the theme backdrop. `base` is the `upper_window` theme
+    // style (chrome ink on a black surface); a per-run explicit game colour still
+    // wins where the run stamps over this fill below.
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            if let Some(c) = buf.cell_mut((x, y)) {
+                c.set_symbol(" ").set_style(base);
+            }
+        }
+    }
+
+    // Bucket runs by their scale-mapped terminal row.
+    let mut raw: BTreeMap<i32, Vec<&PxText>> = BTreeMap::new();
     for t in runs {
         let (_, row) = run_cell(t, scale, cell_px, pane);
-        by_row.entry(row).or_default().push(t);
+        raw.entry(row).or_default().push(t);
     }
+    // SQ-0509: merge horizontally-contiguous same-style fragments before mapping.
+    // A game (Arthur) that positions status text with proportional pixel metrics
+    // emits word fragments as separate runs whose pixel start abuts the previous
+    // run's pixel end; mapping each fragment independently through the letterbox
+    // scale rounds them into stray cell gaps ("Chu rch yard"). Runs within
+    // `FRAG_TOL` px of the previous end (and identical style/colours) concatenate
+    // into one run stamped contiguously from a single mapped cell; runs separated
+    // by a genuine gap (Journey's menu items / column dividers, 8px apart) stay
+    // distinct and keep their proportional spacing.
+    const FRAG_TOL: i32 = 4;
+    let mut by_row: BTreeMap<i32, Vec<PxText>> = BTreeMap::new();
+    for (row, mut rr) in raw {
+        rr.sort_by_key(|t| t.x);
+        let mut merged: Vec<PxText> = Vec::new();
+        for t in rr {
+            if let Some(last) = merged.last_mut() {
+                let last_end = (last.x.max(1) as i32 - 1) + last.text.chars().count() as i32 * 8;
+                let start = t.x.max(1) as i32 - 1;
+                if start >= last_end
+                    && start - last_end <= FRAG_TOL
+                    && last.style == t.style
+                    && last.fg == t.fg
+                    && last.bg == t.bg
+                {
+                    last.text.push_str(&t.text);
+                    continue;
+                }
+            }
+            merged.push((*t).clone());
+        }
+        by_row.insert(row, merged);
+    }
+
+    // SQ-0508(b): divider columns to draw continuously. A reversed WHITESPACE run in
+    // a MIXED row (normal verb text among reversed dividers — Journey's menu body) is
+    // a vertical column divider; extend every such column across the FULL strip height
+    // so the scale-introduced gap rows (bridged in as blank Text rows) don't break the
+    // lines. Collected from mixed rows only, so a pure-reverse bar row (a header /
+    // status bar, already filled edge to edge below) contributes none.
+    let mut divider_cols: Vec<u16> = Vec::new();
+    for row_runs in by_row.values() {
+        let mixed = row_runs.iter().any(|t| t.style & 1 == 0);
+        if !mixed {
+            continue;
+        }
+        for t in row_runs {
+            if t.style & 1 != 0 && t.text.trim().is_empty() {
+                let (c, _) = run_cell(t, scale, cell_px, pane);
+                if c >= rect.x as i32 && c < rect.right() as i32 {
+                    divider_cols.push(c as u16);
+                }
+            }
+        }
+    }
+    divider_cols.sort_unstable();
+    divider_cols.dedup();
+    if !divider_cols.is_empty() {
+        let rev = v6_run_style(base, 0, 0, 1, honor, colors);
+        for y in rect.y..rect.bottom() {
+            for &c in &divider_cols {
+                buf.set_stringn(c, y, " ", 1, rev);
+            }
+        }
+    }
+
     for (row, row_runs) in &by_row {
         if *row < rect.y as i32 || *row >= rect.bottom() as i32 {
             continue;

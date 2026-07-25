@@ -135,3 +135,40 @@ fn arthur_hybrid_status_row_is_solid_terminal_bar() {
         .count();
     assert!(panel_ink > 0, "the graphics panel above the status stays imaged in the ring (got {panel_ink} image cells)");
 }
+
+/// (SQ-0509) At a pane size whose letterbox scale is not 1.0 (100×30 → scale 1.2),
+/// Arthur's status text — emitted as single-glyph runs at fixed 8-px pixel starts —
+/// must still read "Churchyard" as ONE unbroken word: the strip merges the abutting
+/// fragments before mapping, instead of rounding each independently into stray cell
+/// gaps ("Chu rch yard"). The right-hand date field stays in the right portion of
+/// the bar (its runs are separated from the location by a real pixel gap, so they
+/// do NOT merge into the location text).
+#[test]
+fn arthur_hybrid_status_churchyard_is_one_word_date_right() {
+    let Some(session) = arthur_at_status() else { return };
+    let model = session.screen();
+
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    // 100×30 → scale 1.2: at 1.0 the fixed 8-px runs already lined up; only a
+    // non-unit scale exposed the per-run rounding that split the word.
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    let status_y = (0..area.height).find(|&y| row_text(y).contains("Anne")).expect("status row present");
+    let row = row_text(status_y);
+    // The location reads as one unbroken word — no stray gap inside it.
+    assert!(row.contains("Churchyard"), "location must read 'Churchyard' as one word; got: {row:?}");
+    // The date field is intact and sits in the RIGHT portion of the bar (well past
+    // the location on the left), never merged into the location run.
+    let date_at = row.find("St Anne's Day, Compline").expect("date field intact and contiguous");
+    let loc_at = row.find("Churchyard").unwrap();
+    assert!(date_at > loc_at + "Churchyard".len(), "the date stays to the right of the location");
+    assert!(date_at * 2 > area.width as usize, "the date sits in the right half of the {}-col bar (at {date_at})", area.width);
+}

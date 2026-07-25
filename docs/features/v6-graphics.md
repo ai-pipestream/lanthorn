@@ -79,7 +79,18 @@ Sixel):
   of the pixel bands entirely — their rasterized ink never reaches an uploaded
   band image (no raster bar showing through behind the cells), and because a
   band's image no longer depends on that text, navigating the menu re-encodes only
-  the genuinely changed artwork rather than every band.
+  the genuinely changed artwork rather than every band. The whole cell strip is
+  first flooded with the chrome background so the panel reads as one solid block —
+  no theme backdrop peeks through the cells between the runs — and when the
+  letterbox scale spreads the menu's native rows across *more* terminal rows than it
+  has (leaving a blank row mid-menu), that gap row is folded back into the panel and
+  its reversed vertical column dividers are carried through, so the lines never
+  break. Text that a game positions with proportional (sub-cell) pixel metrics —
+  Arthur emits its status words as separate abutting single-glyph runs — is
+  reassembled: fragments whose pixel start touches the previous run's end merge into
+  one word stamped from a single cell (so "Churchyard" stays whole instead of
+  scattering into "Chu rch yard"), while runs held apart by a real pixel gap (menu
+  items, column dividers) keep their spacing and never fuse.
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
   engine drew it natively.
