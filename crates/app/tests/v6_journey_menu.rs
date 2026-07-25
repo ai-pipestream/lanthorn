@@ -175,6 +175,83 @@ fn journey_hybrid_ring_shows_the_menu_band() {
     );
 }
 
+/// (d, SQ-0500) In HYBRID mode the bottom command menu is a PURE-TEXT chrome band
+/// (no artwork behind it), so it paints as real terminal CELLS — "Proceed" is
+/// findable as buffer text in the bottom rows — while the LEFT picture column
+/// (win3 graphics) stays in the pixel ring (image half-block cells, not text).
+#[test]
+fn journey_hybrid_menu_is_terminal_cells_picture_stays_ring() {
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let area = Rect::new(0, 0, 80, 25);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    // "Proceed" is a real menu verb painted as terminal text in the bottom band.
+    let menu_text: String = (18..area.height).map(|y| row_text(y) + "\n").collect();
+    assert!(
+        menu_text.contains("Proceed"),
+        "the command menu renders as terminal CELLS ('Proceed' as buffer text); got:\n{menu_text}"
+    );
+    assert!(menu_text.contains("Praxix"), "party column as cells too:\n{menu_text}");
+
+    // The left picture column stays a pixel-ring image: its cells are half-block
+    // graphics (▀/▄) or coloured, NOT terminal text. Scan the upper-left region.
+    let is_image_cell = |x: u16, y: u16| -> bool {
+        let c = buf.cell((x, y)).unwrap();
+        let sym = c.symbol();
+        sym == "\u{2580}" || sym == "\u{2584}" || c.bg != ratatui::style::Color::Reset
+    };
+    let pic_ink = (1..17)
+        .flat_map(|y| (0..24).map(move |x| (x, y)))
+        .filter(|&(x, y)| is_image_cell(x, y))
+        .count();
+    assert!(pic_ink > 0, "the left picture column stays imaged in the pixel ring (got {pic_ink} image cells)");
+}
+
+/// (e, SQ-0499 raster) In the pixel canvas Raster mode uploads, the menu header
+/// ("The Party" | "Individual Commands", both reverse-video) reads as ONE solid
+/// bar — the wide gap between the two labels fills with the reverse block. The
+/// menu BODY row (reversed column dividers among NON-reversed verb text) is left
+/// alone: the cells between its dividers stay bare, not a full-width bar.
+#[test]
+fn journey_raster_reverse_header_bar_is_solid_body_untouched() {
+    use app::render::v6_layout as v6;
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = v6::native_extent(items);
+    let layout = v6::classify_windows(items);
+    let colors = app::colors::ColorScheme::terminal_default();
+    let canvas = v6::build_chrome_canvas(
+        &layout.chrome, native, image::Rgba([220, 220, 220, 255]), image::Rgba([0, 0, 0, 255]), &colors,
+    );
+    // A whole 8-px cell is "filled" when every pixel column has opaque ink.
+    let cell_filled = |cx: u32, row: u32| -> bool {
+        let (x0, y0) = (cx * 8, row * 16);
+        (x0..(x0 + 8).min(canvas.width())).all(|x| {
+            (y0..(y0 + 16).min(canvas.height())).any(|y| canvas.get_pixel(x, y)[3] >= 128)
+        })
+    };
+    // Header row 19: "The Party" ends ~col28, "Individual Commands" starts ~col47.
+    // Every cell between them (the old bare gap) must now be a filled block.
+    let header_gap_solid = (30..46).all(|cx| cell_filled(cx, 19));
+    assert!(header_gap_solid, "row-19 header gap between the two labels fills into one solid reverse bar");
+    // Body row 20 has reversed dividers at cols ~15/31/47/63 with normal verb text
+    // between — the cells mid-column (e.g. 35..46, between two dividers, no text)
+    // must NOT be block-filled (that row is mixed, not a pure reverse bar).
+    let body_between_dividers_bare = (35..46).any(|cx| !cell_filled(cx, 20));
+    assert!(body_between_dividers_bare, "row-20 menu body stays normal (not over-filled) between its dividers");
+}
+
 /// (c) The menu is live through the app layer: a keypress (arrow) changes the
 /// painted runs and the game stays in `read_char` (still on the menu).
 #[test]

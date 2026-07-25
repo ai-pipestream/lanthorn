@@ -166,3 +166,33 @@ fn zork0_frameless_status_band_is_anchored_full_width() {
     // And it did NOT squat in the left 40 columns (the reported bug).
     assert!(!score_row[41..].trim().is_empty(), "right-side status reaches past the old 40-cell stamp: {score_row:?}");
 }
+
+/// (SQ-0500 pin) Zork0's status ("Moves:"/"Score:") sits ON opaque banner art, so
+/// in HYBRID mode its chrome band stays the pixel RING — the status labels must
+/// NOT appear as terminal cell text (unlike Arthur's clear-interior status row,
+/// which does become cells). Guards the "art behind → keep the ring" branch of the
+/// band decomposition.
+#[test]
+fn zork0_hybrid_status_on_art_stays_in_the_ring() {
+    let Some(session) = boot_zork0() else { return };
+    let model = session.screen();
+
+    let mut state = render_state(app::config::V6RenderMode::Hybrid);
+    state.push_transcript("West of House");
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    // The banner status labels are rasterized into the pixel ring, never stamped
+    // as terminal text cells.
+    let screen: String = (area.y..area.bottom())
+        .map(|y| {
+            (area.x..area.right())
+                .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+                .collect::<String>()
+                + "\n"
+        })
+        .collect();
+    assert!(!screen.contains("Moves:"), "Zork0's on-art status stays in the ring, not cells:\n{screen}");
+    assert!(!screen.contains("Score:"), "Zork0's on-art score stays in the ring, not cells");
+}

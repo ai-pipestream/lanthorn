@@ -61,11 +61,19 @@ Sixel):
   babelmap transcript — including its own inline images (see below). The ring
   is tiled into up to four non-overlapping bands (top/bottom/left/right)
   around the viewport; a band flush against the pane edge is simply omitted.
-  A painted command menu that sits *below* the story window rides that bottom
-  band — Journey drives its whole interface through one (a full-width bar sized
-  to zero height that paints "Proceed / Back / Game", the party column, and the
-  verb columns as fixed pixel runs), and it rasterizes into the bottom ring
-  rather than the story viewport.
+  Each top/bottom band is then decomposed further: a horizontal strip that is
+  **pure chrome text** — status/menu runs with *no* opaque frame art behind it —
+  drops out of the pixel ring and paints as **real terminal cells** (crisp,
+  selectable, themed via the game-colour resolver, with solid reverse-video
+  bars), while a strip that sits over actual artwork keeps the scaled pixel
+  image. So Journey's bottom command menu ("Proceed / Back / Game", the party
+  column, the verb columns — a full-width window sized to zero height that paints
+  fixed pixel runs) becomes terminal text while its left picture column stays
+  imaged; Arthur's location/date status row becomes a crisp reverse bar sitting
+  between the graphics panel above it and the story below; and Zork Zero's
+  status, painted directly *onto* its banner art, stays in the ring. Where a
+  reverse-video bar is drawn as separate runs with bare cells between them, the
+  gaps fill so it reads as one solid block.
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
   engine drew it natively.

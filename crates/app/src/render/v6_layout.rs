@@ -6,7 +6,7 @@
 use image::{Rgba, RgbaImage};
 
 use crate::colors::ColorScheme;
-use crate::engine::{PositionedWindow, WinNode};
+use crate::engine::{PositionedWindow, PxText, WinNode};
 
 /// Resolve a packed z-colour (see `crate::state::pack_zcolour`) to an opaque
 /// RGBA. `0` (Default) → `fallback`. True24 → its RGB. Palette/standard colours
@@ -294,6 +294,100 @@ pub(crate) fn fill_cell(canvas: &mut RgbaImage, px: u32, py: u32, cw: u32, ch: u
 /// paints an opaque block (there is no "transparent ink"), so a run whose
 /// colours are unset falls back to `default_bg`/`default_fg` respectively
 /// rather than leaving the swapped-in channel transparent.
+/// Blit every chrome Graphics window onto `canvas`, in list order (later entries
+/// draw over earlier ones only where opaque). The window canvas is authored in
+/// native game pixels (pictures at their native size/coords), so blit it 1:1 at
+/// the window origin — never scaled — clipped to the window's pixel box (ZMSD §8:
+/// plotting is always clipped to the window; a canvas can be larger than the
+/// current box when the window has since shrunk). Shared by [`build_chrome_canvas`]
+/// (pass 1) and [`build_graphics_canvas`].
+fn blit_chrome_graphics(canvas: &mut RgbaImage, chrome: &[&PositionedWindow]) {
+    for it in chrome {
+        if let WinNode::Graphics(gwn) = &it.node {
+            let src = &gwn.canvas;
+            blit_clipped(canvas, src, it.x_px as u32, it.y_px as u32, it.w_px.max(1) as u32, it.h_px.max(1) as u32);
+        }
+    }
+}
+
+/// Build a native-resolution canvas containing ONLY the chrome frame graphics —
+/// no status/menu text. Used by the hybrid band decomposition to tell a band
+/// strip that sits over real artwork (keeps the pixel ring) from a pure-text
+/// strip (paints as terminal cells), via [`region_has_opaque`] — the full chrome
+/// canvas can't answer that because rasterized text is itself opaque (SQ-0500).
+pub fn build_graphics_canvas(chrome: &[&PositionedWindow], native: (u16, u16)) -> RgbaImage {
+    let mut canvas = RgbaImage::new(native.0 as u32, native.1 as u32);
+    blit_chrome_graphics(&mut canvas, chrome);
+    canvas
+}
+
+/// SQ-0499: fill the unpainted interior cells of a PURE reverse-video row (one
+/// whose every painted run is reversed) so a status/menu bar the game drew as
+/// separate runs with bare gaps between them reads as one solid block. Games paint
+/// a reversed bar as its text runs plus, sometimes, reversed spacer spaces — but
+/// leave odd cells unpainted (Arthur's status skips one cell before "St Anne's
+/// Day"; Journey's menu header leaves a wide gap between its two labels), and the
+/// per-run block painting can't fill a cell no run covers. Only PURE reverse rows
+/// qualify: a row carrying any NON-reversed run is a mixed layout (Journey's menu
+/// BODY — reversed column dividers among normal verb text) and its gaps are real
+/// background, left alone. Inherited reverse over opaque frame art still paints no
+/// block (Zork0's ribbon labels sit ON the banner), matching the per-run over-art
+/// rule so `region_has_opaque` gates each filled cell.
+fn fill_reverse_row_gaps(
+    canvas: &mut RgbaImage,
+    texts: &[PxText],
+    default_fg: Rgba<u8>,
+    colors: &ColorScheme,
+) {
+    use std::collections::BTreeMap;
+    let mut rows: BTreeMap<u32, Vec<&PxText>> = BTreeMap::new();
+    for t in texts {
+        rows.entry(t.y.max(1) as u32 - 1).or_default().push(t);
+    }
+    for (py, runs) in rows {
+        // Pure reverse-video row only: every run reversed (and at least one run).
+        if runs.is_empty() || runs.iter().any(|t| t.style & 1 == 0) {
+            continue;
+        }
+        // The pixel spans the runs already painted, sorted and merged — the gaps
+        // BETWEEN them are what's bare. A row that named real colours fills its
+        // gaps with the swapped block unconditionally; an inherited row defers to
+        // the over-art rule per gap.
+        let mut explicit_block: Option<Rgba<u8>> = None;
+        let mut spans: Vec<(u32, u32)> = runs
+            .iter()
+            .map(|t| {
+                if explicit_block.is_none() && (packed_explicit(t.fg) || packed_explicit(t.bg)) {
+                    explicit_block = Some(packed_to_rgba(t.fg, default_fg, colors));
+                }
+                let s = t.x.max(1) as u32 - 1;
+                (s, s + t.text.chars().count().max(1) as u32 * FONT_W)
+            })
+            .collect();
+        spans.sort_unstable();
+        // Fill each gap at its EXACT pixel extent (not cell-quantized): a run's
+        // start is `x - 1`, rarely 8-aligned, so a quantized fill cell would bleed
+        // a pixel into the next run and make its own over-art test (SQ-0487) see
+        // the fill as artwork — dropping that run's block. Exact gaps never touch
+        // a run's pixels.
+        let mut cursor = spans.first().map(|&(s, _)| s).unwrap_or(0);
+        for &(s, e) in &spans {
+            if s > cursor {
+                let (gs, ge) = (cursor, s);
+                let block = match explicit_block {
+                    Some(b) => Some(b),
+                    None if region_has_opaque(canvas, gs, py, ge - gs, FONT_H) => None,
+                    None => Some(default_fg),
+                };
+                if let Some(b) = block {
+                    fill_cell(canvas, gs, py, ge - gs, FONT_H, b);
+                }
+            }
+            cursor = cursor.max(e);
+        }
+    }
+}
+
 pub fn build_chrome_canvas(
     chrome: &[&PositionedWindow],
     native: (u16, u16),
@@ -303,17 +397,8 @@ pub fn build_chrome_canvas(
 ) -> RgbaImage {
     let mut canvas = RgbaImage::new(native.0 as u32, native.1 as u32);
 
-    // Pass 1 — Graphics entries, in list order. The window canvas is authored in
-    // native game pixels (pictures drawn at their native size/coords), so blit it
-    // 1:1 at the window origin — never scaled — and clip to the window's pixel
-    // box (ZMSD §8: plotting is always clipped to the window; a canvas can be
-    // larger than the current box when the window has since shrunk).
-    for it in chrome {
-        if let WinNode::Graphics(gwn) = &it.node {
-            let src = &gwn.canvas;
-            blit_clipped(&mut canvas, src, it.x_px as u32, it.y_px as u32, it.w_px.max(1) as u32, it.h_px.max(1) as u32);
-        }
-    }
+    // Pass 1 — Graphics entries.
+    blit_chrome_graphics(&mut canvas, chrome);
 
     // Pass 2 — Grid (status) entries, in list order. A v6 grid with
     // pixel-positioned runs draws those at their EXACT game pixel positions
@@ -331,6 +416,12 @@ pub fn build_chrome_canvas(
                 // opaque block — the original renders dark ink directly ON the
                 // art. A block is painted only when the game chose colours.
                 let explicit = packed_explicit;
+                // Fill pure-reverse-row gaps FIRST, while the canvas still holds
+                // only frame graphics (pass 1) — so the over-art test sees real
+                // artwork, not a neighbouring run's own glyph block bleeding one
+                // pixel into an odd-aligned gap cell (SQ-0499). The glyph loop then
+                // paints the run cells on top.
+                fill_reverse_row_gaps(&mut canvas, &g.px_texts, default_fg, colors);
                 for t in &g.px_texts {
                     let px0 = t.x.max(1) as u32 - 1;
                     let py = t.y.max(1) as u32 - 1;

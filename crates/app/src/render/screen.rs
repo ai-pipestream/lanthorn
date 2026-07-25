@@ -480,13 +480,47 @@ fn render_node(
                         // The viewport in the pane's absolute cell coordinates.
                         let viewport = Rect::new(area.x + vp.x, area.y + vp.y, vp.width, vp.height);
                         let bands = v6::chrome_bands(area, viewport);
+                        // SQ-0500: a full-width chrome band (top/bottom) is carved
+                        // into horizontal strips — an ART strip (opaque frame
+                        // graphics behind it) keeps the scaled pixel RING; a
+                        // TEXT-ONLY strip (no graphics behind, just status/menu
+                        // runs) paints as crisp terminal CELLS. Journey's bottom
+                        // command menu becomes text while its left picture column
+                        // (a narrow side band) stays ring; Arthur's status row
+                        // becomes text between the art panel above and the story
+                        // below; Zork0's status sits ON banner art so every strip
+                        // stays ring. The graphics-only canvas answers "art behind
+                        // this strip?" — the full chrome canvas can't, since its
+                        // rasterized text is itself opaque.
+                        let gfx = v6::build_graphics_canvas(&layout.chrome, native);
+                        let chrome_runs: Vec<&crate::engine::PxText> = layout
+                            .chrome
+                            .iter()
+                            .filter_map(|it| match &it.node {
+                                WinNode::Grid(g) => Some(g.px_texts.iter()),
+                                _ => None,
+                            })
+                            .flatten()
+                            .collect();
+                        let strips = decompose_chrome_strips(&bands, area, &scale, cell_px, story, &gfx, &chrome_runs);
+                        let base = state.colors.theme.get("upper_window").style;
                         {
                             let mut gr = state.graphics_render.borrow_mut();
-                            let live: std::collections::HashSet<_> =
-                                bands.iter().map(|b| (b.x, b.y, b.width, b.height)).collect();
+                            let live: std::collections::HashSet<_> = strips
+                                .iter()
+                                .filter_map(|s| match s {
+                                    ChromeStrip::Art(r) => Some((r.x, r.y, r.width, r.height)),
+                                    ChromeStrip::Text(..) => None,
+                                })
+                                .collect();
                             gr.retain_chrome_bands(&live);
-                            for band in &bands {
-                                gr.draw_chrome_band(picker, &canvas, &scale, area, *band, buf);
+                            for strip in &strips {
+                                match strip {
+                                    ChromeStrip::Art(r) => gr.draw_chrome_band(picker, &canvas, &scale, area, *r, buf),
+                                    ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
+                                        runs, *r, &scale, cell_px, area, base, state.config.honor_game_colours, &state.colors, buf,
+                                    ),
+                                }
                             }
                             // Record the letterbox geometry for click→game-pixel
                             // mapping (Lane M): the chrome ring shares this scale.
@@ -501,7 +535,6 @@ fn render_node(
                         // them because the terminal viewport covers that area).
                         // Native px → device px (chrome-ring scale) → terminal
                         // cell, glyphs only (no background fill).
-                        let base = state.colors.theme.get("upper_window").style;
                         for it in &layout.chrome {
                             if let WinNode::Grid(g) = &it.node {
                                 for t in &g.px_texts {
@@ -1381,6 +1414,167 @@ fn draw_painted_screen(
         let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
         let max_w = (area.right() - (area.x + col)) as usize;
         buf.set_stringn(area.x + col, area.y + row, &t.text, max_w, style);
+    }
+}
+
+/// One horizontal strip of a full-width hybrid chrome band (SQ-0500): either
+/// `Art` (opaque frame graphics behind it — keep the scaled pixel ring) or `Text`
+/// (no graphics behind, only status/menu runs — paint as terminal cells). The
+/// runs carried by a `Text` strip are the chrome grid runs that map into it.
+enum ChromeStrip<'a> {
+    Art(Rect),
+    Text(Rect, Vec<&'a crate::engine::PxText>),
+}
+
+/// Map a chrome run's native top-left game pixel to its pane-absolute terminal
+/// cell (col, row) through the letterbox `scale` — the same mapping the pixel
+/// ring and the inside-story overlay use, so a text strip lines up exactly with
+/// the art strips beside it.
+fn run_cell(t: &crate::engine::PxText, scale: &crate::render::v6_layout::Scale, cell_px: (u16, u16), pane: Rect) -> (i32, i32) {
+    let cw = cell_px.0.max(1) as f32;
+    let ch = cell_px.1.max(1) as f32;
+    let px = t.x.max(1) as f32 - 1.0;
+    let py = t.y.max(1) as f32 - 1.0;
+    let col = pane.x as i32 + ((scale.off_x as f32 + px * scale.s) / cw).round() as i32;
+    let row = pane.y as i32 + ((scale.off_y as f32 + py * scale.s) / ch).round() as i32;
+    (col, row)
+}
+
+/// Carve the hybrid chrome `bands` into drawable strips (SQ-0500). Narrow side
+/// bands (beside the story viewport) stay one `Art` strip — picture columns and
+/// borders. Each FULL-WIDTH band (top/bottom of the ring) is split row-by-row:
+/// a terminal row is a TEXT row when it carries chrome runs that lie OUTSIDE the
+/// story box, above or below it, with NO opaque frame graphics behind them; every
+/// other row is ART. Consecutive rows of one class merge into a strip. `story` is
+/// the story window (its native pixel box splits above/below); `gfx` is the
+/// graphics-only chrome canvas (the art test, via [`region_has_opaque`]).
+fn decompose_chrome_strips<'a>(
+    bands: &[Rect],
+    pane: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    story: &crate::engine::PositionedWindow,
+    gfx: &image::RgbaImage,
+    runs: &[&'a crate::engine::PxText],
+) -> Vec<ChromeStrip<'a>> {
+    use crate::render::v6_layout::region_has_opaque;
+    let story_top = story.y_px as i32;
+    let story_bottom = story.y_px as i32 + story.h_px as i32;
+    // A run sits over opaque frame art when its glyph span overlaps graphics.
+    let over_art = |t: &crate::engine::PxText| -> bool {
+        let px0 = t.x.max(1) as u32 - 1;
+        let py = t.y.max(1) as u32 - 1;
+        let w = t.text.chars().count().max(1) as u32 * 8;
+        region_has_opaque(gfx, px0, py, w, 16)
+    };
+    // A run is a text-band candidate when it lies fully above or below the story
+    // box (never beside it — those stay in the side bands' ring).
+    let below_or_above = |t: &crate::engine::PxText| -> bool {
+        let py = t.y.max(1) as i32 - 1;
+        py >= story_bottom || py + 16 <= story_top
+    };
+    let mut out = Vec::new();
+    for band in bands {
+        // Side bands (narrower than the pane) are never text — one Art strip.
+        if band.width < pane.width {
+            out.push(ChromeStrip::Art(*band));
+            continue;
+        }
+        // Classify each terminal row of this full-width band.
+        let mut row = band.y;
+        while row < band.bottom() {
+            let row_runs: Vec<&crate::engine::PxText> = runs
+                .iter()
+                .copied()
+                .filter(|t| below_or_above(t) && run_cell(t, scale, cell_px, pane).1 == row as i32)
+                .collect();
+            let is_text = !row_runs.is_empty() && !row_runs.iter().any(|t| over_art(t));
+            // Extend the strip over the run of same-class rows.
+            let mut end = row + 1;
+            let mut text_runs = row_runs;
+            while end < band.bottom() {
+                let next_runs: Vec<&crate::engine::PxText> = runs
+                    .iter()
+                    .copied()
+                    .filter(|t| below_or_above(t) && run_cell(t, scale, cell_px, pane).1 == end as i32)
+                    .collect();
+                let next_text = !next_runs.is_empty() && !next_runs.iter().any(|t| over_art(t));
+                if next_text != is_text {
+                    break;
+                }
+                text_runs.extend(next_runs);
+                end += 1;
+            }
+            let rect = Rect::new(band.x, row, band.width, end - row);
+            out.push(if is_text { ChromeStrip::Text(rect, text_runs) } else { ChromeStrip::Art(rect) });
+            row = end;
+        }
+    }
+    out
+}
+
+/// Paint a TEXT chrome strip (SQ-0500) as terminal cells: each run stamped at its
+/// scale-mapped cell with [`v6_run_style`], clipped to `rect`. A PURE reverse-video
+/// row (a status/menu bar — every run reversed) first fills the cells between its
+/// first and last reversed column with a reversed space, so a bar the game painted
+/// as separate runs with bare gaps reads as one solid block (SQ-0499 cell path):
+/// Arthur's status row loses its lone unreversed cell; Journey's menu header bar
+/// closes the gap between its two labels. Mixed rows (Journey's menu body — normal
+/// verb text with reversed dividers) skip the fill.
+#[allow(clippy::too_many_arguments)]
+fn draw_chrome_text_strip(
+    runs: &[&crate::engine::PxText],
+    rect: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+    base: ratatui::style::Style,
+    honor: bool,
+    colors: &ColorScheme,
+    buf: &mut Buffer,
+) {
+    use std::collections::BTreeMap;
+    let mut by_row: BTreeMap<i32, Vec<&crate::engine::PxText>> = BTreeMap::new();
+    for t in runs {
+        let (_, row) = run_cell(t, scale, cell_px, pane);
+        by_row.entry(row).or_default().push(t);
+    }
+    for (row, row_runs) in &by_row {
+        if *row < rect.y as i32 || *row >= rect.bottom() as i32 {
+            continue;
+        }
+        // Pure reverse-video row: fill the intervening cells reversed (SQ-0499).
+        if !row_runs.is_empty() && row_runs.iter().all(|t| t.style & 1 != 0) {
+            let spans: Vec<(i32, i32)> = row_runs
+                .iter()
+                .map(|t| {
+                    let (c, _) = run_cell(t, scale, cell_px, pane);
+                    (c, c + t.text.chars().count().max(1) as i32)
+                })
+                .collect();
+            let min_c = spans.iter().map(|&(s, _)| s).min().unwrap_or(0);
+            let max_c = spans.iter().map(|&(_, e)| e).max().unwrap_or(0);
+            let rev = v6_run_style(base, 0, 0, 1, honor, colors);
+            for c in min_c..max_c {
+                if c < rect.x as i32 || c >= rect.right() as i32 {
+                    continue;
+                }
+                if !spans.iter().any(|&(s, e)| c >= s && c < e) {
+                    buf.set_stringn(c as u16, *row as u16, " ", 1, rev);
+                }
+            }
+        }
+        for t in row_runs {
+            let (col, _) = run_cell(t, scale, cell_px, pane);
+            if col < rect.x as i32 || col >= rect.right() as i32 {
+                continue;
+            }
+            let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
+            let max_w = rect.right() as usize - col as usize;
+            if max_w > 0 {
+                buf.set_stringn(col as u16, *row as u16, &t.text, max_w, style);
+            }
+        }
     }
 }
 
