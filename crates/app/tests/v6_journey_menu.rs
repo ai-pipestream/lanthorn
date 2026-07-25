@@ -505,3 +505,56 @@ fn journey_hybrid_tall_pane_menu_pinned_to_bottom() {
     assert!(vp.bottom() <= proceed_y, "the story viewport stops above the bottom-anchored menu (vp bottom {}, menu at {proceed_y})", vp.bottom());
     assert!(vp.x > 0 && vp.right() < area.right(), "the story keeps its constant inset beside the picture column; got {vp:?}");
 }
+
+/// (SQ-0511 divider continuity) At a TALL pane the reclaimed space between the story
+/// and the bottom-anchored menu is now spanned by the STRETCHED left flank band: the
+/// picture column AND its authentic vertical divider (reversed text runs at native
+/// x≈233, rasterized into the chrome canvas → part of the left side band, not a text
+/// strip) run UNBROKEN from the frame top down to the menu strip. Probe first: the
+/// divider is left-flank ring ART (image cells), not terminal text; then assert the
+/// left flank carries a ring image cell on EVERY row from the top to the menu — no
+/// clipped gap where the old reclaim blanked the flank below the picture's art.
+#[test]
+fn journey_hybrid_tall_pane_divider_reaches_menu() {
+    use ratatui::style::Color;
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let area = Rect::new(0, 0, 90, 40);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    let vp = state.transcript_geom.get().expect("hybrid renders the story as a transcript").area;
+    // The menu is bottom-anchored terminal cells; find its top ("Proceed" row).
+    let proceed_y = (0..area.height).find(|&y| row_text(y).contains("Proceed")).expect("'Proceed' menu row");
+    assert!(vp.bottom() <= proceed_y, "the reclaimed story stops above the menu (vp bottom {}, menu {proceed_y})", vp.bottom());
+
+    // The divider/flank is chrome-ring ART, not terminal text: a cell is a ring image
+    // when it is a halfblock glyph or carries a concrete background colour.
+    let is_img = |x: u16, y: u16| -> bool {
+        let c = buf.cell((x, y)).unwrap();
+        let s = c.symbol();
+        s == "\u{2580}" || s == "\u{2584}" || c.bg != Color::Reset
+    };
+    // Every row from the frame top down to the menu strip carries a left-flank ring
+    // image cell — the picture column + divider run unbroken to the menu (the old
+    // clip-to-art-extent reclaim left a bare-backdrop gap below the picture art).
+    for y in 0..proceed_y {
+        assert!(
+            (0..vp.x).any(|x| is_img(x, y)),
+            "the left picture-column/divider must be continuous to the menu — no ring image on row {y} (menu at {proceed_y}); row: {:?}",
+            row_text(y)
+        );
+    }
+    // And it abuts the story viewport with no seam at a deep reclaimed row.
+    let dy = proceed_y.saturating_sub(1);
+    let lmax = (0..vp.x).rev().find(|&x| is_img(x, dy)).expect("left flank ring cells present near the menu");
+    assert_eq!(lmax, vp.x - 1, "the divider/flank abuts the story viewport with no seam (lmax {lmax}, vp.x {})", vp.x);
+}

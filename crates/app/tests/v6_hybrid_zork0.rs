@@ -238,13 +238,17 @@ fn zork0_hybrid_status_change_keeps_flank_bands_fresh() {
     );
 }
 
-/// (SQ-0505 dynamic hybrid layout — Zork0 pin) Zork0's frame ENCLOSES the story to
-/// the native screen bottom (story bottom 398 of 400), so even at a TALL pane where
-/// Arthur/Journey reclaim the letterbox dead space, Zork0 keeps today's CENTERED
-/// letterbox untouched. The rendered story viewport must equal the viewport the
-/// pre-SQ-0505 centered path computes — no top-anchoring, no bottom extension.
+/// (SQ-0511 enclosed-frame reclaim — Zork0 pin) Zork0's frame ENCLOSES the story to
+/// the native screen bottom (story bottom 398 of 400) and is flanked by full-height
+/// side art. At a TALL pane the `Frame` plan now RECLAIMS the letterbox slack: the
+/// top banner stays uniform-scaled and pane-top-anchored, the story viewport grows
+/// from just under it to the pane BOTTOM at constant width, and the ornate side
+/// flanks STRETCH vertically to fill the reclaimed space (no longer a centred
+/// letterbox). Pins the new geometry exactly (halfblocks 10×20 cells, native
+/// 640×400, scale 1.40625, off_y 0). One column is reserved for the scrollbar.
 #[test]
-fn zork0_hybrid_tall_pane_stays_letterboxed() {
+fn zork0_hybrid_tall_pane_frame_reclaim() {
+    use ratatui::style::Color;
     let Some(session) = boot_zork0() else { return };
     let model = session.screen();
     let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
@@ -257,13 +261,32 @@ fn zork0_hybrid_tall_pane_stays_letterboxed() {
     let vp = state.transcript_geom.get().expect("hybrid renders the story as a transcript").area;
     let _ = items;
 
-    // The plan is Letterbox (Zork0's story reaches native y=398 of 400 → enclosed
-    // frame), so the viewport is the centered-letterbox box the pre-SQ-0505 path
-    // produced at 90×40 — pinned exactly (halfblocks 10×20 cells, native 640×400,
-    // scale 1.40625, off_y 118). One column is reserved for the scrollbar.
-    assert_eq!(vp, Rect::new(13, 12, 63, 21), "Zork0 keeps the centered letterbox viewport at a tall pane (no reclaim)");
-    // It IS centered — dead space above AND below the story (not top-anchored, not
-    // extended to the pane bottom), unlike the Arthur/Journey reclaim plans.
-    assert!(vp.y > 0, "letterbox leaves top margin (story not top-anchored): {vp:?}");
-    assert!(vp.bottom() < area.bottom(), "letterbox leaves bottom margin (story not extended): {vp:?}");
+    // Top-anchored under the banner band (native y=78 → dev 109.7 → row 6), extended
+    // to the pane bottom (row 40), constant width (native 86..554 → cols 13..77,
+    // one reserved for the scrollbar → width 63).
+    assert_eq!(vp, Rect::new(13, 6, 63, 34), "Zork0 top-anchors + extends to the pane bottom (Frame reclaim)");
+    assert!(vp.y > 0 && vp.y <= 6, "story top-anchored just under the banner band, not centred: {vp:?}");
+    assert_eq!(vp.bottom(), area.bottom(), "story viewport extends to the pane bottom (slack reclaimed): {vp:?}");
+
+    // A cell carries a chrome-ring image when it is a halfblock glyph or has a
+    // concrete (non-Reset) background — the flank bands upload as image protocols.
+    let is_img = |x: u16, y: u16| -> bool {
+        let c = buf.cell((x, y)).unwrap();
+        let s = c.symbol();
+        s == "\u{2580}" || s == "\u{2584}" || c.bg != Color::Reset
+    };
+    // The side flanks STRETCH into the reclaimed space: at a deep row well below the
+    // old (centred) art extent, both flanks still carry ring image cells — the OLD
+    // clip-to-art-extent path left these rows the bare backdrop.
+    for dy in [vp.bottom() - 3, vp.bottom() - 1] {
+        assert!((0..vp.x).any(|x| is_img(x, dy)), "left flank stretched down to row {dy} (reclaimed space)");
+        assert!((vp.right()..area.width).any(|x| is_img(x, dy)), "right flank stretched down to row {dy}");
+        // Squares-and-seams at the fractional scale 1.40625: the left flank's
+        // rightmost image column abuts the viewport (== vp.x-1) — no gap, no overlap
+        // into the story columns — and the right flank stays at/after vp.right().
+        let lmax = (0..vp.x).rev().find(|&x| is_img(x, dy)).expect("left flank has ring cells");
+        assert_eq!(lmax, vp.x - 1, "left flank abuts the story viewport with no seam at row {dy} (lmax {lmax}, vp.x {})", vp.x);
+        let rmin = (vp.right()..area.width).find(|&x| is_img(x, dy)).expect("right flank has ring cells");
+        assert!(rmin >= vp.right(), "right flank does not overlap the story viewport at row {dy} (rmin {rmin}, vp.right {})", vp.right());
+    }
 }

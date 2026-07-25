@@ -516,7 +516,12 @@ fn render_node(
                                 let vp = v6::story_viewport_box(Some(story), &scale_center, (area.width, area.height), cell_px);
                                 (scale_center, Rect::new(area.x + vp.x, area.y + vp.y, vp.width, vp.height), None)
                             }
-                            BottomPlan::Extend => {
+                            // Extend (Arthur) and Frame (Zork0/Shogun) top-anchor the
+                            // story and grow it to the pane bottom identically; they
+                            // differ only in how the flanks below the side art are
+                            // treated — Extend blanks them, Frame stretches them (the
+                            // reclaim block below branches on the plan).
+                            BottomPlan::Extend | BottomPlan::Frame => {
                                 let vp = v6::story_viewport_box(Some(story), &top_scale, (area.width, area.height), cell_px);
                                 let (x, y) = (area.x + vp.x, area.y + vp.y);
                                 (top_scale, Rect::new(x, y, vp.width, area.bottom().saturating_sub(y)), None)
@@ -563,14 +568,16 @@ fn render_node(
                         } else {
                             Vec::new()
                         };
-                        // SQ-0505: when reclaiming the dead space, clip the ring
-                        // bands to the chrome art's actual vertical extent (its
-                        // lowest opaque native row, mapped through the story scale).
-                        // The flanks BELOW the side art then stay the theme backdrop
-                        // rather than an opaque transparent-crop block — no art
-                        // stretching or tiling into the reclaimed space. Letterbox is
-                        // untouched (its bands lie within the scaled canvas anyway).
-                        if reclaim {
+                        // SQ-0511: the Frame/Menu plans STRETCH the side flank bands to
+                        // fill the reclaimed space (drawn below); the whole flank band
+                        // survives here so the stretch has a full-height target. The
+                        // Extend plan (Arthur) instead CLIPS the ring bands to the chrome
+                        // art's actual vertical extent (its lowest opaque native row,
+                        // mapped through the story scale) so the flanks BELOW its side
+                        // art stay the theme backdrop — no art stretching or tiling there.
+                        // Letterbox is untouched (its bands lie within the scaled canvas).
+                        let stretch_flanks = matches!(plan, BottomPlan::Frame | BottomPlan::Menu);
+                        if reclaim && !stretch_flanks {
                             let ch = cell_px.1.max(1) as f32;
                             let art_bottom_px =
                                 (0..gfx.height()).rev().find(|&y| (0..gfx.width()).any(|x| gfx.get_pixel(x, y)[3] >= 128));
@@ -587,6 +594,15 @@ fn render_node(
                             }
                             ring_bands.retain(|b| b.height > 0 && b.width > 0);
                         }
+                        // SQ-0511: the native row a stretched flank band's art reaches down
+                        // to. Frame flanks span the full canvas height (Zork0/Shogun columns
+                        // are opaque to the native bottom); the Menu flank (Journey's picture
+                        // column + divider) reaches the story bottom, where the bottom-anchored
+                        // menu strip begins — so the divider runs unbroken to the menu.
+                        let flank_native_bottom = match plan {
+                            BottomPlan::Menu => story.y_px as u32 + story.h_px as u32,
+                            _ => native.1 as u32,
+                        };
                         let strips = decompose_chrome_strips(&ring_bands, area, &scale, cell_px, story, &gfx, &chrome_runs);
                         let menu_strips = match &menu {
                             Some(ms) => decompose_chrome_strips(&menu_bands, area, ms, cell_px, story, &gfx, &chrome_runs),
@@ -625,7 +641,24 @@ fn render_node(
                             gr.retain_chrome_bands(&live);
                             for strip in &strips {
                                 match strip {
-                                    ChromeStrip::Art(r) => gr.draw_chrome_band(picker, &canvas, &scale, area, *r, buf),
+                                    // SQ-0511: a SIDE flank band (narrower than the pane)
+                                    // under the Frame/Menu stretch plans is drawn
+                                    // vertically stretched to fill the reclaimed space,
+                                    // keeping the horizontal (uniform) scale; the native
+                                    // crop is the flank columns from this band's device
+                                    // top (via the uniform scale) down to the flank art's
+                                    // bottom. Full-width top/bottom bands, and every band
+                                    // under the non-stretch plans, draw at the uniform scale.
+                                    ChromeStrip::Art(r) => {
+                                        if let Some(crop) = (stretch_flanks && r.width < area.width)
+                                            .then(|| flank_crop(*r, area, &scale, cell_px, flank_native_bottom, native))
+                                            .flatten()
+                                        {
+                                            gr.draw_chrome_band_stretched(picker, &canvas, *r, crop, buf);
+                                        } else {
+                                            gr.draw_chrome_band(picker, &canvas, &scale, area, *r, buf);
+                                        }
+                                    }
                                     ChromeStrip::Text(r, runs) => draw_chrome_text_strip(
                                         runs, *r, &scale, cell_px, area, base, state.config.honor_game_colours, &state.colors, buf,
                                     ),
@@ -1581,10 +1614,15 @@ enum ChromeStrip<'a> {
 ///                 bottom (Arthur: header art + side borders, open below).
 ///   `Menu`      — top-anchor the story/chrome and bottom-anchor a text command
 ///                 strip; the story fills between (Journey's command menu).
+///   `Frame`     — top-anchor the story and grow it to the pane bottom, but keep
+///                 the ENCLOSING side art by stretching the flank bands vertically
+///                 to span the reclaimed space (SQ-0511: Zork0/Shogun, whose frame
+///                 reaches the native bottom and is flanked by full-height side art).
 enum BottomPlan {
     Letterbox,
     Extend,
     Menu,
+    Frame,
 }
 
 /// Classify what sits below the story window natively, to pick the [`BottomPlan`]
@@ -1607,9 +1645,25 @@ fn hybrid_bottom_plan(
         return BottomPlan::Letterbox;
     }
     let story_bottom = story.y_px as u32 + story.h_px as u32;
-    // Story fills to (within one native row of) the screen bottom → enclosed
-    // frame, nothing to reclaim in-frame; keep the centred letterbox.
+    // Story fills to (within one native row of) the screen bottom → enclosed frame.
+    // SQ-0511: when full-height side ART flanks the story on BOTH sides, reclaim the
+    // slack via the `Frame` plan (top-anchor the story to the pane bottom, stretch
+    // the flanks to keep the enclosing columns). Zork0 (story bottom 398/400) and
+    // Shogun (400/400) both qualify. With no side art there is nothing to stretch, so
+    // keep the centred letterbox.
     if native.1 as u32 <= story_bottom + 16 {
+        let sy0 = story.y_px as u32;
+        let sy1 = story_bottom.min(gfx.height());
+        let sx0 = story.x_px as u32;
+        let sx1 = (story.x_px as u32 + story.w_px as u32).min(gfx.width());
+        let flank_opaque = |xa: u32, xb: u32| -> bool {
+            xa < xb && (sy0..sy1).any(|y| (xa..xb).any(|x| gfx.get_pixel(x, y)[3] >= 128))
+        };
+        let left_art = flank_opaque(0, sx0.min(gfx.width()));
+        let right_art = flank_opaque(sx1, gfx.width());
+        if left_art && right_art {
+            return BottomPlan::Frame;
+        }
         return BottomPlan::Letterbox;
     }
     let sx0 = story.x_px as u32;
@@ -1632,6 +1686,36 @@ fn hybrid_bottom_plan(
     } else {
         BottomPlan::Extend
     }
+}
+
+/// SQ-0511: the native crop a stretched side flank `band` samples. Its columns are
+/// the flank's native columns (band device x-range inverted through the uniform
+/// `scale`, so the horizontal factor stays `s`); its rows run from the flank art's
+/// top (the band device top inverted through the same scale — continuous with the
+/// top band above) down to `native_bottom` (the flank art's bottom for a Frame, the
+/// story bottom for a Menu). Returns `None` when the crop is empty. `native` bounds
+/// the crop to the canvas.
+fn flank_crop(
+    band: Rect,
+    pane: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    native_bottom: u32,
+    native: (u16, u16),
+) -> Option<(u32, u32, u32, u32)> {
+    let cw = cell_px.0.max(1) as f32;
+    let ch = cell_px.1.max(1) as f32;
+    let s = if scale.s <= 0.0 { 1.0 } else { scale.s };
+    let inv_x = |cell: u16| (((cell.saturating_sub(pane.x)) as f32 * cw - scale.off_x as f32) / s).round().max(0.0) as u32;
+    let inv_y = |cell: u16| (((cell.saturating_sub(pane.y)) as f32 * ch - scale.off_y as f32) / s).round().max(0.0) as u32;
+    let nx0 = inv_x(band.x).min(native.0 as u32);
+    let nx1 = inv_x(band.right()).min(native.0 as u32);
+    let ny0 = inv_y(band.y).min(native.1 as u32);
+    let ny1 = native_bottom.min(native.1 as u32);
+    if nx1 <= nx0 || ny1 <= ny0 {
+        return None;
+    }
+    Some((nx0, ny0, nx1 - nx0, ny1 - ny0))
 }
 
 /// Map a chrome run's native top-left game pixel to its pane-absolute terminal

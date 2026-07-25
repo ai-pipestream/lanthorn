@@ -494,6 +494,67 @@ fn shogun_hybrid_status_band_floods_game_background() {
     }
 }
 
+/// SQ-0511: Shogun's frame ENCLOSES the story to the native bottom (story bottom
+/// 400 of 400) and is flanked by full-height side art, so at a TALL pane it takes
+/// the `Frame` reclaim plan: the status band stays uniform-scaled + pane-top-
+/// anchored, the story viewport top-anchors just under it and extends to the pane
+/// BOTTOM at constant width, and the side flanks stretch to fill the reclaimed
+/// space. Pins the tall-pane viewport exactly (halfblocks 10×20, native 640×400,
+/// scale 1.40625, off_y 0; story native x=46 y=32 w=548 → cols 7..83 (one reserved
+/// for the scrollbar → 75), top row 3, extended to row 40).
+#[test]
+fn shogun_hybrid_tall_pane_frame_reclaim() {
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    // Enter past the boot menu and settle into gameplay (Bridge).
+    for _turn in 0..6 {
+        match session.pending_input() {
+            InputKind::Line => { session.submit("look"); }
+            InputKind::Char => { session.submit_char(13); }
+            InputKind::Event => { session.submit(""); }
+        }
+    }
+
+    let model = session.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let area = Rect::new(0, 0, 90, 40);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    let vp = state.transcript_geom.get().expect("hybrid renders the story as a transcript").area;
+
+    assert_eq!(vp, Rect::new(7, 3, 75, 37), "Shogun top-anchors under the status band + extends to the pane bottom (Frame reclaim)");
+    assert!(vp.y > 0 && vp.y <= 3, "story top-anchored just under the status band, not centred: {vp:?}");
+    assert_eq!(vp.bottom(), area.bottom(), "story viewport extends to the pane bottom (slack reclaimed): {vp:?}");
+
+    let is_img = |x: u16, y: u16| -> bool {
+        let c = buf.cell((x, y)).unwrap();
+        let s = c.symbol();
+        s == "\u{2580}" || s == "\u{2584}" || c.bg != Color::Reset
+    };
+    // The side flanks stretch into the reclaimed space; at a deep row both flanks
+    // carry ring cells and the left flank abuts the viewport with no seam.
+    for dy in [vp.bottom() - 3, vp.bottom() - 1] {
+        let lmax = (0..vp.x).rev().find(|&x| is_img(x, dy)).expect("left flank stretched into reclaimed space");
+        assert_eq!(lmax, vp.x - 1, "left flank abuts the story viewport with no seam at row {dy} (lmax {lmax}, vp.x {})", vp.x);
+        assert!((vp.right()..area.width).any(|x| is_img(x, dy)), "right flank stretched down to row {dy}");
+    }
+}
+
 /// SQ-0467: in frameless mode Shogun's in-game status band lays out as a classic
 /// full-width status line — the character/location runs anchored flush LEFT, the
 /// "SHOGUN" title CENTERED, and the Score/Moves runs flush RIGHT across the whole

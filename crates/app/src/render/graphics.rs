@@ -572,6 +572,97 @@ impl GraphicsRender {
             Image::new(proto).render(dest, buf);
         }
     }
+
+    /// SQ-0511: draw ONE side flank band VERTICALLY STRETCHED — sample the native
+    /// `crop` sub-rect of `chrome_canvas` (x, y, w, h in game pixels) and resize it
+    /// to fill the whole `band` device region (Nearest → crisp). The horizontal
+    /// resize factor is the uniform letterbox scale (the caller derives `crop`'s
+    /// width from `band.width · cell_w / s`), so columns keep their true width; only
+    /// the vertical factor grows, elongating an ornate frame column to span the
+    /// reclaimed dead space between the top-anchored chrome and a bottom-anchored
+    /// band/menu (enclosed-frame Zork0/Shogun flanks; Journey's picture-column
+    /// divider continuing to its menu strip).
+    ///
+    /// Shares the per-band [`chrome_bands`](Self) cache with [`draw_chrome_band`]
+    /// (one entry per band rect), so a band drawn stretched still participates in
+    /// [`retain_chrome_bands`]/[`chrome_band_hashes`]. The freshness hash covers ONLY
+    /// the crop's own native pixels + its coords + the target size, so a status tick
+    /// (whose pixels sit ABOVE the flank crop) leaves the flank's cached upload fresh
+    /// (SQ-0514 property preserved), and the crop native rect is folded in so the
+    /// stretch factor itself is part of the key.
+    pub fn draw_chrome_band_stretched(
+        &mut self,
+        picker: &Picker,
+        chrome_canvas: &image::RgbaImage,
+        band: Rect,
+        crop: (u32, u32, u32, u32),
+        buf: &mut Buffer,
+    ) {
+        let (cx, cy, cw_n, ch_n) = crop;
+        if band.width == 0 || band.height == 0 || cw_n == 0 || ch_n == 0 {
+            return;
+        }
+        let (canvas_w, canvas_h) = (chrome_canvas.width(), chrome_canvas.height());
+        if cx >= canvas_w || cy >= canvas_h {
+            return;
+        }
+        let fs = picker.font_size();
+        let (cw, ch) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+        let bw = band.width as u32 * cw;
+        let bh = band.height as u32 * ch;
+
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        // Hash ONLY the crop's native footprint (coords + pixels) plus the target
+        // device size — the stretch factor is (bw,bh)/(cw_n,ch_n), so both ends are
+        // covered. A change outside this native rect (e.g. the banner's Score/Moves)
+        // never alters the hash, keeping the flank's cached upload fresh (SQ-0514).
+        1u8.hash(&mut h); // discriminator vs. draw_chrome_band keys on the same map
+        (cx, cy, cw_n, ch_n).hash(&mut h);
+        let x1 = (cx + cw_n).min(canvas_w);
+        let y1 = (cy + ch_n).min(canvas_h);
+        for ny in cy..y1 {
+            for nx in cx..x1 {
+                chrome_canvas.get_pixel(nx, ny).0.hash(&mut h);
+            }
+        }
+        (bw, bh).hash(&mut h);
+        let hash = h.finish();
+        let key = (band.x, band.y, band.width, band.height);
+        let fresh = matches!(self.chrome_bands.get(&key), Some((v, _)) if *v == hash);
+        if !fresh {
+            // Copy the native crop (clamped to the canvas) into its own image, then
+            // resize it to the band's device box. Transparent native pixels stay
+            // transparent, so the theme backdrop shows through gaps in the flank.
+            let mut src = image::RgbaImage::new(cw_n, ch_n);
+            for oy in 0..ch_n {
+                let ny = cy + oy;
+                if ny >= canvas_h {
+                    break;
+                }
+                for ox in 0..cw_n {
+                    let nx = cx + ox;
+                    if nx >= canvas_w {
+                        break;
+                    }
+                    src.put_pixel(ox, oy, *chrome_canvas.get_pixel(nx, ny));
+                }
+            }
+            let stretched = image::imageops::resize(&src, bw, bh, image::imageops::FilterType::Nearest);
+            let img = image::DynamicImage::ImageRgba8(stretched);
+            match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
+                Ok(p) => { self.chrome_bands.insert(key, (hash, p)); }
+                Err(_) => return,
+            }
+        }
+        if let Some((_, proto)) = self.chrome_bands.get(&key) {
+            let sz = proto.size();
+            let w = sz.width.min(band.width);
+            let ht = sz.height.min(band.height);
+            let dest = Rect::new(band.x, band.y, w, ht);
+            Image::new(proto).render(dest, buf);
+        }
+    }
 }
 
 #[cfg(test)]
