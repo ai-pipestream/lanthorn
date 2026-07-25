@@ -9,7 +9,7 @@
 // 10-bit ZSCII escape (shift-5, Z-char 6, hi/lo halves) for characters outside
 // A0/A2 (e.g. accented letters), mirroring the decode side.
 
-use super::{A0, A2};
+use super::{A0, A1, A2};
 use crate::memory::Memory;
 
 /// Encode `text` to its dictionary-resolution Z-character form using the
@@ -62,6 +62,7 @@ fn encode_word_impl(text: &str, version: u8, custom: Option<&[u8; 78]>) -> Vec<u
 
     // Alphabet glyph rows: the story's custom table, or the defaults.
     let a0: &[u8] = custom.map(|r| &r[0..26]).unwrap_or(&A0[..]);
+    let a1: &[u8] = custom.map(|r| &r[26..52]).unwrap_or(&A1[..]);
     let a2: &[u8] = custom.map(|r| &r[52..78]).unwrap_or(&A2[..]);
 
     'outer: for ch in lower.chars() {
@@ -74,6 +75,23 @@ fn encode_word_impl(text: &str, version: u8, custom: Option<&[u8; 78]>) -> Vec<u
         if let Some(pos) = a0.iter().position(|&b| b == byte) {
             zchars.push((pos + 6) as u8); // A0 Z-char = index + 6
             continue;
+        }
+
+        // Try A1 (shift-4). The default A1 is uppercase and is never matched
+        // after lower-casing, so standard stories are unaffected — but a custom
+        // alphabet table may relocate lowercase letters into A1 (Shogun moves
+        // j/q/v/x/z here), so this row must be searched or those words encode
+        // via the 10-bit escape and never match the game's own dictionary.
+        for (i, &b) in a1.iter().enumerate() {
+            if b == byte {
+                // Need 2 Z-chars (shift + glyph); only emit if both fit.
+                if zchars.len() + 2 > zchar_limit {
+                    break 'outer;
+                }
+                zchars.push(4); // shift to A1
+                zchars.push((i + 6) as u8); // A1 Z-char = index + 6
+                continue 'outer;
+            }
         }
 
         // Try A2 (digits, punctuation, etc.) — emits shift-5 then A2 Z-char.
