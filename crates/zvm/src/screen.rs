@@ -373,11 +373,20 @@ impl V6Windows {
         // Inherited colours (Default / Standard "current"/"default") are
         // transparent; a real chosen colour paints an opaque block.
         let bg_opaque = !matches!(run.bg, ZColour::Default | ZColour::Standard(0) | ZColour::Standard(1));
+        // A run that is ENTIRELY blanks is a CLEARING run: the game printing
+        // spaces to wipe a region. Zork Zero blanks the old, LONGER location
+        // name ("Banquet Hall") with such runs before repainting the shorter
+        // "Great Hall" — those blanks must erase the covered glyphs, or the old
+        // tail survives as "Great Hall" + a stale "ll" ("Great Hallll", SQ-0498).
+        // A space WITHIN a mixed run stays non-erasing: those are field-padding
+        // gaps (Shogun pads its status fields with spaces) and erasing under
+        // them would eat a neighbouring label painted in the same row.
+        let clearing = run.text.chars().all(|c| c == ' ');
         let fw = V6_FONT_WIDTH as i32;
         let mut seg_start: Option<i32> = None; // char index of current erasing segment
         let chars: Vec<char> = run.text.chars().collect();
         for i in 0..=chars.len() {
-            let erases = i < chars.len() && (bg_opaque || chars[i] != ' ');
+            let erases = i < chars.len() && (bg_opaque || clearing || chars[i] != ' ');
             match (erases, seg_start) {
                 (true, None) => seg_start = Some(i as i32),
                 (false, Some(s)) => {

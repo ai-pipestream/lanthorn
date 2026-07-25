@@ -1409,11 +1409,34 @@ impl Machine {
                 let rows = ops.first().copied().unwrap_or(0);
                 if self.trace_screen { self.screen_trace.push(format!("@split_window({rows})")); }
                 if self.screen.v6.is_some() {
-                    // v6: split_window is a v3–5 legacy opcode. v6 games manage
-                    // window geometry via move_window/window_size instead — the
-                    // captured Zork0 trace never calls split_window once in v6
-                    // mode. Rather than guess an unverified ZMSD v6 meaning and
-                    // risk corrupting the 8-window table, treat it as a no-op.
+                    // v6: split_window(N) resizes the UPPER window (window 1) to
+                    // the full screen width × N *pixels*, anchored top-left, and
+                    // gives the LOWER window (window 0) the remaining height — the
+                    // classic split adapted to v6's pixel geometry. Zork Zero's
+                    // title screen relies on it: it @erase_window(all),
+                    // @split_window(400) (the full 400px screen height),
+                    // @set_window(upper), then @draw_picture(1) so the ZORK ZERO
+                    // splash fills the whole screen while window 0 collapses to
+                    // zero height (so no story viewport is carved over the
+                    // picture). Without the resize the picture clips to window 1's
+                    // 78px banner box and only its top strip shows, and the story
+                    // window stays open and paints the transcript over the splash.
+                    // Only the sizes change — window 0's ORIGIN (its inset frame
+                    // position) is left untouched, so the game's own
+                    // window_size(win=0, …) call restores it verbatim once the
+                    // splash is dismissed. (SQ-0497)
+                    let screen_w = self.mem.read_word(0x22);
+                    let screen_h = self.mem.read_word(0x24);
+                    if let Some(v6) = self.screen.v6.as_mut() {
+                        let upper = &mut v6.windows[1];
+                        upper.x_coord = 1;
+                        upper.y_coord = 1;
+                        if screen_w > 0 {
+                            upper.x_size = screen_w;
+                        }
+                        upper.y_size = rows;
+                        v6.windows[0].y_size = screen_h.saturating_sub(rows);
+                    }
                 } else {
                     self.screen.upper_window_rows = rows;
                     let cols = self.mem.read_byte(0x21) as u16;
