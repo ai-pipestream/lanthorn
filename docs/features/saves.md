@@ -32,6 +32,16 @@ let the game save itself, or never save at all.
   Glulx-Quetzal in-game save — VM state only, the same shape as the Z-machine's
   `.qzl`. Its round-trip is verified internally; Glulx *cross-interpreter* save
   interop isn't golden-tested yet (tracked in SQ-0229).
+
+  One practical consequence for graphical (v6) stories: an in-game `restore`
+  into a *fresh* session brings back the game state but not your scrollback —
+  the Quetzal format simply carries no transcript, so neither the prose history
+  nor the inline artwork woven through it can come back (every interpreter
+  behaves this way). Within a running session your scrollback — art included —
+  is untouched by an in-game `restore`. To get history back across a relaunch,
+  resume through a Save State or auto-load first (which restores the transcript
+  and its inline images), then `restore` in-game if you need a different
+  in-game save.
 - **Auto-save and auto-load.** Turn on auto-save and babelmap snapshots after
   every turn; leave auto-load on (the default) and launching a story drops you
   straight back where you quit, map and all. Both are configurable — start fresh
