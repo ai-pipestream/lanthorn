@@ -1756,13 +1756,15 @@ fn decompose_chrome_strips<'a>(
 }
 
 /// Paint a TEXT chrome strip (SQ-0500) as terminal cells: each run stamped at its
-/// scale-mapped cell with [`v6_run_style`], clipped to `rect`. A PURE reverse-video
-/// row (a status/menu bar — every run reversed) first fills the cells between its
-/// first and last reversed column with a reversed space, so a bar the game painted
-/// as separate runs with bare gaps reads as one solid block (SQ-0499 cell path):
-/// Arthur's status row loses its lone unreversed cell; Journey's menu header bar
-/// closes the gap between its two labels. Mixed rows (Journey's menu body — normal
-/// verb text with reversed dividers) skip the fill.
+/// scale-mapped cell with [`v6_run_style`], clipped to `rect`. The strip and each
+/// run row are flooded (colour-aware, SQ-0512) before the runs stamp, so the panel
+/// reads as one solid block carrying the game's own background — not just cells
+/// behind the glyphs. A PURE reverse-video row (a status/menu bar — every run
+/// reversed) floods edge to edge reversed, so a bar the game painted as separate
+/// runs with bare gaps reads as one solid block (SQ-0499 cell path): Arthur's
+/// status row loses its lone unreversed cell; Journey's menu header bar closes the
+/// gap between its two labels. Mixed rows (Journey's menu body — normal verb text
+/// with reversed dividers) are not flood-reversed.
 #[allow(clippy::too_many_arguments)]
 fn draw_chrome_text_strip(
     runs: &[&crate::engine::PxText],
@@ -1778,15 +1780,30 @@ fn draw_chrome_text_strip(
     use crate::engine::PxText;
     use std::collections::BTreeMap;
 
-    // SQ-0508(a): fill the WHOLE strip with the base window background first, so the
-    // menu/status panel reads as one solid block — the cells around and between the
-    // runs no longer show the theme backdrop. `base` is the `upper_window` theme
-    // style (chrome ink on a black surface); a per-run explicit game colour still
-    // wins where the run stamps over this fill below.
+    // SQ-0508(a)/SQ-0512: fill the WHOLE strip first, so the menu/status panel reads
+    // as one solid block — the cells around and between the runs no longer show the
+    // theme backdrop. The fill is COLOUR-AWARE: resolve the first run in the strip
+    // that set an explicit game colour (per channel) and flood with THAT bg/fg over
+    // the themed `base`, so a game (Shogun) that paints its status band with an
+    // explicit background floods the whole band, not just the glyph cells, and the
+    // blank/bridged gap rows between run rows read as part of the same panel. When no
+    // run sets an explicit colour this is byte-identical to a bare `base` flood
+    // (Journey's black menu panel, Arthur's status strip). `base` is the
+    // `upper_window` theme style; a per-run explicit colour still wins where the run
+    // stamps over this fill below.
+    let strip_fg = runs.iter().map(|t| t.fg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
+    let strip_bg = runs.iter().map(|t| t.bg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
+    let strip_fill = if crate::render::v6_layout::packed_explicit(strip_fg)
+        || crate::render::v6_layout::packed_explicit(strip_bg)
+    {
+        v6_run_style(base, strip_fg, strip_bg, 0, honor, colors)
+    } else {
+        base
+    };
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {
             if let Some(c) = buf.cell_mut((x, y)) {
-                c.set_symbol(" ").set_style(base);
+                c.set_symbol(" ").set_style(strip_fill);
             }
         }
     }
@@ -1866,23 +1883,28 @@ fn draw_chrome_text_strip(
         if *row < rect.y as i32 || *row >= rect.bottom() as i32 {
             continue;
         }
-        // Pure reverse-video row: a bar the game draws edge to edge, so fill the
-        // ENTIRE strip width reversed around AND between the runs (SQ-0504) — a
-        // full-width band spans the whole pane. Mixed rows (Journey's menu body)
-        // are left alone by the guard above.
-        if !row_runs.is_empty() && row_runs.iter().all(|t| t.style & 1 != 0) {
-            let spans: Vec<(i32, i32)> = row_runs
-                .iter()
-                .map(|t| {
-                    let (c, _) = run_cell(t, scale, cell_px, pane);
-                    (c, c + t.text.chars().count().max(1) as i32)
-                })
-                .collect();
-            let rev = v6_run_style(base, 0, 0, 1, honor, colors);
-            for c in rect.x as i32..rect.right() as i32 {
-                if !spans.iter().any(|&(s, e)| c >= s && c < e) {
-                    buf.set_stringn(c as u16, *row as u16, " ", 1, rev);
-                }
+        // SQ-0512: flood this row's FULL strip width before stamping its runs, so the
+        // row reads as one solid panel — the cells around AND between the runs carry
+        // the row's own background, not the theme backdrop. The fill colour is the
+        // first run in the row with an explicit game colour, per channel, over `base`
+        // (Shogun's status band floods its explicit white edge to edge). A PURE
+        // reverse-video row (a bar the game draws edge to edge — Arthur's status row,
+        // Journey's menu header) floods reversed, subsuming the old pure-reverse gap
+        // fill (SQ-0504): the runs re-stamp reversed over it, so a full-width band
+        // spans the whole pane. A MIXED row (Journey's menu body — normal verbs among
+        // reversed dividers) is NOT flood-reversed; its reversed divider runs re-stamp
+        // over an un-reversed flood below. Colourless non-reverse rows keep the strip
+        // `base` flood untouched (byte-identical), so Journey's menu body is unchanged.
+        let all_rev = !row_runs.is_empty() && row_runs.iter().all(|t| t.style & 1 != 0);
+        let row_fg = row_runs.iter().map(|t| t.fg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
+        let row_bg = row_runs.iter().map(|t| t.bg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
+        if all_rev
+            || crate::render::v6_layout::packed_explicit(row_fg)
+            || crate::render::v6_layout::packed_explicit(row_bg)
+        {
+            let fill = v6_run_style(base, row_fg, row_bg, all_rev as u8, honor, colors);
+            for c in rect.x..rect.right() {
+                buf.set_stringn(c, *row as u16, " ", 1, fill);
             }
         }
         for t in row_runs {

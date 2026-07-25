@@ -418,6 +418,82 @@ fn shogun_frameless_status_band_fills_row_background() {
     assert!(!row0.contains('X'), "band row fully filled — no sentinel left in the gaps: {row0:?}");
 }
 
+/// SQ-0512: in HYBRID mode Shogun's in-game status band now carries the game's
+/// explicit colours (black on white, non-reversed). The whole band strip must be
+/// flooded with the game's background — every cell across the band row, INCLUDING
+/// the gaps between the anchored groups, shares the glyphs' background (z-colour 9,
+/// white → the theme palette's ANSI white = `Color::Gray`), not the theme backdrop.
+/// The old whole-strip flood painted the theme `base` bg, so the background showed
+/// only behind the glyphs. Pins that the band reads as one solid white panel.
+#[test]
+fn shogun_hybrid_status_band_floods_game_background() {
+    use ratatui::style::Color;
+
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    // Enter past the boot menu (Char → 13) and settle into gameplay (Bridge), so the
+    // status band carries the location + Score/Moves runs with explicit colours.
+    for _turn in 0..6 {
+        match session.pending_input() {
+            InputKind::Line => { session.submit("look"); }
+            InputKind::Char => { session.submit_char(13); }
+            InputKind::Event => { session.submit(""); }
+        }
+    }
+
+    let model = session.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    // honor_game_colours defaults true; assert so the pin below is meaningful.
+    assert!(state.config.honor_game_colours, "game colours honoured by default");
+    let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    // The band row is the one carrying "SHOGUN" (native y=1: Erasmus / SHOGUN / Score).
+    let band_y = (0..area.height)
+        .find(|&y| row_text(y).contains("SHOGUN"))
+        .expect("a terminal row carries the SHOGUN status title");
+    let text = row_text(band_y);
+    assert!(text.contains("Score:"), "band row also carries the Score label: {text:?}");
+
+    // z-colour 9 (white) resolves through the theme palette to ANSI white = Gray.
+    // Every cell from the first glyph to the last on the band row — INCLUDING the
+    // gaps BETWEEN Erasmus, SHOGUN and Score — must carry that game background, not
+    // the theme backdrop. Pre-fix the gaps kept the theme `base` bg.
+    let first = text.find(|c: char| c != ' ').expect("band row has glyphs") as u16;
+    let last = text.rfind(|c: char| c != ' ').expect("band row has glyphs") as u16;
+    // Sanity: the glyph cells themselves are on the game's white bg.
+    assert_eq!(
+        buf.cell((first, band_y)).unwrap().bg,
+        Color::Gray,
+        "the first status glyph is on the game's white (z-colour 9) bg: {text:?}"
+    );
+    for x in first..=last {
+        assert_eq!(
+            buf.cell((x, band_y)).unwrap().bg,
+            Color::Gray,
+            "band cell ({x},{band_y}) — incl. inter-group gaps — must flood the game's white bg, \
+             not the theme backdrop: {text:?}"
+        );
+    }
+}
+
 /// SQ-0467: in frameless mode Shogun's in-game status band lays out as a classic
 /// full-width status line — the character/location runs anchored flush LEFT, the
 /// "SHOGUN" title CENTERED, and the Score/Moves runs flush RIGHT across the whole
