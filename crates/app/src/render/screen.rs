@@ -749,7 +749,7 @@ fn render_node(
                         .flatten()
                         .collect();
                     if runs.iter().any(|t| !t.text.trim().is_empty()) {
-                        draw_painted_screen(&runs, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors);
+                        draw_painted_screen(&runs, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native.0);
                         return None;
                     }
                 }
@@ -890,7 +890,7 @@ fn render_node(
                     // A no-op in normal gameplay (chrome grids carry only the
                     // top status runs); on a menu screen it draws the items +
                     // the reverse-video selection caret the anchored band drops.
-                    draw_painted_screen(&runs, STATUS_BAND_ROWS, area, buf, status_style, state.config.honor_game_colours, &state.colors);
+                    draw_painted_screen(&runs, STATUS_BAND_ROWS, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w);
                     return m;
                 }
                 // No streaming story window (a painted menu with win0 in paint
@@ -899,7 +899,7 @@ fn render_node(
                 // z-ordered cell composite, which renders the native geometry as
                 // an unreadable postage stamp (SQ-0478).
                 if runs.iter().any(|t| !t.text.trim().is_empty()) {
-                    draw_painted_screen(&runs, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors);
+                    draw_painted_screen(&runs, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w);
                     return None;
                 }
             }
@@ -1562,6 +1562,51 @@ fn v6_run_style(
     }
 }
 
+/// SQ-0515: which native rows of a painted v6 screen should flood edge-to-edge
+/// with a reverse-video bar (see [`draw_painted_screen`]). A row qualifies only
+/// when EVERY non-blank run at that native row is reverse-video AND each such run's
+/// owning grid window spans at least ~90% of the native screen width — a full-width
+/// title/status bar (Zork0's " InvisiClues (tm)" header sits in a w_px=640/640
+/// window) rather than a narrow selection block (Shogun's boot-menu window is
+/// w_px=169/640, and Zork0's own selected-topic highlight is in the w_px=468/640
+/// topic window — both stay text-width). Returns native_row → flood [`Style`],
+/// with colours resolved first-explicit-wins across the row (this header carries
+/// none) and the reverse bit set, via [`v6_run_style`].
+fn full_width_reverse_flood_rows(
+    chrome: &[&PositionedWindow],
+    native_w: u16,
+    base: ratatui::style::Style,
+    honor: bool,
+    colors: &ColorScheme,
+) -> std::collections::HashMap<u16, ratatui::style::Style> {
+    use crate::render::v6_layout::packed_explicit;
+    let threshold = native_w as u32 * 9 / 10;
+    // Group every non-blank run by native row, carrying its owning window's w_px.
+    let mut per_row: std::collections::HashMap<u16, Vec<(&crate::engine::PxText, u16)>> = Default::default();
+    for pw in chrome {
+        if let WinNode::Grid(g) = &pw.node {
+            for t in &g.px_texts {
+                if t.text.trim().is_empty() {
+                    continue;
+                }
+                let row = (t.y.max(1) - 1) / 16;
+                per_row.entry(row).or_default().push((t, pw.w_px));
+            }
+        }
+    }
+    let mut out = std::collections::HashMap::new();
+    for (row, row_runs) in per_row {
+        let all_reverse = row_runs.iter().all(|(t, _)| t.style & 1 != 0);
+        let all_full_width = row_runs.iter().all(|(_, w)| *w as u32 >= threshold);
+        if all_reverse && all_full_width {
+            let fg = row_runs.iter().map(|(t, _)| t.fg).find(|&p| packed_explicit(p)).unwrap_or(0);
+            let bg = row_runs.iter().map(|(t, _)| t.bg).find(|&p| packed_explicit(p)).unwrap_or(0);
+            out.insert(row, v6_run_style(base, fg, bg, 1, honor, colors));
+        }
+    }
+    out
+}
+
 fn draw_painted_screen(
     runs: &[&crate::engine::PxText],
     min_row: u16,
@@ -1570,7 +1615,31 @@ fn draw_painted_screen(
     base: ratatui::style::Style,
     honor: bool,
     colors: &ColorScheme,
+    chrome: &[&PositionedWindow],
+    native_w: u16,
 ) {
+    // SQ-0515: a native row whose non-blank runs are ALL reverse-video and all
+    // belong to a (near-)full-native-width grid window is a title/status bar —
+    // flood the whole terminal row edge to edge with the reversed style before
+    // stamping the glyphs, so Zork0's " InvisiClues (tm)" header reads as a solid
+    // reverse bar rather than reverse across only its own glyphs. A narrow window's
+    // reverse row (Shogun's boot-menu selection) is untouched — it stays a
+    // text-width highlight block below.
+    let flood = full_width_reverse_flood_rows(chrome, native_w, base, honor, colors);
+    for (&row, &style) in &flood {
+        if row < min_row {
+            continue;
+        }
+        let y = area.y + row;
+        if y >= area.bottom() {
+            continue;
+        }
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(" ").set_style(style);
+            }
+        }
+    }
     for t in runs {
         // Every run stamps, whitespace included — painter semantics. A reversed
         // space fills its cell of the selection bar (SQ-0484), and a NORMAL
@@ -3830,6 +3899,66 @@ mod tests {
         assert_eq!(row_text(10).trim(), "QUIT the game", "row 10 is the QUIT item");
     }
 
+    /// SQ-0515: a chrome grid window carrying `px_texts`, for the flood discriminator.
+    fn flood_probe_window(w_px: u16, runs: Vec<crate::engine::PxText>) -> PositionedWindow {
+        PositionedWindow {
+            x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px, h_px: 16,
+            left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(crate::engine::GridWindow {
+                cols: 1, rows: 1, cells: vec![], active_rows: 1, cursor: (1, 1),
+                cursor_active: false, border: crate::engine::BorderPref::Unspecified,
+                bg: None, fg: None, reverse: false, px_texts: runs,
+            }),
+        }
+    }
+
+    #[test]
+    fn painted_screen_floods_only_full_width_reverse_rows() {
+        use ratatui::style::Modifier;
+        // Native 640px = 80 cells. A FULL-width window (w_px=640) with an all-reverse
+        // row floods edge to edge; a NARROW window (w_px=169, ~26%) with a reverse row
+        // stays a text-width block; a full-width row with a MIXED reverse/non-reverse
+        // run set is NOT all-reverse, so it stays text-width too.
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let base = colors.theme.get("upper_window").style;
+        let native_w = 640u16;
+
+        let full = flood_probe_window(640, vec![
+            // Row 0: single reversed run → floods.
+            crate::engine::PxText { y: 1, x: 1, text: "TITLE".into(), style: 1, fg: 0, bg: 0 },
+            // Row 1: one reversed + one non-reversed run → mixed, does NOT flood.
+            crate::engine::PxText { y: 17, x: 1, text: "LEFT".into(), style: 1, fg: 0, bg: 0 },
+            crate::engine::PxText { y: 17, x: 401, text: "RIGHT".into(), style: 0, fg: 0, bg: 0 },
+        ]);
+        let narrow = flood_probe_window(169, vec![
+            // Row 2: reversed run in a narrow window → text-width block, no flood.
+            crate::engine::PxText { y: 33, x: 1, text: "SEL".into(), style: 1, fg: 0, bg: 0 },
+        ]);
+        let chrome: Vec<&PositionedWindow> = vec![&full, &narrow];
+        let runs: Vec<&crate::engine::PxText> = chrome
+            .iter()
+            .filter_map(|it| match &it.node {
+                WinNode::Grid(g) => Some(g.px_texts.iter()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+
+        let area = Rect::new(0, 0, 80, 10);
+        let mut buf = Buffer::empty(area);
+        draw_painted_screen(&runs, 0, area, &mut buf, base, true, &colors, &chrome, native_w);
+
+        let reversed_count = |y: u16| -> u16 {
+            (0..area.width).filter(|&x| buf.cell((x, y)).unwrap().modifier.contains(Modifier::REVERSED)).count() as u16
+        };
+        // Row 0: full-width all-reverse → flooded edge to edge.
+        assert_eq!(reversed_count(0), area.width, "full-width all-reverse row floods every cell");
+        // Row 1: full-width but MIXED reverse → only the "LEFT" glyphs reversed, no flood.
+        assert!(reversed_count(1) > 0 && reversed_count(1) < area.width, "mixed-reverse row is not flooded: {} reversed", reversed_count(1));
+        // Row 2: narrow window reverse → only "SEL" (3 cells) reversed, no flood.
+        assert_eq!(reversed_count(2), 3, "narrow-window reverse row stays a text-width block");
+    }
+
     /// A v6 Layered model whose chrome is fully TRANSPARENT, leaving the story
     /// window's box as a clear raster interior (the opaque `hybrid_v6_model` chrome
     /// insets `story_clear_native` to nothing). Story box native (43,39,234,160) →
@@ -4197,7 +4326,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 6);
         let mut buf = Buffer::empty(area);
         let colors = crate::colors::ColorScheme::terminal_default();
-        draw_painted_screen(&refs, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors);
+        draw_painted_screen(&refs, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors, &[], 0);
         // Every cell of the bar (cols 0..5) is REVERSED — including the gap at col 2.
         for x in 0..5u16 {
             assert!(
@@ -4214,7 +4343,7 @@ mod tests {
             .map(|t| crate::engine::PxText { style: 0, ..t.clone() })
             .collect();
         let prefs: Vec<&crate::engine::PxText> = plain.iter().collect();
-        draw_painted_screen(&prefs, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors);
+        draw_painted_screen(&prefs, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors, &[], 0);
         assert!(
             !buf.cell((2, 1)).unwrap().modifier.contains(Modifier::REVERSED),
             "the gap cell is repainted plain once the selection moves away (SQ-0490)"
@@ -4304,7 +4433,7 @@ mod tests {
         let refs: Vec<&crate::engine::PxText> = vec![&coloured, &plain];
         let area = Rect::new(0, 0, 20, 6);
         let mut buf = Buffer::empty(area);
-        draw_painted_screen(&refs, 0, area, &mut buf, base, true, &colors);
+        draw_painted_screen(&refs, 0, area, &mut buf, base, true, &colors, &[], 0);
         assert_eq!(
             buf.cell((0, 0)).unwrap().fg,
             crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(3), &colors),
