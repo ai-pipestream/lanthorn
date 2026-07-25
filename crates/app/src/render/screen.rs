@@ -628,6 +628,27 @@ fn render_node(
                             .collect();
                         v6::clear_text_rows(&mut canvas, &text_run_tops);
                         let base = state.colors.theme.get("upper_window").style;
+                        // SQ-0511 fix: in the Menu plan the side flanks are drawn at the
+                        // UNIFORM scale (aspect preserved — Journey's left picture column
+                        // is NOT vertically stretched); only each flank's full-height
+                        // divider/border column is extended down through the reclaimed gap
+                        // to the bottom-anchored menu. Compute those narrow extension bands
+                        // up front so their cache keys join the live set (else they'd be
+                        // pruned and re-encoded every frame). The Frame plan (Zork0/Shogun)
+                        // still stretches its whole flank (border art, no story picture).
+                        let divider_exts: Vec<(Rect, (u32, u32, u32, u32))> = if matches!(plan, BottomPlan::Menu) {
+                            strips
+                                .iter()
+                                .filter_map(|s| match s {
+                                    ChromeStrip::Art(r) if r.width < area.width => flank_divider_extension(
+                                        *r, area, viewport, &scale, cell_px, story, native, &canvas, viewport.bottom(),
+                                    ),
+                                    _ => None,
+                                })
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
                         {
                             let mut gr = state.graphics_render.borrow_mut();
                             let live: std::collections::HashSet<_> = strips
@@ -637,20 +658,21 @@ fn render_node(
                                     ChromeStrip::Art(r) => Some((r.x, r.y, r.width, r.height)),
                                     ChromeStrip::Text(..) => None,
                                 })
+                                .chain(divider_exts.iter().map(|(r, _)| (r.x, r.y, r.width, r.height)))
                                 .collect();
                             gr.retain_chrome_bands(&live);
                             for strip in &strips {
                                 match strip {
                                     // SQ-0511: a SIDE flank band (narrower than the pane)
-                                    // under the Frame/Menu stretch plans is drawn
-                                    // vertically stretched to fill the reclaimed space,
-                                    // keeping the horizontal (uniform) scale; the native
-                                    // crop is the flank columns from this band's device
-                                    // top (via the uniform scale) down to the flank art's
-                                    // bottom. Full-width top/bottom bands, and every band
-                                    // under the non-stretch plans, draw at the uniform scale.
+                                    // under the FRAME stretch plan is drawn vertically
+                                    // stretched to fill the reclaimed space, keeping the
+                                    // horizontal (uniform) scale; the native crop is the
+                                    // flank columns from this band's device top (via the
+                                    // uniform scale) down to the flank art's bottom. Menu
+                                    // flanks and every band under the non-stretch plans draw
+                                    // at the uniform scale (aspect preserved).
                                     ChromeStrip::Art(r) => {
-                                        if let Some(crop) = (stretch_flanks && r.width < area.width)
+                                        if let Some(crop) = (matches!(plan, BottomPlan::Frame) && r.width < area.width)
                                             .then(|| flank_crop(*r, area, &scale, cell_px, flank_native_bottom, native))
                                             .flatten()
                                         {
@@ -663,6 +685,14 @@ fn render_node(
                                         runs, *r, &scale, cell_px, area, base, state.config.honor_game_colours, &state.colors, buf,
                                     ),
                                 }
+                            }
+                            // SQ-0511 fix: extend each Menu flank's divider/border column
+                            // through the reclaimed gap to the menu (a uniform column, so
+                            // the vertical replicate is invisible); the rest of the gap is
+                            // left undrawn (theme backdrop, matching the flank's own
+                            // never-painted background beside the divider).
+                            for (ext, crop) in &divider_exts {
+                                gr.draw_chrome_band_stretched(picker, &canvas, *ext, *crop, buf);
                             }
                             if let Some(ms) = &menu {
                                 for strip in &menu_strips {
@@ -1785,6 +1815,80 @@ fn flank_crop(
         return None;
     }
     Some((nx0, ny0, nx1 - nx0, ny1 - ny0))
+}
+
+/// SQ-0511 fix (Journey Menu plan): the divider/border-column extension for one side
+/// flank. The flank picture is drawn at the UNIFORM scale (aspect preserved), so a gap
+/// opens between the flank art's uniform-scaled bottom (the story's native bottom) and
+/// the bottom-anchored menu. This returns a NARROW band spanning that gap over the
+/// flank's full-height border column — the reversed-run divider abutting the story on
+/// the LEFT flank, the matching border on the RIGHT — plus a 1-native-pixel crop of
+/// those columns to replicate down the gap. The column is uniform, so the vertical
+/// replicate is invisible; the rest of the gap is left undrawn (transparent → theme
+/// backdrop, matching the flank's own never-painted background beside the divider).
+/// Returns `None` when the flank has no border column abutting the story or the gap is
+/// empty. `menu_top_row` is the bottom-anchored menu strip's top cell (viewport bottom).
+fn flank_divider_extension(
+    band: Rect,
+    pane: Rect,
+    viewport: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    story: &crate::engine::PositionedWindow,
+    native: (u16, u16),
+    canvas: &image::RgbaImage,
+    menu_top_row: u16,
+) -> Option<(Rect, (u32, u32, u32, u32))> {
+    let cw = cell_px.0.max(1) as f32;
+    let ch = cell_px.1.max(1) as f32;
+    let s = if scale.s <= 0.0 { 1.0 } else { scale.s };
+    let sy0 = story.y_px as u32;
+    let sy1 = (story.y_px as u32 + story.h_px as u32).min(canvas.height());
+    if sy1 <= sy0 {
+        return None;
+    }
+    // A mid-story native row: the border column is inked here regardless of where the
+    // picture (which may not span the full column height) begins or ends.
+    let mid = sy0 + (sy1 - sy0) / 2;
+    let opaque = |x: u32, y: u32| x < canvas.width() && y < canvas.height() && canvas.get_pixel(x, y)[3] >= 128;
+    // The divider/border is the contiguous opaque native column run abutting the story
+    // box edge on this flank (left flank → run ending at the story's left edge; right
+    // flank → run starting at the story's right edge), sampled at that mid-story row.
+    let story_x0 = story.x_px as u32;
+    let story_x1 = (story.x_px as u32 + story.w_px as u32).min(native.0 as u32);
+    let (dnx0, dnx1) = if band.x < viewport.x {
+        if story_x0 == 0 || !opaque(story_x0 - 1, mid) {
+            return None;
+        }
+        let mut x = story_x0;
+        while x > 0 && opaque(x - 1, mid) {
+            x -= 1;
+        }
+        (x, story_x0)
+    } else {
+        if story_x1 >= native.0 as u32 || !opaque(story_x1, mid) {
+            return None;
+        }
+        let mut x = story_x1;
+        while x < native.0 as u32 && opaque(x, mid) {
+            x += 1;
+        }
+        (story_x1, x)
+    };
+    if dnx1 <= dnx0 {
+        return None;
+    }
+    // Device cell x-range covering the divider columns (through the uniform scale), and
+    // the device row where the flank's uniform-scaled art bottoms out (the story's
+    // native bottom). The extension spans from there down to the menu strip top.
+    let dcell0 = pane.x + ((scale.off_x as f32 + dnx0 as f32 * s) / cw).floor() as u16;
+    let dcell1 = pane.x + ((scale.off_x as f32 + dnx1 as f32 * s) / cw).ceil() as u16;
+    let art_bottom_row = pane.y + ((scale.off_y as f32 + sy1 as f32 * s) / ch).floor() as u16;
+    if dcell1 <= dcell0 || menu_top_row <= art_bottom_row {
+        return None;
+    }
+    let ext = Rect::new(dcell0, art_bottom_row, dcell1 - dcell0, menu_top_row - art_bottom_row);
+    Some((ext, (dnx0, mid, dnx1 - dnx0, 1)))
 }
 
 /// Map a chrome run's native top-left game pixel to its pane-absolute terminal

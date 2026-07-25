@@ -557,4 +557,61 @@ fn journey_hybrid_tall_pane_divider_reaches_menu() {
     let dy = proceed_y.saturating_sub(1);
     let lmax = (0..vp.x).rev().find(|&x| is_img(x, dy)).expect("left flank ring cells present near the menu");
     assert_eq!(lmax, vp.x - 1, "the divider/flank abuts the story viewport with no seam (lmax {lmax}, vp.x {})", vp.x);
+
+    // SQ-0511 fix: the left picture column keeps its ASPECT — it is NOT vertically
+    // stretched to fill the reclaimed slack. A picture pixel is a real image glyph
+    // (▀/▄ halfblock with per-cell colour), so the picture art's rendered rows are
+    // exactly the rows carrying WIDE glyph coverage. Under the uniform scale those
+    // rows stay within the story's native bottom mapped through that scale; the old
+    // stretch filled the WHOLE column with picture glyphs right down to the menu.
+    use app::engine::WinNode;
+    use app::render::v6_layout as v6;
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = v6::native_extent(items);
+    let story = v6::classify_windows(items).story.expect("story window");
+    let fs = ratatui_image::picker::Picker::halfblocks().font_size();
+    let (cw, ch) = (fs.width.max(1) as u32, fs.height.max(1) as u32);
+    let s = v6::uniform_scale(native, (area.width as u32 * cw, area.height as u32 * ch)).s;
+    let story_bottom = story.y_px as u32 + story.h_px as u32;
+    // Top-anchored (off_y = 0): the story's native bottom maps to this device row.
+    let story_bottom_row = (story_bottom as f32 * s / ch as f32).floor() as u16;
+    let is_glyph = |x: u16, y: u16| {
+        let s = buf.cell((x, y)).unwrap().symbol();
+        s == "\u{2580}" || s == "\u{2584}"
+    };
+    let picture_row = |y: u16| (0..vp.x).filter(|&x| is_glyph(x, y)).count() as u16 > vp.x / 2;
+    let picture_bottom = (0..proceed_y).filter(|&y| picture_row(y)).max().expect("picture rows present");
+    assert!(
+        picture_bottom <= story_bottom_row + 1,
+        "the picture keeps its aspect (uniform scale): its glyph coverage bottoms out at row {picture_bottom}, \
+         within the story's uniform-scaled native bottom (row {story_bottom_row}); NOT stretched to the menu {proceed_y}"
+    );
+    // A genuine reclaimed gap remains below the aspect-correct picture, and NO wide
+    // picture glyphs bleed into it (the old stretch put picture glyphs on every row).
+    assert!(
+        proceed_y > picture_bottom + 3,
+        "a reclaimed gap remains below the aspect-correct picture (picture {picture_bottom}, menu {proceed_y})"
+    );
+    for y in (picture_bottom + 1)..proceed_y {
+        assert!(
+            !picture_row(y),
+            "row {y} below the picture carries no stretched picture glyphs; row: {:?}",
+            row_text(y)
+        );
+    }
+    // The grey divider (native [232,240), ~[220,220,220]) — NOT the dark gap fill — is
+    // carried on down through the reclaimed gap to the menu: on a deep reclaimed row
+    // the flank cell abutting the story is markedly lighter than the interior fill.
+    let lum = |x: u16, y: u16| match buf.cell((x, y)).unwrap().bg {
+        Color::Rgb(r, g, b) => r as u16 + g as u16 + b as u16,
+        _ => 0,
+    };
+    let deep = proceed_y.saturating_sub(2);
+    assert!(deep > picture_bottom, "the deep probe row {deep} is inside the reclaimed gap (picture {picture_bottom})");
+    assert!(
+        lum(vp.x - 1, deep) > 400 && lum(vp.x - 1, deep) > lum(vp.x / 2, deep) + 200,
+        "the grey divider reaches the reclaimed row {deep}: edge lum {} stands out over interior lum {}",
+        lum(vp.x - 1, deep),
+        lum(vp.x / 2, deep)
+    );
 }
