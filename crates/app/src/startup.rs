@@ -197,6 +197,12 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // and reused both for the Glulx session's char-cell pixel size and, below,
     // AppState.game_picker (the render side already tolerates None).
     let game_picker = if cfg.images { picker_ui::build_cover_picker(cfg.image_protocol) } else { None };
+    // Probe the terminal's own default fg/bg (OSC 10/11) in the same pre-UI query
+    // window as the image-protocol Picker above (SQ-0510). Seeds the v6 raster
+    // canvas's default ink/page so "terminal default" theme colours follow the
+    // real terminal instead of a hardcoded light-grey-on-black. Never hangs;
+    // terminals that don't answer leave both as None and keep today's fallbacks.
+    let term_default_colors = app::term_colors::query_terminal_default_colors();
     let char_px = game_picker
         .as_ref()
         .map(|p| {
@@ -508,6 +514,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     state.show_loc_method = cfg.show_loc_method;
     state.show_status_bar = cfg.show_status_bar;
     state.game_picker = game_picker;
+    state.term_default_colors = term_default_colors;
     state.pane_sizes = app::state::PaneSizes {
         split_ratio: cfg.split_ratio,
         verb_dock_pct: cfg.verb_dock_pct,

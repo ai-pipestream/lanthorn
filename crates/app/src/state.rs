@@ -1757,6 +1757,10 @@ pub struct AppState {
 
     /// The in-game graphics Picker (None when images are disabled or unbuilt).
     pub game_picker: Option<ratatui_image::picker::Picker>,
+    /// The terminal's own default fg/bg, probed once at startup (SQ-0510). Seeds
+    /// the v6 raster canvas's default ink/page when the theme leaves them at
+    /// "terminal default"; each field is `None` when the terminal didn't answer.
+    pub term_default_colors: crate::term_colors::TermDefaultColors,
     /// Cached graphics-window protocols (interior-mutable for the render pass).
     pub graphics_render: std::cell::RefCell<crate::render::graphics::GraphicsRender>,
     /// Inline-image band blitter (interior-mutable for the render pass).
@@ -1887,6 +1891,7 @@ impl Default for AppState {
             input_deadline: None,
             glulx_timer_next_fire: None,
             game_picker: None,
+            term_default_colors: crate::term_colors::TermDefaultColors::default(),
             graphics_render: std::cell::RefCell::new(Default::default()),
             inline_image_render: std::cell::RefCell::new(Default::default()),
             vm_halted: false,

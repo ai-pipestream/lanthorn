@@ -55,6 +55,7 @@ pub mod style;
 pub mod story_info;
 pub mod styles;
 pub mod symbols;
+pub mod term_colors;
 pub mod text_field;
 pub mod theme;
 pub mod tidy;

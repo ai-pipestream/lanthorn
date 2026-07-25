@@ -450,8 +450,10 @@ fn render_node(
             if !state.any_overlay_open() && !frameless && !(has_menu && hybrid) {
             if let Some(picker) = state.game_picker.as_ref() {
                 let theme_bg = state.colors.theme.get("transcript").style;
-                let default_fg = style_fg_rgba(theme_bg, image::Rgba([220, 220, 220, 255]));
-                let default_bg = style_bg_rgba(theme_bg, image::Rgba([0, 0, 0, 255]));
+                // SQ-0510: a themed RGB wins; else the terminal's own default
+                // (OSC 10/11, probed at startup); else the hardcoded fallback.
+                let default_fg = v6_default_fg(theme_bg, state.term_default_colors.fg);
+                let default_bg = v6_default_bg(theme_bg, state.term_default_colors.bg);
                 use crate::render::v6_layout as v6;
                 let native = v6::native_extent(items);
                 let layout = v6::classify_windows(items);
@@ -758,8 +760,10 @@ fn render_node(
                         // reverse-video block, matching the terminal bar).
                         if state.pager.active {
                             let mp = state.colors.theme.get("more_prompt").style;
-                            let block = style_fg_rgba(mp, image::Rgba([220, 220, 220, 255]));
-                            let ink = style_bg_rgba(mp, image::Rgba([0, 0, 0, 255]));
+                            // Reverse-video: block = default ink, text = default
+                            // page; unthemed selectors fall to the OSC/hard defaults.
+                            let block = v6_default_fg(mp, state.term_default_colors.fg);
+                            let ink = v6_default_bg(mp, state.term_default_colors.bg);
                             let label = "[more]";
                             let n = label.chars().count() as u32;
                             let last_row = rows.saturating_sub(1) as u32;
@@ -1201,6 +1205,25 @@ fn style_bg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> ima
         Some(ratatui::style::Color::Rgb(r, g, b)) => image::Rgba([r, g, b, 255]),
         _ => fallback,
     }
+}
+
+/// Hardcoded v6 raster default ink (light grey) and page (black), used only when
+/// neither the theme nor the terminal (OSC 10/11 probe) supplies a concrete RGB.
+const RASTER_FALLBACK_INK: image::Rgba<u8> = image::Rgba([220, 220, 220, 255]);
+const RASTER_FALLBACK_PAGE: image::Rgba<u8> = image::Rgba([0, 0, 0, 255]);
+
+/// Resolve the v6 raster canvas's default ink (SQ-0510). Layering: an explicitly
+/// themed RGB fg wins; else the terminal's OSC-10 default (when it answered);
+/// else the hardcoded light-grey fallback.
+fn v6_default_fg(themed: ratatui::style::Style, osc: Option<image::Rgba<u8>>) -> image::Rgba<u8> {
+    style_fg_rgba(themed, osc.unwrap_or(RASTER_FALLBACK_INK))
+}
+
+/// Resolve the v6 raster canvas's default page (SQ-0510). Layering: an explicitly
+/// themed RGB bg wins; else the terminal's OSC-11 default (when it answered);
+/// else the hardcoded black fallback.
+fn v6_default_bg(themed: ratatui::style::Style, osc: Option<image::Rgba<u8>>) -> image::Rgba<u8> {
+    style_bg_rgba(themed, osc.unwrap_or(RASTER_FALLBACK_PAGE))
 }
 
 /// A cheap change key for the whole v6 raster composite (SQ-0469). It folds
@@ -2031,6 +2054,29 @@ mod tests {
     use crate::engine::{GridWindow, Split};
     use crate::state::StyleRun;
     use ratatui::layout::Rect;
+
+    #[test]
+    fn v6_default_colours_layer_theme_over_osc_over_fallback() {
+        use ratatui::style::{Color, Style};
+        let osc_fg = Some(image::Rgba([10, 20, 30, 255]));
+        let osc_bg = Some(image::Rgba([40, 50, 60, 255]));
+
+        // Theme sets a concrete RGB → it wins over the OSC probe.
+        let themed = Style::default()
+            .fg(Color::Rgb(1, 2, 3))
+            .bg(Color::Rgb(4, 5, 6));
+        assert_eq!(v6_default_fg(themed, osc_fg), image::Rgba([1, 2, 3, 255]));
+        assert_eq!(v6_default_bg(themed, osc_bg), image::Rgba([4, 5, 6, 255]));
+
+        // Theme leaves fg/bg at "terminal default" (no concrete RGB) → OSC fills in.
+        let unset = Style::default();
+        assert_eq!(v6_default_fg(unset, osc_fg), image::Rgba([10, 20, 30, 255]));
+        assert_eq!(v6_default_bg(unset, osc_bg), image::Rgba([40, 50, 60, 255]));
+
+        // No theme AND no OSC answer → today's hardcoded fallbacks are preserved.
+        assert_eq!(v6_default_fg(unset, None), RASTER_FALLBACK_INK);
+        assert_eq!(v6_default_bg(unset, None), RASTER_FALLBACK_PAGE);
+    }
 
     #[test]
     fn content_bounds_never_clamps_a_layered_v6_root() {

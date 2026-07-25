@@ -105,7 +105,11 @@ Sixel):
   native height (no dead space) degrades to that same centred layout.
 - **`raster`** — the whole pane, story text included, bakes into one
   device-resolution pixel image with a bitmap font, the way the original v6
-  engine drew it natively.
+  engine drew it natively. Its default ink/page follow the theme; where the
+  theme leaves them at "terminal default", babelmap probes the terminal's own
+  foreground/background at startup (OSC 10/11) and paints in those, so raster
+  text stays readable on a light-background terminal instead of forcing a
+  fixed light-grey-on-black.
 - **`frameless`** — a deliberate "classic terminal interpreter, but the
   pictures still show" presentation: **no decorative frame at all**. The story
   runs as a normal full-pane terminal transcript at full size with native
