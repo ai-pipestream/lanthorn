@@ -18,7 +18,7 @@ use ratatui::Terminal;
 use app::export_dot::export_dot;
 use app::export_svg::export_svg;
 use app::map_dump::render_dump;
-use app::archive::{load_archive, save_archive_meta};
+use app::archive::load_archive;
 use app::input::{apply_action, apply_text_entry, key_to_command, mouse_to_action, Action, KeyResolve};
 use app::tidy::should_bg_tidy;
 use app::persist_files::{list_saves, restore_game};

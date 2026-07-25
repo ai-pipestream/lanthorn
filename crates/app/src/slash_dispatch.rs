@@ -4,7 +4,7 @@
 //! pure move — no behavior change. Touches binary-only helpers (save/restore
 //! plumbing, reset, hints, transcript export), all reached via `crate::`.
 
-use app::archive::save_archive_meta;
+use app::archive::save_archive_meta_pics;
 use app::engine::Engine;
 use app::export::export_transcript;
 use app::input::{apply_action, Action};
@@ -147,7 +147,7 @@ pub(crate) fn dispatch_slash_outcome(
                         location,
                         score,
                     };
-                    save_archive_meta(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history)
+                    save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history, &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default())
                         .map(|()| "saved".to_string())
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -192,6 +192,14 @@ pub(crate) fn dispatch_slash_outcome(
                         Ok(RestoreOutcome::Resumed(ac)) => {
                             if let Some(scr) = ac.screen.clone() {
                                 if let Some(z) = zvm_session_opt_mut(&mut *session) { z.machine.screen = scr; }
+                            }
+                            // v6 graphics canvases: mirror the startup auto-load path
+                            // (startup.rs) so a restored v6 story's pictures redraw in
+                            // every mode. Without this pictures_canvas stays empty and
+                            // the screen() adapter emits no Graphics leaves (SQ-0516).
+                            // No-op for non-v6 archives (ac.pictures empty).
+                            if let Some(z) = zvm_session_opt_mut(&mut *session) {
+                                z.load_pictures_png(&ac.pictures);
                             }
                             if state.config.aux_storage != app::config::AuxStorage::Global {
                                 session.set_aux_data(ac.aux.clone());

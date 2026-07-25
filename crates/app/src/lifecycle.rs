@@ -10,7 +10,7 @@ use app::engine::Engine;
 use app::state::AppState;
 
 use crate::engine_helpers::zvm_session_opt;
-use crate::{format_rfc3339, save_archive_meta};
+use crate::format_rfc3339;
 
 /// Save on exit ONLY when auto_save is enabled. With auto_save off (the default),
 /// nothing is saved automatically — the user controls saving via the quit prompt's
@@ -50,7 +50,8 @@ pub(crate) fn exit_auto_save(
         location,
         score,
     };
-    match save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history) {
+    let v6_pics = zvm_session_opt(session).map(|z| z.pictures_png()).unwrap_or_default();
+    match app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history, &v6_pics) {
         Ok(()) => {
             eprintln!("babelmap: map saved to {}", arc_file.display());
         }
@@ -93,7 +94,8 @@ pub(crate) fn quit_dialog_save(
         location,
         score,
     };
-    let _ = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history);
+    let v6_pics = zvm_session_opt(session).map(|z| z.pictures_png()).unwrap_or_default();
+    let _ = app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history, &v6_pics);
 }
 
 // ── Pending config-write flush ────────────────────────────────────────────────

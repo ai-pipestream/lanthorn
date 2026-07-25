@@ -20,8 +20,8 @@ use app::storage::default_state_path;
 use crate::engine_helpers::{restore_error_msg, zvm_session_opt, zvm_session_opt_mut};
 use crate::ingame_io::{open_filename_modal, open_ingame_saves};
 use crate::{
-    format_rfc3339, game_echoes_command, map_pane_dims, reobserve_location, save_archive_meta,
-    should_bg_tidy, PaneRects,
+    format_rfc3339, game_echoes_command, map_pane_dims, reobserve_location, should_bg_tidy,
+    PaneRects,
 };
 
 /// Apply a completed game-turn `result` from a submitted command line: echo the
@@ -343,7 +343,10 @@ fn post_turn_bookkeeping(
             location,
             score,
         };
-        if let Err(e) = save_archive_meta(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history) {
+        // v6 graphics canvases ride along so a resumed v6 story's pictures redraw
+        // (SQ-0516); empty for non-v6 sessions, leaving the archive layout unchanged.
+        let v6_pics = zvm_session_opt(session).map(|z| z.pictures_png()).unwrap_or_default();
+        if let Err(e) = app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history, &v6_pics) {
             state.push_notice(&format!("[Auto-save failed: {}]", e));
         }
     }
@@ -494,6 +497,12 @@ pub(crate) fn apply_launch_resume(
                 // The launch-resume stash omits it, so without this the count would
                 // reset to 0 on resume (SQ-0260) — mirrors the interactive restore.
                 state.turns = ac.meta.turns;
+                // v6 graphics canvases from the same archive: mirror the startup
+                // auto-load / interactive restore so a resumed v6 story's pictures
+                // redraw in every mode (SQ-0516). No-op for non-v6 (ac.pictures empty).
+                if let Some(z) = zvm_session_opt_mut(&mut *session) {
+                    z.load_pictures_png(&ac.pictures);
+                }
             }
             // Reinstate the saved screen too (mirrors the auto-load path, zvm-only),
             // so a once-split game's upper window/status line shows after resuming.
@@ -924,6 +933,94 @@ mod tests {
         );
 
         assert_eq!(state.turns, 42, "launch resume restores the saved turn count (SQ-0260)");
+        let _ = std::fs::remove_file(&arc);
+    }
+
+    // SQ-0516: the launch-dialog auto-resume must repopulate a v6 story's graphics
+    // canvases (`pictures_canvas`) from the archive — otherwise the restored game
+    // shows NO pictures in any render mode (the screen() adapter emits Graphics
+    // leaves only for windows present in pictures_canvas). Guards two coupled fixes:
+    // the arc now carries pictures (save_archive_meta_pics, as the auto-save/exit
+    // paths do) AND apply_launch_resume calls load_pictures_png on restore.
+    // Skips cleanly when the gitignored Zork0 asset is absent.
+    #[test]
+    fn launch_resume_restores_v6_pictures_sq0516() {
+        use app::engine::Engine;
+        use app::graphics::PictSource;
+        use app::session::GameSession;
+
+        let story_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/zork0-r393-s890714.z6");
+        let Ok(story_bytes) = std::fs::read(&story_path) else {
+            eprintln!("SKIP: gitignored Zork0 story missing at {}", story_path.display());
+            return;
+        };
+        let boot = |bytes: Vec<u8>| -> GameSession {
+            let mut picts =
+                PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+            let dims = picts.all_pict_dims();
+            let mut s = GameSession::new_with_trace(
+                bytes, false, false, None, false, dims, picts.std_window(),
+            )
+            .expect("Zork0 (v6) boots");
+            s.set_pict_source(Some(picts));
+            s.flush_boot_pictures();
+            s
+        };
+
+        // Source session with live graphics; write the arc EXACTLY as the fixed
+        // auto-save / exit paths now do (save_archive_meta_pics + pictures_png()).
+        let src = boot(story_bytes.clone());
+        let src_canvas_count = src.pictures_canvas.len();
+        assert!(src_canvas_count > 0, "Zork0 boot draws graphics canvases");
+        let save = src.save_state();
+        let arc = std::env::temp_dir().join(format!("bm-sq516-{}.babelmap", std::process::id()));
+        let meta = app::archive::Meta {
+            format_version: app::archive::CURRENT_FORMAT_VERSION,
+            ifid: None,
+            name: None,
+            turns: 0,
+            saved_at: String::new(),
+            location: None,
+            score: None,
+        };
+        app::archive::save_archive_meta_pics(
+            &arc, &mapper::mapper::Mapper::default(), &save, Some(&src.machine.screen),
+            &src.machine.aux_data, meta, &[], &[], &[], &[], &[], &[], &src.pictures_png(),
+        )
+        .expect("write v6 .babelmap with pictures");
+
+        // Fresh v6 session with an EMPTY canvas, then drive the REAL launch-resume.
+        let mut fresh = boot(story_bytes);
+        fresh.pictures_canvas.clear();
+        assert!(fresh.pictures_canvas.is_empty(), "canvas cleared before resume");
+
+        let mut state = app::state::AppState::default();
+        let mut mapper = mapper::mapper::Mapper::default();
+        let panes = crate::PaneRects {
+            map: ratatui::layout::Rect::default(), story: ratatui::layout::Rect::default(),
+            room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None,
+            reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
+            verb_menu: Default::default(),
+            palette: Vec::new(),
+            transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0,
+            transcript_total_rows: 0,
+            modal_list_viewport: 0,
+        };
+
+        super::apply_launch_resume(
+            &save, Vec::new(), Vec::new(), Some(src.machine.screen.clone()),
+            &mut fresh, &mut mapper, &mut state, &panes, &arc,
+        );
+
+        assert_eq!(
+            fresh.pictures_canvas.len(), src_canvas_count,
+            "launch resume must repopulate v6 graphics canvases from the archive (SQ-0516)"
+        );
+        assert!(
+            !fresh.pictures_png().is_empty(),
+            "restored v6 session re-encodes its graphics canvases"
+        );
         let _ = std::fs::remove_file(&arc);
     }
 
