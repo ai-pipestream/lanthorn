@@ -22,6 +22,30 @@ pub(crate) fn packed_explicit(packed: u32) -> bool {
     packed != 0 && !((packed >> 24) == 1 && (packed & 0xFF) <= 1)
 }
 
+/// The ZMSD §8.3.1 recommended true-colour equivalents for the Standard palette
+/// colours 2..=9, as 15-bit `0bbbbbgggggrrrrr` values. On the pixel/canvas paths
+/// (unlike the terminal cell path) we resolve Standard colours to these DOS/spec-
+/// authentic RGBs directly rather than routing them through the theme's ANSI
+/// palette — that palette maps Standard white(9) to the dim VGA base-white
+/// `Color::Gray` (170,170,170), so a canvas that should show spec white
+/// (255,255,255) instead came out light grey. Greys (10..=12) still go through
+/// `resolve_zcolour`/`grey_rgb`, which already carry their own fixed RGB. (SQ-0506)
+fn standard_pixel_rgb(n: u8) -> Option<Rgba<u8>> {
+    let v15: u16 = match n {
+        2 => 0x0000, // black   → (0,0,0)
+        3 => 0x001D, // red     → (239,0,0)
+        4 => 0x0340, // green   → (0,214,8)
+        5 => 0x03BD, // yellow  → (239,214,8)
+        6 => 0x59A0, // blue    → (0,107,181)
+        7 => 0x7C1F, // magenta → (255,0,255)
+        8 => 0x77A0, // cyan    → (0,239,239)
+        9 => 0x7FFF, // white   → (255,255,255)
+        _ => return None,
+    };
+    let (r, g, b) = zvm::screen::rgb15_to_888(v15);
+    Some(Rgba([r, g, b, 255]))
+}
+
 pub(crate) fn packed_to_rgba(packed: u32, fallback: Rgba<u8>, colors: &ColorScheme) -> Rgba<u8> {
     if packed == 0 {
         return fallback;
@@ -38,6 +62,13 @@ pub(crate) fn packed_to_rgba(packed: u32, fallback: Rgba<u8>, colors: &ColorSche
         2 => zvm::screen::ZColour::True((packed & 0xFFFF) as u16),
         _ => return fallback,
     };
+    // Pixel path: Standard 2..=9 resolve to their ZMSD §8.3.1 true-colour RGB,
+    // bypassing the theme ANSI palette so white is real white, not VGA grey.
+    if let zvm::screen::ZColour::Standard(n) = z {
+        if let Some(rgb) = standard_pixel_rgb(n) {
+            return rgb;
+        }
+    }
     color_to_rgba(crate::render::resolve_zcolour(z, colors), fallback)
 }
 
@@ -911,25 +942,40 @@ mod tests {
 
     #[test]
     fn packed_standard_palette_colour_blits_its_own_rgb_not_default() {
-        // SQ-0480: a run coloured with a Standard palette colour (the compass
-        // letters) must blit in that colour, not the default ink. terminal_default
-        // maps Standard(3) → Color::Red (a NAMED colour); packed_to_rgba must
-        // resolve it to concrete RGB rather than dropping to the fallback.
+        // SQ-0480/SQ-0506: a run coloured with a Standard palette colour (the
+        // compass letters) must blit in that colour, not the default ink. On the
+        // PIXEL path, Standard 2..=9 resolve to the ZMSD §8.3.1 true-colour RGB
+        // (DOS/spec-authentic) rather than the theme's dim VGA ANSI values — so
+        // red is the spec red $001D → (239,0,0), NOT the old VGA base-red
+        // (170,0,0). White(9) likewise becomes real white (255,255,255).
         let colors = ColorScheme::terminal_default();
         let fallback = Rgba([1, 2, 3, 255]);
         // Standard(3): packed tag 1, value 3 (see state::pack_zcolour).
         let packed_std3 = (1u32 << 24) | 3;
         let got = packed_to_rgba(packed_std3, fallback, &colors);
         assert_ne!(got, fallback, "a palette colour must NOT fall back to the default ink");
-        assert_eq!(got, Rgba([170, 0, 0, 255]), "Standard(3) → red resolves to concrete RGB");
+        assert_eq!(got, Rgba([239, 0, 0, 255]), "Standard(3) → spec red $001D on the pixel path");
+        // Standard(9) white must be TRUE white, not the VGA base-grey it used to be.
+        let packed_std9 = (1u32 << 24) | 9;
+        assert_eq!(
+            packed_to_rgba(packed_std9, fallback, &colors),
+            Rgba([255, 255, 255, 255]),
+            "Standard(9) → true white 255,255,255 (ZMSD $7FFF), not VGA grey 170,170,170"
+        );
+        // Standard(2) black stays black.
+        assert_eq!(
+            packed_to_rgba((1u32 << 24) | 2, fallback, &colors),
+            Rgba([0, 0, 0, 255]),
+            "Standard(2) → black 0,0,0 (ZMSD $0000)"
+        );
         // And the full blit through build_chrome_canvas carries it: a space-only
         // run has no ink, so probe an inked glyph's fg by asserting SOME cell pixel
         // is the run's red.
         let win = px_text_grid_item("N", 0, packed_std3, 0);
         let c = build_chrome_canvas(&[&win], (8, 8), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors);
         assert!(
-            (0..8).any(|x| (0..8).any(|y| *c.get_pixel(x, y) == Rgba([170, 0, 0, 255]))),
-            "the compass glyph blits in its own red, not the default fg"
+            (0..8).any(|x| (0..8).any(|y| *c.get_pixel(x, y) == Rgba([239, 0, 0, 255]))),
+            "the compass glyph blits in its own spec red, not the default fg"
         );
     }
 

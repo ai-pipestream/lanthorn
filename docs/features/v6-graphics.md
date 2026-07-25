@@ -167,6 +167,13 @@ layout instead of an approximated grid. Colour is honored too: a text run's
 packed foreground/background (from `set_colour`/`set_true_colour`) resolves
 to real RGB, and the reverse-video style bit swaps fg/bg — which is what
 makes Zork Zero's scroll ribbons come out dark-on-tan instead of inverted.
+On the pixel canvas the Standard palette colours (2–9) resolve to the
+Z-Machine Standard's own recommended true-colour RGB (ZMSD §8.3.1) — so
+white is real white (255,255,255) and black is black (0,0,0), rather than the
+dim VGA base values the terminal ANSI palette would give (white → 170,170,170
+"light grey"). The terminal *cell* path still routes Standard colours through
+the theme's ANSI palette (so a user's Ghostty colours apply); only the pixel
+paths take the authoritative RGB directly.
 The story page itself fills with the window's own background colour (when
 the game set one) rather than leaving the terminal's theme backdrop showing
 through.
