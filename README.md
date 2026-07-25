@@ -54,20 +54,22 @@ roof; one engine-agnostic mapper that charts them all.
 
 ## Quick start
 
-babelmap builds with a Rust toolchain. On Linux, the default `playback` audio
-feature needs ALSA headers: `libasound2-dev` (Debian/Ubuntu) or `alsa-lib-devel`
-(Fedora).
+Grab the archive for your platform from the
+[**latest release**](https://github.com/sharkusk/babelmap/releases) — Linux
+(x86_64), macOS (universal), and Windows (x86_64) builds ship with every
+release, four binaries in each: `babelmap` itself plus the no-map CLI players
+(`zvm-cli` / `gvm-cli` / `scott-cli`). Extract it and run:
 
 ```bash
-# Build
-cargo build --release
-
 # Play a story
-./target/release/babelmap path/to/story.z5
+./babelmap path/to/story.z5
 
 # Point it at a directory to open the story picker instead
-./target/release/babelmap ~/if-games/
+./babelmap ~/if-games/
 ```
+
+Platform notes (Gatekeeper on macOS, SmartScreen on Windows, `libasound2` on
+Linux) are covered in each release's notes.
 
 Don't have a story yet? Launch the picker and press **`/`** to browse IFDB's
 popular list or search by title/author, then **download a playable story file
@@ -177,7 +179,12 @@ live under `~/.babelmap/saves/<story-filename>.save/` by default; `--data-dir
 
 ---
 
-## Development
+## Building from source & development
+
+Prefer to build it yourself? All you need is a Rust toolchain. On Linux, the
+default `playback` audio feature also wants ALSA headers: `libasound2-dev`
+(Debian/Ubuntu) or `alsa-lib-devel` (Fedora). Then
+`cargo build --release` produces `target/release/babelmap`.
 
 ```bash
 cargo build --workspace          # build everything
