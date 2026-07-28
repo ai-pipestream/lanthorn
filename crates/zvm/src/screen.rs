@@ -53,6 +53,33 @@ pub enum ZColour {
     True24(u32),
 }
 
+impl ZColour {
+    /// This channel's colour as a 15-bit true-colour value (ZMSD §8.3.7), given
+    /// the interpreter's own default colour number for the channel.
+    ///
+    /// Standard numbers map through the §8.3.1 table; `Default` resolves to the
+    /// interpreter default the header publishes in $2C/$2D (which is what the
+    /// player actually sees); `True` is already a 15-bit value; `True24` is a
+    /// 24-bit host colour rounded down to 15 bits — §8.8.3.2.8 anticipates
+    /// exactly that ("the value shown may be a 15-bit rounding of a more precise
+    /// colour").
+    ///
+    /// There is no `-4` (transparent) answer here because the model has no
+    /// transparent state: §8.3.6 lets an interpreter without transparency
+    /// "ignore any attempt to select colour 15", and this one does.
+    pub fn true_value(self, interpreter_default: u8) -> u16 {
+        match self {
+            ZColour::Default => standard_true_colour(interpreter_default).unwrap_or(0),
+            ZColour::Standard(n) => standard_true_colour(n).unwrap_or(0),
+            ZColour::True(v) => v & 0x7FFF,
+            ZColour::True24(rgb) => {
+                let (r, g, b) = ((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+                (((b >> 3) << 10) | ((g >> 3) << 5) | (r >> 3)) as u16
+            }
+        }
+    }
+}
+
 /// Expand a 15-bit RGB (0bbbbbgggggrrrrr) to 8-bit `(r, g, b)`. Shared by the
 /// CLI (SGR) and app (ratatui) renderers so the expansion is defined once.
 pub fn rgb15_to_888(v: u16) -> (u8, u8, u8) {
@@ -281,6 +308,11 @@ impl ZWindow {
         }
     }
     /// Write property `n` (0–15, ZMSD 1.1 §8.8.3.2). Out-of-range → ignored.
+    ///
+    /// 16/17 fall in that ignored range on purpose: §8.8.3.2 ends "The true
+    /// foreground and true background properties must not be written by
+    /// put_wind_prop." They are read-derived from the window's channels in the
+    /// `get_wind_prop` arm instead.
     pub fn put_prop(&mut self, n: u16, v: u16) {
         match n {
             0 => self.y_coord = v,
@@ -858,8 +890,73 @@ pub fn write_default_colours(mem: &mut Memory, bg: u8, fg: u8) {
     if mem.version() < 5 {
         return;
     }
-    mem.write_byte(0x2C, clamp_default_colour(bg, DEFAULT_BG_COLOUR));
-    mem.write_byte(0x2D, clamp_default_colour(fg, DEFAULT_FG_COLOUR));
+    let bg = clamp_default_colour(bg, DEFAULT_BG_COLOUR);
+    let fg = clamp_default_colour(fg, DEFAULT_FG_COLOUR);
+    mem.write_byte(0x2C, bg);
+    mem.write_byte(0x2D, fg);
+    write_header_ext_colours(mem, bg, fg);
+}
+
+/// The ZMSD §8.3.1 true-colour equivalent of standard colour number `n`
+/// (2..=12), as a 15-bit RGB value. `None` for the sentinels (0 current,
+/// 1 default, -1 pixel-under-cursor), the reserved 13/14 and 15 (transparent,
+/// which §8.3.7 gives the special value -4 rather than an RGB triple).
+///
+/// This is the spec's own table, transcribed verbatim; §8.3.1.1 calls these
+/// equivalences "recommended" and the interpreter default.
+pub fn standard_true_colour(n: u8) -> Option<u16> {
+    Some(match n {
+        2 => 0x0000,  // black
+        3 => 0x001D,  // red
+        4 => 0x0340,  // green
+        5 => 0x03BD,  // yellow
+        6 => 0x59A0,  // blue
+        7 => 0x7C1F,  // magenta
+        8 => 0x77A0,  // cyan
+        9 => 0x7FFF,  // white
+        10 => 0x5AD6, // light grey  [V6 only]
+        11 => 0x4631, // medium grey [V6 only]
+        12 => 0x2D6B, // dark grey   [V6 only]
+        _ => return None,
+    })
+}
+
+/// Publish the interpreter's side of the header extension table (ZMSD §11.1.7.3):
+/// word 4 = Flags 3, word 5 = true default FOREGROUND, word 6 = true default
+/// BACKGROUND (note the fg-before-bg order — the reverse of $2C/$2D).
+///
+/// All three are marked "Int" and "Rst" in the §11.1.7.3 table, i.e. written by
+/// the interpreter and re-stamped on restart/restore, which is why this rides
+/// along with every `write_default_colours`.
+///
+/// Flags 3 is cleared outright: §11.1.7.4 — "The bits in Flags 3 are set by the
+/// game to request use of a feature. If the interpreter cannot provide a
+/// feature, it must clear the relevant bit" — and §11.1.7.4.1 — "All unused bits
+/// in Flags 3 must be cleared by the interpreter." Its only defined bit is 0
+/// ("game wants to use transparency"), which we do not provide (§8.3.6 lets a
+/// non-transparent interpreter ignore colour 15), so every bit goes to 0.
+///
+/// Writes are skipped for any word past the table's length, per §11.1.7.2: "If
+/// the interpreter needs to write a word which is beyond the length of the
+/// extension table, or the extension table doesn't exist at all, then the result
+/// is that nothing happens."
+fn write_header_ext_colours(mem: &mut Memory, bg: u8, fg: u8) {
+    let ext = mem.read_word(0x36) as u32;
+    if ext == 0 {
+        return;
+    }
+    let count = mem.read_word(ext); // word 0 = number of further words
+    if count >= 4 {
+        mem.write_word(ext + 8, 0); // word 4: Flags 3 — no features provided
+    }
+    if count >= 5 {
+        let true_fg = standard_true_colour(fg).unwrap_or(0x7FFF);
+        mem.write_word(ext + 10, true_fg); // word 5: true default foreground
+    }
+    if count >= 6 {
+        let true_bg = standard_true_colour(bg).unwrap_or(0x0000);
+        mem.write_word(ext + 12, true_bg); // word 6: true default background
+    }
 }
 
 /// Set or clear the Flags1 "colour available" bit (bit 0). No-op for v3, which
@@ -965,6 +1062,19 @@ pub fn write_screen_dims(mem: &mut Memory, rows: u8, cols: u8) {
 /// G1 = score (signed) or hours (unsigned).
 /// G2 = turns or minutes.
 /// Flags1 bit 1: 0 = score/turns, 1 = time.
+/// Does this story keep a clock rather than a score on the status line?
+///
+/// ZMSD §8.2.1: "In Versions 1 and 2, all games are 'score games'. In Version 3,
+/// if bit 1 of 'Flags 1' is clear then the game is a 'score game'; if it is set,
+/// then the game is a 'time game'." Flags 1 bit 1 only carries that meaning from
+/// v3 on, so it must not be consulted below it. (Belt and braces today: the
+/// header parser refuses to load a v1/v2 story at all — see
+/// [`crate::header::parse_header`] — so the guard only matters if that ever
+/// changes.)
+fn is_time_game(version: u8, flags1: u8) -> bool {
+    version >= 3 && (flags1 & (1 << 1)) != 0
+}
+
 pub fn compute_status_line(mem: &Memory) -> StatusLine {
     let gbase = mem.global_vars() as u32;
     let loc_obj = mem.read_word(gbase);
@@ -977,9 +1087,7 @@ pub fn compute_status_line(mem: &Memory) -> StatusLine {
         objects::short_name(mem, loc_obj)
     };
 
-    // Flags1 bit 1 selects time mode.
-    let flags1 = mem.read_byte(0x01);
-    let time_mode = (flags1 & (1 << 1)) != 0;
+    let time_mode = is_time_game(mem.version(), mem.read_byte(0x01));
 
     let right = if time_mode {
         StatusRight::Time { hours: g1 as u8, minutes: g2 as u8 }
@@ -1065,6 +1173,21 @@ mod tests {
         let sl = compute_status_line(&mem);
         assert!(sl.location.starts_with("west"), "location should start with 'west'");
         assert_eq!(sl.right, StatusRight::Time { hours: 10, minutes: 30 });
+    }
+
+    // ── (b2) v1/v2 are always score games (§8.2.1) ───────────────────────────
+
+    #[test]
+    fn v1_v2_status_line_is_always_score() {
+        // §8.2.1: "In Versions 1 and 2, all games are 'score games'" — the
+        // Flags 1 bit 1 "time game" bit must not be consulted below v3.
+        // (Tested on the predicate: `parse_header` refuses v1/v2 story files
+        // outright, so no Memory can be built at those versions.)
+        let flags1_with_time_bit = 1u8 << 1;
+        assert!(!is_time_game(1, flags1_with_time_bit), "v1 is always a score game");
+        assert!(!is_time_game(2, flags1_with_time_bit), "v2 is always a score game");
+        assert!(is_time_game(3, flags1_with_time_bit), "v3 honours the bit");
+        assert!(!is_time_game(3, 0), "v3 without the bit is a score game");
     }
 
     // ── (c) header capability bits ───────────────────────────────────────────
@@ -1280,6 +1403,52 @@ mod tests {
         mem3.write_byte(0x2D, 0x22);
         write_default_colours(&mut mem3, 6, 5);
         assert_eq!((mem3.read_byte(0x2C), mem3.read_byte(0x2D)), (0x11, 0x22), "v3 untouched");
+    }
+
+    #[test]
+    fn default_colours_publish_the_header_extension_words() {
+        // ZMSD §11.1.7.3: word 4 = Flags 3, word 5 = true default FOREGROUND,
+        // word 6 = true default BACKGROUND — all three marked "Int"/"Rst", so
+        // the interpreter writes them alongside $2C/$2D.
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        let ext: u32 = 0x0180; // dynamic memory
+        mem.write_word(0x36, ext as u16);
+        mem.write_word(ext, 6); // 6 further words
+        mem.write_word(ext + 8, 0x0001); // game asked for transparency
+        write_default_colours(&mut mem, 6, 5); // bg = blue, fg = yellow
+
+        assert_eq!(mem.read_word(ext + 8), 0, "Flags 3 cleared — we provide none of its features");
+        assert_eq!(
+            mem.read_word(ext + 10),
+            0x03BD,
+            "word 5 = true default foreground (yellow, §8.3.1)"
+        );
+        assert_eq!(
+            mem.read_word(ext + 12),
+            0x59A0,
+            "word 6 = true default background (blue, §8.3.1)"
+        );
+    }
+
+    #[test]
+    fn header_extension_writes_stop_at_the_table_length() {
+        // ZMSD §11.1.7.2: writing past the table's length must do nothing.
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        let ext: u32 = 0x0180;
+        mem.write_word(0x36, ext as u16);
+        mem.write_word(ext, 4); // only 4 further words: Flags 3 is the last one
+        mem.write_word(ext + 10, 0xDEAD);
+        mem.write_word(ext + 12, 0xBEEF);
+        write_default_colours(&mut mem, 6, 5);
+        assert_eq!(mem.read_word(ext + 8), 0, "word 4 is in range and gets cleared");
+        assert_eq!(mem.read_word(ext + 10), 0xDEAD, "word 5 out of range → untouched");
+        assert_eq!(mem.read_word(ext + 12), 0xBEEF, "word 6 out of range → untouched");
+
+        // No table at all → nothing happens (and no panic).
+        let mut bare = Memory::new(sample_story(5)).unwrap();
+        bare.write_word(0x36, 0);
+        write_default_colours(&mut bare, 6, 5);
+        assert_eq!(bare.read_byte(0x2C), 6, "the $2C/$2D half still lands");
     }
 
     #[test]

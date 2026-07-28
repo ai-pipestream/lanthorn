@@ -1811,6 +1811,20 @@ fn v6_run_style(
             s = s.bg(crate::render::resolve_zcolour(crate::state::unpack_zcolour(bg), colors));
         }
     }
+    // ZMSD §8.7.1 style bits, as the model packs them (1 = reverse video,
+    // 2 = bold, 4 = italic, 8 = fixed-pitch). Bold and italic used to be dropped
+    // on every v6 cell path, so a game's emphasised menu text rendered roman.
+    // They are ADDED when set (never removed): unlike REVERSED — which the
+    // full-width flood rows below stamp into `base` and a non-reverse run must
+    // clear — bold/italic only ever arrive from the run itself, so subtracting
+    // them would fight the theme's own base style. Fixed-pitch (8) needs no
+    // action in a monospaced terminal.
+    if style_bits & 2 != 0 {
+        s = s.add_modifier(ratatui::style::Modifier::BOLD);
+    }
+    if style_bits & 4 != 0 {
+        s = s.add_modifier(ratatui::style::Modifier::ITALIC);
+    }
     if style_bits & 1 != 0 {
         s.add_modifier(ratatui::style::Modifier::REVERSED)
     } else {
@@ -4999,6 +5013,24 @@ mod tests {
         assert!(rev.add_modifier.contains(ratatui::style::Modifier::REVERSED), "reverse bit adds REVERSED");
         let plain = v6_run_style(base.add_modifier(ratatui::style::Modifier::REVERSED), 0, 0, 0, true, &colors);
         assert!(plain.sub_modifier.contains(ratatui::style::Modifier::REVERSED), "no reverse bit removes REVERSED");
+    }
+
+    #[test]
+    fn v6_run_style_carries_bold_and_italic() {
+        // ZMSD §8.7.1 styles: bit 2 = Bold, bit 4 = Italic (bit 1 = Reverse
+        // Video, bit 8 = Fixed Pitch). The v6 cell paths used to drop bold and
+        // italic entirely, rendering emphasised menu text as roman.
+        use ratatui::style::Modifier;
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let base = colors.theme.get("upper_window").style;
+        assert!(v6_run_style(base, 0, 0, 2, true, &colors).add_modifier.contains(Modifier::BOLD));
+        assert!(v6_run_style(base, 0, 0, 4, true, &colors).add_modifier.contains(Modifier::ITALIC));
+        // Combined with reverse video, and unaffected by the colour gate.
+        let all = v6_run_style(base, 0, 0, 1 | 2 | 4, false, &colors).add_modifier;
+        assert!(all.contains(Modifier::BOLD) && all.contains(Modifier::ITALIC) && all.contains(Modifier::REVERSED));
+        // Fixed-pitch (8) alone still adds nothing in a monospaced terminal.
+        let fixed = v6_run_style(base, 0, 0, 8, true, &colors);
+        assert!(!fixed.add_modifier.contains(Modifier::BOLD) && !fixed.add_modifier.contains(Modifier::ITALIC));
     }
 
     #[test]

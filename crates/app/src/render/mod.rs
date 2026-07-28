@@ -66,15 +66,23 @@ pub(crate) fn apply_text_style(base: Style, bits: u8) -> Style {
 /// - `ZColour::Standard(2..=9)` → `scheme.palette[n - 2]` (ANSI colours routed
 ///   through the active theme so the user's Ghostty palette applies)
 /// - `ZColour::Standard(10..=12)` → fixed grey RGB via `grey_rgb(n)`
+/// - `ZColour::Standard(_)` (the §8.3.1 non-colours) → `Color::Reset`
 /// - `ZColour::True(v)` → exact 15-bit RGB via `rgb15_to_888(v)`
 pub(crate) fn resolve_zcolour(c: ZColour, scheme: &ColorScheme) -> Color {
     match c {
         ZColour::Default => Color::Reset,
         ZColour::Standard(n @ 2..=9) => scheme.palette[(n - 2) as usize],
-        ZColour::Standard(n) => {
+        ZColour::Standard(n @ 10..=12) => {
             let (r, g, b) = grey_rgb(n);
             Color::Rgb(r, g, b)
         }
+        // The rest of the §8.3.1 table is not a paintable colour: 0 = "current",
+        // 1 = "default", 13/14 reserved, 15 = transparent. The VM filters all of
+        // them out upstream (`decode_set_colour` turns 1 into `ZColour::Default`
+        // and ignores the others), so this arm is belt and braces — but it must
+        // fall back to the theme default, not to `grey_rgb`'s dark grey, which
+        // would render "default" text in an arbitrary grey.
+        ZColour::Standard(_) => Color::Reset,
         ZColour::True(v) => {
             let (r, g, b) = rgb15_to_888(v);
             Color::Rgb(r, g, b)
@@ -233,6 +241,15 @@ mod text_style_tests {
         assert_eq!(resolve_zcolour(ZColour::True(0x7FFF), &scheme), Color::Rgb(255, 255, 255));
         // True24 carries an exact 24-bit RGB (Glulx stylehint colour).
         assert_eq!(resolve_zcolour(ZColour::True24(0x0011_2233), &scheme), Color::Rgb(0x11, 0x22, 0x33));
+        // ZMSD §8.3.1's non-colours — 0 "current", 1 "default", 13/14 reserved,
+        // 15 transparent — must never paint as dark grey.
+        for n in [0u8, 1, 13, 14, 15] {
+            assert_eq!(
+                resolve_zcolour(ZColour::Standard(n), &scheme),
+                Color::Reset,
+                "colour {n} is not a paintable colour — falls back to the theme default"
+            );
+        }
     }
 
     #[test]

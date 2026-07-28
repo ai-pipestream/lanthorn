@@ -173,13 +173,15 @@ pub(crate) fn pack_status_clusters(
         }
     }
     // LEFT cluster: flush left, truncated to the space before the right cluster.
+    // This is where the {location} segment sits, so an overlong name breaks at a
+    // space and gets an ellipsis (ZMSD §8.2.2.2) instead of a hard clip.
     let left_budget = right_start;
     {
         let mut x = 0usize;
         for (t, s, _) in &left {
             if x >= left_budget { break; }
             let avail = left_budget - x;
-            let txt = truncate_line(t, avail).to_string();
+            let txt = truncate_status_text(t, avail);
             let adv = cw(&txt);
             ops.push((x as u16, txt, *s));
             x += adv;
@@ -228,6 +230,31 @@ pub(crate) fn visible_lines(
     // The window starts at end - rows, clamped to 0.
     let start = end.saturating_sub(rows);
     &transcript[start..end]
+}
+
+/// Truncate a status-bar segment to `width` columns the way ZMSD §8.2.2.2 asks:
+/// "If the object's short name exceeds the available room on the status line,
+/// the author suggests that an interpreter should break it at the last space and
+/// append an ellipsis". We use the single-character ellipsis '…' rather than the
+/// spec's three dots so the marker itself costs one column, not three.
+///
+/// Only applied when the text actually overflows — a segment that fits is
+/// returned unchanged, so nothing gains a spurious '…'. A single word longer
+/// than `width` (no space to break at) falls back to a hard character break,
+/// still marked with the ellipsis.
+pub(crate) fn truncate_status_text(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    let head: String = text.chars().take(width - 1).collect(); // one column for '…'
+    let kept = match head.rfind(' ') {
+        Some(i) => head[..i].trim_end(),
+        None => head.as_str(),
+    };
+    format!("{kept}…")
 }
 
 /// Truncate `line` to at most `width` characters (not bytes).
@@ -2513,13 +2540,32 @@ mod tests {
         let ops2 = pack_status_clusters(&[mk("abc", Align::Left), mk("cc", Align::Center), mk("XY", Align::Right)], 30);
         let center = ops2.iter().find(|(_, t, _)| t == "cc").unwrap();
         assert_eq!(center.0, 14);
-        // narrow width 6: right "XY" preserved at 4; center dropped; left "abcdef" truncated to 4 ("abcd")
+        // narrow width 6: right "XY" preserved at 4; center dropped; left
+        // "abcdef" truncated into the 4 cols before it — one word, so a hard
+        // break plus the §8.2.2.2 ellipsis ("abc…")
         let ops3 = pack_status_clusters(&[mk("abcdef", Align::Left), mk("cc", Align::Center), mk("XY", Align::Right)], 6);
         assert!(ops3.iter().all(|(_, t, _)| t != "cc"), "center dropped under pressure");
         let right3 = ops3.iter().find(|(x, _, _)| *x == 4).unwrap();
         assert_eq!(right3.1, "XY");
         let left3 = ops3.iter().find(|(x, _, _)| *x == 0).unwrap();
-        assert_eq!(left3.1, "abcd"); // truncated to the 4 cols before the right cluster
+        assert_eq!(left3.1, "abc…"); // 4 cols before the right cluster, ellipsis included
+    }
+
+    #[test]
+    fn status_truncation_breaks_at_the_last_space_with_an_ellipsis() {
+        // ZMSD §8.2.2.2: "If the object's short name exceeds the available room
+        // on the status line, the author suggests that an interpreter should
+        // break it at the last space and append an ellipsis."
+        assert_eq!(truncate_status_text("West of House", 13), "West of House", "fits → untouched");
+        assert_eq!(truncate_status_text("West of House", 20), "West of House");
+        assert_eq!(truncate_status_text("West of House", 12), "West of…", "breaks at the last space");
+        assert_eq!(truncate_status_text("Cyclops Room", 8), "Cyclops…");
+        assert_eq!(truncate_status_text("Antechamber", 6), "Antec…", "one long word → hard break");
+        assert_eq!(truncate_status_text("Antechamber", 1), "…");
+        assert_eq!(truncate_status_text("Antechamber", 0), "");
+        for (name, w) in [("West of House", 12), ("Cyclops Room", 8), ("Antechamber", 6)] {
+            assert!(truncate_status_text(name, w).chars().count() <= w, "never exceeds the budget");
+        }
     }
 
     #[test]

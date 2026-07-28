@@ -249,6 +249,10 @@ pub struct Machine {
     /// its "not modeled here" diagnostic — window 0's scrolling is owned by
     /// the host's transcript renderer, not this grid model.
     warned_scroll_window0: bool,
+    /// True once `output_stream 2` (the transcript FILE stream) has recorded its
+    /// "not supported" diagnostic — ZMSD §7.6.5.2 asks for one warning to the
+    /// player, not one per request, and games re-select the stream every turn.
+    warned_stream2: bool,
     /// v5/v6 mouse state (ZMSD §15/§8). Set by [`set_mouse`](Machine::set_mouse)
     /// when the host reports a click; `read_mouse` (EXT:0x16) reports these back.
     /// Coordinates are game pixels, 1-based (ZMSD §8.8.1 coordinate convention).
@@ -397,6 +401,7 @@ impl Machine {
             ever_exec_pcs: std::collections::HashSet::new(),
             buffer_screen_mode: 0,
             warned_scroll_window0: false,
+            warned_stream2: false,
             mouse_x: 0,
             mouse_y: 0,
             mouse_buttons: 0,
@@ -1752,8 +1757,33 @@ impl Machine {
                     }
                 } else {
                     if self.trace_screen { self.screen_trace.push(format!("@set_cursor(row={row}, col={col})")); }
-                    self.screen.cursor_row = row;
-                    self.screen.cursor_col = col;
+                    // ZMSD §8.7.2.3: "When the upper window is selected, its
+                    // cursor position can be moved with set_cursor. … The
+                    // opcode has no effect when the lower window is selected.
+                    // It is illegal to move the cursor outside the current size
+                    // of the upper window."
+                    //
+                    // Half one is literal: a lower-window set_cursor is dropped
+                    // (harmless either way, since §8.7.2 re-homes the upper
+                    // cursor to the top left whenever window 1 is selected).
+                    //
+                    // Half two is deliberately loosened to the PHYSICAL SCREEN
+                    // rather than the split height: Inform's menu library
+                    // (LostPig's HELP) splits N lines and then set_cursors below
+                    // the split, and real interpreters keep that text — see
+                    // `upper_window_write_beyond_split_grows_grid`. So only a
+                    // move that no interpreter could honour (row/col 0, or off
+                    // the screen entirely) is ignored as "illegal".
+                    let screen_rows = self.mem.read_byte(0x20) as u16;
+                    let screen_cols = self.mem.read_byte(0x21) as u16;
+                    let in_range = row >= 1
+                        && col >= 1
+                        && (screen_rows == 0 || row <= screen_rows)
+                        && (screen_cols == 0 || col <= screen_cols);
+                    if self.screen.current_window == 1 && in_range {
+                        self.screen.cursor_row = row;
+                        self.screen.cursor_col = col;
+                    }
                 }
                 StepResult::Continue
             }
@@ -1806,7 +1836,24 @@ impl Machine {
                 match stream {
                     1  => { self.streams.stream1 = true; }
                     -1 => { self.streams.stream1 = false; }
-                    2  => { self.streams.stream2 = true; }
+                    2  => {
+                        self.streams.stream2 = true;
+                        // ZMSD §7.6.5: "Interpreters are allowed to not support
+                        // access to external files (such as with output_stream
+                        // 2 …)"; §7.6.5.2: such an attempt "should ideally print
+                        // a warning to the user that the functionality is not
+                        // available, and otherwise do nothing". Nothing consumes
+                        // `stream2` — there is no transcript FILE — so the flag
+                        // is the "do nothing" half and this diagnostic is the
+                        // warning. The host surfaces diagnostics as Warning
+                        // transcript lines; once per session is enough.
+                        if !self.warned_stream2 {
+                            self.warned_stream2 = true;
+                            self.diagnostics.push(
+                                "transcript file output isn't supported — the game's script command will have no effect (the app keeps its own scrollback)".to_string(),
+                            );
+                        }
+                    }
                     -2 => { self.streams.stream2 = false; }
                     3  => {
                         let table = ops.get(1).copied().unwrap_or(0) as u32;
@@ -1996,8 +2043,12 @@ impl Machine {
                         let w = &v6.windows[cur.min(7)];
                         let y_abs = w.y_coord.max(1) as i32 + w.y_cursor.max(1) as i32 - 1;
                         let x_abs = w.x_coord.max(1) as i32 + w.x_cursor.max(1) as i32 - 1;
-                        let to_edge =
-                            (w.x_coord.max(1) as i32 + w.x_size as i32).saturating_sub(x_abs);
+                        // ZMSD §15 erase_line (v6): the erase is "clipped to
+                        // stay inside the right margin" — the window's right
+                        // edge less its prop-7 right margin, not the raw edge.
+                        let to_edge = (w.x_coord.max(1) as i32 + w.x_size as i32
+                            - w.right_margin as i32)
+                            .saturating_sub(x_abs);
                         let width = if value == 1 { to_edge } else { (value as i32 - 1).min(to_edge) };
                         (y_abs, x_abs, width)
                     };
@@ -2010,7 +2061,14 @@ impl Machine {
                     for c in start..(start + cells).min(w.grid.cols + 1) {
                         w.grid.put(row, c, ' ', 0, w.fg, w.bg);
                     }
-                } else if value == 1 {
+                } else if value == 1 && self.screen.current_window == 1 {
+                    // ZMSD §15 erase_line (v4/5): "erase from the current cursor
+                    // position to the end of its line in the CURRENT window."
+                    // Only the upper window is a modelled grid — the lower
+                    // window is a scrolling stream the host owns — so an
+                    // erase_line issued while window 0 is selected must not
+                    // scribble a blank row into the upper grid at the upper
+                    // window's (unrelated) cursor.
                     let (row, start) = (self.screen.cursor_row, self.screen.cursor_col);
                     let cols = self.screen.upper.cols;
                     let mut c = start;
@@ -2272,9 +2330,22 @@ impl Machine {
             0x13 => {
                 let win = self.v6_window_operand(ops.first().copied().unwrap_or(0));
                 let prop = ops.get(1).copied().unwrap_or(0);
+                let (def_fg, def_bg) = (self.default_fg_colour, self.default_bg_colour);
                 let val = self.screen.v6.as_ref()
                     .and_then(|v6| v6.windows.get(win as usize))
-                    .map(|w| w.get_prop(prop))
+                    .map(|w| match prop {
+                        // ZMSD §8.8.3.2.8: properties 16/17 "show the actual
+                        // colour being used for the foreground and background,
+                        // whether it was set using set_colour or
+                        // set_true_colour" — so they are DERIVED on read from
+                        // the window's live channels (a standard number maps
+                        // through the §8.3.1 table; a `Default` channel resolves
+                        // to the interpreter's own default, the same value
+                        // published in header-extension words 5/6).
+                        16 => w.fg.true_value(def_fg),
+                        17 => w.bg.true_value(def_bg),
+                        _ => w.get_prop(prop),
+                    })
                     .unwrap_or(0);
                 if self.trace_screen {
                     self.screen_trace.push(format!("@get_wind_prop(win={win}, prop={prop}) -> {val}"));
@@ -2419,6 +2490,16 @@ impl Machine {
                         let w = &mut v6.windows[win as usize];
                         w.y_size = y;
                         w.x_size = x;
+                        // ZMSD §8.8.3.4: "If the window size is reduced so that
+                        // its cursor lies outside it, the cursor should be reset
+                        // to the left margin on the top line." Cursors are 1-based
+                        // pixels within the window, so "left margin" is
+                        // left_margin + 1. (Painted text is unaffected —
+                        // window_size "does not change the current display".)
+                        if w.y_cursor > w.y_size || w.x_cursor > w.x_size {
+                            w.y_cursor = 1;
+                            w.x_cursor = w.left_margin + 1;
+                        }
                         let rows = (y / V6_FONT_HEIGHT).clamp(1, GRID_CELL_CAP);
                         let cols = (x / V6_FONT_WIDTH).clamp(1, GRID_CELL_CAP);
                         w.grid.resize(rows, cols);
@@ -3412,9 +3493,49 @@ impl Machine {
     /// with the restored state). Use this for the host's file/restore paths;
     /// `restore_undo` keeps using `restore_quetzal` directly.
     pub fn restore_file(&mut self, data: &[u8]) -> Result<(), crate::error::ZError> {
+        let dims = self.host_screen_dims();
         crate::quetzal::restore_quetzal(self, data)?;
         self.undo_stack.clear();
+        self.post_restore_fixups(dims);
         Ok(())
+    }
+
+    /// The screen dimensions the host last reported (header $20/$21), captured
+    /// before a restore overwrites the header with the SAVED session's screen.
+    fn host_screen_dims(&self) -> (u8, u8) {
+        (self.mem.read_byte(0x20), self.mem.read_byte(0x21))
+    }
+
+    /// Re-establish the interpreter's own view of the header and screen after a
+    /// restore has replaced dynamic memory with the saved session's copy.
+    ///
+    /// ZMSD §11.1: "'Rst' means that the interpreter must set it correctly after
+    /// loading the game, after a restore or after a restart." Everything in that
+    /// column is what [`Machine::init_caps`] writes — capability bits,
+    /// interpreter number/version, screen dimensions and font size, the default
+    /// colours in $2C/$2D and (Standard 1.1) header-extension words 4–6 — so a
+    /// restore re-runs it, then re-applies the dimensions the HOST is actually
+    /// showing (the save may have come from a different-sized screen; `init_caps`
+    /// only seeds the generic default). This mirrors Frotz, whose `z_restore`
+    /// calls `restart_header()` on success for exactly this reason.
+    ///
+    /// ZMSD §8.6.1.3: "Following a 'restore' of the game, the interpreter should
+    /// automatically collapse the upper window to size 0." That clause lives
+    /// under §8.6, "The screen model for Version 3", so the collapse is applied
+    /// to v3 only — the same scoping Frotz uses (`if (h_version == V3)
+    /// split_window(0)`). From v4 on the game owns its upper window across a
+    /// restore.
+    fn post_restore_fixups(&mut self, (rows, cols): (u8, u8)) {
+        self.init_caps();
+        if rows > 0 && cols > 0 {
+            self.set_screen_dims(rows, cols);
+        }
+        if self.mem.version() <= 3 {
+            self.screen.upper_window_rows = 0;
+            let cols = self.mem.read_byte(0x21) as u16;
+            self.screen.upper.resize(0, cols.max(1));
+            self.screen.current_window = 0;
+        }
     }
 
     /// Signal that a restore operation failed (no data / invalid data).
@@ -3448,7 +3569,9 @@ impl Machine {
     /// On `Err` the machine is untouched (the `restore_quetzal` contract); the
     /// caller should then call `complete_restore_failure()`.
     pub fn complete_restore_success(&mut self, data: &[u8]) -> Result<(), crate::error::ZError> {
+        let dims = self.host_screen_dims();
         self.restore_quetzal(data)?;
+        self.post_restore_fixups(dims);
         if self.mem.version() <= 3 {
             // v3 @save is a branch instruction; resume as if it branched on success.
             let br = crate::cpu::decode::decode_branch_at(&self.mem, self.state.pc);
@@ -3604,15 +3727,21 @@ impl Memory {
 // Colour helpers
 // ---------------------------------------------------------------------------
 
-/// Decode a `set_colour` operand into a colour-channel update.
-/// Returns `None` for 0 ("leave unchanged"); `Some(ZColour)` otherwise.
+/// Decode a `set_colour` operand into a colour-channel update, for the
+/// **non-v6** screen model. Returns `None` for 0 ("leave unchanged");
+/// `Some(ZColour)` otherwise.
+///
+/// ZMSD §8.3.1 closes its colour table with "Colours 10, 11, 12, 15 and -1 are
+/// available only in Version 6." Below v6 the three greys are not part of the
+/// palette, so they are ignored (channel kept) rather than rendered — see
+/// [`decode_set_colour_v6`] for the version that honours them.
 fn decode_set_colour(v: u16) -> Option<crate::screen::ZColour> {
     use crate::screen::ZColour;
     match v {
         0 => None,                     // keep current channel
         1 => Some(ZColour::Default),   // default
-        2..=12 => Some(ZColour::Standard(v as u8)), // palette + v6 greys
-        _ => None,                     // -1 (pixel) / unknown → keep
+        2..=9 => Some(ZColour::Standard(v as u8)), // the version-independent palette
+        _ => None,                     // 10–12/15 (v6-only) / -1 / unknown → keep
     }
 }
 
@@ -3629,6 +3758,8 @@ fn decode_set_colour_v6(v: u16) -> Option<crate::screen::ZColour> {
     use crate::screen::ZColour;
     match v as i16 {
         -1 => Some(ZColour::Default), // pixel under the cursor → inherit (no opaque fill)
+        // §8.3.1: light/medium/dark grey exist only from Version 6 on.
+        10..=12 => Some(ZColour::Standard(v as u8)),
         _ => decode_set_colour(v),
     }
 }
@@ -3665,7 +3796,17 @@ fn pack_colour_data(fg: crate::screen::ZColour, bg: crate::screen::ZColour) -> u
         match c {
             Default => 1,
             Standard(n) => n,
-            True(_) | True24(_) => 0,
+            // ZMSD §8.3.5.2: "If the colour selected was not one of the standard
+            // set ... the colour shown in property 11 will be >= 16." The §8
+            // Remarks suggest allocating 16–255 to the last 240 distinct
+            // non-standard colours; we use a cheaper scheme with the same
+            // observable contract — hash the true colour into 16..=255. It is
+            // STABLE (the same colour always reads back the same number) and
+            // always >= 16; distinct colours may collide, which the spec permits
+            // since property 11 is "implementation defined" for true colours
+            // (§8.3.5) beyond the >= 16 rule.
+            True(v) => 16 + (v % 240) as u8,
+            True24(rgb) => 16 + (rgb % 240) as u8,
         }
     }
     ((byte(bg) as u16) << 8) | byte(fg) as u16
@@ -4003,6 +4144,60 @@ pub(crate) mod tests {
         let blob = m.save_quetzal();
         m.restore_file(&blob).unwrap();
         assert!(m.undo_stack.is_empty(), "file restore invalidates and clears undo history");
+    }
+
+    #[test]
+    fn restore_collapses_the_v3_upper_window_and_restamps_rst_fields() {
+        // ZMSD §8.6.1.3 (Version 3 screen model): "Following a 'restore' of the
+        // game, the interpreter should automatically collapse the upper window
+        // to size 0." ZMSD §11.1: "'Rst' means that the interpreter must set it
+        // correctly after loading the game, after a restore or after a restart."
+        let mem = Memory::new(sample_story(3)).unwrap();
+        let mut m = Machine::new(mem);
+        m.init_caps();
+
+        // Save with a header that claims we cannot draw a status line — a save
+        // written by some other interpreter, as far as this one is concerned.
+        m.mem.write_byte(0x01, m.mem.read_byte(0x01) | (1 << 4));
+        let blob = m.save_quetzal();
+
+        m.init_caps(); // (clears it again locally)
+        m.exec_var(0x0A, &[4], None, None); // split_window 4
+        m.exec_var(0x0B, &[1], None, None); // set_window 1
+        assert_eq!(m.screen.upper_window_rows, 4);
+
+        m.restore_file(&blob).unwrap();
+
+        assert_eq!(m.screen.upper_window_rows, 0, "upper window collapsed to size 0");
+        assert_eq!(m.screen.current_window, 0, "back in the lower window");
+        assert_eq!(
+            m.mem.read_byte(0x01) & (1 << 4),
+            0,
+            "Rst: Flags 1 capability bits re-stamped over the restored header"
+        );
+    }
+
+    #[test]
+    fn restore_leaves_the_v5_upper_window_to_the_game() {
+        // §8.6.1.3 sits under §8.6 "The screen model for Version 3"; from v4 on
+        // the game owns its upper window across a restore (Frotz scopes its
+        // collapse the same way). The Rst header re-stamp still happens.
+        let mem = Memory::new(sample_story(5)).unwrap();
+        let mut m = Machine::new(mem);
+        m.init_caps();
+        m.set_screen_dims(12, 40); // the save was written on a small screen
+        let blob = m.save_quetzal();
+        m.set_screen_dims(30, 70); // the host is showing a bigger one now
+        m.exec_var(0x0A, &[4], None, None); // split_window 4
+
+        m.restore_file(&blob).unwrap();
+
+        assert_eq!(m.screen.upper_window_rows, 4, "v5 upper window survives the restore");
+        assert_eq!(
+            (m.mem.read_byte(0x20), m.mem.read_byte(0x21)),
+            (30, 70),
+            "Rst: the HOST's screen size wins over the one baked into the save"
+        );
     }
 
     #[test]
@@ -6283,6 +6478,28 @@ pub(crate) mod tests {
     // ── (d) stream 1 off: screen receives nothing ─────────────────────────────
 
     #[test]
+    fn output_stream2_warns_the_player_once() {
+        // ZMSD §7.6.5.2: "An attempt by the game to use streams to access
+        // external files which is not supported by the interpreter should
+        // ideally print a warning to the user that the functionality is not
+        // available, and otherwise do nothing." The host renders diagnostics as
+        // Warning transcript lines.
+        let mut m = build_test_machine(&[]);
+        m.exec_var(0x13, &[2], None, None); // output_stream 2
+        assert_eq!(m.diagnostics.len(), 1, "one warning: {:?}", m.diagnostics);
+        assert!(
+            m.diagnostics[0].contains("transcript file"),
+            "warning names the missing feature: {:?}", m.diagnostics[0]
+        );
+        assert!(m.streams.stream2, "the selection itself is still recorded");
+
+        // Games re-select the transcript every turn — warn once per session.
+        m.exec_var(0x13, &[(-2i16) as u16], None, None);
+        m.exec_var(0x13, &[2], None, None);
+        assert_eq!(m.diagnostics.len(), 1, "no repeat warning: {:?}", m.diagnostics);
+    }
+
+    #[test]
     fn output_stream1_off_suppresses_screen() {
         // output_stream -1 (disable screen), print "x", output_stream +1, print "y", quit
         // Screen should only have "y".
@@ -6943,6 +7160,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn erase_line_in_lower_window_leaves_the_upper_grid_alone() {
+        // ZMSD §15 erase_line (v4/5): "erase from the current cursor position to
+        // the end of its line in the current window." With window 0 selected the
+        // upper grid is not the current window and must not be touched.
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x21, 5);
+        m.exec_var(0x0A, &[1], None, None); // split 1 row, 5 cols
+        m.exec_var(0x0B, &[1], None, None); // set_window 1
+        m.print_text("ABCDE");
+        m.exec_var(0x0B, &[0], None, None); // set_window 0 (lower)
+        m.screen.cursor_row = 1;
+        m.screen.cursor_col = 3;
+        m.exec_var(0x0E, &[1], None, None); // erase_line 1
+        assert_eq!(m.screen.upper.cell(1, 3).ch, 'C', "upper row survives a lower-window erase_line");
+        assert_eq!(m.screen.upper.cell(1, 5).ch, 'E');
+    }
+
+    #[test]
     fn erase_window_minus_two_clears_grid_without_unsplitting() {
         let mut m = build_test_machine(&[]);
         m.mem.write_byte(0x21, 5); // screen width = 5 cols
@@ -6975,6 +7210,36 @@ pub(crate) mod tests {
         m.screen.cursor_col = 4;
         m.exec_var(0x0B, &[0], None, None); // set_window(0)
         assert_eq!((m.screen.cursor_row, m.screen.cursor_col), (2, 4), "lower select leaves it");
+    }
+
+    #[test]
+    fn set_cursor_is_ignored_in_the_lower_window_and_off_screen() {
+        // ZMSD §8.7.2.3: "The opcode has no effect when the lower window is
+        // selected. It is illegal to move the cursor outside the current size
+        // of the upper window."
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x20, 10); // screen height = 10 lines
+        m.mem.write_byte(0x21, 20); // screen width  = 20 cols
+        m.exec_var(0x0A, &[3], None, None); // split_window 3
+        m.exec_var(0x0B, &[1], None, None); // set_window 1 (upper)
+        m.exec_var(0x0F, &[2, 5], None, None); // legal move inside the split
+        assert_eq!((m.screen.cursor_row, m.screen.cursor_col), (2, 5));
+
+        // Lower window selected → no effect.
+        m.exec_var(0x0B, &[0], None, None); // set_window 0
+        m.exec_var(0x0F, &[1, 1], None, None);
+        assert_eq!(
+            (m.screen.cursor_row, m.screen.cursor_col),
+            (2, 5),
+            "set_cursor has no effect while the lower window is selected"
+        );
+
+        // Back in the upper window, an off-screen target is illegal → ignored.
+        m.exec_var(0x0B, &[1], None, None); // homes the cursor to (1,1)
+        m.exec_var(0x0F, &[11, 1], None, None); // row past the 10-line screen
+        m.exec_var(0x0F, &[1, 21], None, None); // col past the 20-col screen
+        m.exec_var(0x0F, &[0, 0], None, None); // 0 is outside the 1-based grid
+        assert_eq!((m.screen.cursor_row, m.screen.cursor_col), (1, 1), "illegal moves ignored");
     }
 
     #[test]
@@ -7301,8 +7566,20 @@ pub(crate) mod tests {
         // 1 = default
         assert_eq!(run_set_colour(1, 1), (ZColour::Default, ZColour::Default));
 
-        // greys accepted
-        assert_eq!(run_set_colour(10, 12), (ZColour::Standard(10), ZColour::Standard(12)));
+        // ZMSD §8.3.1: "Colours 10, 11, 12, 15 and -1 are available only in
+        // Version 6." This is a v5 story, so the greys are not a legal palette
+        // entry — each channel keeps whatever it had (here: 3 / 6, set above
+        // by the same instruction sequence… run fresh, so Default).
+        assert_eq!(
+            run_set_colour(10, 12),
+            (ZColour::Default, ZColour::Default),
+            "greys 10–12 are v6-only and must be ignored in v5"
+        );
+        assert_eq!(
+            run_set_colour(11, 9),
+            (ZColour::Default, ZColour::Standard(9)),
+            "an illegal fg leaves its channel alone without disturbing a legal bg"
+        );
     }
 
     #[test]
@@ -7995,6 +8272,62 @@ pub(crate) mod tests {
         assert_eq!(crate::cpu::state::read_var(&mut m.state, &m.mem, 0x01), 0);
     }
 
+    #[test]
+    fn v6_true_colour_props_16_17_report_the_actual_colours() {
+        // ZMSD §8.8.3.2.8: props 16/17 "show the actual colour being used for
+        // the foreground and background, whether it was set using set_colour or
+        // set_true_colour".
+        let mut m = v6_exec_machine();
+        let read = |m: &mut Machine, prop: u16| -> u16 {
+            m.exec_ext(0x13, &[1, prop], Some(0x01), None);
+            crate::cpu::state::read_var(&mut m.state, &m.mem, 0x01)
+        };
+
+        // Untouched window: both channels are Default → the interpreter's own
+        // defaults (2 black / 9 white), as §8.3.1 values.
+        assert_eq!(read(&mut m, 16), 0x7FFF, "default fg = white");
+        assert_eq!(read(&mut m, 17), 0x0000, "default bg = black");
+
+        // set_colour with standard numbers → the §8.3.1 table values.
+        m.exec_2op(0x1B, &[3, 6, 1], None, None); // fg=red, bg=blue, window 1
+        assert_eq!(read(&mut m, 16), 0x001D, "red");
+        assert_eq!(read(&mut m, 17), 0x59A0, "blue");
+
+        // set_true_colour → the exact 15-bit values back.
+        m.exec_ext(0x0D, &[0x1234, 0x0456, 1], None, None);
+        assert_eq!(read(&mut m, 16), 0x1234);
+        assert_eq!(read(&mut m, 17), 0x0456);
+
+        // §8.8.3.2: "must not be written by put_wind_prop".
+        m.exec_ext(0x19, &[1, 16, 0x7FFF], None, None);
+        m.exec_ext(0x19, &[1, 17, 0x7FFF], None, None);
+        assert_eq!(read(&mut m, 16), 0x1234, "prop 16 is not writeable");
+        assert_eq!(read(&mut m, 17), 0x0456, "prop 17 is not writeable");
+    }
+
+    #[test]
+    fn v6_colour_data_prop_11_reports_16_or_more_for_true_colours() {
+        // ZMSD §8.3.5.1/.2: a standard colour shows as itself in property 11;
+        // a non-standard (true) colour shows as >= 16.
+        let mut m = v6_exec_machine();
+        m.exec_2op(0x1B, &[3, 6, 1], None, None); // standard red on blue
+        assert_eq!(
+            m.screen.v6.as_ref().unwrap().windows[1].get_prop(11),
+            0x0603,
+            "standard colours report their own numbers (bg high, fg low)"
+        );
+
+        m.exec_ext(0x0D, &[0x1234, 0x0456, 1], None, None); // true colours
+        let data = m.screen.v6.as_ref().unwrap().windows[1].get_prop(11);
+        assert!(data & 0xFF >= 16, "true fg reports >= 16, got {}", data & 0xFF);
+        assert!(data >> 8 >= 16, "true bg reports >= 16, got {}", data >> 8);
+
+        // Stable: re-selecting the same colours reads back the same numbers.
+        m.exec_ext(0x0D, &[0x7FFF, 0x7FFF, 1], None, None);
+        m.exec_ext(0x0D, &[0x1234, 0x0456, 1], None, None);
+        assert_eq!(m.screen.v6.as_ref().unwrap().windows[1].get_prop(11), data, "stable numbering");
+    }
+
     // ── Task 6: get_wind_prop / put_wind_prop over the property array ───────
 
     #[test]
@@ -8213,6 +8546,26 @@ pub(crate) mod tests {
         let joined: String =
             m.screen.v6.as_ref().unwrap().windows[1].texts.iter().map(|t| t.text.as_str()).collect();
         assert_eq!(joined, "BC", "erase_line(9) erases 8 px = one glyph");
+    }
+
+    #[test]
+    fn v6_erase_line_is_clipped_inside_the_right_margin() {
+        // ZMSD §15 erase_line (v6): the erase is "clipped to stay inside the
+        // right margin" — it used to run to the raw window edge, wiping text
+        // that lives in the margin strip.
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 1, 1, 1, 16, 320); // x 1..320
+        m.exec_ext(0x08, &[0, 160, 1], None, None); // set_margins(left=0, right=160)
+        m.exec_var(0x0F, &[1, 1, 1], None, None); // cursor to (1,1)
+        m.print_text("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcd"); // 40 glyphs = 320 px
+        m.exec_var(0x0F, &[1, 1, 1], None, None);
+        m.exec_var(0x0E, &[1], None, None); // erase_line(1): to end of line
+        let joined: String =
+            m.screen.v6.as_ref().unwrap().windows[1].texts.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(
+            joined, "UVWXYZ0123456789abcd",
+            "erase stops at the right margin (320 - 160 px), leaving the margin strip"
+        );
     }
 
     #[test]
@@ -8633,6 +8986,27 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn v6_window_size_rehomes_a_cursor_left_outside() {
+        // ZMSD §8.8.3.4: "If the window size is reduced so that its cursor lies
+        // outside it, the cursor should be reset to the left margin on the top
+        // line." (Shogun shrinks its menu window to a 1-px caret after printing.)
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x11, &[1, 160, 320], None, None); // window_size(1, 160x320)
+        m.exec_ext(0x08, &[24, 0, 1], None, None); // set_margins(left=24, right=0)
+        m.exec_var(0x0F, &[100, 200, 1], None, None); // set_cursor deep inside
+        m.exec_ext(0x11, &[1, 16, 320], None, None); // shrink height: cursor now outside
+        {
+            let w = &m.screen.v6.as_ref().unwrap().windows[1];
+            assert_eq!((w.y_cursor, w.x_cursor), (1, 25), "re-homed to the left margin, top line");
+        }
+        // A resize that still contains the cursor leaves it alone.
+        m.exec_var(0x0F, &[9, 40, 1], None, None);
+        m.exec_ext(0x11, &[1, 160, 320], None, None);
+        let w = &m.screen.v6.as_ref().unwrap().windows[1];
+        assert_eq!((w.y_cursor, w.x_cursor), (9, 40), "cursor still inside → untouched");
+    }
+
+    #[test]
     fn non_v6_picture_data_is_a_noop_stub() {
         // v1–5 byte-identical: picture_data on a non-v6 machine must not write
         // to the array or branch (the Phase 0 stub behaviour).
@@ -9019,6 +9393,8 @@ pub(crate) mod tests {
     fn v6_set_cursor_leaves_v5_classic_path_untouched() {
         let mut m = build_test_machine(&[]);
         assert!(m.screen.v6.is_none());
+        m.exec_var(0x0A, &[4], None, None); // split_window 4
+        m.exec_var(0x0B, &[1], None, None); // set_window 1 — §8.7.2.3 precondition
         m.exec_var(0x0F, &[3, 4], None, None); // set_cursor(3, 4)
         assert_eq!(m.screen.cursor_row, 3);
         assert_eq!(m.screen.cursor_col, 4);
@@ -9032,6 +9408,18 @@ pub(crate) mod tests {
         let v6 = m.screen.v6.as_ref().unwrap();
         assert_eq!(v6.windows[5].fg, ZColour::Standard(3));
         assert_eq!(v6.windows[5].bg, ZColour::Standard(6));
+    }
+
+    #[test]
+    fn v6_set_colour_still_accepts_the_v6_only_greys() {
+        // The other half of §8.3.1's "Colours 10, 11, 12, 15 and -1 are
+        // available only in Version 6": in v6 they ARE the palette.
+        let mut m = v6_exec_machine();
+        m.exec_2op(0x1B, &[10, 12], None, None); // set_colour(light grey, dark grey)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        let cur = v6.current as usize;
+        assert_eq!(v6.windows[cur].fg, ZColour::Standard(10));
+        assert_eq!(v6.windows[cur].bg, ZColour::Standard(12));
     }
 
     #[test]
