@@ -532,6 +532,9 @@ impl Machine {
     /// real screen, not the boot-time default. Window 0 also takes the new
     /// screen HEIGHT (ZMSD §8.8.3.3: "Window 0 occupies the whole screen");
     /// window 1 keeps its zero height until a `split_window`.
+    ///
+    /// For v4/v5/v7/v8 a LIVE upper window follows the new WIDTH — see
+    /// [`Machine::refit_upper_window_width`].
     pub fn set_screen_dims(&mut self, rows: u8, cols: u8) {
         crate::screen::write_screen_dims(&mut self.mem, rows, cols);
         if self.mem.version() == 6 {
@@ -542,6 +545,59 @@ impl Machine {
                 v6.windows[0].y_size = height;
                 v6.windows[1].x_size = width;
             }
+            return;
+        }
+        self.refit_upper_window_width(cols);
+    }
+
+    /// Make an already-open v4+ upper window follow a host screen-width change.
+    ///
+    /// ZMSD §8.4: "The interpreter may change the exact dimensions whenever it
+    /// likes but must write the current height (in lines) and width (in
+    /// characters) into bytes $20 and $21 in the header." Only `split_window`
+    /// used to size the grid (from $21), so a game that splits ONCE at boot and
+    /// never re-splits — Sherlock, Trinity — kept its boot-time grid width for
+    /// the rest of the session while $20/$21 tracked the resized pane: the
+    /// status bar stayed 80 columns in a 100-column pane (or overflowed a
+    /// narrowed one). AMFV only self-healed because it re-splits on every mode
+    /// change. The grid is the interpreter's own storage for the screen the
+    /// spec just let us resize, so it is resized here too.
+    ///
+    /// WIDTH only. The split HEIGHT is the game's (`split_window`, §8.7.2.1),
+    /// so `rows` is left exactly as the game last set it — including any extra
+    /// rows `grow_rows` added for writes below the split. Content is preserved
+    /// per the §15 v4+ rule that a re-split leaves the upper window on screen:
+    /// growing pads right with blanks, shrinking truncates
+    /// ([`UpperWindow::resize_preserving`]).
+    ///
+    /// CURSOR: a shrink can leave `cursor_col` past the new right edge, which
+    /// §8.7.2.3 makes illegal ("It is illegal to move the cursor outside the
+    /// current size of the upper window"), so it is clamped to the last column
+    /// — a minimal sideways move that keeps the row. That follows the one
+    /// V4/V5-scoped precedent for an interpreter-forced cursor relocation,
+    /// §8.7.2.2: "If a split takes place which would cause the upper window to
+    /// swallow the lower window's cursor position, the interpreter should move
+    /// the lower window's cursor down to the line just below the upper window's
+    /// new size" — i.e. nudge onto the nearest legal position on the axis that
+    /// went out of range, don't re-home. (§8.8.3.4's "reset to the left margin
+    /// on the top line" is the Version 6 window-property rule and stays with
+    /// `window_size`; homing here would silently discard a row the game set
+    /// before a resize it never asked for.)
+    ///
+    /// v3 is out of scope: its status line is recomputed from the globals every
+    /// turn, and `write_screen_dims` does not touch $20/$21 below v4 at all.
+    fn refit_upper_window_width(&mut self, cols: u8) {
+        if self.mem.version() < 4 || self.screen.upper.rows == 0 {
+            return;
+        }
+        let new_cols = cols.max(1) as u16;
+        if new_cols == self.screen.upper.cols {
+            return;
+        }
+        let rows = self.screen.upper.rows;
+        self.screen.upper.resize_preserving(rows, new_cols);
+        if self.screen.cursor_col > new_cols {
+            self.screen.cursor_col = new_cols;
         }
     }
 
@@ -7593,6 +7649,77 @@ pub(crate) mod tests {
         assert_eq!(m.screen.upper.cols, 12);
     }
 
+    /// The row of the upper grid as a string (trailing blanks included).
+    fn upper_row_text(m: &Machine, row: u16) -> String {
+        (1..=m.screen.upper.cols).map(|c| m.screen.upper.cell(row, c).ch).collect()
+    }
+
+    /// SQ-0533: a v5 game that splits ONCE (Sherlock, Trinity) must still get a
+    /// grid as wide as the resized screen — §8.4 lets the interpreter change the
+    /// dimensions, so the live upper window follows $21.
+    #[test]
+    fn set_screen_dims_widens_a_live_upper_window_preserving_content() {
+        let mut m = build_test_machine(&[]);
+        m.set_screen_dims(24, 80);
+        m.exec_var(0x0A, &[1], None, None); // split_window 1 (the only split)
+        assert_eq!(m.screen.upper.cols, 80, "boot-time grid width");
+        for (i, ch) in "West of House".chars().enumerate() {
+            m.screen.upper.put(1, i as u16 + 1, ch, 0, ZColour::Default, ZColour::Default);
+        }
+
+        m.set_screen_dims(24, 100); // the terminal got wider
+
+        assert_eq!(m.screen.upper.cols, 100, "the live grid follows the new width");
+        assert_eq!(m.screen.upper.rows, 1, "the split height is the game's, untouched");
+        assert_eq!(m.screen.upper_window_rows, 1, "split rows untouched");
+        let row = upper_row_text(&m, 1);
+        assert!(row.starts_with("West of House"), "content preserved left-aligned: {row:?}");
+        assert_eq!(row.len(), 100, "row spans the new width");
+        assert!(row[13..].chars().all(|c| c == ' '), "grown columns are blank: {row:?}");
+    }
+
+    /// The shrink half: columns past the new width are truncated, and a cursor
+    /// left beyond the right edge clamps to the last column (§8.7.2.3 makes an
+    /// out-of-window cursor illegal; §8.7.2.2's precedent is a minimal nudge on
+    /// the axis that went out of range, keeping the row).
+    #[test]
+    fn set_screen_dims_shrinks_a_live_upper_window_and_clamps_the_cursor() {
+        let mut m = build_test_machine(&[]);
+        m.set_screen_dims(24, 80);
+        m.exec_var(0x0A, &[2], None, None); // split_window 2
+        for (i, ch) in "0123456789".chars().enumerate() {
+            m.screen.upper.put(2, i as u16 + 1, ch, 0, ZColour::Default, ZColour::Default);
+        }
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 2;
+        m.screen.cursor_col = 70;
+
+        m.set_screen_dims(24, 60); // the terminal got narrower
+
+        assert_eq!(m.screen.upper.cols, 60, "the live grid follows the new width");
+        assert_eq!(m.screen.upper.rows, 2, "the split height is the game's, untouched");
+        let row = upper_row_text(&m, 2);
+        assert_eq!(row.len(), 60, "row truncated to the new width");
+        assert!(row.starts_with("0123456789"), "surviving content preserved: {row:?}");
+        assert_eq!(m.screen.cursor_col, 60, "cursor clamped to the last column");
+        assert_eq!(m.screen.cursor_row, 2, "the row the game set is kept");
+    }
+
+    /// No live upper window (never split, or unsplit) → nothing to refit; the
+    /// grid stays empty rather than being conjured at the new width.
+    #[test]
+    fn set_screen_dims_leaves_an_unsplit_upper_window_alone() {
+        let mut m = build_test_machine(&[]);
+        m.set_screen_dims(24, 80);
+        assert_eq!(m.screen.upper.rows, 0, "no split yet");
+        m.set_screen_dims(24, 100);
+        assert_eq!(m.screen.upper.rows, 0, "still no upper window");
+        assert_eq!(m.screen.upper.cols, 0, "no grid conjured by a resize");
+        // …and the NEXT split still adopts the new width (wave 2 behaviour).
+        m.exec_var(0x0A, &[1], None, None);
+        assert_eq!(m.screen.upper.cols, 100);
+    }
+
     // -----------------------------------------------------------------------
     // Task 1: verify (real checksum) + piracy
     // -----------------------------------------------------------------------
@@ -9610,6 +9737,29 @@ pub(crate) mod tests {
         assert_eq!(v6.windows[0].x_size, 80 * V6_FONT_WIDTH);
         assert_eq!(v6.windows[0].y_size, 25 * V6_FONT_HEIGHT);
         assert_eq!(v6.windows[1].y_size, 0, "window 1 stays unsplit");
+    }
+
+    /// SQ-0533: the v4/v5 "live upper window follows the screen width" refit is
+    /// v6-exempt — v6 lays out in its own pixel screen and sizes its window grids
+    /// through `window_size`, so a `set_screen_dims` must leave every v6 window
+    /// grid (and the unused classic `screen.upper`) exactly as it was.
+    #[test]
+    fn set_screen_dims_leaves_v6_window_grids_alone() {
+        let mut m = v6_exec_machine();
+        m.set_screen_dims(25, 80);
+        m.exec_ext(0x11, &[1, 160, 320], None, None); // window_size(1) -> 10x40 grid
+        let before = {
+            let w = &m.screen.v6.as_ref().unwrap().windows[1];
+            (w.grid.rows, w.grid.cols)
+        };
+        assert_eq!(before, (10, 40));
+
+        m.set_screen_dims(25, 100);
+
+        let w = &m.screen.v6.as_ref().unwrap().windows[1];
+        assert_eq!((w.grid.rows, w.grid.cols), before, "v6 window grid untouched by a resize");
+        assert_eq!(m.screen.upper.cols, 0, "the classic upper grid is unused in v6");
+        assert_eq!(m.screen.upper.rows, 0);
     }
 
     #[test]
