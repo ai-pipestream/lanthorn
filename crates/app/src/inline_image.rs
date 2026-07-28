@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 /// Glk `imagealign_*` argument for a buffer-window `glk_image_draw`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ImageAlign {
     InlineUp,
     InlineDown,
@@ -31,7 +31,7 @@ impl ImageAlign {
 
 /// Where a transcript-anchored [`InlineImage`] came from — decides which render
 /// modes may draw it inline. (SQ-0461 decision 3)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ImageSource {
     /// A window-0 story picture (Zork Zero's drop-caps / room icons). Every mode
     /// floats it in the transcript — it *is* the story content.

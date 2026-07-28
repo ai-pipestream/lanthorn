@@ -2430,7 +2430,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 // v6 graphics canvases ride along (Lane P): empty for non-v6
                 // sessions, so the archive layout is unchanged for them.
                 let v6_pics = zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default();
-                match app::archive::save_archive_meta_pics(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history, &v6_pics) {
+                match app::archive::save_archive_meta_pics(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics) {
                     Ok(()) => {
                         state.push_notice(&format!(
                             "[Game saved to {}]",
@@ -2468,6 +2468,10 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                 state.transcript_runs = ac.transcript_runs;
                                 state.transcript_para = ac.transcript_para;
                                 state.reset_transcript_sidecars();
+                                // Re-attach the transcript's inline images AFTER the
+                                // sidecar reset (which zeroes them); parallel to the
+                                // restored transcript so its embedded art renders (SQ-0518).
+                                state.transcript_images = ac.transcript_images;
                                 state.history = ac.history;
                                 state.command_history = ac.command_history;
                                 // After restore, re-observe current location.
@@ -2632,6 +2636,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             state.transcript_runs = ac.transcript_runs;
                             state.transcript_para = ac.transcript_para;
                             state.reset_transcript_sidecars();
+                            // Re-attach inline images after the sidecar reset so a
+                            // restored transcript renders its embedded art (SQ-0518).
+                            state.transcript_images = ac.transcript_images;
                             state.history = ac.history;
                             // Named-slot archives carry no command history; only
                             // adopt it when present so a slot load doesn't wipe it.

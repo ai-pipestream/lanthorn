@@ -346,7 +346,7 @@ fn post_turn_bookkeeping(
         // v6 graphics canvases ride along so a resumed v6 story's pictures redraw
         // (SQ-0516); empty for non-v6 sessions, leaving the archive layout unchanged.
         let v6_pics = zvm_session_opt(session).map(|z| z.pictures_png()).unwrap_or_default();
-        if let Err(e) = app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history, &v6_pics) {
+        if let Err(e) = app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics) {
             state.push_notice(&format!("[Auto-save failed: {}]", e));
         }
     }
@@ -490,6 +490,10 @@ pub(crate) fn apply_launch_resume(
 ) {
     match session.restore_state(save) {
         Ok(()) => {
+            // Inline transcript images from the same archive the stashed lines came
+            // from (parallel to `lines`); re-attached after the sidecar reset below
+            // so a resumed transcript renders its embedded art (SQ-0518).
+            let mut resumed_images: Vec<Option<app::inline_image::InlineImage>> = Vec::new();
             // The resumed game's map is part of its archive state — load it alongside.
             if let Ok(ac) = load_archive(arc_file) {
                 *mapper = ac.mapper;
@@ -503,6 +507,7 @@ pub(crate) fn apply_launch_resume(
                 if let Some(z) = zvm_session_opt_mut(&mut *session) {
                     z.load_pictures_png(&ac.pictures);
                 }
+                resumed_images = ac.transcript_images;
             }
             // Reinstate the saved screen too (mirrors the auto-load path, zvm-only),
             // so a once-split game's upper window/status line shows after resuming.
@@ -517,6 +522,12 @@ pub(crate) fn apply_launch_resume(
             state.transcript_runs = vec![Vec::new(); state.transcript.len()];
             state.transcript_para = vec![app::state::ParaFmt::default(); state.transcript.len()];
             state.reset_transcript_sidecars();
+            // Re-attach inline images after the sidecar reset. Guard length: the
+            // archive's images parallel ac.transcript, which equals the stashed
+            // `lines` (same arc_file) — but a mismatch would desync the renderer.
+            if resumed_images.len() == state.transcript.len() {
+                state.transcript_images = resumed_images;
+            }
             // Re-observe current location (same as Action::RestoreGame).
             reobserve_location(state, mapper, &*session, last_panes.map);
             state.push_notice("[Game resumed from save.]");
@@ -986,7 +997,7 @@ mod tests {
         };
         app::archive::save_archive_meta_pics(
             &arc, &mapper::mapper::Mapper::default(), &save, Some(&src.machine.screen),
-            &src.machine.aux_data, meta, &[], &[], &[], &[], &[], &[], &src.pictures_png(),
+            &src.machine.aux_data, meta, &[], &[], &[], &[], &[], &[], &[], &src.pictures_png(),
         )
         .expect("write v6 .babelmap with pictures");
 

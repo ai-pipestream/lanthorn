@@ -73,6 +73,12 @@ const HISTORY_INDEX: &str = "history/index.json";
 /// frame/graphics windows redraw identically after a host Save State restore
 /// (Lane P) — without them a fresh session shows blank graphics windows.
 const ENTRY_PICTURES_PREFIX: &str = "pictures/win-";
+/// Prefix for the transcript-embedded inline-image PNG blobs
+/// (`transcript-img/NNNN.png`, `NNNN` = the filtered transcript-line index). These
+/// carry the resolved RGBA pixels of pictures that flow inline with the prose
+/// (v6 drop-caps / room icons / content splashes) so a restored transcript shows
+/// its art, not just its text (SQ-0518). Sibling metadata is `TranscriptData.images`.
+const ENTRY_TRANSCRIPT_IMG_PREFIX: &str = "transcript-img/";
 
 pub const CURRENT_FORMAT_VERSION: u32 = 4;
 
@@ -113,6 +119,26 @@ struct TranscriptData {
     /// loader fills left/no-indent defaults.
     #[serde(default)]
     para: Vec<crate::state::ParaFmt>,
+    /// Per-line inline-image metadata, parallel to `lines` (SQ-0518). `Some`
+    /// marks a line whose logical unit is a transcript-embedded picture (v6
+    /// drop-caps / room icons / content splashes); its resolved RGBA pixels live
+    /// in a sibling `transcript-img/NNNN.png` blob keyed by this line's index.
+    /// Defaults to empty for archives written before this field existed → the
+    /// loader restores a transcript with no inline art (acceptable pre-release).
+    #[serde(default)]
+    images: Vec<Option<InlineImageDto>>,
+}
+
+/// serde mirror of the persisted fields of [`crate::inline_image::InlineImage`]
+/// (SQ-0518). The `pixels` are NOT stored here — they ride in a separate
+/// `transcript-img/NNNN.png` blob (PNG is lossless for RGBA, so a restored inline
+/// image reproduces its on-screen pixels exactly, palette state and all).
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct InlineImageDto {
+    align: crate::inline_image::ImageAlign,
+    scaled: Option<(u32, u32)>,
+    margin_px: Option<u32>,
+    source: crate::inline_image::ImageSource,
 }
 
 /// Z-machine screen state written to `screen.json` (zvm has no serde, so we
@@ -317,6 +343,11 @@ pub struct ArchiveContents {
     /// Parallel per-line Glk paragraph layout (same length as `transcript`;
     /// left/no-indent default for archives that pre-date this field). (SQ-0330)
     pub transcript_para: Vec<crate::state::ParaFmt>,
+    /// Parallel per-line inline image (same length as `transcript`; `None` per
+    /// line for archives that pre-date this field). Re-attach to
+    /// `AppState::transcript_images` after `reset_transcript_sidecars` at every
+    /// restore site so a restored transcript renders its embedded art (SQ-0518).
+    pub transcript_images: Vec<Option<crate::inline_image::InlineImage>>,
     /// Per-turn rewind/replay history (empty for archives without `history/`).
     pub history: Vec<crate::history::TurnRecord>,
     /// Saved Z-machine screen state (None for archives without `screen.json`).
@@ -393,7 +424,7 @@ pub fn save_archive_meta(
     command_history: &[String],
 ) -> io::Result<()> {
     save_archive_meta_pics(path, mapper, save, screen, aux, meta, transcript,
-        transcript_kinds, transcript_runs, transcript_para, history, command_history, &[])
+        transcript_kinds, transcript_runs, transcript_para, &[], history, command_history, &[])
 }
 
 /// Write a `.babelmap` archive including per-window v6 graphics-canvas PNG
@@ -401,6 +432,13 @@ pub fn save_archive_meta(
 /// (Lane P). `pictures` is `(window_number, png_bytes)` — pass
 /// `GameSession::pictures_png()`. Non-v6 callers use [`save_archive_meta`],
 /// which forwards an empty `pictures`.
+///
+/// `transcript_images` is the parallel-to-`transcript` inline-image sidecar
+/// (`AppState::transcript_images`): the pictures that flow with the prose (v6
+/// drop-caps / room icons / content splashes). Each `Some` entry's resolved RGBA
+/// is PNG-encoded into a sibling `transcript-img/NNNN.png` blob and its draw
+/// metadata into `transcript.json` so a restored transcript renders its embedded
+/// art, not just its text (SQ-0518). Pass an empty slice when there is none.
 #[allow(clippy::too_many_arguments)]
 pub fn save_archive_meta_pics(
     path: &Path,
@@ -413,6 +451,7 @@ pub fn save_archive_meta_pics(
     transcript_kinds: &[crate::state::TranscriptKind],
     transcript_runs: &[Vec<crate::state::StyleRun>],
     transcript_para: &[crate::state::ParaFmt],
+    transcript_images: &[Option<crate::inline_image::InlineImage>],
     history: &[crate::history::TurnRecord],
     command_history: &[String],
     pictures: &[(u8, Vec<u8>)],
@@ -454,19 +493,58 @@ pub fn save_archive_meta_pics(
     let mut kinds: Vec<TranscriptKind> = Vec::new();
     let mut runs: Vec<Vec<crate::state::StyleRun>> = Vec::new();
     let mut para: Vec<crate::state::ParaFmt> = Vec::new();
+    // Per kept-line inline-image metadata (parallel to `lines`); the resolved
+    // pixels of each `Some` entry are PNG-encoded into a sibling blob keyed by
+    // the filtered line index (SQ-0518).
+    let mut images: Vec<Option<InlineImageDto>> = Vec::new();
+    let mut image_blobs: Vec<(usize, Vec<u8>)> = Vec::new();
     for (i, (line, &k)) in transcript.iter().zip(transcript_kinds.iter()).enumerate() {
         if matches!(k, TranscriptKind::Story | TranscriptKind::Input) {
+            let fi = lines.len(); // this line's index within the filtered vecs
             lines.push(line.clone());
             kinds.push(k);
             runs.push(transcript_runs.get(i).cloned().unwrap_or_default());
             para.push(transcript_para.get(i).copied().unwrap_or_default());
+            match transcript_images.get(i).and_then(|o| o.as_ref()) {
+                Some(img) => {
+                    let mut png = Vec::new();
+                    if image::DynamicImage::ImageRgba8((*img.pixels).clone())
+                        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                        .is_ok()
+                    {
+                        image_blobs.push((fi, png));
+                        images.push(Some(InlineImageDto {
+                            align: img.align,
+                            scaled: img.scaled,
+                            margin_px: img.margin_px,
+                            source: img.source,
+                        }));
+                    } else {
+                        // PNG encode failed (never expected for a valid RgbaImage);
+                        // drop the picture rather than desync the parallel vecs.
+                        images.push(None);
+                    }
+                }
+                None => images.push(None),
+            }
         }
     }
-    let td = TranscriptData { lines, kinds, runs, para };
+    let td = TranscriptData { lines, kinds, runs, para, images };
     let transcript_json =
         serde_json::to_string_pretty(&td).expect("TranscriptData is always serializable");
     zip.start_file(ENTRY_TRANSCRIPT, options)?;
     zip.write_all(transcript_json.as_bytes())?;
+
+    // transcript-img/NNNN.png — resolved RGBA pixels for each inline transcript
+    // image (only when present). PNG is already compressed; store, don't Deflate.
+    if !image_blobs.is_empty() {
+        let stored = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (fi, png) in &image_blobs {
+            zip.start_file(format!("{ENTRY_TRANSCRIPT_IMG_PREFIX}{fi:04}.png"), stored)?;
+            zip.write_all(png)?;
+        }
+    }
 
     // command_history.json — the player's submitted command lines (JSON array).
     let cmd_history_json = serde_json::to_string_pretty(command_history)
@@ -598,7 +676,9 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
     };
 
     // transcript.json — optional; older archives omit it, default to empty vecs.
-    let (transcript, transcript_kinds, transcript_runs, transcript_para) = match zip.by_name(ENTRY_TRANSCRIPT) {
+    // `image_dtos` is the per-line inline-image metadata (SQ-0518); the pixels are
+    // read from the sibling `transcript-img/NNNN.png` blobs below.
+    let (transcript, transcript_kinds, transcript_runs, transcript_para, image_dtos) = match zip.by_name(ENTRY_TRANSCRIPT) {
         Ok(mut entry) => {
             let mut buf = String::new();
             entry.read_to_string(&mut buf)?;
@@ -617,13 +697,58 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
                     } else {
                         vec![crate::state::ParaFmt::default(); td.lines.len()]
                     };
-                    (td.lines, td.kinds, runs, para)
+                    let images = if td.images.len() == td.lines.len() {
+                        td.images
+                    } else {
+                        (0..td.lines.len()).map(|_| None).collect()
+                    };
+                    (td.lines, td.kinds, runs, para, images)
                 }
-                Err(_) => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                Err(_) => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
             }
         }
-        Err(_) => (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+        Err(_) => (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()),
     };
+
+    // transcript-img/NNNN.png — resolved pixels for the inline transcript images
+    // (absent for text-only transcripts). Materialize `transcript_images` parallel
+    // to `transcript`: a line's picture needs both a `Some` DTO and a decodable
+    // blob at its index (SQ-0518). Collect the blob bytes first (releasing each
+    // borrow), then rebuild alongside the DTO metadata.
+    let mut img_png: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+    {
+        let names: Vec<(usize, String)> = (0..zip.len())
+            .filter_map(|i| zip.by_index(i).ok().map(|e| e.name().to_string()))
+            .filter_map(|name| {
+                let n = name.strip_prefix(ENTRY_TRANSCRIPT_IMG_PREFIX)?.strip_suffix(".png")?;
+                n.parse::<usize>().ok().map(|idx| (idx, name))
+            })
+            .collect();
+        for (idx, name) in names {
+            if let Ok(mut e) = zip.by_name(&name) {
+                let mut buf = Vec::new();
+                if e.read_to_end(&mut buf).is_ok() {
+                    img_png.insert(idx, buf);
+                }
+            }
+        }
+    }
+    let transcript_images: Vec<Option<crate::inline_image::InlineImage>> = image_dtos
+        .iter()
+        .enumerate()
+        .map(|(i, dto)| {
+            let dto = dto.as_ref()?;
+            let png = img_png.get(&i)?;
+            let rgba = image::load_from_memory(png).ok()?.to_rgba8();
+            Some(crate::inline_image::InlineImage {
+                pixels: std::sync::Arc::new(rgba),
+                align: dto.align,
+                scaled: dto.scaled,
+                margin_px: dto.margin_px,
+                source: dto.source,
+            })
+        })
+        .collect();
 
     // command_history.json — optional; older archives omit it → empty vec.
     let command_history: Vec<String> = match zip.by_name(ENTRY_COMMAND_HISTORY) {
@@ -731,7 +856,7 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         }
     }
 
-    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, transcript_para, history, screen, aux, command_history, engine, pictures })
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, transcript_para, transcript_images, history, screen, aux, command_history, engine, pictures })
 }
 
 /// Read ONLY the `meta.json` entry from a save archive — avoids `load_archive`
@@ -895,6 +1020,75 @@ mod tests {
         let mut m = zvm::cpu::exec::Machine::new(mem);
         m.init_caps();
         m
+    }
+
+    #[test]
+    fn inline_transcript_images_round_trip_through_archive() {
+        use crate::inline_image::{ImageAlign, ImageSource, InlineImage};
+        use crate::state::TranscriptKind;
+
+        // Two Story lines; the SECOND carries an inline image (an empty-string
+        // placeholder line, as `push_transcript_image` makes it). A distinctive
+        // gradient so a lossy round-trip would be caught.
+        let mut pixels = image::RgbaImage::new(6, 4);
+        for (x, y, p) in pixels.enumerate_pixels_mut() {
+            *p = image::Rgba([(x * 40) as u8, (y * 60) as u8, 7, 255]);
+        }
+        let img = InlineImage {
+            pixels: std::sync::Arc::new(pixels),
+            align: ImageAlign::MarginLeft,
+            scaled: Some((12, 8)),
+            margin_px: Some(40),
+            source: ImageSource::Story,
+        };
+
+        let transcript = vec!["West of House".to_string(), String::new()];
+        let kinds = vec![TranscriptKind::Story, TranscriptKind::Story];
+        let images = vec![None, Some(img.clone())];
+
+        let path = temp_archive_path("inline-img-rt");
+        let machine = dummy_machine();
+        save_archive_meta_pics(
+            &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None },
+            &transcript, &kinds, &[], &[], &images, &[], &[], &[],
+        )
+        .expect("save with inline image");
+        let ac = load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(ac.transcript_images.len(), ac.transcript.len(), "images parallel to transcript");
+        assert!(ac.transcript_images[0].is_none(), "text line carries no image");
+        let got = ac.transcript_images[1].as_ref().expect("inline image restored on line 1");
+        assert_eq!(got.align, ImageAlign::MarginLeft, "align round-trips");
+        assert_eq!(got.scaled, Some((12, 8)), "scaled round-trips");
+        assert_eq!(got.margin_px, Some(40), "margin_px round-trips");
+        assert_eq!(got.source, ImageSource::Story, "source round-trips");
+        assert_eq!(got.pixels.dimensions(), (6, 4), "pixel dims round-trip");
+        assert_eq!(
+            got.pixels.as_raw(), img.pixels.as_raw(),
+            "PNG is lossless — restored pixels are byte-identical to the saved ones"
+        );
+    }
+
+    #[test]
+    fn archive_without_inline_images_loads_all_none() {
+        // A transcript with no inline images restores a per-line all-`None` sidecar
+        // (and no `transcript-img/` blobs are written).
+        let transcript = vec!["West of House".to_string(), "> look".to_string()];
+        let kinds = vec![crate::state::TranscriptKind::Story, crate::state::TranscriptKind::Input];
+        let path = temp_archive_path("no-inline-img");
+        let machine = dummy_machine();
+        save_archive_meta_pics(
+            &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None },
+            &transcript, &kinds, &[], &[], &[], &[], &[], &[],
+        )
+        .expect("save without inline images");
+        let ac = load_archive(&path).expect("load");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(ac.transcript_images.len(), ac.transcript.len());
+        assert!(ac.transcript_images.iter().all(Option::is_none), "no images → all None");
     }
 
     #[test]
@@ -1280,6 +1474,7 @@ mod tests {
                 kinds: vec![TranscriptKind::Story, TranscriptKind::Meta, TranscriptKind::Story],
                 runs: Vec::new(),
                 para: Vec::new(),
+                images: Vec::new(),
             };
             let transcript_json = serde_json::to_string(&td).unwrap();
             zip.start_file(ENTRY_TRANSCRIPT, options).unwrap();
@@ -1304,6 +1499,7 @@ mod tests {
             kinds: vec![TranscriptKind::Story, TranscriptKind::Input],
             runs: vec![vec![StyleRun { start: 0, end: 1, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }], vec![]],
             para: Vec::new(),
+            images: Vec::new(),
         };
         let json = serde_json::to_string(&td).unwrap();
         let back: TranscriptData = serde_json::from_str(&json).unwrap();
@@ -1579,7 +1775,7 @@ mod tests {
         save_archive_meta_pics(
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None },
-            &[], &[], &[], &[], &[], &[],
+            &[], &[], &[], &[], &[], &[], &[],
             &[(7, png_a.clone()), (1, png_b.clone())],
         ).expect("save with pictures");
         let ac = load_archive(&path).expect("load");

@@ -437,7 +437,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                             if let Some(zs) = zvm_session_opt_mut(&mut *session) {
                                 zs.load_pictures_png(&ac.pictures);
                             }
-                            startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs, ac.transcript_para));
+                            startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs, ac.transcript_para, ac.transcript_images));
                             startup_history = ac.history;
                             // Restore the turn counter from the same archive (SQ-0429):
                             // the auto_load resume path mirrors the interactive restore,
@@ -652,13 +652,16 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     }
 
     // If an archived transcript was loaded on startup, replace the fresh one.
-    if let Some((lines, kinds, runs, para)) = startup_transcript {
+    if let Some((lines, kinds, runs, para, images)) = startup_transcript {
         state.transcript = lines;
         state.clear_anchor = None;
         state.transcript_kinds = kinds;
         state.transcript_runs = runs;
         state.transcript_para = para;
         state.reset_transcript_sidecars();
+        // Re-attach inline images after the sidecar reset so an auto-resumed
+        // transcript renders its embedded art (SQ-0518).
+        state.transcript_images = images;
     }
     if !startup_history.is_empty() {
         state.history = startup_history;

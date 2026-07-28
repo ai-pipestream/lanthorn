@@ -127,7 +127,7 @@ pub(crate) fn dispatch_slash_outcome(
             let result = match name_opt {
                 Some(ref name) => {
                     let (location, score) = crate::engine_helpers::save_summary(&*session, state);
-                    save_named(game_dir, ifid, name, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para)
+                    save_named(game_dir, ifid, name, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images)
                         .map(|()| format!("saved as \"{}\"", name))
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -147,7 +147,7 @@ pub(crate) fn dispatch_slash_outcome(
                         location,
                         score,
                     };
-                    save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.history, &state.command_history, &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default())
+                    save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default())
                         .map(|()| "saved".to_string())
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -211,6 +211,9 @@ pub(crate) fn dispatch_slash_outcome(
                             state.transcript_runs = ac.transcript_runs;
                             state.transcript_para = ac.transcript_para;
                             state.reset_transcript_sidecars();
+                            // Re-attach inline images after the sidecar reset so a
+                            // restored transcript renders its embedded art (SQ-0518).
+                            state.transcript_images = ac.transcript_images;
                             state.history = ac.history;
                             if !ac.command_history.is_empty() {
                                 state.command_history = ac.command_history;

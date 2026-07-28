@@ -114,7 +114,7 @@ fn v6_host_save_state_restore_is_byte_identical() {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
             ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None,
         },
-        &[], &[], &[], &[], &[], &[],
+        &[], &[], &[], &[], &[], &[], &[],
         &pics,
     )
     .expect("save_archive_meta_pics");
@@ -145,6 +145,108 @@ fn v6_host_save_state_restore_is_byte_identical() {
     assert!(
         before.as_raw() == after.as_raw(),
         "v6 raster composite must be byte-identical after a host Save State restore"
+    );
+}
+
+/// SQ-0518: an inline transcript image (Zork0's opening drop-cap / room art,
+/// a window-0 picture that flows with the prose) must survive the archive
+/// Save State round-trip. Before the fix the transcript TEXT came back but the
+/// embedded art was dropped on the floor (`transcript_images` was never
+/// serialized). Drives the real elems pipeline to populate `transcript_images`,
+/// saves the way every app path now does (`save_archive_meta_pics` with
+/// `&state.transcript_images`), reloads, and asserts the restored transcript
+/// carries the SAME inline images with byte-identical pixels — the PNG blob is
+/// lossless, so an adaptive-palette picture re-materializes exactly (no re-decode
+/// against a possibly-different Current Palette).
+#[test]
+fn inline_transcript_images_survive_archive_roundtrip_sq0518() {
+    use app::state::{apply_transcript_elems, AppState, TranscriptKind};
+
+    let Some((_bytes, mut session)) = boot_zork0() else {
+        eprintln!("SKIP: gitignored Zork0 story missing at {}", story_path().display());
+        return;
+    };
+
+    // Build the transcript through the SAME elems pipeline the app uses: the boot
+    // banner's window-0 drop-cap arrives as ordered `TranscriptElem::Image`s.
+    let mut state = AppState::default();
+    let elems = Engine::take_transcript_elems(&mut session);
+    apply_transcript_elems(&mut state, &elems);
+    // If the opening frame didn't surface one, drive a couple of turns.
+    if !state.transcript_images.iter().any(Option::is_some) {
+        for cmd in ["look", "wait", "open mailbox"] {
+            let r = Engine::submit(&mut session, cmd);
+            if r.transcript_elems.is_empty() {
+                state.push_transcript_runs(&r.transcript, TranscriptKind::Story, &r.transcript_runs);
+            } else {
+                apply_transcript_elems(&mut state, &r.transcript_elems);
+            }
+            if state.transcript_images.iter().any(Option::is_some) {
+                break;
+            }
+        }
+    }
+
+    // A checksum + dims for every inline image, keyed by transcript index. Every
+    // line here is Story-kind, so the save filter keeps them all and indices align.
+    let fingerprint = |imgs: &[Option<app::inline_image::InlineImage>]| -> Vec<(usize, (u32, u32), u64)> {
+        imgs.iter()
+            .enumerate()
+            .filter_map(|(i, o)| {
+                o.as_ref().map(|img| {
+                    let sum: u64 = img.pixels.as_raw().iter().map(|&b| b as u64).sum();
+                    (i, img.pixels.dimensions(), sum)
+                })
+            })
+            .collect()
+    };
+    let before = fingerprint(&state.transcript_images);
+    assert!(
+        !before.is_empty(),
+        "Zork0's opening must surface at least one inline transcript image to test"
+    );
+    assert!(
+        before.iter().all(|(_, (w, h), _)| *w > 0 && *h > 0),
+        "every pre-save inline image has nonempty pixels"
+    );
+
+    // Save through the REAL archive path (as /save, auto-save, exit-save, and
+    // named slots all do), then reload.
+    let path = std::env::temp_dir().join(format!("zork0-inline-{}.babelmap", std::process::id()));
+    app::archive::save_archive_meta_pics(
+        &path,
+        &mapper::mapper::Mapper::default(),
+        &Engine::save_state(&session),
+        Some(&session.machine.screen),
+        &session.machine.aux_data,
+        app::archive::Meta {
+            format_version: app::archive::CURRENT_FORMAT_VERSION,
+            ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None,
+        },
+        &state.transcript,
+        &state.transcript_kinds,
+        &state.transcript_runs,
+        &state.transcript_para,
+        &state.transcript_images,
+        &[],
+        &[],
+        &session.pictures_png(),
+    )
+    .expect("save_archive_meta_pics with inline transcript images");
+
+    let ac = app::archive::load_archive(&path).expect("load_archive");
+    let _ = std::fs::remove_file(&path);
+
+    let after = fingerprint(&ac.transcript_images);
+    assert_eq!(
+        after, before,
+        "restored transcript must carry the same inline images (index, dims, pixel checksum) — \
+         a lossless PNG round-trip, adaptive palette and all (SQ-0518)"
+    );
+    assert_eq!(
+        ac.transcript_images.len(),
+        ac.transcript.len(),
+        "restored images stay parallel to the restored transcript"
     );
 }
 

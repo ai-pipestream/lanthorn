@@ -1151,8 +1151,14 @@ pub type PendingResume =
     Option<(crate::engine::EngineSave, Vec<String>, Vec<TranscriptKind>, Option<zvm::screen::ScreenState>)>;
 
 /// Transcript bundle loaded from an archive at startup: (lines, kinds, per-line
-/// style runs, per-line paragraph layout).
-pub type LoadedTranscript = Option<(Vec<String>, Vec<TranscriptKind>, Vec<Vec<StyleRun>>, Vec<ParaFmt>)>;
+/// style runs, per-line paragraph layout, per-line inline image).
+pub type LoadedTranscript = Option<(
+    Vec<String>,
+    Vec<TranscriptKind>,
+    Vec<Vec<StyleRun>>,
+    Vec<ParaFmt>,
+    Vec<Option<crate::inline_image::InlineImage>>,
+)>;
 
 /// Cache key for the wrapped-transcript product: every input the wrap output
 /// depends on. A change in any field forces a re-wrap; an unchanged key lets an
