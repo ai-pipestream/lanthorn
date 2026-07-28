@@ -169,6 +169,14 @@ off entirely with `--no-images`.
 
 ---
 
+## Missing or Corrupted Characters / Glyphs
+
+If you are noticing corrupted characters in your maps, you may be missing some
+of the line drawing glyphs utilized by Babelmap. Any of the mono-space nerd fonts
+should contain all of the glyphs you need: https://www.nerdfonts.com
+
+---
+
 ## Configuration
 
 babelmap reads `~/.babelmap/config.toml` (override with `--user-dir`, or point at
