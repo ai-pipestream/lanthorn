@@ -28,7 +28,7 @@ fn boot(name: &str) -> Option<GameSession> {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("v6 story should load and boot without a ZError");
     assert!(!session.quit, "quit during boot");
     assert!(session.machine.fault_trace.is_none(), "faulted during boot");

@@ -662,6 +662,32 @@ pub trait Engine {
     /// event path). (Lane M)
     fn set_mouse(&mut self, _y_px: u16, _x_px: u16) {}
 
+    /// Report the host's REAL screen size, in character cells, to the story.
+    ///
+    /// ZMSD §8.4: the interpreter "may change the exact dimensions whenever it
+    /// likes but must write the current height (in lines) and width (in
+    /// characters) into bytes $20 and $21 in the header" (v5+ also mirrors them
+    /// into the unit words at $22/$24, §8.4.3). The host therefore calls this at
+    /// first layout and on every terminal resize with the story pane's measured
+    /// size — see `loop_tick::poll_zvm_resize`.
+    ///
+    /// Default no-op: Glulx re-arranges through its own `GlulxSession::resize`
+    /// (Glk windows, not a header), and Scott has no screen model. `GameSession`
+    /// overrides it. (SQ-0532/A-F1)
+    fn set_screen_dims(&mut self, _rows: u16, _cols: u16) {}
+
+    /// Publish the interpreter's OWN default background/foreground colours, as
+    /// ZMSD §8.3.1 standard colour numbers, into header bytes $2C/$2D.
+    ///
+    /// §8.3.3: "If the interpreter can produce colours, it should set bit 0 of
+    /// 'Flags 1' in the header, and write its default background and foreground
+    /// colours into bytes $2c and $2d of the header." The host resolves the pair
+    /// from the active theme / the OSC-probed terminal (see
+    /// [`crate::colors::host_default_colour_pair`]) so the bytes describe what is
+    /// actually on screen. Default no-op — non-Z engines have no such header.
+    /// (SQ-0532/A-F2)
+    fn set_default_colours(&mut self, _bg: u8, _fg: u8) {}
+
     /// Enable/disable per-turn execution tracing for the debug inspector.
     fn set_debug_trace(&mut self, _on: bool) {}
 

@@ -39,7 +39,7 @@ fn boot(name: &str, screen_px: Option<(u16, u16)>) -> Option<GameSession> {
     let picture_dims = picts.all_pict_dims();
     let screen_px = screen_px.or_else(|| picts.std_window());
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, screen_px)
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, screen_px, None)
             .unwrap_or_else(|e| panic!("{name} should boot without a ZError: {e:?}"));
     assert!(!session.quit, "{name} quit during boot");
     assert!(session.machine.fault_trace.is_none(), "{name} faulted during boot");

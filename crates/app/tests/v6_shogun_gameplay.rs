@@ -39,7 +39,7 @@ fn shogun_boots_plays_and_emits_no_control_chars() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Shogun (v6) should load and boot without a ZError");
     assert!(!session.quit, "Shogun quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Shogun faulted during boot");
@@ -128,7 +128,7 @@ fn shogun_opening_is_a_right_margin_float() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -208,7 +208,7 @@ fn shogun_boot_menu_items_paint_horizontally_and_splash_clears() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Shogun (v6) should load and boot without a ZError");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -260,7 +260,7 @@ fn shogun_frameless_boot_menu_paints_items_and_caret() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -320,7 +320,7 @@ fn shogun_hybrid_boot_menu_is_coherent_text_with_solid_reverse_bar() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -383,7 +383,7 @@ fn shogun_frameless_status_band_fills_row_background() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -422,7 +422,10 @@ fn shogun_frameless_status_band_fills_row_background() {
 /// explicit colours (black on white, non-reversed). The whole band strip must be
 /// flooded with the game's background — every cell across the band row, INCLUDING
 /// the gaps between the anchored groups, shares the glyphs' background (z-colour 9,
-/// white → the theme palette's ANSI white = `Color::Gray`), not the theme backdrop.
+/// white), not the theme backdrop. Retargeted for SQ-0532/A-F5: the default palette
+/// now resolves Standard colours to their ZMSD §8.3.1 true-colour equivalents
+/// ("9 = white (true $7FFF)"), so white is the exact (255,255,255) the v6 pixel
+/// paths already drew, no longer the dim ANSI `Color::Gray`.
 /// The old whole-strip flood painted the theme `base` bg, so the background showed
 /// only behind the glyphs. Pins that the band reads as one solid white panel.
 #[test]
@@ -437,7 +440,7 @@ fn shogun_hybrid_status_band_floods_game_background() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -472,7 +475,7 @@ fn shogun_hybrid_status_band_floods_game_background() {
     let text = row_text(band_y);
     assert!(text.contains("Score:"), "band row also carries the Score label: {text:?}");
 
-    // z-colour 9 (white) resolves through the theme palette to ANSI white = Gray.
+    // z-colour 9 (white) resolves through the theme palette to the §8.3.1 RGB.
     // Every cell from the first glyph to the last on the band row — INCLUDING the
     // gaps BETWEEN Erasmus, SHOGUN and Score — must carry that game background, not
     // the theme backdrop. Pre-fix the gaps kept the theme `base` bg.
@@ -481,13 +484,13 @@ fn shogun_hybrid_status_band_floods_game_background() {
     // Sanity: the glyph cells themselves are on the game's white bg.
     assert_eq!(
         buf.cell((first, band_y)).unwrap().bg,
-        Color::Gray,
+        Color::Rgb(255, 255, 255),
         "the first status glyph is on the game's white (z-colour 9) bg: {text:?}"
     );
     for x in first..=last {
         assert_eq!(
             buf.cell((x, band_y)).unwrap().bg,
-            Color::Gray,
+            Color::Rgb(255, 255, 255),
             "band cell ({x},{band_y}) — incl. inter-group gaps — must flood the game's white bg, \
              not the theme backdrop: {text:?}"
         );
@@ -514,7 +517,7 @@ fn shogun_hybrid_tall_pane_frame_reclaim() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -570,7 +573,7 @@ fn shogun_frameless_status_band_anchors_left_center_right() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -635,7 +638,7 @@ fn shogun_raster_status_band_floods_game_white() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();

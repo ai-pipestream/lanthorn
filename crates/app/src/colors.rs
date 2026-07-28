@@ -18,6 +18,110 @@ use regex::Regex;
 use crate::render::dialog::DialogPlacement;
 use crate::render::paneframe::{BorderStyle, PaneGlyphs, PaneSides};
 
+// ── ZMSD §8.3.1 standard colour table ────────────────────────────────────────
+
+/// The Z-machine Standard colours 2..=9 paired with their ZMSD §8.3.1
+/// recommended true-colour equivalents, as 15-bit `0bbbbbgggggrrrrr` values:
+///
+/// ```text
+///  2 = black   (true $0000)    6 = blue    (true $59A0)
+///  3 = red     (true $001D)    7 = magenta (true $7C1F)
+///  4 = green   (true $0340)    8 = cyan    (true $77A0)
+///  5 = yellow  (true $03BD)    9 = white   (true $7FFF)
+/// ```
+///
+/// §8.3.1.1: "The equivalences between the colour numbers and true colours are
+/// recommended. The interpreter may allow the user to change the mapping, but
+/// the given values should be the default." This is that default, shared by the
+/// pixel paths (`render::v6_layout::standard_pixel_rgb`) and the terminal cell
+/// palette ([`ColorScheme::terminal_default`]) so one game colour looks the same
+/// in both. Colours 10..=12 (v6-only greys) carry their own fixed RGB in
+/// `zvm::screen::grey_rgb` and are not in this table.
+pub const STANDARD_COLOUR_RGB15: [(u8, u16); 8] = [
+    (2, 0x0000),
+    (3, 0x001D),
+    (4, 0x0340),
+    (5, 0x03BD),
+    (6, 0x59A0),
+    (7, 0x7C1F),
+    (8, 0x77A0),
+    (9, 0x7FFF),
+];
+
+/// The §8.3.1 true-colour equivalent of Standard colour `n` as 8-bit RGB, or
+/// `None` outside 2..=9.
+pub fn standard_colour_rgb(n: u8) -> Option<(u8, u8, u8)> {
+    STANDARD_COLOUR_RGB15
+        .iter()
+        .find(|(c, _)| *c == n)
+        .map(|(_, v)| zvm::screen::rgb15_to_888(*v))
+}
+
+/// The §8.3.1 true-colour equivalent of Standard colour `n` as a concrete
+/// `Color::Rgb`. Panics outside 2..=9 — the only callers are the fixed 2..=9
+/// palette seed below.
+fn standard_colour(n: u8) -> Color {
+    let (r, g, b) = standard_colour_rgb(n).expect("standard colour 2..=9");
+    Color::Rgb(r, g, b)
+}
+
+/// The Standard colour (2..=9) whose §8.3.1 true-colour equivalent sits nearest
+/// `rgb`, by squared Euclidean distance in RGB space. Ties go to the LOWER
+/// colour number (so a colour exactly between black and white reads as black),
+/// which keeps the mapping deterministic.
+///
+/// Used to express the app's own default page/ink as the standard codes the
+/// header can carry (§8.3.3 — bytes $2C/$2D hold colour NUMBERS, not RGB).
+pub fn nearest_standard_colour(rgb: (u8, u8, u8)) -> u8 {
+    let (r, g, b) = (rgb.0 as i32, rgb.1 as i32, rgb.2 as i32);
+    let mut best = (2u8, i32::MAX);
+    for (n, _) in STANDARD_COLOUR_RGB15 {
+        let (cr, cg, cb) = standard_colour_rgb(n).expect("table entry");
+        let d = (r - cr as i32).pow(2) + (g - cg as i32).pow(2) + (b - cb as i32).pow(2);
+        if d < best.1 {
+            best = (n, d);
+        }
+    }
+    best.0
+}
+
+/// Resolve the interpreter's OWN default page + ink and express it as a ZMSD
+/// §8.3.1 standard colour pair, returned as `(background, foreground)` — the
+/// order of header bytes $2C/$2D.
+///
+/// §8.3.3: "If the interpreter can produce colours, it should set bit 0 of
+/// 'Flags 1' in the header, and write its default background and foreground
+/// colours into bytes $2c and $2d of the header." Those bytes should therefore
+/// describe what the player actually sees, not a fixed black/white guess.
+///
+/// The pair is drawn from ONE layer, exactly like the v6 raster canvas's
+/// `v6_default_pair` (SQ-0510): the theme, but only when it supplies BOTH
+/// channels as concrete RGB; else the OSC 10/11-probed terminal pair, but only
+/// when the terminal answered BOTH. A half-resolved layer is skipped whole
+/// rather than mixed, so page and ink always come from the same design. When
+/// neither layer resolves, `None` — the caller leaves the interpreter's own
+/// black-on-white seed (§8.3.2's colours 2 and 9) in place.
+pub fn host_default_colour_pair(
+    themed: Style,
+    osc_fg: Option<(u8, u8, u8)>,
+    osc_bg: Option<(u8, u8, u8)>,
+) -> Option<(u8, u8)> {
+    fn rgb(c: Option<Color>) -> Option<(u8, u8, u8)> {
+        match c {
+            Some(Color::Rgb(r, g, b)) => Some((r, g, b)),
+            _ => None,
+        }
+    }
+    let (fg, bg) = match (rgb(themed.fg), rgb(themed.bg)) {
+        (Some(f), Some(b)) => (f, b),
+        _ => match (osc_fg, osc_bg) {
+            (Some(f), Some(b)) => (f, b),
+            _ => return None,
+        },
+    };
+    Some((nearest_standard_colour(bg), nearest_standard_colour(fg)))
+}
+
 /// A compiled user transcript-styling rule: a regex matched whole-line against
 /// Story text, plus the `Style` patched over the base `transcript` style on a
 /// match. `PartialEq` compares the source `pattern` and `style` only — the
@@ -350,14 +454,25 @@ impl ColorScheme {
             transcript_rules: Vec::new(),
             statusbar_layout: StatusBarLayout::default(),
             palette: [
-                Color::Black,      // 0  Z Standard(2) black
-                Color::Red,        // 1  Standard(3) red
-                Color::Green,      // 2  Standard(4) green
-                Color::Yellow,     // 3  Standard(5) yellow
-                Color::Blue,       // 4  Standard(6) blue
-                Color::Magenta,    // 5  Standard(7) magenta
-                Color::Cyan,       // 6  Standard(8) cyan
-                Color::Gray,       // 7  Standard(9) white (ANSI 7)
+                // Slots 0..=7 are the Z-machine Standard colours 2..=9 (see
+                // `resolve_zcolour`). ZMSD §8.3.1.1: "The equivalences between the
+                // colour numbers and true colours are recommended. The interpreter
+                // may allow the user to change the mapping, but the given values
+                // should be the default." So the BUILT-IN default seeds them from
+                // the §8.3.1 true-colour table as concrete RGB rather than named
+                // ANSI colours — the named mapping sent Standard white(9) to
+                // `Color::Gray` (the dim VGA base white), which disagreed with the
+                // exact RGB the v6 raster path already used (`standard_pixel_rgb`),
+                // so the same game colour looked different in cell and pixel paths.
+                // A user theme still overrides the whole palette (SQ-0532/A-F5).
+                standard_colour(2),  // 0  Z Standard(2) black
+                standard_colour(3),  // 1  Standard(3) red
+                standard_colour(4),  // 2  Standard(4) green
+                standard_colour(5),  // 3  Standard(5) yellow
+                standard_colour(6),  // 4  Standard(6) blue
+                standard_colour(7),  // 5  Standard(7) magenta
+                standard_colour(8),  // 6  Standard(8) cyan
+                standard_colour(9),  // 7  Standard(9) white
                 Color::DarkGray,   // 8  bright black
                 Color::LightRed,   // 9
                 Color::LightGreen, // 10
@@ -970,12 +1085,103 @@ unknown-key = ignored
 
     #[test]
     fn terminal_default_palette_maps_standard_colours_concretely() {
+        // Retargeted for SQ-0532/A-F5. ZMSD §8.3.1.1: "The equivalences between
+        // the colour numbers and true colours are recommended. The interpreter may
+        // allow the user to change the mapping, but the given values should be the
+        // default." The built-in default therefore resolves Standard colours to
+        // the §8.3.1 RGBs, not to named ANSI colours — which mattered most for
+        // white(9), previously `Color::Gray` (the dim VGA base white) in the cell
+        // path while the raster path already drew the spec's (255,255,255).
         use zvm::screen::ZColour;
         use ratatui::style::Color;
         let s = ColorScheme::terminal_default();
-        assert_eq!(crate::render::resolve_zcolour(ZColour::Standard(2), &s), Color::Black, "black");
-        assert_eq!(crate::render::resolve_zcolour(ZColour::Standard(3), &s), Color::Red, "red");
-        assert_eq!(crate::render::resolve_zcolour(ZColour::Standard(9), &s), Color::Gray, "white(9)->ANSI white");
+        assert_eq!(crate::render::resolve_zcolour(ZColour::Standard(2), &s), Color::Rgb(0, 0, 0), "black (true $0000)");
+        assert_eq!(crate::render::resolve_zcolour(ZColour::Standard(3), &s), Color::Rgb(239, 0, 0), "red (true $001D)");
+        assert_eq!(crate::render::resolve_zcolour(ZColour::Standard(9), &s), Color::Rgb(255, 255, 255), "white (true $7FFF)");
+    }
+
+    #[test]
+    fn default_palette_equals_the_zmsd_standard_rgbs() {
+        // A-F5: every Standard colour 2..=9 in the DEFAULT scheme is exactly its
+        // ZMSD §8.3.1 true-colour equivalent, so a game colour cannot look one way
+        // in a terminal cell and another in the v6 pixel canvas.
+        let s = ColorScheme::terminal_default();
+        for (n, v15) in STANDARD_COLOUR_RGB15 {
+            let (r, g, b) = zvm::screen::rgb15_to_888(v15);
+            assert_eq!(
+                s.palette[(n - 2) as usize],
+                Color::Rgb(r, g, b),
+                "Standard({n}) must be the §8.3.1 true colour"
+            );
+        }
+    }
+
+    #[test]
+    fn cell_and_raster_paths_agree_on_standard_white() {
+        // A-F5: the same game colour through the terminal cell path
+        // (`resolve_zcolour` → palette) and the pixel path
+        // (`v6_layout::standard_pixel_rgb`, exercised here via its shared table).
+        let s = ColorScheme::terminal_default();
+        let cell = crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(9), &s);
+        let raster = standard_colour_rgb(9).expect("white is in the table");
+        assert_eq!(cell, Color::Rgb(raster.0, raster.1, raster.2));
+        assert_eq!(raster, (255, 255, 255), "§8.3.1: 9 = white (true $7FFF)");
+    }
+
+    #[test]
+    fn nearest_standard_colour_is_identity_on_the_table() {
+        // A-F2: each §8.3.1 true colour maps back to its own colour number.
+        for (n, v15) in STANDARD_COLOUR_RGB15 {
+            assert_eq!(nearest_standard_colour(zvm::screen::rgb15_to_888(v15)), n);
+        }
+    }
+
+    #[test]
+    fn nearest_standard_colour_snaps_off_table_colours_sensibly() {
+        // Near-misses land on the obvious neighbour...
+        assert_eq!(nearest_standard_colour((10, 10, 12)), 2, "near-black → black");
+        assert_eq!(nearest_standard_colour((250, 250, 240)), 9, "off-white → white");
+        assert_eq!(nearest_standard_colour((200, 20, 20)), 3, "dark red → red");
+        assert_eq!(nearest_standard_colour((30, 90, 160)), 6, "muted blue → blue");
+        // Real terminal themes land where you would expect, both ends.
+        assert_eq!(nearest_standard_colour((0x28, 0x2c, 0x34)), 2, "One Dark page → black");
+        assert_eq!(nearest_standard_colour((0x00, 0x2b, 0x36)), 2, "Solarized dark page → black");
+        assert_eq!(nearest_standard_colour((0xfd, 0xf6, 0xe3)), 9, "Solarized light page → white");
+        // A mid-grey is the honest hard case: colours 2..=9 contain NO grey (the
+        // greys are 10..=12, Version 6 only, and `set_default_colours` clamps to
+        // 2..=9 anyway), so the nearest entry is blue — the only mid-luminance
+        // colour in the set — not a coin flip between black and white.
+        assert_eq!(nearest_standard_colour((128, 128, 128)), 6, "mid grey → blue (no grey in 2..=9)");
+    }
+
+    #[test]
+    fn host_default_pair_prefers_a_fully_concrete_theme() {
+        // A-F2 / ZMSD §8.3.3: (background, foreground) in $2C/$2D order.
+        let dark = Style::new().fg(Color::Rgb(240, 240, 240)).bg(Color::Rgb(8, 8, 12));
+        assert_eq!(host_default_colour_pair(dark, None, None), Some((2, 9)),
+            "dark page + white ink → black background, white foreground");
+        let light = Style::new().fg(Color::Rgb(0, 0, 0)).bg(Color::Rgb(255, 255, 255));
+        assert_eq!(host_default_colour_pair(light, None, None), Some((9, 2)),
+            "white page + black ink → white background, black foreground");
+    }
+
+    #[test]
+    fn host_default_pair_falls_back_to_osc_then_gives_up() {
+        // A half-resolved theme is skipped WHOLE (never mixed) — the OSC pair is
+        // used instead, mirroring the v6 raster's `v6_default_pair` layering.
+        let half = Style::new().fg(Color::Rgb(240, 240, 240));
+        assert_eq!(
+            host_default_colour_pair(half, Some((0, 0, 0)), Some((255, 255, 255))),
+            Some((9, 2)),
+            "OSC white page + black ink wins over a theme that set only fg"
+        );
+        // Neither layer complete → None, so the caller leaves the VM's §8.3.2
+        // black-on-white seed alone.
+        assert_eq!(host_default_colour_pair(half, None, Some((255, 255, 255))), None);
+        assert_eq!(host_default_colour_pair(Style::new(), None, None), None);
+        // A non-RGB (named/indexed) theme colour is not a known RGB either.
+        let named = Style::new().fg(Color::White).bg(Color::Black);
+        assert_eq!(host_default_colour_pair(named, None, None), None);
     }
 
 }

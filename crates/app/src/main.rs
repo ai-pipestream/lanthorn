@@ -1072,6 +1072,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             &mut resize_dirty,
             &mut vm_story_size,
         );
+        // ZMSD §8.4 / §8.3.3 (SQ-0532): keep the story's header describing the REAL
+        // host — the story pane's measured size in $20/$21, and our own default
+        // page/ink in $2C/$2D (which a live style reload can change mid-game).
+        needs_redraw |= loop_tick::poll_zvm_screen_dims(&mut *session, &state, &last_panes);
+        loop_tick::poll_zvm_default_colours(&mut *session, &state);
         needs_redraw |= loop_tick::poll_tidy_jobs(&mut state, &mut mapper, &last_panes);
         needs_redraw |= state.poll_render_job();
         needs_redraw |= state.poll_v6_encode_job();

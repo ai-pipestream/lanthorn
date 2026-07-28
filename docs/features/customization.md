@@ -242,9 +242,15 @@ re-seed the new template, or hand-write the new shape from
   directory as the default (writing it to the config file); after that, a bare
   `babelmap` opens the story picker there. With no argument and no default set,
   babelmap prints how to fix it and exits.
-- **Virtual screen size** — `virtual_screen_cols` / `virtual_screen_rows`
-  (default 80 × 24) set the fixed screen dimensions reported to the game; v4+
-  cursor-addressed games (forms, status displays) want a roomy story pane.
+- **Virtual screen size** — `virtual_screen_cols` / `virtual_screen_rows` pin the
+  screen dimensions reported to the game. Leave them **unset** (the default) and
+  babelmap reports the story pane's real measured size and re-reports it whenever
+  you resize the terminal, so a v4+ game's cursor-addressed forms and status
+  displays fill the pane and line up with the prose. Set one to reproduce a game's
+  original fixed layout (say `virtual_screen_cols = 80`) — a pinned width narrower
+  than the pane is drawn centred, and a pinned width wider than it scrolls to
+  follow the cursor. Version 6 stories ignore both: they lay out on their own
+  fixed pixel screen, which babelmap scales into whatever pane it has.
 - `undo_levels` (default 16) — how many in-memory undo states the Z-machine
   keeps for the game's own UNDO command (0 disables undo).
 - **v6 story rendering** — `v6_render` selects how graphical v6 titles (*Zork Zero*,

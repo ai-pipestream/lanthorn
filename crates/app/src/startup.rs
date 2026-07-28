@@ -268,6 +268,23 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // hidden (captured here before `cfg` is moved into the engine build below).
     let start_map_hidden = app::styles::read_per_game_show_map(&game_dir) == Some(false);
     let theme_colours = app::glk_backend::theme_style_colours(&cs);
+    // ZMSD §8.3.3 (SQ-0532/A-F2): publish OUR default page + ink in header bytes
+    // $2C/$2D, as the nearest §8.3.1 standard colour numbers, so a game that asks
+    // "what does 'default' look like here?" gets an honest answer instead of a
+    // fixed black-on-white. Resolved from the same layering the renderer uses
+    // (theme when it supplies both channels concretely, else the OSC 10/11 probe)
+    // and passed into the constructor so it is in force BEFORE the game boots.
+    // `honor_game_colours = false` means the interpreter declares itself
+    // colourless to the story, so the VM's §8.3.2 seed is left alone.
+    let host_default_colours = if cfg.honor_game_colours {
+        app::colors::host_default_colour_pair(
+            cs.theme.get("transcript").style,
+            term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
+            term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
+        )
+    } else {
+        None
+    };
 
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
     // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
@@ -295,7 +312,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
 
             // `--debug` (SQ-0449): trace from the first boot instruction so the
             // game's initialisation code is captured (a later `/debug` can't).
-            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number, cli.debug, picture_dims, v6_screen_px) {
+            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number, cli.debug, picture_dims, v6_screen_px, host_default_colours) {
                 Ok(s) => s,
                 Err(e) => {
                     use zvm::error::ZError;
@@ -321,16 +338,23 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             // very first `screen()` (before the player's first turn) already
             // shows the boot graphics instead of a blank window.
             s.flush_boot_pictures();
-            // Apply the configured virtual screen dimensions to the VM. init_caps
-            // (called inside GameSession::new) seeds defaults; override here.
+            // Pinned virtual screen dimensions, if the user set either key.
+            // `init_caps` (inside the constructor) seeded the fallback; a set key
+            // overrides it here, and an UNSET key is left for the story pane's real
+            // measurement to fill in at the first frame (`poll_zvm_resize`,
+            // ZMSD §8.4 — SQ-0532/A-F1).
             // v6 stories run at their NATIVE picture resolution (advertised before
-            // boot in new_with_trace); the configurable virtual screen is a v1–5
-            // concern, so leave the v6 native dims untouched here (SQ-0186).
-            if s.machine.mem.version() != 6 {
+            // boot in new_with_trace); the virtual screen is a v1–5 concern, so
+            // leave the v6 native dims untouched here (SQ-0186).
+            if s.machine.mem.version() != 6
+                && (cfg.virtual_screen_rows.is_some() || cfg.virtual_screen_cols.is_some())
+            {
+                let rows = cfg.virtual_screen_rows.unwrap_or(s.machine.mem.read_byte(0x20) as u16);
+                let cols = cfg.virtual_screen_cols.unwrap_or(s.machine.mem.read_byte(0x21) as u16);
                 zvm::screen::write_screen_dims(
                     &mut s.machine.mem,
-                    cfg.virtual_screen_rows as u8,
-                    cfg.virtual_screen_cols as u8,
+                    rows.clamp(1, 255) as u8,
+                    cols.clamp(1, 255) as u8,
                 );
             }
             s.machine.undo_cap = cfg.undo_levels;
@@ -341,8 +365,8 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             match GlulxSession::new_in(
                 game_dir.clone(),
                 bytes,
-                cfg.virtual_screen_cols as u32,
-                cfg.virtual_screen_rows as u32,
+                cfg.virtual_screen_cols.unwrap_or(app::config::FALLBACK_SCREEN_COLS) as u32,
+                cfg.virtual_screen_rows.unwrap_or(app::config::FALLBACK_SCREEN_ROWS) as u32,
                 cfg.acceleration,
                 cfg.images,
                 cfg.enable_sound,

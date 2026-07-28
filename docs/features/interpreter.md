@@ -38,9 +38,14 @@ playing.
 - **v4+ upper-window screen model** — cursor-addressed status lines and full-screen
   forms (Bureaucracy's infamous licence application, for one) render in a fixed
   grid pinned atop the transcript, and `read_char` keystrokes are forwarded so you
-  fill those forms in place. The game sees a fixed, configurable virtual screen
-  (`virtual_screen_cols`/`virtual_screen_rows`, default 80×24); when the pane is
-  smaller than that, the viewport auto-follows the cursor. The virtual window is
+  fill those forms in place. The game is told the story pane's **real** size — the
+  standard asks the interpreter to keep the current height and width in the header
+  and lets it change them whenever it likes, so babelmap measures the pane and
+  re-measures it on every terminal resize. A game's full-width form therefore lines
+  up column-for-column with the prose beside it instead of floating in a fixed
+  80-column box. Pin a fixed screen with `virtual_screen_cols`/`virtual_screen_rows`
+  if you want a game's original layout back; when the pane is smaller than a pinned
+  screen, the viewport auto-follows the cursor. The virtual window is
   themeable (`upper_window`, `upper_window_border`, `virtual_window_border`).
   During a `read_char` prompt keystrokes go to the game; only the hotkey prefix
   (default `Ctrl+P`) stays reserved.

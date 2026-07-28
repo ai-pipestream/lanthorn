@@ -30,7 +30,7 @@ fn zork0_hint_menu_paints_topics_by_row_and_keeps_transcript_clean() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -113,7 +113,7 @@ fn zork0_hybrid_hint_header_floods_full_width_reverse_bar() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Zork0 (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();

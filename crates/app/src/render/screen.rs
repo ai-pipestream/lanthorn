@@ -261,6 +261,75 @@ fn margin_style(model: &ScreenModel, state: &AppState) -> ratatui::style::Style 
     state.colors.theme.get("transcript").style
 }
 
+/// The text-window inner margin actually applied inside `area`, as
+/// `(horizontal, vertical)` cells.
+///
+/// A discovered garglk.ini's `tmarginx`/`tmarginy` wins (highest precedence,
+/// runtime-only — never persisted), else the global config default (SQ-0344);
+/// either is capped so at least one cell of text survives. Shared by
+/// [`reserve_text_margin`] (which inset the transcript by it) and
+/// [`story_screen_dims`] (which must report the same width to the story).
+fn effective_text_margin(area: Rect, state: &AppState) -> (u16, u16) {
+    let ov = state.garglk_overlay.as_ref();
+    let want_x = ov.and_then(|o| o.margin_x).unwrap_or(state.config.text_margin_x);
+    let want_y = ov.and_then(|o| o.margin_y).unwrap_or(state.config.text_margin_y);
+    (
+        want_x.min(area.width.saturating_sub(1) / 2),
+        want_y.min(area.height.saturating_sub(1) / 2),
+    )
+}
+
+/// The screen size, in character cells, that the Z-machine should be told the
+/// host has — `(rows, cols)` for header bytes $20/$21.
+///
+/// ZMSD §8.4: the interpreter "may change the exact dimensions whenever it likes
+/// but must write the current height (in lines) and width (in characters) into
+/// bytes $20 and $21 in the header." So this measures the REAL story pane
+/// (`area` is the pane's content rect) instead of reporting a fixed guess.
+///
+/// The number reported is the region the game's own screen actually gets:
+///
+/// - the text margin (`text_margin_x`) is subtracted, because that is where the
+///   transcript wraps — declaring a wider screen would make a game's centred
+///   full-width form sit wider than the prose beside it, the exact mismatch this
+///   replaces;
+/// - the transcript's one-column scrollbar gutter is subtracted for the same
+///   reason (`render_transcript` always reserves it);
+/// - the upper window's frame is subtracted, because `draw_grid` draws the grid
+///   INSIDE that frame. Without this the declared width would not fit and the
+///   game's rightmost columns would be clipped.
+///
+/// The three together are exactly the chrome that separates the pane from the
+/// story's own columns, so the declared width IS the width the upper grid is
+/// rendered at AND the width the transcript wraps at — they can no longer drift
+/// apart the way a fixed 80 did.
+///
+/// `virtual_screen_cols`/`virtual_screen_rows` still win when the user pinned
+/// them (see the config docs). Returns `None` for a zero-area pane (before the
+/// first frame, or while the story pane is hidden) — there is nothing to report.
+pub fn story_screen_dims(area: Rect, state: &AppState) -> Option<(u16, u16)> {
+    if area.width == 0 || area.height == 0 {
+        return None;
+    }
+    let sides = state.colors.upper_window_border_sides;
+    let on = |s: crate::render::paneframe::BorderStyle| {
+        u16::from(s != crate::render::paneframe::BorderStyle::None)
+    };
+    let border_cols = on(sides.left) + on(sides.right);
+    let border_rows = on(sides.top) + on(sides.bottom);
+    let (mx, _) = effective_text_margin(area, state);
+    let gutter = u16::from(area.width >= 2);
+    let cols = state
+        .config
+        .virtual_screen_cols
+        .unwrap_or_else(|| (area.width - 2 * mx).saturating_sub(border_cols + gutter));
+    let rows = state
+        .config
+        .virtual_screen_rows
+        .unwrap_or_else(|| area.height.saturating_sub(border_rows));
+    Some((rows.max(1), cols.max(1)))
+}
+
 /// Reserve the configured text-window inner margin (SQ-0345) inside a
 /// text-buffer rect: paint the whole rect with `fill` so the reserved band reads
 /// as clean padding, then return the inset rect the transcript draws into.
@@ -271,14 +340,7 @@ fn margin_style(model: &ScreenModel, state: &AppState) -> ratatui::style::Style 
 /// `render_transcript` publishes its geometry from the rect it receives, insetting
 /// here also keeps mouse selection and the copy path aligned (SQ-0197/SQ-0420).
 fn reserve_text_margin(area: Rect, state: &AppState, fill: ratatui::style::Style, buf: &mut Buffer) -> Rect {
-    // Effective margin: a discovered garglk.ini's tmarginx/tmarginy wins (highest
-    // precedence, runtime-only — never persisted), else the global config default
-    // (SQ-0344).
-    let ov = state.garglk_overlay.as_ref();
-    let want_x = ov.and_then(|o| o.margin_x).unwrap_or(state.config.text_margin_x);
-    let want_y = ov.and_then(|o| o.margin_y).unwrap_or(state.config.text_margin_y);
-    let mx = want_x.min(area.width.saturating_sub(1) / 2);
-    let my = want_y.min(area.height.saturating_sub(1) / 2);
+    let (mx, my) = effective_text_margin(area, state);
     // Publish the applied horizontal margin so the transcript draws its scrollbar
     // flush against the border (in the right margin band) rather than inset with
     // the text (SQ-0345). Set even in the no-op case so a stale value never leaks.
@@ -909,8 +971,28 @@ fn render_node(
                 let status_style = state.colors.theme.get("upper_window").style;
                 // Native screen width in cells (v6 screens vary — Zork0 is
                 // 320px/40 cells, others differ) sets the anchor thresholds.
-                let (native_w, _) = crate::render::v6_layout::native_extent(items);
+                let (native_w, native_h) = crate::render::v6_layout::native_extent(items);
                 let ncols = (native_w as u32).div_ceil(8).max(1);
+                // v6 mouse input in the cell path (SQ-0532/A-F4): this branch draws
+                // no game image, so there is no letterbox to invert — but the pane
+                // still IS the game's screen, so record the proportional pane→native
+                // map. Frameless mode lives here permanently; without a map its
+                // clicks were dead while the raster/hybrid paths' both worked.
+                {
+                    let cell_px = state
+                        .game_picker
+                        .as_ref()
+                        .map(|p| {
+                            let f = p.font_size();
+                            (f.width, f.height)
+                        })
+                        .unwrap_or((8, 16));
+                    state.graphics_render.borrow_mut().record_frameless_click_map(
+                        area,
+                        (native_w, native_h),
+                        cell_px,
+                    );
+                }
                 // Painted text runs across ALL grid windows: the chrome grids
                 // carry the status band AND (on a menu/hint screen) the deep
                 // absolutely-positioned menu items (Shogun's boot menu paints
@@ -2392,7 +2474,7 @@ mod tests {
         let mut picts = crate::graphics::PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
         let dims = picts.all_pict_dims();
         let mut session =
-            crate::session::GameSession::new_with_trace(bytes, false, false, None, false, dims, picts.std_window())
+            crate::session::GameSession::new_with_trace(bytes, false, false, None, false, dims, picts.std_window(), None)
                 .expect("Zork0 (v6) loads and boots");
         session.set_pict_source(Some(picts));
         session.flush_boot_pictures();
@@ -2739,6 +2821,109 @@ mod tests {
         assert_eq!(inset.y, base.y + 2, "top margin reserved");
         assert_eq!(inset.width, base.width - 6, "both horizontal margins reserved");
         assert_eq!(inset.height, base.height - 4, "top+bottom margins reserved");
+    }
+
+    /// SQ-0532/A-F1. ZMSD §8.4: the interpreter "may change the exact dimensions
+    /// whenever it likes but must write the current height (in lines) and width
+    /// (in characters) into bytes $20 and $21 in the header." What we report is
+    /// therefore MEASURED from the story pane, not a fixed 80x24 guess.
+    #[test]
+    fn story_screen_dims_measure_the_story_pane() {
+        let state = frameless_state(); // upper-window frame themed off
+        assert_eq!(
+            story_screen_dims(Rect::new(0, 0, 100, 30), &state),
+            Some((30, 99)),
+            "a bare pane reports its own cell size, less the scrollbar gutter column"
+        );
+        assert_eq!(
+            story_screen_dims(Rect::new(4, 2, 62, 17), &state),
+            Some((17, 61)),
+            "the pane's position is irrelevant; only its extent is reported"
+        );
+        // A hidden or not-yet-measured pane has nothing to report.
+        assert_eq!(story_screen_dims(Rect::new(0, 0, 0, 0), &state), None);
+        assert_eq!(story_screen_dims(Rect::new(0, 0, 80, 0), &state), None);
+    }
+
+    #[test]
+    fn story_screen_dims_subtract_the_margin_and_the_upper_window_frame() {
+        // The declared screen is the region the game's own screen actually gets:
+        // the text margin is where the transcript wraps, and the upper window's
+        // frame is drawn AROUND the grid, so both come off the reported size.
+        let mut state = frameless_state();
+        state.config.text_margin_x = 3;
+        state.config.text_margin_y = 2;
+        assert_eq!(
+            story_screen_dims(Rect::new(0, 0, 100, 30), &state),
+            Some((30, 93)),
+            "horizontal margin comes off the width; the grid is never inset vertically"
+        );
+        state.config.text_margin_x = 0;
+        state.colors.upper_window_border_sides =
+            crate::render::paneframe::PaneSides::all(crate::render::paneframe::BorderStyle::Single);
+        assert_eq!(
+            story_screen_dims(Rect::new(0, 0, 100, 30), &state),
+            Some((28, 97)),
+            "a framed upper window loses one row/column per drawn side"
+        );
+    }
+
+    #[test]
+    fn story_screen_dims_honour_a_pinned_config_override() {
+        // `virtual_screen_cols`/`rows` stay available for pinning a fixed virtual
+        // screen; an unset key follows the pane (see the config docs).
+        let mut state = frameless_state();
+        state.config.virtual_screen_cols = Some(80);
+        assert_eq!(
+            story_screen_dims(Rect::new(0, 0, 132, 40), &state),
+            Some((40, 80)),
+            "a pinned width wins; the unset height still follows the pane"
+        );
+        state.config.virtual_screen_rows = Some(24);
+        assert_eq!(story_screen_dims(Rect::new(0, 0, 132, 40), &state), Some((24, 80)));
+    }
+
+    /// SQ-0532/A-F1(c): the width the story is TOLD about, the width the upper
+    /// window is RENDERED at, and the width the transcript WRAPS at are one
+    /// number. Before this, the grid was sized from a fixed 80-column header and
+    /// centred in the pane while the prose wrapped at the pane's real width, so a
+    /// game's full-width form sat offset from the text beside it.
+    #[test]
+    fn declared_width_equals_rendered_grid_width_equals_transcript_wrap() {
+        let state = frameless_state(); // no upper-window frame, no text margin
+        let area = Rect::new(0, 0, 60, 12);
+        let (_, cols) = story_screen_dims(area, &state).expect("pane measured");
+        assert_eq!(cols, area.width - 1, "with no frame and no margin, the pane less its scrollbar gutter");
+
+        // A grid sized the way `split_window` sizes it — from header byte $21.
+        let mut grid = crate::engine::GridWindow { active_rows: 1, ..Default::default() };
+        grid.resize(1, cols);
+        grid.put(1, 1, '<', 0);
+        grid.put(1, cols, '>', 0);
+        let model = ScreenModel {
+            root: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
+            status: StatusModel::HostManaged,
+            bg: 0,
+            fg: 0,
+            content_size: (0, 0),
+        };
+        let mut buf = Buffer::empty(area);
+        let mut links = Vec::new();
+        let used = draw_upper_window(&grid, false, &state.colors, area, &mut buf, true, &mut links);
+        assert_eq!(used, 1, "one grid row, no frame rows");
+        // Rendered edge-to-edge across the pane: no centring offset left to drift.
+        assert_eq!(buf.cell((area.x, area.y)).unwrap().symbol(), "<");
+        assert_eq!(buf.cell((area.x + cols - 1, area.y)).unwrap().symbol(), ">");
+
+        // The transcript below wraps at that same width (its rightmost column is
+        // the scrollbar gutter, which is chrome, not story columns).
+        let mut state2 = frameless_state();
+        state2.push_transcript("x");
+        let tarea = Rect::new(area.x, area.y + used, area.width, area.height - used);
+        let (_, _, _, _) = render_transcript(&model.status, None, &state2, tarea, &mut buf, None);
+        let geom = state2.transcript_geom.get().expect("geometry published").area;
+        assert_eq!(geom.width, cols, "transcript wraps at the declared width");
+        assert_eq!(geom.x, area.x, "and starts at the same column the grid does");
     }
 
     #[test]
@@ -3534,8 +3719,11 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_story_pane(&model, false, None, &state, area, &mut buf);
         // A blank interior cell (the empty transcript body, not the bottom input
-        // row) carries the game background (black).
-        assert_eq!(buf.cell((0, 2)).unwrap().style().bg, Some(Color::Black),
+        // row) carries the game background (black). Retargeted for SQ-0532/A-F5:
+        // the default palette now resolves Standard colours to their ZMSD §8.3.1
+        // true-colour equivalents ("2 = black (true $0000)") rather than the named
+        // ANSI colour, so black is the exact RGB (0,0,0).
+        assert_eq!(buf.cell((0, 2)).unwrap().style().bg, Some(Color::Rgb(0, 0, 0)),
             "story pane blank cell painted with game background");
     }
 
@@ -4399,6 +4587,55 @@ mod tests {
             .collect();
         assert!(screen.contains("SCORE 10"), "status band renders as terminal text, screen:\n{screen}");
         assert!(screen.contains("HELLO STORY WORLD"), "story renders as a full-pane transcript, screen:\n{screen}");
+    }
+
+    #[test]
+    fn frameless_publishes_a_click_map_covering_the_pane() {
+        // SQ-0532/A-F4: the cell path (frameless, and the no-picker fallback)
+        // draws no game image, so it used to record NO click map at all — v6
+        // mouse input was dead there while raster and hybrid both worked. It now
+        // records the proportional pane→native map, and a click maps into the
+        // game-pixel rect the clicked cell stands for.
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = crate::config::V6RenderMode::Frameless;
+        state.push_transcript("HELLO STORY WORLD");
+
+        let model = frameless_v6_model();
+        let area = Rect::new(0, 0, 40, 25);
+        let mut buf = Buffer::empty(area);
+        let mut links = Vec::new();
+        let _ = render_node(
+            &model.root, &model.status, false, None, &state, area, &mut buf, None, &mut links, &state.colors,
+        );
+
+        let map = state
+            .graphics_render
+            .borrow()
+            .last_v6_map
+            .expect("frameless publishes a v6 click map");
+        // The model's native extent is its 320x200 game-pixel screen.
+        let (nw, nh) = crate::render::v6_layout::native_extent(match &model.root {
+            WinNode::Layered(items) => items,
+            _ => unreachable!("frameless_v6_model is Layered"),
+        });
+        assert_eq!((map.native_w, map.native_h), (nw, nh));
+
+        // Top-left cell → the top-left game pixel (1-based origin, ZMSD §8.8.1).
+        let (gx, gy) = map.map_click(area.x, area.y).expect("a click inside the pane maps");
+        assert!(gx <= nw / area.width + 1 && gy <= nh / area.height + 1,
+            "top-left cell maps into the top-left game-pixel cell, got ({gx},{gy})");
+        // A known interior cell maps into the game-pixel rect it stands for: cell
+        // (col, row) covers native x in [col/W, (col+1)/W) of the screen width.
+        let (col, row) = (area.x + 30, area.y + 20);
+        let (gx, gy) = map.map_click(col, row).expect("interior click maps");
+        let (lo_x, hi_x) = (nw as u32 * 30 / 40, nw as u32 * 31 / 40);
+        let (lo_y, hi_y) = (nh as u32 * 20 / 25, nh as u32 * 21 / 25);
+        assert!((lo_x..=hi_x).contains(&(gx as u32 - 1)), "x {gx} in {lo_x}..={hi_x}");
+        assert!((lo_y..=hi_y).contains(&(gy as u32 - 1)), "y {gy} in {lo_y}..={hi_y}");
+        // Outside the pane is still a miss (the app falls back to selection).
+        assert_eq!(map.map_click(area.right() + 2, area.y), None);
     }
 
     #[test]

@@ -274,8 +274,12 @@ pub struct HotkeysConfig {
 fn default_command_prefix() -> char { '/' }
 fn default_undo_levels() -> usize { 16 }
 
-fn default_virtual_screen_cols() -> u16 { 80 }
-fn default_virtual_screen_rows() -> u16 { 24 }
+/// Fallback screen size used only before the story pane has been measured (the
+/// engine boots before the first frame) and by the Glulx factory, whose real
+/// size arrives one poll later from `poll_glulx_resize`. ZMSD §8.4 asks for "at
+/// least 60 characters wide by 14 lines deep"; 80×24 is the classic terminal.
+pub const FALLBACK_SCREEN_COLS: u16 = 80;
+pub const FALLBACK_SCREEN_ROWS: u16 = 24;
 pub(crate) fn default_split_ratio() -> u16 { 50 }
 pub(crate) fn default_verb_dock_pct() -> u16 { 32 }
 pub(crate) fn default_inv_dock_pct() -> u16 { 33 }
@@ -534,12 +538,21 @@ pub struct Config {
     /// Search configuration: start direction, nav keys.
     #[serde(default)]
     pub search: SearchConfig,
-    /// Virtual screen width reported to the Z-machine (chars). Default 80.
-    #[serde(default = "default_virtual_screen_cols")]
-    pub virtual_screen_cols: u16,
-    /// Virtual screen height reported to the Z-machine (lines). Default 24.
-    #[serde(default = "default_virtual_screen_rows")]
-    pub virtual_screen_rows: u16,
+    /// OVERRIDE for the screen width (in characters) reported to the Z-machine in
+    /// header byte $21. Unset (the default) means "follow the story pane": ZMSD
+    /// §8.4 requires the interpreter to "write the current height (in lines) and
+    /// width (in characters) into bytes $20 and $21", and it "may change the exact
+    /// dimensions whenever it likes", so babelmap reports the pane's real measured
+    /// size and re-reports it on every terminal resize. Set this key only to pin a
+    /// fixed virtual screen (e.g. to reproduce a game's original 80-column
+    /// layout); a pinned width no longer matches what the transcript wraps at, so
+    /// the upper window will be drawn centred inside the pane. (SQ-0532/A-F1)
+    #[serde(default)]
+    pub virtual_screen_cols: Option<u16>,
+    /// OVERRIDE for the screen height (in lines) reported in header byte $20.
+    /// Unset (the default) follows the story pane — see `virtual_screen_cols`.
+    #[serde(default)]
+    pub virtual_screen_rows: Option<u16>,
     /// Story pane's share of the story/map Split, as a percentage (default 50).
     #[serde(default = "default_split_ratio")]
     pub split_ratio: u16,
@@ -629,8 +642,8 @@ impl Default for Config {
             show_loc_method: false,
             show_status_bar: true,
             search: SearchConfig::default(),
-            virtual_screen_cols: default_virtual_screen_cols(),
-            virtual_screen_rows: default_virtual_screen_rows(),
+            virtual_screen_cols: None,
+            virtual_screen_rows: None,
             split_ratio: default_split_ratio(),
             verb_dock_pct: default_verb_dock_pct(),
             inv_dock_pct: default_inv_dock_pct(),
@@ -827,8 +840,17 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     if let Some(n) = cfg.interpreter_number {
         doc["interpreter_number"] = toml_edit::value(n as i64);
     }
-    doc["virtual_screen_cols"] = toml_edit::value(i64::from(cfg.virtual_screen_cols));
-    doc["virtual_screen_rows"] = toml_edit::value(i64::from(cfg.virtual_screen_rows));
+    // Written only when the user pinned one: an absent key means "follow the
+    // story pane" (ZMSD §8.4), and emitting the measured size would silently turn
+    // this session's terminal into a permanent override. (SQ-0532/A-F1)
+    match cfg.virtual_screen_cols {
+        Some(n) => { doc["virtual_screen_cols"] = toml_edit::value(i64::from(n)); }
+        None => { doc.remove("virtual_screen_cols"); }
+    }
+    match cfg.virtual_screen_rows {
+        Some(n) => { doc["virtual_screen_rows"] = toml_edit::value(i64::from(n)); }
+        None => { doc.remove("virtual_screen_rows"); }
+    }
     doc["split_ratio"] = toml_edit::value(i64::from(cfg.split_ratio));
     doc["verb_dock_pct"] = toml_edit::value(i64::from(cfg.verb_dock_pct));
     doc["inv_dock_pct"] = toml_edit::value(i64::from(cfg.inv_dock_pct));
@@ -890,17 +912,19 @@ mod tests {
     }
 
     #[test]
-    fn virtual_screen_defaults_80x24() {
+    fn virtual_screen_defaults_to_following_the_pane() {
         let cfg = Config::default();
-        assert_eq!(cfg.virtual_screen_cols, 80);
-        assert_eq!(cfg.virtual_screen_rows, 24);
+        // ZMSD §8.4 wants the REAL screen size in $20/$21, so an unset key means
+        // "measure the story pane", not a fixed 80x24 guess. (SQ-0532/A-F1)
+        assert_eq!(cfg.virtual_screen_cols, None);
+        assert_eq!(cfg.virtual_screen_rows, None);
     }
 
     #[test]
     fn virtual_screen_parses_from_toml() {
         let cfg: Config = toml::from_str("virtual_screen_cols = 64\nvirtual_screen_rows = 20").unwrap();
-        assert_eq!(cfg.virtual_screen_cols, 64);
-        assert_eq!(cfg.virtual_screen_rows, 20);
+        assert_eq!(cfg.virtual_screen_cols, Some(64));
+        assert_eq!(cfg.virtual_screen_rows, Some(20));
     }
 
     #[test]
@@ -1221,8 +1245,8 @@ use_defaults = false
             enable_sound: true,
             volume: 100,
             search: SearchConfig::default(),
-            virtual_screen_cols: 80,
-            virtual_screen_rows: 24,
+            virtual_screen_cols: None,
+            virtual_screen_rows: None,
             split_ratio: 70,
             verb_dock_pct: 40,
             inv_dock_pct: 25,

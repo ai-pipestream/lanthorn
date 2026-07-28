@@ -36,7 +36,7 @@ fn boot_zork0() -> Option<(Vec<u8>, GameSession)> {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path()).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session = GameSession::new_with_trace(
-        story_bytes.clone(), false, false, None, false, picture_dims, picts.std_window(),
+        story_bytes.clone(), false, false, None, false, picture_dims, picts.std_window(), None,
     )
     .expect("Zork0 (v6) should boot without a ZError");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
@@ -129,7 +129,7 @@ fn v6_host_save_state_restore_is_byte_identical() {
 
     // Restore into a completely FRESH session (fresh boot + fresh Pict source).
     let mut fresh = GameSession::new_with_trace(
-        story_bytes, false, false, None, false, fresh_picts().all_pict_dims(), fresh_picts().std_window(),
+        story_bytes, false, false, None, false, fresh_picts().all_pict_dims(), fresh_picts().std_window(), None,
     )
     .expect("fresh Zork0 boot");
     Engine::restore_state(&mut fresh, &ac.engine_save()).expect("restore_state (Quetzal memory/stack/pc)");

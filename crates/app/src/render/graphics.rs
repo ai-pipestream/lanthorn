@@ -428,6 +428,37 @@ impl GraphicsRender {
         });
     }
 
+    /// Record the click map for the v6 CELL path — frameless mode (SQ-0461), and
+    /// the same fallback taken on a terminal with no image protocol.
+    ///
+    /// That path draws no game image at all: it re-lays the v6 screen out as
+    /// ordinary terminal text filling the whole pane. There is therefore no
+    /// letterbox to invert — but the pane still stands for the game's screen, so
+    /// a click is mapped by proportion: the pane's full cell rect covers the
+    /// native `(width, height)` game-pixel canvas, and a click at a given
+    /// fraction across/down the pane yields the game pixel at the same fraction.
+    ///
+    /// Without this, clicks in frameless mode were simply dead — the raster and
+    /// hybrid paths each recorded a map and this one recorded none, so
+    /// `map_click` returned a stale (or missing) geometry while games that ask
+    /// for mouse input (the capability bit is advertised) got nothing.
+    /// (SQ-0532/A-F4)
+    pub fn record_frameless_click_map(&mut self, pane: Rect, native: (u16, u16), cell_px: (u16, u16)) {
+        let (cw, ch) = (cell_px.0.max(1), cell_px.1.max(1));
+        self.last_v6_map = Some(V6ClickMap {
+            pane_x: pane.x,
+            pane_y: pane.y,
+            cell_w: cw,
+            cell_h: ch,
+            img_x: 0.0,
+            img_y: 0.0,
+            img_w: pane.width as f32 * cw as f32,
+            img_h: pane.height as f32 * ch as f32,
+            native_w: native.0,
+            native_h: native.1,
+        });
+    }
+
     /// Drop cached chrome-band protocols whose band rect is not in `live` — called
     /// once per hybrid frame so a resize/layout change can't leave stale band
     /// uploads accumulating.

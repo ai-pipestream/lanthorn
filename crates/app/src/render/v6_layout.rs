@@ -23,26 +23,16 @@ pub(crate) fn packed_explicit(packed: u32) -> bool {
 }
 
 /// The ZMSD §8.3.1 recommended true-colour equivalents for the Standard palette
-/// colours 2..=9, as 15-bit `0bbbbbgggggrrrrr` values. On the pixel/canvas paths
-/// (unlike the terminal cell path) we resolve Standard colours to these DOS/spec-
-/// authentic RGBs directly rather than routing them through the theme's ANSI
-/// palette — that palette maps Standard white(9) to the dim VGA base-white
-/// `Color::Gray` (170,170,170), so a canvas that should show spec white
-/// (255,255,255) instead came out light grey. Greys (10..=12) still go through
-/// `resolve_zcolour`/`grey_rgb`, which already carry their own fixed RGB. (SQ-0506)
+/// colours 2..=9. On the pixel/canvas paths we resolve Standard colours to these
+/// DOS/spec-authentic RGBs directly rather than routing them through the theme's
+/// ANSI palette, which a user theme may remap arbitrarily (SQ-0506). Greys
+/// (10..=12) still go through `resolve_zcolour`/`grey_rgb`, which already carry
+/// their own fixed RGB.
 fn standard_pixel_rgb(n: u8) -> Option<Rgba<u8>> {
-    let v15: u16 = match n {
-        2 => 0x0000, // black   → (0,0,0)
-        3 => 0x001D, // red     → (239,0,0)
-        4 => 0x0340, // green   → (0,214,8)
-        5 => 0x03BD, // yellow  → (239,214,8)
-        6 => 0x59A0, // blue    → (0,107,181)
-        7 => 0x7C1F, // magenta → (255,0,255)
-        8 => 0x77A0, // cyan    → (0,239,239)
-        9 => 0x7FFF, // white   → (255,255,255)
-        _ => return None,
-    };
-    let (r, g, b) = zvm::screen::rgb15_to_888(v15);
+    // SQ-0532/A-F5: the table itself now lives in `colors::STANDARD_COLOUR_RGB15`
+    // so the terminal cell palette resolves Standard colours to the SAME §8.3.1
+    // RGBs this pixel path uses (they used to disagree — e.g. white).
+    let (r, g, b) = crate::colors::standard_colour_rgb(n)?;
     Some(Rgba([r, g, b, 255]))
 }
 

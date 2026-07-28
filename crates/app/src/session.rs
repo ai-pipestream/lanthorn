@@ -511,7 +511,7 @@ impl GameSession {
     /// game's opening text into the sink.  The sink is NOT drained here; the
     /// caller can call `take_transcript` to retrieve the banner/intro text.
     pub fn new(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>) -> Result<GameSession, ZError> {
-        Self::new_with_trace(story, honor_game_colours, sound_available, interpreter_number, false, Vec::new(), None)
+        Self::new_with_trace(story, honor_game_colours, sound_available, interpreter_number, false, Vec::new(), None, None)
     }
 
     /// Like [`new`](Self::new) but enables execution tracing BEFORE the VM runs to
@@ -525,12 +525,23 @@ impl GameSession {
     /// called during boot, which happens inside this very function (Phase 0
     /// boot-tracing lesson), so `set_picture_dims` runs right after
     /// `set_sound_available`, before `init_caps()`/the boot loop.
-    pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>) -> Result<GameSession, ZError> {
+    ///
+    /// `default_colours` is the host's own `(background, foreground)` §8.3.1
+    /// standard colour pair for header bytes $2C/$2D (ZMSD §8.3.3). It is applied
+    /// BEFORE `init_caps()` for the same reason as `picture_dims`: the game's
+    /// initialisation runs inside this function, and a game that reads the header
+    /// default pair while booting (Beyond Zork picks its colour scheme there)
+    /// must already see the host's real page/ink. `None` leaves the VM's own
+    /// §8.3.2 black-on-white seed. (SQ-0532/A-F2)
+    pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, default_colours: Option<(u8, u8)>) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
         let sink = Box::new(CaptureSink::new());
         let mut machine = Machine::with_output(mem, sink);
         machine.set_honor_game_colours(honor_game_colours);
         machine.set_sound_available(sound_available);
+        if let Some((bg, fg)) = default_colours {
+            machine.set_default_colours(bg, fg);
+        }
         // v6 (SQ-0479): the game lays out on the 640×400 UNIT screen, so
         // `picture_data` must report the doubled (unit-space) picture sizes —
         // Frotz's Amiga/DOS interpreter returns `scaler * size` for every pic.
@@ -1787,6 +1798,31 @@ impl Engine for GameSession {
         self.machine.set_mouse(y_px, x_px, 0b1);
     }
 
+    fn set_screen_dims(&mut self, rows: u16, cols: u16) {
+        // ZMSD §8.4 — publish the host's REAL pane size in bytes $20/$21 (and the
+        // v5+ unit words). A story pane wider or narrower than the old fixed 80×24
+        // guess otherwise made `split_window` build an upper grid at the WRONG
+        // width, so a game's centred form/quote box never lined up with the prose
+        // beside it. (SQ-0532/A-F1)
+        //
+        // v6 is deliberately exempt: it lays out in its own fixed 640×400 pixel
+        // screen (`V6_ART_SCALE`d Blorb `Reso` window, seeded before boot), and
+        // the app SCALES that native frame into whatever pane it has. Feeding the
+        // pane's cell size in would resize the game's coordinate system underneath
+        // its own hardcoded art placement.
+        if self.machine.mem.version() == 6 {
+            return;
+        }
+        self.machine
+            .set_screen_dims(rows.clamp(1, 255) as u8, cols.clamp(1, 255) as u8);
+    }
+
+    fn set_default_colours(&mut self, bg: u8, fg: u8) {
+        // ZMSD §8.3.3 — the header's default pair should be the interpreter's own
+        // (the codes are clamped to 2..=9 by the VM). (SQ-0532/A-F2)
+        self.machine.set_default_colours(bg, fg);
+    }
+
     fn take_transcript(&mut self) -> String {
         self.take_transcript()
     }
@@ -2969,7 +3005,7 @@ mod tests {
         // cumulative set is non-empty even before any player turn — capturing the
         // boot/init code a mid-game /debug can never see.
         let story = read_char_story_v5();
-        let traced = GameSession::new_with_trace(story.clone(), false, false, None, true, Vec::new(), None)
+        let traced = GameSession::new_with_trace(story.clone(), false, false, None, true, Vec::new(), None, None)
             .expect("traced session");
         assert!(!traced.machine.ever_exec_pcs.is_empty(),
             "boot PCs must be captured when tracing from boot");
@@ -3013,9 +3049,89 @@ mod tests {
         // space by V6_ART_SCALE (SQ-0479): `picture_data` reports the doubled
         // sizes the game lays out on the 640×400 screen with.
         let dims = vec![(5u16, 100u16, 60u16), (9u16, 20u16, 30u16)];
-        let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone(), None)
+        let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone(), None, None)
             .expect("v6 session");
         assert_eq!(session.machine.picture_dims, vec![(5, 200, 120), (9, 40, 60)]);
+    }
+
+    /// SQ-0532/A-F1. ZMSD §8.4: the interpreter "may change the exact dimensions
+    /// whenever it likes but must write the current height (in lines) and width
+    /// (in characters) into bytes $20 and $21 in the header." Feeding the host's
+    /// measured pane size through `Engine::set_screen_dims` must land there — and
+    /// land again on every later resize, not just once at startup.
+    #[test]
+    fn set_screen_dims_publishes_the_host_pane_size_and_tracks_resizes() {
+        let mut s = GameSession::new(read_char_story_v5(), false, false, None).expect("v5 session");
+        Engine::set_screen_dims(&mut s, 40, 132);
+        assert_eq!(s.machine.mem.read_byte(0x20), 40, "$20 = height in lines");
+        assert_eq!(s.machine.mem.read_byte(0x21), 132, "$21 = width in characters");
+        // §8.4.3: "In Version 5 and later, the screen's width and height in units
+        // should be written to the words at $22 and $24."
+        assert_eq!(s.machine.mem.read_word(0x22), 132, "$22 = width in units");
+        assert_eq!(s.machine.mem.read_word(0x24), 40, "$24 = height in units");
+
+        // A terminal resize re-reports; the header follows rather than sticking.
+        Engine::set_screen_dims(&mut s, 24, 60);
+        assert_eq!(
+            (s.machine.mem.read_byte(0x20), s.machine.mem.read_byte(0x21)),
+            (24, 60),
+            "a resize re-writes both bytes"
+        );
+        assert_eq!((s.machine.mem.read_word(0x22), s.machine.mem.read_word(0x24)), (60, 24));
+
+        // Degenerate sizes never publish a zero screen.
+        Engine::set_screen_dims(&mut s, 0, 0);
+        assert_eq!((s.machine.mem.read_byte(0x20), s.machine.mem.read_byte(0x21)), (1, 1));
+    }
+
+    /// A-F1(d): v6 lays out on its own fixed 640×400 pixel screen (seeded before
+    /// boot from the Blorb `Reso` window) and the app SCALES that frame into
+    /// whatever pane it has, so the pane feed must not touch it.
+    #[test]
+    fn set_screen_dims_leaves_the_v6_pixel_screen_alone() {
+        let mut s = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, Vec::new(), None, None)
+            .expect("v6 session");
+        let before = (
+            s.machine.mem.read_byte(0x20),
+            s.machine.mem.read_byte(0x21),
+            s.machine.mem.read_word(0x22),
+            s.machine.mem.read_word(0x24),
+        );
+        Engine::set_screen_dims(&mut s, 45, 200);
+        let after = (
+            s.machine.mem.read_byte(0x20),
+            s.machine.mem.read_byte(0x21),
+            s.machine.mem.read_word(0x22),
+            s.machine.mem.read_word(0x24),
+        );
+        assert_eq!(before, after, "a v6 story keeps its native screen dimensions");
+    }
+
+    /// SQ-0532/A-F2. ZMSD §8.3.3: the interpreter "should ... write its default
+    /// background and foreground colours into bytes $2c and $2d of the header."
+    /// The host resolves its own page/ink to the nearest §8.3.1 standard colour
+    /// and hands them over; the header must show them.
+    #[test]
+    fn host_default_colours_reach_header_bytes_2c_2d() {
+        use ratatui::style::{Color, Style};
+        // A dark page with white ink → black background (2), white foreground (9).
+        let dark = Style::new().fg(Color::Rgb(238, 238, 238)).bg(Color::Rgb(12, 12, 16));
+        let (bg, fg) = crate::colors::host_default_colour_pair(dark, None, None).expect("resolved");
+        assert_eq!((bg, fg), (2, 9));
+        let s = GameSession::new_with_trace(read_char_story_v5(), true, false, None, false, Vec::new(), None, Some((bg, fg)))
+            .expect("v5 session");
+        assert_eq!(s.machine.mem.read_byte(0x2C), 2, "$2C = default background");
+        assert_eq!(s.machine.mem.read_byte(0x2D), 9, "$2D = default foreground");
+
+        // A light page with black ink is the mirror image, and reaches the header
+        // through the live path too (a theme reload has no constructor to use).
+        let light = Style::new().fg(Color::Rgb(0, 0, 0)).bg(Color::Rgb(250, 250, 250));
+        let (bg, fg) = crate::colors::host_default_colour_pair(light, None, None).expect("resolved");
+        assert_eq!((bg, fg), (9, 2));
+        let mut s = GameSession::new(read_char_story_v5(), true, false, None).expect("v5 session");
+        Engine::set_default_colours(&mut s, bg, fg);
+        assert_eq!(s.machine.mem.read_byte(0x2C), 9);
+        assert_eq!(s.machine.mem.read_byte(0x2D), 2);
     }
 
     /// Variant of `read_char_story_v5`: after the read_char completes, instead

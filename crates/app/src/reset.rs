@@ -72,8 +72,8 @@ pub(crate) fn reset_game(
             GlulxSession::new_in(
                 game_dir.to_path_buf(),
                 bytes,
-                state.config.virtual_screen_cols as u32,
-                state.config.virtual_screen_rows as u32,
+                state.config.virtual_screen_cols.unwrap_or(app::config::FALLBACK_SCREEN_COLS) as u32,
+                state.config.virtual_screen_rows.unwrap_or(app::config::FALLBACK_SCREEN_ROWS) as u32,
                 state.config.acceleration,
                 state.config.images,
                 state.config.enable_sound,

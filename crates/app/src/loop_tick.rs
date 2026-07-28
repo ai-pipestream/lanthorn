@@ -101,6 +101,83 @@ pub(crate) fn poll_glulx_resize(
     redraw
 }
 
+/// Report the story pane's REAL size to the Z-machine (ZMSD §8.4 — SQ-0532/A-F1).
+///
+/// §8.4: the interpreter "may change the exact dimensions whenever it likes but
+/// must write the current height (in lines) and width (in characters) into bytes
+/// $20 and $21 in the header." Uses last frame's story rect (one-frame lag is
+/// fine) and runs BEFORE the draw so the frame that follows already renders the
+/// upper window at the width the game was just told about.
+///
+/// Unlike [`poll_glulx_resize`] there is no settle timer: this writes two header
+/// bytes rather than running the game's re-layout code, so it is free to track
+/// every intermediate size during a drag. It also carries no cached "last
+/// applied" size — it compares against what the header currently SAYS, so a fresh
+/// boot after `@restart` (whose new `Machine` re-seeds the fallback) is corrected
+/// on the next pass without the restart path having to know about any of this.
+///
+/// Skipped for v6, whose fixed 640×400 pixel screen is scaled into the pane
+/// rather than measured from it, and for v1–3, which have no such header fields.
+/// Returns `true` when the header changed (the upper window's width follows it).
+pub(crate) fn poll_zvm_screen_dims(
+    session: &mut dyn Engine,
+    state: &AppState,
+    last_panes: &crate::PaneRects,
+) -> bool {
+    let Some(gs) = session.as_any().downcast_ref::<app::session::GameSession>() else {
+        return false;
+    };
+    let version = gs.machine.mem.version();
+    if version < 4 || version == 6 {
+        return false;
+    }
+    let Some((rows, cols)) = app::render::screen::story_screen_dims(last_panes.story, state) else {
+        return false;
+    };
+    let current = (
+        gs.machine.mem.read_byte(0x20) as u16,
+        gs.machine.mem.read_byte(0x21) as u16,
+    );
+    if current == (rows.min(255), cols.min(255)) {
+        return false;
+    }
+    session.set_screen_dims(rows, cols);
+    true
+}
+
+/// Keep header bytes $2C/$2D describing the colours the player actually sees
+/// (ZMSD §8.3.3 — SQ-0532/A-F2).
+///
+/// The pair is resolved at startup and passed into the session before boot; this
+/// poller exists for what happens AFTER: a `/reload-style`, a style-watch reload,
+/// or a per-game theme switch changes the app's default page/ink, and
+/// `reload_style` only sees `AppState` — it has no engine to tell. Comparing
+/// against the machine's stored pair makes the poll a no-op on every pass but the
+/// one right after a change (and re-arms it after an `@restart` rebuild).
+///
+/// `honor_game_colours = false` declares the interpreter colourless to the story
+/// (§8.3.2), so the VM's own black-on-white seed is left alone. No redraw
+/// contribution — this changes header bytes, not the screen.
+pub(crate) fn poll_zvm_default_colours(session: &mut dyn Engine, state: &AppState) {
+    if !state.config.honor_game_colours {
+        return;
+    }
+    let Some(gs) = session.as_any().downcast_ref::<app::session::GameSession>() else {
+        return;
+    };
+    let Some((bg, fg)) = app::colors::host_default_colour_pair(
+        state.colors.theme.get("transcript").style,
+        state.term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
+        state.term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
+    ) else {
+        return;
+    };
+    if (gs.machine.default_bg_colour, gs.machine.default_fg_colour) == (bg, fg) {
+        return;
+    }
+    session.set_default_colours(bg, fg);
+}
+
 /// Background tidy job + tidy-animation build job: poll and apply/install.
 /// Runs BEFORE the draw so the first fully-drawn frame after completion shows the
 /// new layout. Returns `true` if either job finished (map changed → repaint).
