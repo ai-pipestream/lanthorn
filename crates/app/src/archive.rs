@@ -1506,6 +1506,27 @@ mod tests {
         assert_eq!(back.runs, td.runs);
     }
 
+    /// SQ-0538: the transcript archive stores LOGICAL lines and re-wraps them at
+    /// render, so the `buffer_mode` state must survive with them — it rides along
+    /// in `ParaFmt::nowrap_from`, and an archive written before the field existed
+    /// loads as `None` (fully buffered).
+    #[test]
+    fn transcript_para_round_trips_buffer_mode_nowrap() {
+        use crate::state::{ParaFmt, TranscriptKind};
+        let td = TranscriptData {
+            lines: vec!["Please wait....".into()],
+            kinds: vec![TranscriptKind::Story],
+            runs: Vec::new(),
+            para: vec![ParaFmt { nowrap_from: Some(11), ..ParaFmt::default() }],
+            images: Vec::new(),
+        };
+        let json = serde_json::to_string(&td).unwrap();
+        let back: TranscriptData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.para, td.para);
+        let old: ParaFmt = serde_json::from_str(r#"{"indent":0,"para_indent":0,"justify":0}"#).unwrap();
+        assert_eq!(old.nowrap_from, None, "pre-SQ-0538 archives load as buffered");
+    }
+
     #[test]
     fn old_transcript_json_loads_with_empty_runs() {
         // JSON without a "runs" field (older archive)

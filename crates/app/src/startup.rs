@@ -454,7 +454,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                         Ok(()) => {
                             if let Some(scr) = ac.screen.clone() {
                                 if let Some(zs) = zvm_session_opt_mut(&mut *session) {
-                                    zs.machine.screen = scr;
+                                    app::session::restore_screen(&mut zs.machine, scr);
                                 }
                             }
                             // v6 graphics canvases (Lane P): no-op for non-v6 archives.

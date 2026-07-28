@@ -67,17 +67,25 @@ pub struct FilenameReq {
 /// `para` is the paragraph layout format (always [`ParaFmt::default`] on the
 /// Z-machine path — the Glulx buffer path is the only source of non-default
 /// layout, carried via [`crate::glk_backend::AppGlk::take_transcript_elems`]).
-/// One captured `(char_count, text_style_bits, fg, bg, link, para, ...)` chunk.
-type CaptureRun = (usize, u8, ZColour, ZColour, u32, ParaFmt, u8);
+/// One captured `(char_count, text_style_bits, fg, bg, link, para, glk_style,
+/// nowrap)` chunk. `nowrap` is `true` when the run was printed with the
+/// Z-machine's output buffering switched OFF (`buffer_mode 0`, ZMSD §7.2.1), so
+/// the renderer must break it after the last character that fits instead of
+/// word-wrapping it.
+pub type CaptureRun = (usize, u8, ZColour, ZColour, u32, ParaFmt, u8, bool);
 
 pub struct CaptureSink {
     pub text: String,
     pub runs: Vec<CaptureRun>,
+    /// Current `buffer_mode` state (ZMSD §7.2.1: on at the start of a game).
+    /// Every captured run records `!buffering` so the transcript can honour the
+    /// game's choice when it wraps.
+    buffering: bool,
 }
 
 impl CaptureSink {
     fn new() -> Self {
-        CaptureSink { text: String::new(), runs: Vec::new() }
+        CaptureSink { text: String::new(), runs: Vec::new(), buffering: true }
     }
 
     /// Drain accumulated text and style runs together, leaving both empty.
@@ -93,16 +101,25 @@ impl CaptureSink {
 
 impl Output for CaptureSink {
     fn print(&mut self, s: &str) {
-        self.runs.push((s.chars().count(), 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0));
+        let nowrap = !self.buffering;
+        self.runs.push((s.chars().count(), 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, nowrap));
         self.text.push_str(s);
     }
     fn print_styled(&mut self, s: &str, style: u8) {
-        self.runs.push((s.chars().count(), style, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0));
+        let nowrap = !self.buffering;
+        self.runs.push((s.chars().count(), style, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, nowrap));
         self.text.push_str(s);
     }
     fn print_attr(&mut self, s: &str, attrs: TextAttrs) {
-        self.runs.push((s.chars().count(), attrs.style, attrs.fg, attrs.bg, 0, ParaFmt::default(), 0));
+        let nowrap = !self.buffering;
+        self.runs.push((s.chars().count(), attrs.style, attrs.fg, attrs.bg, 0, ParaFmt::default(), 0, nowrap));
         self.text.push_str(s);
+    }
+    /// ZMSD §7.2.1: the game switched buffering on/off. Runs captured while it
+    /// is off are marked `nowrap`, and the transcript breaks them after the last
+    /// character that fits (no word-wrap) — see [`ParaFmt::nowrap_from`].
+    fn set_buffer_mode(&mut self, on: bool) {
+        self.buffering = on;
     }
     fn as_any(&self) -> &dyn Any {
         self
@@ -117,18 +134,15 @@ impl Output for CaptureSink {
 /// trailing prompt). Chunks past the limit are dropped; the boundary chunk is
 /// truncated. A list shorter than `char_len` is returned unchanged (the missing
 /// tail is treated as plain by `push_transcript_runs`).
-pub(crate) fn clamp_runs(
-    runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)>,
-    char_len: usize,
-) -> Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)> {
+pub(crate) fn clamp_runs(runs: Vec<CaptureRun>, char_len: usize) -> Vec<CaptureRun> {
     let mut out = Vec::with_capacity(runs.len());
     let mut total = 0usize;
-    for (c, b, fg, bg, link, para, gs) in runs {
+    for (c, b, fg, bg, link, para, gs, nw) in runs {
         if total >= char_len {
             break;
         }
         let take = c.min(char_len - total);
-        out.push((take, b, fg, bg, link, para, gs));
+        out.push((take, b, fg, bg, link, para, gs, nw));
         total += take;
     }
     out
@@ -252,7 +266,7 @@ fn win0_pic_align(
 
 fn interleave_story_pics(
     text: &str,
-    runs: &[(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)],
+    runs: &[CaptureRun],
     pics: Vec<(u64, crate::inline_image::InlineImage)>,
     base: u64,
 ) -> Vec<TranscriptElem> {
@@ -274,8 +288,8 @@ fn interleave_story_pics(
     // Lockstep style-chunk consumption: `take(n)` returns the chunks covering
     // the next `n` chars, splitting the boundary chunk as needed.
     let mut run_iter = runs.iter().copied();
-    let mut pending: Option<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)> = run_iter.next();
-    let mut take = |n: usize| -> Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)> {
+    let mut pending: Option<CaptureRun> = run_iter.next();
+    let mut take = |n: usize| -> Vec<CaptureRun> {
         let mut out = Vec::new();
         let mut left = n;
         while left > 0 {
@@ -334,7 +348,7 @@ fn interleave_story_pics(
 /// chunks) or an inline image. Preserves emission order so images land between
 /// the right lines.
 pub enum TranscriptElem {
-    Text { text: String, runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)> },
+    Text { text: String, runs: Vec<CaptureRun> },
     Image(crate::inline_image::InlineImage),
 }
 
@@ -413,7 +427,7 @@ pub struct TurnResult {
     /// list covering every char of `transcript`, fed to `push_transcript_runs`. All
     /// chunks carry bits 0, default colours and default `para` when the turn emitted
     /// no styling (the Z-machine path never sets a non-default `para`).
-    pub transcript_runs: Vec<(usize, u8, ZColour, ZColour, u32, ParaFmt, u8)>,
+    pub transcript_runs: Vec<CaptureRun>,
     pub location: Option<ObjectSnapshot>,
     pub quit: bool,
     /// The game cleared the screen this turn — a Z-machine `erase_window`
@@ -1440,6 +1454,18 @@ fn sink_mut(machine: &mut Machine) -> &mut CaptureSink {
         .expect("GameSession machine must have a CaptureSink output")
 }
 
+/// Install a `ScreenState` restored from a host archive on `machine`, re-syncing
+/// the output sink's `buffer_mode` from it (ZMSD §7.2.1). The flag lives in two
+/// places — the screen model and the sink that tags captured runs — and only the
+/// former is archived, so a restore must hand it back to the sink or unbuffered
+/// output would silently start word-wrapping again. (`@restart` re-syncs via
+/// `init_caps`.)
+pub fn restore_screen(machine: &mut Machine, screen: zvm::screen::ScreenState) {
+    let buffering = screen.buffer_mode;
+    machine.screen = screen;
+    machine.out.set_buffer_mode(buffering);
+}
+
 // ── Adventure-title helpers ───────────────────────────────────────────────────
 
 /// Canonical titles for well-known games, keyed by the release+serial prefix of
@@ -2451,9 +2477,28 @@ mod tests {
         let (text, runs) = s.take_styled();
         assert_eq!(text, "abCD");
         assert_eq!(runs, vec![
-            (2, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
-            (2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
+            (2, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false),
+            (2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false),
         ]);
+    }
+
+    /// ZMSD §7.2.1: buffering is on at the start of a game, and `buffer_mode`
+    /// switches it. Runs printed while it is OFF are flagged so the transcript
+    /// can char-break them.
+    #[test]
+    fn capture_sink_flags_runs_printed_with_buffering_off() {
+        use zvm::io::Output;
+        let mut s = CaptureSink::new();
+        s.print("on");
+        s.set_buffer_mode(false);
+        s.print("off");
+        s.print_styled("OFF", 0x02);
+        s.set_buffer_mode(true);
+        s.print("on again");
+        let (text, runs) = s.take_styled();
+        assert_eq!(text, "onoffOFFon again");
+        let flags: Vec<(usize, bool)> = runs.iter().map(|r| (r.0, r.7)).collect();
+        assert_eq!(flags, vec![(2, false), (3, true), (3, true), (8, false)]);
     }
 
     #[test]
@@ -2468,7 +2513,7 @@ mod tests {
         };
         let text = "first line\nsecond line";
         // One style chunk covering everything (bold), to verify run splitting.
-        let runs = vec![(text.chars().count(), 2u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0u8)];
+        let runs = vec![(text.chars().count(), 2u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0u8, false)];
         // Drawn at abs offset base+15 — mid-"second line" — must SNAP to that
         // line's start (offset 11), splitting cleanly at the line boundary.
         let elems = interleave_story_pics(text, &runs, vec![(115, img)], 100);
@@ -2576,12 +2621,12 @@ mod tests {
         use zvm::screen::ZColour;
         // strip_read_prompt removed 3 trailing chars ("\n> " etc.) → clamp.
         let runs = vec![
-            (2, 0u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0),
-            (5, 0x02u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0),
+            (2, 0u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0, false),
+            (5, 0x02u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0, false),
         ];
         assert_eq!(clamp_runs(runs, 4), vec![
-            (2, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
-            (2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
+            (2, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false),
+            (2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false),
         ]);
     }
 
@@ -2602,7 +2647,7 @@ mod tests {
         let kept = strip_read_prompt(raw).chars().count();
         let mut elems = vec![TranscriptElem::Text {
             text: raw.to_string(),
-            runs: vec![(raw.chars().count(), 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)],
+            runs: vec![(raw.chars().count(), 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false)],
         }];
         trim_elems_to_len(&mut elems, kept);
         let TranscriptElem::Text { text, runs } = &elems[0] else { panic!("expected Text") };
@@ -2617,9 +2662,9 @@ mod tests {
         // The trim clears the trailing ">" element and reaches back past the
         // image to trim the "\n" off "foo\n".
         let mut elems = vec![
-            TranscriptElem::Text { text: "foo\n".into(), runs: vec![(4, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)] },
+            TranscriptElem::Text { text: "foo\n".into(), runs: vec![(4, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false)] },
             TranscriptElem::Image(dummy_inline_image()),
-            TranscriptElem::Text { text: ">".into(), runs: vec![(1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)] },
+            TranscriptElem::Text { text: ">".into(), runs: vec![(1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false)] },
         ];
         trim_elems_to_len(&mut elems, 3);
         let TranscriptElem::Text { text, .. } = &elems[0] else { panic!("expected Text") };

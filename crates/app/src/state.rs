@@ -275,6 +275,17 @@ pub struct ParaFmt {
     /// 2=centered, 3=right-flush.
     #[serde(default)]
     pub justify: u8,
+    /// Char offset within the line at/after which the game had output BUFFERING
+    /// OFF (`buffer_mode 0`, ZMSD §7.2/§7.2.1): from there on the text must break
+    /// after the last character that fits, never word-wrap. `None` (the default)
+    /// = fully buffered, i.e. ordinary word-wrap.
+    ///
+    /// Per-line (a logical transcript line is one paragraph), derived by
+    /// [`AppState::push_transcript_runs`] from the per-run flag `CaptureSink`
+    /// records. It is a wrap POLICY, not a style, which is why it lives here
+    /// beside the other paragraph layout rather than in [`StyleRun`].
+    #[serde(default)]
+    pub nowrap_from: Option<u32>,
 }
 
 /// Encode a [`zvm::screen::ZColour`] as a packed `u32` for serde-safe storage in
@@ -2908,11 +2919,16 @@ impl AppState {
     /// separators (as recorded by `CaptureSink`). Adjacent equal-attribute spans
     /// merge; zero-bits/default-colour spans are omitted (so an unstyled line
     /// yields an empty run vec).
+    ///
+    /// A chunk's `nowrap` flag (printed while `buffer_mode` was off, ZMSD §7.2.1)
+    /// is folded per line into [`ParaFmt::nowrap_from`] — the first char offset on
+    /// that line that was emitted unbuffered — so the wrap can char-break from
+    /// exactly there.
     pub fn push_transcript_runs(
         &mut self,
         text: &str,
         kind: TranscriptKind,
-        chunks: &[(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, ParaFmt, u8)],
+        chunks: &[crate::session::CaptureRun],
     ) {
         // A turn with no new lower-window output (e.g. a read_char keypress that
         // only redrew the upper window) yields an empty string; appending it would
@@ -2936,19 +2952,21 @@ impl AppState {
         let mut link: u32 = 0;
         let mut para = ParaFmt::default();
         let mut glk_style: u8 = 0;
+        let mut nowrap = false;
         // Advance to the next non-exhausted chunk when the current one is spent.
         // When chunks run out, treat the remainder as plain (bits 0, default
-        // colours, no link, default layout, Normal style).
+        // colours, no link, default layout, Normal style, buffered).
         let mut refill = |rem: &mut usize,
                           bits: &mut u8,
                           fg: &mut zvm::screen::ZColour,
                           bg: &mut zvm::screen::ZColour,
                           link: &mut u32,
                           para: &mut ParaFmt,
-                          glk_style: &mut u8| {
+                          glk_style: &mut u8,
+                          nowrap: &mut bool| {
             while *rem == 0 {
                 match chunk_iter.next() {
-                    Some((c, b, f, bk, lk, pf, gs)) => {
+                    Some((c, b, f, bk, lk, pf, gs, nw)) => {
                         *rem = c;
                         *bits = b;
                         *fg = f;
@@ -2956,6 +2974,7 @@ impl AppState {
                         *link = lk;
                         *para = pf;
                         *glk_style = gs;
+                        *nowrap = nw;
                     }
                     None => {
                         *rem = usize::MAX;
@@ -2965,6 +2984,7 @@ impl AppState {
                         *link = 0;
                         *para = ParaFmt::default();
                         *glk_style = 0;
+                        *nowrap = false;
                         break;
                     }
                 }
@@ -2976,7 +2996,7 @@ impl AppState {
             // Consume the '\n' separator's chunk char (one per separator, i.e.
             // before every line except the first).
             if !first {
-                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link, &mut para, &mut glk_style);
+                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link, &mut para, &mut glk_style, &mut nowrap);
                 rem = rem.saturating_sub(1);
             }
             first = false;
@@ -2984,11 +3004,16 @@ impl AppState {
             // The paragraph's layout comes from the FIRST content run on the line
             // (a paragraph is normally one style). `None` until the first char.
             let mut line_para: Option<ParaFmt> = None;
+            // First column on this line printed with buffering off (§7.2.1).
+            let mut line_nowrap: Option<u32> = None;
             let mut runs: Vec<StyleRun> = Vec::new();
             for (col, _ch) in line.chars().enumerate() {
-                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link, &mut para, &mut glk_style);
+                refill(&mut rem, &mut bits, &mut fg, &mut bg, &mut link, &mut para, &mut glk_style, &mut nowrap);
                 if line_para.is_none() {
                     line_para = Some(para);
+                }
+                if nowrap && line_nowrap.is_none() {
+                    line_nowrap = Some(col as u32);
                 }
                 let pfg = pack_zcolour(fg);
                 let pbg = pack_zcolour(bg);
@@ -3011,7 +3036,7 @@ impl AppState {
             self.transcript_kinds.push(kind);
             self.transcript_styles.push(None);
             self.transcript_runs.push(runs);
-            self.transcript_para.push(line_para.unwrap_or_default());
+            self.transcript_para.push(ParaFmt { nowrap_from: line_nowrap, ..line_para.unwrap_or_default() });
             self.transcript_images.push(None);
         }
     }
@@ -3377,9 +3402,9 @@ mod tests {
             scaled: None, margin_px: None, source: crate::inline_image::ImageSource::Story,
         };
         let elems = vec![
-            TranscriptElem::Text { text: "a".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0)] },
+            TranscriptElem::Text { text: "a".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0, false)] },
             TranscriptElem::Image(dummy),
-            TranscriptElem::Text { text: "b".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0)] },
+            TranscriptElem::Text { text: "b".into(), runs: vec![(1, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0, false)] },
         ];
         apply_transcript_elems(&mut st, &elems);
         assert_eq!(st.transcript, vec!["a".to_string(), "".to_string(), "b".to_string()]);
@@ -3560,7 +3585,7 @@ mod tests {
         s.push_transcript_runs(
             ">",
             TranscriptKind::Story,
-            &[(1, 0, ZColour::Default, ZColour::True24(0x00FF_FFFF), 0, ParaFmt::default(), 0)],
+            &[(1, 0, ZColour::Default, ZColour::True24(0x00FF_FFFF), 0, ParaFmt::default(), 0, false)],
         );
         s.append_to_last_transcript_line("look");
         assert_eq!(s.transcript.last().unwrap(), ">look");
@@ -3590,7 +3615,7 @@ mod tests {
         // as a separate pushed line — CounterfeitMonkey's shape.
         s.push_transcript_kind(">", TranscriptKind::Story);
         s.push_transcript_runs("look", TranscriptKind::Story,
-            &[(4, 2 /* bold */, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)]);
+            &[(4, 2 /* bold */, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false)]);
         assert_eq!(s.transcript.len(), 2);
         s.merge_line_into_previous(1);
         // One line now: ">look", and the bold run is shifted past the ">".
@@ -3612,10 +3637,10 @@ mod tests {
         // A `>look` line where `>` has no run and "look" is bold with DEFAULT colour,
         // except a single char CM coloured red explicitly.
         s.push_transcript_runs(">look", TranscriptKind::Story, &[
-            (1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),       // '>' — unstyled
-            (1, 2, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),       // 'l' — bold, default colour
-            (1, 2, ZColour::True24(0x00FF_0000), ZColour::Default, 0, ParaFmt::default(), 0), // 'o' — bold + explicit red fg
-            (2, 2, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),       // 'ok' — bold, default colour
+            (1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false),       // '>' — unstyled
+            (1, 2, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false),       // 'l' — bold, default colour
+            (1, 2, ZColour::True24(0x00FF_0000), ZColour::Default, 0, ParaFmt::default(), 0, false), // 'o' — bold + explicit red fg
+            (2, 2, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false),       // 'ok' — bold, default colour
         ]);
         s.fill_line_default_colours(0, black, white);
         // Every char now has fg/bg resolved; the '>' and default chars take black/white,
@@ -3743,13 +3768,13 @@ mod tests {
         // the parallel `transcript_para` stays length-synced. A default-layout line
         // keeps the default ParaFmt (the Z-machine path).
         let mut st = AppState::default();
-        let centered = ParaFmt { indent: 0, para_indent: 0, justify: 2 };
+        let centered = ParaFmt { indent: 0, para_indent: 0, justify: 2, nowrap_from: None };
         st.push_transcript_runs(
             "plain\ncentered",
             TranscriptKind::Story,
             &[
-                (6, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0), // "plain\n"
-                (8, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, centered, 0),        // "centered"
+                (6, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, ParaFmt::default(), 0, false), // "plain\n"
+                (8, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, centered, 0, false),        // "centered"
             ],
         );
         assert_eq!(st.transcript, vec!["plain".to_string(), "centered".to_string()]);
@@ -3819,7 +3844,7 @@ mod tests {
         use zvm::screen::ZColour;
         let mut s = AppState::default();
         s.push_transcript_runs("ab cd", TranscriptKind::Story,
-            &[(2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0), (3, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)]);
+            &[(2, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false), (3, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false)]);
         assert_eq!(s.transcript.last().unwrap(), "ab cd");
         assert_eq!(s.transcript_runs.last().unwrap(), &vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
         assert_eq!(s.transcript.len(), s.transcript_runs.len());
@@ -3831,9 +3856,9 @@ mod tests {
         use zvm::screen::ZColour;
         let mut s = AppState::default();
         s.push_transcript_runs("A\nB", TranscriptKind::Story,
-            &[(1, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
-              (1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0),
-              (1, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)]);
+            &[(1, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false),
+              (1, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false),
+              (1, 0x02, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false)]);
         let n = s.transcript.len();
         assert_eq!(s.transcript[n - 2], "A");
         assert_eq!(s.transcript[n - 1], "B");
@@ -3850,8 +3875,8 @@ mod tests {
         // the two spans stay separate runs. (Unstyled/default spans emit no run,
         // which is why both spans here carry a nonzero link.)
         s.push_transcript_runs("link more", TranscriptKind::Story,
-            &[(4, 0, ZColour::Default, ZColour::Default, 42, ParaFmt::default(), 0),
-              (5, 0, ZColour::Default, ZColour::Default, 99, ParaFmt::default(), 0)]);
+            &[(4, 0, ZColour::Default, ZColour::Default, 42, ParaFmt::default(), 0, false),
+              (5, 0, ZColour::Default, ZColour::Default, 99, ParaFmt::default(), 0, false)]);
         let runs = s.transcript_runs.last().unwrap();
         assert_eq!(runs.len(), 2, "differing links do not coalesce");
         assert_eq!((runs[0].start, runs[0].end, runs[0].link), (0, 4, 42));
@@ -3871,8 +3896,27 @@ mod tests {
         use zvm::screen::ZColour;
         let mut s = AppState::default();
         s.push_transcript_runs("hello", TranscriptKind::Story,
-            &[(5, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0)]);
+            &[(5, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false)]);
         assert!(s.transcript_runs.last().unwrap().is_empty());
+    }
+
+    /// ZMSD §7.2.1: a run captured with `buffer_mode` off marks its line's
+    /// `nowrap_from` at the first unbuffered column, per line (offsets are
+    /// line-relative, and a fully buffered line stays `None`).
+    #[test]
+    fn push_runs_folds_buffering_off_into_para_nowrap_from() {
+        use zvm::screen::ZColour;
+        let plain = |n: usize, nw: bool| (n, 0u8, ZColour::Default, ZColour::Default, 0u32, ParaFmt::default(), 0u8, nw);
+        let mut s = AppState::default();
+        // "buffered\nmixed" + "DOTS" printed unbuffered on the second line.
+        s.push_transcript_runs(
+            "buffered\nmixedDOTS",
+            TranscriptKind::Story,
+            &[plain(14, false), plain(4, true)], // 8 + '\n' + 5 chars, then "DOTS"
+        );
+        let n = s.transcript_para.len();
+        assert_eq!(s.transcript_para[n - 2].nowrap_from, None, "fully buffered line");
+        assert_eq!(s.transcript_para[n - 1].nowrap_from, Some(5), "offset is line-relative");
     }
 
     #[test]
@@ -3912,7 +3956,7 @@ mod tests {
         // Thread colour through push_transcript_runs → StyleRun.
         let mut s = AppState::default();
         s.push_transcript_runs("ab", TranscriptKind::Story,
-            &[(2, 0x02, ZColour::Standard(3), ZColour::Default, 0, ParaFmt::default(), 0)]);
+            &[(2, 0x02, ZColour::Standard(3), ZColour::Default, 0, ParaFmt::default(), 0, false)]);
         let run = s.transcript_runs.last().unwrap().first()
             .expect("coloured chunk must produce a StyleRun");
         assert_eq!(unpack_zcolour(run.fg), ZColour::Standard(3),

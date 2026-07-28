@@ -35,10 +35,16 @@ pub trait Output: Any {
         self.print_styled(s, attrs.style);
     }
     /// Notify the sink that the Z-machine `buffer_mode` opcode changed the
-    /// buffering flag. When `on` is `false` the interpreter must NOT soft-wrap
-    /// output at the terminal column limit (though explicit `\n` and paging
-    /// still apply). The default is a no-op so that `BufferOutput` and the
-    /// `app` crate's sink compile unchanged.
+    /// buffering flag (ZMSD §7.2.1: buffering is on at the start of a game).
+    /// When `on` is `false` the interpreter must NOT word-wrap output — text
+    /// breaks after the last character that fits (explicit `\n` and paging still
+    /// apply).
+    ///
+    /// The default is a no-op, which is right only for sinks that never wrap
+    /// (e.g. `BufferOutput`, which just accumulates a `String`). Any sink that
+    /// lays text out in columns MUST override it — `zvm-cli`'s `StdoutOutput`
+    /// stops soft-wrapping, and the `app` crate's `CaptureSink` flags the runs it
+    /// captures so the transcript char-breaks them.
     fn set_buffer_mode(&mut self, _on: bool) {}
     fn as_any(&self) -> &dyn Any;
     /// Mutable downcast support — required to drain sink state (e.g. `CaptureSink::take_text`).

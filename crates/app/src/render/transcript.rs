@@ -285,6 +285,21 @@ pub(crate) fn wrap_line(line: &str, width: u16) -> Vec<String> {
 /// both: row N ends before the space, row N+1 starts after it. Hard-broken long
 /// words split into contiguous ranges.
 pub(crate) fn wrap_line_ranges(line: &str, width: u16) -> Vec<(String, usize, usize)> {
+    wrap_line_ranges_nw(line, width, None)
+}
+
+/// [`wrap_line_ranges`] with the Z-machine's `buffer_mode` honoured (ZMSD §7.2.1):
+/// `nowrap_from` is the char offset at/after which the game had buffering OFF, so
+/// from there on the text must break after the last character that FITS — no
+/// word-wrap, no word carried to the next row (a long word splits mid-word, and
+/// the break space is kept rather than swallowed).
+///
+/// Rule for a MIXED line (buffering turned off part-way through): a row
+/// word-wraps only while it lies entirely inside the buffered prefix; the first
+/// row that reaches into the unbuffered region — and every row after it —
+/// char-breaks. This matches the spec's model (buffering is a property of the
+/// moment the text was printed) without needing per-word state.
+fn wrap_line_ranges_nw(line: &str, width: u16, nowrap_from: Option<usize>) -> Vec<(String, usize, usize)> {
     let width = width as usize;
     if width == 0 {
         return vec![(line.to_string(), 0, line.chars().count())];
@@ -304,6 +319,9 @@ pub(crate) fn wrap_line_ranges(line: &str, width: u16) -> Vec<(String, usize, us
             break;
         }
 
+        // This row reaches into text printed with buffering off → hard char-break.
+        let unbuffered = nowrap_from.is_some_and(|n| n < base_col + width);
+
         // Collect byte offsets for chars 0..=width (inclusive so we see the boundary char).
         // We want the last space at char index ≤ width to break at.
         let mut last_space_before: Option<usize> = None; // byte offset of last space in 0..width
@@ -313,12 +331,12 @@ pub(crate) fn wrap_line_ranges(line: &str, width: u16) -> Vec<(String, usize, us
                 byte_at_width = byte_i;
                 // If the char right at the boundary is a space, break here
                 // (the row is exactly `width` non-space chars).
-                if ch == ' ' {
+                if ch == ' ' && !unbuffered {
                     last_space_before = Some(byte_i);
                 }
                 break;
             }
-            if ch == ' ' {
+            if ch == ' ' && !unbuffered {
                 last_space_before = Some(byte_i);
             }
         }
@@ -398,10 +416,16 @@ fn shift_runs(runs: Vec<StyleRun>, pad: u16) -> Vec<StyleRun> {
 ///
 /// A default `pf` (left, no indent) reduces to `wrap_line_ranges` with `pad == 0`,
 /// so the Z-machine path and un-hinted buffers render byte-identically.
+///
+/// `pf.nowrap_from` (the game switched `buffer_mode` off) makes the affected rows
+/// char-break instead of word-wrap — see [`wrap_line_ranges_nw`].
 fn wrap_para_ranges(line: &str, width: u16, pf: ParaFmt) -> Vec<(String, usize, usize, u16)> {
-    // Fast path: the common no-layout case is exactly the old behaviour.
-    if pf == ParaFmt::default() || width == 0 {
-        return wrap_line_ranges(line, width)
+    let nw = pf.nowrap_from.map(|n| n as usize);
+    // Fast path: the common no-layout case is exactly the old behaviour (an
+    // unbuffered Z-machine line carries no Glk layout, so it lands here too).
+    let no_layout = pf.indent == 0 && pf.para_indent == 0 && pf.justify == 0;
+    if no_layout || width == 0 {
+        return wrap_line_ranges_nw(line, width, nw)
             .into_iter()
             .map(|(t, s, e)| (t, s, e, 0))
             .collect();
@@ -415,12 +439,14 @@ fn wrap_para_ranges(line: &str, width: u16, pf: ParaFmt) -> Vec<(String, usize, 
 
     // Wrap row 0 at first_w, then the remainder at cont_w, keeping original char
     // offsets so runs re-base correctly.
-    let mut ranges: Vec<(String, usize, usize)> = wrap_line_ranges(line, first_w);
+    let mut ranges: Vec<(String, usize, usize)> = wrap_line_ranges_nw(line, first_w, nw);
     if ranges.len() > 1 && cont_w != first_w {
         let second_start = ranges[1].1;
         let remainder: String = line.chars().skip(second_start).collect();
         ranges.truncate(1);
-        for (t, s, e) in wrap_line_ranges(&remainder, cont_w) {
+        // The remainder is re-wrapped in its own coordinates, so rebase `nw` too.
+        let rem_nw = nw.map(|n| n.saturating_sub(second_start));
+        for (t, s, e) in wrap_line_ranges_nw(&remainder, cont_w, rem_nw) {
             ranges.push((t, s + second_start, e + second_start));
         }
     }
@@ -575,7 +601,8 @@ pub(crate) fn wrap_lines_kinded(
                     (fl.image.clone(), fl.cols, fl.rows, fl.reserve, fl.pad, fl.x_off, fl.next_strip, fl.remaining() as usize)
                 };
                 let narrow = width.saturating_sub(reserve).max(1);
-                let ranges = wrap_line_ranges_var(line, |k| if k < rem { narrow } else { width });
+                let nw = para.get(i).and_then(|p| p.nowrap_from).map(|n| n as usize);
+                let ranges = wrap_line_ranges_var(line, nw, |k| if k < rem { narrow } else { width });
                 let nrows = ranges.len();
                 for (k, (text, start, end)) in ranges.into_iter().enumerate() {
                     let (pad, float_band) = if k < rem {
@@ -747,7 +774,10 @@ fn flush_float(out: &mut Vec<WrappedRow>, float: &mut Option<FloatState>) {
 /// float (narrow while the picture is present, full width once it ends). Each
 /// row carries its `[start, end)` char range in the original `line` so per-line
 /// style runs can be re-based onto the wrapped rows. (SQ-0454)
-fn wrap_line_ranges_var(line: &str, width_for: impl Fn(usize) -> u16) -> Vec<(String, usize, usize)> {
+///
+/// `nowrap_from` char-breaks the rows that reach into unbuffered text, exactly as
+/// in [`wrap_line_ranges_nw`] (ZMSD §7.2.1).
+fn wrap_line_ranges_var(line: &str, nowrap_from: Option<usize>, width_for: impl Fn(usize) -> u16) -> Vec<(String, usize, usize)> {
     if line.is_empty() {
         return vec![(String::new(), 0, 0)];
     }
@@ -762,18 +792,20 @@ fn wrap_line_ranges_var(line: &str, width_for: impl Fn(usize) -> u16) -> Vec<(St
             rows.push((remaining.to_string(), base_col, base_col + char_count));
             break;
         }
-        // Last space at char index ≤ width to break at (see `wrap_line_ranges`).
+        // Last space at char index ≤ width to break at (see `wrap_line_ranges`);
+        // suppressed once the row reaches unbuffered text (hard char-break).
+        let unbuffered = nowrap_from.is_some_and(|n| n < base_col + width);
         let mut last_space_before: Option<usize> = None;
         let mut byte_at_width = remaining.len();
         for (idx, (byte_i, ch)) in remaining.char_indices().enumerate() {
             if idx == width {
                 byte_at_width = byte_i;
-                if ch == ' ' {
+                if ch == ' ' && !unbuffered {
                     last_space_before = Some(byte_i);
                 }
                 break;
             }
-            if ch == ' ' {
+            if ch == ' ' && !unbuffered {
                 last_space_before = Some(byte_i);
             }
         }
@@ -2789,7 +2821,7 @@ mod tests {
         let machine = minimal_machine();
         let mut state = AppState::default();
         // A linked line ("northgate" → link 42) followed by a plain line.
-        state.push_transcript_runs("northgate", TranscriptKind::Story, &[(9, 0, ZColour::Default, ZColour::Default, 42, ParaFmt::default(), 0)]);
+        state.push_transcript_runs("northgate", TranscriptKind::Story, &[(9, 0, ZColour::Default, ZColour::Default, 42, ParaFmt::default(), 0, false)]);
         state.push_transcript("plain text");
         state.focus = Focus::Game;
 
@@ -2821,7 +2853,7 @@ mod tests {
         state.config.honor_game_colours = true;
         state.push_transcript_runs(
             "hi", TranscriptKind::Story,
-            &[(2, 0, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0, ParaFmt::default(), 0)],
+            &[(2, 0, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0, ParaFmt::default(), 0, false)],
         );
         state.focus = Focus::Game;
         let area = Rect::new(0, 0, 40, 10);
@@ -2845,7 +2877,7 @@ mod tests {
         // Two black-on-white paragraphs separated by a blank line: the blank line
         // between them must also fill white, so the band is contiguous. (SQ-0263)
         use zvm::screen::ZColour;
-        let white_run = |n: usize| (n, 0u8, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0u32, ParaFmt::default(), 0);
+        let white_run = |n: usize| (n, 0u8, ZColour::True24(0), ZColour::True24(0x00FF_FFFF), 0u32, ParaFmt::default(), 0, false);
         let machine = minimal_machine();
         let mut state = AppState::default();
         state.config.honor_game_colours = true;
@@ -2940,6 +2972,65 @@ mod tests {
         assert_eq!(out[1].runs, vec![StyleRun { start: 0, end: 5, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]);
     }
 
+    // ── SQ-0538 / ZMSD §7.2.1: buffer_mode off ⇒ char-break, never word-wrap ──
+
+    /// Helper: a line whose text is unbuffered from char `from` onwards.
+    fn nowrap_para(from: u32) -> ParaFmt {
+        ParaFmt { nowrap_from: Some(from), ..ParaFmt::default() }
+    }
+
+    fn wrapped(line: &str, width: u16, pf: ParaFmt) -> Vec<String> {
+        let lines = vec![line.to_string()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        wrap_lines_kinded(&lines, &kinds, &styles, &[], &[pf], &[], (1, 1), false, false, width)
+            .into_iter()
+            .map(|r| r.text)
+            .collect()
+    }
+
+    #[test]
+    fn unbuffered_line_breaks_after_last_char_that_fits() {
+        // Buffered (the default) word-wraps; unbuffered breaks at the column.
+        assert_eq!(wrapped("AAAAA BBBBB", 8, ParaFmt::default()), vec!["AAAAA", "BBBBB"]);
+        assert_eq!(wrapped("AAAAA BBBBB", 8, nowrap_para(0)), vec!["AAAAA BB", "BBB"]);
+    }
+
+    #[test]
+    fn unbuffered_long_word_splits_mid_word() {
+        // A word longer than the width hard-breaks either way; the point is that
+        // an unbuffered line never carries a partial word to the next row.
+        assert_eq!(wrapped("Please wait...........", 10, nowrap_para(0)),
+                   vec!["Please wai", "t.........", ".."]);
+    }
+
+    #[test]
+    fn buffering_back_on_resumes_word_wrap() {
+        // Same text, fully buffered again → ordinary word-wrap.
+        assert_eq!(wrapped("Please wait...........", 10, ParaFmt::default()),
+                   vec!["Please", "wait......", "....."]);
+    }
+
+    /// Documented mixed-line rule: rows that lie entirely inside the buffered
+    /// prefix word-wrap; the first row reaching into the unbuffered region — and
+    /// every row after it — char-breaks.
+    #[test]
+    fn mixed_line_word_wraps_until_buffering_turns_off() {
+        // "one two " is buffered (8 chars); "xxxxxxxxxxxx" is not.
+        let rows = wrapped("one two xxxxxxxxxxxx", 8, nowrap_para(8));
+        assert_eq!(rows, vec!["one two", "xxxxxxxx", "xxxx"]);
+    }
+
+    #[test]
+    fn unbuffered_wrap_ranges_stay_contiguous_for_selection() {
+        // Selection/copy geometry (SQ-0197) re-bases runs from these ranges, so a
+        // char-broken row must cover its source chars with no gaps.
+        let rows = wrap_line_ranges_nw("AAAAA BBBBB", 8, Some(0));
+        assert_eq!(rows.iter().map(|r| (r.1, r.2)).collect::<Vec<_>>(), vec![(0, 8), (8, 11)]);
+        assert_eq!(rows.iter().map(|r| r.0.chars().count()).sum::<usize>(), 11,
+                   "no break space is swallowed when buffering is off");
+    }
+
     // ── SQ-0330: Glk paragraph layout (indent / para_indent / justification) ──
 
     #[test]
@@ -2949,7 +3040,7 @@ mod tests {
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
         let runs = vec![vec![StyleRun { start: 0, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }]];
-        let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 2 }];
+        let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 2, nowrap_from: None }];
         let out = wrap_lines_kinded(&lines, &kinds, &styles, &runs, &para, &[], (1, 1), false, false, 10);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].text, "    hi", "text padded to centre");
@@ -2963,7 +3054,7 @@ mod tests {
         let lines = vec!["hi".to_string()];
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
-        let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 3 }];
+        let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 3, nowrap_from: None }];
         let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, false, 10);
         assert_eq!(out[0].text, "        hi", "right-flush pads to the right edge");
     }
@@ -2975,7 +3066,7 @@ mod tests {
         let lines = vec!["AAAAA BBBBB".to_string()];
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
-        let para = vec![ParaFmt { indent: 2, para_indent: 0, justify: 0 }];
+        let para = vec![ParaFmt { indent: 2, para_indent: 0, justify: 0, nowrap_from: None }];
         let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, false, 8);
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].text, "  AAAAA");
@@ -2988,7 +3079,7 @@ mod tests {
         let lines = vec!["AAAAA BBBBB".to_string()];
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
-        let para = vec![ParaFmt { indent: 1, para_indent: 2, justify: 0 }];
+        let para = vec![ParaFmt { indent: 1, para_indent: 2, justify: 0, nowrap_from: None }];
         let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, false, 10);
         assert_eq!(out[0].text, "   AAAAA", "row 0 gets indent+para_indent");
         assert_eq!(out[1].text, " BBBBB", "continuation gets only indent");
@@ -3020,7 +3111,7 @@ mod tests {
         let lines = vec!["hi".to_string()];
         let kinds = vec![TranscriptKind::Story];
         let styles = vec![Style::default()];
-        let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 2 }];
+        let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 2, nowrap_from: None }];
         let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, false, 10);
         let row = &out[0].text;
         let sel: String = row.chars().skip(4).take(2).collect();

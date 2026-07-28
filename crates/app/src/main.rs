@@ -2457,7 +2457,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         match restore_err {
                             Ok(()) => {
                                 if let Some(scr) = ac.screen.clone() {
-                                    if let Some(z) = zvm_session_opt_mut(&mut *session) { z.machine.screen = scr; }
+                                    if let Some(z) = zvm_session_opt_mut(&mut *session) { app::session::restore_screen(&mut z.machine, scr); }
                                 }
                                 // v6 graphics canvases (Lane P): no-op for non-v6 archives.
                                 if let Some(z) = zvm_session_opt_mut(&mut *session) {
@@ -2624,7 +2624,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         Ok(RestoreOutcome::Resumed(ac)) => {
                             state.ingame_io = None;
                             if let Some(scr) = ac.screen.clone() {
-                                if let Some(z) = zvm_session_opt_mut(&mut *session) { z.machine.screen = scr; }
+                                if let Some(z) = zvm_session_opt_mut(&mut *session) { app::session::restore_screen(&mut z.machine, scr); }
                             }
                             // Restore the v6 graphics canvases in their persisted
                             // paint order (Lane P); a no-op for non-v6 archives.

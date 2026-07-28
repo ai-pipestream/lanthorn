@@ -86,6 +86,8 @@ fn resolve_glk_colour(style: GlkStyle, colour: StyleColour, attrs: StyleAttrs) -
 /// hints — and the whole Z-machine path — renders exactly as before.
 fn resolve_glk_para(attrs: StyleAttrs) -> crate::state::ParaFmt {
     crate::state::ParaFmt {
+        // Glk has no `buffer_mode`; its text windows always word-wrap.
+        nowrap_from: None,
         indent: attrs.indent.unwrap_or(0).clamp(0, u16::MAX as i32) as u16,
         para_indent: attrs.para_indent.unwrap_or(0).clamp(i16::MIN as i32, i16::MAX as i32) as i16,
         justify: attrs.justify.unwrap_or(0).min(3) as u8,
@@ -238,8 +240,10 @@ impl Default for AppGlk {
 }
 
 /// One styled text chunk drained by `take_transcript`: `(char_count, style-bits,
-/// fg, bg, link, paragraph format, glk_style)`.
-type TranscriptChunk = (usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, crate::state::ParaFmt, u8);
+/// fg, bg, link, paragraph format, glk_style, nowrap)`. Glk has no `buffer_mode`
+/// equivalent — its text windows always word-wrap — so `nowrap` is always
+/// `false` on this path.
+type TranscriptChunk = crate::session::CaptureRun;
 
 impl AppGlk {
     /// A backend reporting a `cols × rows` display. Stylehint colour is always
@@ -421,14 +425,14 @@ impl AppGlk {
             return (String::new(), Vec::new());
         };
         let mut text = String::new();
-        let mut chunks: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, crate::state::ParaFmt, u8)> = Vec::new();
+        let mut chunks: Vec<TranscriptChunk> = Vec::new();
         for elem in &buf.log[buf.drained..] {
             let BufElem::Text { bits, fg, bg, link, para, glk_style, text: s } = elem else { continue };
             let n = s.chars().count();
             if n == 0 {
                 continue;
             }
-            chunks.push((n, *bits, crate::state::unpack_zcolour(*fg), crate::state::unpack_zcolour(*bg), *link, *para, *glk_style));
+            chunks.push((n, *bits, crate::state::unpack_zcolour(*fg), crate::state::unpack_zcolour(*bg), *link, *para, *glk_style, false));
             text.push_str(s);
         }
         buf.drained = buf.log.len();
@@ -446,7 +450,7 @@ impl AppGlk {
         // char-count chunk shape `push_transcript_runs` expects:
         // (char_count, bits, fg, bg).
         let mut cur_text = String::new();
-        let mut cur_runs: Vec<(usize, u8, zvm::screen::ZColour, zvm::screen::ZColour, u32, crate::state::ParaFmt, u8)> = Vec::new();
+        let mut cur_runs: Vec<TranscriptChunk> = Vec::new();
         let flush = |out: &mut Vec<TranscriptElem>, text: &mut String, runs: &mut Vec<_>| {
             if !text.is_empty() {
                 out.push(TranscriptElem::Text { text: std::mem::take(text), runs: std::mem::take(runs) });
@@ -462,7 +466,7 @@ impl AppGlk {
                         // Convert packed u32 colours back to ZColour to match
                         // the chunk type push_transcript_runs consumes.
                         let (f, b) = (crate::state::unpack_zcolour(*fg), crate::state::unpack_zcolour(*bg));
-                        cur_runs.push((n, *bits, f, b, *link, *para, *glk_style));
+                        cur_runs.push((n, *bits, f, b, *link, *para, *glk_style, false));
                         cur_text.push_str(text);
                     }
                 }
@@ -1411,8 +1415,8 @@ mod tests {
         let (text, chunks) = glk.take_transcript();
         assert_eq!(text, "You are here. Look!");
         assert_eq!(chunks, vec![
-            (14, 0u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0u32, crate::state::ParaFmt::default(), 0),
-            (5, 0x04u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0u32, crate::state::ParaFmt::default(), 1), // Emphasized → style class 1
+            (14, 0u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0u32, crate::state::ParaFmt::default(), 0, false),
+            (5, 0x04u8, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0u32, crate::state::ParaFmt::default(), 1, false), // Emphasized → style class 1
         ]);
         // A second drain returns only new text.
         glk.put_text(1, GlkStyle::Normal, " More.");
@@ -1499,7 +1503,7 @@ mod tests {
         let (text, chunks) = glk.take_transcript();
         assert_eq!(text, "hi");
         assert_eq!(chunks.len(), 1);
-        let (n, _bits, fg, bg, _link, _para, _gs) = chunks[0];
+        let (n, _bits, fg, bg, _link, _para, _gs, _nw) = chunks[0];
         assert_eq!(n, 2);
         assert_eq!(fg, ZColour::True24(0x00FF_0000), "24-bit fg carried losslessly");
         assert_eq!(bg, ZColour::Default);
@@ -1517,7 +1521,7 @@ mod tests {
         let (_text, chunks) = glk.take_transcript();
         assert_eq!(chunks.len(), 1);
         let para = chunks[0].5;
-        assert_eq!(para, crate::state::ParaFmt { indent: 4, para_indent: -2, justify: 2 });
+        assert_eq!(para, crate::state::ParaFmt { indent: 4, para_indent: -2, justify: 2, nowrap_from: None });
     }
 
     #[test]
@@ -1691,7 +1695,7 @@ mod tests {
             crate::session::TranscriptElem::Text { text, runs } => {
                 assert_eq!(text, "foobar", "the two leading runs coalesce into one element");
                 assert_eq!(runs.len(), 2, "each source run kept as its own chunk, in order");
-                assert_eq!(runs[0], (3, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, crate::state::ParaFmt::default(), 0));
+                assert_eq!(runs[0], (3, 0, zvm::screen::ZColour::Default, zvm::screen::ZColour::Default, 0, crate::state::ParaFmt::default(), 0, false));
                 assert_eq!(runs[1].0, 3);
                 assert_eq!(runs[1].1, 0x02, "second chunk carries the different style bits");
             }

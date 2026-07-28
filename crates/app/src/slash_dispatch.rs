@@ -202,7 +202,7 @@ pub(crate) fn dispatch_slash_outcome(
                         }
                         Ok(RestoreOutcome::Resumed(ac)) => {
                             if let Some(scr) = ac.screen.clone() {
-                                if let Some(z) = zvm_session_opt_mut(&mut *session) { z.machine.screen = scr; }
+                                if let Some(z) = zvm_session_opt_mut(&mut *session) { app::session::restore_screen(&mut z.machine, scr); }
                             }
                             // v6 graphics canvases: mirror the startup auto-load path
                             // (startup.rs) so a restored v6 story's pictures redraw in
