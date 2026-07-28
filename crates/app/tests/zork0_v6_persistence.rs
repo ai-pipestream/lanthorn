@@ -68,6 +68,7 @@ fn composite(session: &GameSession) -> image::RgbaImage {
     let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors);
     let main = v6::MainText {
         lines: (0..6).map(|i| format!("story line {i} {}", "x".repeat(20))).collect(),
+        styles: Vec::new(),
         input: String::new(),
         cursor_col: 0,
         awaiting: false,

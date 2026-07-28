@@ -1617,7 +1617,24 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
             .max()
             .unwrap_or(0)
     };
+    // The §8.7.1 style bits the raster font can synthesize a face for (SQ-0540):
+    // bold and italic. Reverse and fixed-pitch are meaningless in the prose
+    // raster (no block to swap, one fixed-pitch face) and are dropped here.
+    const EMPHASIS: u8 = 2 | 4;
     let mut wrapped: Vec<String> = Vec::new();
+    // Per-char emphasis for wrapped rows that carry any, parallel to `wrapped`
+    // and self-padding with empty (= all-roman) rows, so an unemphasised
+    // transcript allocates nothing.
+    let mut wrapped_styles: Vec<Vec<u8>> = Vec::new();
+    fn set_row_styles(styles: &mut Vec<Vec<u8>>, row: usize, bits: Vec<u8>) {
+        if bits.iter().all(|&b| b == 0) {
+            return;
+        }
+        if styles.len() <= row {
+            styles.resize(row + 1, Vec::new());
+        }
+        styles[row] = bits;
+    }
     let mut floats: Vec<AbsFloat> = Vec::new();
     for (i, line) in state.transcript.iter().enumerate() {
         if let Some(Some(img)) = state.transcript_images.get(i) {
@@ -1687,19 +1704,53 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
             wrapped.push(String::new());
             continue;
         }
+        // Per-char emphasis for this logical line (SQ-0540), materialised only
+        // when the line actually carries some — `transcript_runs` is parallel to
+        // `transcript`, with char offsets into the UNWRAPPED line.
+        let line_bits: Option<Vec<u8>> = state.transcript_runs.get(i).and_then(|runs| {
+            runs.iter().any(|r| r.bits & EMPHASIS != 0).then(|| {
+                let n = line.chars().count();
+                let mut v = vec![0u8; n];
+                for r in runs {
+                    let end = r.end.min(n);
+                    for b in v.iter_mut().take(end).skip(r.start.min(end)) {
+                        *b = r.bits & EMPHASIS;
+                    }
+                }
+                v
+            })
+        });
+        // Slice `line_bits` for a wrapped row of `n` chars starting at source
+        // char offset `from`. Wrapping only ever drops the single space at a
+        // break, so each row is a contiguous run of the source line.
+        let row_bits = |from: usize, n: usize| -> Vec<u8> {
+            match &line_bits {
+                Some(bits) => (0..n).map(|j| bits.get(from + j).copied().unwrap_or(0)).collect(),
+                None => Vec::new(),
+            }
+        };
         // Word-wrap with per-row width: rows beside an active float are narrower.
         let mut cur = String::new();
+        let mut cur_start = 0usize; // source char offset of `cur`'s first char
+        let mut src = 0usize; // source char offset of `word`
         for word in line.split(' ') {
             let width = cols.saturating_sub(reserve_at(&floats, wrapped.len())).max(1) as usize;
             if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > width {
+                let n = cur.chars().count();
                 wrapped.push(std::mem::take(&mut cur));
+                set_row_styles(&mut wrapped_styles, wrapped.len() - 1, row_bits(cur_start, n));
             }
-            if !cur.is_empty() {
+            if cur.is_empty() {
+                cur_start = src;
+            } else {
                 cur.push(' ');
             }
             cur.push_str(word);
+            src += word.chars().count() + 1; // +1 for the separating space
         }
+        let n = cur.chars().count();
         wrapped.push(cur);
+        set_row_styles(&mut wrapped_styles, wrapped.len() - 1, row_bits(cur_start, n));
     }
     // One row is reserved for the live input line, so the transcript body budget
     // is `rows - 1` — this is the raster viewport height the [more] pager and the
@@ -1717,6 +1768,10 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
     let start = end.saturating_sub(budget);
     let visible_len = end - start;
     let lines = wrapped[start..end].to_vec();
+    // Emphasis travels with the visible slice (padded first: `wrapped_styles`
+    // only reaches the last row that carried any).
+    wrapped_styles.resize(total, Vec::new());
+    let styles = wrapped_styles[start..end].to_vec();
     // Shift floats into the visible window; keep those still (partially) visible.
     let floats: Vec<crate::render::v6_layout::RasterFloat> = floats
         .into_iter()
@@ -1738,7 +1793,7 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
     // is at the bottom — scrolled-back history must not be overwritten by the live
     // line (matching the terminal transcript's `effective_scroll == 0` guard).
     let awaiting = scroll == 0 && matches!(state.focus, crate::state::Focus::Game);
-    let main = crate::render::v6_layout::MainText { lines, input, cursor_col, awaiting, floats };
+    let main = crate::render::v6_layout::MainText { lines, styles, input, cursor_col, awaiting, floats };
     let metrics = RasterMetrics {
         total_rows: total.min(u16::MAX as usize) as u16,
         viewport_rows: budget.min(u16::MAX as usize) as u16,
@@ -2818,6 +2873,36 @@ mod tests {
             }
         }
         assert!(main.lines[5..].iter().any(|r| r.chars().count() > 19), "rows past the float use full width");
+    }
+
+    #[test]
+    fn build_main_text_maps_style_runs_onto_wrapped_rows() {
+        // SQ-0540: the raster prose path carries per-char emphasis, so the
+        // synthesized bold/italic faces land on the same characters the terminal
+        // transcript emphasises. The mapping must survive word wrapping: a run's
+        // char offsets index the UNWRAPPED line.
+        let mut state = crate::state::AppState::default();
+        // 3 words of 5 chars: "aaaaa bbbbb ccccc" wraps to 2 rows at 12 cols.
+        state.push_transcript_kind("aaaaa bbbbb ccccc", crate::state::TranscriptKind::Story);
+        state.transcript_runs.resize(state.transcript.len(), Vec::new());
+        let last = state.transcript.len() - 1;
+        state.transcript_runs[last] = vec![
+            // "bbbbb" bold (chars 6..11), the trailing "cc" of "ccccc" italic.
+            crate::state::StyleRun { start: 6, end: 11, bits: 2, fg: 0, bg: 0, link: 0, glk_style: 0 },
+            crate::state::StyleRun { start: 15, end: 17, bits: 4, fg: 0, bg: 0, link: 0, glk_style: 0 },
+        ];
+        let (main, _) = build_main_text(&state, 12, 8);
+        assert_eq!(main.lines, vec!["aaaaa bbbbb", "ccccc"], "wraps into two rows");
+        assert_eq!(main.styles.len(), main.lines.len(), "styles stay parallel to lines");
+        assert_eq!(main.styles[0], vec![0, 0, 0, 0, 0, 0, 2, 2, 2, 2, 2], "row 0: only 'bbbbb' is bold");
+        assert_eq!(main.styles[1], vec![0, 0, 0, 4, 4], "row 1: the run is rebased past the dropped wrap space");
+
+        // Reverse/fixed-pitch bits are dropped (no block to swap in the prose
+        // raster, and the bitmap font is fixed-pitch already) — and a line with
+        // no emphasis at all allocates no style row.
+        state.transcript_runs[last] = vec![crate::state::StyleRun { start: 0, end: 17, bits: 1 | 8, fg: 0, bg: 0, link: 0, glk_style: 0 }];
+        let (main, _) = build_main_text(&state, 12, 8);
+        assert!(main.styles.iter().all(|r| r.is_empty()), "reverse/fixed-pitch leave every row roman, got {:?}", main.styles);
     }
 
     #[test]

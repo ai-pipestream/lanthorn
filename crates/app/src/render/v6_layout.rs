@@ -182,6 +182,12 @@ pub struct RasterFloat {
 #[derive(Debug, Default, Clone)]
 pub struct MainText {
     pub lines: Vec<String>,
+    /// Per-character ZMSD §8.7.1 style bytes for `lines`, parallel to it
+    /// (SQ-0540). An EMPTY inner vec — the common case, and what a short vec's
+    /// missing tail means — is an all-roman row, so a transcript with no
+    /// emphasis costs nothing. Only bold (2) and italic (4) are carried; the
+    /// raster prose path has no reverse-video block to draw into.
+    pub styles: Vec<Vec<u8>>,
     pub input: String,
     pub cursor_col: u16,
     pub awaiting: bool,
@@ -628,9 +634,14 @@ pub fn build_chrome_canvas(
                     // paint time (v6 paint semantics) — no window-origin
                     // offset: the window may have moved/shrunk since (Shogun
                     // turns its menu window into a 1-px caret after printing).
+                    // The run's own §8.7.1 style byte rides along: the raster
+                    // font synthesizes bold/italic (SQ-0540). Reverse (bit 1) is
+                    // already resolved into the fg/bg pair above and fixed-pitch
+                    // (bit 8) is a no-op in a bitmap font, so `blit_glyph_styled`
+                    // ignores both — passing the raw byte can't double-apply.
                     for (i, ch) in t.text.chars().enumerate() {
                         let px = px0 + i as u32 * FONT_W;
-                        crate::render::bitfont::blit_glyph(&mut canvas, ch, px, py, FONT_W, FONT_H, fg, bg);
+                        crate::render::bitfont::blit_glyph_styled(&mut canvas, ch, px, py, FONT_W, FONT_H, fg, bg, t.style);
                     }
                 }
                 continue;
@@ -650,7 +661,7 @@ pub fn build_chrome_canvas(
                     }
                     let fg = packed_to_rgba(cell.fg, default_fg, colors);
                     let cellbg = (cell.bg != 0).then(|| packed_to_rgba(cell.bg, Rgba([0, 0, 0, 255]), colors));
-                    crate::render::bitfont::blit_glyph(&mut canvas, cell.ch, px, py, FONT_W, FONT_H, fg, cellbg);
+                    crate::render::bitfont::blit_glyph_styled(&mut canvas, cell.ch, px, py, FONT_W, FONT_H, fg, cellbg, cell.style);
                 }
             }
         }
@@ -887,8 +898,14 @@ pub fn draw_story_text(canvas: &mut RgbaImage, main: &MainText, ox: u32, oy: u32
         let (reserve, text_col) = float_at(row);
         let avail = (cols as u32).saturating_sub(reserve);
         let mut drawn = 0u32;
+        // Per-char emphasis for this row (SQ-0540): the raster font synthesizes
+        // bold/italic, so a game's emphasised prose (Zork Zero's bold room
+        // names, Shogun's italic "Erasmus") reads as emphasis here too. A row
+        // with no `styles` entry — or a char past its end — is roman.
+        let row_styles = main.styles.get(row as usize);
         for (col, glyph) in line.chars().take(avail as usize).enumerate() {
-            crate::render::bitfont::blit_glyph(canvas, glyph, ox + (text_col + col as u32) * FONT_W, oy + row * FONT_H, FONT_W, FONT_H, fg, None);
+            let style = row_styles.and_then(|s| s.get(col)).copied().unwrap_or(0);
+            crate::render::bitfont::blit_glyph_styled(canvas, glyph, ox + (text_col + col as u32) * FONT_W, oy + row * FONT_H, FONT_W, FONT_H, fg, None, style);
             drawn = col as u32 + 1;
         }
         last_row_end = text_col + drawn;
@@ -1005,6 +1022,7 @@ mod tests {
         let img = RgbaImage::from_pixel(16, 32, Rgba([200, 20, 20, 255]));
         let main = MainText {
             lines: vec!["AAAA".into(), "BBBB".into(), "CCCC".into()],
+            styles: Vec::new(),
             input: String::new(), cursor_col: 0, awaiting: false,
             floats: vec![RasterFloat { row: 0, rows: 2, reserve_cols: 3, text_col: 3, img_col: 0, img: Arc::new(img) }],
         };
@@ -1032,6 +1050,7 @@ mod tests {
         let img = RgbaImage::from_pixel(32, 32, Rgba([20, 200, 20, 255]));
         let main = MainText {
             lines: vec!["AAAAAAAA".into(), "BBBB".into(), "CCCCCCCC".into()],
+            styles: Vec::new(),
             input: String::new(), cursor_col: 0, awaiting: false,
             floats: vec![RasterFloat { row: 0, rows: 2, reserve_cols: 5, text_col: 0, img_col: 6, img: Arc::new(img) }],
         };
@@ -1108,6 +1127,7 @@ mod tests {
         };
         let main = MainText {
             lines: vec!["Room desc.".into(), ">".into()],
+            styles: Vec::new(),
             input: "go".into(),
             cursor_col: 2,
             awaiting: true,
@@ -1134,6 +1154,7 @@ mod tests {
         };
         let main = MainText {
             lines: vec!["Prose line.".into(), String::new()],
+            styles: Vec::new(),
             input: "x".into(),
             cursor_col: 1,
             awaiting: true,
@@ -1158,6 +1179,7 @@ mod tests {
         }
         let main = MainText {
             lines: vec!["XXXX".into()],
+            styles: Vec::new(),
             input: String::new(), cursor_col: 0, awaiting: false,
             floats: vec![RasterFloat { row: -1, rows: 2, reserve_cols: 2, text_col: 2, img_col: 0, img: Arc::new(img) }],
         };
@@ -1295,6 +1317,107 @@ mod tests {
                 px_texts: vec![PxText { y: 1, x: 1, text: text.into(), style, fg, bg }],
             }),
         }
+    }
+
+    /// Lit-`fg` pixel coordinates of a rendered canvas — the shape the raster
+    /// font actually drew, independent of where the cells sit.
+    fn ink(c: &RgbaImage, fg: Rgba<u8>) -> std::collections::BTreeSet<(u32, u32)> {
+        c.enumerate_pixels().filter(|(_, _, p)| **p == fg).map(|(x, y, _)| (x, y)).collect()
+    }
+
+    #[test]
+    fn px_text_bold_run_double_strikes_the_raster_glyphs() {
+        // SQ-0540: a painted run carrying style bit 2 (Journey stamps its command
+        // menu labels — "Proceed", "Combat", "Cast" — exactly this way) renders
+        // emboldened in the pixel composite, not roman.
+        let fg = Rgba([255, 0, 0, 255]);
+        let canvas = |style: u8| {
+            let win = px_text_grid_item("Ab", style, RED, 0);
+            let chrome: Vec<&PositionedWindow> = vec![&win];
+            build_chrome_canvas(&chrome, (24, 16), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors())
+        };
+        let roman = ink(&canvas(0), fg);
+        let bold = ink(&canvas(2), fg);
+        assert_ne!(bold, roman, "a bold run must not render identically to a roman one");
+        assert!(roman.is_subset(&bold), "bold keeps every roman pixel");
+        for &(x, y) in bold.difference(&roman) {
+            assert!(x > 0 && roman.contains(&(x - 1, y)), "bold pixel ({x},{y}) is not a +1 double-strike");
+        }
+        // Italic leans the top half; bold-italic is heavier still.
+        let italic = ink(&canvas(4), fg);
+        assert_ne!(italic, roman, "an italic run must not render roman");
+        assert!(ink(&canvas(6), fg).len() > italic.len(), "bold-italic is heavier than italic");
+    }
+
+    #[test]
+    fn px_text_reverse_only_run_keeps_the_roman_face() {
+        // Zork Zero's banner/ribbon chrome is style-REVERSE with no emphasis: the
+        // reverse bit is resolved into the fg/bg pair before the blit, so the
+        // glyphs must be the same roman shapes a plain run with the swapped pair
+        // draws — SQ-0540's faces must not touch it (nor may fixed-pitch, bit 8).
+        let render = |style: u8, fg: u32, bg: u32| {
+            let win = px_text_grid_item("Ab", style, fg, bg);
+            let chrome: Vec<&PositionedWindow> = vec![&win];
+            build_chrome_canvas(&chrome, (24, 16), Rgba([255, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors())
+        };
+        let blue = Rgba([0, 0, 255, 255]);
+        // Reversed: the run's fg becomes the block, its bg becomes the ink. The
+        // INK pixels (blue) must be the same roman glyph shapes a plain blue-on-
+        // transparent run draws. (The two canvases differ elsewhere — reverse
+        // also floods the row gaps — so compare the ink, not the whole image.)
+        let reversed = render(1, RED, BLUE);
+        assert_eq!(ink(&reversed, blue), ink(&render(0, BLUE, 0), blue), "reverse ink keeps the roman face");
+        assert_eq!(render(1 | 8, RED, BLUE), reversed, "fixed-pitch changes nothing in a bitmap font");
+    }
+
+    #[test]
+    fn status_grid_cell_carries_bold() {
+        // The cell-grid fallback path (no pixel-positioned runs) gets faces too:
+        // a v6 game can `set_text_style` bold in any window.
+        let cells = |style: u8| vec![GridCell { ch: 'A', style, fg: 0, bg: 0, link: 0, glk_style: 0 }];
+        let canvas = |style: u8| {
+            let win = PositionedWindow {
+                x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 16, left_margin: 0, right_margin: 0,
+                node: WinNode::Grid(GridWindow {
+                    cols: 1, rows: 1, cells: cells(style), active_rows: 1, cursor: (0, 0), cursor_active: false,
+                    border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
+                    px_texts: Vec::new(),
+                }),
+            };
+            let chrome: Vec<&PositionedWindow> = vec![&win];
+            build_chrome_canvas(&chrome, (8, 16), Rgba([0, 255, 255, 255]), Rgba([0, 0, 0, 255]), &colors())
+        };
+        let fg = Rgba([0, 255, 255, 255]);
+        let roman = ink(&canvas(0), fg);
+        let bold = ink(&canvas(2), fg);
+        assert!(roman.is_subset(&bold) && bold.len() > roman.len(), "a bold grid cell is emboldened");
+    }
+
+    #[test]
+    fn story_text_applies_per_char_emphasis() {
+        // The prose path (Zork Zero's bold room names, Shogun's italic "Erasmus")
+        // takes per-char style bytes parallel to its lines; chars with no entry
+        // stay roman, and emphasis never spills into the neighbouring cells.
+        let fg = Rgba([255, 255, 255, 255]);
+        let draw = |styles: Vec<Vec<u8>>| {
+            let main = MainText { lines: vec!["AAAA".into()], styles, input: String::new(), cursor_col: 0, awaiting: false, floats: vec![] };
+            let mut c = RgbaImage::new(6 * FONT_W, 2 * FONT_H);
+            draw_story_text(&mut c, &main, 0, 0, 6, 2, fg);
+            c
+        };
+        let roman = ink(&draw(Vec::new()), fg);
+        // Bold only the two middle chars (cols 1..3).
+        let mixed = ink(&draw(vec![vec![0, 2, 2, 0]]), fg);
+        assert_ne!(mixed, roman, "an emphasised row must differ from the roman one");
+        assert!(roman.is_subset(&mixed), "double-strike is additive");
+        for &(x, y) in mixed.difference(&roman) {
+            let col = x / FONT_W;
+            assert!((1..3).contains(&col), "only the bold columns changed, got a new pixel in col {col} at ({x},{y})");
+            assert!(roman.contains(&(x - 1, y)), "new pixel ({x},{y}) is a +1 double-strike");
+        }
+        // A short/absent style row is all-roman.
+        assert_eq!(ink(&draw(vec![Vec::new()]), fg), roman, "an empty style row renders roman");
+        assert_eq!(ink(&draw(vec![vec![0, 0]]), fg), roman, "a short style row's tail renders roman");
     }
 
     #[test]

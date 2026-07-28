@@ -126,6 +126,64 @@ fn scale2x(bits: &[u8; 8]) -> [[bool; 16]; 16] {
     out
 }
 
+/// ZMSD §8.7.1 style bit for bold, as the model packs it (see
+/// [`crate::engine::PxText::style`] / [`crate::engine::GridCell::style`] and
+/// `screen::v6_run_style`, which reads the same numbering for the cell paths).
+const STYLE_BOLD: u8 = 2;
+/// ZMSD §8.7.1 style bit for italic (see [`STYLE_BOLD`]).
+const STYLE_ITALIC: u8 = 4;
+
+/// Synthesize a bold / italic / bold-italic face from the roman 8×8 master
+/// (SQ-0540). The raster path has ONE face, so emphasis is faked the way bitmap
+/// terminals always faked it — and it is done here, in FONT space, BEFORE the
+/// glyph is scaled into its `cw × ch` cell, for two reasons:
+///
+/// * **Scale.** A v6 cell is 8×16 device px (`v6_layout`'s `FONT_W`/`FONT_H`), and
+///   [`blit_glyph`] maps font column `c` to device column `dx` with `col = dx*8/cw`
+///   — at `cw == 8` that is 1:1, so one font pixel IS one device pixel horizontally
+///   and a one-column shift is exactly the classic one-device-pixel double-strike.
+///   (Vertically the same cell doubles each font row, which the shifts don't touch.)
+///   At any other cell width the shift scales with the glyph's own stroke width,
+///   which is what you want: a 2× cell gets a 2 px double-strike over 2 px strokes,
+///   not a hairline. Shifting in device space instead would need per-`cw` tuning to
+///   stay proportional.
+/// * **Clipping.** Each row is a `u8` with bit `n` = column `n`, so shifting LEFT
+///   moves the glyph RIGHT and the `u8` truncation drops anything past column 7 —
+///   the transform physically cannot bleed into the neighbouring cell, whatever
+///   the caller's geometry. The 16×16 [`scale2x`] path then smooths the
+///   already-emboldened/sheared shape rather than fighting it.
+///
+/// **Bold** double-strikes: `row | row << 1`, i.e. the glyph OR'd with itself one
+/// pixel right. Purely additive — a bold glyph is a superset of its roman self, so
+/// nothing (not even a full-width box-drawing row) can be thinned or lost.
+///
+/// **Italic** shears one step: the top half (font rows 0–3) moves one pixel right,
+/// the bottom half (rows 4–7) stays put, so the stem leans forward across the
+/// x-height. One step is the maximum the cell affords — the Latin masters fill
+/// columns 0–6, leaving exactly one column of headroom, and a 2-step shear would
+/// push their right edge out of the 8 px cell (a wide box-drawing glyph, columns
+/// 0–7, does lose its last column under italic; italic box art isn't a thing any
+/// v6 title does).
+///
+/// Bits 1 (reverse) and 8 (fixed-pitch) are deliberately IGNORED: reverse is a
+/// fg/bg swap the caller has already resolved (see `build_chrome_canvas`'s
+/// px-run branch), and the bitmap font is fixed-pitch by construction. Passing a
+/// run's raw style byte through is therefore safe and never double-applies.
+fn synthesize_face(bits: [u8; 8], style: u8) -> [u8; 8] {
+    let mut out = bits;
+    if style & STYLE_ITALIC != 0 {
+        for row in out.iter_mut().take(4) {
+            *row <<= 1;
+        }
+    }
+    if style & STYLE_BOLD != 0 {
+        for row in out.iter_mut() {
+            *row |= *row << 1;
+        }
+    }
+    out
+}
+
 /// Blit one glyph into `canvas`, top-left at device pixel `(px, py)`, scaled to
 /// `cw × ch` device px. Set bits paint `fg`; clear bits paint `bg` when `Some`
 /// (skipped when `None`, leaving the canvas — transparent text over graphics).
@@ -136,6 +194,9 @@ fn scale2x(bits: &[u8; 8]) -> [[bool; 16]; 16] {
 /// [`scale2x`] instead of plain nearest-neighbour doubling. Any other size
 /// (including the native 8×8 used by the current v6 pixel-canvas call sites)
 /// uses nearest-neighbour, unchanged from before.
+///
+/// Draws the ROMAN face; [`blit_glyph_styled`] is the same blit with a v6 style
+/// byte applied.
 pub fn blit_glyph(
     canvas: &mut RgbaImage,
     glyph: char,
@@ -146,7 +207,25 @@ pub fn blit_glyph(
     fg: Rgba<u8>,
     bg: Option<Rgba<u8>>,
 ) {
-    let bits = glyph_bits(glyph); // Option<[u8; 8]>
+    blit_glyph_styled(canvas, glyph, px, py, cw, ch, fg, bg, 0);
+}
+
+/// [`blit_glyph`], with the run's ZMSD §8.7.1 `style` byte applied as a
+/// synthesized face (bit 2 bold, bit 4 italic — see [`synthesize_face`], which
+/// also documents why reverse/fixed-pitch are ignored here). `style == 0` is
+/// byte-for-byte the old roman blit.
+pub fn blit_glyph_styled(
+    canvas: &mut RgbaImage,
+    glyph: char,
+    px: u32,
+    py: u32,
+    cw: u32,
+    ch: u32,
+    fg: Rgba<u8>,
+    bg: Option<Rgba<u8>>,
+    style: u8,
+) {
+    let bits = glyph_bits(glyph).map(|b| synthesize_face(b, style)); // Option<[u8; 8]>
     let smoothed = (cw == 16 && ch == 16).then(|| bits.map(|b| scale2x(&b))).flatten();
     let (cwidth, cheight) = (canvas.width(), canvas.height());
     for dy in 0..ch {
@@ -288,6 +367,96 @@ mod tests {
         for (i, (ci, gi)) in EXTRA_GLYPHS.iter().enumerate() {
             for (cj, gj) in EXTRA_GLYPHS.iter().skip(i + 1) {
                 assert_ne!(gi, gj, "{:?} and {:?} render identically", ci, cj);
+            }
+        }
+    }
+
+    /// The lit (fg) pixel coordinates of a glyph blitted into its own 8×16 v6
+    /// cell at the origin — the geometry every raster call site uses.
+    fn lit_cell(glyph: char, style: u8) -> std::collections::BTreeSet<(u32, u32)> {
+        let fg = Rgba([255, 0, 0, 255]);
+        let mut c = RgbaImage::from_pixel(8, 16, Rgba([0, 0, 0, 0]));
+        blit_glyph_styled(&mut c, glyph, 0, 0, 8, 16, fg, None, style);
+        c.enumerate_pixels().filter(|(_, _, p)| **p == fg).map(|(x, y, _)| (x, y)).collect()
+    }
+
+    #[test]
+    fn roman_face_is_unchanged_by_reverse_and_fixed_pitch_bits() {
+        // SQ-0540: only bits 2/4 synthesize a face. Reverse (1) is the caller's
+        // fg/bg swap and fixed-pitch (8) is a no-op in a bitmap font, so a run
+        // carrying them — Zork Zero's whole reverse-video banner/ribbon chrome —
+        // must stay pixel-identical to the roman blit.
+        for glyph in ['A', 'g', '0', ' ', '\u{2500}'] {
+            let roman = lit_cell(glyph, 0);
+            for bits in [1, 8, 1 | 8] {
+                assert_eq!(lit_cell(glyph, bits), roman, "{glyph:?} with style {bits} must render roman");
+            }
+        }
+    }
+
+    #[test]
+    fn bold_double_strikes_one_pixel_right() {
+        // Emboldening is additive: bold ⊇ roman, and every added pixel is a roman
+        // pixel shifted one column right (the classic bitmap double-strike).
+        for glyph in ['A', 'm', 'W', '5'] {
+            let roman = lit_cell(glyph, 0);
+            let bold = lit_cell(glyph, 2);
+            assert!(roman.is_subset(&bold), "{glyph:?}: bold must keep every roman pixel");
+            assert!(bold.len() > roman.len(), "{glyph:?}: bold must light more pixels than roman");
+            // Each extra pixel is its left neighbour from the roman face.
+            for &(x, y) in bold.difference(&roman) {
+                assert!(x > 0 && roman.contains(&(x - 1, y)), "{glyph:?}: bold pixel ({x},{y}) is not a +1 double-strike");
+            }
+        }
+    }
+
+    #[test]
+    fn italic_shears_the_top_half_only() {
+        // The 8×16 cell doubles each font row, so the shear boundary (font row 4)
+        // lands at device row 8: rows 0..8 move one pixel right, rows 8..16 stay.
+        for glyph in ['A', 'l', 'H'] {
+            let roman = lit_cell(glyph, 0);
+            let italic = lit_cell(glyph, 4);
+            let split = |s: &std::collections::BTreeSet<(u32, u32)>, top: bool| -> std::collections::BTreeSet<(u32, u32)> {
+                s.iter().copied().filter(|&(_, y)| (y < 8) == top).collect()
+            };
+            let want_top: std::collections::BTreeSet<(u32, u32)> =
+                split(&roman, true).into_iter().filter(|&(x, _)| x < 7).map(|(x, y)| (x + 1, y)).collect();
+            assert_eq!(split(&italic, true), want_top, "{glyph:?}: top half must be the roman top shifted +1");
+            assert_eq!(split(&italic, false), split(&roman, false), "{glyph:?}: bottom half must not move");
+            assert_ne!(italic, roman, "{glyph:?}: italic must differ from roman");
+        }
+    }
+
+    #[test]
+    fn bold_italic_applies_both_transforms() {
+        let roman = lit_cell('A', 0);
+        let bold = lit_cell('A', 2);
+        let italic = lit_cell('A', 4);
+        let both = lit_cell('A', 2 | 4);
+        assert!(italic.is_subset(&both), "bold-italic keeps the sheared shape");
+        assert!(both.len() > italic.len(), "bold-italic is heavier than italic");
+        for face in [&roman, &bold, &italic] {
+            assert_ne!(&both, face, "bold-italic must differ from every single face");
+        }
+    }
+
+    #[test]
+    fn styled_faces_never_bleed_into_neighbouring_cells() {
+        // Blit into the middle cell of a 3×3 grid of 8×16 cells and assert every
+        // pixel outside that cell is untouched — the u8 row shift drops anything
+        // past column 7, so no synthesized face can spill sideways.
+        let fg = Rgba([255, 0, 0, 255]);
+        for style in [0u8, 2, 4, 6, 1 | 2 | 4 | 8] {
+            for glyph in ['W', '\u{2588}', '\u{2500}', 'j'] {
+                let mut c = RgbaImage::from_pixel(24, 48, Rgba([0, 0, 0, 0]));
+                blit_glyph_styled(&mut c, glyph, 8, 16, 8, 16, fg, Some(Rgba([9, 9, 9, 255])), style);
+                for (x, y, p) in c.enumerate_pixels() {
+                    let inside = (8..16).contains(&x) && (16..32).contains(&y);
+                    if !inside {
+                        assert_eq!(*p, Rgba([0, 0, 0, 0]), "{glyph:?} style {style} painted ({x},{y}) outside its cell");
+                    }
+                }
             }
         }
     }

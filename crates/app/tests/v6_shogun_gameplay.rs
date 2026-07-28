@@ -716,3 +716,90 @@ fn shogun_raster_status_band_floods_game_white() {
         "the inter-run gap on the status band floods the game's explicit white, same as under the glyphs (px {gx},{gy})"
     );
 }
+
+/// SQ-0540: Shogun emphasises its PROSE — the room name ("Bridge") is bold and
+/// the ship's name ("Erasmus") italic — so the v6 raster story path must carry
+/// those §8.7.1 bits per character from the transcript's style runs all the way
+/// into the synthesized bitmap faces, instead of drawing everything roman.
+#[test]
+fn shogun_prose_emphasis_reaches_the_raster_faces() {
+    use app::render::v6_layout as v6;
+
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+
+    // Leave the title splash (any key), select START (Enter), then play a few
+    // turns — the opening scene prints the emphasised room name / ship name.
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    session.submit_char(b' ');
+    for turn in 0..6 {
+        let r = match session.pending_input() {
+            InputKind::Char => session.submit_char(13),
+            InputKind::Line => session.submit("look"),
+            InputKind::Event => session.submit(""),
+        };
+        state.push_transcript_runs(&r.transcript, app::state::TranscriptKind::Story, &r.transcript_runs);
+        if turn >= 1 && state.transcript_runs.iter().any(|runs| runs.iter().any(|s| s.bits & 6 != 0)) {
+            break;
+        }
+    }
+
+    let cols = 68u16;
+    let (main, _) = app::render::screen::build_main_text(&state, cols, 40);
+    // The emphasised words, as the raster model sees them.
+    let emphasised: Vec<(u8, String)> = main
+        .lines
+        .iter()
+        .zip(main.styles.iter())
+        .flat_map(|(line, styles)| {
+            let chars: Vec<char> = line.chars().collect();
+            let mut out: Vec<(u8, String)> = Vec::new();
+            for (i, &b) in styles.iter().enumerate() {
+                if b == 0 {
+                    continue;
+                }
+                match out.last_mut() {
+                    Some((prev, s)) if *prev == b && i > 0 && styles[i - 1] == b => s.push(chars[i]),
+                    _ => out.push((b, chars[i].to_string())),
+                }
+            }
+            out
+        })
+        .collect();
+    eprintln!("Shogun emphasised prose runs: {emphasised:?}");
+    assert!(
+        emphasised.iter().any(|(bits, _)| bits & 2 != 0),
+        "Shogun's prose must reach the raster model with BOLD chars, got {emphasised:?}"
+    );
+
+    // Those bits must actually change the pixels: the same lines drawn with the
+    // style vector cleared are the roman rendering, and every extra bold pixel is
+    // a +1 double-strike of it.
+    let draw = |m: &v6::MainText| {
+        let mut c = image::RgbaImage::new(cols as u32 * 8, 40 * 16);
+        v6::draw_story_text(&mut c, m, 0, 0, cols, 40, image::Rgba([255, 255, 255, 255]));
+        c
+    };
+    let styled = draw(&main);
+    let roman = draw(&v6::MainText { styles: Vec::new(), ..main.clone() });
+    assert_ne!(styled, roman, "emphasised prose must not rasterize identically to roman prose");
+    let lit = |c: &image::RgbaImage| -> std::collections::BTreeSet<(u32, u32)> {
+        c.enumerate_pixels().filter(|(_, _, p)| p[3] >= 128).map(|(x, y, _)| (x, y)).collect()
+    };
+    let (s, r) = (lit(&styled), lit(&roman));
+    for &(x, y) in s.difference(&r) {
+        assert!(x > 0 && r.contains(&(x - 1, y)), "styled pixel ({x},{y}) is not a +1 shift of the roman face");
+    }
+}

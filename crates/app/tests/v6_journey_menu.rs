@@ -622,3 +622,58 @@ fn journey_hybrid_tall_pane_divider_reaches_menu() {
         lum(vp.x / 2, deep)
     );
 }
+
+/// SQ-0540: Journey stamps its selected command-menu label ("Start", "Proceed",
+/// "Combat", "Cast", …) as a painted run with §8.7.1 style bit 2 — the one v6
+/// moment where a real game's BOLD reaches the raster path. The composite must
+/// synthesize a bold face for it (double-strike, +1 px) instead of drawing the
+/// same roman glyphs as an unstyled run.
+#[test]
+fn journey_bold_menu_label_rasterizes_emboldened() {
+    use app::render::v6_layout as v6;
+    let Some(session) = journey_at_menu() else { return };
+    let mut model = session.screen();
+    let WinNode::Layered(items) = &mut model.root else { panic!("v6 Layered root") };
+
+    // The bold runs Journey paints this frame (the highlighted verb label).
+    let bold: Vec<String> = items
+        .iter()
+        .filter_map(|it| match &it.node {
+            WinNode::Grid(g) => Some(g.px_texts.iter().filter(|t| t.style & 2 != 0).map(|t| t.text.clone()).collect::<Vec<_>>()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(!bold.is_empty(), "Journey's command menu must carry at least one bold painted run at the menu page");
+    eprintln!("Journey bold menu run(s): {bold:?}");
+
+    let native = v6::native_extent(items);
+    let colors = app::colors::ColorScheme::terminal_default();
+    let fg = image::Rgba([220, 220, 220, 255]);
+    let bg = image::Rgba([0, 0, 0, 255]);
+    let render = |items: &[app::engine::PositionedWindow]| {
+        let layout = v6::classify_windows(items);
+        v6::build_chrome_canvas(&layout.chrome, native, fg, bg, &colors)
+    };
+    let with_bold = render(items);
+
+    // Same frame with the bold bit cleared: the roman rendering of the same text.
+    for it in items.iter_mut() {
+        if let WinNode::Grid(g) = &mut it.node {
+            for t in g.px_texts.iter_mut() {
+                t.style &= !2;
+            }
+        }
+    }
+    let roman = render(items);
+
+    assert_ne!(with_bold, roman, "the bold label must not rasterize identically to its roman self");
+    let lit = |c: &image::RgbaImage| -> std::collections::BTreeSet<(u32, u32)> {
+        c.enumerate_pixels().filter(|(_, _, p)| p[3] >= 128).map(|(x, y, _)| (x, y)).collect()
+    };
+    let (b, r) = (lit(&with_bold), lit(&roman));
+    assert!(r.is_subset(&b), "double-strike is additive — bold keeps every roman pixel");
+    for &(x, y) in b.difference(&r) {
+        assert!(x > 0 && r.contains(&(x - 1, y)), "bold pixel ({x},{y}) is not a +1 double-strike of the roman face");
+    }
+}
