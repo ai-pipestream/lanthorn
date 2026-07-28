@@ -450,10 +450,12 @@ fn render_node(
             if !state.any_overlay_open() && !frameless && !(has_menu && hybrid) {
             if let Some(picker) = state.game_picker.as_ref() {
                 let theme_bg = state.colors.theme.get("transcript").style;
-                // SQ-0510: a themed RGB wins; else the terminal's own default
-                // (OSC 10/11, probed at startup); else the hardcoded fallback.
-                let default_fg = v6_default_fg(theme_bg, state.term_default_colors.fg);
-                let default_bg = v6_default_bg(theme_bg, state.term_default_colors.bg);
+                // SQ-0510 (reopened): ink+page resolve as a matched PAIR from one
+                // source — the theme (only when it gives BOTH channels), else the
+                // OSC-probed terminal pair (both channels), else the fallback pair.
+                // Never mix a themed ink with a page from another source.
+                let (default_fg, default_bg) =
+                    v6_default_pair(theme_bg, state.term_default_colors.fg, state.term_default_colors.bg);
                 use crate::render::v6_layout as v6;
                 let native = v6::native_extent(items);
                 let layout = v6::classify_windows(items);
@@ -798,13 +800,18 @@ fn render_node(
                     let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
                     let mut raster_metrics: Option<RasterMetrics> = None;
                     if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
-                        // The story window's own background colour (set by the game
-                        // via set_colour), when it set one — paints the page instead
-                        // of leaving it transparent over the theme backdrop. No
-                        // colour set ⇒ unchanged (transparent) behaviour.
-                        if let Some(color) = v6::story_bg_rgba(layout.story, &state.colors) {
-                            v6::fill_cell(&mut canvas, sx, sy, sw, sh, color);
-                        }
+                        // Paint the story page opaque (SQ-0510, reopened). A game-set
+                        // window colour (`set_colour`) wins; otherwise the paired
+                        // default page fills the CLEAR interior. Leaving it transparent
+                        // let the graphics compositor show its own backdrop — WHITE on
+                        // the user's dark terminal — so the default ink read as
+                        // unreadable light-on-white. `story_clear_native` has already
+                        // inset past any bordering frame art (and an opaque full-bleed
+                        // background tint insets it to nothing, so that still shows
+                        // through); inline-image floats redraw on top in
+                        // `draw_story_text`. So no artwork is covered.
+                        let page = v6::story_bg_rgba(layout.story, &state.colors).unwrap_or(default_bg);
+                        v6::fill_cell(&mut canvas, sx, sy, sw, sh, page);
                         // Window-0 inline pictures (drop-caps, room icons) arrive as
                         // transcript-anchored floats (`transcript_images` sidecar):
                         // build_main_text wraps text beside them and draw_story_text
@@ -823,10 +830,11 @@ fn render_node(
                         // reverse-video block, matching the terminal bar).
                         if state.pager.active {
                             let mp = state.colors.theme.get("more_prompt").style;
-                            // Reverse-video: block = default ink, text = default
-                            // page; unthemed selectors fall to the OSC/hard defaults.
-                            let block = v6_default_fg(mp, state.term_default_colors.fg);
-                            let ink = v6_default_bg(mp, state.term_default_colors.bg);
+                            // Reverse-video: block = default ink, text = default page.
+                            // Resolved as a PAIR from one source (theme both / OSC both
+                            // / fallback), so the block and its ink never mix sources.
+                            let (block, ink) =
+                                v6_default_pair(mp, state.term_default_colors.fg, state.term_default_colors.bg);
                             let label = "[more]";
                             let n = label.chars().count() as u32;
                             let last_row = rows.saturating_sub(1) as u32;
@@ -1275,18 +1283,41 @@ fn style_bg_rgba(style: ratatui::style::Style, fallback: image::Rgba<u8>) -> ima
 const RASTER_FALLBACK_INK: image::Rgba<u8> = image::Rgba([220, 220, 220, 255]);
 const RASTER_FALLBACK_PAGE: image::Rgba<u8> = image::Rgba([0, 0, 0, 255]);
 
-/// Resolve the v6 raster canvas's default ink (SQ-0510). Layering: an explicitly
-/// themed RGB fg wins; else the terminal's OSC-10 default (when it answered);
-/// else the hardcoded light-grey fallback.
-fn v6_default_fg(themed: ratatui::style::Style, osc: Option<image::Rgba<u8>>) -> image::Rgba<u8> {
-    style_fg_rgba(themed, osc.unwrap_or(RASTER_FALLBACK_INK))
+/// A style channel's concrete RGB, or `None` when it is unset / a terminal-default
+/// or named (non-`Rgb`) colour. The pixel canvas needs real bytes, so only an
+/// explicit `Color::Rgb` counts as "the theme supplied this channel".
+fn style_rgb(c: Option<ratatui::style::Color>) -> Option<image::Rgba<u8>> {
+    match c {
+        Some(ratatui::style::Color::Rgb(r, g, b)) => Some(image::Rgba([r, g, b, 255])),
+        _ => None,
+    }
 }
 
-/// Resolve the v6 raster canvas's default page (SQ-0510). Layering: an explicitly
-/// themed RGB bg wins; else the terminal's OSC-11 default (when it answered);
-/// else the hardcoded black fallback.
-fn v6_default_bg(themed: ratatui::style::Style, osc: Option<image::Rgba<u8>>) -> image::Rgba<u8> {
-    style_bg_rgba(themed, osc.unwrap_or(RASTER_FALLBACK_PAGE))
+/// Resolve the v6 raster canvas's default ink+page as a matched PAIR from a
+/// SINGLE source (SQ-0510, reopened). Resolving the two channels independently
+/// paired a theme's ink — a cream/beige foreground authored for the theme's own
+/// dark page — with a page from a *different* source (the OSC-probed terminal, or
+/// the transparent-canvas-over-white compositor backdrop): two colours never
+/// designed to sit together, e.g. beige-on-white. So ink and page are drawn from
+/// ONE layer, in order:
+///   1. Theme — only when the transcript style supplies BOTH a concrete fg and bg RGB.
+///   2. OSC terminal colours — only when the probe answered BOTH channels.
+///   3. The hardcoded fallback pair (light grey ink on black page).
+///
+/// A partial layer (theme fg but no bg; only one OSC channel) is skipped whole
+/// rather than mixed, so the returned pair is always internally consistent.
+fn v6_default_pair(
+    themed: ratatui::style::Style,
+    osc_fg: Option<image::Rgba<u8>>,
+    osc_bg: Option<image::Rgba<u8>>,
+) -> (image::Rgba<u8>, image::Rgba<u8>) {
+    if let (Some(fg), Some(bg)) = (style_rgb(themed.fg), style_rgb(themed.bg)) {
+        return (fg, bg);
+    }
+    if let (Some(fg), Some(bg)) = (osc_fg, osc_bg) {
+        return (fg, bg);
+    }
+    (RASTER_FALLBACK_INK, RASTER_FALLBACK_PAGE)
 }
 
 /// A cheap change key for the whole v6 raster composite (SQ-0469). It folds
@@ -2335,26 +2366,43 @@ mod tests {
     use ratatui::layout::Rect;
 
     #[test]
-    fn v6_default_colours_layer_theme_over_osc_over_fallback() {
+    fn v6_default_pair_resolves_ink_and_page_from_one_source() {
         use ratatui::style::{Color, Style};
         let osc_fg = Some(image::Rgba([10, 20, 30, 255]));
         let osc_bg = Some(image::Rgba([40, 50, 60, 255]));
+        let osc_pair = (image::Rgba([10, 20, 30, 255]), image::Rgba([40, 50, 60, 255]));
+        let fallback = (RASTER_FALLBACK_INK, RASTER_FALLBACK_PAGE);
 
-        // Theme sets a concrete RGB → it wins over the OSC probe.
-        let themed = Style::default()
-            .fg(Color::Rgb(1, 2, 3))
-            .bg(Color::Rgb(4, 5, 6));
-        assert_eq!(v6_default_fg(themed, osc_fg), image::Rgba([1, 2, 3, 255]));
-        assert_eq!(v6_default_bg(themed, osc_bg), image::Rgba([4, 5, 6, 255]));
+        // (a) Theme supplies BOTH channels → the theme pair, OSC ignored.
+        let both = Style::default().fg(Color::Rgb(1, 2, 3)).bg(Color::Rgb(4, 5, 6));
+        assert_eq!(
+            v6_default_pair(both, osc_fg, osc_bg),
+            (image::Rgba([1, 2, 3, 255]), image::Rgba([4, 5, 6, 255]))
+        );
 
-        // Theme leaves fg/bg at "terminal default" (no concrete RGB) → OSC fills in.
+        // (b) THE REGRESSION: theme supplies fg ONLY (a cream ink with no page) and
+        // OSC answered both → the OSC pair, NOT the theme ink mixed with an OSC page.
+        let fg_only = Style::default().fg(Color::Rgb(1, 2, 3));
+        assert_eq!(v6_default_pair(fg_only, osc_fg, osc_bg), osc_pair);
+        // Symmetric partiality: theme supplies bg ONLY → still skipped whole.
+        let bg_only = Style::default().bg(Color::Rgb(4, 5, 6));
+        assert_eq!(v6_default_pair(bg_only, osc_fg, osc_bg), osc_pair);
+
+        // (c) No theme RGB at all + OSC answered both → the OSC pair.
         let unset = Style::default();
-        assert_eq!(v6_default_fg(unset, osc_fg), image::Rgba([10, 20, 30, 255]));
-        assert_eq!(v6_default_bg(unset, osc_bg), image::Rgba([40, 50, 60, 255]));
+        assert_eq!(v6_default_pair(unset, osc_fg, osc_bg), osc_pair);
 
-        // No theme AND no OSC answer → today's hardcoded fallbacks are preserved.
-        assert_eq!(v6_default_fg(unset, None), RASTER_FALLBACK_INK);
-        assert_eq!(v6_default_bg(unset, None), RASTER_FALLBACK_PAGE);
+        // (d) Only ONE OSC channel answered → the fallback pair (no mixing).
+        assert_eq!(v6_default_pair(unset, osc_fg, None), fallback);
+        assert_eq!(v6_default_pair(unset, None, osc_bg), fallback);
+
+        // (e) Nothing → the fallback pair.
+        assert_eq!(v6_default_pair(unset, None, None), fallback);
+
+        // A named (non-Rgb) theme colour is not "supplied" — the pixel canvas needs
+        // real bytes, so terminal_default White/Black falls through to the OSC pair.
+        let named = Style::default().fg(Color::White).bg(Color::Black);
+        assert_eq!(v6_default_pair(named, osc_fg, osc_bg), osc_pair);
     }
 
     #[test]
