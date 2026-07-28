@@ -613,3 +613,96 @@ fn shogun_frameless_status_band_anchors_left_center_right() {
     let last_glyph = score_row.rfind(|c: char| c != ' ').expect("score row has text");
     assert!(last_glyph >= area.width as usize - 2, "Score flush right (last glyph col {last_glyph}): {score_row:?}");
 }
+
+/// SQ-0519 (raster twin of SQ-0512): in RASTER mode Shogun's in-game status band
+/// carries the game's explicit black-on-white colours (non-reversed). The native
+/// chrome canvas must flood the band's whole WINDOW width with the game's white
+/// background BEFORE the glyphs stamp, so the band reads as one solid bar in the
+/// pixel composite — the gaps between "Erasmus :", "SHOGUN" and "Score:" carry the
+/// explicit white, the same as under the glyphs, not the transparent page. Probes a
+/// pixel in a bare gap between two band runs on native row 0.
+#[test]
+fn shogun_raster_status_band_floods_game_white() {
+    use app::engine::{PxText, WinNode};
+    use app::render::v6_layout as v6;
+    use image::Rgba;
+
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window())
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    // Enter past the boot menu (Char → 13) and settle into gameplay (Bridge), so the
+    // status band carries the location + Score/Moves runs with explicit colours.
+    for _turn in 0..6 {
+        match session.pending_input() {
+            InputKind::Line => { session.submit("look"); }
+            InputKind::Char => { session.submit_char(13); }
+            InputKind::Event => { session.submit(""); }
+        }
+    }
+
+    let screen = session.screen();
+    let WinNode::Layered(items) = &screen.root else {
+        panic!("v6 story's screen() root must be WinNode::Layered, got {:?}", screen.root);
+    };
+    let native = v6::native_extent(items);
+    let layout = v6::classify_windows(items);
+    let colors = app::colors::ColorScheme::default();
+    let default_fg = Rgba([220, 220, 220, 255]);
+    let default_bg = Rgba([0, 0, 0, 255]);
+    let canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &colors);
+
+    // Gather the status band's runs: chrome grid runs on native row 0 (px y=1), the
+    // "SHOGUN" title row, a non-reverse black-on-white band (bg = z-colour 9,
+    // packed 0x01000009).
+    let mut band: Vec<&PxText> = Vec::new();
+    for it in &layout.chrome {
+        if let WinNode::Grid(g) = &it.node {
+            for t in &g.px_texts {
+                if t.y == 1 {
+                    band.push(t);
+                }
+            }
+        }
+    }
+    band.sort_by_key(|t| t.x);
+    assert!(
+        band.iter().any(|t| t.text.contains("SHOGUN")),
+        "native row 0 carries the SHOGUN title: {:?}",
+        band.iter().map(|t| &t.text).collect::<Vec<_>>()
+    );
+    let white_run = band
+        .iter()
+        .find(|t| t.bg == 0x0100_0009)
+        .expect("a band run names the explicit white bg (z-colour 9, packed 0x01000009)");
+    assert_eq!(white_run.style & 1, 0, "the status band runs are NON-reversed (SQ-0519 is a bg flood, not reverse)");
+
+    // Find a bare GAP between two adjacent band runs and probe its midpoint. Runs
+    // carry screen-absolute 1-based px; a run spans FONT_W(8) per char.
+    let (gap_start, gap_end) = band
+        .windows(2)
+        .find_map(|w| {
+            let end = (w[0].x.max(1) as u32 - 1) + w[0].text.chars().count() as u32 * 8;
+            let start = w[1].x.max(1) as u32 - 1;
+            (start > end + 4).then_some((end, start))
+        })
+        .expect("two band runs with a bare gap between them");
+    let gx = (gap_start + gap_end) / 2;
+    let gy = 8; // inside native row 0 (py 0..16)
+    // z-colour 9 (white) resolves to spec white (255,255,255) on the pixel path
+    // (see v6_layout's packed_standard_palette_colour_blits_its_own_rgb_not_default).
+    // The gap — no glyph over it — must carry that flooded white, not the page.
+    assert_eq!(
+        *canvas.get_pixel(gx, gy),
+        Rgba([255, 255, 255, 255]),
+        "the inter-run gap on the status band floods the game's explicit white, same as under the glyphs (px {gx},{gy})"
+    );
+}

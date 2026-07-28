@@ -427,6 +427,57 @@ fn fill_reverse_row_gaps(
     }
 }
 
+/// SQ-0519: the window-wide background-flood colour for a chrome grid row, or
+/// `None` when the row must not flood. Mirrors SQ-0512's hybrid per-row flood at
+/// the raster canvas level: a NON-reverse row that names an explicit background
+/// (first-explicit-wins per channel — Shogun's in-game status band prints
+/// black-on-white, non-reversed) floods its whole window width with that bg so the
+/// band reads as one solid bar in the pixel composite, not just behind the glyph
+/// runs (the gaps between "Erasmus :", "SHOGUN", "Score:" otherwise showed the page
+/// through). Two kinds of row return `None`, keeping the canvas byte-identical to
+/// before: a row with no explicit background (Zork0's compass letters — explicit
+/// FG only, no bg — so their windows never paint an opaque box over the banner
+/// art), and a PURE reverse-video row (every run reversed — Zork0's on-banner ribbon
+/// labels), which [`fill_reverse_row_gaps`] already handles edge to edge with the
+/// over-art gate that leaves the art untouched. A mixed row (some reversed runs,
+/// some not) still floods when it names an explicit bg, first-explicit-wins.
+fn row_flood_bg(runs: &[&PxText], default_bg: Rgba<u8>, colors: &ColorScheme) -> Option<Rgba<u8>> {
+    // Pure reverse-video (or empty) rows are owned by `fill_reverse_row_gaps`.
+    if runs.is_empty() || runs.iter().all(|t| t.style & 1 != 0) {
+        return None;
+    }
+    let bg = runs.iter().map(|t| t.bg).find(|&p| packed_explicit(p))?;
+    Some(packed_to_rgba(bg, default_bg, colors))
+}
+
+/// SQ-0519: flood the window-width background of each explicit-bg chrome grid row
+/// (see [`row_flood_bg`]) BEFORE its glyphs stamp, so an explicitly-coloured status
+/// band (Shogun's black-on-white location/score bar) reads as one solid bar across
+/// the whole window — not just behind each run. `ox`/`win_w` are the window's own
+/// native pixel extent: the flood spans only THIS window (unlike the screen-wide
+/// pure-reverse SQ-0504 fill and unlike the hybrid full-width title-bar rule
+/// SQ-0515, which are look decisions on other paths). Runs carry screen-absolute
+/// pixel rows, so each row floods at its own run `y` (`y - 1`, one `FONT_H` tall).
+fn fill_explicit_bg_rows(
+    canvas: &mut RgbaImage,
+    texts: &[PxText],
+    ox: u32,
+    win_w: u32,
+    default_bg: Rgba<u8>,
+    colors: &ColorScheme,
+) {
+    use std::collections::BTreeMap;
+    let mut rows: BTreeMap<u32, Vec<&PxText>> = BTreeMap::new();
+    for t in texts {
+        rows.entry(t.y.max(1) as u32 - 1).or_default().push(t);
+    }
+    for (py, runs) in rows {
+        if let Some(bg) = row_flood_bg(&runs, default_bg, colors) {
+            fill_cell(canvas, ox, py, win_w, FONT_H, bg);
+        }
+    }
+}
+
 /// SQ-0504: carve the native rows occupied by pure-TEXT chrome runs out of `canvas`
 /// (make them fully transparent). Those rows render as crisp terminal CELLS in the
 /// hybrid path, so their rasterized ink must not survive into the pixel bands built
@@ -485,6 +536,16 @@ pub fn build_chrome_canvas(
                 // pixel into an odd-aligned gap cell (SQ-0499). The glyph loop then
                 // paints the run cells on top.
                 fill_reverse_row_gaps(&mut canvas, &g.px_texts, default_fg, colors);
+                // SQ-0519: then flood the full WINDOW width of each explicit-bg,
+                // non-reverse row with its own background, so an explicitly-coloured
+                // status band (Shogun's black-on-white location/score bar) reads as
+                // one solid bar in the pixel composite rather than showing the page
+                // in the gaps between its runs. Only when the window's width is
+                // resolved (a size sentinel would balloon the flood, SQ-0481). The
+                // glyph loop then stamps the runs on top.
+                if (it.w_px as i16) >= 0 {
+                    fill_explicit_bg_rows(&mut canvas, &g.px_texts, ox, it.w_px as u32, default_bg, colors);
+                }
                 for t in &g.px_texts {
                     let px0 = t.x.max(1) as u32 - 1;
                     let py = t.y.max(1) as u32 - 1;
@@ -1299,6 +1360,86 @@ mod tests {
                 assert_eq!(c.get_pixel(x, y)[3], 0, "no bg, no reverse ⇒ transparent at ({x},{y})");
             }
         }
+    }
+
+    // ── explicit-bg status-band flood (SQ-0519) ─────────────────────────────
+
+    #[test]
+    fn row_flood_bg_predicate_first_explicit_wins_and_skips_reverse() {
+        // The window-wide flood predicate (raster twin of SQ-0512's hybrid per-row
+        // flood): a NON-reverse row that names an explicit bg floods with it; a pure
+        // reverse-video row and a row with no explicit bg do NOT (byte-identical).
+        let colors = colors();
+        let default_bg = Rgba([9, 9, 9, 255]);
+        let z_black = (1u32 << 24) | 2; // Standard 2 (explicit)
+        let z_white = (1u32 << 24) | 9; // Standard 9 (explicit) → spec white
+        let run = |x: u16, style: u8, fg: u32, bg: u32| PxText { y: 1, x, text: "AB".into(), style, fg, bg };
+        // (a) explicit-bg non-reverse row → floods the resolved white.
+        let a = run(1, 0, z_black, z_white);
+        let b = run(50, 0, z_black, z_white);
+        assert_eq!(
+            row_flood_bg(&[&a, &b], default_bg, &colors),
+            Some(Rgba([255, 255, 255, 255])),
+            "explicit-bg row floods z-colour 9 white"
+        );
+        // (b) pure reverse-video, non-explicit row (Zork0's on-art ribbon) → None:
+        // fill_reverse_row_gaps owns it (with the over-art gate).
+        let rev = run(1, 1, 0, 0);
+        assert_eq!(row_flood_bg(&[&rev], default_bg, &colors), None, "reverse row: no window flood");
+        // (c) mixed partial-explicit row → first-explicit-wins (the second run's white).
+        let plain = run(1, 0, 0, 0);
+        let white = run(50, 0, z_black, z_white);
+        assert_eq!(
+            row_flood_bg(&[&plain, &white], default_bg, &colors),
+            Some(Rgba([255, 255, 255, 255])),
+            "mixed row floods the first explicit bg"
+        );
+        // (d) explicit-FG-only, non-reverse row (Zork0's compass letters) → None: no
+        // explicit bg means no opaque box painted over the banner art.
+        let fg_only = run(1, 0, z_black, 0);
+        assert_eq!(row_flood_bg(&[&fg_only], default_bg, &colors), None, "explicit-fg-only row: no window flood");
+    }
+
+    fn band_grid(w_px: u16, runs: Vec<PxText>) -> PositionedWindow {
+        PositionedWindow {
+            x: 0, y: 0, w: (w_px / 8).max(1), h: 1, x_px: 0, y_px: 0, w_px, h_px: 16, left_margin: 0, right_margin: 0,
+            node: WinNode::Grid(GridWindow {
+                cols: (w_px / 8).max(1), rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0), cursor_active: false,
+                border: BorderPref::Unspecified, bg: None, fg: None, reverse: false, px_texts: runs,
+            }),
+        }
+    }
+
+    #[test]
+    fn explicit_bg_status_row_floods_the_whole_window_width() {
+        // SQ-0519: two explicit black-on-white runs with a bare gap between them —
+        // the gap (and the whole window width) floods the explicit white, so the band
+        // reads as one solid bar rather than showing the page between the runs.
+        let z_black = (1u32 << 24) | 2;
+        let z_white = (1u32 << 24) | 9;
+        let win = band_grid(64, vec![
+            PxText { y: 1, x: 1, text: "AB".into(), style: 0, fg: z_black, bg: z_white },
+            PxText { y: 1, x: 41, text: "CD".into(), style: 0, fg: z_black, bg: z_white },
+        ]);
+        let c = build_chrome_canvas(&[&win], (64, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        // px 24 is a gap between run A (px 0..16) and run C (px 40..): flooded white.
+        assert_eq!(*c.get_pixel(24, 8), Rgba([255, 255, 255, 255]), "the inter-run gap floods the explicit white");
+        // The window's far edge is flooded too — the whole window width is one bar.
+        assert_eq!(*c.get_pixel(60, 8), Rgba([255, 255, 255, 255]), "the flood spans the full window width");
+    }
+
+    #[test]
+    fn explicit_fg_only_run_over_art_is_not_flooded() {
+        // SQ-0519 byte-identity guard: Zork0's compass letters are explicit-FG-only,
+        // non-reverse, ON opaque banner art. With no explicit bg the flood must NOT
+        // fire — an art pixel beside the letter keeps its value (no black box).
+        let z_red = (1u32 << 24) | 3;
+        let art_color = Rgba([180, 140, 90, 255]);
+        let art = graphics_window(0, 0, 16, 16, image::RgbaImage::from_pixel(16, 16, art_color));
+        let letter = band_grid(16, vec![PxText { y: 1, x: 1, text: "N".into(), style: 0, fg: z_red, bg: 0 }]);
+        let c = build_chrome_canvas(&[&art, &letter], (16, 16), Rgba([200, 200, 200, 255]), Rgba([0, 0, 0, 255]), &colors());
+        // px 12 is the second cell (no ink, no run) — the banner art shows through.
+        assert_eq!(*c.get_pixel(12, 8), art_color, "explicit-fg-only run leaves the banner art (no bg flood)");
     }
 
     // ── story region background fill (Lane C) ───────────────────────────────
