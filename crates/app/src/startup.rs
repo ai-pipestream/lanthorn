@@ -675,6 +675,22 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
         );
     }
 
+    // [more] pager for the OPENING BANNER (SQ-0532 wave-5). The banner is one
+    // batch of game output exactly like a turn's, and a v6 story box is small —
+    // Zork Zero's window 0 holds 20 rows and its prologue wraps to 23, so the
+    // view pinned to the newest rows and the illuminated drop-cap that opens the
+    // game scrolled off before it was ever seen. Arm the pager the way
+    // `finish_command_turn` arms it for a turn: the first frame measures the rows
+    // the banner actually produced and engages ONLY if it overflowed the story
+    // viewport, parking the view on the first screenful. Same guard as a turn —
+    // never when the game is waiting on a keypress, where the key must reach the
+    // game rather than page the pane. Skipped entirely for a resumed transcript
+    // (below): that scrollback was already read, and paging it would park a
+    // returning player mid-history.
+    if startup_transcript.is_none() && session.pending_input() == app::session::InputKind::Line {
+        state.pager.arm(0);
+    }
+
     // If an archived transcript was loaded on startup, replace the fresh one.
     if let Some((lines, kinds, runs, para, images)) = startup_transcript {
         state.transcript = lines;

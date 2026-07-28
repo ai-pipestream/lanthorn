@@ -129,6 +129,14 @@ fn state_for(mode: app::config::V6RenderMode) -> app::state::AppState {
 /// matters for the whole-canvas raster path, which hybrid also falls through to
 /// when there is no story window.)
 fn bg_census(model: &ScreenModel, mode: app::config::V6RenderMode) -> (usize, usize) {
+    let (white, art, _) = cell_census(model, mode);
+    (white, art)
+}
+
+/// As [`bg_census`], plus the count of cells the render left at `Color::Reset` —
+/// the HOST THEME's backdrop, i.e. every cell no game pixel or page reached.
+/// (SQ-0532 wave-5, defect 1: with a game-set page that count must be zero.)
+fn cell_census(model: &ScreenModel, mode: app::config::V6RenderMode) -> (usize, usize, usize) {
     let mut state = state_for(mode);
     state.push_transcript("West of House");
     let area = Rect::new(0, 0, 80, 30);
@@ -145,17 +153,54 @@ fn bg_census(model: &ScreenModel, mode: app::config::V6RenderMode) -> (usize, us
     }
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(model, false, None, &state, area, &mut buf);
-    let (mut white, mut art) = (0, 0);
+    let (mut white, mut art, mut backdrop) = (0, 0, 0);
     for y in 0..area.height {
         for x in 0..area.width {
             match buf.cell((x, y)).unwrap().bg {
                 Color::Rgb(255, 255, 255) => white += 1,
-                Color::Reset => {}
+                Color::Reset => backdrop += 1,
                 _ => art += 1,
             }
         }
     }
-    (white, art)
+    (white, art, backdrop)
+}
+
+/// The story window's explicit `(fg, bg)` pair, as the render resolves it.
+/// `None` per channel when the game set no colour there.
+fn story_pair(model: &ScreenModel) -> (Option<image::Rgba<u8>>, Option<image::Rgba<u8>>) {
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let colors = app::colors::ColorScheme::terminal_default();
+    let layout = app::render::v6_layout::classify_windows(items);
+    (
+        app::render::v6_layout::story_fg_rgba(layout.story, &colors),
+        app::render::v6_layout::story_bg_rgba(layout.story, &colors),
+    )
+}
+
+/// The story window's native pixel rect `(x, y, w, h)` in the 640×400 canvas.
+fn story_rect(model: &ScreenModel) -> (u32, u32, u32, u32) {
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let layout = app::render::v6_layout::classify_windows(items);
+    let s = layout.story.expect("a story window");
+    (s.x_px as u32, s.y_px as u32, s.w_px as u32, s.h_px as u32)
+}
+
+/// The v6 RASTER composite in the game's native pixel space, plus its story
+/// scroll/pager metrics. `build_v6_raster_canvas` IS the render's own canvas
+/// step (`render_story_pane` calls exactly this and hands the result to the
+/// resize+encode worker), so asserting on these pixels pins the shipped
+/// composite rather than a re-implementation of it. The pane's own scaling is
+/// deliberately not involved: the game's ink, page, glyphs and drop-caps all
+/// live here, at native resolution.
+fn raster_canvas(
+    model: &ScreenModel,
+    state: &app::state::AppState,
+) -> (image::RgbaImage, Option<app::render::screen::RasterMetrics>) {
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let native = app::render::v6_layout::native_extent(items);
+    let layout = app::render::v6_layout::classify_windows(items);
+    app::render::screen::build_v6_raster_canvas(&layout, native, state)
 }
 
 /// Regression 2 (hybrid). **Mode: `honor_game_colours = true`** — the shipped
@@ -350,4 +395,246 @@ fn shogun_gets_its_story_window_back_once_the_game_uses_it() {
             "colours={colours}: and it is the game's own box, not the whole screen"
         );
     }
+}
+
+// ── SQ-0532 wave-5: the three defects the wave-4 build still showed on a TTY ──
+//
+// All three are Zork Zero with `honor_game_colours = true` (the shipped default,
+// and the mode the user runs): its boot `set_colour(fg=2 black, bg=9 white)` on
+// window 0 gives it an explicit §8.3 pair, which the render must honour as a
+// PAIR and as the whole screen's page — the DOS original is a white page with
+// the frame art printed on it, not white art floating on a dark host theme.
+
+/// Wave-5 defect 1 (hybrid). **Mode: `honor_game_colours = true`.** The game's
+/// page covers the ENTIRE pane — letterbox margins, the chrome band surrounds,
+/// everything behind the frame art — not just the story-window region. Broken
+/// build: the letterbox/backdrop cells stayed `Color::Reset` (the host theme),
+/// so Zork Zero's white frame floated on a dark surround.
+#[test]
+fn zork0_hybrid_page_covers_the_whole_pane() {
+    let Some(s) = boot_v6("zork0-r393-s890714.z6", true) else { return };
+    let model = s.screen();
+    // Premise: the game really did set a page on its story window.
+    let (fg, bg) = story_pair(&model);
+    assert_eq!(bg, Some(image::Rgba([255, 255, 255, 255])), "Zork0's window 0 is explicit white");
+    assert_eq!(fg, Some(image::Rgba([0, 0, 0, 255])), "…on explicit black ink");
+    let (white, art, backdrop) = cell_census(&model, app::config::V6RenderMode::Hybrid);
+    eprintln!("Zork0 hybrid page census: white={white} art={art} backdrop={backdrop} (of 2400)");
+    assert_eq!(
+        backdrop, 0,
+        "every pane cell must carry the game's page or its art — {backdrop} cells were left on the \
+         host theme backdrop, which is the white-frame-on-dark-surround defect"
+    );
+    assert!(art > 0, "the frame art still reaches the pane (white={white}, art={art})");
+}
+
+/// Paired companion. **Mode: `honor_game_colours = false`** — the game's
+/// `set_colour` is declined outright, so the story window has NO explicit page
+/// and the host theme owns the pane exactly as before. This is the divergence
+/// the whole-pane fill must be strictly gated on.
+#[test]
+fn zork0_hybrid_keeps_the_theme_backdrop_when_colours_are_declined() {
+    let Some(s) = boot_v6("zork0-r393-s890714.z6", false) else { return };
+    let model = s.screen();
+    assert_eq!(story_pair(&model), (None, None), "colours declined: the window carries no pair");
+    let (_, _, backdrop) = cell_census(&model, app::config::V6RenderMode::Hybrid);
+    eprintln!("Zork0 hybrid backdrop with colours declined: {backdrop} (of 2400)");
+    assert!(
+        backdrop > 0,
+        "with no game page the host theme must still own the pane surround; flooding it anyway \
+         would repaint every v6 game's letterbox"
+    );
+}
+
+/// The other half of the gate: a game that sets NO story-window colour keeps
+/// today's look even with `honor_game_colours = true`. Arthur draws a header art
+/// panel and side borders and never calls `set_colour`, so its pane surround must
+/// stay the theme backdrop — the fill is keyed on the window's explicit bg, not
+/// on the flag.
+#[test]
+fn a_game_that_sets_no_page_keeps_the_theme_backdrop() {
+    let Some(s) = boot_v6("arthur-r74-s890714.z6", true) else { return };
+    let model = s.screen();
+    let (_, bg) = story_pair(&model);
+    assert_eq!(bg, None, "Arthur sets no story-window background");
+    let (_, _, backdrop) = cell_census(&model, app::config::V6RenderMode::Hybrid);
+    eprintln!("Arthur hybrid backdrop (colours honoured): {backdrop} (of 2400)");
+    assert!(backdrop > 0, "Arthur's pane surround must stay the host theme backdrop");
+}
+
+/// Wave-5 defect 2 (raster). **Mode: `honor_game_colours = true`.** The story
+/// prose must be rasterized in the GAME's ink, not the host's resolved default.
+/// Broken build: `draw_story_text` was handed `default_fg` (the theme/OSC ink,
+/// (220,220,220) here) while the page took the game's white — light grey on
+/// white, i.e. invisible text. Fixed: the window's explicit fg wins over
+/// `default_fg` exactly as its bg already wins over `default_bg`.
+///
+/// Asserted on the composite the render itself builds, so this pins the shipped
+/// pixels rather than a re-implementation.
+#[test]
+fn zork0_raster_inks_its_prose_in_the_games_own_colour() {
+    let Some(s) = boot_v6("zork0-r393-s890714.z6", true) else { return };
+    let model = s.screen();
+    let (sx, sy, sw, sh) = story_rect(&model);
+    let mut state = state_for(app::config::V6RenderMode::Raster);
+    state.push_transcript("The hall is filled to capacity.");
+    // Premise: the host's own default ink is the light grey that used to be used
+    // for the prose — the colour that must NOT appear on the game's white page.
+    assert_eq!(
+        app::render::screen::v6_host_pair(&state).0,
+        image::Rgba([220, 220, 220, 255]),
+        "the host default ink under this theme is light grey"
+    );
+    let (img, _) = raster_canvas(&model, &state);
+
+    // Inside the story box the only things drawn are the page, the glyphs and any
+    // inline float — the frame art is inset out by `story_clear_native`.
+    let mut page = 0usize;
+    let mut ink = 0usize;
+    let mut default_ink = 0usize;
+    for y in sy..(sy + sh).min(img.height()) {
+        for x in sx..(sx + sw).min(img.width()) {
+            match img.get_pixel(x, y).0 {
+                [255, 255, 255, 255] => page += 1,
+                [0, 0, 0, 255] => ink += 1,
+                [220, 220, 220, 255] => default_ink += 1,
+                _ => {}
+            }
+        }
+    }
+    eprintln!("Zork0 raster story box: page={page} ink={ink} host-default-ink={default_ink}");
+    assert!(page > 1000, "the story page is the game's white ({page} px)");
+    assert!(ink > 100, "the prose is inked in the game's black ({ink} px)");
+    assert_eq!(
+        default_ink, 0,
+        "no glyph may still be drawn in the host's default ink — that is the white-on-white defect \
+         ({default_ink} px of (220,220,220) inside the story box)"
+    );
+}
+
+/// Paired companion. **Mode: `honor_game_colours = false`.** With the game's
+/// colours declined the window carries no pair at all, so BOTH channels fall back
+/// to the host's resolved default pair — the ink is the host's (220,220,220) and
+/// the page its black. Ink and page still differ; they simply come from the host.
+#[test]
+fn zork0_raster_falls_back_to_the_host_pair_when_colours_are_declined() {
+    let Some(s) = boot_v6("zork0-r393-s890714.z6", false) else { return };
+    let model = s.screen();
+    let (sx, sy, sw, sh) = story_rect(&model);
+    assert_eq!(story_pair(&model), (None, None), "colours declined: no game pair to honour");
+    let mut state = state_for(app::config::V6RenderMode::Raster);
+    state.push_transcript("The hall is filled to capacity.");
+    let (img, _) = raster_canvas(&model, &state);
+    let mut default_ink = 0usize;
+    for y in sy..(sy + sh).min(img.height()) {
+        for x in sx..(sx + sw).min(img.width()) {
+            if img.get_pixel(x, y).0 == [220, 220, 220, 255] {
+                default_ink += 1;
+            }
+        }
+    }
+    eprintln!("Zork0 raster host-default ink with colours declined: {default_ink} px");
+    assert!(
+        default_ink > 100,
+        "with no game ink the host default must still draw the prose ({default_ink} px)"
+    );
+}
+
+/// Wave-5 defect 3 (raster). Zork Zero's illuminated opening drop-cap must be on
+/// screen when the game starts.
+///
+/// Root cause it guards: the opening banner wraps to more rows than Zork Zero's
+/// 20-row window 0 holds, so the view pinned to the NEWEST rows and the drop-cap
+/// — anchored to the very first transcript line — was cropped away before the
+/// player ever saw it. The `[more]` pager (SQ-0404) is exactly the machinery for
+/// "one batch of output overflowed the story box"; `startup` now arms it for the
+/// opening banner as `finish_command_turn` already does for a turn, so the first
+/// frame parks the view on the first screenful. This drives that same decision —
+/// `activation_target(0, total, viewport)` — and then asserts the drop-cap's own
+/// pixels are really in the composite.
+#[test]
+fn zork0_raster_shows_its_opening_drop_cap() {
+    use app::engine::Engine;
+    use app::state::apply_transcript_elems;
+
+    let Some(mut s) = boot_v6("zork0-r393-s890714.z6", true) else { return };
+    let mut state = state_for(app::config::V6RenderMode::Raster);
+    // The REAL elems pipeline: the banner's window-0 pictures arrive as ordered
+    // `TranscriptElem::Image`s and land in `transcript_images`.
+    let elems = Engine::take_transcript_elems(&mut s);
+    apply_transcript_elems(&mut state, &elems);
+    let drop_cap = state.transcript_images[0]
+        .clone()
+        .expect("Zork0's opening line IS the illuminated drop-cap");
+    assert_eq!(drop_cap.align, app::inline_image::ImageAlign::MarginLeft, "it floats at the left margin");
+
+    let model = s.screen();
+    let (sx, sy, ..) = story_rect(&model);
+
+    // Frame 1: measure. The banner overflowed its story box, so the pager engages
+    // — this is exactly the decision `startup`'s arm hands the first frame.
+    let (before, m) = raster_canvas(&model, &state);
+    let m = m.expect("Zork0 has a story window");
+    eprintln!("Zork0 banner: total_rows={} viewport_rows={}", m.total_rows, m.viewport_rows);
+    assert!(
+        m.total_rows > m.viewport_rows,
+        "premise: the opening banner ({} rows) really does overflow the {}-row story box",
+        m.total_rows,
+        m.viewport_rows
+    );
+    // Broken build: pinned to the newest rows, the drop-cap is cropped away.
+    let unparked = drop_cap_pixels(&before, &drop_cap, sx, sy);
+    let target = app::pager::activation_target(0, m.total_rows, m.viewport_rows).expect(
+        "Zork0's opening banner overflows its 20-row story box — the pager must engage, or the \
+         drop-cap on the first row is scrolled away unread",
+    );
+    state.transcript_scroll = target;
+    state.pager.active = true;
+
+    // Frame 2: the parked view must show the drop-cap, whole.
+    let (img, _) = raster_canvas(&model, &state);
+    let (matched, opaque) = drop_cap_pixels(&img, &drop_cap, sx, sy);
+    let (dw, dh) = drop_cap.pixels.dimensions();
+    eprintln!("Zork0 drop-cap pixels in the composite: parked {matched}/{opaque}, unparked {}/{}", unparked.0, unparked.1);
+    assert!(opaque > 1000, "the drop-cap art has substance ({opaque} opaque px of {dw}x{dh})");
+    assert!(
+        matched * 10 >= opaque * 9,
+        "the drop-cap must be blitted into the story box at the parked scroll — only {matched} of \
+         {opaque} of its pixels reached the composite"
+    );
+    // And the defect it replaces really was a defect: pinned to the newest rows,
+    // almost none of it survived (the float is cropped from its own top).
+    assert!(
+        unparked.0 * 2 < opaque,
+        "premise: unparked, the drop-cap is cropped away ({} of {opaque} px survived) — if it were \
+         already whole this test would prove nothing",
+        unparked.0
+    );
+}
+
+/// `(matching, opaque)` pixel counts for `img`'s copy of `drop_cap` blitted with
+/// its top-left at native `(ox, oy)` — how much of the picture actually reached
+/// the composite. Transparent source pixels are not counted (nothing to blit).
+fn drop_cap_pixels(
+    img: &image::RgbaImage,
+    drop_cap: &app::inline_image::InlineImage,
+    ox: u32,
+    oy: u32,
+) -> (usize, usize) {
+    let (dw, dh) = drop_cap.pixels.dimensions();
+    let (mut opaque, mut matched) = (0usize, 0usize);
+    for y in 0..dh {
+        for x in 0..dw {
+            let src = drop_cap.pixels.get_pixel(x, y);
+            if src[3] < 128 {
+                continue;
+            }
+            opaque += 1;
+            let (cx, cy) = (ox + x, oy + y);
+            if cx < img.width() && cy < img.height() && img.get_pixel(cx, cy).0[..3] == src.0[..3] {
+                matched += 1;
+            }
+        }
+    }
+    (matched, opaque)
 }

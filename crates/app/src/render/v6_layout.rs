@@ -272,6 +272,24 @@ pub fn story_bg_rgba(story: Option<&PositionedWindow>, colors: &ColorScheme) -> 
     Some(packed_to_rgba(b.bg?, Rgba([0, 0, 0, 255]), colors))
 }
 
+/// The story window's own FOREGROUND colour (set by the game via `set_colour`),
+/// resolved to an opaque RGBA for the ink the story prose is rasterized in.
+/// `None` when the game set no colour — the caller then falls back to its
+/// resolved default ink.
+///
+/// The exact mirror of [`story_bg_rgba`], and for the same reason (SQ-0532
+/// wave-5): the pair is the game's, so it has to be honoured as a pair. Zork
+/// Zero boots `set_colour(fg=2 black, bg=9 white)` on window 0; taking its white
+/// page but keeping the host's own (light) default ink rasterized white-on-white
+/// prose that could not be read at all.
+pub fn story_fg_rgba(story: Option<&PositionedWindow>, colors: &ColorScheme) -> Option<Rgba<u8>> {
+    let WinNode::Buffer(b) = &story?.node else { return None };
+    // `fg`, when `Some`, always packs a non-Default channel (see
+    // `state::pack_zcolour`), so the fallback here is never actually used —
+    // it exists only to satisfy `packed_to_rgba`'s signature.
+    Some(packed_to_rgba(b.fg?, Rgba([255, 255, 255, 255]), colors))
+}
+
 /// Whether any pixel in the `w × h` box at `(px, py)` of `canvas` is opaque
 /// (alpha ≥ 128). Used to tell a reverse-video run sitting ON frame art from one
 /// over a clear background, so the art is preserved but a bare selection bar still

@@ -511,13 +511,7 @@ fn render_node(
             });
             if !state.any_overlay_open() && !frameless && !(has_menu && hybrid) {
             if let Some(picker) = state.game_picker.as_ref() {
-                let theme_bg = state.colors.theme.get("transcript").style;
-                // SQ-0510 (reopened): ink+page resolve as a matched PAIR from one
-                // source — the theme (only when it gives BOTH channels), else the
-                // OSC-probed terminal pair (both channels), else the fallback pair.
-                // Never mix a themed ink with a page from another source.
-                let (default_fg, default_bg) =
-                    v6_default_pair(theme_bg, state.term_default_colors.fg, state.term_default_colors.bg);
+                let (default_fg, default_bg) = v6_host_pair(state);
                 use crate::render::v6_layout as v6;
                 let native = v6::native_extent(items);
                 let layout = v6::classify_windows(items);
@@ -531,6 +525,21 @@ fn render_node(
                 // bands. Needs a story window; without one, fall through to raster.
                 if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
                     if let Some(story) = layout.story {
+                        // SQ-0532 wave-5: a game that set its own story page presents
+                        // on a FULL page — Zork Zero boots `set_colour(fg=2 black,
+                        // bg=9 white)` and the DOS original's white runs edge to edge:
+                        // behind the frame art, through the chrome band surrounds, out
+                        // into the letterbox margins. Flood the whole pane with it
+                        // before the ring and viewport draw over it (the ring's clear
+                        // pixels then show the page, not the theme backdrop). Strictly
+                        // gated on the story window's EXPLICIT bg, so a game that sets
+                        // none — Journey's black picture panel, Arthur, Shogun's
+                        // gameplay screen — keeps today's theme backdrop, as does
+                        // `honor_game_colours = false` (the window's bg stays
+                        // `Default`, so `story_bg_rgba` is `None`).
+                        if let Some(p) = v6::story_bg_rgba(Some(story), &state.colors) {
+                            fill_pane_page(area, p, buf);
+                        }
                         let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
                         let fs = picker.font_size();
                         let cell_px = (fs.width, fs.height);
@@ -858,73 +867,26 @@ fn render_node(
                 // it matches the last-ready encode we reuse the uploaded protocol
                 // and republish the cached scroll metrics — no rebuild, no hash.
                 let gen = v6_raster_gen(items, state, area, picker);
+                // The game's own page, when it set one (SQ-0532 wave-5). Resolved out
+                // here — not inside the gate — because the pane fill below runs on
+                // every frame, not just the frames that rebuild the canvas.
+                let game_page = v6::story_bg_rgba(layout.story, &state.colors);
                 if state.graphics_render.borrow().v6_wants_build(gen, area) {
-                    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
-                    // The raster page (SQ-0510). A game-set story-window colour
-                    // (`set_colour`) wins; otherwise the paired default page.
-                    let page = v6::story_bg_rgba(layout.story, &state.colors).unwrap_or(default_bg);
-                    let mut raster_metrics: Option<RasterMetrics> = None;
-                    if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
-                        // Paint the story page opaque (SQ-0510, reopened). Leaving it
-                        // transparent let whoever composites the image pick the colour
-                        // instead of us. `story_clear_native` has already inset past any
-                        // bordering frame art, and `flatten_onto_page` below covers the
-                        // degenerate case where that inset leaves nothing; inline-image
-                        // floats redraw on top in `draw_story_text`. So no artwork is
-                        // covered.
-                        v6::fill_cell(&mut canvas, sx, sy, sw, sh, page);
-                        // Window-0 inline pictures (drop-caps, room icons) arrive as
-                        // transcript-anchored floats (`transcript_images` sidecar):
-                        // build_main_text wraps text beside them and draw_story_text
-                        // blits each at its anchored row — they scroll with the text.
-                        // Non-square 8×16 v6 cell (SQ-0479): columns divide the
-                        // clear width by FONT_W(8), rows the height by FONT_H(16).
-                        let cols = (sw / 8).max(1) as u16;
-                        let rows = (sh / 16).max(1) as u16;
-                        let (main, rm) = build_main_text(state, cols, rows);
-                        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, default_fg);
-                        // [more] pager indicator (SQ-0455): when a single turn's output
-                        // overflowed the story box the shared pager (SQ-0404) parks the
-                        // scroll and shows a `[more]` prompt. The raster path can't reserve
-                        // a terminal row, so draw the prompt as a text run bottom-right of
-                        // the story box, themed via the `more_prompt` selector (drawn as a
-                        // reverse-video block, matching the terminal bar).
-                        if state.pager.active {
-                            let mp = state.colors.theme.get("more_prompt").style;
-                            // Reverse-video: block = default ink, text = default page.
-                            // Resolved as a PAIR from one source (theme both / OSC both
-                            // / fallback), so the block and its ink never mix sources.
-                            let (block, ink) =
-                                v6_default_pair(mp, state.term_default_colors.fg, state.term_default_colors.bg);
-                            let label = "[more]";
-                            let n = label.chars().count() as u32;
-                            let last_row = rows.saturating_sub(1) as u32;
-                            let start_col = (cols as u32).saturating_sub(n);
-                            for (i, ch) in label.chars().enumerate() {
-                                // 8×16 cell: X by FONT_W(8), Y by FONT_H(16).
-                                crate::render::bitfont::blit_glyph(
-                                    &mut canvas, ch, sx + (start_col + i as u32) * 8, sy + last_row * 16, 8, 16, ink, Some(block),
-                                );
-                            }
-                        }
-                        raster_metrics = Some(rm);
-                    }
-                    // Every layer has now drawn. Raster mode ships the WHOLE canvas as
-                    // one image, so any pixel still fully transparent would be resolved
-                    // by the compositor, not by us — kitty keeps the alpha and lets the
-                    // terminal decide, halfblocks flattens an untouched cell's
-                    // `Color::Reset` to WHITE. Paint those leftovers (the letterbox
-                    // margins around the frame art, and the story interior itself if a
-                    // full-bleed background tint inset `story_clear_native` to nothing)
-                    // with the same page, so the composite is self-contained and looks
-                    // identical on every protocol/terminal. Touches alpha==0 pixels
-                    // ONLY — art, status bands, glyphs and drop-caps are all opaque and
-                    // are left byte-for-byte alone. (SQ-0510)
-                    v6::flatten_onto_page(&mut canvas, page);
+                    let (canvas, raster_metrics) = build_v6_raster_canvas(&layout, native, state);
                     // Cache the fresh metrics for skipped frames, then hand the
                     // built canvas to the off-thread resize+encode worker.
                     state.v6_raster_metrics.set(raster_metrics);
                     state.graphics_render.borrow_mut().spawn_v6_encode(picker, canvas, gen, area);
+                }
+                // SQ-0532 wave-5: the game's own page runs to the pane EDGE. The
+                // composite is drawn letterboxed inside the pane, so the margins
+                // around it are ordinary terminal cells — with a game-set page they
+                // must carry it too, or a white-page game (Zork Zero) floats its
+                // white frame on the dark theme backdrop. A game that sets no page
+                // (Journey, Arthur, Shogun) — and `honor_game_colours = false`,
+                // where the window's bg stays `Default` — keeps the theme backdrop.
+                if let Some(p) = game_page {
+                    fill_pane_page(area, p, buf);
                 }
                 // Draw the last-ready encode (this frame's, or the previous one
                 // until the worker lands — never blanks to avoid flicker).
@@ -1411,6 +1373,130 @@ fn v6_default_pair(
         return (fg, bg);
     }
     (RASTER_FALLBACK_INK, RASTER_FALLBACK_PAGE)
+}
+
+/// The HOST's resolved default `(ink, page)` pair for the v6 pixel paths — the
+/// transcript theme layered over the OSC probe over the fallback, via
+/// [`v6_default_pair`]. One function so the hybrid ring, the raster canvas and
+/// the tests can never resolve it differently.
+pub fn v6_host_pair(state: &AppState) -> (image::Rgba<u8>, image::Rgba<u8>) {
+    v6_default_pair(
+        state.colors.theme.get("transcript").style,
+        state.term_default_colors.fg,
+        state.term_default_colors.bg,
+    )
+}
+
+/// Build the v6 RASTER composite for one frame, in the game's native pixel space:
+/// the chrome art, the story page, the wrapped story text in the game's own ink,
+/// its inline floats (drop-caps, room icons), the `[more]` prompt — then flattened
+/// onto the page so the shipped image is self-contained. Returns the canvas and
+/// the story scroll/pager metrics (`None` when there is no story window).
+///
+/// Public so a test can assert on the EXACT pixels the render composites (a glyph's
+/// ink, the page beneath it, a drop-cap's art) instead of re-implementing the
+/// pipeline and pinning the re-implementation. (SQ-0532 wave-5)
+pub fn build_v6_raster_canvas(
+    layout: &crate::render::v6_layout::V6Layout<'_>,
+    native: (u16, u16),
+    state: &AppState,
+) -> (image::RgbaImage, Option<RasterMetrics>) {
+    use crate::render::v6_layout as v6;
+    let (default_fg, default_bg) = v6_host_pair(state);
+    // The story PAIR (SQ-0510, extended in SQ-0532 wave-5): a game-set
+    // story-window colour (`set_colour`) wins per channel, else the paired
+    // host default. Zork Zero boots `set_colour(fg=2, bg=9)`, so taking its
+    // white page while rasterizing the prose in the host's own light default
+    // ink drew white-on-white — unreadable. The window's explicit fg wins over
+    // `default_fg` exactly as its bg wins over `default_bg`.
+    let game_page = v6::story_bg_rgba(layout.story, &state.colors);
+    let game_ink = v6::story_fg_rgba(layout.story, &state.colors);
+    let page = game_page.unwrap_or(default_bg);
+    let ink = game_ink.unwrap_or(default_fg);
+    let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+    let mut raster_metrics: Option<RasterMetrics> = None;
+    if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
+        // Paint the story page opaque (SQ-0510, reopened). Leaving it
+        // transparent let whoever composites the image pick the colour
+        // instead of us. `story_clear_native` has already inset past any
+        // bordering frame art, and `flatten_onto_page` below covers the
+        // degenerate case where that inset leaves nothing; inline-image
+        // floats redraw on top in `draw_story_text`. So no artwork is covered.
+        v6::fill_cell(&mut canvas, sx, sy, sw, sh, page);
+        // Window-0 inline pictures (drop-caps, room icons) arrive as
+        // transcript-anchored floats (`transcript_images` sidecar):
+        // build_main_text wraps text beside them and draw_story_text
+        // blits each at its anchored row — they scroll with the text.
+        // Non-square 8×16 v6 cell (SQ-0479): columns divide the
+        // clear width by FONT_W(8), rows the height by FONT_H(16).
+        let cols = (sw / 8).max(1) as u16;
+        let rows = (sh / 16).max(1) as u16;
+        let (main, rm) = build_main_text(state, cols, rows);
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink);
+        // [more] pager indicator (SQ-0455): when a single turn's output
+        // overflowed the story box the shared pager (SQ-0404) parks the
+        // scroll and shows a `[more]` prompt. The raster path can't reserve
+        // a terminal row, so draw the prompt as a text run bottom-right of
+        // the story box, themed via the `more_prompt` selector (drawn as a
+        // reverse-video block, matching the terminal bar).
+        if state.pager.active {
+            let mp = state.colors.theme.get("more_prompt").style;
+            // Reverse-video against whatever the story page/ink actually ARE.
+            // When the game set its own pair (Zork Zero's black on white) the
+            // prompt must reverse THAT pair, or a themed block resolved from an
+            // unrelated source lands as (say) white on white on the game's page.
+            // With no game pair the themed `more_prompt` selector still governs,
+            // resolved as a PAIR from one source (theme both / OSC both /
+            // fallback) so the block and its ink never mix sources.
+            let (block, prompt_ink) = match (game_page, game_ink) {
+                (Some(p), Some(i)) => (i, p),
+                _ => v6_default_pair(mp, state.term_default_colors.fg, state.term_default_colors.bg),
+            };
+            let label = "[more]";
+            let n = label.chars().count() as u32;
+            let last_row = rows.saturating_sub(1) as u32;
+            let start_col = (cols as u32).saturating_sub(n);
+            for (i, ch) in label.chars().enumerate() {
+                // 8×16 cell: X by FONT_W(8), Y by FONT_H(16).
+                crate::render::bitfont::blit_glyph(
+                    &mut canvas, ch, sx + (start_col + i as u32) * 8, sy + last_row * 16, 8, 16, prompt_ink, Some(block),
+                );
+            }
+        }
+        raster_metrics = Some(rm);
+    }
+    // Every layer has now drawn. Raster mode ships the WHOLE canvas as
+    // one image, so any pixel still fully transparent would be resolved
+    // by the compositor, not by us — kitty keeps the alpha and lets the
+    // terminal decide, halfblocks flattens an untouched cell's
+    // `Color::Reset` to WHITE. Paint those leftovers (the letterbox
+    // margins around the frame art, and the story interior itself if a
+    // full-bleed background tint inset `story_clear_native` to nothing)
+    // with the same page, so the composite is self-contained and looks
+    // identical on every protocol/terminal. Touches alpha==0 pixels
+    // ONLY — art, status bands, glyphs and drop-caps are all opaque and
+    // are left byte-for-byte alone. (SQ-0510)
+    v6::flatten_onto_page(&mut canvas, page);
+    (canvas, raster_metrics)
+}
+
+/// Flood every cell of `area` with an opaque game page colour (SQ-0532 wave-5).
+///
+/// Used by the two v6 pixel modes when the story window carries an EXPLICIT
+/// background: the game's page is the whole screen's page, so the pane must show
+/// it everywhere the scaled composite doesn't reach (letterbox margins) and
+/// everywhere the composite is transparent (the chrome ring's clear pixels).
+/// Drawn first, so the ring, the story viewport and the raster image all paint
+/// over it.
+fn fill_pane_page(area: Rect, page: image::Rgba<u8>, buf: &mut Buffer) {
+    let style = ratatui::style::Style::new().bg(ratatui::style::Color::Rgb(page[0], page[1], page[2]));
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(" ").set_style(style);
+            }
+        }
+    }
 }
 
 /// A cheap change key for the whole v6 raster composite (SQ-0469). It folds
