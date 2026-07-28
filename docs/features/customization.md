@@ -261,8 +261,10 @@ re-seed the new template, or hand-write the new shape from
   entirely and shows the story as a normal full-pane terminal transcript (full
   size, native scrollback) with a compact status band and inline pictures — the
   most legible mode, at the cost of the compass and border art. It also cycles
-  in the settings screen. (Applies only to graphical v6 stories; other games are
-  unaffected.) See [Graphical v6](v6-graphics.md) for the full picture.
+  in the settings screen, and `/set-v6-render` switches modes live mid-game
+  (session-only) for quick comparisons. (Applies only to graphical v6 stories;
+  other games are unaffected.) See [Graphical v6](v6-graphics.md) for the full
+  picture.
 - **v6 arrow keys** — `v6_arrow_keys` (default `true`) controls whether arrow
   keypresses are forwarded to a v6 story as movement input; set it `false` (in
   config.toml or the settings screen) to withhold them so arrows drive babelmap's own

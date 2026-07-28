@@ -52,7 +52,9 @@ classification (which is pure ratios) lands exactly where it did before.
 
 Set `v6_render` in the config (or cycle it from the settings screen) to pick
 how a v6 story's pane is drawn on an image-capable terminal (Kitty, iTerm2, or
-Sixel):
+Sixel). Want to compare looks mid-game? `/set-v6-render` hops to the next mode
+on the spot (or jumps straight to one: `/set-v6-render raster`) — a
+session-only switch that never touches your saved config:
 
 - **`hybrid`** (the default) — the decorative chrome (banner, borders, the
   compass) renders as a single scaled pixel image forming a **ring** around an

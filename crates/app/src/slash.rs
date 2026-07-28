@@ -92,6 +92,10 @@ pub enum SlashOutcome {
     /// Toggle debug-trace sections: `None` shows current state; `Some(list)` sets
     /// the active set (comma list of screen,map,hostio / all / none). (trace feature)
     Trace(Option<String>),
+    /// Switch the v6 render mode live for this session (`Some`) or cycle to the
+    /// next mode (`None` = bare). Session-only — the config screen persists.
+    /// Handled in `slash_dispatch` (mutates `state.config.v6_render`).
+    SetV6Render(Option<crate::config::V6RenderMode>),
 }
 
 // ── TranscriptFilterArg ───────────────────────────────────────────────────────
@@ -391,6 +395,18 @@ pub static COMMANDS: &[CommandSpec] = &[
             Some("off")  => SlashOutcome::SetGameColours(Some(false)),
             Some("auto") => SlashOutcome::SetGameColours(None),
             _ => err("set-game-colours requires an argument: on | off | auto"),
+        } },
+    CommandSpec { name: "set-v6-render", category: Category::Style, context: Context::Global,
+        usage: "set-v6-render [hybrid|raster|frameless]", description: "switch the v6 render mode live — bare cycles to the next mode; session-only (the settings screen persists)",
+        dispatch: |a| {
+            use crate::config::V6RenderMode;
+            match a.first().copied() {
+                None => SlashOutcome::SetV6Render(None),
+                Some("hybrid")    => SlashOutcome::SetV6Render(Some(V6RenderMode::Hybrid)),
+                Some("raster")    => SlashOutcome::SetV6Render(Some(V6RenderMode::Raster)),
+                Some("frameless") => SlashOutcome::SetV6Render(Some(V6RenderMode::Frameless)),
+                Some(s) => err(format!("set-v6-render: unknown mode '{s}' (hybrid | raster | frameless, or bare to cycle)")),
+            }
         } },
     CommandSpec { name: "set-game-borders", category: Category::Style, context: Context::Global,
         usage: "set-game-borders on|off|auto", description: "show this game's Glk window borders (on), or render borderless/abutting (off); auto = default (on); persisted per-game",
@@ -744,13 +760,14 @@ mod tests {
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
         // Total count matches the spec table (Game 12, Map 20, View 6,
-        // Transcript 3, Style 6, Export 3, Animation 4, Help 3). `open-saves`
+        // Transcript 3, Style 7, Export 3, Animation 4, Help 3). `open-saves`
         // was removed — `restore-state` (bare) opens the saves dialog instead.
         // `debug` (SQ-0169) opens the Z-machine debug inspector. `open-gallery`
         // and `open-style-editor` were removed (SQ-0309): the interactive
         // gallery/style-editor UIs are gone; `reload-style` remains.
         // `quit-to-library` (SQ-0435) exits to the story picker.
-        assert_eq!(COMMANDS.len(), 59, "registry must match the spec's Full command table");
+        // `set-v6-render` switches/cycles the v6 render mode live.
+        assert_eq!(COMMANDS.len(), 60, "registry must match the spec's Full command table");
     }
 
     #[test]
@@ -848,6 +865,17 @@ mod tests {
         assert!(matches!(parse("set-game-borders", '/'), SlashOutcome::Error(_)));
         assert!(matches!(parse("set-game-borders maybe", '/'), SlashOutcome::Error(_)));
         assert_eq!(find_command("set-game-borders").expect("set-game-borders").category, Category::Style);
+    }
+
+    #[test]
+    fn set_v6_render_parses_modes_and_bare_cycles() {
+        use crate::config::V6RenderMode;
+        assert!(matches!(parse("set-v6-render hybrid", '/'), SlashOutcome::SetV6Render(Some(V6RenderMode::Hybrid))));
+        assert!(matches!(parse("set-v6-render raster", '/'), SlashOutcome::SetV6Render(Some(V6RenderMode::Raster))));
+        assert!(matches!(parse("set-v6-render frameless", '/'), SlashOutcome::SetV6Render(Some(V6RenderMode::Frameless))));
+        assert!(matches!(parse("set-v6-render", '/'), SlashOutcome::SetV6Render(None)));
+        assert!(matches!(parse("set-v6-render sepia", '/'), SlashOutcome::Error(_)));
+        assert_eq!(find_command("set-v6-render").expect("set-v6-render").category, Category::Style);
     }
 
     #[test]
