@@ -708,7 +708,13 @@ pub fn glk_mouse_target(
         .find(|&(_, _, r)| sx >= r.left && sx < r.left + r.width && sy >= r.top && sy < r.top + r.height)?;
     let (rel_x, rel_y) = (sx - rect.left, sy - rect.top);
     let (vx, vy) = if wintype == WinType::Graphics {
-        (rel_x * char_px.0, rel_y * char_px.1)
+        // Report the CENTRE of the clicked cell in window pixels: the player
+        // aimed at the middle of what the cell shows, and a top-left corner
+        // could land one button to the left/above on a packed toolbar
+        // (advent.blb, SQ-0520). The kitty render scales the canvas to exactly
+        // the window's cell rect (`render_kitty_virtual`), so cells and canvas
+        // pixels stay in proportion.
+        (rel_x * char_px.0 + char_px.0 / 2, rel_y * char_px.1 + char_px.1 / 2)
     } else {
         (rel_x, rel_y)
     };
@@ -1969,9 +1975,10 @@ mod tests {
         // A graphics window offset within the pane at rect(4, 1, 20, 10).
         let windows = [(5u32, WinType::Graphics, GlkRect { left: 4, top: 1, width: 20, height: 10 })];
         // Story pane at origin (0,0); click at (6, 3) → story cell (6,3) →
-        // window-relative (2, 2) → pixels (2×9, 2×19) = (18, 38).
+        // window-relative (2, 2) → CELL-CENTRE pixels (2×9+4, 2×19+9) = (22, 47)
+        // (SQ-0520: centre, not top-left, so packed toolbar buttons hit true).
         let got = super::glk_mouse_target(false, 6, 3, (0, 0, 80, 24), &windows, (9, 19));
-        assert_eq!(got, Some((5, 18, 38)), "graphics reports pixels (rel cells × char_px)");
+        assert_eq!(got, Some((5, 22, 47)), "graphics reports cell-centre pixels");
     }
 
     #[test]

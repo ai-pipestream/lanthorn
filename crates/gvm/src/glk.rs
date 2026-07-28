@@ -715,6 +715,10 @@ pub struct TestBackend {
     /// Resnums that simulate a missing/undecodable image (draw reports false,
     /// nothing recorded).
     missing_images: BTreeSet<u32>,
+    /// Canned pixel dimensions per image resnum, served by
+    /// [`GlkBackend::image_info`] (`glk_image_get_info`). Resnums not present
+    /// report `None` (image unknown), the trait default.
+    image_infos: BTreeMap<u32, (u32, u32)>,
     /// Last background color set per graphics window.
     backgrounds: BTreeMap<u32, u32>,
     /// Next schannel ref to hand out (pre-incremented; first create → 1).
@@ -756,6 +760,7 @@ impl TestBackend {
             fills: BTreeMap::new(),
             draws: BTreeMap::new(),
             missing_images: BTreeSet::new(),
+            image_infos: BTreeMap::new(),
             backgrounds: BTreeMap::new(),
             next_schannel: 0,
             schannel_rocks: BTreeMap::new(),
@@ -778,6 +783,12 @@ impl TestBackend {
     /// false for it and records nothing.
     pub fn with_missing_image(mut self, resnum: u32) -> Self {
         self.missing_images.insert(resnum);
+        self
+    }
+    /// Register image `resnum` as existing with the given pixel dimensions, so
+    /// `glk_image_get_info` succeeds for it (games size toolbars/frames from it).
+    pub fn with_image_info(mut self, resnum: u32, w: u32, h: u32) -> Self {
+        self.image_infos.insert(resnum, (w, h));
         self
     }
     /// Register a canned Blorb `Data` resource (`num` → `(bytes, is_text)`) that
@@ -949,6 +960,9 @@ impl GlkBackend for TestBackend {
         }
         self.draws.entry(win).or_default().push((resnum, x, y, scale));
         true
+    }
+    fn image_info(&mut self, resnum: u32) -> Option<(u32, u32)> {
+        self.image_infos.get(&resnum).copied()
     }
     fn schannel_create(&mut self, rock: u32) -> u32 {
         self.next_schannel += 1;

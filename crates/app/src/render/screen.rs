@@ -471,7 +471,9 @@ fn render_node(
             } else if let Some(picker) = state.game_picker.as_ref() {
                 state.graphics_render.borrow_mut().render(picker, gw, area, state.colors.theme.get("graphics").style, buf);
             } else {
-                fill(area, buf, &state.colors);
+                // No image protocol: approximate the detailed canvas as colour
+                // cells rather than blanking it (SQ-0520).
+                crate::render::graphics::render_graphics_as_cells(gw, area, buf, true);
             }
             None
         }

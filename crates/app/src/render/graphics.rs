@@ -86,11 +86,33 @@ pub fn render_graphics_as_cells(gw: &GraphicsWindow, area: Rect, buf: &mut Buffe
     // Handle a thin strip (a rule/divider) or a solid uniform fill as cells;
     // otherwise leave it to the image protocol. The uniform scan short-circuits on
     // the first differing/transparent cell, so a detailed image bails fast.
+    //
+    // A thin window is a RULE only when every opaque cell agrees on one colour
+    // (gaps allowed — a partial-length rule). A DETAILED thin canvas — advent.blb's
+    // clickable toolbar lands at 2 cells tall — is an image, not a divider:
+    // averaging it into ─ glyphs shredded it into "two thin strips of pixels"
+    // while the real icons never reached the image protocol. (SQ-0520)
     let thin = area.width.min(area.height) <= 2;
     let first = cell_color(0, 0);
     let uniform = first.is_some()
         && (0..area.height).all(|cy| (0..area.width).all(|cx| cell_color(cx, cy).is_some_and(|c| close(c, first.unwrap()))));
-    if !(force || thin || uniform) {
+    let rule_like = thin && {
+        // All opaque cells close to the first opaque cell's colour.
+        let mut reference: Option<image::Rgba<u8>> = None;
+        (0..area.height).all(|cy| {
+            (0..area.width).all(|cx| match cell_color(cx, cy) {
+                None => true,
+                Some(c) => match reference {
+                    None => {
+                        reference = Some(c);
+                        true
+                    }
+                    Some(r) => close(c, r),
+                },
+            })
+        })
+    };
+    if !(force || rule_like || uniform) {
         return false;
     }
     // A window ≤2 cells in one dimension IS a rule/divider (Kerkerkruip's panel
@@ -241,6 +263,24 @@ pub struct GraphicsRender {
     /// content + scale + scaled dimensions; each band crops its sub-rect from it,
     /// so band output stays byte-identical to a per-band whole-canvas resize.
     chrome_scaled: Option<(u64, image::RgbaImage)>,
+    /// Kitty-protocol graphics windows: one transmitted image per window,
+    /// placed with an EXPLICIT r×c grid so the terminal scales the canvas to
+    /// exactly the window's cell rect (SQ-0520 — see `render_kitty_virtual`).
+    kitty_wins: std::collections::HashMap<u32, KittyWindowImage>,
+    /// Monotonic id source for `kitty_wins` (offset into a private id range).
+    next_kitty_id: u32,
+}
+
+/// One transmitted kitty image backing a graphics window (SQ-0520).
+struct KittyWindowImage {
+    version: u64,
+    w: u16,
+    h: u16,
+    id: u32,
+    /// The transmit escape (plus a delete of the id it replaces), prepended to
+    /// the first placeholder row of the next emitted frame, then dropped — the
+    /// terminal keeps the image by id after that.
+    pending_transmit: Option<String>,
 }
 
 impl std::fmt::Debug for GraphicsRender {
@@ -261,6 +301,17 @@ impl GraphicsRender {
                     c.set_symbol(" ").set_style(letterbox);
                 }
             }
+        }
+        // Kitty terminals: place the canvas ourselves with an explicit r×c grid,
+        // so the terminal scales it to exactly the window's cell rect. The
+        // ratatui-image placement omits r/c, leaving the on-screen extent up to
+        // the terminal's own cell-pixel accounting — on displays where images
+        // render at device pixels but cell metrics report logical points
+        // (Ghostty/macOS 2×), the image covered only part of the window and
+        // mouse clicks mapped to the wrong game pixels. (SQ-0520)
+        if picker.protocol_type() == ratatui_image::picker::ProtocolType::Kitty {
+            self.render_kitty_virtual(gw, area, buf);
+            return;
         }
         let fresh = matches!(self.cache.get(&gw.win),
             Some((v, w, h, _)) if *v == gw.version && *w == area.width && *h == area.height);
@@ -287,6 +338,51 @@ impl GraphicsRender {
     /// Drop cache entries for windows no longer live (evicts on close; bounds growth).
     pub fn retain_live(&mut self, live: &std::collections::HashSet<u32>) {
         self.cache.retain(|win, _| live.contains(win));
+        self.kitty_wins.retain(|win, _| live.contains(win));
+    }
+
+    /// Render a graphics window's canvas through kitty unicode placeholders
+    /// with an EXPLICIT `r×c` grid on the virtual placement (SQ-0520): the
+    /// terminal scales the image to exactly the placeholder rect, so the
+    /// visible image always fills the window's cells — independent of any
+    /// logical-vs-device pixel mismatch — and the cell→game-pixel mouse
+    /// mapping in `glk_mouse_target` stays truthful.
+    ///
+    /// The image is transmitted once per (canvas version, area size); a
+    /// replaced transmission deletes its predecessor's id so a game that
+    /// repaints every turn (advent.blb's toolbar) doesn't accumulate dead
+    /// images in the terminal. Placeholder cells are re-written every frame
+    /// (identical content, so the terminal diff drops them when unchanged).
+    fn render_kitty_virtual(&mut self, gw: &GraphicsWindow, area: Rect, buf: &mut Buffer) {
+        use std::fmt::Write as _;
+        let fresh = matches!(self.kitty_wins.get(&gw.win),
+            Some(e) if e.version == gw.version && e.w == area.width && e.h == area.height);
+        if !fresh {
+            let old_id = self.kitty_wins.get(&gw.win).map(|e| e.id);
+            // Private id range, disjoint from ratatui-image's random ids in
+            // practice; top byte stays 0 so the id_extra diacritic is 0.
+            self.next_kitty_id = self.next_kitty_id.wrapping_add(1) & 0x000F_FFFF;
+            let id = 0x00B0_0000 | self.next_kitty_id;
+            let mut transmit = String::new();
+            if let Some(old) = old_id {
+                // d=I frees the replaced image's data and placements.
+                write!(transmit, "\x1b_Gq=2,a=d,d=I,i={old}\x1b\\").unwrap();
+            }
+            transmit.push_str(&kitty_transmit_virtual(&gw.canvas, id, area.height, area.width));
+            self.kitty_wins.insert(
+                gw.win,
+                KittyWindowImage {
+                    version: gw.version,
+                    w: area.width,
+                    h: area.height,
+                    id,
+                    pending_transmit: Some(transmit),
+                },
+            );
+        }
+        let entry = self.kitty_wins.get_mut(&gw.win).expect("inserted above");
+        let transmit = entry.pending_transmit.take();
+        kitty_place_rows(entry.id, transmit.as_deref(), area, buf);
     }
 
     /// Resize + encode a native v6 canvas into a terminal image protocol,
@@ -696,6 +792,116 @@ impl GraphicsRender {
     }
 }
 
+// ── Kitty virtual-placement emission (SQ-0520) ────────────────────────────────
+
+/// The kitty row/column placeholder diacritics (first 140 of kitty's 297-entry
+/// rowcolumn-diacritics.txt). Only explicit indices need the table: rows use
+/// one entry each (emission caps at 140 rows — far above any real graphics
+/// window) and columns after the first are bare placeholders whose position the
+/// terminal infers.
+const KITTY_DIACRITICS: [char; 140] = [
+    '\u{305}', '\u{30D}', '\u{30E}', '\u{310}', '\u{312}', '\u{33D}', '\u{33E}', '\u{33F}',
+    '\u{346}', '\u{34A}', '\u{34B}', '\u{34C}', '\u{350}', '\u{351}', '\u{352}', '\u{357}',
+    '\u{35B}', '\u{363}', '\u{364}', '\u{365}', '\u{366}', '\u{367}', '\u{368}', '\u{369}',
+    '\u{36A}', '\u{36B}', '\u{36C}', '\u{36D}', '\u{36E}', '\u{36F}', '\u{483}', '\u{484}',
+    '\u{485}', '\u{486}', '\u{487}', '\u{592}', '\u{593}', '\u{594}', '\u{595}', '\u{597}',
+    '\u{598}', '\u{599}', '\u{59C}', '\u{59D}', '\u{59E}', '\u{59F}', '\u{5A0}', '\u{5A1}',
+    '\u{5A8}', '\u{5A9}', '\u{5AB}', '\u{5AC}', '\u{5AF}', '\u{5C4}', '\u{610}', '\u{611}',
+    '\u{612}', '\u{613}', '\u{614}', '\u{615}', '\u{616}', '\u{617}', '\u{657}', '\u{658}',
+    '\u{659}', '\u{65A}', '\u{65B}', '\u{65D}', '\u{65E}', '\u{6D6}', '\u{6D7}', '\u{6D8}',
+    '\u{6D9}', '\u{6DA}', '\u{6DB}', '\u{6DC}', '\u{6DF}', '\u{6E0}', '\u{6E1}', '\u{6E2}',
+    '\u{6E4}', '\u{6E7}', '\u{6E8}', '\u{6EB}', '\u{6EC}', '\u{730}', '\u{732}', '\u{733}',
+    '\u{735}', '\u{736}', '\u{73A}', '\u{73D}', '\u{73F}', '\u{740}', '\u{741}', '\u{743}',
+    '\u{745}', '\u{747}', '\u{749}', '\u{74A}', '\u{7EB}', '\u{7EC}', '\u{7ED}', '\u{7EE}',
+    '\u{7EF}', '\u{7F0}', '\u{7F1}', '\u{7F3}', '\u{816}', '\u{817}', '\u{818}', '\u{819}',
+    '\u{81B}', '\u{81C}', '\u{81D}', '\u{81E}', '\u{81F}', '\u{820}', '\u{821}', '\u{822}',
+    '\u{823}', '\u{825}', '\u{826}', '\u{827}', '\u{829}', '\u{82A}', '\u{82B}', '\u{82C}',
+    '\u{82D}', '\u{951}', '\u{953}', '\u{954}', '\u{F82}', '\u{F83}', '\u{F86}', '\u{F87}',
+    '\u{135D}', '\u{135E}', '\u{135F}', '\u{17DD}',
+];
+
+/// Plain-Rust base64 (standard alphabet, padded) — only used for kitty image
+/// transmission, so no dependency is worth it.
+fn kitty_b64(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for c in data.chunks(3) {
+        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        out.push(T[(n >> 18) as usize & 63] as char);
+        out.push(T[(n >> 12) as usize & 63] as char);
+        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
+/// The kitty transmit sequence for `canvas` as image `id`: a VIRTUAL placement
+/// (`U=1`) declaring an explicit `r×c` grid, so the terminal scales the image
+/// to exactly the placeholder rect (SQ-0520). RGBA chunked per the protocol's
+/// 4096-encoded-byte limit. (No tmux passthrough — matches the app's existing
+/// kitty support, which targets direct terminals.)
+fn kitty_transmit_virtual(canvas: &image::RgbaImage, id: u32, rows: u16, cols: u16) -> String {
+    use std::fmt::Write as _;
+    let (w, h) = (canvas.width(), canvas.height());
+    let bytes = canvas.as_raw();
+    let chunks: Vec<&[u8]> = bytes.chunks(3072).collect();
+    let n = chunks.len();
+    let mut out = String::with_capacity(bytes.len() / 3 * 4 + n * 24);
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let more = u8::from(i + 1 < n);
+        if i == 0 {
+            write!(out, "\x1b_Gq=2,i={id},a=T,U=1,f=32,t=d,s={w},v={h},r={rows},c={cols},m={more};").unwrap();
+        } else {
+            write!(out, "\x1b_Gq=2,m={more};").unwrap();
+        }
+        out.push_str(&kitty_b64(chunk));
+        out.push_str("\x1b\\");
+    }
+    out
+}
+
+/// Write the placeholder rows for image `id` into `buf` over `area`, in the
+/// same cell shape ratatui-image uses: the whole row's escape string lives in
+/// the row's first cell (forced width 1) and the remaining cells are marked
+/// Skip so the diff never overwrites the placeholders. `transmit` (first frame
+/// after an encode) is prepended to the first row.
+fn kitty_place_rows(id: u32, transmit: Option<&str>, area: Rect, buf: &mut Buffer) {
+    use ratatui::buffer::CellDiffOption;
+    use std::fmt::Write as _;
+    let [_, id_r, id_g, id_b] = id.to_be_bytes();
+    // Restore the cursor saved at the row start, then park it at the area's
+    // far corner so the terminal's cursor stays inside the drawn region.
+    let (right, down) = (area.width - 1, area.height - 1);
+    let rows = area.height.min(KITTY_DIACRITICS.len() as u16);
+    let mut transmit = transmit;
+    for y in 0..rows {
+        let mut symbol = String::new();
+        if let Some(seq) = transmit.take() {
+            symbol.push_str(seq);
+        }
+        write!(
+            symbol,
+            "\x1b[s\x1b[38;2;{id_r};{id_g};{id_b}m\u{10EEEE}{}{}{}",
+            KITTY_DIACRITICS[y as usize], KITTY_DIACRITICS[0], KITTY_DIACRITICS[0]
+        )
+        .unwrap();
+        for _ in 1..area.width {
+            symbol.push('\u{10EEEE}');
+        }
+        write!(symbol, "\x1b[u\x1b[{right}C\x1b[{down}B").unwrap();
+        for x in 1..area.width {
+            if let Some(cell) = buf.cell_mut((area.left() + x, area.top() + y)) {
+                cell.set_diff_option(CellDiffOption::Skip);
+            }
+        }
+        if let Some(cell) = buf.cell_mut((area.left(), area.top() + y)) {
+            cell.set_symbol(&symbol)
+                .set_diff_option(CellDiffOption::ForcedWidth(std::num::NonZeroU16::new(1).unwrap()));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -847,6 +1053,79 @@ mod tests {
         let mut buf = Buffer::empty(area);
         assert!(render_graphics_as_cells(&gw, area, &mut buf, false));
         assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "\u{2502}", "sparse vertical rule → │ glyph");
+    }
+
+    #[test]
+    fn kitty_graphics_place_with_explicit_grid_and_transmit_once() {
+        // SQ-0520: on a kitty terminal a graphics window transmits its canvas as
+        // a virtual placement with an EXPLICIT r×c grid (the terminal scales the
+        // image to exactly the window's cells) and re-transmits only when the
+        // canvas version or area changes — a replaced transmit deletes its
+        // predecessor's image id.
+        let mut img = image::RgbaImage::new(1104, 36);
+        for (x, _y, p) in img.enumerate_pixels_mut() {
+            *p = image::Rgba([(x % 256) as u8, 40, 200, 255]);
+        }
+        let gw = GraphicsWindow { win: 7, canvas: std::sync::Arc::new(img), version: 3, upscale: false };
+        // from_fontsize is deprecated in favor of a live stdio query, which a
+        // headless test can't do — the fixed 8×18 mirrors the SQ-0520 report.
+        #[allow(deprecated)]
+        let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(8, 18));
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+        let area = Rect::new(0, 0, 138, 2);
+        let mut gr = GraphicsRender::default();
+
+        let mut buf = Buffer::empty(area);
+        gr.render(&picker, &gw, area, Style::default(), &mut buf);
+        let first = buf.cell((0, 0)).unwrap().symbol().to_string();
+        assert!(first.contains(",r=2,c=138,"), "transmit declares the explicit cell grid");
+        assert!(first.contains("a=T,U=1,f=32"), "virtual placement transmit present");
+        assert!(first.contains('\u{10EEEE}'), "placeholder run present");
+        assert!(!first.contains("a=d"), "first transmit deletes nothing");
+        assert!(buf.cell((0, 1)).unwrap().symbol().contains('\u{10EEEE}'), "second row placed");
+
+        // Same version + area: no re-transmit, placeholders only.
+        let mut buf2 = Buffer::empty(area);
+        gr.render(&picker, &gw, area, Style::default(), &mut buf2);
+        let second = buf2.cell((0, 0)).unwrap().symbol().to_string();
+        assert!(!second.contains("a=T"), "unchanged canvas is not re-transmitted");
+        assert!(second.contains('\u{10EEEE}'), "placeholders still placed every frame");
+
+        // Version bump (the game repainted): new transmit deleting the old id.
+        let gw2 = GraphicsWindow { win: 7, canvas: gw.canvas.clone(), version: 4, upscale: false };
+        let mut buf3 = Buffer::empty(area);
+        gr.render(&picker, &gw2, area, Style::default(), &mut buf3);
+        let third = buf3.cell((0, 0)).unwrap().symbol().to_string();
+        assert!(third.contains("a=d,d=I"), "replaced image id is deleted");
+        assert!(third.contains("a=T,U=1"), "repainted canvas is re-transmitted");
+    }
+
+    #[test]
+    fn thin_but_detailed_toolbar_is_not_a_rule() {
+        // SQ-0520: advent.blb's clickable toolbar is a DETAILED graphics window
+        // that lands at 2 cells tall on common pane widths (its ~36px request /
+        // an 18px cell). The thin-strip shortcut must not claim it as a rule and
+        // paint colour-averaged ─ glyphs ("two thin strips of pixels") — a thin
+        // window whose cells disagree in colour is an image for the protocol.
+        let mut img = image::RgbaImage::new(1104, 36); // 138×2 cells at 8×18
+        for (x, _y, p) in img.enumerate_pixels_mut() {
+            // Blocks of strongly different hues, like toolbar icons.
+            *p = match (x / 48) % 4 {
+                0 => image::Rgba([200, 60, 40, 255]),
+                1 => image::Rgba([40, 160, 60, 255]),
+                2 => image::Rgba([50, 80, 200, 255]),
+                _ => image::Rgba([220, 210, 200, 255]),
+            };
+        }
+        let gw = GraphicsWindow { win: 1, canvas: std::sync::Arc::new(img), version: 1, upscale: false };
+        let area = Rect::new(0, 0, 138, 2);
+        let mut buf = Buffer::empty(area);
+        assert!(
+            !render_graphics_as_cells(&gw, area, &mut buf, false),
+            "a thin-but-detailed canvas must fall through to the image protocol"
+        );
+        // force=true (the no-picker fallback) still paints the approximation.
+        assert!(render_graphics_as_cells(&gw, area, &mut buf, true), "forced → approximated as cells");
     }
 
     #[test]
