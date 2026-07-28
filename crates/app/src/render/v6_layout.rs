@@ -272,8 +272,8 @@ pub fn classify_windows(items: &[PositionedWindow]) -> V6Layout<'_> {
 /// The story window's own background colour (set by the game via
 /// `set_colour`), resolved to an opaque RGBA for filling the story rect
 /// before floats/text. `None` when the game set no colour — the caller then
-/// leaves the rect transparent (the theme backdrop shows through, unchanged
-/// from before this colour handling existed).
+/// falls back to its resolved default page (SQ-0510); either way the rect ends
+/// up opaque, never left for a compositor to colour in.
 pub fn story_bg_rgba(story: Option<&PositionedWindow>, colors: &ColorScheme) -> Option<Rgba<u8>> {
     let WinNode::Buffer(b) = &story?.node else { return None };
     // `bg`, when `Some`, always packs a non-Default channel (see
@@ -303,6 +303,31 @@ pub(crate) fn fill_cell(canvas: &mut RgbaImage, px: u32, py: u32, cw: u32, ch: u
     for y in py..(py + ch).min(h) {
         for x in px..(px + cw).min(w) {
             canvas.put_pixel(x, y, color);
+        }
+    }
+}
+
+/// Flatten a FULLY COMPOSED raster canvas onto an opaque `page` (SQ-0510):
+/// every pixel the composite left completely transparent (`alpha == 0`) becomes
+/// `page`; every pixel any layer touched (`alpha > 0` — frame art, status bands,
+/// the story page fill, glyphs, inline drop-caps) is left exactly as it was.
+///
+/// Why: raster mode ships the whole canvas as ONE image, and a transparent pixel
+/// is then resolved by whoever composites it — not by us. The kitty encoder
+/// (`ratatui_image`'s `transmit_virtual`, `f=32`) keeps the alpha channel and
+/// lets the terminal decide; the halfblocks encoder flattens with `to_rgb8()`
+/// and maps an untouched cell's `Color::Reset` to **white**. So "transparent"
+/// renders differently per protocol and per terminal, and is never safe in
+/// raster mode. Painting the leftovers ourselves makes the composite
+/// self-contained and identical everywhere.
+///
+/// Only ever called on the raster path's finished canvas. The HYBRID path must
+/// NOT use this — there transparency is load-bearing (the chrome ring's clear
+/// middle is what lets the terminal transcript show through).
+pub(crate) fn flatten_onto_page(canvas: &mut RgbaImage, page: Rgba<u8>) {
+    for px in canvas.pixels_mut() {
+        if px[3] == 0 {
+            *px = page;
         }
     }
 }
@@ -1481,6 +1506,27 @@ mod tests {
             }
         }
         assert_eq!(canvas.get_pixel(0, 0)[3], 0, "outside the story rect stays transparent");
+    }
+
+    #[test]
+    fn flatten_onto_page_only_repaints_fully_transparent_pixels() {
+        // SQ-0510: the raster composite's leftover holes become the page, but any
+        // pixel a layer touched — however faintly — is left byte-for-byte alone,
+        // so frame art, status bands, glyphs and drop-caps can never be covered.
+        let page = Rgba([26, 26, 26, 255]);
+        let art = Rgba([102, 34, 0, 255]);
+        let faint = Rgba([1, 2, 3, 1]); // alpha 1: touched, so untouchable
+        let mut canvas = RgbaImage::new(3, 1);
+        canvas.put_pixel(0, 0, Rgba([0, 0, 0, 0])); // an untouched hole
+        canvas.put_pixel(1, 0, art);
+        canvas.put_pixel(2, 0, faint);
+
+        flatten_onto_page(&mut canvas, page);
+
+        assert_eq!(*canvas.get_pixel(0, 0), page, "a fully transparent pixel becomes the page");
+        assert_eq!(*canvas.get_pixel(1, 0), art, "an opaque art pixel is never repainted");
+        assert_eq!(*canvas.get_pixel(2, 0), faint, "even alpha==1 counts as drawn and survives");
+        assert!(canvas.pixels().all(|p| p[3] > 0), "no fully transparent pixel is left behind");
     }
 
     #[test]

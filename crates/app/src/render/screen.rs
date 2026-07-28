@@ -798,19 +798,18 @@ fn render_node(
                 let gen = v6_raster_gen(items, state, area, picker);
                 if state.graphics_render.borrow().v6_wants_build(gen, area) {
                     let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
+                    // The raster page (SQ-0510). A game-set story-window colour
+                    // (`set_colour`) wins; otherwise the paired default page.
+                    let page = v6::story_bg_rgba(layout.story, &state.colors).unwrap_or(default_bg);
                     let mut raster_metrics: Option<RasterMetrics> = None;
                     if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
-                        // Paint the story page opaque (SQ-0510, reopened). A game-set
-                        // window colour (`set_colour`) wins; otherwise the paired
-                        // default page fills the CLEAR interior. Leaving it transparent
-                        // let the graphics compositor show its own backdrop — WHITE on
-                        // the user's dark terminal — so the default ink read as
-                        // unreadable light-on-white. `story_clear_native` has already
-                        // inset past any bordering frame art (and an opaque full-bleed
-                        // background tint insets it to nothing, so that still shows
-                        // through); inline-image floats redraw on top in
-                        // `draw_story_text`. So no artwork is covered.
-                        let page = v6::story_bg_rgba(layout.story, &state.colors).unwrap_or(default_bg);
+                        // Paint the story page opaque (SQ-0510, reopened). Leaving it
+                        // transparent let whoever composites the image pick the colour
+                        // instead of us. `story_clear_native` has already inset past any
+                        // bordering frame art, and `flatten_onto_page` below covers the
+                        // degenerate case where that inset leaves nothing; inline-image
+                        // floats redraw on top in `draw_story_text`. So no artwork is
+                        // covered.
                         v6::fill_cell(&mut canvas, sx, sy, sw, sh, page);
                         // Window-0 inline pictures (drop-caps, room icons) arrive as
                         // transcript-anchored floats (`transcript_images` sidecar):
@@ -848,6 +847,18 @@ fn render_node(
                         }
                         raster_metrics = Some(rm);
                     }
+                    // Every layer has now drawn. Raster mode ships the WHOLE canvas as
+                    // one image, so any pixel still fully transparent would be resolved
+                    // by the compositor, not by us — kitty keeps the alpha and lets the
+                    // terminal decide, halfblocks flattens an untouched cell's
+                    // `Color::Reset` to WHITE. Paint those leftovers (the letterbox
+                    // margins around the frame art, and the story interior itself if a
+                    // full-bleed background tint inset `story_clear_native` to nothing)
+                    // with the same page, so the composite is self-contained and looks
+                    // identical on every protocol/terminal. Touches alpha==0 pixels
+                    // ONLY — art, status bands, glyphs and drop-caps are all opaque and
+                    // are left byte-for-byte alone. (SQ-0510)
+                    v6::flatten_onto_page(&mut canvas, page);
                     // Cache the fresh metrics for skipped frames, then hand the
                     // built canvas to the off-thread resize+encode worker.
                     state.v6_raster_metrics.set(raster_metrics);
@@ -2364,6 +2375,100 @@ mod tests {
     use crate::engine::{GridWindow, Split};
     use crate::state::StyleRun;
     use ratatui::layout::Rect;
+
+    /// Real-Zork0 raster acceptance (SQ-0510): compose the raster canvas exactly
+    /// as the raster branch does, then prove the finished image is fully opaque,
+    /// that the story page and the ink are distinct, and that not one artwork
+    /// pixel was painted over. Skips cleanly when the gitignored story is absent.
+    #[test]
+    fn zork0_raster_canvas_is_opaque_and_preserves_art() {
+        use crate::render::v6_layout as v6;
+        let story_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories/zork0-r393-s890714.z6");
+        let Ok(bytes) = std::fs::read(&story_path) else {
+            eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+            return;
+        };
+        let mut picts = crate::graphics::PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+        let dims = picts.all_pict_dims();
+        let mut session =
+            crate::session::GameSession::new_with_trace(bytes, false, false, None, false, dims, picts.std_window())
+                .expect("Zork0 (v6) loads and boots");
+        session.set_pict_source(Some(picts));
+        session.flush_boot_pictures();
+        let model = crate::engine::Engine::screen(&session);
+        let items = match &model.root {
+            WinNode::Layered(v) => v.clone(),
+            other => panic!("expected Layered, got {other:?}"),
+        };
+
+        let mut state = AppState::default();
+        state.colors = crate::colors::ColorScheme::terminal_default();
+        state.push_transcript("West of House");
+        state.push_transcript("You are standing in an open field west of a white house.");
+
+        // The user's dark terminal: OSC 10/11 both answered → the pair is the
+        // terminal's own light ink on its dark page.
+        let osc = crate::term_colors::TermDefaultColors {
+            fg: Some(image::Rgba([216, 216, 216, 255])),
+            bg: Some(image::Rgba([26, 26, 26, 255])),
+        };
+        let (ink, page_default) =
+            v6_default_pair(state.colors.theme.get("transcript").style, osc.fg, osc.bg);
+        assert_ne!(ink, page_default, "ink and page must never resolve to the same colour");
+
+        // ── Compose exactly as the raster branch does ────────────────────────
+        let native = v6::native_extent(&items);
+        let layout = v6::classify_windows(&items);
+        let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, ink, page_default, &state.colors);
+        let chrome_only = canvas.clone(); // pre-fill artwork reference
+        let page = v6::story_bg_rgba(layout.story, &state.colors).unwrap_or(page_default);
+        let (sx, sy, sw, sh) = v6::story_clear_native(layout.story, &canvas).expect("Zork0 has a story window");
+        assert!(sw > 0 && sh > 0, "Zork0's clear story interior is non-empty: {sw}x{sh}");
+        v6::fill_cell(&mut canvas, sx, sy, sw, sh, page);
+        let cols = (sw / 8).max(1) as u16;
+        let rows = (sh / 16).max(1) as u16;
+        let (main, _) = build_main_text(&state, cols, rows);
+        v6::draw_story_text(&mut canvas, &main, sx, sy, cols, rows, ink);
+        let pre_flatten = canvas.clone();
+        v6::flatten_onto_page(&mut canvas, page);
+
+        // (1) The shipped image is fully opaque: no pixel is left for a compositor
+        // (kitty's terminal backdrop, halfblocks' white `Color::Reset`) to resolve.
+        assert!(
+            canvas.pixels().all(|p| p[3] == 255),
+            "every pixel of the raster composite is opaque"
+        );
+
+        // (2) Nothing already drawn was painted over — every pixel any layer had
+        // touched is byte-identical after the flatten (frame art, banner text,
+        // status bands, glyphs, and any inline drop-cap alike).
+        for (x, y, p) in pre_flatten.enumerate_pixels() {
+            if p[3] > 0 {
+                assert_eq!(canvas.get_pixel(x, y), p, "flatten must not repaint drawn pixel ({x},{y})");
+            }
+        }
+        // ...and the frame artwork specifically still matches the pre-fill chrome.
+        let mut art_pixels = 0u32;
+        for (x, y, p) in chrome_only.enumerate_pixels() {
+            if p[3] > 0 {
+                art_pixels += 1;
+                assert_eq!(canvas.get_pixel(x, y), p, "frame art pixel ({x},{y}) survives fill+flatten");
+            }
+        }
+        assert!(art_pixels > 10_000, "Zork0's frame art is substantial: {art_pixels} px");
+
+        // (3) The story interior reads as the resolved page, and the text on it is
+        // visible (glyph ink differs from the page).
+        assert_eq!(*canvas.get_pixel(sx + sw / 2, sy + sh / 2), page, "story interior is the opaque page");
+        let ink_px = canvas
+            .enumerate_pixels()
+            .filter(|(x, y, p)| {
+                (sx..sx + sw).contains(x) && (sy..sy + sh).contains(y) && **p == ink
+            })
+            .count();
+        assert!(ink_px > 100, "seeded story text is drawn in ink on the page: {ink_px} ink pixels");
+    }
 
     #[test]
     fn v6_default_pair_resolves_ink_and_page_from_one_source() {
