@@ -1228,7 +1228,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         state.input_deadline = None;
                         needs_redraw = true; // interrupt ran → repaint any output
                         if turn::apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
+                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::Timeout,
                         ) {
                             break 'event_loop state.exit_target.into();
                         }
@@ -1246,7 +1246,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     if let Some(gs) = glulx_session_opt_mut(&mut *session) {
                         let result = gs.deliver_timer();
                         if turn::apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
+                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::Timeout,
                         ) {
                             break 'event_loop state.exit_target.into();
                         }
@@ -1267,7 +1267,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         if let Some(zs) = zvm_session_opt_mut(&mut *session) {
                             let result = zs.run_sound_finish(routine);
                             if turn::apply_game_driven_result(
-                                &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
+                                &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::Timeout,
                             ) {
                                 break 'event_loop state.exit_target.into();
                             }
@@ -1280,7 +1280,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     if let Some(gs) = glulx_session_opt_mut(&mut *session) {
                         let result = gs.sound_notify(snd, notify);
                         if turn::apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
+                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::Timeout,
                         ) {
                             break 'event_loop state.exit_target.into();
                         }
@@ -1309,7 +1309,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 if let Some(gs) = glulx_session_opt_mut(&mut *session) {
                     let result = gs.volume_notify(notify);
                     if turn::apply_game_driven_result(
-                        &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
+                        &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::Timeout,
                     ) {
                         break 'event_loop state.exit_target.into();
                     }
@@ -1966,7 +1966,14 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // the hotkey-dialog prefix (Ctrl+P) or any Ctrl/Alt combo. Those are
         // reserved for app routing so the user can always escape (quit, hotkeys)
         // out of a read_char form; only plain keypresses become game input.
-        if state.char_mode && !state.any_overlay_open() {
+        //
+        // …and never while the `[more]` pager is showing (SQ-0539): a read_char
+        // that dumped more than a screenful is paged FIRST, so the keystroke falls
+        // through to `key_to_command`'s pager intercept and advances the view
+        // instead of answering the read. Only once the pager has caught up (and
+        // cleared `active`) does the next key reach the game — exactly the
+        // original interpreters' [MORE] behavior.
+        if state.char_mode && !state.any_overlay_open() && !state.pager.active {
             if let Event::Key(k) = &event {
                 if k.kind == KeyEventKind::Press {
                     use crossterm::event::KeyModifiers;
@@ -2000,7 +2007,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             })
                             {
                                 if turn::apply_game_driven_result(
-                                    &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
+                                    &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::PlayerInput,
                                 ) {
                                     break 'event_loop state.exit_target.into();
                                 }
@@ -2019,7 +2026,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // key's normal app behavior. Only plain (no Shift/Ctrl/Alt) arrows + F-keys
         // are candidates; every other key — and any non-terminator arrow/F-key —
         // falls through unchanged so it keeps its app behavior (history/scroll/pan).
+        // Suspended while the `[more]` pager is showing (SQ-0539): ↓ is a paging
+        // key, and submitting the line would resume the game before the player
+        // has seen the output that armed the pager.
         if !state.any_overlay_open()
+            && !state.pager.active
             && zvm_session_opt(&*session).is_some_and(|z| z.pending_input() == app::session::InputKind::Line)
         {
             if let Event::Key(k) = &event {
@@ -2128,7 +2139,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                     ) {
                                         let result = gs.deliver_hyperlink(win, link);
                                         if turn::apply_game_driven_result(
-                                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
+                                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::PlayerInput,
                                         ) {
                                             break 'event_loop state.exit_target.into();
                                         }
@@ -2154,7 +2165,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             if let Some((win, vx, vy)) = target {
                                 let result = gs.deliver_mouse(win, vx, vy);
                                 if turn::apply_game_driven_result(
-                                    &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
+                                    &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::PlayerInput,
                                 ) {
                                     break 'event_loop state.exit_target.into();
                                 }
@@ -2276,7 +2287,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         z.set_mouse(gy, gx); // engine stores (y, x)
                         let result = z.submit_char(254); // ZSCII single-click (§3.8)
                         if turn::apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session,
+                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::PlayerInput,
                         ) {
                             break 'event_loop state.exit_target.into();
                         }
@@ -4090,6 +4101,48 @@ mod tests {
         assert!(s.any_overlay_open(), "hotkey_dialog open => overlay open");
         assert!(!s.char_mode || s.any_overlay_open(),
             "char_mode gate must not fire when overlay is open");
+    }
+
+    #[test]
+    fn char_mode_gate_is_suppressed_while_the_more_pager_is_showing() {
+        // SQ-0539, per the directive "[more] should work any time output is larger
+        // than what fits on the screen … we should behave as the original game
+        // intended": a read_char whose output overflowed is PAGED FIRST. The
+        // run-loop gate therefore carries `!state.pager.active`, so the keystroke
+        // falls through to `key_to_command`'s pager intercept (which advances one
+        // screen) instead of answering the pending read. Only once the view has
+        // caught up — the pager clears `active` — does the next key reach the VM,
+        // exactly as an Infocom interpreter's [MORE] prompt behaved.
+        use app::input::{key_to_action, Action};
+        use app::state::AppState;
+        use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+        let app_combo = |m: KeyModifiers| m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        let y_key = KeyEvent {
+            code: KeyCode::Char('y'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let gate = |s: &AppState| {
+            let spec = app::keymap::KeySpec::from_key_event(y_key);
+            s.char_mode
+                && !s.any_overlay_open()
+                && !s.pager.active
+                && spec != s.hotkeys.prefix
+                && !app_combo(y_key.modifiers)
+        };
+
+        let mut s = AppState::default();
+        s.char_mode = true;
+        s.pager.active = true;
+        assert!(!gate(&s), "the pager owns the keyboard while [more] is up");
+        // …and the key it swallows pages the pane instead of reaching the game.
+        assert!(matches!(key_to_action(&s, y_key), Action::PagerAdvance));
+
+        // Caught up: the pager steps aside and the very next key answers the read.
+        s.pager.active = false;
+        assert!(gate(&s), "with the pager gone the keystroke goes to the VM");
     }
 
     #[test]

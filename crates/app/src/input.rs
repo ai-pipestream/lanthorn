@@ -498,11 +498,19 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     // [more] pager (SQ-0404): while it's showing, keypresses page the transcript
     // instead of reaching the game. Space/PgDn/↓/Enter advance one screen; any
     // other key jumps to the bottom and dismisses.
+    //
+    // …except with a `read_char` pending (SQ-0539): there, EVERY key advances one
+    // screen. Jumping to the bottom would skip output the player never saw — the
+    // one thing the pager exists to prevent — and the game is waiting on a single
+    // keypress, so the original interpreters' rule applies: the key is consumed by
+    // the [MORE] prompt, and only after the view catches up (pager inactive) does
+    // a key reach the game (see the char-input gate in main.rs).
     if state.pager.active {
         return match key.code {
             KeyCode::Char(' ') | KeyCode::PageDown | KeyCode::Down | KeyCode::Enter => {
                 KeyResolve::Action(Action::PagerAdvance)
             }
+            _ if state.char_mode => KeyResolve::Action(Action::PagerAdvance),
             _ => KeyResolve::Action(Action::PagerDismiss),
         };
     }
@@ -3095,6 +3103,41 @@ mod tests {
         // Inactive: the pager does not intercept — a plain letter reaches input.
         s.pager.active = false;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('x'))), Action::InputChar('x')));
+    }
+
+    #[test]
+    fn more_pager_pages_on_any_key_while_a_read_char_is_pending() {
+        // SQ-0539, per the directive "[more] should work any time output is larger
+        // than what fits on the screen … we should behave as the original game
+        // intended": with a `read_char` pending, jumping to the bottom would skip
+        // text the player never saw AND then hand that key to the game. So while
+        // char_mode is live EVERY key advances one screen; nothing dismisses, and
+        // nothing reaches the game until the pager has caught up (main.rs's
+        // char-input gate is suppressed for the whole time `active` is set).
+        let mut s = AppState::default();
+        s.pager.active = true;
+        s.char_mode = true;
+        for code in [
+            KeyCode::Char(' '),
+            KeyCode::PageDown,
+            KeyCode::Down,
+            KeyCode::Enter,
+            KeyCode::Char('x'),
+            KeyCode::Char('y'),
+            KeyCode::Esc,
+            KeyCode::Char('q'),
+        ] {
+            assert!(
+                matches!(key_to_command(&s, key(code)), KeyResolve::Action(Action::PagerAdvance)),
+                "{code:?} must PAGE (never dismiss/deliver) while a read_char is pending"
+            );
+        }
+        // Line input keeps its existing feel: a non-paging key still dismisses.
+        s.char_mode = false;
+        assert!(matches!(
+            key_to_command(&s, key(KeyCode::Char('x'))),
+            KeyResolve::Action(Action::PagerDismiss)
+        ));
     }
 
     #[test]

@@ -83,16 +83,19 @@ pub(crate) fn finish_command_turn(
     apply_turn_events(state, &result);
     flush_screen_trace(&state.config.user_dir, session, state.config.trace.screen);
     flush_v6_trace(&state.config.user_dir, session, state.config.trace.v6);
-    // [more] pager (SQ-0404): arm the pager for this command's output only when
-    // the game is now awaiting a normal LINE command — never on a screen clear
-    // (menu takeover) or when it switched to char/event input (a keypress menu or
-    // "press any key"), where a keypress must reach the game, not page the pane.
-    // The next render measures the rows added and engages if it overflowed.
-    if !result.erase_lower && session.pending_input() == app::session::InputKind::Line {
-        state.pager.arm(state.last_transcript_total_rows);
-    } else {
-        state.pager.disarm();
-    }
+    // [more] pager (SQ-0404, ruleset reworked in SQ-0539): arm for this command's
+    // output whenever the game is now awaiting the player — LINE *or* CHAR — and
+    // the v6 "never print [MORE]" veto is off. The old `!result.erase_lower`
+    // exclusion is gone: a clear preserves scrollback and re-anchors, so the rows
+    // this turn added already measure the post-clear repaint alone (fits → no
+    // pager; overflows → page it). The next render measures the rows added and
+    // engages if it overflowed. See `app::pager` for the full table.
+    state.pager.arm_after_turn(
+        state.last_transcript_total_rows,
+        session.pending_input(),
+        app::pager::more_suppressed(&*session),
+        app::pager::Driver::PlayerInput,
+    );
     if let Some(note) = &result.info {
         state.push_transcript(note);
     }
@@ -620,6 +623,7 @@ pub(crate) fn apply_game_driven_result(
     game_dir: &std::path::Path,
     map_area: Rect,
     session: &dyn Engine,
+    driver: app::pager::Driver,
 ) -> bool {
     if result.erase_lower {
         // A game-driven screen clear is a menu redraw navigated by keystrokes —
@@ -642,6 +646,20 @@ pub(crate) fn apply_game_driven_result(
     if let Some(note) = &result.info {
         state.push_transcript(note);
     }
+    // [more] pager (SQ-0539): a game-driven turn pages exactly like a command
+    // turn. A `read_char` that dumps more than a screenful — a hint page, a "press
+    // any key" dump, a menu repaint that overflows — must show its FIRST screenful
+    // and let the player page, and the paging keys are swallowed by the pager
+    // rather than answering the pending read (see `app::pager` and the char-input
+    // gate in main.rs). `driver` keeps a timed-input interrupt / Glk timer /
+    // sound-finish routine from reloading the baseline or dismissing an active
+    // pager — a timeout is not a keystroke.
+    state.pager.arm_after_turn(
+        state.last_transcript_total_rows,
+        session.pending_input(),
+        app::pager::more_suppressed(session),
+        driver,
+    );
     // apply_turn: this input doesn't carry direction info (no text command to
     // parse), but we still observe any location change so the map stays in sync.
     let rooms_before = mapper.graph.rooms().count();
@@ -734,7 +752,10 @@ mod tests {
             String::new()
         }
         fn pending_input(&self) -> app::session::InputKind {
-            unreachable!("not exercised by this test")
+            // A game-driven turn ends on a keypress read (menu navigation, "press
+            // any key"), which is what `apply_game_driven_result` asks about when
+            // it arms the [more] pager (SQ-0539).
+            app::session::InputKind::Char
         }
         fn resume_save(&mut self, _wrote_ok: bool) -> app::session::TurnResult {
             unreachable!("not exercised by this test")
@@ -1101,16 +1122,67 @@ mod tests {
         state.push_transcript("room description"); // pre-menu content
 
         // First menu draw (a clearing turn): appends MENU v1.
-        super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v1"), &tmp, rect, &eng);
+        super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v1"), &tmp, rect, &eng, app::pager::Driver::PlayerInput);
         assert!(state.transcript.iter().any(|l| l.contains("MENU v1")));
         let len_after_v1 = state.transcript.len();
 
         // Second draw (an arrow keypress): collapses v1, appends MENU v2.
-        super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v2"), &tmp, rect, &eng);
+        super::apply_game_driven_result(&mut state, &mut m, &clearing_result("MENU v2"), &tmp, rect, &eng, app::pager::Driver::PlayerInput);
         assert!(!state.transcript.iter().any(|l| l.contains("MENU v1")), "v1 must be collapsed, not stacked");
         assert!(state.transcript.iter().any(|l| l.contains("MENU v2")), "v2 present");
         assert!(state.transcript.iter().any(|l| l.contains("room description")), "pre-menu content preserved");
         assert!(state.transcript.len() <= len_after_v1, "transcript did not grow across reprints");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn game_driven_char_turn_arms_the_more_pager_even_when_it_clears() {
+        // SQ-0539, per the directive "[more] should work any time output is larger
+        // than what fits on the screen (including boot) … we should behave as the
+        // original game intended". The v1 (SQ-0404) rule armed only for a LINE
+        // read on a turn that did NOT clear, so BOTH of this turn's properties —
+        // game-driven keypress, screen clear — used to disqualify it. Now the
+        // clear is irrelevant (it preserves scrollback and re-anchors, so the rows
+        // this turn added measure the post-clear repaint alone) and a keypress
+        // read arms like a command line; only `activation_target`, at render time,
+        // decides fits-vs-overflows.
+        let tmp = std::env::temp_dir().join(format!("babelmap-pagerarm-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut state = app::state::AppState::default();
+        state.config.user_dir = tmp.clone();
+        let mut m = mapper::mapper::Mapper::default();
+        let rect = ratatui::layout::Rect::new(0, 0, 20, 20);
+        let eng = TraceOnlyEngine { line: None, v6: None }; // pending_input() == Char
+        state.last_transcript_total_rows = 12;
+
+        super::apply_game_driven_result(
+            &mut state, &mut m, &clearing_result("MENU"), &tmp, rect, &eng,
+            app::pager::Driver::PlayerInput,
+        );
+        assert_eq!(
+            state.pager.pending_before_rows, Some(12),
+            "a clearing char-input turn must arm with the pre-turn row total"
+        );
+
+        // A timeout-driven turn on top must NOT reload that baseline (mirrors the
+        // engine's v6 line-count rule: keystrokes reload, timeouts don't).
+        state.last_transcript_total_rows = 40;
+        super::apply_game_driven_result(
+            &mut state, &mut m, &clearing_result("TICK"), &tmp, rect, &eng,
+            app::pager::Driver::Timeout,
+        );
+        assert_eq!(state.pager.pending_before_rows, Some(12), "a timeout is not a keystroke");
+
+        // And an already-showing pager is never re-parked mid-catch-up.
+        state.pager.active = true;
+        state.pager.disarm();
+        super::apply_game_driven_result(
+            &mut state, &mut m, &clearing_result("TICK 2"), &tmp, rect, &eng,
+            app::pager::Driver::Timeout,
+        );
+        assert!(state.pager.pending_before_rows.is_none(), "no re-arm while [more] is up");
+        assert!(state.pager.active, "and a timeout never dismisses it");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -1134,12 +1206,12 @@ mod tests {
 
         // Re-reporting the SAME room (a menu keystroke) must not re-route.
         let same = game_driven_result(Some(zvm::ObjectSnapshot { number: 1, parent: 0, name: "Lab".into() }));
-        super::apply_game_driven_result(&mut state, &mut m, &same, &tmp, rect, &eng);
+        super::apply_game_driven_result(&mut state, &mut m, &same, &tmp, rect, &eng, app::pager::Driver::PlayerInput);
         assert_eq!(state.graph_gen, gen0, "re-reporting a known room must not bump graph_gen");
 
         // Revealing a NEW room must bump (the map has to update).
         let moved = game_driven_result(Some(zvm::ObjectSnapshot { number: 2, parent: 0, name: "Hall".into() }));
-        super::apply_game_driven_result(&mut state, &mut m, &moved, &tmp, rect, &eng);
+        super::apply_game_driven_result(&mut state, &mut m, &moved, &tmp, rect, &eng, app::pager::Driver::PlayerInput);
         assert_ne!(state.graph_gen, gen0, "a new room on a game-driven turn must bump graph_gen");
 
         let _ = std::fs::remove_dir_all(&tmp);

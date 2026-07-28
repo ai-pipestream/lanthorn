@@ -13,6 +13,46 @@
 //!   2. **activate** — the next render knows the *after* total and the viewport
 //!      height, so [`activation_target`] decides whether to engage and where to
 //!      park the scroll offset.
+//!
+//! # Arming ruleset (SQ-0539)
+//!
+//! The v1 (SQ-0404) pager only armed behind a LINE read on a turn that did not
+//! clear the screen. That is narrower than the games expect: an authentic Infocom
+//! interpreter paged whenever the output since the last player interaction
+//! exceeded the screen, *regardless* of what input came next. So the rule is now
+//! simply "the game is waiting for the player, and the player would otherwise
+//! miss text":
+//!
+//! | turn kind (pending input after the turn) | screen cleared | added rows > viewport | v6 veto | behavior |
+//! |---|---|---|---|---|
+//! | `Line` | no  | yes | no  | **page** |
+//! | `Line` | no  | no  | no  | no pager (nothing past the fold) |
+//! | `Line` | yes | yes | no  | **page** — the fresh screenful itself overflows |
+//! | `Line` | yes | no  | no  | no pager — the repaint fits, nothing was missed |
+//! | `Char` | any | yes | no  | **page** (keys page until caught up — see below) |
+//! | `Char` | any | no  | no  | no pager |
+//! | `Event` (Glulx timer/mouse-only `glk_select`) | any | any | any | no pager — out of scope |
+//! | any | any | any | **yes** | no pager (ZMSD §8.8.3.2.6 "never print [MORE]") |
+//! | babelmap meta output (`/help`, …) | — | — | — | no pager (never reaches an arm site) |
+//!
+//! A screen clear needs no special case: the clear preserves scrollback and marks
+//! an anchor, so *rows added by this turn* already measures exactly the post-clear
+//! repaint — which is precisely "what the player can still scroll to see".
+//!
+//! **Char input.** While the pager is showing with a `read_char` pending, the
+//! paging keys are consumed by the pager and NOT delivered to the game: the first
+//! key pages instead of answering the read, and only once the view has caught up
+//! to the bottom does the next key reach the game. Any key pages (not just
+//! Space/PgDn/↓/Enter) — jumping to the bottom would skip text the player never
+//! saw, which is the one thing the pager exists to prevent.
+//!
+//! **Timeouts.** Mirroring the engine's v6 line-count rule (a real keystroke
+//! reloads the count, a timeout does not — see `Machine::v6_reload_line_counts`),
+//! a turn driven by a timed-input interrupt / Glk timer / sound-finish routine
+//! never reloads the pager baseline and never dismisses an active pager; its
+//! output simply accumulates toward the baseline the last real interaction set.
+
+use crate::session::InputKind;
 
 /// Pager runtime state, held on `AppState`.
 #[derive(Debug, Default, Clone)]
@@ -36,6 +76,79 @@ impl Pager {
     pub fn disarm(&mut self) {
         self.pending_before_rows = None;
     }
+
+    /// Apply the [module ruleset](self) to the turn that just appended output.
+    ///
+    /// `before_rows` is the transcript's wrapped-row total from the last rendered
+    /// frame, `pending` the input the game is waiting on *now*, `more_suppressed`
+    /// the v6 "never print [MORE]" veto (see [`more_suppressed`]) and `driver`
+    /// what caused the turn.
+    pub fn arm_after_turn(
+        &mut self,
+        before_rows: u16,
+        pending: InputKind,
+        more_suppressed: bool,
+        driver: Driver,
+    ) {
+        // Already paging: never re-park the view or reload the baseline
+        // mid-catch-up. (Real keystrokes can't reach the game while the pager is
+        // up, so only timer/sound-driven turns normally land here.)
+        if self.active {
+            return;
+        }
+        if !should_arm(pending, more_suppressed) {
+            // A real interaction that doesn't qualify cancels a stale arm; a
+            // timeout leaves the standing baseline alone.
+            if driver == Driver::PlayerInput {
+                self.disarm();
+            }
+            return;
+        }
+        match driver {
+            Driver::PlayerInput => self.arm(before_rows),
+            // A timeout is not a keystroke: keep the baseline the last real
+            // interaction set, so this output accumulates toward it instead of
+            // resetting the "since the player last acted" measurement.
+            Driver::Timeout => {
+                self.pending_before_rows.get_or_insert(before_rows);
+            }
+        }
+    }
+}
+
+/// What drove the turn whose output the pager is about to measure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Driver {
+    /// A real player interaction — a submitted command line or a keypress.
+    PlayerInput,
+    /// No player input: a timed-input interrupt, a Glk timer tick, or a
+    /// sound-finish routine.
+    Timeout,
+}
+
+/// Does a turn that left the game waiting on `pending` qualify for the pager?
+///
+/// `Line` and `Char` both do — the original interpreters paged before *any* read,
+/// not only a `>` prompt. `Event` (a Glulx timer/mouse-only `glk_select`) does
+/// not: no typed input is requested and the Z-machine transcript pager is out of
+/// scope there. `more_suppressed` vetoes everything (ZMSD §8.8.3.2.6).
+pub fn should_arm(pending: InputKind, more_suppressed: bool) -> bool {
+    if more_suppressed {
+        return false;
+    }
+    matches!(pending, InputKind::Line | InputKind::Char)
+}
+
+/// The running story's "never print [MORE]" veto: true only for a v6 Z-machine
+/// story whose current window has parked its line count at -999 (ZMSD §8.8.3.2.6
+/// — the device Zork Zero's demonstration mode uses). Safely false for every
+/// non-v6 Z-machine story and for a Glulx/Scott engine, which expose no such
+/// counter. (SQ-0534, app half.)
+pub fn more_suppressed(engine: &dyn crate::engine::Engine) -> bool {
+    engine
+        .as_any()
+        .downcast_ref::<crate::session::GameSession>()
+        .is_some_and(|z| z.machine.v6_suppress_more())
 }
 
 /// Given the transcript's wrapped-row totals before/after a turn and the story
@@ -92,5 +205,88 @@ mod tests {
         p.disarm();
         assert!(p.pending_before_rows.is_none());
         assert!(!p.active);
+    }
+
+    #[test]
+    fn char_input_turns_arm_like_line_input_turns() {
+        // SQ-0539, per the directive "[more] should work any time output is larger
+        // than what fits on the screen (including boot) … we should behave as the
+        // original game intended". The v1 (SQ-0404) rule armed only behind a LINE
+        // read, so a game that dumped three screens and then waited on a keypress
+        // scrolled the first two away unread. Both reads arm now; only a
+        // non-input Glulx `glk_select` (Event) stays out of scope.
+        assert!(should_arm(InputKind::Line, false));
+        assert!(should_arm(InputKind::Char, false));
+        assert!(!should_arm(InputKind::Event, false));
+    }
+
+    #[test]
+    fn v6_never_print_more_vetoes_every_turn_kind() {
+        // SQ-0534 (app half) / ZMSD §8.8.3.2.6: a line count of -999 means "never
+        // print [MORE]" — Zork Zero's demonstration mode. It outranks everything.
+        for pending in [InputKind::Line, InputKind::Char, InputKind::Event] {
+            assert!(!should_arm(pending, true), "{pending:?} must not arm under the v6 veto");
+        }
+        let mut p = Pager::default();
+        p.arm_after_turn(7, InputKind::Char, true, Driver::PlayerInput);
+        assert!(p.pending_before_rows.is_none(), "the veto leaves the pager unarmed");
+    }
+
+    #[test]
+    fn screen_clearing_turns_are_no_longer_excluded() {
+        // SQ-0539: v1 refused to arm on any turn that cleared the screen, so a
+        // menu/hint page that CLEARS and then paints more than a screenful showed
+        // only its tail. `arm_after_turn` no longer looks at the clear at all —
+        // the clear preserves scrollback and re-anchors, so "rows added by this
+        // turn" already measures the post-clear repaint by itself, and
+        // `activation_target` makes the fits/overflows call:
+        //   clear + fits     → no pager (nothing was missed)
+        //   clear + overflows→ page it
+        let mut p = Pager::default();
+        p.arm_after_turn(100, InputKind::Char, false, Driver::PlayerInput);
+        assert_eq!(p.pending_before_rows, Some(100), "a clearing turn arms like any other");
+        // 6 post-clear rows into a 10-row viewport: fits, nothing to page.
+        assert_eq!(activation_target(100, 106, 10), None);
+        // 26 post-clear rows into the same viewport: page from the first screenful.
+        assert_eq!(activation_target(100, 126, 10), Some(16));
+    }
+
+    #[test]
+    fn a_timeout_never_reloads_or_dismisses_the_pager() {
+        // SQ-0539, mirroring the engine's v6 line-count rule (`Machine::
+        // v6_reload_line_counts` — Frotz reloads on a real keystroke, never on a
+        // timeout): a timed-input interrupt / Glk timer / sound-finish routine
+        // must not re-baseline the pager, and must never dismiss an active one.
+        let mut p = Pager::default();
+        p.arm_after_turn(10, InputKind::Char, false, Driver::PlayerInput);
+        // A timeout lands on top: the baseline stays where the real input set it,
+        // so the timeout's own output accumulates toward the same measurement.
+        p.arm_after_turn(30, InputKind::Char, false, Driver::Timeout);
+        assert_eq!(p.pending_before_rows, Some(10), "a timeout is not a keystroke");
+        // A timeout that leaves the game in a non-arming state must not disarm
+        // either (a real interaction would).
+        p.arm_after_turn(30, InputKind::Event, false, Driver::Timeout);
+        assert_eq!(p.pending_before_rows, Some(10));
+        p.arm_after_turn(30, InputKind::Event, false, Driver::PlayerInput);
+        assert!(p.pending_before_rows.is_none(), "a real interaction cancels a stale arm");
+
+        // While the pager is showing, NOTHING re-arms or re-parks it — the player
+        // is mid-catch-up and a fresh baseline would jump the view.
+        let mut p = Pager { active: true, pending_before_rows: None };
+        p.arm_after_turn(50, InputKind::Char, false, Driver::Timeout);
+        assert!(p.pending_before_rows.is_none());
+        p.arm_after_turn(50, InputKind::Line, false, Driver::PlayerInput);
+        assert!(p.pending_before_rows.is_none());
+        assert!(p.active, "and it stays up until the view catches up");
+    }
+
+    #[test]
+    fn an_unarmed_timeout_still_measures_its_own_output() {
+        // The other half of the rule: with no standing baseline (the player has
+        // been idle), a timed interrupt that dumps a screenful is still paged —
+        // it just takes the current row count as its baseline.
+        let mut p = Pager::default();
+        p.arm_after_turn(12, InputKind::Char, false, Driver::Timeout);
+        assert_eq!(p.pending_before_rows, Some(12));
     }
 }

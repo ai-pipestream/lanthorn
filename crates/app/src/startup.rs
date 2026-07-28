@@ -682,12 +682,15 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // game scrolled off before it was ever seen. Arm the pager the way
     // `finish_command_turn` arms it for a turn: the first frame measures the rows
     // the banner actually produced and engages ONLY if it overflowed the story
-    // viewport, parking the view on the first screenful. Same guard as a turn —
-    // never when the game is waiting on a keypress, where the key must reach the
-    // game rather than page the pane. Skipped entirely for a resumed transcript
-    // (below): that scrollback was already read, and paging it would park a
-    // returning player mid-history.
-    if startup_transcript.is_none() && session.pending_input() == app::session::InputKind::Line {
+    // viewport, parking the view on the first screenful. Same rule as a turn
+    // (SQ-0539): a boot that ends on a `read_char` — a splash "press any key", a
+    // startup menu — pages too, and the paging keys are swallowed by the pager
+    // until the view catches up rather than answering that read. Skipped entirely
+    // for a resumed transcript (below): that scrollback was already read, and
+    // paging it would park a returning player mid-history.
+    if startup_transcript.is_none()
+        && app::pager::should_arm(session.pending_input(), app::pager::more_suppressed(&*session))
+    {
         state.pager.arm(0);
     }
 
