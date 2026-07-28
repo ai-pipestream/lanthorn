@@ -638,3 +638,164 @@ fn drop_cap_pixels(
     }
     (matched, opaque)
 }
+
+// ── SQ-0532 wave-6: the TYPED input takes the game's pair too ─────────────────
+//
+// The live input line resolves its colour through `game_input_style`, which read
+// `ScreenModel.bg/fg` — the PANE PAGE. Wave 4 correctly stopped a v6 model from
+// publishing one (a v6 story has none; every window carries its own §8.3 pair),
+// so the typed text fell back to the theme's grey `input_text` while the prose
+// beside it — coloured per-run from the same §8.3 mirror — stayed black. On Zork
+// Zero's white page that is grey-on-white: the user's TTY report. The committed
+// echo was never affected (it inherits the prompt line's runs, SQ-0269), which is
+// exactly the divergence pinned below.
+
+/// The typed text's drawn cells: find `needle` in the rendered pane and return
+/// the cells of its first char and of the one just past it (the caret, when
+/// `needle` is the whole live input). Panics if the text never reached the pane.
+fn drawn_cells(buf: &Buffer, area: Rect, needle: &str) -> (ratatui::buffer::Cell, ratatui::buffer::Cell) {
+    for y in 0..area.height {
+        let row: String = (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect();
+        if let Some(byte_at) = row.find(needle) {
+            let x = row[..byte_at].chars().count() as u16;
+            let after = x + needle.chars().count() as u16;
+            return (
+                buf.cell((x, y)).unwrap().clone(),
+                buf.cell((after.min(area.width - 1), y)).unwrap().clone(),
+            );
+        }
+    }
+    panic!("{needle:?} was never drawn into the pane");
+}
+
+/// Render `model` in hybrid with `typed` sitting at the live prompt, mirroring the
+/// game's own turn output (with its §8.3 runs) into the transcript first, exactly
+/// as `turn.rs` does. Returns the pane so the caller can find its cells.
+fn hybrid_pane_with_input(
+    model: &ScreenModel,
+    colours: bool,
+    turn: &app::session::TurnResult,
+    echo: Option<&str>,
+    typed: &str,
+    area: Rect,
+) -> Buffer {
+    let mut state = state_for(app::config::V6RenderMode::Hybrid);
+    state.config.honor_game_colours = colours;
+    state.push_transcript_runs(&turn.transcript, app::state::TranscriptKind::Story, &turn.transcript_runs);
+    if state.transcript.is_empty() {
+        state.push_transcript(">"); // a turn that printed nothing still has a prompt to type at
+    }
+    if let Some(cmd) = echo {
+        // Inline mode: the game's own `>` is the last transcript line, so the
+        // committed command is appended to it (turn.rs's echo path).
+        state.append_to_last_transcript_line(cmd);
+    }
+    state.input.set(typed, true);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(model, false, None, &state, area, &mut buf);
+    buf
+}
+
+/// Play a v6 story to its first ordinary line prompt and return the session plus
+/// that turn's output (whose style runs carry the game's §8.3 pair).
+fn v6_at_prompt(file: &str, colours: bool) -> Option<(GameSession, app::session::TurnResult)> {
+    let mut s = boot_v6(file, colours)?;
+    let mut last = None;
+    for _ in 0..6 {
+        let r = match s.pending_input() {
+            InputKind::Line => {
+                last = Some(s.submit("look"));
+                break;
+            }
+            InputKind::Char => s.submit_char(13),
+            InputKind::Event => s.submit(""),
+        };
+        assert!(r.fault.is_none(), "{file} faulted: {:?}", r.fault);
+        last = Some(r);
+    }
+    let turn = last.expect("the story produced a turn");
+    Some((s, turn))
+}
+
+/// The theme's own input-text style — what the typed line must fall back to
+/// whenever there is no game pair to honour.
+fn theme_input_style() -> ratatui::style::Style {
+    let c = app::colors::ColorScheme::terminal_default();
+    c.theme.get("transcript").style.patch(c.theme.get("input_text").style)
+}
+
+/// **Mode: `honor_game_colours = true`.** The live, being-typed input renders in
+/// Zork Zero's own pair — black ink on its white page — like the prose beside it.
+/// Broken build: the theme's grey `input_text` on the game's white page.
+#[test]
+fn zork0_hybrid_types_the_live_input_in_the_games_own_colour() {
+    let Some((s, turn)) = v6_at_prompt("zork0-r393-s890714.z6", true) else { return };
+    let model = s.screen();
+    assert_eq!(story_pair(&model).1, Some(image::Rgba([255, 255, 255, 255])), "premise: Zork0's page is white");
+    let palette = app::colors::ColorScheme::terminal_default().palette;
+    let (black, white) = (palette[0], palette[7]); // Z Standard(2) / Standard(9)
+    let area = Rect::new(0, 0, 80, 30);
+    let buf = hybrid_pane_with_input(&model, true, &turn, None, "xyzzyq", area);
+    let (text, caret) = drawn_cells(&buf, area, "xyzzyq");
+    eprintln!("Zork0 hybrid live input: fg={:?} bg={:?}; caret fg={:?} bg={:?} rev={}",
+        text.fg, text.bg, caret.fg, caret.bg, caret.modifier.contains(ratatui::style::Modifier::REVERSED));
+    assert_eq!(text.fg, black, "the typed text must be inked in the game's black, not the theme's grey");
+    assert_eq!(text.bg, white, "…on the game's white page");
+    assert_ne!(Some(text.fg), theme_input_style().fg, "premise: the theme's input ink is NOT the game's");
+    // The caret is reverse-video of the resolved input style, so it stays a
+    // visible block on the game's page (a bare theme cursor would not be).
+    assert!(caret.modifier.contains(ratatui::style::Modifier::REVERSED), "the caret must reverse the game pair");
+    assert_eq!((caret.fg, caret.bg), (black, white), "…reversing the GAME's pair, not the theme's");
+}
+
+/// Paired companion. **Mode: `honor_game_colours = false`.** With the game's
+/// `set_colour` declined there is no pair to honour, so the typed line keeps the
+/// theme's own input style exactly as before.
+#[test]
+fn zork0_hybrid_types_the_live_input_in_the_theme_when_colours_are_declined() {
+    let Some((s, turn)) = v6_at_prompt("zork0-r393-s890714.z6", false) else { return };
+    let model = s.screen();
+    assert_eq!(story_pair(&model), (None, None), "colours declined: no game pair exists");
+    let area = Rect::new(0, 0, 80, 30);
+    let buf = hybrid_pane_with_input(&model, false, &turn, None, "xyzzyq", area);
+    let (text, _) = drawn_cells(&buf, area, "xyzzyq");
+    eprintln!("Zork0 hybrid live input, colours declined: fg={:?} bg={:?}", text.fg, text.bg);
+    let theme = theme_input_style();
+    assert_eq!(Some(text.fg), theme.fg, "the theme's input ink owns the typed line");
+    assert_ne!(text.bg, app::colors::ColorScheme::terminal_default().palette[7], "no game page is painted under it");
+}
+
+/// The other half of the gate: a v6 game that sets NO story-window colour keeps
+/// the theme's input style even with colours honoured — Arthur never calls
+/// `set_colour`, so its typed line must look exactly as it does today.
+#[test]
+fn a_game_that_sets_no_page_types_the_live_input_in_the_theme() {
+    let Some((s, turn)) = v6_at_prompt("arthur-r74-s890714.z6", true) else { return };
+    let model = s.screen();
+    assert_eq!(story_pair(&model), (None, None), "Arthur sets no story-window pair");
+    let area = Rect::new(0, 0, 80, 30);
+    let buf = hybrid_pane_with_input(&model, true, &turn, None, "xyzzyq", area);
+    let (text, _) = drawn_cells(&buf, area, "xyzzyq");
+    eprintln!("Arthur hybrid live input (colours honoured): fg={:?} bg={:?}", text.fg, text.bg);
+    assert_eq!(Some(text.fg), theme_input_style().fg, "with no game pair the theme still owns the typed line");
+}
+
+/// The committed echo (`>look` in scrollback) already resolved the game's pair —
+/// it inherits the prompt line's trailing run (SQ-0269) — and must keep doing so,
+/// in the SAME pair the live line now uses. Pinning both together is what stops
+/// the two halves of one prompt from diverging again.
+#[test]
+fn zork0_hybrid_echoes_the_committed_command_in_the_live_inputs_pair() {
+    let Some((s, turn)) = v6_at_prompt("zork0-r393-s890714.z6", true) else { return };
+    let model = s.screen();
+    let area = Rect::new(0, 0, 80, 30);
+    let palette = app::colors::ColorScheme::terminal_default().palette;
+    let (black, white) = (palette[0], palette[7]);
+    // The committed echo of "xyzzyq" in scrollback, with a fresh "plugh" being typed.
+    let buf = hybrid_pane_with_input(&model, true, &turn, Some("xyzzyq"), "plugh", area);
+    let (echo, _) = drawn_cells(&buf, area, "xyzzyq");
+    let (live, _) = drawn_cells(&buf, area, "plugh");
+    eprintln!("Zork0 hybrid echo: fg={:?} bg={:?}; live: fg={:?} bg={:?}", echo.fg, echo.bg, live.fg, live.bg);
+    assert_eq!((echo.fg, echo.bg), (black, white), "the committed echo keeps the game's pair");
+    assert_eq!((live.fg, live.bg), (echo.fg, echo.bg), "the live line and its committed echo are one prompt");
+}

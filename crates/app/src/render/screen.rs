@@ -82,12 +82,28 @@ fn is_simple(model: &ScreenModel) -> bool {
 
 /// The game's live input colour (fg/bg) for the input line, or None when
 /// colours are off or the game left both channels Default (theme-neutral).
+///
+/// The pair comes from `ScreenModel.bg`/`fg` — the PANE PAGE — for v1–5, but a
+/// v6 story has no pane page (see `session::v6_screen_model`): every window
+/// carries its own pair (§8.3) and the model's stays `Default`. So v6 reads the
+/// STORY WINDOW's explicit pair instead, the same source the page/ink already
+/// use (`v6::story_bg_rgba`/`story_fg_rgba`) — otherwise the typed input falls
+/// back to the theme's grey `input_text` on the game's own white page, while the
+/// prose beside it (coloured per-run from its `TextAttrs`) is black. Cell-side,
+/// so the packed colours resolve through `resolve_zcolour` exactly as the prose
+/// runs in `draw_str_runs` do. (SQ-0532 wave-6)
 fn game_input_style(model: &ScreenModel, state: &AppState) -> Option<ratatui::style::Style> {
     if !state.config.honor_game_colours {
         return None;
     }
-    let fg = crate::state::unpack_zcolour(model.fg);
-    let bg = crate::state::unpack_zcolour(model.bg);
+    let (fg, bg) = match &model.root {
+        WinNode::Layered(items) => {
+            let story = crate::render::v6_layout::classify_windows(items).story;
+            let (f, b) = crate::render::v6_layout::story_pair_packed(story);
+            (crate::state::unpack_zcolour(f), crate::state::unpack_zcolour(b))
+        }
+        _ => (crate::state::unpack_zcolour(model.fg), crate::state::unpack_zcolour(model.bg)),
+    };
     if matches!(fg, zvm::screen::ZColour::Default) && matches!(bg, zvm::screen::ZColour::Default) {
         return None;
     }

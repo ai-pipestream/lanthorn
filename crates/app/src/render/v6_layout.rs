@@ -290,6 +290,18 @@ pub fn story_fg_rgba(story: Option<&PositionedWindow>, colors: &ColorScheme) -> 
     Some(packed_to_rgba(b.fg?, Rgba([255, 255, 255, 255]), colors))
 }
 
+/// The story window's explicit `(fg, bg)` pair as PACKED z-colours (`0` when the
+/// game set none), for the cell-side callers — the live input line resolves them
+/// through `resolve_zcolour`, exactly as the transcript's prose runs do, rather
+/// than through the pixel path's [`story_fg_rgba`]/[`story_bg_rgba`]. Same
+/// source, same window, one resolution per path. (SQ-0532 wave-6)
+pub fn story_pair_packed(story: Option<&PositionedWindow>) -> (u32, u32) {
+    match story.map(|s| &s.node) {
+        Some(WinNode::Buffer(b)) => (b.fg.unwrap_or(0), b.bg.unwrap_or(0)),
+        _ => (0, 0),
+    }
+}
+
 /// Whether any pixel in the `w × h` box at `(px, py)` of `canvas` is opaque
 /// (alpha ≥ 128). Used to tell a reverse-video run sitting ON frame art from one
 /// over a clear background, so the art is preserved but a bare selection bar still
