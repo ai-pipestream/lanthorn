@@ -645,9 +645,10 @@ mod colour_tests {
         // true colour fg
         let t = TextAttrs { style: 0, fg: ZColour::True(0x7FFF), bg: ZColour::Default };
         assert_eq!(style_wrap("x", t, true), "\x1b[38;2;255;255;255mx\x1b[0m");
-        // grey 11 -> 808080
+        // grey 11 -> 8C8C8C (ZMSD §8.3.1: medium grey is true colour $4631;
+        // this used to pin the invented #808080)
         let g = TextAttrs { style: 0, fg: ZColour::Standard(11), bg: ZColour::Default };
-        assert_eq!(style_wrap("x", g, true), "\x1b[38;2;128;128;128mx\x1b[0m");
+        assert_eq!(style_wrap("x", g, true), "\x1b[38;2;140;140;140mx\x1b[0m");
         // non-tty stays plain
         assert_eq!(style_wrap("x", a, false), "x");
     }
@@ -678,7 +679,9 @@ mod page_bg_tests {
         // source) — no invented palette here either.
         assert_eq!(super::zcolour_rgb(ZColour::Standard(3)), None);
         // 10..=12 resolve via the shared grey_rgb table, same as push_colour_sgr.
-        assert_eq!(super::zcolour_rgb(ZColour::Standard(11)), Some((0x80, 0x80, 0x80)));
+        // ZMSD §8.3.1 fixes medium grey (11) at true colour $4631 → #8C8C8C.
+        // (This assertion previously pinned the invented #808080.)
+        assert_eq!(super::zcolour_rgb(ZColour::Standard(11)), Some((0x8C, 0x8C, 0x8C)));
         // True colour goes through rgb15_to_888, same as push_colour_sgr.
         assert_eq!(super::zcolour_rgb(ZColour::True(0x001F)), Some((255, 0, 0)));
     }

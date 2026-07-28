@@ -226,7 +226,10 @@ mod text_style_tests {
         scheme.palette[1] = Color::Rgb(10, 20, 30); // "red" slot
         assert_eq!(resolve_zcolour(ZColour::Standard(3), &scheme), Color::Rgb(10, 20, 30));
         assert_eq!(resolve_zcolour(ZColour::Default, &scheme), Color::Reset);
-        assert_eq!(resolve_zcolour(ZColour::Standard(11), &scheme), Color::Rgb(0x80, 0x80, 0x80));
+        // ZMSD §8.3.1 fixes medium grey (colour 11) at true colour $4631, which
+        // expands to #8C8C8C. (This assertion previously pinned the invented
+        // #808080 that `zvm::screen::grey_rgb` used to return.)
+        assert_eq!(resolve_zcolour(ZColour::Standard(11), &scheme), Color::Rgb(0x8C, 0x8C, 0x8C));
         assert_eq!(resolve_zcolour(ZColour::True(0x7FFF), &scheme), Color::Rgb(255, 255, 255));
         // True24 carries an exact 24-bit RGB (Glulx stylehint colour).
         assert_eq!(resolve_zcolour(ZColour::True24(0x0011_2233), &scheme), Color::Rgb(0x11, 0x22, 0x33));

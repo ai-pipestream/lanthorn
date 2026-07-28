@@ -62,11 +62,15 @@ pub fn rgb15_to_888(v: u16) -> (u8, u8, u8) {
 
 /// Fixed RGB for the v6 greys (Standard 10/11/12). Defined once here so both
 /// renderers agree. Any other value falls back to dark grey (12).
+///
+/// ZMSD §8.3.1 gives the true-colour values for these three entries —
+/// 10 = light grey ($5AD6), 11 = medium grey ($4631), 12 = dark grey ($2D6B) —
+/// so they are just [`rgb15_to_888`] of the spec table, not an invented ramp.
 pub fn grey_rgb(n: u8) -> (u8, u8, u8) {
     match n {
-        10 => (0xB0, 0xB0, 0xB0),
-        11 => (0x80, 0x80, 0x80),
-        _ => (0x50, 0x50, 0x50), // 12
+        10 => rgb15_to_888(0x5AD6), // light grey  → #B5B5B5
+        11 => rgb15_to_888(0x4631), // medium grey → #8C8C8C
+        _ => rgb15_to_888(0x2D6B),  // dark grey   → #5A5A5A
     }
 }
 
@@ -97,9 +101,41 @@ impl UpperWindow {
         self.cols = cols;
         self.cells = vec![Cell::default(); rows as usize * cols as usize];
     }
+    /// Resize the grid **preserving** whatever cells survive the new extent
+    /// (growing adds blank rows/cols, shrinking truncates).
+    ///
+    /// ZMSD §15 `split_window`: "In Version 3 (only) the upper window should be
+    /// cleared after the split" — so from Version 4 on a re-split must leave the
+    /// existing upper-window contents on screen. [`resize`] (which reallocates
+    /// blank) is the Version 3 behaviour.
+    pub fn resize_preserving(&mut self, rows: u16, cols: u16) {
+        if cols == self.cols {
+            // Row-major with an unchanged stride: truncate/extend in place.
+            self.cells.resize(rows as usize * cols as usize, Cell::default());
+            self.rows = rows;
+            return;
+        }
+        let mut next = vec![Cell::default(); rows as usize * cols as usize];
+        for r in 0..rows.min(self.rows) as usize {
+            for c in 0..cols.min(self.cols) as usize {
+                next[r * cols as usize + c] = self.cells[r * self.cols as usize + c];
+            }
+        }
+        self.cells = next;
+        self.rows = rows;
+        self.cols = cols;
+    }
     pub fn clear(&mut self) {
+        self.clear_to(ZColour::Default);
+    }
+    /// Blank every cell to `bg`.
+    ///
+    /// ZMSD §8.7.3.2: a window is erased "to background colour", and §8.7.3.4
+    /// adds "Even if the text style is Reverse Video the new blank space should
+    /// not have reversed colours" — hence style 0 (no reverse bit) on the blank.
+    pub fn clear_to(&mut self, bg: ZColour) {
         for c in &mut self.cells {
-            *c = Cell::default();
+            *c = Cell { ch: ' ', style: 0, fg: ZColour::Default, bg };
         }
     }
     /// Grow the grid to at least `new_rows` rows, preserving existing content.
@@ -672,17 +708,20 @@ pub fn default_interpreter_number(version: u8) -> u8 {
 
 /// Set interpreter capability bits in the story header at machine startup.
 ///
-/// We advertise a basic text interpreter:
-///   - Flags1: clear graphics (bit 1 v3 is status-line kind — leave alone),
-///     clear colour (bit 0 in v5+), clear pictures. Sound (bit 5 in v4+) is
-///     capability-driven — see `advertise_sound`.
-///     Set fixed-pitch available (bit 4 in v3 Flags2? — actually interpreter
-///     sets this in response to Flags2; for simplicity we just clear "no
-///     status line" bit).
-///   - Flags2: we clear bits we don't support (pictures=0, undo=0, mouse=0,
-///     colour=0, menubar=0) by masking. Sound (bit 7) is capability-driven —
-///     see `advertise_sound`. Leave transcript (bit 0) and fixed-pitch (bit 1)
-///     as-is (game controls those).
+/// The bit meanings are ZMSD §11.1's "Flags 1" / "Flags 2" tables; the per-bit
+/// reasoning lives beside each mask below. In outline:
+///   - Flags1 (v1–3): clear "status line not available" and "variable-pitch
+///     font default"; set "screen-splitting available". Bit 1 is the game's
+///     status-line kind — left alone.
+///   - Flags1 (v4+): advertise bold, italic, fixed-space and timed keyboard
+///     input; advertise pictures for v6. Colour (bit 0) and sound (bit 5) are
+///     capability-driven — see `advertise_colour` / `advertise_sound`.
+///   - Flags2: these are the GAME's requests, so we only clear what we cannot
+///     honour — menus (bit 8, `make_menu` is a stub). Font 3 / pictures (bit 3)
+///     and mouse (bit 5) are provided and stay as the game left them; undo
+///     (bit 4) is advertised for v5+; colour (bit 6) and sound (bit 7) are
+///     capability-driven. Transcript (bit 0) and fixed-pitch (bit 1) are the
+///     game's own state.
 ///   - 0x1E: interpreter number — override, else Frotz's default (6 for v6, else 1).
 ///   - 0x1F: interpreter version — 'A' (ASCII 0x41), standard v1.1 era.
 ///   - 0x32/0x33: standard revision number (1.1 → 1, 1).
@@ -710,28 +749,42 @@ pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, sound_availa
         f1 & !((1 << 4) | (1 << 6))   // clear "status line not available" + variable-pitch default
           | (1 << 5)      // screen-splitting available
     } else {
-        // v4+ Flags1 bits (ZMSD §11.1.3):
-        //   bit 0: colour available — clear (no colour)
-        //   bit 1: picture display available — clear
-        //   bit 2: boldface available — set (rendered via SGR / style spans)
-        //   bit 3: italic available — set (rendered via SGR / style spans)
-        //   bit 4: fixed-space font available — set
-        //   bit 5: sound effects available — handled separately (advertise_sound)
-        //   bit 7: timed keyboard available — clear
-        f1 & !((1 << 1) | (1 << 7))  // clear unsupported (colour, sound handled separately)
-          | (1 << 2) | (1 << 3) | (1 << 4)  // bold, italic, fixed-space font available
+        // v4+ Flags1 bits (ZMSD §11.1, "Flags 1" Version 4+ table):
+        //   bit 0: "Colours available?" (V5) — handled separately (advertise_colour)
+        //   bit 1: "Picture displaying available?" (V6) — set for v6: pictures are
+        //          implemented end to end (draw_picture/picture_data/erase_picture
+        //          over the blorb Pict resources). Clear below v6, where the bit
+        //          has no meaning.
+        //   bit 2: "Boldface available?" — set (rendered via SGR / style spans)
+        //   bit 3: "Italic available?" — set (rendered via SGR / style spans)
+        //   bit 4: "Fixed-space style available?" — set
+        //   bit 5: "Sound effects available?" (V6) — handled separately (advertise_sound)
+        //   bit 7: "Timed keyboard input available?" — set: timed `read` and
+        //          `read_char` (the time/routine operands) are implemented.
+        let base = f1 | (1 << 2) | (1 << 3) | (1 << 4) | (1 << 7);
+        if version == 6 { base | (1 << 1) } else { base & !(1 << 1) }
     };
     mem.write_byte(0x01, new_f1);
 
-    // Flags2 (word 0x10–0x11, interpreter clears bits it doesn't support).
-    // ZMSD §11.1.4: bits 3–5, 7 are interpreter-writable (clear = not supported).
-    //   bit 3: pictures — clear
-    //   bit 4: undo available — set for v5+ (save_undo/restore_undo implemented);
-    //          pre-v5 has no undo opcodes, so leave it clear.
-    //   bit 5: mouse — clear
-    //   bit 7: sound effects — handled separately (advertise_sound)
+    // Flags2 (word 0x10–0x11). ZMSD §11.1 "Flags 2": bits 3–8 are the GAME's
+    // requests ("If set, game wants to use …"); the interpreter clears the ones
+    // it cannot honour and otherwise leaves the request standing.
+    //   bit 3: V5 = character-graphics font wanted, V6 = "game wants to use
+    //          pictures". PRESERVE either way — §8.1.5.1 says only "an
+    //          interpreter which cannot provide the character graphics font
+    //          should clear bit 3", and we render font 3 (font3_translate) and
+    //          v6 pictures both.
+    //   bit 4: "game wants to use the UNDO opcodes" — set for v5+ (save_undo/
+    //          restore_undo implemented); pre-v5 has no undo opcodes, so clear.
+    //   bit 5: "game wants to use a mouse" — PRESERVE: mouse input is
+    //          implemented (read_mouse / mouse_window, `Machine::set_mouse`,
+    //          and the host delivers clicks).
+    //   bit 6: "game wants to use colours" — handled separately (advertise_colour).
+    //   bit 7: "game wants to use sound effects" — handled separately (advertise_sound).
+    //   bit 8: "game wants to use menus" — CLEAR: `make_menu` (EXT:0x1B) is a
+    //          stub that always branches false, so menus are not available.
     let f2 = mem.read_word(0x10);
-    let mut new_f2 = f2 & !((1 << 3) | (1 << 5));
+    let mut new_f2 = f2 & !(1 << 8);
     if version >= 5 {
         new_f2 |= 1 << 4; // undo available
     } else {
@@ -770,13 +823,43 @@ pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, sound_availa
     // Beyond Zork (V5) among them — compute garbage colour numbers from 0/0 and
     // their set_colour calls get ignored, leaving the game monochrome. Seeding
     // valid numbers here makes such games colour correctly.
-    if version >= 5 {
-        mem.write_byte(0x2C, 2); // default background = black
-        mem.write_byte(0x2D, 9); // default foreground = white
-    }
+    write_default_colours(mem, DEFAULT_BG_COLOUR, DEFAULT_FG_COLOUR);
 
     advertise_colour(mem, honor_game_colours);
     advertise_sound(mem, sound_available);
+}
+
+/// Interpreter default background colour written to header $2C when the host
+/// never says otherwise: 2 = black (ZMSD §8.3.1).
+pub const DEFAULT_BG_COLOUR: u8 = 2;
+/// Interpreter default foreground colour written to header $2D when the host
+/// never says otherwise: 9 = white (ZMSD §8.3.1).
+pub const DEFAULT_FG_COLOUR: u8 = 9;
+
+/// Clamp a host-supplied default colour to a standard colour number.
+///
+/// ZMSD §8.3.1 defines 2..=9 as the true colour names; 0/1 are the "current"/
+/// "default" sentinels, 10–12 are V6-only greys, 13–14 reserved and 15
+/// transparent — none of which are meaningful as *the interpreter's own*
+/// default, so anything outside 2..=9 falls back to `fallback`.
+pub(crate) fn clamp_default_colour(c: u8, fallback: u8) -> u8 {
+    if (2..=9).contains(&c) { c } else { fallback }
+}
+
+/// Write the interpreter's default background/foreground colours into header
+/// bytes $2C and $2D (V5+ only; those bytes have no meaning before V5).
+///
+/// ZMSD §8.3.3: "If the interpreter can produce colours, it should set bit 0 of
+/// 'Flags 1' in the header, and write its default background and foreground
+/// colours into bytes $2c and $2d of the header." (§8.3.2 asks a non-colour
+/// interpreter for 2 and 9 "either way round", which the 2/9 default satisfies.)
+/// Values outside 2..=9 fall back to [`DEFAULT_BG_COLOUR`]/[`DEFAULT_FG_COLOUR`].
+pub fn write_default_colours(mem: &mut Memory, bg: u8, fg: u8) {
+    if mem.version() < 5 {
+        return;
+    }
+    mem.write_byte(0x2C, clamp_default_colour(bg, DEFAULT_BG_COLOUR));
+    mem.write_byte(0x2D, clamp_default_colour(fg, DEFAULT_FG_COLOUR));
 }
 
 /// Set or clear the Flags1 "colour available" bit (bit 0). No-op for v3, which
@@ -1107,14 +1190,96 @@ mod tests {
     }
 
     #[test]
-    fn header_caps_flags2_clears_pictures() {
+    fn header_caps_flags2_preserves_font3_and_picture_request() {
+        // ZMSD §8.1.5.1: "In Version 5 (only), an interpreter which cannot
+        // provide the character graphics font should clear bit 3 of 'Flags 2'."
+        // We CAN provide font 3, so the game's request must survive. In V6 the
+        // same bit is "game wants to use pictures" (§11.1) — also provided, so
+        // also preserved. (This test previously pinned the opposite.)
+        for v in [5u8, 6] {
+            let mut mem = Memory::new(sample_story(v)).unwrap();
+            let f2 = mem.read_word(0x10) | (1 << 3);
+            mem.write_word(0x10, f2);
+            init_header_caps(&mut mem, false, false, None);
+            assert_ne!(
+                mem.read_word(0x10) & (1 << 3),
+                0,
+                "v{v}: Flags2 bit 3 (font 3 / pictures wanted) must be preserved"
+            );
+        }
+    }
+
+    #[test]
+    fn header_caps_flags1_advertises_timed_input_and_v6_pictures() {
+        // ZMSD §11.1 "Flags 1" (Version 4+): bit 1 "Picture displaying
+        // available?" (Version 6), bit 7 "Timed keyboard input available?".
+        // Timed `read`/`read_char` and v6 pictures are both implemented, so both
+        // must be advertised — they used to be cleared unconditionally.
+        for v in [4u8, 5, 6, 7, 8] {
+            let mut mem = Memory::new(sample_story(v)).unwrap();
+            init_header_caps(&mut mem, false, false, None);
+            let f1 = mem.read_byte(0x01);
+            assert_ne!(f1 & (1 << 7), 0, "v{v}: Flags1 bit 7 (timed input) must be set");
+            if v == 6 {
+                assert_ne!(f1 & (1 << 1), 0, "v6: Flags1 bit 1 (pictures available) must be set");
+            } else {
+                assert_eq!(f1 & (1 << 1), 0, "v{v}: Flags1 bit 1 is a v6-only capability");
+            }
+        }
+    }
+
+    #[test]
+    fn header_caps_flags2_preserves_mouse_request_and_clears_menus() {
+        // ZMSD §11.1 "Flags 2": bit 5 "If set, game wants to use a mouse" —
+        // preserved, mouse input is implemented (read_mouse / Machine::set_mouse
+        // and the host delivers clicks). Bit 8 "If set, game wants to use menus"
+        // — cleared, `make_menu` is a stub that always branches false.
+        for v in [5u8, 6] {
+            let mut mem = Memory::new(sample_story(v)).unwrap();
+            mem.write_word(0x10, mem.read_word(0x10) | (1 << 5) | (1 << 8));
+            init_header_caps(&mut mem, false, false, None);
+            let f2 = mem.read_word(0x10);
+            assert_ne!(f2 & (1 << 5), 0, "v{v}: Flags2 bit 5 (mouse wanted) must be preserved");
+            assert_eq!(f2 & (1 << 8), 0, "v{v}: Flags2 bit 8 (menus wanted) must be cleared");
+        }
+    }
+
+    #[test]
+    fn header_caps_flags2_leaves_unrequested_bits_unset() {
+        // The interpreter only ever CLEARS a game request it cannot honour; it
+        // never invents one. With the game asking for nothing, bits 3 and 5 stay
+        // clear (bit 4, UNDO, is the interpreter's own advertisement and is set).
         let mut mem = Memory::new(sample_story(5)).unwrap();
-        // Pre-set pictures (bit 3) in Flags2.
-        let f2 = mem.read_word(0x10) | (1 << 3);
-        mem.write_word(0x10, f2);
+        mem.write_word(0x10, 0);
         init_header_caps(&mut mem, false, false, None);
-        let f2_after = mem.read_word(0x10);
-        assert_eq!(f2_after & (1 << 3), 0, "pictures bit in Flags2 should be clear");
+        let f2 = mem.read_word(0x10);
+        assert_eq!(f2 & (1 << 3), 0, "bit 3 not requested, not invented");
+        assert_eq!(f2 & (1 << 5), 0, "bit 5 not requested, not invented");
+        assert_ne!(f2 & (1 << 4), 0, "bit 4 (undo available) is ours to set");
+    }
+
+    #[test]
+    fn write_default_colours_clamps_and_skips_pre_v5() {
+        // ZMSD §8.3.3: the interpreter writes ITS default background ($2C) and
+        // foreground ($2D). §8.3.1 only names 2..=9 as real colours, so anything
+        // else falls back to black-on-white.
+        let mut mem = Memory::new(sample_story(5)).unwrap();
+        write_default_colours(&mut mem, 6, 5);
+        assert_eq!((mem.read_byte(0x2C), mem.read_byte(0x2D)), (6, 5), "valid pair lands as given");
+        for bad in [0u8, 1, 10, 12, 15, 200] {
+            write_default_colours(&mut mem, bad, bad);
+            assert_eq!(
+                (mem.read_byte(0x2C), mem.read_byte(0x2D)),
+                (DEFAULT_BG_COLOUR, DEFAULT_FG_COLOUR),
+                "colour {bad} is not a standard colour number — falls back to 2/9"
+            );
+        }
+        // $2C/$2D are not colour bytes before V5.
+        let mut mem3 = Memory::new(sample_story(3)).unwrap();
+        mem3.write_byte(0x2C, 0x11);
+        mem3.write_byte(0x2D, 0x22);
+        write_default_colours(&mut mem3, 6, 5);
+        assert_eq!((mem3.read_byte(0x2C), mem3.read_byte(0x2D)), (0x11, 0x22), "v3 untouched");
     }
 
     #[test]
@@ -1455,7 +1620,13 @@ mod tests {
     fn rgb15_expansion_and_greys() {
         assert_eq!(rgb15_to_888(0x7FFF), (255, 255, 255));
         assert_eq!(rgb15_to_888(0x001F), (255, 0, 0)); // red = low 5 bits
-        assert_eq!(grey_rgb(11), (0x80, 0x80, 0x80));
+        // ZMSD §8.3.1 fixes the true-colour value of each grey; expanding those
+        // 15-bit values is what `grey_rgb` must return (it used to return an
+        // invented #B0/#80/#50 ramp).
+        assert_eq!(grey_rgb(10), rgb15_to_888(0x5AD6), "10 = light grey ($5AD6)");
+        assert_eq!(grey_rgb(11), rgb15_to_888(0x4631), "11 = medium grey ($4631)");
+        assert_eq!(grey_rgb(12), rgb15_to_888(0x2D6B), "12 = dark grey ($2D6B)");
+        assert_eq!(grey_rgb(11), (0x8C, 0x8C, 0x8C));
     }
 
     #[test]

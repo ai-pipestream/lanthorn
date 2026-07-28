@@ -14,7 +14,7 @@ use crate::dictionary;
 use crate::io::{BufferOutput, Output};
 use crate::memory::Memory;
 use crate::objects;
-use crate::screen::{advertise_colour, advertise_sound, init_header_caps, ScreenState, StreamState, V6Windows, V6_FONT_HEIGHT, V6_FONT_WIDTH};
+use crate::screen::{advertise_colour, advertise_sound, init_header_caps, write_default_colours, ScreenState, StreamState, V6Windows, V6_FONT_HEIGHT, V6_FONT_WIDTH};
 use crate::text::cp437::cp437_to_char;
 use crate::text::decode::{decode_string, zscii_to_char};
 
@@ -213,6 +213,12 @@ pub struct Machine {
     /// Interpreter number to advertise in header byte 0x1E. `None` = auto (Frotz's
     /// rule: 6 for v6, else 1). `Some(n)` overrides. Applied at `init_caps`.
     pub interpreter_number: Option<u8>,
+    /// The interpreter's default background/foreground colours, published to the
+    /// game in header bytes $2C/$2D (ZMSD §8.3.3). Standard colour numbers
+    /// 2..=9; defaults to black-on-white (2/9). Set via `set_default_colours`,
+    /// re-applied at every `init_caps` (so `@restart` keeps the host's choice).
+    pub default_bg_colour: u8,
+    pub default_fg_colour: u8,
     /// Set when `step()` returns `Fault`; the host drains it for display.
     pub fault_trace: Option<crate::cpu::trace::StackTrace>,
     /// Start PC of the instruction currently being executed (set each `step()`).
@@ -320,12 +326,17 @@ fn boot_state_and_screen(mem: &mut Memory) -> (State, ScreenState) {
         }
         // ...and 15 (wrapping+scrolling+scripting+buffering) on window 0.
         v6.windows[0].attributes = 15;
-        // Frotz restart_screen also gives windows 0 and 1 the full screen width
-        // (pixels in v6) — games read it back via get_wind_prop before ever
-        // calling window_size. Reseeded with the real screen size by
-        // `set_screen_dims` when the host reports it.
+        // ZMSD §8.8.3.3: "Window 0 occupies the whole screen and is initially
+        // selected. Window 1 is as wide as the screen but has zero height.
+        // Windows 2 to 7 have zero width and height." So windows 0 and 1 both
+        // get the full screen width (pixels in v6 — games read it back via
+        // get_wind_prop before ever calling window_size) and window 0 also gets
+        // the full screen HEIGHT; window 1 stays at height 0. Reseeded with the
+        // real screen size by `set_screen_dims` when the host reports it.
         let width = crate::screen::DEFAULT_SCREEN_COLS as u16 * crate::screen::V6_FONT_WIDTH;
+        let height = crate::screen::DEFAULT_SCREEN_ROWS as u16 * crate::screen::V6_FONT_HEIGHT;
         v6.windows[0].x_size = width;
+        v6.windows[0].y_size = height;
         v6.windows[1].x_size = width;
         screen.v6 = Some(v6);
     }
@@ -375,6 +386,8 @@ impl Machine {
             honor_game_colours: false,
             sound_available: false,
             interpreter_number: None,
+            default_bg_colour: crate::screen::DEFAULT_BG_COLOUR,
+            default_fg_colour: crate::screen::DEFAULT_FG_COLOUR,
             fault_trace: None,
             cur_instr_pc: 0,
             trace_screen: false,
@@ -406,6 +419,9 @@ impl Machine {
     /// buffers may overlap header bytes).
     pub fn init_caps(&mut self) {
         init_header_caps(&mut self.mem, self.honor_game_colours, self.sound_available, self.interpreter_number);
+        // Re-apply the host's chosen interpreter defaults over the 2/9 seed
+        // `init_header_caps` writes, so they survive `@restart` too.
+        write_default_colours(&mut self.mem, self.default_bg_colour, self.default_fg_colour);
         // Communicate the initial buffer_mode state (false = off) to the sink.
         self.out.set_buffer_mode(self.screen.buffer_mode);
     }
@@ -486,17 +502,39 @@ impl Machine {
         w
     }
 
+    /// Keep `screen.current_fg`/`current_bg` mirroring the CURRENT v6 window's
+    /// colour pair.
+    ///
+    /// ZMSD §8.3 gives each Version 6 window its own foreground/background pair,
+    /// but the prose stream (window 0's scrolling text) tags its `TextAttrs` from
+    /// `current_fg`/`current_bg` — the fields only the non-v6 `set_colour` path
+    /// used to write. Without this mirror, v6 prose always printed in the
+    /// interpreter default no matter what the game selected. Call with the new
+    /// pair whenever the current window's colours change (`set_colour`,
+    /// `set_true_colour`) or a different window becomes current (`set_window`,
+    /// `erase_window` -1); `None` means "nothing to mirror".
+    fn mirror_v6_colours(&mut self, pair: Option<(crate::screen::ZColour, crate::screen::ZColour)>) {
+        if let Some((fg, bg)) = pair {
+            self.screen.current_fg = fg;
+            self.screen.current_bg = bg;
+        }
+    }
+
     /// Report the screen size to the story: writes the header dimension fields
     /// (see [`write_screen_dims`]) and, for v6, reseeds windows 0 and 1 with
     /// the new screen width in pixels (frotz restart_screen) so games that
     /// read window widths via `get_wind_prop` before sizing anything see the
-    /// real screen, not the boot-time default.
+    /// real screen, not the boot-time default. Window 0 also takes the new
+    /// screen HEIGHT (ZMSD §8.8.3.3: "Window 0 occupies the whole screen");
+    /// window 1 keeps its zero height until a `split_window`.
     pub fn set_screen_dims(&mut self, rows: u8, cols: u8) {
         crate::screen::write_screen_dims(&mut self.mem, rows, cols);
         if self.mem.version() == 6 {
             if let Some(v6) = self.screen.v6.as_mut() {
                 let width = cols.max(1) as u16 * crate::screen::V6_FONT_WIDTH;
+                let height = rows.max(1) as u16 * crate::screen::V6_FONT_HEIGHT;
                 v6.windows[0].x_size = width;
+                v6.windows[0].y_size = height;
                 v6.windows[1].x_size = width;
             }
         }
@@ -561,6 +599,25 @@ impl Machine {
     /// auto default (Frotz's rule). Takes effect at the next `init_caps`.
     pub fn set_interpreter_number(&mut self, n: Option<u8>) {
         self.interpreter_number = n;
+    }
+
+    /// Publish the interpreter's own default colours to the game.
+    ///
+    /// ZMSD §8.3.3: a colour-capable interpreter "should ... write its default
+    /// background and foreground colours into bytes $2c and $2d of the header"
+    /// — i.e. the colours the host actually paints unstyled text in, which games
+    /// read back to build their palettes (Beyond Zork does exactly this).
+    /// Arguments are standard colour numbers (ZMSD §8.3.1); anything outside
+    /// 2..=9 falls back to black background (2) / white foreground (9).
+    ///
+    /// Writes the header immediately (so it may be called after boot) and is
+    /// re-applied at every `init_caps`, including the one `@restart` performs.
+    /// No-op below V5, where $2C/$2D are not colour bytes.
+    pub fn set_default_colours(&mut self, bg: u8, fg: u8) {
+        use crate::screen::{clamp_default_colour, DEFAULT_BG_COLOUR, DEFAULT_FG_COLOUR};
+        self.default_bg_colour = clamp_default_colour(bg, DEFAULT_BG_COLOUR);
+        self.default_fg_colour = clamp_default_colour(fg, DEFAULT_FG_COLOUR);
+        write_default_colours(&mut self.mem, self.default_bg_colour, self.default_fg_colour);
     }
 
     /// Seed the cumulative "ever executed" set from host-persisted knowledge
@@ -915,6 +972,7 @@ impl Machine {
                         let bg = decode_set_colour_v6(b).map(zscreen_colour_name).unwrap_or_else(|| b.to_string());
                         self.screen_trace.push(format!("@set_colour(fg={fg}, bg={bg}, window={win})"));
                     }
+                    let mut mirror = None;
                     if let Some(w) = v6.windows.get_mut(win as usize) {
                         if let Some(c) = decode_set_colour_v6(a) {
                             w.fg = c;
@@ -923,7 +981,11 @@ impl Machine {
                             w.bg = c;
                         }
                         w.colour_data = pack_colour_data(w.fg, w.bg);
+                        if win == v6.current {
+                            mirror = Some((w.fg, w.bg));
+                        }
                     }
+                    self.mirror_v6_colours(mirror);
                 } else {
                     if self.trace_screen {
                         let fg = decode_set_colour(a).map(zscreen_colour_name).unwrap_or_else(|| a.to_string());
@@ -1440,28 +1502,52 @@ impl Machine {
                 } else {
                     self.screen.upper_window_rows = rows;
                     let cols = self.mem.read_byte(0x21) as u16;
-                    self.screen.upper.resize(rows, cols.max(1));
+                    // ZMSD §15 split_window: "In Version 3 (only) the upper
+                    // window should be cleared after the split." From v4 on the
+                    // existing contents survive a re-split (games re-split every
+                    // turn and repaint only the fields that changed), so grow
+                    // with blanks / shrink by truncation instead of reallocating.
+                    if self.mem.version() <= 3 {
+                        self.screen.upper.resize(rows, cols.max(1));
+                        let bg = self.screen.current_bg;
+                        self.screen.upper.clear_to(bg);
+                    } else {
+                        self.screen.upper.resize_preserving(rows, cols.max(1));
+                    }
                     self.screen.cursor_row = 1;
                     self.screen.cursor_col = 1;
                 }
                 StepResult::Continue
             }
             // 0x0B set_window — select window 0 (lower) or 1 (upper) (v3+).
-            // v6: selects one of the 8 windows and resets its grid cursor to
-            // the top-left cell (ZMSD §8.4).
+            //
+            // Versions 3–5 (ZMSD §8.6.1, repeated for §8.7's v4/v5 model):
+            // "Whenever the upper window is selected, its cursor position is
+            // reset to the top left."
+            //
+            // Version 6 (ZMSD §8.8.3.5): "Each window remembers its own cursor
+            // position ... it is legal to move the cursor for an unselected
+            // window" — selecting a window must NOT disturb the cursor it
+            // remembers. It does become the window whose colour pair the prose
+            // stream prints in (§8.3), so mirror that pair.
             0x0B => {
                 let win = self.v6_window_operand(ops.first().copied().unwrap_or(0)) as u8;
                 if self.trace_screen { self.screen_trace.push(format!("@set_window({})", zscreen_window_name(win as u16))); }
+                let mut mirror = None;
                 if let Some(v6) = self.screen.v6.as_mut() {
                     let w = win as usize;
                     if w < v6.windows.len() {
                         v6.current = win;
-                        v6.windows[w].y_cursor = 1;
-                        v6.windows[w].x_cursor = 1;
+                        mirror = Some((v6.windows[w].fg, v6.windows[w].bg));
                     }
                 } else {
                     self.screen.current_window = win;
+                    if win == 1 {
+                        self.screen.cursor_row = 1;
+                        self.screen.cursor_col = 1;
+                    }
                 }
+                self.mirror_v6_colours(mirror);
                 StepResult::Continue
             }
             // 0x0D erase_window — clear window (state-tracking only; no render).
@@ -1470,15 +1556,18 @@ impl Machine {
             // scrolling contents live in the host, so we flag the request for it
             // to drain (erase_lower_requested), mirroring show_status_requested.
             //
-            // v6: the 8-window table has no "split" concept to undo (all 8
-            // windows always exist), so -1 and -2 both clear every window's
-            // grid and reset its cursor; a window number 0–7 clears just that
-            // window's grid + cursor.
+            // v6 keeps -1 and -2 DISTINCT (ZMSD §8.8.5.3.1/§8.8.5.3.2) — see the
+            // match arms below; a window number 0–7 clears just that window's
+            // rect, grid and cursor.
             0x0D => {
                 // -3 = current window (frotz winarg0); -1/-2 keep their own
                 // erase-all meanings below.
                 let win = self.v6_window_operand(ops.first().copied().unwrap_or(0)) as i16;
                 if self.trace_screen { self.screen_trace.push(format!("@erase_window({})", zscreen_window_name(win as u16))); }
+                let cur_bg = self.screen.current_bg;
+                let screen_w = self.mem.read_word(0x22);
+                let screen_h = self.mem.read_word(0x24);
+                let mut mirror = None;
                 if let Some(v6) = self.screen.v6.as_mut() {
                     // v6 erase is PAINT: background fills the window's CURRENT
                     // screen rect. Painted text runs (any window's) lose the
@@ -1491,12 +1580,48 @@ impl Machine {
                     let out_chars = self.v6_win0_out_chars;
                     let mut clear_canvas: Vec<u8> = Vec::new();
                     match win {
-                        -1 | -2 => {
+                        -1 => {
+                            // ZMSD §8.8.5.3.1: "Erasing window number -1 erases
+                            // the entire screen to the background colour of
+                            // window 0, unsplits windows 0 and 1 and selects
+                            // window 0."
+                            let bg0 = v6.windows[0].bg;
                             for (i, w) in v6.windows.iter_mut().enumerate() {
-                                w.grid.clear();
+                                w.grid.clear_to(bg0);
                                 w.texts.clear();
                                 w.y_cursor = 1;
                                 w.x_cursor = 1;
+                                clear_canvas.push(i as u8);
+                            }
+                            // "unsplits windows 0 and 1": window 1 collapses to
+                            // zero height, window 0 takes the whole screen
+                            // (§8.8.3.3's boot geometry).
+                            v6.windows[0].y_coord = 1;
+                            v6.windows[0].x_coord = 1;
+                            v6.windows[1].y_coord = 1;
+                            v6.windows[1].x_coord = 1;
+                            v6.windows[1].y_size = 0;
+                            if screen_w > 0 {
+                                v6.windows[0].x_size = screen_w;
+                                v6.windows[1].x_size = screen_w;
+                            }
+                            if screen_h > 0 {
+                                v6.windows[0].y_size = screen_h;
+                            }
+                            v6.current = 0;
+                            mirror = Some((v6.windows[0].fg, v6.windows[0].bg));
+                        }
+                        -2 => {
+                            // ZMSD §8.8.5.3.2: "Erasing window -2 erases the
+                            // entire screen to the current background colour.
+                            // (It doesn't perform erase_window for all the
+                            // individual windows, and it doesn't change any
+                            // window attributes or cursor positions.)" — so the
+                            // pixels go, but cursors, geometry and the current
+                            // window selection all stay exactly as they were.
+                            for (i, w) in v6.windows.iter_mut().enumerate() {
+                                w.grid.clear_to(cur_bg);
+                                w.texts.clear();
                                 clear_canvas.push(i as u8);
                             }
                         }
@@ -1512,7 +1637,10 @@ impl Machine {
                             };
                             v6.erase_screen_rect(top, left, h, wd);
                             let w = &mut v6.windows[n as usize];
-                            w.grid.clear();
+                            // ZMSD §8.8.5.3: erase "to background colour (even
+                            // if the current text style is Reverse Video)".
+                            let bg = w.bg;
+                            w.grid.clear_to(bg);
                             w.y_cursor = 1;
                             w.x_cursor = 1;
                             clear_canvas.push(n as u8);
@@ -1531,25 +1659,52 @@ impl Machine {
                         });
                     }
                 } else {
+                    // ZMSD §8.7.3.2.1: "In Versions 5 and later, the cursor for
+                    // the window being erased should be moved to the top left.
+                    // In Version 4, the lower window's cursor moves to its
+                    // bottom left, while the upper window's cursor moves to top
+                    // left." Both versions therefore put the UPPER window's
+                    // cursor at (1,1) — the only cursor this model owns; the
+                    // lower window's scrolling cursor lives in the host (it
+                    // drains `erase_lower_requested` and re-homes its own).
+                    let bg = self.screen.current_bg;
                     match win {
                         -1 => {
+                            // §8.7.3.3: "Erasing window -1 clears the whole
+                            // screen to the background colour of the lower
+                            // screen, collapses the upper window to height 0,
+                            // moves the cursor of the lower screen to bottom
+                            // left (in Version 4) or top left (in Versions 5 and
+                            // later) and selects the lower screen."
                             self.screen.upper_window_rows = 0;
                             self.screen.upper.resize(0, self.screen.upper.cols);
                             self.screen.erase_lower_requested = true;
+                            self.screen.current_window = 0;
+                            self.screen.cursor_row = 1;
+                            self.screen.cursor_col = 1;
                         }
                         -2 => {
-                            self.screen.upper.clear();
+                            // §15 erase_window: -2 "clears the screen without
+                            // unsplitting it" — the upper window is erased, so
+                            // §8.7.3.2.1 homes its cursor, but the split height
+                            // and the window selection are untouched.
+                            self.screen.upper.clear_to(bg);
                             self.screen.erase_lower_requested = true;
+                            self.screen.cursor_row = 1;
+                            self.screen.cursor_col = 1;
                         }
                         0 => {
                             self.screen.erase_lower_requested = true;
                         }
                         1 => {
-                            self.screen.upper.clear();
+                            self.screen.upper.clear_to(bg);
+                            self.screen.cursor_row = 1;
+                            self.screen.cursor_col = 1;
                         }
                         _ => {}
                     }
                 }
+                self.mirror_v6_colours(mirror);
                 StepResult::Continue
             }
             // 0x0F set_cursor — update cursor position (row, col) in upper window.
@@ -1841,10 +1996,13 @@ impl Machine {
                 } else if value == 1 {
                     let (row, start) = (self.screen.cursor_row, self.screen.cursor_col);
                     let cols = self.screen.upper.cols;
-                    let style = self.screen.text_style;
                     let mut c = start;
                     while c <= cols {
-                        self.screen.upper.put(row, c, ' ', style, self.screen.current_fg, self.screen.current_bg);
+                        // ZMSD §8.7.3.4: erase_line clears "to background
+                        // colour", and "Even if the text style is Reverse Video
+                        // the new blank space should not have reversed colours"
+                        // — so the blanks carry style 0, never `text_style`.
+                        self.screen.upper.put(row, c, ' ', 0, crate::screen::ZColour::Default, self.screen.current_bg);
                         c += 1;
                     }
                 }
@@ -2060,6 +2218,7 @@ impl Machine {
                         let bg = decode_true_colour(bg_op).map(zscreen_colour_name).unwrap_or_else(|| bg_op.to_string());
                         self.screen_trace.push(format!("@set_true_colour(fg={fg}, bg={bg}, window={win})"));
                     }
+                    let mut mirror = None;
                     if let Some(w) = v6.windows.get_mut(win as usize) {
                         if let Some(c) = decode_true_colour(fg_op) {
                             w.fg = c;
@@ -2068,7 +2227,11 @@ impl Machine {
                             w.bg = c;
                         }
                         w.colour_data = pack_colour_data(w.fg, w.bg);
+                        if win == v6.current {
+                            mirror = Some((w.fg, w.bg));
+                        }
                     }
+                    self.mirror_v6_colours(mirror);
                 } else {
                     if self.trace_screen {
                         let fg = decode_true_colour(fg_op).map(zscreen_colour_name).unwrap_or_else(|| fg_op.to_string());
@@ -3436,17 +3599,19 @@ fn decode_set_colour(v: u16) -> Option<crate::screen::ZColour> {
     }
 }
 
-/// v6 variant of [`decode_set_colour`]: ZMSD §8.3.4 — in Version 6, colour
-/// **-1 means "the colour of the pixel under the cursor" (transparent)**.
-/// Zork Zero prints its banner labels under `COLOR 1 -1` so the text draws
-/// over the ribbon art. Our compositor's closest equivalent is the inherited
-/// `Default` channel (which renders with NO opaque fill), so -1 resolves to
-/// `Default` rather than "keep" — keeping an earlier explicit bg (black from
-/// the border setup) painted opaque boxes over the banner art.
+/// v6 variant of [`decode_set_colour`]: per the ZMSD §8.3.1 colour table,
+/// **-1 is "the colour of the pixel under the cursor (if any) (true -3)"**, a
+/// Version 6-only entry. (It is NOT transparency — §8.3.6 gives that to colour
+/// 15, "true -4".) Zork Zero prints its banner labels under `COLOR 1 -1` so the
+/// text draws over the ribbon art. Our compositor's closest equivalent to
+/// "whatever is already there" is the inherited `Default` channel (which
+/// renders with NO opaque fill), so -1 resolves to `Default` rather than "keep"
+/// — keeping an earlier explicit bg (black from the border setup) painted
+/// opaque boxes over the banner art.
 fn decode_set_colour_v6(v: u16) -> Option<crate::screen::ZColour> {
     use crate::screen::ZColour;
     match v as i16 {
-        -1 => Some(ZColour::Default), // transparent → inherit (no opaque fill)
+        -1 => Some(ZColour::Default), // pixel under the cursor → inherit (no opaque fill)
         _ => decode_set_colour(v),
     }
 }
@@ -6203,6 +6368,32 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn set_default_colours_publishes_host_defaults_in_the_header() {
+        // ZMSD §8.3.3: the interpreter writes ITS default background ($2C) and
+        // foreground ($2D) into the header, so games can build a palette from
+        // the colours the host actually paints in.
+        let mut m = Machine::new(
+            Memory::new(crate::header::tests_support::sample_story(5)).unwrap(),
+        );
+        m.init_caps();
+        assert_eq!(
+            (m.mem.read_byte(0x2C), m.mem.read_byte(0x2D)),
+            (2, 9),
+            "unset: black-on-white is the boot-time seed"
+        );
+        // Callable after boot: the bytes land immediately.
+        m.set_default_colours(6, 5); // blue background, yellow foreground
+        assert_eq!((m.mem.read_byte(0x2C), m.mem.read_byte(0x2D)), (6, 5));
+        // ...and survive a re-init (which is what @restart performs).
+        m.init_caps();
+        assert_eq!((m.mem.read_byte(0x2C), m.mem.read_byte(0x2D)), (6, 5), "kept across init_caps");
+        // Anything outside the §8.3.1 standard colours 2..=9 falls back to 2/9.
+        m.set_default_colours(0, 15);
+        assert_eq!((m.mem.read_byte(0x2C), m.mem.read_byte(0x2D)), (2, 9));
+        assert_eq!((m.default_bg_colour, m.default_fg_colour), (2, 9), "the stored pair is clamped too");
+    }
+
+    #[test]
     fn set_interpreter_number_overrides_at_init_caps() {
         let mut buf = sample_story(5);
         buf[0x80] = 0xBA;                 // quit at 0x80
@@ -6748,6 +6939,129 @@ pub(crate) mod tests {
         assert_eq!(m.screen.upper_window_rows, 2, "split preserved (no unsplit)");
         assert_eq!(m.screen.upper.cell(1, 1).ch, ' ', "upper grid cleared");
         assert!(m.screen.erase_lower_requested, "lower-window erase requested");
+    }
+
+    #[test]
+    fn set_window_upper_homes_the_cursor_below_v6() {
+        // ZMSD §8.6.1: "Whenever the upper window is selected, its cursor
+        // position is reset to the top left." set_window used to only assign
+        // current_window.
+        let mut m = build_test_machine(&[]);
+        m.exec_var(0x0A, &[3], None, None); // split_window 3
+        m.screen.cursor_row = 3;
+        m.screen.cursor_col = 7;
+        m.exec_var(0x0B, &[1], None, None); // set_window(1) — the upper window
+        assert_eq!((m.screen.cursor_row, m.screen.cursor_col), (1, 1), "upper cursor homed");
+        // Selecting the LOWER window is not covered by that sentence: the upper
+        // window keeps whatever position it had.
+        m.screen.cursor_row = 2;
+        m.screen.cursor_col = 4;
+        m.exec_var(0x0B, &[0], None, None); // set_window(0)
+        assert_eq!((m.screen.cursor_row, m.screen.cursor_col), (2, 4), "lower select leaves it");
+    }
+
+    #[test]
+    fn split_window_preserves_upper_contents_from_v4() {
+        // ZMSD §15 split_window: "In Version 3 (only) the upper window should be
+        // cleared after the split." From v4 a re-split must leave the existing
+        // contents on screen; our resize used to reallocate blank in every
+        // version.
+        let mut m = screen_machine(5);
+        m.exec_var(0x0A, &[2], None, None); // split 2 rows
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 1;
+        m.screen.cursor_col = 1;
+        m.print_text("HELLO");
+        m.exec_var(0x0A, &[3], None, None); // re-split, taller
+        assert_eq!(m.screen.upper.cell(1, 1).ch, 'H', "v5 re-split keeps the old contents");
+        assert_eq!(m.screen.upper.rows, 3, "and still resizes");
+        assert_eq!(m.screen.upper.cell(3, 1).ch, ' ', "the new row is blank");
+        m.exec_var(0x0A, &[1], None, None); // shrink
+        assert_eq!(m.screen.upper.rows, 1, "shrinking truncates");
+        assert_eq!(m.screen.upper.cell(1, 1).ch, 'H', "the surviving row survives");
+    }
+
+    #[test]
+    fn split_window_clears_upper_in_v3_only() {
+        // The other half of the same §15 sentence.
+        let mut m = screen_machine(3);
+        m.exec_var(0x0A, &[2], None, None);
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 1;
+        m.screen.cursor_col = 1;
+        m.print_text("HELLO");
+        assert_eq!(m.screen.upper.cell(1, 1).ch, 'H');
+        m.exec_var(0x0A, &[2], None, None); // re-split
+        assert_eq!(m.screen.upper.cell(1, 1).ch, ' ', "v3 clears the upper window after a split");
+    }
+
+    #[test]
+    fn erase_window_blanks_to_background_and_never_reverse_video() {
+        // ZMSD §8.7.3.2: a window is erased "to background colour"; §8.7.3.4:
+        // "Even if the text style is Reverse Video the new blank space should
+        // not have reversed colours." The blanks used to be Cell::default()
+        // (Default background) regardless of the selected colours.
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x21, 5);
+        m.exec_var(0x0A, &[1], None, None);
+        m.exec_2op(0x1B, &[3, 6], None, None); // set_colour(fg=red, bg=blue)
+        m.screen.text_style = 1; // reverse video ON
+        m.exec_var(0x0D, &[1], None, None); // erase_window(1)
+        let c = m.screen.upper.cell(1, 1);
+        assert_eq!(c.bg, ZColour::Standard(6), "blank carries the current background");
+        assert_eq!(c.style & 1, 0, "blank space is never reverse-video");
+    }
+
+    #[test]
+    fn erase_line_blank_is_never_reverse_video() {
+        // Same §8.7.3.4 sentence, via erase_line: the blanks used to be stamped
+        // with `text_style`, reverse bit and all.
+        let mut m = build_test_machine(&[]);
+        m.mem.write_byte(0x21, 5);
+        m.exec_var(0x0A, &[1], None, None);
+        m.exec_2op(0x1B, &[3, 6], None, None); // set_colour(fg=red, bg=blue)
+        m.screen.current_window = 1;
+        m.screen.cursor_row = 1;
+        m.screen.cursor_col = 1;
+        m.screen.text_style = 1; // reverse video ON
+        m.exec_var(0x0E, &[1], None, None); // erase_line 1
+        let c = m.screen.upper.cell(1, 1);
+        assert_eq!(c.bg, ZColour::Standard(6), "erased cell clears to background colour");
+        assert_eq!(c.style & 1, 0, "erased cell is never reverse-video");
+    }
+
+    #[test]
+    fn erase_window_homes_the_upper_cursor_and_minus_one_selects_lower() {
+        // ZMSD §8.7.3.2.1: "In Versions 5 and later, the cursor for the window
+        // being erased should be moved to the top left. In Version 4, the lower
+        // window's cursor moves to its bottom left, while the upper window's
+        // cursor moves to top left." §8.7.3.3 adds that erasing -1 "selects the
+        // lower screen". erase_window used to do neither.
+        for v in [4u8, 5] {
+            let mut m = screen_machine(v);
+            m.exec_var(0x0A, &[3], None, None);
+            m.screen.current_window = 1;
+            m.screen.cursor_row = 3;
+            m.screen.cursor_col = 7;
+            m.exec_var(0x0D, &[1], None, None); // erase_window(1)
+            assert_eq!(
+                (m.screen.cursor_row, m.screen.cursor_col),
+                (1, 1),
+                "v{v}: erasing the upper window homes its cursor"
+            );
+
+            m.screen.current_window = 1;
+            m.screen.cursor_row = 2;
+            m.screen.cursor_col = 5;
+            m.exec_var(0x0D, &[0xFFFF], None, None); // erase_window(-1)
+            assert_eq!(m.screen.current_window, 0, "v{v}: -1 selects the lower window");
+            assert_eq!(m.screen.upper_window_rows, 0, "v{v}: -1 collapses the upper window");
+            assert_eq!(
+                (m.screen.cursor_row, m.screen.cursor_col),
+                (1, 1),
+                "v{v}: -1 homes the upper cursor too"
+            );
+        }
     }
 
     #[test]
@@ -7683,10 +7997,13 @@ pub(crate) mod tests {
     fn v6_put_wind_prop_out_of_range_window_is_ignored() {
         let mut m = v6_exec_machine();
         // window 8 is out of range (table is 0-7) — must not panic, must be a no-op.
+        let before: Vec<u16> =
+            m.screen.v6.as_ref().unwrap().windows.iter().map(|w| w.get_prop(2)).collect();
         m.exec_ext(0x19, &[8, 2, 99], None, None);
-        for w in &m.screen.v6.as_ref().unwrap().windows {
-            assert_eq!(w.get_prop(2), 0, "no window was touched by an out-of-range put");
-        }
+        let after: Vec<u16> =
+            m.screen.v6.as_ref().unwrap().windows.iter().map(|w| w.get_prop(2)).collect();
+        assert_eq!(before, after, "no window was touched by an out-of-range put");
+        assert!(!after.contains(&99), "the out-of-range value landed nowhere");
     }
 
     #[test]
@@ -8446,8 +8763,65 @@ pub(crate) mod tests {
         m.exec_var(0x0B, &[7], None, None); // set_window(7)
         let v6 = m.screen.v6.as_ref().expect("v6 story has a window table");
         assert_eq!(v6.current, 7, "set_window(7) selects window 7");
-        assert_eq!(v6.windows[7].y_cursor, 1, "cursor reset to top-left row");
-        assert_eq!(v6.windows[7].x_cursor, 1, "cursor reset to top-left col");
+    }
+
+    #[test]
+    fn v6_set_window_preserves_each_windows_own_cursor() {
+        // ZMSD §8.8.3.5: "Each window remembers its own cursor position
+        // (relative to its own coordinates ...). These can be changed using
+        // set_cursor (and it is legal to move the cursor for an unselected
+        // window)." Selecting a window must therefore NOT home its cursor.
+        // (This test replaces an assertion that pinned the opposite.)
+        let mut m = v6_exec_machine();
+        {
+            let v6 = m.screen.v6.as_mut().unwrap();
+            v6.windows[7].y_cursor = 33;
+            v6.windows[7].x_cursor = 57;
+        }
+        m.exec_var(0x0B, &[7], None, None); // set_window(7)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.current, 7);
+        assert_eq!(v6.windows[7].y_cursor, 33, "window 7 remembers its own cursor row");
+        assert_eq!(v6.windows[7].x_cursor, 57, "window 7 remembers its own cursor col");
+    }
+
+    #[test]
+    fn v6_set_window_adopts_target_windows_colour_pair() {
+        // ZMSD §8.3: in Version 6 each window carries its own colour pair, and
+        // prose printed to the current window must be tagged with it.
+        let mut m = v6_exec_machine();
+        {
+            let v6 = m.screen.v6.as_mut().unwrap();
+            v6.windows[4].fg = ZColour::Standard(3);
+            v6.windows[4].bg = ZColour::Standard(6);
+        }
+        m.exec_var(0x0B, &[4], None, None); // set_window(4)
+        assert_eq!(m.screen.current_fg, ZColour::Standard(3), "prose fg follows the window");
+        assert_eq!(m.screen.current_bg, ZColour::Standard(6), "prose bg follows the window");
+    }
+
+    #[test]
+    fn v6_set_colour_on_current_window_reaches_the_prose_stream() {
+        // ZMSD §8.3: v6 set_colour targets a window; the prose stream tags its
+        // TextAttrs from current_fg/current_bg, so a colour set on the CURRENT
+        // window has to land there too (it used to be dropped, leaving all v6
+        // prose in the interpreter default).
+        let mut m = v6_exec_machine();
+        m.exec_2op(0x1B, &[4, 6], None, None); // set_colour(green, blue) — current window
+        assert_eq!(m.screen.current_fg, ZColour::Standard(4));
+        assert_eq!(m.screen.current_bg, ZColour::Standard(6));
+        // A colour aimed at some OTHER window must not disturb the prose pair.
+        m.exec_2op(0x1B, &[3, 9, 5], None, None); // set_colour(red, white, window 5)
+        assert_eq!(m.screen.current_fg, ZColour::Standard(4), "window 5's colour is not window 0's");
+        assert_eq!(m.screen.current_bg, ZColour::Standard(6));
+    }
+
+    #[test]
+    fn v6_set_true_colour_on_current_window_reaches_the_prose_stream() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x0D, &[0x1234, 0x5678], None, None);
+        assert_eq!(m.screen.current_fg, ZColour::True(0x1234));
+        assert_eq!(m.screen.current_bg, ZColour::True(0x5678));
     }
 
     #[test]
@@ -8465,6 +8839,96 @@ pub(crate) mod tests {
         assert_eq!(v6.windows[3].grid.cell(1, 1).ch, ' ', "window 3's grid cleared");
         assert_eq!(v6.windows[3].y_cursor, 1, "cursor reset to top-left row");
         assert_eq!(v6.windows[3].x_cursor, 1, "cursor reset to top-left col");
+    }
+
+    /// A machine on a bare story of the requested version, with a 10-column
+    /// screen in the header so the upper-window grid has a width.
+    fn screen_machine(version: u8) -> Machine {
+        let mut m = Machine::new(
+            Memory::new(crate::header::tests_support::sample_story(version)).unwrap(),
+        );
+        m.mem.write_byte(0x21, 10); // screen width = 10 cols
+        m
+    }
+
+    #[test]
+    fn v6_window0_boots_occupying_the_whole_screen() {
+        // ZMSD §8.8.3.3: "Window 0 occupies the whole screen and is initially
+        // selected. Window 1 is as wide as the screen but has zero height."
+        // Window 0's height used to boot at 0.
+        let m = v6_exec_machine();
+        let v6 = m.screen.v6.as_ref().unwrap();
+        let full_w = crate::screen::DEFAULT_SCREEN_COLS as u16 * V6_FONT_WIDTH;
+        let full_h = crate::screen::DEFAULT_SCREEN_ROWS as u16 * V6_FONT_HEIGHT;
+        assert_eq!(v6.windows[0].x_size, full_w, "window 0 is as wide as the screen");
+        assert_eq!(v6.windows[0].y_size, full_h, "window 0 is as tall as the screen");
+        assert_eq!(v6.windows[1].x_size, full_w, "window 1 is as wide as the screen");
+        assert_eq!(v6.windows[1].y_size, 0, "window 1 has zero height");
+        assert_eq!(v6.current, 0, "window 0 is initially selected");
+    }
+
+    #[test]
+    fn v6_set_screen_dims_gives_window0_the_whole_screen() {
+        // Same §8.8.3.3 clause, re-applied when the host reports the real size.
+        let mut m = v6_exec_machine();
+        m.set_screen_dims(25, 80);
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.windows[0].x_size, 80 * V6_FONT_WIDTH);
+        assert_eq!(v6.windows[0].y_size, 25 * V6_FONT_HEIGHT);
+        assert_eq!(v6.windows[1].y_size, 0, "window 1 stays unsplit");
+    }
+
+    #[test]
+    fn v6_erase_window_minus_one_unsplits_and_selects_window_zero() {
+        // ZMSD §8.8.5.3.1: "Erasing window number -1 erases the entire screen to
+        // the background colour of window 0, unsplits windows 0 and 1 and
+        // selects window 0."
+        let mut m = v6_exec_machine();
+        m.set_screen_dims(25, 80);
+        m.exec_var(0x0A, &[160], None, None); // split_window(160px) -> window 1 has height
+        {
+            let v6 = m.screen.v6.as_mut().unwrap();
+            v6.current = 3;
+            v6.windows[0].bg = ZColour::Standard(6);
+            v6.windows[2].y_cursor = 40;
+        }
+        m.exec_var(0x0D, &[0xFFFF], None, None); // erase_window(-1)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.current, 0, "-1 selects window 0");
+        assert_eq!(v6.windows[1].y_size, 0, "-1 unsplits: window 1 collapses to zero height");
+        assert_eq!(v6.windows[0].y_size, 25 * V6_FONT_HEIGHT, "-1 gives window 0 the screen");
+        assert_eq!(v6.windows[2].y_cursor, 1, "-1 is a full per-window erase: cursors home");
+        assert_eq!(
+            m.screen.current_bg,
+            ZColour::Standard(6),
+            "the screen is erased to window 0's background, which becomes current"
+        );
+    }
+
+    #[test]
+    fn v6_erase_window_minus_two_changes_no_attributes_or_cursors() {
+        // ZMSD §8.8.5.3.2: "Erasing window -2 erases the entire screen to the
+        // current background colour. (It doesn't perform erase_window for all
+        // the individual windows, and it doesn't change any window attributes or
+        // cursor positions.)" -1 and -2 used to be handled identically.
+        let mut m = v6_exec_machine();
+        m.set_screen_dims(25, 80);
+        m.exec_var(0x0A, &[160], None, None); // split_window(160px)
+        {
+            let v6 = m.screen.v6.as_mut().unwrap();
+            v6.current = 3;
+            v6.windows[2].grid.resize(1, 2);
+            v6.windows[2].grid.put(1, 1, 'X', 0, ZColour::Default, ZColour::Default);
+            v6.windows[2].y_cursor = 40;
+            v6.windows[2].x_cursor = 24;
+        }
+        m.exec_var(0x0D, &[0xFFFE], None, None); // erase_window(-2)
+        let v6 = m.screen.v6.as_ref().unwrap();
+        assert_eq!(v6.current, 3, "-2 does not change the selected window");
+        assert_eq!(v6.windows[1].y_size, 160, "-2 does not unsplit");
+        assert_eq!(v6.windows[2].y_cursor, 40, "-2 leaves cursor positions alone");
+        assert_eq!(v6.windows[2].x_cursor, 24, "-2 leaves cursor positions alone");
+        assert_eq!(v6.windows[2].grid.cell(1, 1).ch, ' ', "-2 still erases the whole screen");
     }
 
     #[test]
