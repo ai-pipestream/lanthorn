@@ -1905,6 +1905,16 @@ impl Machine {
             // VAR:0x10 get_cursor — write (row, col) of the upper-window cursor into a 2-word array.
             // v6 (frotz z_get_cursor): the CURRENT window's pixel cursor, verbatim —
             // the non-v6 screen cursor fields are never updated by the v6 path.
+            //
+            // ZMSD §8.8.3.2.7: "If an attempt is made by the game to read the
+            // cursor position at a time when text is held unprinted in a
+            // buffer, then this text should be flushed first, to ensure that
+            // the cursor position is accurate before being read." Nothing is
+            // ever held here: `print_text` paints/streams each call as it
+            // arrives and moves the window cursor with it
+            // (`v6_advance_prose_cursor`, SQ-0536), so the read below is
+            // already the flushed position. Any future deferred buffer must
+            // flush at this point.
             0x10 => {
                 let array = ops.first().copied().unwrap_or(0) as u32;
                 if let Some(v6) = self.screen.v6.as_ref() {
@@ -3030,6 +3040,74 @@ impl Machine {
         self.newline_interrupt_active = false;
     }
 
+    /// Advance the current v6 window's cursor as `s` streams out through the
+    /// scrolling prose path (ZMSD §8.8.3.2.7: the cursor a game reads back
+    /// must be accurate for the text already printed — with nothing held in a
+    /// buffer here, keeping the cursor current at print time IS the flush).
+    ///
+    /// Mirrors frotz `screen_char`: a glyph that no longer fits between the
+    /// margins wraps first (this regime always has wrapping on — it is what
+    /// selects it), then the cursor advances one glyph. The host does the
+    /// real, word-aware wrapping of prose, so the model's line breaks are an
+    /// approximation of the visible ones; they exist to keep props 4/5 (and
+    /// the line count) moving, not to place pixels.
+    ///
+    /// No-op below v6.
+    fn v6_advance_prose_cursor(&mut self, s: &str) {
+        let fw = V6_FONT_WIDTH;
+        let Some(v6) = self.screen.v6.as_mut() else {
+            return;
+        };
+        let idx = (v6.current as usize).min(7);
+        let w = &mut v6.windows[idx];
+        for ch in s.chars() {
+            if ch == '\n' {
+                w.prose_new_line();
+                continue;
+            }
+            let right_edge = w.x_size.saturating_sub(w.right_margin);
+            if w.x_cursor.saturating_add(fw).saturating_sub(1) > right_edge {
+                w.prose_new_line();
+            }
+            w.x_cursor = w.x_cursor.saturating_add(fw);
+        }
+    }
+
+    /// Reload every v6 window's line count (ZMSD §8.8.3.2.2 / §8.8.3.2.6 —
+    /// see [`crate::screen::ZWindow::reload_line_count`]). Frotz does this for
+    /// all eight windows whenever a keystroke actually arrives (not on a
+    /// timeout), in `console_read_input` and `console_read_key`; without it a
+    /// long game walks the count down to the -999 floor and silently turns
+    /// "[MORE]" off for good. No-op below v6.
+    fn v6_reload_line_counts(&mut self) {
+        if let Some(v6) = self.screen.v6.as_mut() {
+            for w in v6.windows.iter_mut() {
+                w.reload_line_count();
+            }
+        }
+    }
+
+    /// The current v6 window's line count (property 15) as a signed number:
+    /// how many more lines it prints before "[MORE]" falls due (zero or below
+    /// = due; [`crate::screen::NEVER_MORE`] = never). `None` below v6.
+    ///
+    /// For the host's pager — the engine only maintains the count (decrement
+    /// per new-line, floor at -999, reload on input); deciding when to show
+    /// "[MORE]" stays a host job.
+    pub fn v6_line_count(&self) -> Option<i16> {
+        self.screen
+            .v6
+            .as_ref()
+            .map(|v6| v6.windows[(v6.current as usize).min(7)].line_count_signed())
+    }
+
+    /// ZMSD §8.8.3.2.6: "A line count of -999 means 'never print [MORE]'."
+    /// True only for a v6 story whose current window is parked at the
+    /// sentinel — the device Zork Zero's demonstration mode uses (§8 Remarks).
+    pub fn v6_suppress_more(&self) -> bool {
+        self.v6_line_count() == Some(crate::screen::NEVER_MORE)
+    }
+
     /// Complete a pending timed read as *interrupted* (the interrupt routine
     /// returned true / the host timed out): `read_char` stores ZSCII 0;
     /// `read` writes the partial `typed` line and stores terminator 0 (v5+).
@@ -3106,6 +3184,24 @@ impl Machine {
             self.streams.write_stream3_bytes(&bytes);
             return;
         }
+        // Stream 2 (the transcript) takes a copy of everything printed while it
+        // is selected — including v6 text that PAINTS rather than streams, which
+        // used to fall out through the paint path's early return below (SQ-0537).
+        // Which windows contribute is a per-window decision in v6: ZMSD §8.8.3.1
+        // attribute "2: text copied to output stream 2 (the transcript, if
+        // selected)" — frotz's `enable_scripting`, taken from the CURRENT
+        // window's attribute bits. Below v6 the same bit is what keeps upper
+        // window text out of transcripts: frotz's restart_screen gives window 0
+        // attribute 15 (scripting on) and windows 1-7 attribute 8 (off).
+        if self.streams.stream2 {
+            let copy = match self.screen.v6.as_ref() {
+                Some(v6) => v6.windows[(v6.current as usize).min(7)].scripting(),
+                None => self.screen.current_window != 1,
+            };
+            if copy {
+                self.streams.write_stream2(s);
+            }
+        }
         let font3 = self.screen.current_font == 3;
         // v6: prop-14 attributes route stream-vs-paint UNIFORMLY across all 8
         // windows. A window is a flowing-prose "main" window — its output
@@ -3157,14 +3253,67 @@ impl Machine {
                     // `(px-1)/font + 1`. Each printed run is also recorded at
                     // its exact pixel start (`texts`) for pixel-faithful rasters.
                     let mut run: Option<crate::screen::V6Text> = None;
-                    for ch in s.chars() {
+                    // ZMSD §8.8.3.1.2.2: "If 'buffered printing' is on, then
+                    // text is wrapped after the last word which could fit on a
+                    // line. If not, then text is wrapped after the last
+                    // character that could fit." Word wrapping therefore needs
+                    // BOTH wrapping (attribute 0) and buffered printing
+                    // (attribute 3); with buffering off the per-character wrap
+                    // at the end of this loop stands (SQ-0535).
+                    let word_wrap = w.wrapping() && w.buffered();
+                    let chars: Vec<char> = s.chars().collect();
+                    let mut i = 0;
+                    while i < chars.len() {
+                        let ch = chars[i];
+                        i += 1;
                         if ch == '\n' {
                             if let Some(r) = run.take() {
                                 finished.push(r);
                             }
+                            if w.scrolling() {
+                                w.tick_line_count();
+                            }
                             w.y_cursor += fh;
                             w.x_cursor = w.left_margin + 1;
                             continue;
+                        }
+                        // Word wrap: measure the word about to start and break
+                        // the line ahead of it if it cannot fit. Frotz buffers
+                        // a word together with its leading space and drops that
+                        // space at the break (`screen_word`), so the wrapped
+                        // line does not end in a stray blank. A word longer than
+                        // the whole line is left to the character wrap below.
+                        // (Our buffer only spans one print call, so a word split
+                        // across two calls still breaks mid-word — real v6 games
+                        // print prose through the host path, not here.)
+                        if word_wrap {
+                            let at_space = ch == ' ';
+                            if at_space || i == 1 {
+                                let start = if at_space { i } else { i - 1 };
+                                let word = chars[start..]
+                                    .iter()
+                                    .take_while(|c| **c != ' ' && **c != '\n')
+                                    .count();
+                                let col = ((w.x_cursor.max(1) - 1) / fw + 1) as usize;
+                                let need = word + usize::from(at_space);
+                                if word > 0
+                                    && col > 1
+                                    && word <= cols as usize
+                                    && col + need - 1 > cols as usize
+                                {
+                                    if let Some(r) = run.take() {
+                                        finished.push(r);
+                                    }
+                                    if w.scrolling() {
+                                        w.tick_line_count();
+                                    }
+                                    w.y_cursor += fh;
+                                    w.x_cursor = w.left_margin + 1;
+                                    if at_space {
+                                        continue; // the break consumes the space
+                                    }
+                                }
+                            }
                         }
                         let out_ch = if font3 { font3_translate(ch) } else { ch };
                         // Wrapping is the window's attribute bit 0 (ZMSD
@@ -3199,6 +3348,9 @@ impl Machine {
                         if wrapping && c >= cols {
                             if let Some(r) = run.take() {
                                 finished.push(r);
+                            }
+                            if w.scrolling() {
+                                w.tick_line_count();
                             }
                             w.y_cursor += fh;
                             w.x_cursor = w.left_margin + 1;
@@ -3273,6 +3425,14 @@ impl Machine {
             } else {
                 self.out.print_attr(s, attrs);
             }
+            // The prose regime moves the window cursor too (SQ-0536). Before
+            // this, v6 window 0 / win7 printed whole paragraphs without prop
+            // 4/5 ever changing, so get_wind_prop and get_cursor reported the
+            // position the window had before the print. Runs BEFORE the
+            // newline interrupt so a prop-8 routine sees the post-newline
+            // cursor, exactly as it would in frotz (whose screen_new_line
+            // moves the cursor and only then counts down).
+            self.v6_advance_prose_cursor(s);
             // v6 newline interrupt (ZMSD §8.8.3.2.2): this stream path is the
             // *scrolling* regime (v6 window 0 / Inform's wrap+scroll win7), the
             // only place Frotz counts new-lines. Tick the current window's prop-9
@@ -3359,6 +3519,13 @@ impl Machine {
             None => return, // no pending read — ignore
         };
 
+        // A key actually arrived, so the v6 windows get a fresh screenful
+        // before "[MORE]" is due again (frotz console_read_input, which skips
+        // this on ZC_TIME_OUT — our timeout path is terminator 0).
+        if terminator != 0 {
+            self.v6_reload_line_counts();
+        }
+
         let version = self.mem.version();
         let text_buf = pending.text_buf;
         let parse_buf = pending.parse_buf;
@@ -3413,6 +3580,11 @@ impl Machine {
             Some(p) => p,
             None => return,
         };
+        // As in `supply_line`: a real keystroke reloads the v6 line counts,
+        // ZSCII 0 (our timed-read timeout) does not (frotz console_read_key).
+        if ch != 0 {
+            self.v6_reload_line_counts();
+        }
         self.do_store(pending.store_var, ch as u16);
     }
 
@@ -8806,6 +8978,177 @@ pub(crate) mod tests {
         m.exec_var(0x10, &[0x0100], None, None); // get_cursor -> array at 0x0100
         assert_eq!(m.mem.read_word(0x0100), 57, "word 0 = y cursor in pixels");
         assert_eq!(m.mem.read_word(0x0102), 123, "word 1 = x cursor in pixels");
+    }
+
+    // -----------------------------------------------------------------------
+    // SQ-0535: v6 word wrap when "buffered printing" (attribute 3) is on.
+    // ZMSD §8.8.3.1.2.2: "If 'buffered printing' is on, then text is wrapped
+    // after the last word which could fit on a line. If not, then text is
+    // wrapped after the last character that could fit." The spec's own example
+    // prints "Here is an abacus" in a narrow window; with wrapping on the two
+    // buffering settings must give "Here is an" / "abacus" and
+    // "Here is an aba" / "cus" respectively. Infocom's v6 windows 1-7 boot with
+    // wrapping OFF and window 0's prose leaves through the host path, so only a
+    // synthetic window exercises this.
+    // -----------------------------------------------------------------------
+
+    /// Place `win` as a paint-regime window `cols` characters wide, with
+    /// wrapping on (attribute 0) and buffered printing per `buffered`.
+    fn v6_wrap_window(m: &mut Machine, win: u8, cols: u16, buffered: bool) {
+        let w = cols * crate::screen::V6_FONT_WIDTH;
+        v6_place_window(m, win, 1, 1, 4 * crate::screen::V6_FONT_HEIGHT, w);
+        m.exec_ext(0x12, &[win as u16, 0b0001, 1], None, None); // window_style: set wrapping
+        // Attribute 3 (buffering) is on for every window at boot; clear it for
+        // the character-wrap half of the pair.
+        if !buffered {
+            m.exec_ext(0x12, &[win as u16, 0b1000, 2], None, None); // clear buffering
+        }
+    }
+
+    #[test]
+    fn v6_buffered_window_wraps_after_the_last_whole_word() {
+        let mut m = v6_exec_machine();
+        v6_wrap_window(&mut m, 2, 14, true);
+        m.print_text("Here is an abacus");
+        let w = &m.screen.v6.as_ref().unwrap().windows[2];
+        let runs: Vec<(u16, u16, &str)> =
+            w.texts.iter().map(|t| (t.y, t.x, t.text.as_str())).collect();
+        assert_eq!(
+            runs,
+            vec![(1, 1, "Here is an"), (1 + crate::screen::V6_FONT_HEIGHT, 1, "abacus")],
+            "buffered printing breaks at the space, which the break consumes"
+        );
+        // "abacus^" — the cursor sits just after the carried word.
+        assert_eq!(w.x_cursor, 1 + 6 * crate::screen::V6_FONT_WIDTH, "cursor after 'abacus'");
+    }
+
+    #[test]
+    fn v6_unbuffered_window_wraps_after_the_last_character() {
+        let mut m = v6_exec_machine();
+        v6_wrap_window(&mut m, 2, 14, false);
+        m.print_text("Here is an abacus");
+        let w = &m.screen.v6.as_ref().unwrap().windows[2];
+        let runs: Vec<(u16, u16, &str)> =
+            w.texts.iter().map(|t| (t.y, t.x, t.text.as_str())).collect();
+        assert_eq!(
+            runs,
+            vec![(1, 1, "Here is an aba"), (1 + crate::screen::V6_FONT_HEIGHT, 1, "cus")],
+            "with buffering off the break falls wherever the 14th column does"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SQ-0536: the v6 prose path advances the window cursor, so get_cursor
+    // (ZMSD §8.8.3.2.7) reports where the text actually left it.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v6_prose_print_advances_the_window_cursor_for_get_cursor() {
+        let mut m = v6_exec_machine();
+        // Window 0 boots wrap+scroll (attributes 15) → the streaming prose path.
+        m.print_text("Hello");
+        m.exec_var(0x10, &[0x0100], None, None); // get_cursor
+        assert_eq!(m.mem.read_word(0x0100), 1, "still on the first line");
+        assert_eq!(
+            m.mem.read_word(0x0102),
+            1 + 5 * crate::screen::V6_FONT_WIDTH,
+            "x cursor advanced one glyph per printed character"
+        );
+        m.print_text("\n");
+        m.exec_var(0x10, &[0x0100], None, None);
+        assert_eq!(
+            m.mem.read_word(0x0100),
+            1 + crate::screen::V6_FONT_HEIGHT,
+            "the new-line dropped the cursor one line"
+        );
+        assert_eq!(m.mem.read_word(0x0102), 1, "and returned it to the left margin");
+    }
+
+    #[test]
+    fn v6_prose_cursor_stops_at_the_bottom_line_of_a_scrolling_window() {
+        // frotz screen_new_line: on the last line a scrolling window scrolls
+        // under a stationary cursor. Without this the cursor would walk past
+        // the window (and overflow prop 4 outright in a long game).
+        let mut m = v6_exec_machine();
+        let fh = crate::screen::V6_FONT_HEIGHT;
+        let y_size = m.screen.v6.as_ref().unwrap().windows[0].y_size;
+        m.print_text(&"\n".repeat(y_size as usize / fh as usize + 20));
+        let w = &m.screen.v6.as_ref().unwrap().windows[0];
+        assert_eq!(w.y_cursor, y_size - fh + 1, "parked on the bottom line");
+    }
+
+    // -----------------------------------------------------------------------
+    // SQ-0537: ZMSD §8.8.3.1 attribute "2: text copied to output stream 2
+    // (the transcript, if selected)". Painted text used to return before any
+    // stream handling at all.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v6_attribute_2_copies_painted_text_to_stream_2() {
+        let mut m = v6_exec_machine();
+        v6_place_window(&mut m, 2, 1, 1, 16, 320);
+        m.exec_var(0x13, &[2], None, None); // output_stream 2 (transcript on)
+        m.exec_ext(0x12, &[2, 0b0100, 1], None, None); // window_style: set attribute 2
+        m.print_text("copied");
+        assert_eq!(m.streams.stream2_text(), "copied", "attr 2 + stream 2 → transcript");
+        m.exec_ext(0x12, &[2, 0b0100, 2], None, None); // clear attribute 2
+        m.print_text("silent");
+        assert_eq!(
+            m.streams.stream2_text(),
+            "copied",
+            "with attribute 2 clear the window's text stays out of the transcript"
+        );
+        // And deselecting stream 2 stops the copy even with the attribute set.
+        m.exec_ext(0x12, &[2, 0b0100, 1], None, None);
+        m.exec_var(0x13, &[(-2i16) as u16], None, None); // output_stream -2
+        m.print_text("offline");
+        assert_eq!(m.streams.stream2_text(), "copied", "unselected stream 2 takes nothing");
+    }
+
+    // -----------------------------------------------------------------------
+    // SQ-0534 (zvm half): the per-window line count (property 15) lives.
+    // ZMSD §8.8.3.2.2 "the line count is decremented on each new-line",
+    // §8.8.3.2.2.3 "A line count is never decremented below -999",
+    // §8.8.3.2.6 "A line count of -999 means 'never print [MORE]'".
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn v6_line_count_decrements_on_each_new_line() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x19, &[0, 15, 3], None, None); // put_wind_prop(win0, line count, 3)
+        m.print_text("one\ntwo\n");
+        assert_eq!(m.v6_line_count(), Some(1), "two new-lines, two decrements");
+        // A window without the scrolling attribute never pages, so it never
+        // counts (frotz gates on `enable_scrolling`).
+        v6_place_window(&mut m, 2, 1, 1, 64, 320);
+        m.exec_ext(0x19, &[2, 15, 5], None, None);
+        m.print_text("no\ncount\n");
+        assert_eq!(m.v6_line_count(), Some(5), "non-scrolling window keeps its count");
+    }
+
+    #[test]
+    fn v6_line_count_floors_at_minus_999_and_sticks_there() {
+        let mut m = v6_exec_machine();
+        m.exec_ext(0x19, &[0, 15, (-998i16) as u16], None, None);
+        assert!(!m.v6_suppress_more(), "-998 still pages");
+        m.print_text("\n\n\n\n");
+        assert_eq!(m.v6_line_count(), Some(-999), "never decremented below -999");
+        assert!(m.v6_suppress_more(), "-999 means never print [MORE]");
+        m.print_text("\n\n");
+        assert_eq!(m.v6_line_count(), Some(-999), "and it stays parked there");
+    }
+
+    #[test]
+    fn v6_line_count_reloads_on_input_but_not_on_a_timeout() {
+        let mut m = v6_exec_machine();
+        let full = m.screen.v6.as_ref().unwrap().windows[0].more_interval();
+        m.exec_ext(0x19, &[0, 15, 1], None, None);
+        m.exec_var(0x16, &[0], Some(0x01), None); // read_char (arms pending input)
+        m.supply_char(0); // ZSCII 0 = timed out
+        assert_eq!(m.v6_line_count(), Some(1), "a timeout is not a keystroke");
+        m.exec_var(0x16, &[0], Some(0x01), None);
+        m.supply_char(b'x');
+        assert_eq!(m.v6_line_count(), Some(full), "a real key reloads a full screen");
     }
 
     #[test]

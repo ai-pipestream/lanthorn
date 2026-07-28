@@ -284,7 +284,87 @@ impl V6Text {
     }
 }
 
+/// ZMSD §8.8.3.2.6: "A line count of -999 means 'never print [MORE]'."
+/// Also the floor §8.8.3.2.2.3 clamps to ("A line count is never decremented
+/// below -999"), so once a window reaches the sentinel it stays there.
+pub const NEVER_MORE: i16 = -999;
+
 impl ZWindow {
+    /// ZMSD §8.8.3.1 attribute 0 ("wrapping").
+    pub fn wrapping(&self) -> bool {
+        self.attributes & 0b0001 != 0
+    }
+    /// ZMSD §8.8.3.1 attribute 1 ("scrolling").
+    pub fn scrolling(&self) -> bool {
+        self.attributes & 0b0010 != 0
+    }
+    /// ZMSD §8.8.3.1 attribute 2 ("text copied to output stream 2 (the
+    /// transcript, if selected)").
+    pub fn scripting(&self) -> bool {
+        self.attributes & 0b0100 != 0
+    }
+    /// ZMSD §8.8.3.1 attribute 3 ("buffered printing").
+    pub fn buffered(&self) -> bool {
+        self.attributes & 0b1000 != 0
+    }
+
+    /// Property 15 read as the signed number the spec talks about (window
+    /// properties are "standard Z-machine numbers", i.e. signed 16-bit).
+    pub fn line_count_signed(&self) -> i16 {
+        self.line_count as i16
+    }
+
+    /// How many lines this window prints before "[MORE]" falls due — its
+    /// height in text lines less one, matching frotz's `screen_new_line`
+    /// threshold (`above + below - 1`). Degenerate (zero-height) windows
+    /// report 1 rather than 0 so the count never starts already-due.
+    pub fn more_interval(&self) -> i16 {
+        let lines = (self.y_size / V6_FONT_HEIGHT) as i32;
+        (lines - 1).clamp(1, i16::MAX as i32) as i16
+    }
+
+    /// One new-line happened in this window: ZMSD §8.8.3.2.2 "the line count
+    /// is decremented on each new-line", §8.8.3.2.2.3 "A line count is never
+    /// decremented below -999". The sentinel is sticky — a window the game
+    /// parked at -999 to suppress "[MORE]" (§8.8.3.2.6) stays there.
+    pub fn tick_line_count(&mut self) {
+        let lc = self.line_count_signed();
+        if lc == NEVER_MORE {
+            return;
+        }
+        self.line_count = lc.saturating_sub(1).max(NEVER_MORE) as u16;
+    }
+
+    /// Reload the line count to a full window's worth of lines. Frotz does the
+    /// equivalent (`line_count = 0`, counting the other way) for all eight
+    /// windows whenever a keystroke actually arrives — see
+    /// `console_read_input`/`console_read_key` — which is what stops the count
+    /// drifting down to the -999 floor over a long game.
+    pub fn reload_line_count(&mut self) {
+        self.line_count = self.more_interval() as u16;
+    }
+
+    /// One new-line in the *scrolling prose* regime (v6 window 0, or an Inform
+    /// v6 library's wrap+scroll main window): the cursor returns to the left
+    /// margin and drops a line, except on the bottom line where the window
+    /// scrolls under a stationary cursor. Mirrors frotz `screen_new_line`
+    /// (`if (y_cursor + 2 * font_height - 1 > y_size) scroll else y_cursor +=
+    /// font_height`), and ticks the line count (§8.8.3.2.2).
+    ///
+    /// The *paint* regime deliberately does not use this: painted text keeps
+    /// running past the bottom of its window (runs are screen-absolute), so
+    /// clamping there would move glyphs the games expect to stay put.
+    pub fn prose_new_line(&mut self) {
+        self.x_cursor = self.left_margin.saturating_add(1);
+        if self.scrolling() {
+            self.tick_line_count();
+        }
+        let fh = V6_FONT_HEIGHT as u32;
+        if self.y_cursor as u32 + 2 * fh - 1 <= self.y_size as u32 {
+            self.y_cursor += V6_FONT_HEIGHT;
+        }
+    }
+
     /// Read property `n` (0–15, ZMSD 1.1 §8.8.3.2). Out-of-range → 0.
     pub fn get_prop(&self, n: u16) -> u16 {
         match n {
@@ -599,6 +679,15 @@ pub struct StreamState {
     pub input_stream: u8,
     /// Stack of active stream-3 frames (nested up to 16).
     stream3_stack: Vec<Stream3Frame>,
+    /// Everything routed to stream 2 while it was selected (ZMSD §7.1.2:
+    /// stream 2 is "the game transcript"). Writing it to a FILE is a host
+    /// concern the app does not implement (§7.6.5 lets an interpreter decline
+    /// external files, and `output_stream 2` warns the player); the model
+    /// still has to route text here so the routing is correct the day a file
+    /// sink exists — in particular the v6 per-window "copy to stream 2"
+    /// attribute (§8.8.3.1 attribute 2), which decides *which* windows'
+    /// text a transcript would contain.
+    stream2_buf: String,
 }
 
 impl Default for StreamState {
@@ -615,7 +704,20 @@ impl StreamState {
             stream4: false,
             input_stream: 0,
             stream3_stack: Vec::new(),
+            stream2_buf: String::new(),
         }
+    }
+
+    /// Append `s` to the transcript sink (see [`StreamState::stream2_buf`]).
+    /// Callers gate this on stream 2 being selected AND — in v6 — on the
+    /// printing window carrying attribute 2.
+    pub fn write_stream2(&mut self, s: &str) {
+        self.stream2_buf.push_str(s);
+    }
+
+    /// The transcript text accumulated so far.
+    pub fn stream2_text(&self) -> &str {
+        &self.stream2_buf
     }
 
     /// True when stream 3 is active (text goes to memory, not screen).
