@@ -14,6 +14,13 @@
 //! faults, so this file does **not** drive a second turn after a move — doing so
 //! would make the test fail. The fault is reported, not asserted as a pass/fail
 //! condition, per the "don't fix, don't fail" rule for smoke tests that expose bugs.
+//!
+//! **Colour mode: `honor_game_colours = true`** — the app's shipped config
+//! default, so these render assertions are made in the mode real players run.
+//! (Before SQ-0532 wave 4 every v6 smoke booted with the game's colours
+//! DECLINED, which is exactly why three colour-driven render regressions
+//! shipped unseen. The theme-only `false` path is covered by the paired cases
+//! in `v6_game_colour_regression.rs`.)
 
 use std::path::PathBuf;
 
@@ -58,7 +65,7 @@ fn zork0_v6_gameplay_smoke_boot_compass_and_one_safe_move() {
     // boot instruction (via `take_screen_trace`, `Engine` trait) so the
     // boot-time compass draws are visible.
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, true, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, true, picture_dims, picts.std_window(), None)
             .expect("Zork0 (v6) should load and boot without a ZError");
 
     assert!(!session.quit, "Zork0 quit during boot");
@@ -177,7 +184,7 @@ fn zork0_v6_gameplay_turns_after_move_do_not_fault() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit, "Zork0 quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
@@ -249,7 +256,7 @@ fn boot_session() -> Option<GameSession> {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit, "Zork0 quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");

@@ -1094,6 +1094,26 @@ impl GameSession {
             if (win.x_size == 0 || win.y_size == 0) && win.texts.is_empty() {
                 continue;
             }
+            // ZMSD §8.8.3.3 boots window 0 "occupying the whole screen", and an
+            // `erase_window(-1)` unsplit restores exactly that. Until the game
+            // gives it content, though, a full-screen window 0 is a placeholder,
+            // not a story page: `render::v6_layout::classify_windows` would make
+            // it the story window, and hybrid mode would then open a pane-sized
+            // transcript viewport over the title art with a zero-thickness chrome
+            // ring around it (Shogun's splash goes blank). So skip window 0 while
+            // it still covers the untouched whole screen with nothing in it —
+            // neither painted runs nor a single character streamed to it. The
+            // moment the game prints or resizes/moves it (Zork Zero sizes it to
+            // 468x320 during boot) it takes part again.
+            if i == 0
+                && win.texts.is_empty()
+                && self.machine.v6_win0_out_chars == 0
+                && !self.pictures_canvas.contains_key(&0)
+                && (win.x_coord, win.y_coord) == (1, 1)
+                && (win.x_size, win.y_size) == (self.machine.mem.read_word(0x22), self.machine.mem.read_word(0x24))
+            {
+                continue;
+            }
             // ZMSD §8.8.1: window coords are 1-based ((1,1) = screen top-left);
             // the composite raster is 0-based, so positions drop by one here.
             let x_px = win.x_coord.saturating_sub(1);
@@ -1248,8 +1268,21 @@ impl GameSession {
         ScreenModel {
             root: WinNode::Layered(graphics_entries),
             status: status_model_from_machine(&self.machine),
-            bg: crate::state::pack_zcolour(screen.current_bg),
-            fg: crate::state::pack_zcolour(screen.current_fg),
+            // `ScreenModel.bg`/`fg` is the PANE PAGE: `render_story_pane` floods
+            // the whole story pane with it before anything is drawn. A Version 6
+            // story has no such thing — ZMSD §8.3 gives every window its own
+            // pair, and each is published on its own node (`GridWindow.bg`,
+            // `BufferWindow.bg`) while the region around the scaled 640x400
+            // frame belongs to the host theme. `screen.current_fg/current_bg`
+            // hold the CURRENT WINDOW's pair (mirrored there so v6 prose runs
+            // carry the right `TextAttrs`, §8.3) — publishing that as the page
+            // repainted the entire pane in whatever window happened to be
+            // selected, e.g. flooding Zork Zero's pane with its white window-0
+            // background and burying the artwork. So v6 leaves the page unset
+            // and the host supplies it, exactly as the three v6 render modes
+            // already resolve their own page.
+            bg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
+            fg: crate::state::pack_zcolour(zvm::screen::ZColour::Default),
             content_size,
         }
     }

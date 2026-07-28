@@ -19,6 +19,13 @@
 //!
 //! Story asset is gitignored (local-only) → this test **skips cleanly** when
 //! absent, mirroring the other `zork0_v6_*` tests.
+//!
+//! **Colour mode: `honor_game_colours = true`** — the app's shipped config
+//! default, so these render assertions are made in the mode real players run.
+//! (Before SQ-0532 wave 4 every v6 smoke booted with the game's colours
+//! DECLINED, which is exactly why three colour-driven render regressions
+//! shipped unseen. The theme-only `false` path is covered by the paired cases
+//! in `v6_game_colour_regression.rs`.)
 
 use std::path::PathBuf;
 
@@ -42,7 +49,7 @@ fn boot_zork0() -> Option<GameSession> {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();

@@ -54,15 +54,29 @@
 //! viewport covers the whole pane with the splash art reduced to a chrome ring
 //! of zero thickness. This one reproduces with colours off too.
 //!
-//! # Status
+//! # Status — FIXED (wave 4), these now guard the fixes
 //!
-//! These tests assert the CORRECT behaviour and therefore FAIL on this build.
-//! They are `#[ignore]`d so the suite stays green for unrelated work; remove the
-//! `#[ignore]` attributes as part of the fix. Run them with:
+//! 1. The v6 `erase_window` arms went back to `grid.clear()`: a v6 character
+//!    grid is a compositing layer drawn OVER the picture canvases, so a blank
+//!    cell must stay `ZColour::Default`/transparent. §8.8.5.3's erase colour
+//!    still reaches the host — as each window's own `bg` and as the number-0
+//!    canvas-clear event the same arm already queues. (The v1–5 upper window
+//!    keeps `clear_to(bg)`: it has no art beneath it, so an explicit background
+//!    there is exactly §8.7.3.2's "cleared to background colour".)
+//! 2. `v6_screen_model` no longer publishes `screen.current_fg/bg` as
+//!    `ScreenModel.bg/fg`. That field is the PANE PAGE, and a v6 story has none
+//!    — every window carries its own pair (§8.3) and publishes it on its own
+//!    node. The §8.3 mirror itself stays: v6 prose runs still get the current
+//!    window's pair in their `TextAttrs`.
+//! 3. `v6_screen_model` skips window 0 while it is still the untouched
+//!    whole-screen boot window (§8.8.3.3) with nothing in it — no painted runs,
+//!    no streamed characters, no canvas. `get_wind_prop` keeps reporting the
+//!    real 640×400 dimensions (the wave-1 spec fix); only the RENDER declines to
+//!    treat an empty placeholder as the story page.
 //!
-//! ```text
-//! cargo test -p app --test v6_game_colour_regression -- --ignored
-//! ```
+//! Both colour modes are covered: the three cases above run with
+//! `honor_game_colours = true` (the shipped default), and each has a
+//! theme-only (`false`) companion pinning where the two modes diverge.
 
 use std::path::PathBuf;
 
@@ -107,10 +121,28 @@ fn state_for(mode: app::config::V6RenderMode) -> app::state::AppState {
 /// `(pure-white cells, non-white coloured "art" cells)`. In the halfblock cell
 /// path the scaled picture arrives as `Rgb` cell backgrounds, so a healthy v6
 /// frame has many art cells; a flooded one is uniformly white.
+///
+/// The raster composite is resized+encoded on a background worker (SQ-0469) and
+/// only appears once `poll_v6_job` installs it, so — like the real app, which
+/// polls every frame — this renders until the encode lands before counting.
+/// (The hybrid ring's band images are drawn synchronously; the settle only
+/// matters for the whole-canvas raster path, which hybrid also falls through to
+/// when there is no story window.)
 fn bg_census(model: &ScreenModel, mode: app::config::V6RenderMode) -> (usize, usize) {
     let mut state = state_for(mode);
     state.push_transcript("West of House");
     let area = Rect::new(0, 0, 80, 30);
+    let mut buf = Buffer::empty(area);
+    for _ in 0..200 {
+        let _ = app::render::screen::render_story_pane(model, false, None, &state, area, &mut buf);
+        if !state.graphics_render.borrow().v6_encode_in_flight() {
+            break; // this path draws no whole-canvas raster — nothing to wait for
+        }
+        if state.graphics_render.borrow_mut().poll_v6_job() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let mut buf = Buffer::empty(area);
     let _ = app::render::screen::render_story_pane(model, false, None, &state, area, &mut buf);
     let (mut white, mut art) = (0, 0);
@@ -126,12 +158,11 @@ fn bg_census(model: &ScreenModel, mode: app::config::V6RenderMode) -> (usize, us
     (white, art)
 }
 
-/// Regression 2 (hybrid). With the app's real `honor_game_colours = true`,
-/// Zork Zero's frame art must still reach the pane. Observed on this build:
-/// 2400 white cells, 0 art cells — a solid white pane. With the two wave-1
-/// deltas neutralised the same drive yields 0 white / 950 art.
+/// Regression 2 (hybrid). **Mode: `honor_game_colours = true`** — the shipped
+/// default, and the only mode in which this ever broke. Zork Zero's frame art
+/// must reach the pane. Broken build: 2400 white / 0 art, a solid white pane.
+/// Fixed: 0 white / 950 art.
 #[test]
-#[ignore = "SQ-0532 regression: erase_window clear_to + mirror_v6_colours flood the pane white; un-ignore with the fix"]
 fn zork0_hybrid_keeps_its_art_when_game_colours_are_honoured() {
     let Some(mut s) = boot_v6("zork0-r393-s890714.z6", true) else { return };
     for _ in 0..3 {
@@ -148,15 +179,51 @@ fn zork0_hybrid_keeps_its_art_when_game_colours_are_honoured() {
     assert!(white < 2000, "the hybrid pane is flooded with opaque white (white={white} of 2400)");
 }
 
-/// Regression 1 (raster). Same story, raster mode: the page fill must not be
-/// forced to the game's white. Observed on this build: 2400 white cells.
+/// Regression 1 (raster). **Mode: `honor_game_colours = true`.** The whole PANE
+/// must not be repainted in the current window's background. Broken build: 2400
+/// white cells (every cell of the pane). Fixed: ~1269 — the raster composite's
+/// own story page, which legitimately IS the game's white (SQ-0510,
+/// `story_bg_rgba`: a game-set story-window colour wins), surrounded by real
+/// frame art. The threshold separates "the game's page inside its frame" from
+/// "the pane has been flooded".
 #[test]
-#[ignore = "SQ-0532 regression: ScreenModel.bg is forced to the game's explicit white; un-ignore with the fix"]
 fn zork0_raster_page_is_not_flooded_white_when_game_colours_are_honoured() {
     let Some(s) = boot_v6("zork0-r393-s890714.z6", true) else { return };
-    let (white, _) = bg_census(&s.screen(), app::config::V6RenderMode::Raster);
-    eprintln!("Zork0 raster census: white={white} (of 2400)");
+    let (white, art) = bg_census(&s.screen(), app::config::V6RenderMode::Raster);
+    eprintln!("Zork0 raster census: white={white} art={art} (of 2400)");
     assert!(white < 2000, "the raster page is flooded with opaque white (white={white} of 2400)");
+    assert!(art > 0, "Zork0's frame art vanished from the raster pane (white={white}, art={art})");
+}
+
+/// Paired companion to the two above. **Mode: `honor_game_colours = false`** —
+/// the theme-only path, where the game's `set_colour` is declined outright.
+/// Both modes must reach the pane with real art and no flood; the DIVERGENCE
+/// that must persist is only in the model: with colours honoured the story
+/// window carries the game's explicit pair (§8.3), with them declined it stays
+/// `Default`. Neither may ever become the pane page.
+#[test]
+fn zork0_renders_its_frame_in_both_colour_modes() {
+    for colours in [true, false] {
+        let Some(s) = boot_v6("zork0-r393-s890714.z6", colours) else { return };
+        let model = s.screen();
+        assert_eq!(
+            (model.bg, model.fg),
+            (0, 0),
+            "colours={colours}: a v6 model never publishes a pane page — the host theme owns it"
+        );
+        let w0 = &s.machine.screen.v6.as_ref().expect("v6 screen").windows[0];
+        if colours {
+            assert_ne!(w0.bg, zvm::screen::ZColour::Default, "the game's window-0 background is recorded (§8.3)");
+        } else {
+            assert_eq!(w0.bg, zvm::screen::ZColour::Default, "colours declined: the game never set one");
+        }
+        for mode in [app::config::V6RenderMode::Hybrid, app::config::V6RenderMode::Raster] {
+            let (white, art) = bg_census(&model, mode);
+            eprintln!("Zork0 {mode:?} colours={colours}: white={white} art={art} (of 2400)");
+            assert!(art > 0, "colours={colours} {mode:?}: the frame art vanished (white={white}, art={art})");
+            assert!(white < 2000, "colours={colours} {mode:?}: the pane is flooded white ({white} of 2400)");
+        }
+    }
 }
 
 /// The precise mechanism behind both: `erase_window` must not turn a window's
@@ -168,57 +235,119 @@ fn zork0_raster_page_is_not_flooded_white_when_game_colours_are_honoured() {
 /// the rest of the session.
 ///
 /// Zork Zero's window 7 is the full-screen decorative window: after boot its
-/// 25×80 grid holds no text at all, yet every one of its 2000 blank cells now
-/// carries an explicit background.
+/// 25×80 grid holds no text at all, yet every one of its 2000 blank cells used
+/// to carry an explicit background.
+///
+/// **Modes: both.** The grid must be transparent either way; the divergence is
+/// the window-level pair, which is where §8.8.5.3's erase colour actually lives
+/// (together with the number-0 canvas-clear event on the picture queue).
 #[test]
-#[ignore = "SQ-0532 regression: erase_window(-1) stamps an opaque bg into every text-grid cell; un-ignore with the fix"]
 fn erase_window_must_not_make_a_blank_text_grid_opaque() {
-    let Some(s) = boot_v6("zork0-r393-s890714.z6", true) else { return };
-    let v6 = s.machine.screen.v6.as_ref().expect("v6 screen");
-    let w7 = &v6.windows[7];
-    assert_eq!((w7.x_size, w7.y_size), (640, 400), "window 7 is Zork0's full-screen decorative window");
-    assert!(w7.texts.is_empty(), "it holds no painted text — it is pure backdrop");
-    let explicit = w7
-        .grid
-        .cells
-        .iter()
-        .filter(|c| c.bg != zvm::screen::ZColour::Default)
-        .count();
-    eprintln!("Zork0 window 7: {explicit} of {} blank cells carry an explicit bg", w7.grid.cells.len());
-    assert_eq!(
-        explicit, 0,
-        "a blank erased cell must stay transparent to the compositor, or its window \
-         covers the art beneath it ({explicit} of {} cells are opaque)",
-        w7.grid.cells.len()
-    );
+    for colours in [true, false] {
+        let Some(s) = boot_v6("zork0-r393-s890714.z6", colours) else { return };
+        let v6 = s.machine.screen.v6.as_ref().expect("v6 screen");
+        let w7 = &v6.windows[7];
+        assert_eq!((w7.x_size, w7.y_size), (640, 400), "window 7 is Zork0's full-screen decorative window");
+        assert!(w7.texts.is_empty(), "it holds no painted text — it is pure backdrop");
+        let explicit = w7
+            .grid
+            .cells
+            .iter()
+            .filter(|c| c.bg != zvm::screen::ZColour::Default)
+            .count();
+        eprintln!(
+            "Zork0 window 7 (colours={colours}): {explicit} of {} blank cells carry an explicit bg",
+            w7.grid.cells.len()
+        );
+        assert_eq!(
+            explicit, 0,
+            "colours={colours}: a blank erased cell must stay transparent to the compositor, or its \
+             window covers the art beneath it ({explicit} of {} cells are opaque)",
+            w7.grid.cells.len()
+        );
+        // The divergence: the erase colour still reaches the WINDOW when the
+        // game's colours are honoured — it just never reaches the grid cells.
+        if colours {
+            assert_eq!(w7.bg, zvm::screen::ZColour::Standard(9), "the game's window-7 background is kept (§8.3)");
+        } else {
+            assert_eq!(w7.bg, zvm::screen::ZColour::Default, "colours declined: no window background is set");
+        }
+    }
 }
 
 /// Regression 3. Shogun's title splash is a full-screen picture drawn before the
-/// game splits any window. It must keep reaching the hybrid pane. Reproduces
-/// with `honor_game_colours` either way — this is purely the window-0 boot
-/// geometry change.
+/// game splits any window. It must keep reaching the hybrid pane.
+///
+/// **Modes: both** — this one is purely the window-0 boot-geometry change and
+/// reproduced with `honor_game_colours` either way, so it is driven in both and
+/// the two must agree (Shogun sets no colour at all on this screen).
+///
+/// The wave-1 §8.8.3.3 fix itself is NOT reverted: window 0 really does report
+/// the whole 640×400 screen to `get_wind_prop` (asserted below). It simply must
+/// not be RENDERED as the story page while it is an empty placeholder.
 #[test]
-#[ignore = "SQ-0532 regression: v6 window 0 booting full-height makes hybrid treat the splash as a story page; un-ignore with the fix"]
 fn shogun_splash_still_shows_its_art_in_hybrid() {
-    let Some(s) = boot_v6("shogun-r322-s890706.z6", true) else { return };
+    for colours in [true, false] {
+        let Some(s) = boot_v6("shogun-r322-s890706.z6", colours) else { return };
 
-    // Structural mechanism: at the splash the game has sized nothing, yet
-    // window 0 now reports the whole screen and so classifies as the story page.
-    let model = s.screen();
-    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
-    let layout = app::render::v6_layout::classify_windows(items);
-    let native = app::render::v6_layout::native_extent(items);
-    if let Some(story) = layout.story {
+        // The spec win survives: the model still holds a whole-screen window 0.
+        let w0 = &s.machine.screen.v6.as_ref().expect("v6 screen").windows[0];
+        assert_eq!(
+            (w0.x_size, w0.y_size),
+            (640, 400),
+            "§8.8.3.3: window 0 still occupies the whole screen in the model"
+        );
+
+        // Structural mechanism: an empty whole-screen window 0 must not become
+        // the story page, or hybrid carves a pane-sized transcript viewport over
+        // the splash and the chrome ring collapses to zero thickness.
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let layout = app::render::v6_layout::classify_windows(items);
+        let native = app::render::v6_layout::native_extent(items);
+        if let Some(story) = layout.story {
+            assert!(
+                !(story.w_px >= native.0 && story.h_px >= native.1),
+                "colours={colours}: before the game splits anything, window 0 covers the entire \
+                 {native:?} screen ({}x{}), so hybrid renders a story page over the splash instead \
+                 of showing the art",
+                story.w_px,
+                story.h_px
+            );
+        }
+
+        let (white, art) = bg_census(&model, app::config::V6RenderMode::Hybrid);
+        eprintln!("Shogun splash hybrid census (colours={colours}): white={white} art={art} (of 2400)");
         assert!(
-            !(story.w_px >= native.0 && story.h_px >= native.1),
-            "before the game splits anything, window 0 covers the entire {native:?} screen \
-             ({}x{}), so hybrid renders a story page over the splash instead of showing the art",
-            story.w_px,
-            story.h_px
+            art > 200,
+            "colours={colours}: Shogun's splash art vanished from the hybrid pane (white={white}, art={art})"
         );
     }
+}
 
-    let (white, art) = bg_census(&model, app::config::V6RenderMode::Hybrid);
-    eprintln!("Shogun splash hybrid census: white={white} art={art} (of 2400)");
-    assert!(art > 200, "Shogun's splash art vanished from the hybrid pane (white={white}, art={art})");
+/// The other half of fix 3: once the game GIVES window 0 something, it becomes
+/// the story window again — the skip is a placeholder rule, not a removal.
+/// **Modes: both**, since it is geometry/content driven, not colour driven.
+#[test]
+fn shogun_gets_its_story_window_back_once_the_game_uses_it() {
+    for colours in [true, false] {
+        let Some(mut s) = boot_v6("shogun-r322-s890706.z6", colours) else { return };
+        for _ in 0..6 {
+            let r = match s.pending_input() {
+                InputKind::Line => s.submit("look"),
+                InputKind::Char => s.submit_char(13),
+                InputKind::Event => s.submit(""),
+            };
+            assert!(r.fault.is_none(), "Shogun faulted: {:?}", r.fault);
+        }
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let layout = app::render::v6_layout::classify_windows(items);
+        let story = layout.story.expect("colours={colours}: in play, window 0 IS the story window");
+        let native = app::render::v6_layout::native_extent(items);
+        assert!(
+            story.w_px < native.0 || story.h_px < native.1,
+            "colours={colours}: and it is the game's own box, not the whole screen"
+        );
+    }
 }

@@ -1564,7 +1564,6 @@ impl Machine {
                 // erase-all meanings below.
                 let win = self.v6_window_operand(ops.first().copied().unwrap_or(0)) as i16;
                 if self.trace_screen { self.screen_trace.push(format!("@erase_window({})", zscreen_window_name(win as u16))); }
-                let cur_bg = self.screen.current_bg;
                 let screen_w = self.mem.read_word(0x22);
                 let screen_h = self.mem.read_word(0x24);
                 let mut mirror = None;
@@ -1585,9 +1584,20 @@ impl Machine {
                             // the entire screen to the background colour of
                             // window 0, unsplits windows 0 and 1 and selects
                             // window 0."
-                            let bg0 = v6.windows[0].bg;
+                            // The erase colour is carried to the host by the
+                            // number-0 canvas-clear events pushed below (and by
+                            // each window's own `bg`, which the model publishes
+                            // as the window's background); the CHARACTER GRID
+                            // must NOT be stamped with it. A v6 grid is a
+                            // compositing layer drawn OVER the picture canvases,
+                            // so an explicitly-coloured blank cell is opaque
+                            // forever: Zork Zero erases at boot with a white
+                            // window-0 background and its full-screen decorative
+                            // window 7 would hide every picture for the rest of
+                            // the session. Blank cells therefore stay
+                            // `ZColour::Default` — transparent to the compositor.
                             for (i, w) in v6.windows.iter_mut().enumerate() {
-                                w.grid.clear_to(bg0);
+                                w.grid.clear();
                                 w.texts.clear();
                                 w.y_cursor = 1;
                                 w.x_cursor = 1;
@@ -1619,8 +1629,11 @@ impl Machine {
                             // window attributes or cursor positions.)" — so the
                             // pixels go, but cursors, geometry and the current
                             // window selection all stay exactly as they were.
+                            // Grid cells stay transparent for the same
+                            // compositing reason as -1 above; the erase colour
+                            // travels as the canvas-clear event.
                             for (i, w) in v6.windows.iter_mut().enumerate() {
-                                w.grid.clear_to(cur_bg);
+                                w.grid.clear();
                                 w.texts.clear();
                                 clear_canvas.push(i as u8);
                             }
@@ -1638,9 +1651,13 @@ impl Machine {
                             v6.erase_screen_rect(top, left, h, wd);
                             let w = &mut v6.windows[n as usize];
                             // ZMSD §8.8.5.3: erase "to background colour (even
-                            // if the current text style is Reverse Video)".
-                            let bg = w.bg;
-                            w.grid.clear_to(bg);
+                            // if the current text style is Reverse Video)" — the
+                            // window's `bg` (published as the window background)
+                            // and the canvas-clear event below carry that; the
+                            // grid cells go back to `ZColour::Default` so the
+                            // erased window does not become an opaque layer over
+                            // the pictures (see the -1 arm).
+                            w.grid.clear();
                             w.y_cursor = 1;
                             w.x_cursor = 1;
                             clear_canvas.push(n as u8);

@@ -17,6 +17,13 @@
 //! cleanly** when absent — CI and fresh clones stay green, dev worktrees get
 //! the real coverage. Mirrors the skip-if-absent pattern in
 //! `crates/gvm/tests/kerkerkruip_boots.rs` / `crates/app/tests/wizard_sniffer.rs`.
+//!
+//! **Colour mode: `honor_game_colours = true`** — the app's shipped config
+//! default, so these render assertions are made in the mode real players run.
+//! (Before SQ-0532 wave 4 every v6 smoke booted with the game's colours
+//! DECLINED, which is exactly why three colour-driven render regressions
+//! shipped unseen. The theme-only `false` path is covered by the paired cases
+//! in `v6_game_colour_regression.rs`.)
 
 use std::path::PathBuf;
 
@@ -55,7 +62,7 @@ fn zork0_v6_windows_smoke() {
     eprintln!("resolved {} Pict dimension entries from the sidecar", picture_dims.len());
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Zork0 (v6) should load and boot without a ZError");
 
     // (a) No fault/panic during boot.
@@ -193,7 +200,7 @@ fn v6_positioned_windows_carry_game_pixel_rects() {
     let picture_dims = picts.all_pict_dims();
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit, "Zork0 quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
@@ -232,7 +239,7 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
     let picture_dims = picts.all_pict_dims();
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit, "Zork0 quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
@@ -292,7 +299,7 @@ fn zork0_v6_story_classified_and_clear_interior_inside_frame() {
     let picture_dims = picts.all_pict_dims();
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit, "Zork0 quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
