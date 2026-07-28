@@ -65,6 +65,13 @@ active, what background tasks are doing, and the story/VM facts.
     (complements the 2026-06-30 feature-gap audits).
 
 **`app` — babelmap:**
+- **Terminal default colours (OSC 10/11 probe)** — added 2026-07-28 (SQ-0510
+  round 3). The parsed `state.term_default_colors.fg`/`.bg` RGBs plus the RAW
+  probe reply bytes (escaped), and which layer the v6 raster ink/page pair
+  actually resolved from (theme pair / OSC pair / hardcoded fallback,
+  `v6_default_pair` in `render/screen.rs`). Needed because raster colour bugs
+  on a real TTY are undebuggable headless — the probe answer differs per
+  terminal and can't be reproduced in tests.
 - **Styling:** resolved `style.toml` path (or built-in/`default`) · base scheme ·
   per-game `styles/<ifid>.toml` (present? active?)
 - **Background tasks:** style watcher on/off + watched paths (style.toml +
