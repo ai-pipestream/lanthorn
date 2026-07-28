@@ -76,6 +76,17 @@ pub(crate) fn dispatch_slash_outcome(
                     _ => state.push_transcript_internal(&line, TranscriptKind::Meta),
                 }
             }
+            // SQ-0510 diagnostics: what the OSC 10/11 startup probe actually
+            // captured — the input to the v6 raster ink/page pair resolution.
+            let fmt = |c: Option<image::Rgba<u8>>| match c {
+                Some(image::Rgba([r, g, b, _])) => format!("rgb({r},{g},{b})"),
+                None => "unanswered".to_string(),
+            };
+            let td = state.term_default_colors;
+            state.push_transcript_internal(
+                &format!("terminal defaults (OSC 10/11 probe): fg {} · bg {}", fmt(td.fg), fmt(td.bg)),
+                TranscriptKind::Meta,
+            );
         }
         SlashOutcome::DumpWindows => {
             for line in session.window_dump() {
