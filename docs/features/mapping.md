@@ -106,6 +106,10 @@ and it understands the awkward cases:
   inspector lists every exit with its direction and destination, so nothing is lost,
   only unstacked.
 
+Where two unrelated connectors still have to cross, the map says so rather than drawing a
+junction: the vertical run passes through unbroken and the horizontal one breaks for a single
+cell, so a crossing never reads as a place the two passages meet.
+
 Confirmed reciprocal N/S and E/W adjacencies are treated as inviolable: an up/down
 move yields rather than shove a reciprocal partner off its shared column or row, and
 overlap cleanup may only slide a reciprocal room *along* its own axis, never off it.

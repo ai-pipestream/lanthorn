@@ -1285,9 +1285,12 @@ fn render_lane_connectors(
     // two connectors (one ─, one │) combines to ┼; a connector revisiting its own cell is
     // idempotent and harmless. Compass connectors accumulate in `cells`; up/down connectors
     // accumulate separately in `updown_cells` so the two never mix (dotted vs solid glyphs).
-    let mut cells: std::collections::HashMap<(i32, i32), u8> =
+    // Value is `(mask, owning connector index)`. The owner is what lets an unrelated CROSSING be
+    // told from one connector's own turn: only a cell two DIFFERENT connectors want can be one
+    // (SQ-0525).
+    let mut cells: std::collections::HashMap<(i32, i32), (u8, usize)> =
         std::collections::HashMap::new();
-    let mut updown_cells: std::collections::HashMap<(i32, i32), u8> =
+    let mut updown_cells: std::collections::HashMap<(i32, i32), (u8, usize)> =
         std::collections::HashMap::new();
     // Dotted glyph set for up/down connector bodies: straight runs read as dotted; any turn
     // glyph falls back to the solid corner set (up/down routes like N/S so may still turn).
@@ -1318,7 +1321,7 @@ fn render_lane_connectors(
         .flat_map(|(_, p)| p.cells.iter().map(|(c, _)| *c))
         .collect();
 
-    for (conn, plot) in plots.iter() {
+    for (ci, (conn, plot)) in plots.iter().enumerate() {
         let is_updown = matches!(conn.exit_dir, Direction::Up | Direction::Down);
         let has_secondary = !conn.secondary_exit.is_empty() || !conn.secondary_entry.is_empty();
         // Up/down connectors always use the portal selector (they're never distorted);
@@ -1344,9 +1347,31 @@ fn render_lane_connectors(
             if !in_area(sx, sy, area) {
                 continue;
             }
-            let entry = cell_map.entry(*c).or_insert(0);
-            *entry |= *mask;
-            let glyph_s = glyph_for(*entry, glyphs).unwrap_or('·').to_string();
+            let entry = cell_map.entry(*c).or_insert((0, ci));
+            let (prev, owner) = *entry;
+            // Two DIFFERENT connectors, one running N|S and the other E|W: that cell is a
+            // crossing, not a junction, and ORing them into `┼` said the two passages meet there
+            // (SQ-0525). Connectors are point-to-point and never branch, so a four-bit mask can
+            // only ever arise this way — there is no real junction to preserve. The vertical run
+            // passes through and the horizontal one breaks, leaving a one-cell gap: horizontal
+            // gaps are a single cell wide and read better than a broken vertical.
+            //
+            // Deliberately ONLY the clean four-bit case. Three-bit cells (a turn stomping a
+            // straight run) are what `overlap_stats` counts as ILLEGAL and `cleanup_overlaps`
+            // exists to remove; breaking a line there would hide a real layout defect and cost
+            // the turning connector its corner.
+            let crossing = owner != ci
+                && matches!((prev, *mask), (m, n) | (n, m) if m == DIR_N | DIR_S && n == DIR_E | DIR_W);
+            if crossing {
+                if *mask == DIR_N | DIR_S {
+                    *entry = (*mask, ci); // the vertical arrives second and takes the cell
+                } else {
+                    continue; // the horizontal yields; its neighbours already drew the approach
+                }
+            } else {
+                entry.0 |= *mask;
+            }
+            let glyph_s = glyph_for(entry.0, glyphs).unwrap_or('·').to_string();
             if let Some(cell) = buf.cell_mut((sx as u16, sy as u16)) {
                 cell.set_symbol(&glyph_s).set_style(style);
             }
@@ -1373,9 +1398,9 @@ fn render_lane_connectors(
                 .flatten();
             let glyph_s = match merge {
                 Some(bits) => {
-                    let entry = cell_map.entry(*c).or_insert(0);
-                    *entry |= bits;
-                    glyph_for(*entry, glyphs).unwrap_or(*ch).to_string()
+                    let entry = cell_map.entry(*c).or_insert((0, ci));
+                    entry.0 |= bits;
+                    glyph_for(entry.0, glyphs).unwrap_or(*ch).to_string()
                 }
                 None => ch.to_string(),
             };
@@ -3815,9 +3840,10 @@ mod tests {
     /// Collect every arrowhead cell with its owning connector index. Mirrors the renderer's
     /// logic in `render_lane_connectors`: every connector gets a departure arrow at its
     #[test]
-    fn two_connectors_perpendicular_crossing_is_single_cross() {
+    fn two_connectors_perpendicular_crossing_breaks_the_horizontal() {
         // A vertical connector (1 above 2) and a horizontal connector (3 left of 4) routed so
-        // their long runs cross exactly once. The shared cell must be a single clean ┼.
+        // their long runs cross exactly once. The two passages do NOT meet there, so the cell must
+        // not read as a junction: the vertical passes through and the horizontal breaks (SQ-0525).
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         for id in [1, 2, 3, 4] { g.upsert_room(id, "r".into()); }
@@ -3849,9 +3875,15 @@ mod tests {
         let off = (cols.room_pixel(rm.bounds.0.0), rows.room_pixel(rm.bounds.0.1));
         let (sx, sy) = (cross_cell.0 - off.0, cross_cell.1 - off.1);
         assert_eq!(
-            buf.cell((sx as u16, sy as u16)).unwrap().symbol(), "┼",
-            "the crossing cell must render as ┼",
+            buf.cell((sx as u16, sy as u16)).unwrap().symbol(), "│",
+            "the vertical run passes through the crossing; a ┼ would say the two passages meet",
         );
+        // The horizontal's own cells either side are still drawn, so the break is a one-cell gap
+        // rather than a truncated line.
+        for dx in [-1i32, 1] {
+            let sym = buf.cell(((sx + dx) as u16, sy as u16)).unwrap().symbol();
+            assert_eq!(sym, "─", "the horizontal run resumes at dx={dx}, got {sym:?}");
+        }
     }
 
     /// A vertical N/S reciprocal pair plus an extra A\u{2192}E\u{2192}B edge. This used to draw the extra as a
@@ -6028,6 +6060,7 @@ mod tests {
         assert!(content.contains('│'), "has vertical border sides");
     }
 }
+
 
 
 
