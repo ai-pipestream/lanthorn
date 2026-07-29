@@ -77,9 +77,9 @@ The map is a place you can move through, not just a picture.
   up and down and `i`/`o` for in and out beside it:
 
   ```
-  nw  N ne   u
-   w  +  E  i o
-  sw  s se   D
+  nw  N  ne   u
+   w  +  E   i o
+  sw  s  se   D
   ```
 - **Hand edits** — select rooms with `select-room next|prev`, `nudge-room` a stray
   box into place, `rename-room` / `rename-layer`, jot `edit-notes`, or clean up the

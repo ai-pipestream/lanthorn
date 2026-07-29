@@ -197,21 +197,21 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, 
     // left to do is readable at a glance, without counting letters. The vertical/portal block
     // sits to the right so it never competes with the compass for the same visual grid.
     //
-    //     nw  n ne     u
+    //     nw  n  ne    u
     //      w  +  e    i o
-    //     sw  s se     d
+    //     sw  s  se    d
     if row + 3 <= max_y {
         row += 1; // breathing room under the detail lines
         let explored = |d: Direction| diag.explored.iter().any(|&(k, v)| k == d && v);
         let untried_style = value_style.add_modifier(ratatui::style::Modifier::ITALIC);
         // (column, direction) per row; `None` is the rose's centre mark.
         let rows: [[(u16, Option<Direction>); 5]; 3] = [
-            [(0, Some(Direction::NW)), (4, Some(Direction::N)), (6, Some(Direction::NE)),
-             (11, Some(Direction::Up)), (13, None)],
+            [(0, Some(Direction::NW)), (4, Some(Direction::N)), (7, Some(Direction::NE)),
+             (12, Some(Direction::Up)), (14, None)],
             [(1, Some(Direction::W)), (4, None), (7, Some(Direction::E)),
-             (10, Some(Direction::In)), (12, Some(Direction::Out))],
-            [(0, Some(Direction::SW)), (4, Some(Direction::S)), (6, Some(Direction::SE)),
-             (11, Some(Direction::Down)), (13, None)],
+             (11, Some(Direction::In)), (13, Some(Direction::Out))],
+            [(0, Some(Direction::SW)), (4, Some(Direction::S)), (7, Some(Direction::SE)),
+             (12, Some(Direction::Down)), (14, None)],
         ];
         for (dy, cells) in rows.iter().enumerate() {
             for &(dx, dir) in cells {
@@ -484,9 +484,9 @@ mod tests {
         draw_inspector(&diag, area, &mut buf, &make_dialog_style());
 
         // The rose, drawn as three rows. A walked edge and a foiled attempt both count.
-        assert!(buf_contains(&buf, "nw  N ne   u"), "north walked -> N; up untried -> u");
-        assert!(buf_contains(&buf, " w  +  E  i o"), "east tried though it went nowhere -> E");
-        assert!(buf_contains(&buf, "sw  s se   D"), "down tried -> D");
+        assert!(buf_contains(&buf, "nw  N  ne   u"), "north walked -> N; up untried -> u");
+        assert!(buf_contains(&buf, " w  +  E   i o"), "east tried though it went nowhere -> E");
+        assert!(buf_contains(&buf, "sw  s  se   D"), "down tried -> D");
     }
 
     #[test]
