@@ -72,7 +72,15 @@ The map is a place you can move through, not just a picture.
   come straight back when you toggle it off — styled by the `map.untried_exit` selector.
 - **Room inspector** — `toggle-inspector` opens an overlay for the selected room:
   its id, name, layer, position, and the per-edge layout constraints, so you can
-  see *why* a room landed where it did.
+  see *why* a room landed where it did. It also draws a **compass rose** of the ways out —
+  lower-case italic for a direction never tried, upper case once you have — with `u`/`d` for
+  up and down and `i`/`o` for in and out beside it:
+
+  ```
+  nw  N ne   u
+   w  +  E  i o
+  sw  s se   D
+  ```
 - **Hand edits** — select rooms with `select-room next|prev`, `nudge-room` a stray
   box into place, `rename-room` / `rename-layer`, jot `edit-notes`, or clean up the
   graph with `delete-connection` and `relabel-edge`. Room-number labels toggle with

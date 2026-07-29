@@ -254,15 +254,18 @@ impl MapGraph {
     /// The compass directions never typed in this room — what a player has left to explore
     /// (SQ-0391). Directions that LED somewhere are tried by definition, so an edge out counts
     /// even on a map loaded from before this was recorded.
+    /// True when `dir` has been explored from `id`: typed there (worked or not), or carrying an
+    /// edge that leads somewhere — the only signal a map saved before `tried` existed still has.
+    pub fn is_tried(&self, id: RoomId, dir: Direction) -> bool {
+        let typed = self.rooms.get(&id).is_some_and(|r| r.tried.contains(&dir));
+        typed || self.conns.iter().any(|c| c.origin == id && c.dir == dir)
+    }
+
     pub fn untried(&self, id: RoomId) -> Vec<Direction> {
-        let Some(room) = self.rooms.get(&id) else { return Vec::new() };
-        let walked: Vec<Direction> =
-            self.conns.iter().filter(|c| c.origin == id).map(|c| c.dir).collect();
-        crate::direction::UNTRIED_DIRS
-            .iter()
-            .copied()
-            .filter(|d| !room.tried.contains(d) && !walked.contains(d))
-            .collect()
+        if !self.rooms.contains_key(&id) {
+            return Vec::new();
+        }
+        crate::direction::UNTRIED_DIRS.iter().copied().filter(|d| !self.is_tried(id, *d)).collect()
     }
 
     /// Test-only: drop a room's recorded attempts, to stand in for a map file written before

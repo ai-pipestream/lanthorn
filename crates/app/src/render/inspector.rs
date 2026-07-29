@@ -44,6 +44,30 @@ pub struct RoomDiagnostics {
     /// How the mapper first worked out the player was here (SQ-0527), recorded on
     /// the room at discovery. `None` for rooms mapped before it was recorded.
     pub loc_method: Option<String>,
+    /// Which of the twelve travel directions have been explored FROM this room (SQ-0391), for
+    /// the compass rose. Carried as a list so the panel needs no second look at the graph.
+    pub explored: Vec<(mapper::direction::Direction, bool)>,
+}
+
+/// The twelve directions the inspector's compass rose reports on, in the order it draws them:
+/// the eight compass points, then Up, In, Out, Down. Wider than the map overlay's set, which
+/// deliberately omits In/Out — here there is room to say everything.
+const ROSE_DIRS: [Direction; 12] = [
+    Direction::NW, Direction::N, Direction::NE,
+    Direction::W, Direction::E,
+    Direction::SW, Direction::S, Direction::SE,
+    Direction::Up, Direction::In, Direction::Out, Direction::Down,
+];
+
+/// The rose's letter for a direction, lower-case. Up/Down are `u`/`d` rather than an arrow so
+/// they take one cell like every other entry and can carry the same tried/untried casing.
+fn rose_label(d: Direction) -> &'static str {
+    match d {
+        Direction::N => "n", Direction::NE => "ne", Direction::E => "e", Direction::SE => "se",
+        Direction::S => "s", Direction::SW => "sw", Direction::W => "w", Direction::NW => "nw",
+        Direction::Up => "u", Direction::Down => "d", Direction::In => "i", Direction::Out => "o",
+        Direction::Unknown => "?",
+    }
 }
 
 /// Gather layout diagnostics for `id` from the public `MapGraph` API.
@@ -78,7 +102,8 @@ pub fn room_diagnostics(graph: &MapGraph, id: RoomId) -> Option<RoomDiagnostics>
     let distorted_count = edges.iter().filter(|e| e.distorted).count();
 
     let loc_method = room.loc_method.clone();
-    Some(RoomDiagnostics { id, name, layer_id, layer_name, pos, edges, edge_count, distorted_count, loc_method })
+    let explored = ROSE_DIRS.iter().map(|&d| (d, graph.is_tried(id, d))).collect();
+    Some(RoomDiagnostics { id, name, layer_id, layer_name, pos, edges, edge_count, distorted_count, loc_method, explored })
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -93,7 +118,7 @@ pub fn room_diagnostics(graph: &MapGraph, id: RoomId) -> Option<RoomDiagnostics>
 pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, dialog_style: &DialogStyle) -> Option<DialogRects> {
     const WIDTH: u16 = 38;
     // rows: border top + id/name + layer + pos + blank + edges (≥1) + blank + summary + border bot
-    const FIXED_ROWS: u16 = 9; // with at least 0 edge rows
+    const FIXED_ROWS: u16 = 13; // with at least 0 edge rows; +4 for the compass rose (SQ-0391)
     let edge_rows = diag.edge_count as u16;
     let needed_h = FIXED_ROWS + edge_rows;
     let panel_h = needed_h.min(map_area.height);
@@ -167,6 +192,42 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, 
         draw_str_clipped(buf, inner_x, row, &format!("Found by {m}"), value_style, clip);
         row += 1;
     }
+    // Compass rose: which ways OUT of this room have been explored (SQ-0391). Lower-case italic
+    // for a direction never tried, upper-case plain once it has been — so the shape of what is
+    // left to do is readable at a glance, without counting letters. The vertical/portal block
+    // sits to the right so it never competes with the compass for the same visual grid.
+    //
+    //     nw  n ne     u
+    //      w  +  e    i o
+    //     sw  s se     d
+    if row + 3 <= max_y {
+        row += 1; // breathing room under the detail lines
+        let explored = |d: Direction| diag.explored.iter().any(|&(k, v)| k == d && v);
+        let untried_style = value_style.add_modifier(ratatui::style::Modifier::ITALIC);
+        // (column, direction) per row; `None` is the rose's centre mark.
+        let rows: [[(u16, Option<Direction>); 5]; 3] = [
+            [(0, Some(Direction::NW)), (4, Some(Direction::N)), (6, Some(Direction::NE)),
+             (11, Some(Direction::Up)), (13, None)],
+            [(1, Some(Direction::W)), (4, None), (7, Some(Direction::E)),
+             (10, Some(Direction::In)), (12, Some(Direction::Out))],
+            [(0, Some(Direction::SW)), (4, Some(Direction::S)), (6, Some(Direction::SE)),
+             (11, Some(Direction::Down)), (13, None)],
+        ];
+        for (dy, cells) in rows.iter().enumerate() {
+            for &(dx, dir) in cells {
+                let Some(d) = dir else { continue };
+                let (text, style) = if explored(d) {
+                    (rose_label(d).to_uppercase(), value_style)
+                } else {
+                    (rose_label(d).to_string(), untried_style)
+                };
+                draw_str_clipped(buf, inner_x + dx, row + dy as u16, &text, style, clip);
+            }
+        }
+        // The centre mark, so the cross reads as a compass rather than loose letters.
+        draw_str_clipped(buf, inner_x + 4, row + 1, "+", label_style, clip);
+        row += 3;
+    }
     // blank separator
     if row <= max_y {
         row += 1;
@@ -218,7 +279,7 @@ mod tests {
     use crate::render::dialog::{DialogPlacement, DialogStyle};
     use crate::render::paneframe::BorderStyle;
 
-    fn make_dialog_style() -> DialogStyle<'static> {
+    pub(super) fn make_dialog_style() -> DialogStyle<'static> {
         use crate::render::paneframe::PaneGlyphs;
         static TEST_THEME: std::sync::LazyLock<crate::theme::resolve::Theme> =
             std::sync::LazyLock::new(|| crate::colors::ColorScheme::terminal_default().theme);
@@ -352,6 +413,11 @@ mod tests {
             edge_count,
             distorted_count,
             loc_method: Some("via status variable".to_owned()),
+            // A room where north and up have been explored and nothing else has.
+            explored: ROSE_DIRS
+                .iter()
+                .map(|&d| (d, matches!(d, Direction::N | Direction::Up)))
+                .collect(),
         }
     }
 
@@ -397,6 +463,30 @@ mod tests {
             draw_inspector(&diag, area, f.buffer_mut(), &ds);
         }).unwrap();
         // No assertions — just must not panic.
+    }
+
+    /// SQ-0391: the rose says which ways OUT of this room have been explored — lower case for
+    /// never tried, upper case once tried — so what is left to do reads at a glance.
+    #[test]
+    fn inspector_rose_capitalises_the_directions_already_explored() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "West of House".into());
+        g.upsert_room(2, "North of House".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (0, -1));
+        g.add_edge(1, Direction::N, 2); // walked north
+        g.mark_tried(1, Direction::E); // typed east, went nowhere — still explored
+        g.mark_tried(1, Direction::Down);
+        let diag = room_diagnostics(&g, 1).unwrap();
+        let area = Rect::new(0, 0, 44, 24);
+        let mut buf = Buffer::empty(area);
+        draw_inspector(&diag, area, &mut buf, &make_dialog_style());
+
+        // The rose, drawn as three rows. A walked edge and a foiled attempt both count.
+        assert!(buf_contains(&buf, "nw  N ne   u"), "north walked -> N; up untried -> u");
+        assert!(buf_contains(&buf, " w  +  E  i o"), "east tried though it went nowhere -> E");
+        assert!(buf_contains(&buf, "sw  s se   D"), "down tried -> D");
     }
 
     #[test]
@@ -535,3 +625,4 @@ mod tests {
         assert!(dr.close.is_some(), "DialogRects.close must be Some (show_close=true)");
     }
 }
+
