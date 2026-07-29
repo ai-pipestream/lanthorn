@@ -87,9 +87,7 @@ and it understands the awkward cases:
   connectors with up/down (or stairs) glyphs — never as arrows, never as "distorted"
   red edges. A matching Up+Down pair between two rooms collapses to a single dotted
   path marked at both ends. Where a room pair is joined by *both* a compass direction
-  and a staircase, both draw: a staircase gets its own dotted trunk rather than folding
-  into the compass line, because a line reaches the room it leads to and an icon can only
-  say that a way up exists.
+  and a staircase, only one line is drawn — see below for which wins.
 - **Nautical directions** — ship games (Seastalker and kin) that steer by
   *fore / aft / port / starboard* (plus *bow* / *stern* / *forward*) instead of the
   compass are understood: those map onto north / south / west / east so the vessel's
@@ -97,13 +95,16 @@ and it understands the awkward cases:
 - **Combined multi-direction paths** — two rooms get **one** line between them, however
   many ways you can actually walk it. Zork's around-the-house ring links each pair by
   both a cardinal and a diagonal; Adventure's maze will happily connect the same two
-  rooms four different ways. Rather than draw four lines that then have to cross each
-  other, babelmap keeps one — preferring the pair that runs straight — and stacks every
-  other compass direction as a small arrow in the border slots beside the retained
-  arrowhead — never on the cell another passage's arrowhead sits on — styled by the
-  `shared_path` selector. No command is ever hidden. Staircases are deliberately left
-  out of this: they keep their own dotted line, since collapsing one to an icon would
-  drop the only thing it has to tell you, which room it goes to.
+  rooms four different ways, and a staircase often shadows a compass passage. Drawing
+  them all means lines that exist only to cross each other, so babelmap picks a single
+  representative: a **reciprocal** pairing first — the two ends are exact opposites, so
+  the line runs straight and each arrowhead points the way you really travel — and
+  otherwise by direction priority, **N, S, E, W, NE, NW, SE, SW, up, down**. The line
+  that wins keeps its own arrowhead (or `↑`/`↓` if a staircase won), and the passages
+  that lost draw nothing at all. Lines carrying more than one passage are tinted with
+  the `shared_path` selector so you can see there is more to the story — and the room
+  inspector lists every exit with its direction and destination, so nothing is lost,
+  only unstacked.
 
 Confirmed reciprocal N/S and E/W adjacencies are treated as inviolable: an up/down
 move yields rather than shove a reciprocal partner off its shared column or row, and

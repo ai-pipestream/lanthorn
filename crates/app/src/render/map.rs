@@ -603,14 +603,6 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     if !state.show_portal_labels {
         let current_room = rm.rooms.iter().find(|r| r.is_current).map(|r| r.id);
         draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors, state.selected_room, current_room);
-        // Stack the collapsed passages' icons beside the line that survived. This is what keeps
-        // a collapsed compass passage visible now that a pair draws one connector per channel
-        // (SQ-0522). It sits BESIDE the retained arrowhead, never on it.
-        if boxes {
-            if let Some((cols, rows)) = &axes {
-                draw_secondary_markers(rm, cols, rows, state, (off_x, off_y), area, buf);
-            }
-        }
     }
 }
 
@@ -1516,134 +1508,6 @@ fn arrow_for_direction(
         Direction::In => portal.in_,
         Direction::Out => portal.out,
         Direction::Unknown => portal.unknown,
-    }
-}
-
-/// Stamp collapsed secondary directions as arrow glyphs in the border slot beside the
-/// retained connector's arrowhead — along the corner's border edge for a diagonal end, along
-/// the side's border edge for a cardinal end (stacking for multiples). Boxes zoom only;
-/// caller passes the axis tables. Color is `shared_path`.
-fn draw_secondary_markers(
-    rm: &RenderMap,
-    cols: &PosTable,
-    rows: &PosTable,
-    state: &AppState,
-    offset: (i32, i32),
-    area: Rect,
-    buf: &mut Buffer,
-) {
-    let (off_x, off_y) = offset;
-    let style = state.colors.theme.get("map.shared_path").style;
-    let arrows = &state.symbols.arrows;
-    // Room-cell lookup built once (was an O(rooms) `.iter().find` per connector end,
-    // i.e. O(connectors × rooms) over the loop below). (SQ-0305)
-    let room_cell: std::collections::HashMap<RoomId, (i32, i32)> =
-        rm.rooms.iter().map(|r| (r.id, r.cell)).collect();
-    let cell_of = |id: RoomId| room_cell.get(&id).copied();
-
-    // Every cell a connector ANCHORS on, across the whole map: each end of each connector owns
-    // the border cell its arrowhead is drawn on. A secondary marker may never take one of these.
-    // A room's side is only BOX_H-2 cells tall and several connectors can anchor along it at
-    // distinct slots, so "the cells beside MY arrowhead" is not the same as "the free cells" —
-    // marking one of them erased another passage's arrowhead outright — a room visibly lost a
-    // compass exit to a collapsed passage's icon (SQ-0522).
-    let anchored: std::collections::HashSet<(i32, i32)> = rm
-        .plan
-        .connectors
-        .iter()
-        .flat_map(|c| {
-            let ends = [(c.origin, c.exit, c.exit_slot), (c.dest, c.entry, c.entry_slot)];
-            ends.into_iter().filter_map(|(id, side, slot)| {
-                cell_of(id).map(|cell| box_edge_anchor(cols, rows, cell, side, slot))
-            })
-        })
-        .collect();
-
-    // Stamp the secondaries at one end, in the border slot right next to the retained arrowhead.
-    // DIAGONAL end: the arrowhead is on the box CORNER (`corner_anchor`); each secondary hugs a
-    // border edge one slot from the corner — cardinal secondaries (N/S and E/W) slide along the
-    // corner's horizontal (top/bottom) edge, a diagonal one steps inward diagonally. CARDINAL end:
-    // the arrowhead is on a side (`box_edge_anchor` at its slot);
-    // the marker steps one cell inward, perpendicular to that side. `ix`/`iy` are the inward signs.
-    let stamp = |dirs: &[Direction], cell: (i32, i32), side: Side, slot: u16,
-                 diag: Option<Direction>, buf: &mut Buffer| {
-        match diag {
-            Some(d) if mapper::direction::is_diagonal(d) => {
-                let (cx, cy) = corner_anchor(cols, rows, cell, d);
-                let (ix, iy) = match d {
-                    Direction::NE => (-1, 1),
-                    Direction::NW => (1, 1),
-                    Direction::SE => (-1, -1),
-                    Direction::SW => (1, -1),
-                    _ => (0, 0),
-                };
-                // `sx` stacks cardinal (N/S and E/W) markers ALONG the corner's horizontal
-                // (top/bottom) border edge; `sy` steps diagonal markers inward diagonally. E/W
-                // markers slide along the horizontal edge too (not down the vertical edge, which
-                // stranded them on the room's side — zork1 #143/#217, SQ-0414 follow-up).
-                let (mut sx, mut sy) = (0, 0);
-                for dir in dirs {
-                    // Defensive: a direction with no grid offset slides along the horizontal edge
-                    // like a cardinal one rather than being silently dropped.
-                    let go = mapper::direction::grid_offset(*dir).unwrap_or((0, 0));
-                    let (mx, my) = if go.0 != 0 && go.1 != 0 {
-                        sy += 1;
-                        (cx + ix * sy, cy + iy * sy) // diagonal secondary: step in diagonally
-                    } else {
-                        sx += 1;
-                        (cx + ix * sx, cy) // cardinal (N/S or E/W): slide along the horizontal edge
-                    };
-                    put_char(buf, mx + off_x, my + off_y,
-                        arrow_for_direction(*dir, arrows, &state.symbols.portal), style, area);
-                }
-            }
-            _ => {
-                let (ax, ay) = box_edge_anchor(cols, rows, cell, side, slot);
-                let (bx, by) = (cols.room_pixel(cell.0), rows.room_pixel(cell.1));
-                // Stack secondaries ALONG the border edge (tangential to `side`) beside the
-                // retained arrowhead — stepping inward would strand them inside the room
-                // (SQ-0414). Pick from the cells that are ACTUALLY free, nearest the arrowhead
-                // first: marching a fixed direction and clamping to the box put markers back on
-                // top of each other, and on a side whose anchor already sits at the end of the
-                // edge it landed on the arrowhead itself and erased it. SQ-0522 stacks far more
-                // of these than the occasional collapsed pair did, so a near-miss is now the
-                // common case rather than a curiosity. A marker with nowhere left to go is
-                // dropped rather than drawn over something that matters.
-                let (lo, hi) = match side {
-                    Side::Top | Side::Bottom => (bx + 1, bx + BOX_W - 2),
-                    Side::Left | Side::Right => (by + 1, by + BOX_H - 2),
-                };
-                let mut spots: Vec<(i32, i32)> = (lo..=hi)
-                    .map(|v| match side {
-                        Side::Top | Side::Bottom => (v, ay),
-                        Side::Left | Side::Right => (ax, v),
-                    })
-                    .filter(|c| !anchored.contains(c))
-                    .collect();
-                spots.sort_by_key(|&(x, y)| ((x - ax).abs() + (y - ay).abs(), x, y));
-                for (k, dir) in dirs.iter().enumerate() {
-                    let Some(&(mx, my)) = spots.get(k) else { continue };
-                    put_char(buf, mx + off_x, my + off_y,
-                        arrow_for_direction(*dir, arrows, &state.symbols.portal), style, area);
-                }
-            }
-        }
-    };
-
-    // Secondaries are COMPASS directions only: a staircase is never collapsed (SQ-0522), so it
-    // still draws its own trunk and carries its own end glyph. Stacking one here instead lost the
-    // one thing the passage has to say — where it goes — since an icon has no line to follow.
-    for conn in &rm.plan.connectors {
-        if !conn.secondary_exit.is_empty() {
-            if let Some(cell) = cell_of(conn.origin) {
-                stamp(&conn.secondary_exit, cell, conn.exit, conn.exit_slot, Some(conn.exit_dir), buf);
-            }
-        }
-        if !conn.secondary_entry.is_empty() {
-            if let Some(cell) = cell_of(conn.dest) {
-                stamp(&conn.secondary_entry, cell, conn.entry, conn.entry_slot, conn.entry_dir, buf);
-            }
-        }
     }
 }
 
@@ -2851,10 +2715,11 @@ mod tests {
         assert!(!text.contains('▲'), "the Up connector must NOT render a filled N arrow");
     }
 
+    /// A--North-->B AND A--Up-->B: only the N line is drawn (SQ-0522 priority). The `\u{2191}` used to be
+    /// re-stamped on the border so vertical access still read, but a glyph with no line attached
+    /// says a staircase exists while pointing nowhere — the room inspector answers that properly.
     #[test]
-    fn deduped_updown_pair_still_shows_room_glyph() {
-        // A--North-->B AND A--Up-->B: Task 11 suppresses the up/down connector, but the
-        // rooms must still show the up/down glyph so vertical access reads.
+    fn a_pair_with_both_a_compass_edge_and_a_staircase_draws_only_the_compass_line() {
         use mapper::direction::Direction;
         use mapper::graph::MapGraph;
 
@@ -2874,9 +2739,9 @@ mod tests {
 
         let up = state.symbols.portal.up;
         let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
-        assert!(text.contains(up), "the up glyph still shows on the room border even though the connector was suppressed");
+        assert!(!text.contains(up), "the staircase draws nothing: it lost to N on priority");
+        assert!(text.contains(state.symbols.arrows.north), "the N passage keeps its own arrowhead");
     }
-
     #[test]
     fn reciprocal_updown_connector_draws_glyph_at_both_ends() {
         // Task 9 (SQ-0216): a reciprocal up/down connector draws its glyph at BOTH ends —
@@ -3989,11 +3854,12 @@ mod tests {
         );
     }
 
+    /// A vertical N/S reciprocal pair plus an extra A\u{2192}E\u{2192}B edge. This used to draw the extra as a
+    /// merge stub whose polyline could collapse to 2 points, and a `< 3` guard once dropped that
+    /// whole connector, arrow included. SQ-0522 retains exactly one connector per pair, so no
+    /// same-pair edge reaches the merge-stub path at all and the collapse cannot recur.
     #[test]
-    fn merge_stub_keeps_exit_arrow_when_polyline_collapses() {
-        // Vertical N/S reciprocal trunk (A above B) plus an extra A→E→B edge: the E stub's
-        // polyline can collapse to 2 points, but it must STILL render A's east exit arrow ▶
-        // (regression: the < 3 guard dropped the whole connector, arrow included).
+    fn an_extra_same_pair_edge_never_becomes_a_collapsible_merge_stub() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
@@ -4001,27 +3867,18 @@ mod tests {
         g.set_pos(1, (0, 0));
         g.set_pos(2, (0, 2)); // B directly south of A
         g.add_edge(1, Direction::S, 2);
-        g.add_edge(2, Direction::N, 1); // vertical trunk
-        g.add_edge(1, Direction::E, 2); // extra same-pair edge → merge stub
+        g.add_edge(2, Direction::N, 1); // vertical reciprocal \u{2014} outranks the lone E edge
+        g.add_edge(1, Direction::E, 2); // the extra same-pair edge
         let (illegal, _) = render_overlap_stats(&g);
         assert_eq!(illegal, 0, "no illegal overlap");
         let rm = mapper::render::render(&g);
-        let mut st = AppState::default();
-        st.scroll = rm.bounds.0;
-        let area = Rect::new(0, 0, 80, 40);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &st, area, &mut buf);
-        let right = buf.content.iter().filter(|c| c.symbol() == "▶").count();
-        assert!(right >= 1, "the extra E edge's box-edge exit arrow ▶ must still render");
+        assert_eq!(rm.plan.connectors.len(), 1, "one line for the pair");
+        assert!(rm.plan.connectors.iter().all(|c| !c.merge), "and no merge stub to collapse");
+        assert_eq!(rm.plan.connectors[0].exit_dir, Direction::S, "the reciprocal S/N pairing wins");
+        assert_eq!(rm.plan.connectors[0].secondary_exit, vec![Direction::E], "E recorded, not drawn");
     }
-
-    /// #77 and #239 are ADJACENT with a reciprocal E/W passage plus extra N and S edges back.
-    /// When the reverse edges are added so the geometric opposite (W) is NOT first, the pairing
-    /// must still pick W, or the retained line bends up-and-over instead of running straight
-    /// between the two boxes. SQ-0522 made the extras stacked icons rather than merge stubs, but
-    /// the ordering guarantee this test was written for is unchanged.
     #[test]
-    fn reciprocal_pairing_picks_the_geometric_opposite_whatever_the_edge_order() {
+    fn reciprocal_pairing_outranks_the_edge_order() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(77, "Forest".into());
@@ -4042,23 +3899,10 @@ mod tests {
         );
         let mut secs = c.secondary_entry.clone();
         secs.sort_by_key(|d| format!("{d:?}"));
-        assert_eq!(secs, vec![Direction::N, Direction::S], "the extras collapse to icons at 239");
-
-        let mut st = AppState::default();
-        st.scroll = rm.bounds.0;
-        let area = Rect::new(0, 0, 60, 20);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &st, area, &mut buf);
-        let count = |sym: &str| buf.content.iter().filter(|c| c.symbol() == sym).count();
-        assert!(count("▲") >= 1, "239's collapsed N passage still shows its ▲");
-        assert!(count("▼") >= 1, "239's collapsed S passage still shows its ▼");
+        assert_eq!(secs, vec![Direction::N, Direction::S], "the extras are recorded, not drawn");
     }
-
-    /// The same shape with a gap between the boxes. Four passages between two rooms used to draw
-    /// a trunk plus two merge stubs joining it at T-junctions; SQ-0522 draws ONE line and stacks
-    /// the other two directions as icons beside it.
     #[test]
-    fn four_passages_between_two_rooms_draw_one_line_and_stacked_icons() {
+    fn four_passages_between_two_rooms_draw_one_line() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(77, "F".into());
@@ -4066,7 +3910,7 @@ mod tests {
         g.set_pos(77, (0, 0));
         g.set_pos(239, (2, 0)); // east of 77, a gap of one cell
         g.add_edge(77, Direction::E, 239);
-        g.add_edge(239, Direction::W, 77); // reciprocal trunk
+        g.add_edge(239, Direction::W, 77); // reciprocal → wins outright
         g.add_edge(239, Direction::N, 77);
         g.add_edge(239, Direction::S, 77);
         let (illegal, _) = render_overlap_stats(&g);
@@ -4075,6 +3919,11 @@ mod tests {
         let rm = mapper::render::render(&g);
         assert_eq!(rm.plan.connectors.len(), 1, "one line for the pair, not a trunk plus stubs");
         assert!(!rm.plan.connectors[0].merge, "and it is a real connector, not a merge stub");
+        assert_eq!(
+            (rm.plan.connectors[0].exit_dir, rm.plan.connectors[0].entry_dir),
+            (Direction::E, Some(Direction::W)),
+            "the reciprocal E/W pairing outranks the one-way N and S edges"
+        );
 
         let mut st = AppState::default();
         st.scroll = rm.bounds.0;
@@ -4082,12 +3931,9 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_map(&rm, &st, area, &mut buf);
         let count = |sym: &str| buf.content.iter().filter(|c| c.symbol() == sym).count();
-        assert!(count("▲") >= 1, "239's collapsed N passage still shows its ▲");
-        assert!(count("▼") >= 1, "239's collapsed S passage still shows its ▼");
-        let tjuncts: usize = ["├", "┤", "┬", "┴", "┼"].iter().map(|s| count(s)).sum();
+        let tjuncts: usize = ["\u{251c}", "\u{2524}", "\u{252c}", "\u{2534}", "\u{253c}"].iter().map(|s| count(s)).sum();
         assert_eq!(tjuncts, 0, "no T-junction: there are no merge stubs left to join a trunk");
     }
-
     #[test]
     fn overlap_stats_clean_pair_is_zero() {
         use mapper::graph::MapGraph;
@@ -4908,22 +4754,12 @@ mod tests {
         assert!(has_dotted, "an Up portal with no compass edge draws a dotted connector");
     }
 
-    /// SQ-0224 reverses SQ-0219's suppression: when a compass edge AND an up/down edge join the
-    /// same room pair, BOTH draw (the compass path plus a dotted up/down body), and the room-level
-    /// up glyph still renders on the border. Even in the same-axis case here (N compass + Up,
-    /// vertically adjacent — the worst case, both vertical) the two connectors share the side at
-    /// distinct slots and must not form an ILLEGAL overlap.
-    ///
-    /// SQ-0522 folded the staircase into the compass line and was reverted: collapsing it turns it
-    /// into an ICON, and an icon has no line to follow, so the passage could no longer say WHERE it
-    /// went. The dotted trunk costs crossings and earns them back in meaning.
+    /// A pair joined by BOTH a compass edge and a staircase draws ONE line, and priority picks
+    /// which: N outranks Up (SQ-0522). SQ-0224 drew both, on separate trunks — two lines between
+    /// two rooms that then had to cross each other. The staircase is not lost, it is simply not
+    /// drawn; the room inspector's exit list names every direction with its destination.
     #[test]
-    fn compass_and_updown_on_same_pair_both_draw_without_illegal_overlap() {
-        // SQ-0224 reverses SQ-0219's suppression: when a compass edge AND an up/down edge join the
-        // same room pair, BOTH draw (the compass path plus a dotted up/down body), and the
-        // room-level up glyph still renders on the border. Even in the same-axis case here (N
-        // compass + Up, vertically adjacent — the worst case, both vertical) the two connectors
-        // share the side at distinct slots and must not form an ILLEGAL overlap.
+    fn compass_and_updown_on_same_pair_draw_one_line_by_priority() {
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
@@ -4932,20 +4768,23 @@ mod tests {
         g.set_pos(2, (1, 0)); // due north of room 1
         g.add_edge(1, Direction::Up, 2);
         g.add_edge(1, Direction::N, 2); // a compass connector also joins the pair
-        assert_eq!(render_overlap_stats(&g).0, 0,
-            "both-drawn same-pair connectors must not form an illegal overlap");
+        assert_eq!(render_overlap_stats(&g).0, 0, "the single retained connector overlaps nothing");
+
         let rm = render(&g);
+        assert_eq!(rm.plan.connectors.len(), 1, "one line for the pair, whatever the directions");
+        assert_eq!(rm.plan.connectors[0].exit_dir, Direction::N, "N outranks Up");
+        assert_eq!(rm.plan.connectors[0].secondary_exit, vec![Direction::Up], "Up is recorded, not drawn");
+
         let mut st = AppState::default();
         st.scroll = rm.bounds.0;
         let area = Rect::new(0, 0, 120, 60);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &st, area, &mut buf);
-        let has_dotted = buf.content.iter().any(|c| matches!(c.symbol(), "┊" | "┄"));
-        assert!(has_dotted, "the up/down connector now draws its dotted body alongside the compass path");
-        let has_up_glyph = buf.content.iter().any(|c| c.symbol() == "↑");
-        assert!(has_up_glyph, "the room still shows the up glyph on its border");
+        let dotted = buf.content.iter().filter(|c| matches!(c.symbol(), "\u{250a}" | "\u{2504}")).count();
+        assert_eq!(dotted, 0, "no second, dotted line for the passage that lost");
+        let ups = buf.content.iter().filter(|c| c.symbol() == "\u{2191}").count();
+        assert_eq!(ups, 0, "and no icon for it either — an icon has no line to follow");
     }
-
     #[test]
     fn interlayer_badge_dest_label_appears_in_portal_view() {
         // Build a two-layer graph: Hall (1) and Study (2) on MAIN_LAYER, linked by a Down
@@ -6131,165 +5970,6 @@ mod tests {
     }
 
     #[test]
-    fn secondary_marker_glyph_drawn_inside_room_in_shared_color() {
-        use crate::state::AppState;
-        use mapper::graph::MapGraph;
-        use mapper::direction::Direction;
-        let mut g = MapGraph::new();
-        g.upsert_room(68, "W".into());
-        g.upsert_room(217, "S".into());
-        g.set_pos(68, (0, 0));
-        g.set_pos(217, (1, 1));
-        for (o, d, dst) in [(68, Direction::S, 217), (68, Direction::SE, 217),
-                            (217, Direction::W, 68), (217, Direction::NW, 68)] {
-            g.add_edge(o, d, dst);
-        }
-        let state = AppState::default(); // Boxes zoom by default
-        let south = state.symbols.arrows.south.to_string();
-        let west = state.symbols.arrows.west.to_string();
-        // Compared via `cell.fg` (not `cell.style() ==`), matching
-        // `shared_connector_line_uses_shared_path_color` above: `Cell::set_style` patches
-        // rather than replaces, so `Cell::style()` never equals a partially-set `Style`.
-        let shared_fg = state.colors.theme.get("map.shared_path").style.fg.expect("shared_path has an fg color");
-        let rm = mapper::render::render(&g);
-        let area = Rect::new(0, 0, 60, 30);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
-        let has_glyph = |glyph: &str| (0..area.width)
-            .flat_map(|x| (0..area.height).map(move |y| (x, y)))
-            .any(|(x, y)| buf.cell((x, y))
-                .map(|c| c.symbol() == glyph && c.fg == shared_fg).unwrap_or(false));
-        assert!(has_glyph(&south), "S secondary marker present in shared color");
-        assert!(has_glyph(&west), "W secondary marker present in shared color");
-    }
-
-    #[test]
-    fn secondary_marker_sits_next_to_the_retained_arrowhead() {
-        // Regression: the marker must hug the retained connector's arrowhead. The house-ring
-        // connectors are DIAGONAL, so the arrowhead sits on a box CORNER; the marker must anchor
-        // to that corner (one cell inward), not to a side midpoint (which strands it inside the
-        // room — the bug this test guards).
-        use crate::state::AppState;
-        use mapper::graph::MapGraph;
-        use mapper::direction::Direction;
-        let mut g = MapGraph::new();
-        g.upsert_room(68, "W".into());
-        g.upsert_room(217, "S".into());
-        g.set_pos(68, (0, 0));
-        g.set_pos(217, (1, 1));
-        for (o, d, dst) in [(68, Direction::S, 217), (68, Direction::SE, 217),
-                            (217, Direction::W, 68), (217, Direction::NW, 68)] {
-            g.add_edge(o, d, dst);
-        }
-        let state = AppState::default();
-        let se = state.symbols.arrows.se.to_string();       // retained SE departure arrowhead (at 68)
-        let south = state.symbols.arrows.south.to_string(); // S secondary marker (at 68)
-        let shared_fg = state.colors.theme.get("map.shared_path").style.fg.expect("shared_path has an fg color");
-        let rm = mapper::render::render(&g);
-        let area = Rect::new(0, 0, 60, 30);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
-        let find = |glyph: &str| (0..area.width as i32)
-            .flat_map(|x| (0..area.height as i32).map(move |y| (x, y)))
-            .find(|&(x, y)| buf.cell((x as u16, y as u16))
-                .map(|c| c.symbol() == glyph && c.fg == shared_fg).unwrap_or(false));
-        let arrow = find(&se).expect("SE departure arrowhead present");
-        let marker = find(&south).expect("S secondary marker present");
-        let (dx, dy) = ((arrow.0 - marker.0).abs(), (arrow.1 - marker.1).abs());
-        // Orthogonally adjacent (shares an edge with the arrowhead cell), i.e. in the border slot
-        // beside it — NOT one cell diagonally inward (dx+dy==2), which reads as "a space away".
-        assert_eq!(dx + dy, 1,
-            "S marker must sit in the border slot beside the SE arrowhead, got arrow={arrow:?} marker={marker:?}");
-    }
-
-    #[test]
-    fn cardinal_secondary_marker_stacks_along_the_shared_border() {
-        // Regression (SQ-0414): when a pair shares BOTH an n/s and an e/w connection, the retained
-        // connector exits on a CARDINAL side (here S, on the shared horizontal border), and the e/w
-        // edge collapses to a secondary. That marker must stack ALONG the border beside the retained
-        // arrowhead — same border row — NOT step one cell inward into the room interior (the bug).
-        use crate::state::AppState;
-        use mapper::graph::MapGraph;
-        use mapper::direction::Direction;
-        let mut g = MapGraph::new();
-        g.upsert_room(100, "A".into());
-        g.upsert_room(200, "B".into());
-        g.set_pos(100, (0, 0));
-        g.set_pos(200, (0, 1)); // B directly south of A -> shared horizontal border
-        for (o, d, dst) in [(100, Direction::S, 200), (100, Direction::E, 200),
-                            (200, Direction::N, 100), (200, Direction::W, 100)] {
-            g.add_edge(o, d, dst);
-        }
-        let state = AppState::default();
-        let south = state.symbols.arrows.south.to_string(); // retained S departure arrowhead (at A)
-        let east = state.symbols.arrows.east.to_string();    // E secondary marker (at A)
-        let shared_fg = state.colors.theme.get("map.shared_path").style.fg.expect("shared_path has an fg color");
-        let rm = mapper::render::render(&g);
-        let area = Rect::new(0, 0, 60, 30);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
-        let all = |glyph: &str| (0..area.width as i32)
-            .flat_map(|x| (0..area.height as i32).map(move |y| (x, y)))
-            .filter(|&(x, y)| buf.cell((x as u16, y as u16))
-                .map(|c| c.symbol() == glyph && c.fg == shared_fg).unwrap_or(false))
-            .collect::<Vec<_>>();
-        let marker = *all(&east).first().expect("E secondary marker present in shared color");
-        // The retained S arrowhead must be orthogonally adjacent to the marker...
-        let arrow = all(&south).into_iter()
-            .find(|s| (s.0 - marker.0).abs() + (s.1 - marker.1).abs() == 1)
-            .expect("retained S arrowhead adjacent to the E secondary marker");
-        // ...and on the SAME row: the marker sits in the next border slot along the shared edge,
-        // not one row inward (arrow.1 != marker.1), which would strand it inside the room.
-        assert_eq!(arrow.1, marker.1,
-            "E secondary must stack along the shared border (same row as the S arrowhead), \
-             got arrow={arrow:?} marker={marker:?}");
-    }
-
-    #[test]
-    fn diagonal_case_e_w_secondary_stacks_on_the_horizontal_border() {
-        // Regression (SQ-0414 follow-up, zork1 #143/#217): when the retained connector is DIAGONAL,
-        // an E/W secondary used to slide down the box's VERTICAL edge, stranding it on the side of
-        // the room. It must instead stack along the corner's HORIZONTAL (top/bottom) border edge,
-        // same row as the retained arrowhead. The 68/217 collapse retains the SE/NW diagonal and
-        // drops S (at 68) and W (at 217) as secondaries; W is the E/W case under test.
-        use crate::state::AppState;
-        use mapper::graph::MapGraph;
-        use mapper::direction::Direction;
-        let mut g = MapGraph::new();
-        g.upsert_room(68, "W".into());
-        g.upsert_room(217, "S".into());
-        g.set_pos(68, (0, 0));
-        g.set_pos(217, (1, 1));
-        for (o, d, dst) in [(68, Direction::S, 217), (68, Direction::SE, 217),
-                            (217, Direction::W, 68), (217, Direction::NW, 68)] {
-            g.add_edge(o, d, dst);
-        }
-        let state = AppState::default();
-        let nw = state.symbols.arrows.nw.to_string();     // retained NW arrival arrowhead (at 217's corner)
-        let west = state.symbols.arrows.west.to_string(); // W secondary marker (at 217)
-        let shared_fg = state.colors.theme.get("map.shared_path").style.fg.expect("shared_path has an fg color");
-        let rm = mapper::render::render(&g);
-        let area = Rect::new(0, 0, 60, 30);
-        let mut buf = Buffer::empty(area);
-        render_map(&rm, &state, area, &mut buf);
-        let all = |glyph: &str| (0..area.width as i32)
-            .flat_map(|x| (0..area.height as i32).map(move |y| (x, y)))
-            .filter(|&(x, y)| buf.cell((x as u16, y as u16))
-                .map(|c| c.symbol() == glyph && c.fg == shared_fg).unwrap_or(false))
-            .collect::<Vec<_>>();
-        let marker = *all(&west).first().expect("W secondary marker present in shared color");
-        // The retained NW arrowhead must be orthogonally adjacent to the marker...
-        let arrow = all(&nw).into_iter()
-            .find(|a| (a.0 - marker.0).abs() + (a.1 - marker.1).abs() == 1)
-            .expect("retained NW arrowhead adjacent to the W secondary marker");
-        // ...and on the SAME row: the marker sits in the next slot ALONG the horizontal border,
-        // not one row down the vertical edge (arrow.1 != marker.1 = stranded on the side).
-        assert_eq!(arrow.1, marker.1,
-            "W secondary must stack along the horizontal border (same row as the NW arrowhead), \
-             got arrow={arrow:?} marker={marker:?}");
-    }
-
-    #[test]
     fn house_ring_collapses_to_clean_lines_with_no_illegal_overlap() {
         use mapper::graph::MapGraph;
         use mapper::direction::Direction;
@@ -6348,6 +6028,7 @@ mod tests {
         assert!(content.contains('│'), "has vertical border sides");
     }
 }
+
 
 
 

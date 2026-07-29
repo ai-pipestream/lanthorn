@@ -15,28 +15,58 @@ struct Secondary {
     dir: Direction,
 }
 
-/// Decide which edges are DRAWN and which collapse into direction icons beside the line that
-/// is (SQ-0225, widened to every COMPASS pair by SQ-0522).
+/// Rank for choosing which passage represents a pair: N, S, E, W, NE, NW, SE, SW, Up, Down,
+/// then anything else. Lower wins (SQ-0522).
+fn dir_priority(d: Direction) -> u8 {
+    match d {
+        Direction::N => 0,
+        Direction::S => 1,
+        Direction::E => 2,
+        Direction::W => 3,
+        Direction::NE => 4,
+        Direction::NW => 5,
+        Direction::SE => 6,
+        Direction::SW => 7,
+        Direction::Up => 8,
+        Direction::Down => 9,
+        _ => 10, // In/Out/Unknown never reach here — they are badges, not lines
+    }
+}
+
+/// True when the routing loop can actually PAIR these two into ONE bidirectional connector.
+/// `back_edge_idx` pairs an Up/Down edge only with its exact opposite, and never pairs a compass
+/// edge with an Up/Down one; anything else goes.
+fn can_pair(fwd: Direction, bwd: Direction) -> bool {
+    let vertical = |d| matches!(d, Direction::Up | Direction::Down);
+    match (vertical(fwd), vertical(bwd)) {
+        (true, true) => bwd == opposite(fwd),
+        (false, false) => true,
+        _ => false,
+    }
+}
+
+/// Decide which single passage REPRESENTS each room pair on the map; the rest are recorded as
+/// `Secondary` and simply not drawn (SQ-0225, generalised by SQ-0522).
 ///
-/// ONE line per unordered room pair, whatever the directions involved. Per pair this keeps at
-/// most one edge in each direction-of-travel bucket (forward = origin is the lower id, backward
-/// = the higher id) — the two the routing loop then pairs into a single bidirectional connector
-/// — and makes every other edge of that pair a `Secondary`: a direction icon stamped at its own
-/// end of that one line. Returns the secondary indices into `graph.connections()` plus the
-/// records.
+/// However many ways two rooms connect, they get ONE line. Per pair this keeps at most one edge
+/// each way — the two the routing loop then pairs into a single bidirectional connector — and
+/// every other edge becomes a secondary. Returns the secondary indices into `graph.connections()`
+/// plus the records.
 ///
-/// "Best" within a bucket = geometrically satisfied first, then the exact opposite of the other
-/// bucket's pick (straightness), then lowest connection index.
+/// The choice is: a RECIPROCAL pairing first (the two ends are exact opposites, so the line runs
+/// straight and each arrowhead points the way you actually travel), then by direction priority —
+/// N, S, E, W, NE, NW, SE, SW, Up, Down. A pairing the router cannot join is not a candidate at
+/// all: taking one would draw the second line this pass exists to remove.
 ///
-/// COMPASS edges only. A staircase is never folded into a pair's compass line, and keeps the
-/// separate trunk SQ-0224 gave it. Folding it in was tried (SQ-0522) and reverted: a collapsed
-/// Up/Down becomes an ICON, and an icon has no line to follow, so the passage lost the one thing
-/// it has to say — WHERE it goes. `↓` on a room's bottom border while the retained line runs west
-/// tells you a staircase exists and then points at nothing; the dotted trunk, for all that it
-/// costs in crossings, actually reaches the room it leads to.
+/// Nothing marks the passages that lost. Two earlier attempts drew them as icons stacked on the
+/// room border and both failed in play: the icons competed with the arrowheads for the two or
+/// three cells a box side has, and a collapsed staircase's `↑` pointed at a room the retained
+/// line did not go to — an icon has no line to follow, so it can say a passage exists but never
+/// where it leads. The map now shows one honest path per pair and the room inspector's exit list
+/// carries every direction, destination included.
 ///
-/// In/Out/Unknown are absent for a different reason: they carry no layout offset, are never
-/// routed, and draw as portal badges anchored on the room.
+/// In/Out/Unknown never appear here: they carry no layout offset, are never routed, and draw as
+/// portal badges anchored on the room.
 fn select_shared_paths(
     graph: &MapGraph,
 ) -> (std::collections::BTreeSet<usize>, Vec<Secondary>) {
@@ -44,8 +74,8 @@ fn select_shared_paths(
     let conns = graph.connections();
     let mut by_pair: BTreeMap<(RoomId, RoomId), Vec<usize>> = BTreeMap::new();
     for (i, c) in conns.iter().enumerate() {
-        if grid_offset(c.dir).is_none() {
-            continue; // compass 8-way only; Up/Down keep their own trunk, In/Out/Unknown are badges
+        if layout_offset(c.dir).is_none() {
+            continue; // In/Out/Unknown: portal badges, never routed
         }
         let pair = (c.origin.min(c.dest), c.origin.max(c.dest));
         by_pair.entry(pair).or_default().push(i);
@@ -57,17 +87,33 @@ fn select_shared_paths(
             idxs.iter().copied().filter(|&i| conns[i].origin == origin).collect()
         };
         let (fwd, bwd) = (bucket(pair.0), bucket(pair.1));
-        // Pick the retained edge of a bucket: satisfied first, optional opposite-direction
-        // preference (straightness), then lowest index.
-        let pick = |bucket: &[usize], prefer_opp: Option<Direction>| -> Option<usize> {
-            bucket.iter().copied().min_by_key(|&i| {
-                let sat = crate::layout::edge_is_satisfied(graph, &conns[i]);
-                let opp = prefer_opp == Some(conns[i].dir);
-                (std::cmp::Reverse(sat), std::cmp::Reverse(opp), i)
-            })
+        // Best two-way representative: reciprocal first, then the priority of the two ends. Only
+        // pairings the router can actually join are considered.
+        let best_two_way = fwd
+            .iter()
+            .flat_map(|&f| bwd.iter().map(move |&b| (f, b)))
+            .filter(|&(f, b)| can_pair(conns[f].dir, conns[b].dir))
+            .min_by_key(|&(f, b)| {
+                let (fd, bd) = (conns[f].dir, conns[b].dir);
+                let reciprocal = bd == opposite(fd);
+                (
+                    std::cmp::Reverse(reciprocal),
+                    dir_priority(fd).min(dir_priority(bd)),
+                    dir_priority(fd).max(dir_priority(bd)),
+                    f,
+                    b,
+                )
+            });
+        // Best single edge, for a one-way pair or when no pairing can be joined.
+        let best_one_way = idxs
+            .iter()
+            .copied()
+            .min_by_key(|&i| (dir_priority(conns[i].dir), i))
+            .expect("a pair has at least one edge");
+        let (ret_fwd, ret_bwd) = match best_two_way {
+            Some((f, b)) => (Some(f), Some(b)),
+            None => (Some(best_one_way), None),
         };
-        let ret_fwd = pick(&fwd, None);
-        let ret_bwd = pick(&bwd, ret_fwd.map(|i| opposite(conns[i].dir)));
         for &i in &idxs {
             if Some(i) != ret_fwd && Some(i) != ret_bwd {
                 secondary_idx.insert(i);
@@ -2120,14 +2166,13 @@ mod tests {
         assert!(!vertical[0].reciprocal, "an unmatched one-way up/down stays non-reciprocal");
     }
 
+    /// A--Up-->B and B--S-->A: B--S-->A is geometrically the "reverse" edge between the same two
+    /// rooms, but up/down must NEVER PAIR (collapse into a reciprocal) with a compass edge — it
+    /// pairs only with the exact opposite up/down direction. The Up edge is listed FIRST to
+    /// exercise that ordering. Since the two cannot pair, SQ-0522 keeps the higher-priority edge
+    /// alone: S (priority 1) beats Up (priority 8), so one one-way line is drawn.
     #[test]
-    fn updown_does_not_pair_with_a_compass_edge_but_still_draws() {
-        // A--Up-->B and B--S-->A: B--S-->A is geometrically the "reverse" edge between the same
-        // two rooms, but up/down must NEVER PAIR (collapse into a reciprocal) with a compass edge
-        // — it pairs only with the exact opposite up/down direction. Since SQ-0224 the up/down
-        // edge still DRAWS as its own connector alongside the compass one (no longer suppressed),
-        // on a SEPARATE trunk, so it must not steal the compass edge's trunk (turning the S
-        // connector into a merge stub). The Up edge is listed FIRST to exercise that ordering.
+    fn a_staircase_never_pairs_with_a_compass_edge() {
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
@@ -2137,16 +2182,13 @@ mod tests {
         g.add_edge(2, Direction::S, 1);
 
         let plan = route_lanes(&g);
-        let up = plan.connectors.iter().find(|c| c.exit_dir == Direction::Up)
-            .expect("the up/down edge draws as its own connector (SQ-0224)");
-        assert_ne!(up.entry_dir, Some(Direction::S),
-            "the up/down connector did not pair with the compass S edge");
-        let s = plan.connectors.iter().find(|c| c.exit_dir == Direction::S)
-            .expect("the compass edge is still routed");
-        assert!(!s.merge,
-            "the S connector stays a full connector, not a merge stub of the up/down trunk");
+        assert_eq!(plan.connectors.len(), 1, "one line for the pair");
+        let c = &plan.connectors[0];
+        assert_eq!(c.exit_dir, Direction::S, "S outranks Up, and the two could never pair anyway");
+        assert_eq!(c.entry_dir, None, "it did NOT pair with the Up edge");
+        assert!(!c.merge, "and stays a full connector, never a merge stub of an up/down trunk");
+        assert_eq!(c.secondary_entry, vec![Direction::Up], "Up recorded at A, its own end");
     }
-
     #[test]
     fn ns_reciprocal_outranks_updown_for_center_slot() {
         // Room 1 has BOTH a reciprocal N/S connector (to room 2, bent — off-column) and a
@@ -2549,14 +2591,14 @@ mod tests {
         assert_eq!(route_side(Direction::Down), Some(Side::Bottom));
     }
 
+    /// A pair joined by a compass edge AND a staircase draws ONE line; priority decides which,
+    /// and E outranks Up (SQ-0522). SQ-0224 drew both on separate trunks, which is how a pair
+    /// connected two ways became two lines that had to cross.
     #[test]
-    fn compass_and_updown_on_same_pair_both_draw() {
+    fn compass_outranks_a_staircase_on_the_same_pair() {
         use crate::direction::Direction;
         use crate::graph::MapGraph;
 
-        // A--East-->B AND A--Up-->B on the same pair: BOTH a compass connector and an up/down
-        // connector are drawn, on their own sides (SQ-0224 reverses SQ-0219's suppression — a
-        // horizontal and a vertical passage between the same two rooms are distinct).
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
@@ -2566,25 +2608,18 @@ mod tests {
         g.add_edge(1, Direction::Up, 2);
 
         let plan = route_lanes(&g);
-        let updown: Vec<_> = plan.connectors.iter()
-            .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
-            .collect();
-        assert_eq!(updown.len(), 1, "the up/down connector is now drawn alongside the compass one");
-        let compass: Vec<_> = plan.connectors.iter()
-            .filter(|c| matches!(c.exit_dir, Direction::E | Direction::W))
-            .collect();
-        assert_eq!(compass.len(), 1, "the compass connector is drawn");
-        assert_ne!(updown[0].exit, compass[0].exit,
-            "the two passages leave on different sides (Top for Up vs Right for E)");
+        assert_eq!(plan.connectors.len(), 1, "one line for the pair, whatever the directions");
+        assert_eq!(plan.connectors[0].exit_dir, Direction::E, "E outranks Up");
+        assert_eq!(plan.connectors[0].secondary_exit, vec![Direction::Up], "Up recorded, not drawn");
     }
-
     #[test]
     fn updown_stays_out_of_the_compass_direct_route_contest() {
         // `direct_route_losers` decides which connector keeps a contested straight room-line: the
         // LONGER one wins, the shorter weaves. An up/down edge sharing a pair with a compass edge
         // must stay OUT of that contest (SQ-0224) so it cannot steal the pair's representative slot
-        // and flip who wins — even though, since SQ-0224, the up/down edge now DRAWS as its own
-        // connector.
+        // and flip who wins. Since SQ-0522 it is out of the routing set entirely — W outranks Up on
+        // its pair, so Up is recorded and not drawn — which is a stronger version of the same
+        // guarantee, so the contest winner must still be byte-identical either way.
         //
         // T(1) is the contested destination. A(2, far) and B(3, near) both want a straight W line
         // into T. The LONGER connector (A) must keep the straight line. B also carries an Up edge
@@ -2612,8 +2647,14 @@ mod tests {
         assert_eq!(a_with.points, a_without.points,
             "the contest winner A->T's straight line must be unaffected by B's Up edge staying out \
              of the contest: {:?} vs {:?}", a_with.points, a_without.points);
-        assert!(with_up.connectors.iter().any(|c| c.origin == 3 && c.exit_dir == Direction::Up),
-            "B's Up edge now draws as its own connector (SQ-0224)");
+        assert!(
+            with_up.connectors.iter().any(|c| {
+                (c.origin.min(c.dest), c.origin.max(c.dest)) == (1, 3)
+                    && c.secondary_exit.contains(&Direction::Up)
+            }),
+            "B's Up edge is recorded on the pair's retained line rather than drawing its own \
+             (SQ-0522), which is a stronger form of staying out of the contest"
+        );
     }
 
     #[test]
