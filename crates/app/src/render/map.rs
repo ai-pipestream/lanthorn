@@ -597,6 +597,12 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         draw_portal_icons(rm, &placed, state, state.show_portal_labels, (off_x, off_y), area, buf);
     }
 
+    // Untried compass directions (SQ-0391), before the arrowheads so a passage that DOES exist
+    // always wins its border cell — an arrow drawn over a `?` is the correct outcome, not a clash.
+    if boxes && state.show_untried_exits {
+        draw_untried_exits(rm, &placed, state, (off_x, off_y), area, buf);
+    }
+
     // ── 5. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
     //       border it sits on (replacing the box-edge glyph, pointing outward).
     // Portal view hides the cardinal connector arrowheads so only portal icons sit on borders.
@@ -1788,6 +1794,48 @@ fn mid_precedence(dir: Direction) -> u8 {
 /// One room's portal icon choices: three slots (Up / Mid / Down), each holding an optional
 /// `(glyph_char, dest_label)` pair chosen with `mid_precedence` for the shared mid slot.
 type PortalSlots<'a> = [Option<(char, Option<&'a str>)>; 3];
+
+/// Mark each compass direction never tried from a room with a `?` on the box outline, laid out as
+/// a compass rose: N at top centre, NE at the top-right corner, E at the right centre, and so on
+/// (SQ-0391).
+///
+/// Off by default and reached with `toggle-untried-exits` — it answers "where haven't I been?",
+/// which is a question you ask now and then rather than one worth eight glyphs per room all the
+/// time. Placement is by MEANING, not by where a connector happens to sit: a `?` in the top-right
+/// corner is the north-east you have not walked, wherever this room's other passages leave from.
+///
+/// Drawn before the arrowheads, so a direction that turns out to have a passage keeps its arrow.
+fn draw_untried_exits(
+    rm: &RenderMap,
+    placed: &std::collections::HashMap<RoomId, VRect>,
+    state: &AppState,
+    offset: (i32, i32),
+    area: Rect,
+    buf: &mut Buffer,
+) {
+    let (off_x, off_y) = offset;
+    let style = state.colors.theme.get("map.untried_exit").style;
+    let glyph = state.symbols.portal.unknown;
+    for room in &rm.rooms {
+        let Some(&rect) = placed.get(&room.id) else { continue };
+        let (bx, by) = (rect.x, rect.y);
+        for dir in &room.untried {
+            // The rose, on the outline: corners for the diagonals, edge centres for the cardinals.
+            let (dx, dy) = match *dir {
+                Direction::N => (BOX_W / 2, 0),
+                Direction::NE => (BOX_W - 1, 0),
+                Direction::E => (BOX_W - 1, BOX_H / 2),
+                Direction::SE => (BOX_W - 1, BOX_H - 1),
+                Direction::S => (BOX_W / 2, BOX_H - 1),
+                Direction::SW => (0, BOX_H - 1),
+                Direction::W => (0, BOX_H / 2),
+                Direction::NW => (0, 0),
+                _ => continue,
+            };
+            put_char(buf, bx + dx + off_x, by + dy + off_y, glyph, style, area);
+        }
+    }
+}
 
 /// Draw in-room portal indicators at Boxes zoom as a post-room overlay (so icons sit on top of
 /// the box interior). Each room's portal (stub) edges map to a right-interior-column slot:
@@ -5193,6 +5241,7 @@ mod tests {
             label: "Test".into(),
             is_current: true,
             has_layer_portal: false,
+            untried: Vec::new(),
             has_notes: false,
             align_code: String::new(),
         };
@@ -5226,6 +5275,7 @@ mod tests {
             label: "Test".into(),
             is_current: true,
             has_layer_portal: false,
+            untried: Vec::new(),
             has_notes: false,
             align_code: String::new(),
         };
@@ -5249,6 +5299,7 @@ mod tests {
             label: "Test".into(),
             is_current: false,
             has_layer_portal: false,
+            untried: Vec::new(),
             has_notes: false,
             align_code: String::new(),
         };

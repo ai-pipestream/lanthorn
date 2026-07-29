@@ -189,6 +189,7 @@ pub enum Action {
     TogglePortalLabels,
     /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
     ToggleRoomNumbers,
+    ToggleUntriedExits,
     ToggleStatusBar,
     /// Toggle honoring the Z-machine's timed-input (`read`/`read_char` timers).
     ToggleTimedInput,
@@ -1737,6 +1738,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
         Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
         Action::ToggleRoomNumbers => state.show_room_numbers = !state.show_room_numbers,
+        Action::ToggleUntriedExits => state.show_untried_exits = !state.show_untried_exits,
         Action::ToggleStatusBar => state.show_status_bar = !state.show_status_bar,
         Action::ToggleTimedInput => {
             state.config.honor_timed_input = !state.config.honor_timed_input;
@@ -3265,9 +3267,9 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::OpenVerbMenu));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::TogglePortalLabels));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
-        // 'u' (export-map) and 'x' (reset-game's old letter) are now palette-only:
-        // unbound leader letters close the dialog.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::CloseHotkeyDialog));
+        // 'u' now fires SQ-0391's untried-exits overlay; it was one of this test's examples of
+        // an unbound letter, and 'x' (reset-game's old letter) still is.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::ToggleUntriedExits));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('x'))), Action::CloseHotkeyDialog));
     }
 

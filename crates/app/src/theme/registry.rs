@@ -235,6 +235,9 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("map.connector_distorted", Section::Map, Kind::Style, None, fg(Color::Magenta)),
     row("map.connector_portal", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
     row("map.shared_path", Section::Map, Kind::Style, None, fg(Color::LightCyan)),
+    // The `?` marking a compass direction never tried from a room (SQ-0391). `muted` on purpose:
+    // it is a prompt about absence, and must never out-shout a passage that actually exists.
+    row("map.untried_exit", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     row("map.loc_indicator", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     // layer_cycle: sole list-valued selector; value in LAYER_CYCLE_DEFAULT.
     row("map.layer_cycle", Section::Map, Kind::Style, None, Delta::EMPTY),
@@ -393,6 +396,7 @@ mod tests {
         "map.connector_distorted",
         "map.connector_portal",
         "map.shared_path",
+        "map.untried_exit",
         "map.loc_indicator",
         "map.layer_cycle",
         "map.box_style",

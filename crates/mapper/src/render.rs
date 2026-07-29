@@ -30,6 +30,9 @@ pub struct RenderRoom {
     /// True when this room owns an outgoing portal to another layer (set by `render_layer`).
     /// The renderer draws such rooms with a distinct box outline.
     pub has_layer_portal: bool,
+    /// Compass directions never tried from this room — see [`MapGraph::untried`] (SQ-0391).
+    /// Carried here so the optional overlay needs no second pass over the graph.
+    pub untried: Vec<crate::direction::Direction>,
 }
 
 /// The complete zoom-independent render description of the map.
@@ -79,6 +82,7 @@ pub fn render_traced(graph: &MapGraph, on_step: &mut dyn FnMut(&str)) -> RenderM
                 is_current: Some(room.id) == current,
                 align_code,
                 has_layer_portal: false,
+                untried: graph.untried(room.id),
             })
         })
         .collect();

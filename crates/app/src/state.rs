@@ -1716,6 +1716,9 @@ pub struct AppState {
     pub pending_resume: PendingResume,
     /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
     pub show_room_numbers: bool,
+    /// Mark compass directions never tried from a room with a `?` on its border (SQ-0391).
+    /// Off by default: it is an exploration aid you reach for, not a permanent decoration.
+    pub show_untried_exits: bool,
     /// How the current room was detected (for the map indicator). Retained
     /// across turns; updated when a turn reports a method.
     pub loc_method: Option<zvm::location::LocationMethod>,
@@ -1895,6 +1898,7 @@ impl Default for AppState {
             prev_objects_here: std::collections::BTreeSet::new(),
             pending_resume: None,
             show_room_numbers: false,
+            show_untried_exits: false,
             loc_method: None,
             current_room_name: None,
             show_status_bar: true,

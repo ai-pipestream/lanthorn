@@ -384,7 +384,7 @@ const DEFAULT_GROUPS: &[(&str, &[(char, &str)])] = &[
     ("Layout", &[('t', "tidy-map"), ('a', "animate-tidy")]),
     ("Layers", &[('p', "peel-layer"), ('m', "merge-layer"), ('c', "cycle-layer next")]),
     ("Edit", &[('r', "rename-room"), ('n', "edit-notes"), ('d', "delete-connection"), ('e', "relabel-edge")]),
-    ("View", &[('i', "toggle-inventory"), ('l', "toggle-portal-labels"), ('v', "open-verb-menu")]),
+    ("View", &[('i', "toggle-inventory"), ('l', "toggle-portal-labels"), ('v', "open-verb-menu"), ('u', "toggle-untried-exits")]),
     ("Session", &[('s', "open-config"), ('h', "open-history"), ('g', "reset-game")]),
 ];
 
@@ -874,7 +874,7 @@ mod tests {
             .collect();
         let unique: std::collections::HashSet<char> = letters.iter().copied().collect();
         assert_eq!(letters.len(), unique.len(), "leader letters must be unique");
-        assert_eq!(letters.len(), 15, "expected 15 authored leader letters (SQ-0446 Proposal B)");
+        assert_eq!(letters.len(), 16, "expected 16 authored leader letters (SQ-0446 Proposal B, plus SQ-0391's toggle-untried-exits)");
     }
 
     #[test]

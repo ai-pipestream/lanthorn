@@ -258,7 +258,7 @@ impl MapGraph {
         let Some(room) = self.rooms.get(&id) else { return Vec::new() };
         let walked: Vec<Direction> =
             self.conns.iter().filter(|c| c.origin == id).map(|c| c.dir).collect();
-        crate::direction::COMPASS
+        crate::direction::UNTRIED_DIRS
             .iter()
             .copied()
             .filter(|d| !room.tried.contains(d) && !walked.contains(d))
