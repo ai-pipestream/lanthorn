@@ -241,12 +241,14 @@ save-on-quit prompt) — `/quit` still exits babelmap outright. Launched against
 single story file, there's no library to return to, so `/quit-to-library` just
 says so.
 
-Once a story's metadata has been fetched, a narrow **RATE** column carries
-IFDB's community average — the plain number to one decimal (`3.8`), no star
-glyphs to squint at. A game nobody has rated, or one you haven't fetched yet,
-leaves the cell empty rather than pretending to a damning `0.0`; press `r` to
-sweep the library and fill them in. RATE is the first column to step aside on a
-narrow pane, so it never crowds the title or author.
+Once a story's metadata has been fetched, a **RATING** column carries IFDB's
+community average with the number of votes behind it — `3.8 (226)`, the plain
+number to one decimal, no star glyphs to squint at. The vote count is there
+because a lone `5.0` and a `5.0` over three hundred ratings are not the same
+claim. A game nobody has rated, or one you haven't fetched yet, leaves the cell
+empty rather than pretending to a damning `0.0`; press `r` to sweep the library
+and fill them in. RATING is the first column to step aside on a narrow pane, so
+it never crowds the title or author.
 
 The list sorts by **title**, **author**, **year**, **rating**, or **type** —
 click a column header, press `s` to cycle the column, or `d` to flip the
@@ -271,7 +273,7 @@ They live beside the `story_badge` selector that colours them. The badge cluster
 sortable headers, and info panel are all themeable through
 `story_badge`, `story_header`/`story_header:active` (the
 active sort column), `story_author`, `story_year`, `story_rating` (the IFDB
-average in the RATE column), `story_no_metadata` (the
+average and vote count in the RATING column), `story_no_metadata` (the
 "(no metadata yet)" placeholder), `story_tile`/`story_tile:selected` (the
 cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
 `:cover`) style selectors.

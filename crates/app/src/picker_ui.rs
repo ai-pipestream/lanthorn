@@ -137,9 +137,14 @@ const COL_GAP: u16 = 2;
 const AUTHOR_COL_W: u16 = 20;
 const AUTHOR_MAX_W: u16 = 40;
 const YEAR_COL_W: u16 = 6;
-/// IFDB rating column ("3.8" — one decimal, never stars). Sized to hold the
-/// header plus its sort arrow ("RATE ▲"), which is wider than any value.
-const RATING_COL_W: u16 = 6;
+/// IFDB rating column: the average to one decimal, then the number of votes it
+/// is over — `4.6 (118)`. Never stars. The vote count matters because a lone
+/// 5.0 and a 5.0 over 300 ratings are not the same claim.
+///
+/// Sized for `4.6 (1234)` (10) — a 4-digit count is comfortably beyond IFDB's
+/// most-rated games, and the value now outgrows the header, so `RATING ▲` (8)
+/// fits where the old 6-wide column could only take `RATE ▲`.
+const RATING_COL_W: u16 = 10;
 /// Interpreter/format column ("Z5", "Z5 (blorb)", "G3.1.2"): fixed width, sits
 /// just left of the badge cluster. `Z8 (blorb)` (10) is the widest (SQ-0369).
 const INTERP_COL_W: u16 = 13;
@@ -1456,7 +1461,7 @@ fn draw_story_picker(
         header_rects.push((SortKey::Year, Rect::new(year_x, header_y, cols.year_w, 1)));
     }
     if cols.rating_w > 0 {
-        let (rating_label, rating_active) = header_label("RATE", SortKey::Rating, sort);
+        let (rating_label, rating_active) = header_label("RATING", SortKey::Rating, sort);
         let rating_hstyle = if rating_active { story_header_active } else { story_header };
         draw_str_clipped(buf, rating_x, header_y, &rating_label, rating_hstyle, area);
         header_rects.push((SortKey::Rating, Rect::new(rating_x, header_y, cols.rating_w, 1)));
@@ -1518,7 +1523,14 @@ fn draw_story_picker(
         // which would read as a real (and damning) score.
         if cols.rating_w > 0 {
             if let Some(r) = entry.meta.ifdb_rating.filter(|r| r.is_finite()) {
-                let rating_txt = truncate_to_width(&format!("{r:.1}"), cols.rating_w as usize);
+                // The vote count rides beside the average so a 5.0 over three
+                // ratings can't pass for a 5.0 over three hundred. A record with
+                // an average but no count still shows the average alone.
+                let cell = match entry.meta.ifdb_rating_count {
+                    Some(n) => format!("{r:.1} ({n})"),
+                    None => format!("{r:.1}"),
+                };
+                let rating_txt = truncate_to_width(&cell, cols.rating_w as usize);
                 let rating_style = if sel { style } else { story_rating };
                 draw_str_clipped(buf, rating_x, y, &rating_txt, rating_style, row_rect);
             }
@@ -2831,14 +2843,14 @@ mod tests {
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
             &cs, app::picker::Sort::default(), area, &mut buf,
         );
-        // 60 cells is too narrow for the RATE column, so four headers show.
+        // 60 cells is too narrow for the RATING column, so four headers show.
         assert_eq!(header_rects.len(), 4, "title/author/year/type at this width: {header_rects:?}");
         for (key, rect) in &header_rects {
             let expected_char = match key {
                 app::picker::SortKey::Title => "T",
                 app::picker::SortKey::Author => "A",
                 app::picker::SortKey::Year => "Y",
-                app::picker::SortKey::Rating => "R", // "RATE"
+                app::picker::SortKey::Rating => "R", // "RATING"
                 app::picker::SortKey::Type => "T",   // "TYPE"
             };
             let cell = buf.cell((rect.x, rect.y)).unwrap();
@@ -2850,7 +2862,8 @@ mod tests {
         }
     }
 
-    /// SQ-0529. The RATE column shows IFDB's average to one decimal, and an
+    /// SQ-0529. The RATING column shows IFDB's average to one decimal followed by
+    /// the number of votes it is over — `3.8 (226)` — and an
     /// unrated story (or one never fetched — the sidecar only gained the field
     /// at `FETCH_VERSION` 2, so `r` repopulates it) leaves the cell EMPTY. The
     /// cell is located via the returned header rect rather than a hard-coded
@@ -2870,7 +2883,7 @@ mod tests {
         let mut list = app::list_scroll::ListScroll::new();
         list.len(stories.len());
 
-        // Wide enough for every column (the RATE column is the first to drop).
+        // Wide enough for every column (the RATING column is the first to drop).
         let area = Rect::new(0, 0, 100, 10);
         let mut buf = Buffer::empty(area);
         let (_, _, header_rects) = super::draw_story_picker(
@@ -2890,15 +2903,18 @@ mod tests {
                 .take(rect.width as usize)
                 .collect()
         };
-        assert_eq!(cell(1).trim(), "RATE", "the column header sits over its own rect");
-        assert_eq!(cell(2).trim(), "3.8", "one decimal — not stars, not the raw 3.818584");
+        assert_eq!(cell(1).trim(), "RATING", "the column header sits over its own rect");
+        assert_eq!(
+            cell(2).trim(), "3.8 (226)",
+            "one decimal plus the vote count — not stars, not the raw 3.818584"
+        );
         assert_eq!(
             cell(3).trim(), "",
             "no rating renders as blank; a 0.0 would read as a real, damning score"
         );
     }
 
-    /// The RATE column joins the sortable set: it takes the direction arrow
+    /// The RATING column joins the sortable set: it takes the direction arrow
     /// when active, exactly like TITLE/AUTHOR/YEAR/TYPE.
     #[test]
     fn rating_header_takes_the_sort_arrow_when_active() {
@@ -2918,7 +2934,7 @@ mod tests {
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"), &cs, sort, area, &mut buf,
         );
         let header = row_text(&buf, 1, area);
-        assert!(header.contains("RATE ▼"), "active RATE column shows the arrow: {header:?}");
+        assert!(header.contains("RATING ▼"), "active RATING column shows the arrow: {header:?}");
         assert!(!header.contains("YEAR ▼") && !header.contains("TITLE ▼"), "{header:?}");
     }
 
