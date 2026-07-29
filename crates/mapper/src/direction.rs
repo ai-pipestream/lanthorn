@@ -53,6 +53,20 @@ pub fn is_diagonal(d: Direction) -> bool {
     matches!(d, Direction::NE | Direction::NW | Direction::SE | Direction::SW)
 }
 
+/// The eight compass directions, in reading order: the ones a room can be asked "have you
+/// tried this way?" about (SQ-0391). Up/Down/In/Out are excluded — they are not part of the
+/// compass rose a player scans, and an untried `?` on every one of them would bury the map.
+pub const COMPASS: [Direction; 8] = [
+    Direction::N,
+    Direction::NE,
+    Direction::E,
+    Direction::SE,
+    Direction::S,
+    Direction::SW,
+    Direction::W,
+    Direction::NW,
+];
+
 pub fn grid_offset(d: Direction) -> Option<(i32, i32)> {
     match d {
         Direction::N => Some((0, -1)),

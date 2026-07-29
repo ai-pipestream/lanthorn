@@ -25,6 +25,13 @@ impl Mapper {
     pub fn observe(&mut self, location: RoomId, name: &str, via: Option<Direction>) {
         self.graph.upsert_room(location, name.to_string());
         let prev = self.graph.current();
+        // Record the direction against the room it was TYPED IN — the one we are leaving, not the
+        // one we arrive at — and do it whether or not the move worked (SQ-0391). A direction that
+        // bounced off a wall still answers "have I tried this way?", and that case is exactly the
+        // one the `location != prev` arm below skips.
+        if let (Some(prev_id), Some(d)) = (prev, via) {
+            self.graph.mark_tried(prev_id, d);
+        }
         match prev {
             None => {
                 // First room ever: anchor at the origin. Nothing was walked to
@@ -389,5 +396,47 @@ mod tests {
         let cells: Vec<_> = m.graph.rooms().filter_map(|r| r.pos).collect();
         let set: std::collections::BTreeSet<_> = cells.iter().collect();
         assert_eq!(cells.len(), set.len());
+    }
+}
+
+#[cfg(test)]
+mod untried_tests {
+    use super::*;
+
+    /// SQ-0391: the map can offer a "where haven't I been?" prompt only if the mapper records
+    /// every direction the player TYPES, not just the ones that worked.
+    #[test]
+    fn a_direction_that_goes_nowhere_still_counts_as_tried() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        assert_eq!(m.graph.untried(1).len(), 8, "a fresh room has all eight ways untried");
+
+        // A move that WORKS is tried, and so is the edge it minted.
+        m.observe(2, "Cave", Some(Direction::N));
+        assert!(!m.graph.untried(1).contains(&Direction::N), "north led somewhere");
+        assert_eq!(m.graph.untried(1).len(), 7);
+
+        // A move that goes NOWHERE — same room back — is the case worth recording: without it the
+        // map would keep offering a wall forever.
+        m.observe(2, "Cave", Some(Direction::E));
+        assert!(!m.graph.untried(2).contains(&Direction::E), "east was tried and refused");
+        m.observe(2, "Cave", Some(Direction::E)); // twice is still once
+        assert_eq!(m.graph.untried(2).iter().filter(|d| **d == Direction::E).count(), 0);
+
+        // A command naming no direction records nothing.
+        let before = m.graph.untried(2).len();
+        m.observe(2, "Cave", None);
+        assert_eq!(m.graph.untried(2).len(), before, "a non-directional command tries nothing");
+    }
+
+    /// A map saved before this was recorded has no `tried` list, but its EDGES still prove which
+    /// ways were walked — those must not come back as untried.
+    #[test]
+    fn walked_edges_count_as_tried_on_an_older_map() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cave", Some(Direction::N));
+        m.graph.room_mut_tried_clear_for_test(1);
+        assert!(!m.graph.untried(1).contains(&Direction::N), "the N edge out of #1 says it was walked");
     }
 }

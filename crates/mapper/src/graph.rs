@@ -21,6 +21,15 @@ pub struct Room {
     /// rooms mapped before this was recorded.
     #[serde(default)]
     pub loc_method: Option<String>,
+    /// Compass directions the player has TYPED while standing in this room, whether or not the
+    /// move worked (SQ-0391). What it answers is "where have I not tried yet?", so a direction
+    /// that bounced off a wall counts as tried just as much as one that led somewhere — the map
+    /// stops nagging about it either way.
+    ///
+    /// A `Vec` rather than a set because [`Direction`] is deliberately not `Ord`, and the list is
+    /// at most eight long. Absent from older map files, hence `serde(default)`.
+    #[serde(default)]
+    pub tried: Vec<Direction>,
 }
 
 impl Room {
@@ -147,6 +156,7 @@ impl MapGraph {
                     pos: None,
                     layer: MAIN_LAYER,
                     loc_method: None,
+                    tried: Vec::new(),
                 });
             }
         }
@@ -231,6 +241,39 @@ impl MapGraph {
     /// mapper first came to know the room, and a later visit may well be resolved
     /// by a weaker method (a name match rather than the object) without that
     /// saying anything new. A no-op for an unknown room.
+    /// Record that `dir` was TYPED while standing in `id`, whether or not it moved the player
+    /// (SQ-0391). Idempotent — a direction you try twice is still one tried direction.
+    pub fn mark_tried(&mut self, id: RoomId, dir: Direction) {
+        if let Some(r) = self.rooms.get_mut(&id) {
+            if !r.tried.contains(&dir) {
+                r.tried.push(dir);
+            }
+        }
+    }
+
+    /// The compass directions never typed in this room — what a player has left to explore
+    /// (SQ-0391). Directions that LED somewhere are tried by definition, so an edge out counts
+    /// even on a map loaded from before this was recorded.
+    pub fn untried(&self, id: RoomId) -> Vec<Direction> {
+        let Some(room) = self.rooms.get(&id) else { return Vec::new() };
+        let walked: Vec<Direction> =
+            self.conns.iter().filter(|c| c.origin == id).map(|c| c.dir).collect();
+        crate::direction::COMPASS
+            .iter()
+            .copied()
+            .filter(|d| !room.tried.contains(d) && !walked.contains(d))
+            .collect()
+    }
+
+    /// Test-only: drop a room's recorded attempts, to stand in for a map file written before
+    /// they were recorded.
+    #[doc(hidden)]
+    pub fn room_mut_tried_clear_for_test(&mut self, id: RoomId) {
+        if let Some(r) = self.rooms.get_mut(&id) {
+            r.tried.clear();
+        }
+    }
+
     pub fn set_loc_method(&mut self, id: RoomId, method: &str) {
         if let Some(r) = self.rooms.get_mut(&id) {
             if r.loc_method.is_none() {
