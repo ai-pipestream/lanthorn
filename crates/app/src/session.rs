@@ -1464,6 +1464,37 @@ pub fn restore_screen(machine: &mut Machine, screen: zvm::screen::ScreenState) {
     let buffering = screen.buffer_mode;
     machine.screen = screen;
     machine.out.set_buffer_mode(buffering);
+    // SQ-0551: same class of fix as the `buffer_mode` re-sync above — state that
+    // lives in two places, only one of which is archived.
+    //
+    // `current_fg`/`current_bg` are transient display state the VM deliberately
+    // does NOT serialize: ZMSD §8.3 gives every v6 window its own pair, and these
+    // fields only MIRROR the current window's so the prose stream can tag its runs
+    // (see `Machine::mirror_v6_colours`). A restore therefore brings back every
+    // window's colours but hands these back as `Default` — and since the prose
+    // stream reads them, the first turn after a resume printed in the HOST THEME's
+    // ink on top of the story's own, correctly restored, page. Zork Zero came back
+    // with a cyan room name and light grey prose over its white page, healing only
+    // once the game next called `set_colour` and re-mirrored.
+    //
+    // Re-derive the pair from the restored window table exactly as the runtime
+    // maintains it — the window table is the authority for v6, so deriving keeps
+    // the restored screen self-consistent and needs nothing persisted.
+    //
+    // Versions 1–5/7/8 have no window table to derive from, and nothing else in
+    // the archive holds the game's selected colour, so THEY carry the pair in
+    // `screen.json` instead (see `ScreenDto::current_fg`) — it is already in
+    // `screen` by the time we get here, and the derivation below simply doesn't
+    // fire for them. Beyond Zork, Photopia and Nameless all set colours and
+    // depend on that path.
+    let pair = machine.screen.v6.as_ref().map(|v| {
+        let w = &v.windows[(v.current as usize).min(v.windows.len() - 1)];
+        (w.fg, w.bg)
+    });
+    if let Some((fg, bg)) = pair {
+        machine.screen.current_fg = fg;
+        machine.screen.current_bg = bg;
+    }
 }
 
 // ── Adventure-title helpers ───────────────────────────────────────────────────

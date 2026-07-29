@@ -162,6 +162,23 @@ struct ScreenDto {
     /// `#[serde(default)]` keeps pre-v6 archives loading as `None`.
     #[serde(default)]
     v6: Option<V6WindowsDto>,
+    /// The current logical fg/bg pair (SQ-0551).
+    ///
+    /// `ScreenState` documents these as transient display state and does not put
+    /// them in a Quetzal save — but the PROSE stream tags every run's colour from
+    /// them, so a resume that hands them back as `Default` prints the first turn
+    /// in the host theme's ink until the game next calls `set_colour`.
+    ///
+    /// A **v6** story needs no help here: ZMSD §8.3 gives each window its own
+    /// pair, the whole window table is archived above, and `restore_screen`
+    /// re-derives the current pair from it — so for v6 these fields are written
+    /// but ignored on the way back in. Versions 1–5/7/8 have no window table and
+    /// nothing else that holds the game's selected colour (this DTO stores the
+    /// upper window as char+style only), so for them the pair must travel.
+    #[serde(default)]
+    current_fg: ZColourDto,
+    #[serde(default)]
+    current_bg: ZColourDto,
 }
 
 impl ScreenDto {
@@ -178,6 +195,17 @@ impl ScreenDto {
             rows: s.upper.rows,
             cells: s.upper.cells.iter().map(|c| (c.ch, c.style)).collect(),
             v6: s.v6.as_ref().map(V6WindowsDto::from_v6),
+            // Written ONLY when there is no window table to re-derive from, so
+            // each version has exactly one source of truth for its ink and
+            // neither mechanism can quietly paper over the other going wrong.
+            current_fg: match s.v6 {
+                Some(_) => ZColourDto::Default,
+                None => ZColourDto::from_z(s.current_fg),
+            },
+            current_bg: match s.v6 {
+                Some(_) => ZColourDto::Default,
+                None => ZColourDto::from_z(s.current_bg),
+            },
         }
     }
 
@@ -200,6 +228,8 @@ impl ScreenDto {
                     .collect(),
             },
             v6: self.v6.as_ref().map(V6WindowsDto::to_v6),
+            current_fg: self.current_fg.to_z(),
+            current_bg: self.current_bg.to_z(),
             ..Default::default()
         }
     }
@@ -211,8 +241,9 @@ impl ScreenDto {
 
 /// serde mirror of `zvm::screen::ZColour` (that type is transient display state
 /// zvm does not serialize; we persist it for host Save State render fidelity).
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 enum ZColourDto {
+    #[default]
     Default,
     Standard(u8),
     True(u16),
