@@ -1802,10 +1802,14 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
         Action::EditNotes => {
             if let Some(id) = state.selected_room {
+                let current_notes =
+                    mapper.graph.room(id).map(|r| r.notes.clone()).unwrap_or_default();
                 state.overlays.hotkey_dialog = false;
                 state.overlays.dialog_focus = 0;
-                // Opens empty: submit replaces the room's notes (empty clears them).
-                state.overlays.text_entry = Some(TextEntryDialog::new(TextEntryKind::EditNotes(id), ""));
+                // Prefilled with the room's existing notes (caret at the end): submit
+                // replaces the notes with the field's contents (empty clears them).
+                state.overlays.text_entry =
+                    Some(TextEntryDialog::new(TextEntryKind::EditNotes(id), current_notes));
             }
         }
         Action::RelabelSelectedEdge => {
@@ -3740,6 +3744,66 @@ mod tests {
         state.overlays.text_entry = None;
         // Room name unchanged.
         assert_eq!(mapper.graph.room(1).unwrap().label(), "Original");
+    }
+
+    #[test]
+    fn edit_notes_prefills_with_existing_notes() {
+        // SQ-0524: the dialog should open with the room's current notes already
+        // in the field (caret at the end) instead of empty.
+        let mut mapper = Mapper::default();
+        mapper.observe(1, "Dark Room", None);
+        mapper.set_notes(1, "watch for the loose brick".to_string());
+
+        let mut state = AppState::default();
+        state.toggle_focus();
+        state.select_room(Some(1));
+
+        apply_action(Action::EditNotes, &mut state, &mut mapper);
+        let dlg = state.overlays.text_entry.as_ref().expect("text-entry dialog opened");
+        assert!(matches!(dlg.kind, crate::state::TextEntryKind::EditNotes(1)));
+        assert_eq!(dlg.field.value, "watch for the loose brick");
+        assert_eq!(
+            dlg.field.cursor,
+            "watch for the loose brick".chars().count(),
+            "caret starts at the end of the prefilled text"
+        );
+    }
+
+    #[test]
+    fn edit_notes_opens_empty_for_a_room_with_no_notes() {
+        let mut mapper = Mapper::default();
+        mapper.observe(1, "Dark Room", None);
+
+        let mut state = AppState::default();
+        state.toggle_focus();
+        state.select_room(Some(1));
+
+        apply_action(Action::EditNotes, &mut state, &mut mapper);
+        let dlg = state.overlays.text_entry.as_ref().expect("text-entry dialog opened");
+        assert_eq!(dlg.field.value, "");
+    }
+
+    #[test]
+    fn edit_notes_submit_empty_still_clears_notes() {
+        let mut mapper = Mapper::default();
+        mapper.observe(1, "Dark Room", None);
+        mapper.set_notes(1, "old note".to_string());
+
+        let mut state = AppState::default();
+        state.toggle_focus();
+        state.select_room(Some(1));
+
+        apply_action(Action::EditNotes, &mut state, &mut mapper);
+        // Clear the prefilled field (select-all/delete, as a user would).
+        let d = state.overlays.text_entry.as_mut().unwrap();
+        for _ in 0.."old note".chars().count() {
+            d.field.backspace();
+        }
+        assert_eq!(d.field.value, "");
+
+        let dlg = state.overlays.text_entry.take().unwrap();
+        apply_text_entry(dlg, &mut state, &mut mapper);
+        assert_eq!(mapper.graph.room(1).unwrap().notes, "");
     }
 
     #[test]
