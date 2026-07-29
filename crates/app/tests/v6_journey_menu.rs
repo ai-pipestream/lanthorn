@@ -652,6 +652,68 @@ fn journey_hybrid_tall_pane_divider_reaches_menu() {
     );
 }
 
+/// SQ-0547 follow-up: the panel fill must reach the flank's right edge, and the
+/// divider must run the WHOLE column.
+///
+/// Two defects the first cut shipped, both visible at the TTY. (a) The art was
+/// cropped to the flank's full native column width, so Journey's transparent side
+/// margins (its picture occupies native x 5..226 of 240) were dragged into the
+/// drawn image and rendered as dark cells ON TOP of the panel fill — a strip of
+/// "missing background" down the right of the picture. The crop is now tight to
+/// the art's bounding box on both axes. (b) Cropping tight then dropped the
+/// divider on the picture's own rows, because the divider column lives at native
+/// x≈233, outside that box — it used to ride along in the band image. The divider
+/// extension now spans the whole column instead of starting below the art.
+#[test]
+fn journey_hybrid_tall_pane_panel_fill_reaches_the_divider() {
+    use ratatui::style::Color;
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let area = Rect::new(0, 0, 90, 40);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    let vp = state.transcript_geom.get().expect("hybrid transcript").area;
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    let proceed_y = (0..area.height).find(|&y| row_text(y).contains("Proceed")).expect("'Proceed' menu row");
+    let lum = |x: u16, y: u16| match buf.cell((x, y)).unwrap().bg {
+        Color::Rgb(r, g, b) => r as u16 + g as u16 + b as u16,
+        _ => 0,
+    };
+
+    // (b) The divider reaches every row of the column — including the rows the
+    // picture sits on, and the rows ABOVE it, not just the reclaimed gap below.
+    for y in [vp.y + 1, vp.y + vp.height / 2, proceed_y.saturating_sub(2)] {
+        assert!(
+            lum(vp.x - 1, y) > 400,
+            "the divider runs the whole flank column: row {y} col {} has lum {} (row: {:?})",
+            vp.x - 1,
+            lum(vp.x - 1, y),
+            row_text(y)
+        );
+    }
+
+    // (a) Every flank cell carries SOMETHING the game painted — panel fill, picture
+    // or divider — with no untouched theme-backdrop cells left behind. A `Reset`
+    // background is the tell: that is a cell nothing drew.
+    for y in vp.y..proceed_y.min(vp.y + vp.height) {
+        for x in 0..vp.x {
+            assert_ne!(
+                buf.cell((x, y)).unwrap().bg,
+                Color::Reset,
+                "flank cell ({x},{y}) kept the theme backdrop — the panel fill must cover \
+                 the whole column (row: {:?})",
+                row_text(y)
+            );
+        }
+    }
+}
+
 /// SQ-0540: Journey stamps its selected command-menu label ("Start", "Proceed",
 /// "Combat", "Cast", …) as a painted run with §8.7.1 style bit 2 — the one v6
 /// moment where a real game's BOLD reaches the raster path. The composite must

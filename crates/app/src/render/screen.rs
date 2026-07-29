@@ -2207,25 +2207,47 @@ fn menu_flank_panel(
     if nx1 <= nx0 {
         return None;
     }
-    // The art's opaque row span in that column, plus the first opaque pixel on its
-    // top row — the art's outer edge, i.e. the panel colour the game painted.
+    // The art's opaque BOUNDING BOX in that column, plus the first opaque pixel on
+    // its top row — the art's outer edge, i.e. the panel colour the game painted.
+    //
+    // The box must be tight on BOTH axes. Journey's picture occupies native x 5..226
+    // of a 240-wide column, so cropping the whole column would drag its transparent
+    // side margins into the drawn image, and those render as dark cells ON TOP of the
+    // panel fill — a strip of "missing background" down the right of the picture.
     let mut top: Option<(u32, image::Rgba<u8>)> = None;
-    let mut bottom = 0u32;
+    let (mut ax0, mut ax1, mut ay1) = (u32::MAX, 0u32, 0u32);
     for y in 0..gfx.height() {
-        if let Some(x) = (nx0..nx1).find(|&x| gfx.get_pixel(x, y)[3] >= 128) {
+        let mut row_first: Option<u32> = None;
+        for x in nx0..nx1 {
+            if gfx.get_pixel(x, y)[3] >= 128 {
+                if row_first.is_none() {
+                    row_first = Some(x);
+                }
+                ax0 = ax0.min(x);
+                ax1 = ax1.max(x);
+            }
+        }
+        if let Some(x) = row_first {
             if top.is_none() {
                 top = Some((y, *gfx.get_pixel(x, y)));
             }
-            bottom = y;
+            ay1 = y;
         }
     }
-    let (ny0, panel) = top?;
-    let art_h = bottom - ny0 + 1;
-    let ch = cell_px.1.max(1) as u32;
-    // The art's height in cells at the uniform scale, capped to the column.
+    let (ay0, panel) = top?;
+    if ax1 < ax0 {
+        return None;
+    }
+    let (art_w, art_h) = (ax1 - ax0 + 1, ay1 - ay0 + 1);
+    let (cw, ch) = (cell_px.0.max(1) as u32, cell_px.1.max(1) as u32);
+    // Horizontal placement is unchanged from the band mapping: the art's native left
+    // edge through the same scale. Only the VERTICAL anchor moves (centred).
+    let x = band.x + ((scale.off_x as f32 + ax0 as f32 * scale.s) / cw as f32).floor() as u16;
+    let cols = (((art_w as f32 * scale.s) / cw as f32).ceil() as u16)
+        .clamp(1, band.right().saturating_sub(x).max(1));
     let rows = (((art_h as f32 * scale.s) / ch as f32).ceil() as u16).clamp(1, band.height);
     let y = band.y + (band.height - rows) / 2;
-    Some((panel, Rect::new(band.x, y, band.width, rows), (nx0, ny0, nx1 - nx0, art_h)))
+    Some((panel, Rect::new(x, y, cols, rows), (ax0, ay0, art_w, art_h)))
 }
 
 fn flank_divider_extension(
@@ -2240,7 +2262,6 @@ fn flank_divider_extension(
     menu_top_row: u16,
 ) -> Option<(Rect, (u32, u32, u32, u32))> {
     let cw = cell_px.0.max(1) as f32;
-    let ch = cell_px.1.max(1) as f32;
     let s = if scale.s <= 0.0 { 1.0 } else { scale.s };
     let sy0 = story.y_px as u32;
     let sy1 = (story.y_px as u32 + story.h_px as u32).min(canvas.height());
@@ -2283,11 +2304,16 @@ fn flank_divider_extension(
     // native bottom). The extension spans from there down to the menu strip top.
     let dcell0 = pane.x + ((scale.off_x as f32 + dnx0 as f32 * s) / cw).floor() as u16;
     let dcell1 = pane.x + ((scale.off_x as f32 + dnx1 as f32 * s) / cw).ceil() as u16;
-    let art_bottom_row = pane.y + ((scale.off_y as f32 + sy1 as f32 * s) / ch).floor() as u16;
-    if dcell1 <= dcell0 || menu_top_row <= art_bottom_row {
+    if dcell1 <= dcell0 || menu_top_row <= band.y {
         return None;
     }
-    let ext = Rect::new(dcell0, art_bottom_row, dcell1 - dcell0, menu_top_row - art_bottom_row);
+    // The divider runs the WHOLE flank column, from its top down to the menu strip.
+    // It used to start where the flank art bottomed out, which was fine while the art
+    // was top-anchored and carried its own divider pixels above that row. Now the art
+    // is centred and cropped to its own bounding box (SQ-0547), so those pixels are no
+    // longer drawn — and the divider column lies to the RIGHT of the picture, so
+    // running it full height covers the gap without touching the art.
+    let ext = Rect::new(dcell0, band.y, dcell1 - dcell0, menu_top_row - band.y);
     Some((ext, (dnx0, mid, dnx1 - dnx0, 1)))
 }
 
