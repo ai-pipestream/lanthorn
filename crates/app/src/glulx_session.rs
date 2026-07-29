@@ -96,6 +96,9 @@ pub struct GlulxSession {
     /// The current room, derived from the last Inform `Subheader` heading and
     /// held sticky across heading-less turns (examine/talk/failed-move).
     last_room: Option<LocationInfo>,
+    /// Learns which RAM word holds the game's `location` global, so same-named
+    /// rooms get distinct ids (SQ-0526). See [`crate::glulx_roomlock`].
+    room_lock: crate::glulx_roomlock::RoomLock,
     /// When false, the game's own trailing `>` read prompt is kept in the
     /// transcript instead of being stripped. Default true. See
     /// [`Engine::set_strip_prompt`].
@@ -360,10 +363,22 @@ impl GlulxSession {
             aux: BTreeMap::new(),
             aux_dirty: false,
             last_room: None,
+            room_lock: crate::glulx_roomlock::RoomLock::new(0, 0),
             strip_prompt: true,
             game_dir,
         };
         session.refresh_screen();
+        session.room_lock = match session.remembered_room_global() {
+            Some(addr) => crate::glulx_roomlock::RoomLock::locked_at(
+                session.machine.mem().ramstart(),
+                session.scan_words(),
+                addr,
+            ),
+            None => crate::glulx_roomlock::RoomLock::new(
+                session.machine.mem().ramstart(),
+                session.scan_words(),
+            ),
+        };
         session.last_room =
             session.appglk().take_room_heading().map(|n| heading_to_room(&n));
         Ok(session)
@@ -526,8 +541,28 @@ impl GlulxSession {
         let transcript_runs = clamp_runs(raw_runs, kept);
         trim_elems_to_len(&mut elems, kept);
         self.refresh_screen();
-        if let Some(name) = self.appglk().take_room_heading() {
-            self.last_room = Some(heading_to_room(&name));
+        // SQ-0526: fold this turn into the room-lock learner, then resolve the
+        // room. `movement` is what we can say for sure about the room changing —
+        // and a repeated heading says NOTHING, because it is either a `look` or a
+        // move into a different room with the same name (the maze).
+        let heading = self.appglk().take_room_heading();
+        let movement = match (&heading, self.last_room.as_ref().map(|r| &r.name)) {
+            (None, _) => crate::glulx_roomlock::Movement::Unchanged,
+            (Some(h), Some(prev)) if h == prev => crate::glulx_roomlock::Movement::Ambiguous,
+            (Some(_), _) => crate::glulx_roomlock::Movement::Changed,
+        };
+        let ram = self.scan_ram();
+        let name = heading.clone().or_else(|| self.last_room.as_ref().map(|r| r.name.clone()));
+        let was_locked = self.room_lock.locked();
+        self.room_lock.observe(ram.clone(), name.clone(), movement);
+        if let (None, Some(addr)) = (was_locked, self.room_lock.locked()) {
+            self.remember_room_global(addr);
+        }
+        // Re-resolve the room every turn, not only when a heading is printed: a
+        // maze step prints the SAME heading from a different room, so the id has
+        // to come from the global even when the name did not change.
+        if let Some(n) = name {
+            self.last_room = Some(self.room_for(&n, &ram));
         }
         let location = self.last_room.clone();
         let location_method = location.as_ref().map(|_| LocationMethod::RoomHeading);
@@ -554,6 +589,101 @@ impl GlulxSession {
             pictures: Vec::new(),
             transcript_elems: elems,
         }
+    }
+
+    /// Words of RAM the room-lock learner scans, from `ramstart`.
+    ///
+    /// Inform lays its globals out at the start of RAM — Adventure's `location`
+    /// sits at `ramstart+0x28` — so a bounded window finds it while keeping both
+    /// the per-turn diff and the retained learning snapshots small. An I7 game's
+    /// RAM can run to megabytes; scanning all of it every turn, and holding a
+    /// dozen copies, would cost far more than the feature is worth. A game whose
+    /// global lies beyond the window simply never locks and keeps the name-derived
+    /// ids it has today.
+    fn scan_words(&self) -> usize {
+        const WINDOW_BYTES: u32 = 64 * 1024;
+        let mem = self.machine.mem();
+        let start = mem.ramstart();
+        let end = mem.endmem().min(start.saturating_add(WINDOW_BYTES));
+        (end.saturating_sub(start) / 4) as usize
+    }
+
+    /// A snapshot of the scanned RAM window.
+    fn scan_ram(&self) -> Vec<u32> {
+        let base = self.machine.mem().ramstart();
+        (0..self.scan_words())
+            .map(|i| self.machine.mem().read32(base + (i as u32) * 4).unwrap_or(0))
+            .collect()
+    }
+
+    /// The room id for this turn: the locked `location` global when it is known,
+    /// else the hash of the room name — which is what every Glulx game used before
+    /// the lock existed, and what a game that never locks keeps using.
+    fn room_for(&self, name: &str, ram: &[u32]) -> LocationInfo {
+        match self.room_lock.room_id(ram) {
+            Some(addr) => zvm::ObjectSnapshot {
+                number: crate::roomid::glulx_room_id(addr),
+                parent: 0,
+                name: name.to_string(),
+            },
+            None => heading_to_room(name),
+        }
+    }
+
+    /// The re-key table produced when the lock resolves: rooms mapped under a
+    /// name-derived id while learning, paired with their real ids. Empty on every
+    /// other turn. The caller applies it to the map so the pre-lock rooms are the
+    /// same nodes as the post-lock ones instead of duplicates.
+    pub fn take_room_remap(&mut self) -> Vec<(String, u32)> {
+        self.room_lock.take_remap()
+    }
+
+    /// Where the learned `location` address is remembered for this story.
+    fn room_global_path(&self) -> Option<std::path::PathBuf> {
+        (!self.game_dir.as_os_str().is_empty()).then(|| self.game_dir.join("room-global"))
+    }
+
+    /// The address learned in an earlier run of this story, if any.
+    ///
+    /// Persisting it is not an optimisation, it is what keeps a RESUME correct:
+    /// the learner needs unambiguous room changes to converge, and a save parked
+    /// somewhere ambiguous — the maze, where every heading repeats — could never
+    /// re-learn. Falling back to name-derived ids there would key the resumed
+    /// rooms differently from the ones already in the restored map and duplicate
+    /// every one of them. Object addresses are fixed for a given story file, so a
+    /// remembered address stays valid; it is verified every turn regardless, and
+    /// dropped if the game ever contradicts it.
+    fn remembered_room_global(&self) -> Option<u32> {
+        let raw = std::fs::read_to_string(self.room_global_path()?).ok()?;
+        raw.trim().parse::<u32>().ok().filter(|&a| a != 0)
+    }
+
+    /// Remember a freshly learned address for later runs. Best-effort: a story
+    /// with no writable directory simply re-learns next time.
+    fn remember_room_global(&self, addr: u32) {
+        if let Some(p) = self.room_global_path() {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(p, addr.to_string());
+        }
+    }
+
+    /// The learned `location` address, for persisting across runs.
+    pub fn locked_room_global(&self) -> Option<u32> {
+        self.room_lock.locked()
+    }
+
+    /// Start already locked to a previously learned address (see
+    /// [`Self::locked_room_global`]). Object addresses are fixed for a given story
+    /// file, so a remembered address is valid on every later run — and the lock is
+    /// still verified each turn, so a wrong one is dropped rather than trusted.
+    pub fn relock_room_global(&mut self, addr: u32) {
+        self.room_lock = crate::glulx_roomlock::RoomLock::locked_at(
+            self.machine.mem().ramstart(),
+            self.scan_words(),
+            addr,
+        );
     }
 
     /// Seed the cached location after a host Save State resume (SQ-0523).

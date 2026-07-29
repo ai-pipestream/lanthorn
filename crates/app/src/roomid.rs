@@ -25,9 +25,56 @@ pub fn synthetic_room_id(name: &str) -> u16 {
     SYNTHETIC_ROOM_FLAG | (h as u16 & 0x7FFF)
 }
 
+/// RoomId for a Glulx room identified by its OBJECT ADDRESS rather than its name
+/// (SQ-0526).
+///
+/// Glulx has no object tree, so rooms were identified by hashing the printed room
+/// name — which makes every same-named room one room, and collapses a maze into a
+/// single node. Once the `location` global is located
+/// ([`crate::glulx_roomlock`]), the room's own address is available and is a true
+/// identity. Hashed into the same 15-bit space with the synthetic flag set,
+/// because these are not Z-machine object numbers either.
+///
+/// Two rooms can still collide, as they can under [`synthetic_room_id`] — but
+/// that is a remote accident here, where under the name hash it was a certainty
+/// for every repeated name.
+pub fn glulx_room_id(addr: u32) -> u16 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in addr.to_be_bytes() {
+        h ^= b as u32;
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    SYNTHETIC_ROOM_FLAG | (h as u16 & 0x7FFF)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point: addresses that differ give ids that differ, where the name
+    /// hash gave one id for every room sharing a name.
+    #[test]
+    fn distinct_addresses_give_distinct_ids() {
+        // Adventure's three maze rooms, all printing the heading "Maze".
+        let ids: Vec<u16> = [0x21b0c, 0x21b2c, 0x21b4c].iter().map(|&a| glulx_room_id(a)).collect();
+        assert_eq!(
+            ids.iter().collect::<std::collections::BTreeSet<_>>().len(),
+            3,
+            "three maze rooms must be three ids, got {ids:?}"
+        );
+        assert_eq!(
+            synthetic_room_id("Maze"),
+            synthetic_room_id("Maze"),
+            "whereas the name hash gives them all the same id — the bug"
+        );
+    }
+
+    #[test]
+    fn glulx_ids_are_marked_synthetic_and_stable() {
+        let id = glulx_room_id(0x21b0c);
+        assert!(is_synthetic_room(id), "not a Z-machine object number");
+        assert_eq!(id, glulx_room_id(0x21b0c), "stable across calls, so saves reload");
+    }
 
     #[test]
     fn synthetic_id_high_bit_set_and_deterministic() {
