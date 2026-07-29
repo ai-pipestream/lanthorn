@@ -9,7 +9,7 @@ const IFDB_NS: &str = "http://ifdb.org/api/xmlns";
 
 /// Parsed iFiction. Every field is optional: an IFmd chunk may carry only a
 /// subset, and thin metadata must never fail a scan.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct IFiction {
     pub ifids: Vec<String>,
     pub title: Option<String>,
@@ -22,11 +22,19 @@ pub struct IFiction {
     pub ifdb: Option<IfdbExt>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct IfdbExt {
     pub tuid: String,
     pub link: Option<String>,
     pub cover_url: Option<String>,
+    /// IFDB's community average rating on a 1–5 scale (`<averageRating>`).
+    /// `None` when the game has no ratings — IFDB simply omits the element, and
+    /// "unrated" must never collapse into a real `0.0`.
+    pub average_rating: Option<f32>,
+    /// How many ratings that average is over (`<ratingCountAvg>`). Not
+    /// displayed, but it breaks ties in the picker's rating sort so two 4.6s
+    /// don't order arbitrarily.
+    pub rating_count: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -211,7 +219,15 @@ pub fn parse(xml: &[u8]) -> Result<IFiction, IFictionError> {
                 .children()
                 .find(|n| n.is_element() && n.tag_name().name() == "coverart")
                 .and_then(|coverart| child_text_any_ns(coverart, "url"));
-            result.ifdb = Some(IfdbExt { tuid, link, cover_url });
+            // An unrated game omits these (or leaves them empty), which
+            // `child_text_any_ns` already reports as None — so a parse failure
+            // and an absent rating land on the same, correct answer.
+            let average_rating =
+                child_text_any_ns(ifdb, "averageRating").and_then(|s| s.parse::<f32>().ok());
+            let rating_count =
+                child_text_any_ns(ifdb, "ratingCountAvg").and_then(|s| s.parse::<u32>().ok());
+            result.ifdb =
+                Some(IfdbExt { tuid, link, cover_url, average_rating, rating_count });
         }
     }
 
@@ -251,6 +267,56 @@ mod tests {
             Some("https://ifdb.org/coverart?id=0dbnusxunq7fw5ro&version=45"),
             "entity-decoded: &amp; must become &"
         );
+    }
+
+    /// SQ-0529: the community rating rides in the same `<ifdb>` block as the
+    /// tuid. Pinned against the captured live response, not from memory —
+    /// `averageRating` is the value shown (3.81858407 → "3.8"), NOT the
+    /// pre-rounded `starRating` of 4.
+    #[test]
+    fn extracts_the_ifdb_average_rating_and_count() {
+        let ext = parse(ZORK).unwrap().ifdb.expect("ifdb extension present");
+        let avg = ext.average_rating.expect("Zork I is rated");
+        assert!((avg - 3.818_584).abs() < 1e-4, "the raw average, unrounded: {avg}");
+        assert_eq!(format!("{avg:.1}"), "3.8", "one decimal is what the list shows");
+        assert_eq!(ext.rating_count, Some(226), "ratingCountAvg, the sort tiebreak");
+    }
+
+    /// An unrated game still has an `<ifdb>` block (tuid, link, cover) — IFDB
+    /// just omits the rating elements. That must read as None, never 0.0: a
+    /// list column cannot tell "nobody rated it" from "everybody hated it".
+    #[test]
+    fn an_ifdb_block_without_rating_elements_yields_none_not_zero() {
+        let xml = br#"<ifindex version="1.0" xmlns="http://babel.ifarchive.org/protocol/iFiction/">
+            <story><bibliographic><title>Unrated</title></bibliographic>
+            <ifdb xmlns="http://ifdb.org/api/xmlns"><tuid>abc123</tuid>
+            <link>https://ifdb.org/viewgame?id=abc123</link></ifdb></story></ifindex>"#;
+        let ext = parse(xml).unwrap().ifdb.expect("the block is present, just rating-free");
+        assert_eq!(ext.tuid, "abc123", "the rest of the block still parses");
+        assert_eq!(ext.average_rating, None);
+        assert_eq!(ext.rating_count, None);
+    }
+
+    /// An empty `<averageRating/>` (IFDB's other way of saying "no ratings",
+    /// as seen in the search feed) is also None, not a parse of "".
+    #[test]
+    fn an_empty_rating_element_is_none() {
+        let xml = br#"<ifindex><story><bibliographic><title>Blank</title></bibliographic>
+            <ifdb xmlns="http://ifdb.org/api/xmlns"><tuid>t</tuid>
+            <averageRating></averageRating><ratingCountAvg></ratingCountAvg></ifdb></story></ifindex>"#;
+        let ext = parse(xml).unwrap().ifdb.unwrap();
+        assert_eq!((ext.average_rating, ext.rating_count), (None, None));
+    }
+
+    /// A blorb's own IFmd chunk has no `<ifdb>` block at all, so there is no
+    /// rating to reach for — and asking for one must not panic or invent 0.0.
+    #[test]
+    fn no_ifdb_block_means_no_rating_to_read() {
+        let xml = br#"<ifindex version="1.0" xmlns="http://babel.ifarchive.org/protocol/iFiction/">
+            <story><bibliographic><title>Local Only</title></bibliographic></story></ifindex>"#;
+        let f = parse(xml).unwrap();
+        assert!(f.ifdb.is_none());
+        assert_eq!(f.ifdb.as_ref().and_then(|e| e.average_rating), None);
     }
 
     /// A thin IFmd chunk carrying only a title must parse, not error — most of

@@ -129,14 +129,17 @@ fn center_crop_rect(scaled: (u32, u32), budget: (u32, u32)) -> (u32, u32, u32, u
 }
 
 /// Story-list row layout: the selection-marker glyph column, the gap between
-/// text columns, and each data column's target width. Year drops first as
-/// the row narrows, then author, leaving title + badges at the narrowest —
-/// see `compute_columns`.
+/// text columns, and each data column's target width. Rating drops first as
+/// the row narrows, then year, then author, leaving title + badges at the
+/// narrowest — see `compute_columns`.
 const ROW_MARKER_W: u16 = 2;
 const COL_GAP: u16 = 2;
 const AUTHOR_COL_W: u16 = 20;
 const AUTHOR_MAX_W: u16 = 40;
 const YEAR_COL_W: u16 = 6;
+/// IFDB rating column ("3.8" — one decimal, never stars). Sized to hold the
+/// header plus its sort arrow ("RATE ▲"), which is wider than any value.
+const RATING_COL_W: u16 = 6;
 /// Interpreter/format column ("Z5", "Z5 (blorb)", "G3.1.2"): fixed width, sits
 /// just left of the badge cluster. `Z8 (blorb)` (10) is the widest (SQ-0369).
 const INTERP_COL_W: u16 = 13;
@@ -147,14 +150,15 @@ const TITLE_MIN_W: u16 = 8;
 const TITLE_PREFERRED_W: u16 = 24;
 
 /// Resolved column widths for one draw, given `text_w` — the row width left
-/// for marker+title+author+year once the badge cluster's fixed columns (and
-/// its lead-in gap) are excluded by the caller. Title always absorbs
+/// for marker+title+author+year+rating once the badge cluster's fixed columns
+/// (and its lead-in gap) are excluded by the caller. Title always absorbs
 /// whatever space the shown columns don't use, so there is never a gap
 /// before the badges.
 struct ListColumns {
     title_w: u16,
     author_w: u16,
     year_w: u16,
+    rating_w: u16,
 }
 
 /// `want_author_w` is the widest author display width to show in full; the
@@ -165,6 +169,7 @@ struct ListColumns {
 fn compute_columns(text_w: u16, want_author_w: u16) -> ListColumns {
     let avail = text_w.saturating_sub(ROW_MARKER_W);
     let need_year = TITLE_MIN_W + COL_GAP + AUTHOR_COL_W + COL_GAP + YEAR_COL_W;
+    let need_rating = need_year + COL_GAP + RATING_COL_W;
     let need_author = TITLE_MIN_W + COL_GAP + AUTHOR_COL_W;
     let grow = |cols_space: u16| -> u16 {
         // Space shared by title+author (year already excluded). Author gets at
@@ -175,16 +180,25 @@ fn compute_columns(text_w: u16, want_author_w: u16) -> ListColumns {
         let ceiling = AUTHOR_MAX_W.min(cols_space.saturating_sub(TITLE_PREFERRED_W));
         want_author_w.clamp(AUTHOR_COL_W, ceiling.max(AUTHOR_COL_W))
     };
-    if avail >= need_year {
+    if avail >= need_rating {
+        let cols_space = avail - COL_GAP - COL_GAP - YEAR_COL_W - COL_GAP - RATING_COL_W;
+        let author_w = grow(cols_space);
+        ListColumns {
+            title_w: cols_space - author_w,
+            author_w,
+            year_w: YEAR_COL_W,
+            rating_w: RATING_COL_W,
+        }
+    } else if avail >= need_year {
         let cols_space = avail - COL_GAP - COL_GAP - YEAR_COL_W;
         let author_w = grow(cols_space);
-        ListColumns { title_w: cols_space - author_w, author_w, year_w: YEAR_COL_W }
+        ListColumns { title_w: cols_space - author_w, author_w, year_w: YEAR_COL_W, rating_w: 0 }
     } else if avail >= need_author {
         let cols_space = avail - COL_GAP;
         let author_w = grow(cols_space);
-        ListColumns { title_w: cols_space - author_w, author_w, year_w: 0 }
+        ListColumns { title_w: cols_space - author_w, author_w, year_w: 0, rating_w: 0 }
     } else {
-        ListColumns { title_w: avail, author_w: 0, year_w: 0 }
+        ListColumns { title_w: avail, author_w: 0, year_w: 0, rating_w: 0 }
     }
 }
 
@@ -1199,7 +1213,8 @@ pub(crate) fn run_story_picker(
                             sort.key = match sort.key {
                                 app::picker::SortKey::Title => app::picker::SortKey::Author,
                                 app::picker::SortKey::Author => app::picker::SortKey::Year,
-                                app::picker::SortKey::Year => app::picker::SortKey::Type,
+                                app::picker::SortKey::Year => app::picker::SortKey::Rating,
+                                app::picker::SortKey::Rating => app::picker::SortKey::Type,
                                 app::picker::SortKey::Type => app::picker::SortKey::Title,
                             };
                             list.select(
@@ -1354,6 +1369,7 @@ fn draw_story_picker(
     let story_author = cs.theme.get("story_author").style;
     let story_no_metadata = cs.theme.get("story_no_metadata").style;
     let story_year = cs.theme.get("story_year").style;
+    let story_rating = cs.theme.get("story_rating").style;
     let story_badge = cs.theme.get("story_badge").style;
     let scrollbar = cs.theme.get("scrollbar").style;
 
@@ -1418,6 +1434,7 @@ fn draw_story_picker(
     let title_x = area.left() + ROW_MARKER_W;
     let author_x = title_x + cols.title_w + COL_GAP;
     let year_x = author_x + cols.author_w + COL_GAP;
+    let rating_x = year_x + cols.year_w + COL_GAP;
 
     // Column-header row: dimmed, except the active sort column, which shows
     // its direction arrow.
@@ -1437,6 +1454,12 @@ fn draw_story_picker(
         let year_hstyle = if year_active { story_header_active } else { story_header };
         draw_str_clipped(buf, year_x, header_y, &year_label, year_hstyle, area);
         header_rects.push((SortKey::Year, Rect::new(year_x, header_y, cols.year_w, 1)));
+    }
+    if cols.rating_w > 0 {
+        let (rating_label, rating_active) = header_label("RATE", SortKey::Rating, sort);
+        let rating_hstyle = if rating_active { story_header_active } else { story_header };
+        draw_str_clipped(buf, rating_x, header_y, &rating_label, rating_hstyle, area);
+        header_rects.push((SortKey::Rating, Rect::new(rating_x, header_y, cols.rating_w, 1)));
     }
     // TYPE column header, above the interpreter labels in the right-hand zone.
     // Sortable like the other columns: active-styled with a direction arrow and
@@ -1487,6 +1510,17 @@ fn draw_story_picker(
                 let year_txt = truncate_to_width(yr, cols.year_w as usize);
                 let year_style = if sel { style } else { story_year };
                 draw_str_clipped(buf, year_x, y, &year_txt, year_style, row_rect);
+            }
+        }
+
+        // IFDB's average rating to one decimal. Absent — unrated, or simply
+        // never fetched — draws nothing at all: a blank cell, never "0.0",
+        // which would read as a real (and damning) score.
+        if cols.rating_w > 0 {
+            if let Some(r) = entry.meta.ifdb_rating.filter(|r| r.is_finite()) {
+                let rating_txt = truncate_to_width(&format!("{r:.1}"), cols.rating_w as usize);
+                let rating_style = if sel { style } else { story_rating };
+                draw_str_clipped(buf, rating_x, y, &rating_txt, rating_style, row_rect);
             }
         }
 
@@ -2403,7 +2437,7 @@ mod tests {
             size_bytes: 0, modified: None, engine, format: String::new(),
             version: version.map(String::from), serial: None, release: None, ifid: String::new(),
             features: Features::default(), self_blorb: None, author: None, year: None,
-            genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
+            genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
         // Z-code: "Z<v>", plus " (blorb)" only when blorb'd.
         assert_eq!(super::interp_label(&meta(Engine::ZCode, Some("5")), false), "Z5");
@@ -2444,7 +2478,7 @@ mod tests {
                 size_bytes: 1, modified: None, engine, format: "Z-code".into(),
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None,
-                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
+                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
             },
             hint_sidecar: None,
         };
@@ -2464,7 +2498,7 @@ mod tests {
                 version: None, serial: None, release: None, ifid: title.into(),
                 features: Features::default(), self_blorb: None,
                 author: author.map(String::from), year: year.map(String::from),
-                genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
+                genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
             },
             hint_sidecar: None,
         }
@@ -2797,13 +2831,15 @@ mod tests {
             &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
             &cs, app::picker::Sort::default(), area, &mut buf,
         );
-        assert_eq!(header_rects.len(), 4, "all four columns are shown at this width: {header_rects:?}");
+        // 60 cells is too narrow for the RATE column, so four headers show.
+        assert_eq!(header_rects.len(), 4, "title/author/year/type at this width: {header_rects:?}");
         for (key, rect) in &header_rects {
             let expected_char = match key {
                 app::picker::SortKey::Title => "T",
                 app::picker::SortKey::Author => "A",
                 app::picker::SortKey::Year => "Y",
-                app::picker::SortKey::Type => "T", // "TYPE"
+                app::picker::SortKey::Rating => "R", // "RATE"
+                app::picker::SortKey::Type => "T",   // "TYPE"
             };
             let cell = buf.cell((rect.x, rect.y)).unwrap();
             assert_eq!(
@@ -2812,6 +2848,96 @@ mod tests {
                 rect.x, rect.y
             );
         }
+    }
+
+    /// SQ-0529. The RATE column shows IFDB's average to one decimal, and an
+    /// unrated story (or one never fetched — the sidecar only gained the field
+    /// at `FETCH_VERSION` 2, so `r` repopulates it) leaves the cell EMPTY. The
+    /// cell is located via the returned header rect rather than a hard-coded
+    /// column, so the assertion survives a layout tweak.
+    #[test]
+    fn rating_column_shows_one_decimal_and_leaves_unrated_rows_blank() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+
+        let mut rated = story_with_meta("Zork", Some("Marc Blank"), Some("1980"));
+        rated.meta.ifdb_rating = Some(3.818_584); // the fixture's real average
+        rated.meta.ifdb_rating_count = Some(226);
+        let stories = vec![rated, story_with_meta("Nobody", Some("A N Other"), Some("1999"))];
+        let badges = vec![app::picker::RowBadges::default(); 2];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(stories.len());
+
+        // Wide enough for every column (the RATE column is the first to drop).
+        let area = Rect::new(0, 0, 100, 10);
+        let mut buf = Buffer::empty(area);
+        let (_, _, header_rects) = super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"),
+            &cs, app::picker::Sort::default(), area, &mut buf,
+        );
+        let rect = header_rects
+            .iter()
+            .find(|(k, _)| *k == app::picker::SortKey::Rating)
+            .map(|(_, r)| *r)
+            .expect("the RATE column is shown at 100 cells");
+
+        let cell = |row_y: u16| -> String {
+            row_text(&buf, row_y, area)
+                .chars()
+                .skip(rect.x as usize)
+                .take(rect.width as usize)
+                .collect()
+        };
+        assert_eq!(cell(1).trim(), "RATE", "the column header sits over its own rect");
+        assert_eq!(cell(2).trim(), "3.8", "one decimal — not stars, not the raw 3.818584");
+        assert_eq!(
+            cell(3).trim(), "",
+            "no rating renders as blank; a 0.0 would read as a real, damning score"
+        );
+    }
+
+    /// The RATE column joins the sortable set: it takes the direction arrow
+    /// when active, exactly like TITLE/AUTHOR/YEAR/TYPE.
+    #[test]
+    fn rating_header_takes_the_sort_arrow_when_active() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let cs = app::colors::ColorScheme::terminal_default();
+        let sym = app::config::SymbolConfig::default();
+        let glyphs = app::picker::BadgeGlyphs::from_symbols(&sym);
+        let stories = vec![story_with_meta("Zork", Some("Marc Blank"), Some("1980"))];
+        let badges = vec![app::picker::RowBadges::default()];
+        let mut list = app::list_scroll::ListScroll::new();
+        list.len(1);
+        let area = Rect::new(0, 0, 100, 10);
+
+        let mut buf = Buffer::empty(area);
+        let sort = app::picker::Sort { key: app::picker::SortKey::Rating, desc: true };
+        super::draw_story_picker(
+            &stories, &list, &badges, &glyphs, std::path::Path::new("/tmp"), &cs, sort, area, &mut buf,
+        );
+        let header = row_text(&buf, 1, area);
+        assert!(header.contains("RATE ▼"), "active RATE column shows the arrow: {header:?}");
+        assert!(!header.contains("YEAR ▼") && !header.contains("TITLE ▼"), "{header:?}");
+    }
+
+    /// The RATE column is the first to go as the pane narrows — title and
+    /// author must never be crowded out for it (SQ-0529's sizing brief).
+    #[test]
+    fn rating_column_drops_before_year_on_a_narrow_pane() {
+        // Widths are in the same units `compute_columns` takes: the row space
+        // left once the badge cluster and TYPE column are excluded.
+        let wide = super::compute_columns(90, 20);
+        assert!(wide.rating_w > 0 && wide.year_w > 0, "both shown when there is room");
+
+        let mid = super::compute_columns(46, 20);
+        assert_eq!(mid.rating_w, 0, "rating goes first");
+        assert!(mid.year_w > 0, "year survives it");
+
+        let narrow = super::compute_columns(34, 20);
+        assert_eq!((narrow.rating_w, narrow.year_w), (0, 0), "then year");
+        assert!(narrow.author_w > 0, "author outlives both");
     }
 
     #[test]
@@ -2876,7 +3002,7 @@ mod tests {
             format: "Z-code".into(), version: Some("3".into()), serial: None, release: None,
             ifid: "ZCODE-88-840726".into(), features: app::picker::Features::default(),
             self_blorb: None, author: None, year: None, genre: None, language: None,
-            description: None, ifdb_link: None, fetch_not_found: false,
+            description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
         let area = Rect::new(0, 0, 40, 12);
         let mut buf = Buffer::empty(area);
@@ -2916,7 +3042,7 @@ mod tests {
                     detail: Some("15.4 kHz · 8-bit · mono · 2.2s".into()),
                 },
             ]),
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
         let game_dir = std::path::PathBuf::from("/tmp/babelmap-info-panel-saves/zork1.z3");
         let aux = app::picker::StoryAux {
@@ -3017,7 +3143,7 @@ mod tests {
             ifid: "ZCODE-88-840726".into(),
             features: app::picker::Features::default(),
             self_blorb: Some(chunks),
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
         let area = Rect::new(0, 0, 34, 10);
         let mut buf = Buffer::empty(area);
@@ -3054,7 +3180,7 @@ mod tests {
             format: "Blorb (Glulx)".into(), version: Some("3.1.2".into()),
             serial: None, release: None, ifid: "IFID-X".into(),
             features: app::picker::Features::default(), self_blorb: None,
-            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
+            author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         }
     }
 
@@ -3781,7 +3907,7 @@ mod tests {
                 usage: "Pict".into(), number: 3, chunk_type: "PNG ".into(), len: 100, detail: None,
             }]),
             author: None, year: None, genre: None, language: None, description: None,
-            ifdb_link: None, fetch_not_found: false,
+            ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None, fetch_not_found: false,
         };
         let area = Rect::new(0, 0, 40, 30);
         let mut buf = Buffer::empty(area);

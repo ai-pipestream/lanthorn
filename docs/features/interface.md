@@ -241,8 +241,18 @@ save-on-quit prompt) — `/quit` still exits babelmap outright. Launched against
 single story file, there's no library to return to, so `/quit-to-library` just
 says so.
 
-The list sorts by **title**, **author**, **year**, or **type** — click a column
-header, press `s` to cycle the column, or `d` to flip the direction. `i` or
+Once a story's metadata has been fetched, a narrow **RATE** column carries
+IFDB's community average — the plain number to one decimal (`3.8`), no star
+glyphs to squint at. A game nobody has rated, or one you haven't fetched yet,
+leaves the cell empty rather than pretending to a damning `0.0`; press `r` to
+sweep the library and fill them in. RATE is the first column to step aside on a
+narrow pane, so it never crowds the title or author.
+
+The list sorts by **title**, **author**, **year**, **rating**, or **type** —
+click a column header, press `s` to cycle the column, or `d` to flip the
+direction. Sorting by rating parks every unrated story at the bottom in both
+directions, and breaks ties between equal averages by how many people voted, so
+a 4.6 from two hundred players outranks a 4.6 from three. `i` or
 `Tab` slides in a themeable **info panel** for the highlighted story:
 format/version/release/serial, IFID, author/year/genre, a blurb, feature flags,
 bundled resources, and saves. It animates per the `animation` config, starts
@@ -257,7 +267,8 @@ scroll resets whenever the highlighted story changes.
 `[symbols]` (`badge_save`/`badge_hint`/`badge_hint_available`, plus `badge_zcode`/
 `badge_glulx`/`badge_blorb`), and the badge cluster, sortable headers, and info panel are all
 themeable through the `story_badge`, `story_header`/`story_header:active` (the
-active sort column), `story_author`, `story_year`, `story_no_metadata` (the
+active sort column), `story_author`, `story_year`, `story_rating` (the IFDB
+average in the RATE column), `story_no_metadata` (the
 "(no metadata yet)" placeholder), `story_tile`/`story_tile:selected` (the
 cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
 `:cover`) style selectors.

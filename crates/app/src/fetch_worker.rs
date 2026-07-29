@@ -238,6 +238,8 @@ pub(crate) fn found_meta(iff: &IFiction, cover: Option<String>) -> FetchedMeta {
         description: iff.description.clone(),
         ifdb_tuid: iff.ifdb.as_ref().map(|e| e.tuid.clone()),
         ifdb_link: iff.ifdb.as_ref().and_then(|e| e.link.clone()),
+        ifdb_rating: iff.ifdb.as_ref().and_then(|e| e.average_rating),
+        ifdb_rating_count: iff.ifdb.as_ref().and_then(|e| e.rating_count),
         cover,
         not_found: false,
     }
@@ -256,6 +258,8 @@ fn not_found_meta() -> FetchedMeta {
         description: None,
         ifdb_tuid: None,
         ifdb_link: None,
+        ifdb_rating: None,
+        ifdb_rating_count: None,
         cover: None,
         not_found: true,
     }
@@ -461,6 +465,8 @@ mod tests {
             description: None,
             ifdb_tuid: None,
             ifdb_link: None,
+            ifdb_rating: None,
+            ifdb_rating_count: None,
             cover: None,
             not_found: false,
         }
@@ -739,6 +745,8 @@ mod tests {
                 tuid: "abc123".into(),
                 link: None,
                 cover_url: Some("https://ifdb.org/coverart?id=abc123&version=1".into()),
+                average_rating: None,
+                rating_count: None,
             }),
             ..Default::default()
         };
@@ -774,6 +782,8 @@ mod tests {
                 tuid: "xyz".into(),
                 link: None,
                 cover_url: Some("https://ifdb.org/coverart?id=xyz&version=1".into()),
+                average_rating: None,
+                rating_count: None,
             }),
             ..Default::default()
         };

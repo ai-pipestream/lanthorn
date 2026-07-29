@@ -41,7 +41,7 @@ pub struct Features {
 }
 
 /// Eager per-story metadata, derived from bytes `scan_stories` already reads.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoryMeta {
     pub size_bytes: u64,
     pub modified: Option<String>, // "YYYY-MM-DD"
@@ -62,13 +62,19 @@ pub struct StoryMeta {
     pub description: Option<String>,
     /// The story's IFDB page URL, present only once fetched (no IFmd equivalent).
     pub ifdb_link: Option<String>,
+    /// IFDB's community average rating, 1–5 (SQ-0529). Fetched-only, like the
+    /// link. `None` covers both "never fetched" and "IFDB has no ratings for
+    /// it", and the RATE column renders both as blank — never as `0.0`.
+    pub ifdb_rating: Option<f32>,
+    /// The number of ratings behind `ifdb_rating`; the rating sort's tiebreak.
+    pub ifdb_rating_count: Option<u32>,
     /// A fetch ran but IFDB had no record for this IFID — so the panel offers a
     /// manual IFDB search link instead of a dead end (SQ-0371).
     pub fetch_not_found: bool,
 }
 
 /// One selectable story in the picker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct StoryEntry {
     pub path: PathBuf,
     /// Display title: `known_title(ifid)` or the filename stem.
@@ -466,7 +472,7 @@ fn glulx_features(self_blorb: Option<&[ChunkInfo]>) -> Features {
 
 /// Per-field metadata resolution, produced once by [`resolve`] and read
 /// verbatim by everything downstream (list, sort, info panel).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Resolved {
     title: String,
     author: Option<String>,
@@ -475,6 +481,8 @@ struct Resolved {
     language: Option<String>,
     description: Option<String>,
     ifdb_link: Option<String>,
+    ifdb_rating: Option<f32>,
+    ifdb_rating_count: Option<u32>,
     fetch_not_found: bool,
 }
 
@@ -605,10 +613,16 @@ fn resolve(
         .and_then(|i| i.description.clone())
         .or_else(|| fetched.and_then(|f| f.description.clone()))
         .or_else(|| tsv_description.map(str::to_string));
-    // IFDB-only: the page link exists solely in a fetched block.
+    // IFDB-only: the page link and the community rating exist solely in a
+    // fetched block — an IFmd chunk has no equivalent for either.
     let ifdb_link = fetched.and_then(|f| f.ifdb_link.clone());
+    let ifdb_rating = fetched.and_then(|f| f.ifdb_rating);
+    let ifdb_rating_count = fetched.and_then(|f| f.ifdb_rating_count);
     let fetch_not_found = fetched.map(|f| f.not_found).unwrap_or(false);
-    Resolved { title, author, year, genre, language, description, ifdb_link, fetch_not_found }
+    Resolved {
+        title, author, year, genre, language, description, ifdb_link, ifdb_rating,
+        ifdb_rating_count, fetch_not_found,
+    }
 }
 
 /// Scan `dir` (top level, non-recursive) for **launchable** Z-machine stories,
@@ -815,6 +829,8 @@ pub fn resolve_entry(path: &Path, data_base: &Path) -> Option<StoryEntry> {
         language: resolved.language,
         description: resolved.description,
         ifdb_link: resolved.ifdb_link,
+        ifdb_rating: resolved.ifdb_rating,
+        ifdb_rating_count: resolved.ifdb_rating_count,
         fetch_not_found: resolved.fetch_not_found,
     };
     Some(StoryEntry { path: path.to_path_buf(), title, filename, meta, hint_sidecar: None })
@@ -826,6 +842,7 @@ pub enum SortKey {
     Title,
     Author,
     Year,
+    Rating,
     Type,
 }
 
@@ -859,8 +876,8 @@ fn bibliographic_key(title: &str) -> String {
     lower
 }
 
-/// Order `stories` in place by `sort`. Blanks (no author / no year, or a
-/// non-numeric year) always sort last, in both ascending and descending
+/// Order `stories` in place by `sort`. Blanks (no author / no year, a
+/// non-numeric year, or no IFDB rating) always sort last, in both ascending and descending
 /// order — only the non-blank comparison reverses with `desc`. Filename is
 /// the tie-break in every case.
 pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
@@ -906,6 +923,21 @@ pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
         }
     }
 
+    /// IFDB's average rating as tenths, so it sorts through the same `Ord`
+    /// path as every other key (`f32` is not `Ord`). Unrated — including a
+    /// story that has simply never been fetched — is blank, so it lands last
+    /// in both directions. The rating count is the tiebreak: between two 4.6s,
+    /// the one 200 people rated outranks the one 3 people did.
+    fn rating_key(e: &StoryEntry) -> (bool, (u32, u32)) {
+        match e.meta.ifdb_rating {
+            Some(r) if r.is_finite() && r > 0.0 => (
+                false,
+                ((r * 10.0).round().max(0.0) as u32, e.meta.ifdb_rating_count.unwrap_or(0)),
+            ),
+            _ => (true, (0, 0)),
+        }
+    }
+
     /// Groups rows by engine (Z-code, then Glulx, then Scott), and within an
     /// engine by version. Each dotted version component is zero-padded to a
     /// fixed width so a plain string compare orders numerically (Z3 < Z5 < Z8,
@@ -944,6 +976,11 @@ pub fn sort_stories(stories: &mut [StoryEntry], sort: Sort) {
             SortKey::Year => {
                 let (a_blank, a_val) = year_key(a);
                 let (b_blank, b_val) = year_key(b);
+                cmp_blank_last(a_blank, &a_val, b_blank, &b_val, sort.desc)
+            }
+            SortKey::Rating => {
+                let (a_blank, a_val) = rating_key(a);
+                let (b_blank, b_val) = rating_key(b);
                 cmp_blank_last(a_blank, &a_val, b_blank, &b_val, sort.desc)
             }
             SortKey::Type => {
@@ -1159,7 +1196,8 @@ mod tests {
                 year: year.map(|s| s.to_string()),
                 genre: None,
                 language: None,
-                description: None, ifdb_link: None, fetch_not_found: false,
+                description: None, ifdb_link: None, ifdb_rating: None,
+                ifdb_rating_count: None, fetch_not_found: false,
             },
             hint_sidecar: None,
         }
@@ -1320,6 +1358,69 @@ mod tests {
 
         sort_stories(&mut stories, Sort { key: SortKey::Year, desc: true });
         assert_eq!(titles_of(&stories), vec!["New", "Old", "NoYear", "BadYear"]);
+    }
+
+    /// `story()` plus an IFDB rating — SQ-0529's sort key.
+    fn rated(title: &str, filename: &str, rating: Option<f32>, count: Option<u32>) -> StoryEntry {
+        let mut e = story(title, filename, None, None);
+        e.meta.ifdb_rating = rating;
+        e.meta.ifdb_rating_count = count;
+        e
+    }
+
+    /// Ratings are `f32`, so a naive sort would not even compile against `Ord`;
+    /// the key goes through tenths. Check the ordering is numeric, not lexical
+    /// ("10" vs "9" is the classic trap even though IFDB caps at 5).
+    #[test]
+    fn sort_stories_rating_orders_numerically() {
+        let mut stories = vec![
+            rated("Mid", "m.z5", Some(3.8), Some(226)),
+            rated("Best", "b.z5", Some(4.6), Some(50)),
+            rated("Worst", "w.z5", Some(1.2), Some(9)),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Rating, desc: false });
+        assert_eq!(titles_of(&stories), vec!["Worst", "Mid", "Best"]);
+
+        sort_stories(&mut stories, Sort { key: SortKey::Rating, desc: true });
+        assert_eq!(titles_of(&stories), vec!["Best", "Mid", "Worst"]);
+    }
+
+    /// SPEC (SQ-0529): unrated stories sort LAST — in both directions. A story
+    /// that has simply never been fetched is unrated too, and the two are
+    /// indistinguishable here by design; neither may masquerade as a 0.0 and
+    /// lead the descending list.
+    #[test]
+    fn sort_stories_rating_unrated_last_both_directions() {
+        let mut stories = vec![
+            rated("Unfetched", "u.z5", None, None),
+            rated("Loved", "l.z5", Some(4.6), Some(50)),
+            rated("Panned", "p.z5", Some(1.2), Some(9)),
+            rated("Unrated", "z.z5", None, None),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Rating, desc: false });
+        assert_eq!(titles_of(&stories), vec!["Panned", "Loved", "Unfetched", "Unrated"]);
+
+        sort_stories(&mut stories, Sort { key: SortKey::Rating, desc: true });
+        assert_eq!(
+            titles_of(&stories), vec!["Loved", "Panned", "Unfetched", "Unrated"],
+            "descending flips the rated rows only — the unrated tail stays put"
+        );
+    }
+
+    /// Two identical averages are broken by how many people rated them, so a
+    /// 4.6 from 200 voters outranks a 4.6 from three. Without the tiebreak the
+    /// pair would fall through to the filename, which is meaningless here.
+    #[test]
+    fn sort_stories_rating_ties_break_on_the_rating_count() {
+        let mut stories = vec![
+            rated("Fluke", "a.z5", Some(4.6), Some(3)),
+            rated("Classic", "z.z5", Some(4.6), Some(200)),
+        ];
+        sort_stories(&mut stories, Sort { key: SortKey::Rating, desc: true });
+        assert_eq!(
+            titles_of(&stories), vec!["Classic", "Fluke"],
+            "the well-rated 4.6 leads, despite losing the filename tie-break"
+        );
     }
 
     #[test]
@@ -1490,6 +1591,8 @@ mod tests {
             description: None,
             ifdb_tuid: None,
             ifdb_link: None,
+            ifdb_rating: None,
+            ifdb_rating_count: None,
             cover: None,
             not_found: false,
         }
@@ -1536,6 +1639,27 @@ mod tests {
         let r = resolve(None, Some(&fetched), None, Some("Kim Watt"), Some("A desc."), "stem");
         assert_eq!(r.author.as_deref(), Some("From IFDB"));
         assert_eq!(r.description.as_deref(), Some("From IFDB"));
+    }
+
+    /// The rating is IFDB-only: a blorb's IFmd chunk has no equivalent, so it
+    /// comes from a fetched block or not at all (SQ-0529). A story with rich
+    /// local metadata and no sidecar still has no rating — and the resolver
+    /// must leave it None rather than default it.
+    #[test]
+    fn the_ifdb_rating_comes_only_from_a_fetched_block() {
+        let ifmd = IFiction { title: Some("Local".into()), ..Default::default() };
+        let r = resolve(Some(&ifmd), None, None, None, None, "stem");
+        assert_eq!(r.ifdb_rating, None, "an IFmd chunk carries no community rating");
+        assert_eq!(r.ifdb_rating_count, None);
+
+        let fetched = FetchedMeta {
+            ifdb_rating: Some(3.818_584),
+            ifdb_rating_count: Some(226),
+            ..fetched_stub()
+        };
+        let r = resolve(Some(&ifmd), Some(&fetched), None, None, None, "stem");
+        assert_eq!(r.ifdb_rating, Some(3.818_584), "IFmd wins the title but has no rating to win");
+        assert_eq!(r.ifdb_rating_count, Some(226));
     }
 
     #[test]
@@ -1610,7 +1734,9 @@ mod tests {
                 format: "Z-code".into(), version: Some("5".into()),
                 serial: None, release: None, ifid: ifid.into(),
                 features: Features::default(), self_blorb,
-                author: None, year: None, genre: None, language: None, description: None, ifdb_link: None, fetch_not_found: false,
+                author: None, year: None, genre: None, language: None, description: None,
+                ifdb_link: None, ifdb_rating: None, ifdb_rating_count: None,
+                fetch_not_found: false,
             },
             hint_sidecar: None,
         }

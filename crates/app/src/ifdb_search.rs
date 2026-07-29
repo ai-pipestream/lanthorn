@@ -1082,6 +1082,8 @@ mod tests {
                 tuid: "k82q3libhff6ks8l".into(),
                 link: None,
                 cover_url: Some("https://ifdb.org/coverart?id=k82q3libhff6ks8l&version=1".into()),
+                average_rating: None,
+                rating_count: None,
             }),
             ..Default::default()
         };

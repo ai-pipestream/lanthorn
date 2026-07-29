@@ -20,9 +20,9 @@ pub const FORMAT_VERSION: u32 = 1;
 ///
 /// `r` skips stories already fetched at this version, which is what makes it
 /// double as the rescan-all: bump this and the next `r` refreshes the library.
-pub const FETCH_VERSION: u32 = 1;
+pub const FETCH_VERSION: u32 = 2;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoryInfo {
     pub format_version: u32,
     /// The IFID these blocks describe. Checked against the story on disk.
@@ -34,7 +34,7 @@ pub struct StoryInfo {
 
 /// Present ONLY for a fetch that ran to completion — found, or authoritatively
 /// not-found. A transport error writes no block, so `r` retries it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FetchedMeta {
     pub scanned_at: String,
     pub fetch_version: u32,
@@ -47,6 +47,11 @@ pub struct FetchedMeta {
     pub description: Option<String>,
     pub ifdb_tuid: Option<String>,
     pub ifdb_link: Option<String>,
+    /// IFDB's community average rating, 1–5 (SQ-0529). `None` for an unrated
+    /// game — never `0.0`, which is a rating the list would have to show.
+    pub ifdb_rating: Option<f32>,
+    /// The number of ratings behind `ifdb_rating`; the rating sort's tiebreak.
+    pub ifdb_rating_count: Option<u32>,
     /// Filename of the cached cover beside this file, e.g. "cover.png".
     pub cover: Option<String>,
     pub not_found: bool,
@@ -112,7 +117,8 @@ mod tests {
             title: Some("Zork I".into()),
             author: Some("Marc Blank and Dave Lebling".into()),
             language: None, first_published: Some("1980".into()), genre: None,
-            description: None, ifdb_tuid: None, ifdb_link: None, cover: None,
+            description: None, ifdb_tuid: None, ifdb_link: None,
+            ifdb_rating: Some(3.8), ifdb_rating_count: Some(226), cover: None,
             not_found: false,
         }
     }

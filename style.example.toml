@@ -61,6 +61,7 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # story_header_active = { parent = "accent", bold = true }
 # story_author = { parent = "text" }
 # story_year = { parent = "text" }
+# story_rating = { parent = "text" }
 # story_no_metadata = { parent = "muted" }
 # story_tile = { parent = "text" }
 # story_tile_selected = { parent = "accent", bold = true, reversed = true }
