@@ -1016,7 +1016,8 @@ pub fn mouse_to_action(
         // ── Left-click in map ─────────────────────────────────────────────────
         MouseEventKind::Down(MouseButton::Left) if in_map => {
             match room_at_screen(room_rects, col, row) {
-                // Room hit: show its info panel (apply_action also sets Focus::Map).
+                // Room hit: show its info panel. Focus deliberately stays on the
+                // story pane so you can keep typing (see `ShowRoomInfo`).
                 Some(id) => Action::ShowRoomInfo(id),
                 // Empty map gutter: activate map focus and close any open panel.
                 None => Action::ActivatePane(crate::state::Focus::Map),

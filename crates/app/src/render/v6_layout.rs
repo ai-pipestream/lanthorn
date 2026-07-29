@@ -176,7 +176,8 @@ pub struct RasterFloat {
 
 /// The story (primary) window's rasterizable content: visible wrapped lines
 /// (oldest-first), the live input line, and the caret column. `awaiting` gates
-/// the input line + block cursor (drawn only when the game has host focus).
+/// the input line + block cursor (drawn while the view sits at the bottom of the
+/// transcript; deliberately independent of which pane holds keyboard focus).
 /// `floats` carries the window-0 inline pictures anchored within the visible
 /// rows — blitted at the left margin with text indented beside them.
 #[derive(Debug, Default, Clone)]

@@ -1957,10 +1957,18 @@ pub fn build_main_text(state: &AppState, cols: u16, rows: u16) -> (crate::render
         .collect();
     let input = state.input.value.clone();
     let cursor_col = input.chars().count().min(cols.saturating_sub(1) as usize) as u16;
-    // Show the input line + caret only when the game has host focus AND the view
-    // is at the bottom — scrolled-back history must not be overwritten by the live
-    // line (matching the terminal transcript's `effective_scroll == 0` guard).
-    let awaiting = scroll == 0 && matches!(state.focus, crate::state::Focus::Game);
+    // Show the input line + caret whenever the view is at the bottom — scrolled-back
+    // history must not be overwritten by the live line (matching the terminal
+    // transcript's `effective_scroll == 0` guard).
+    //
+    // Deliberately NOT gated on host focus. It used to be, which meant the caret and
+    // everything you had typed vanished the moment the keyboard went to the map —
+    // opening a room panel, or reaching the inspector via select-room, hid your own
+    // half-typed command with no indication it was still buffered. The Z-machine
+    // transcript path has never had such a gate, so the two engines disagreed too.
+    // Whether keystrokes currently reach the story is the focus HIGHLIGHT's job, not
+    // the input line's.
+    let awaiting = scroll == 0;
     let main = crate::render::v6_layout::MainText { lines, styles, input, cursor_col, awaiting, floats };
     let metrics = RasterMetrics {
         total_rows: total.min(u16::MAX as usize) as u16,
@@ -3117,6 +3125,35 @@ mod tests {
         let model = hybrid_v6_model(); // Layered root, content_size (40, 25)
         let area = Rect::new(0, 0, 210, 55);
         assert_eq!(content_bounds(&model, area), area, "Layered root gets the full pane");
+    }
+
+    /// The live input line and its caret must NOT depend on which pane holds the
+    /// keyboard. This was focus-gated on the Glulx/v6 raster path, so opening a room
+    /// panel (or reaching the inspector via select-room) made the caret and your
+    /// half-typed command disappear with no sign they were still buffered — while the
+    /// Z-machine transcript path, which has no such gate, kept showing them.
+    #[test]
+    fn the_live_input_line_shows_regardless_of_which_pane_has_focus() {
+        let cols = 40u16;
+        let rows = 10u16;
+        for focus in [crate::state::Focus::Game, crate::state::Focus::Map] {
+            let mut state = AppState::default();
+            state.colors = crate::colors::ColorScheme::terminal_default();
+            state.push_transcript("You are standing in an open field.");
+            for ch in "open mailbox".chars() {
+                state.input.value.push(ch);
+            }
+            state.input.cursor = state.input.value.chars().count();
+            state.focus = focus;
+
+            let (main, _) = build_main_text(&state, cols, rows);
+            assert!(
+                main.awaiting,
+                "the input line must render with focus {focus:?} — it is not a focus indicator"
+            );
+            assert_eq!(main.input, "open mailbox", "the buffered command must be carried through");
+            assert_eq!(main.cursor_col, "open mailbox".chars().count() as u16, "caret sits after the text");
+        }
     }
 
     #[test]
