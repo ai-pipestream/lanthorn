@@ -1247,6 +1247,46 @@ pub(crate) fn visible_suggestion_line(
     line.chars().skip(offset).take(width).collect()
 }
 
+/// SQ-0542: the dim completion hint drawn immediately AFTER the typed input,
+/// replacing the candidate bar for STORY-WORD completions.
+///
+/// The bar cost a row, and in the default inline-prompt mode that row came out of
+/// the transcript viewport — so every keystroke that gained or lost a candidate
+/// shifted the prompt row, and all the scrollback with it, by one line. A hint
+/// rendered on the prompt row itself cannot move anything.
+///
+/// Story-word candidates ([`crate::complete::suggest`]) match by PREFIX, so the
+/// candidate always extends what you typed and the hint is simply its tail:
+/// typing `op` with `open` offered draws a dim `en` after the caret.
+///
+/// The COMMAND PALETTE is deliberately untouched: a line starting with the command
+/// prefix keeps the bracketed candidate bar below the prompt (its names match by
+/// substring, so they have no tail to show, and the palette is an explicit mode
+/// where seeing every candidate at once is the point).
+///
+/// `None` when the caret is not at the end of the line (a hint mid-line reads as
+/// text you typed), when focus is elsewhere or an overlay is up, or when the
+/// candidate adds nothing — which is exactly the state right after Tab applied it,
+/// so the hint clears itself without any extra bookkeeping.
+pub(crate) fn ghost_completion(state: &AppState) -> Option<String> {
+    if state.focus != Focus::Game || state.any_overlay_open() {
+        return None;
+    }
+    if state.input.as_str().starts_with(state.config.command_prefix) {
+        return None; // command palette — keeps its bar
+    }
+    if state.input.cursor < state.input.char_len() {
+        return None;
+    }
+    let candidate = state.suggestions.get(state.suggestion_idx % state.suggestions.len().max(1))?;
+    let partial = state.current_partial();
+    if !candidate.to_lowercase().starts_with(&partial.to_lowercase()) {
+        return None;
+    }
+    let hint: String = candidate.chars().skip(partial.chars().count()).collect();
+    (!hint.is_empty()).then_some(hint)
+}
+
 /// The current inventory item list: the engine's live object-tree contents
 /// when `player_obj` is locked and introspection is available, otherwise the
 /// last parsed `inventory_fallback` list. Used by the inventory dock panel
@@ -1559,6 +1599,17 @@ fn render_input_content(
     // Where the text actually landed, so a click can be mapped back to a caret index (SQ-0354).
     state.input_text_origin.set(Some((text_x, input_y)));
 
+    // SQ-0542: the completion hint rides on this row, after the typed text, so it
+    // never moves anything. Drawn BEFORE the caret so the caret can sit on its
+    // first glyph (the fish/zsh look) rather than blanking it.
+    let ghost = ghost_completion(state);
+    if let Some(g) = &ghost {
+        let gx = text_x + input_trunc.chars().count() as u16;
+        let gw = region.right().saturating_sub(gx) as usize;
+        let g_trunc = truncate_line(g, gw);
+        draw_str_clipped(buf, gx, input_y, g_trunc, state.colors.theme.get("suggestion").style, region);
+    }
+
     if state.focus == Focus::Game && !state.any_overlay_open() {
         // Draw the caret where it actually IS, not always after the last char (SQ-0354). Clamped to
         // the drawn text: a long line is truncated to fit, and the caret must not be painted past
@@ -1570,7 +1621,10 @@ fn render_input_content(
                 // Mid-line, underscore the char the caret sits ON rather than replacing it — the
                 // text must stay readable while you edit it.
                 let style = cursor_style(text_style, game_input);
-                if state.input.cursor < drawn {
+                // Mid-line, or sitting on the ghost's first glyph (SQ-0542): keep
+                // the symbol and just restyle, so the text — and the hint — stay
+                // readable under the caret.
+                if state.input.cursor < drawn || ghost.is_some() {
                     cell.set_style(style);
                 } else {
                     cell.set_symbol(" ").set_style(style);
@@ -1605,7 +1659,18 @@ fn render_middle(
     // When search is active, the search hint replaces the suggestion line.
     let suggestion_y = middle_bottom.saturating_sub(1);
     let has_search = state.search_query.is_some();
-    let has_suggestions = state.focus == Focus::Game && !state.suggestions.is_empty() && !has_search;
+    // SQ-0542: only the COMMAND PALETTE still shows the candidate bar. Story-word
+    // completions draw as a ghost tail on the prompt row itself
+    // ([`ghost_completion`]) and reserve nothing — the bar's row used to come out
+    // of the transcript viewport, so in inline-prompt mode every keystroke that
+    // gained or lost a candidate shifted the prompt row and all the scrollback
+    // with it. Palette names match by substring and have no tail to show, and the
+    // palette is an explicit mode where seeing every candidate at once is the
+    // point, so it keeps the bar (and its bounce) unchanged.
+    let has_suggestions = state.focus == Focus::Game
+        && !state.suggestions.is_empty()
+        && !has_search
+        && state.input.as_str().starts_with(state.config.command_prefix);
 
     // Optional box chrome for the auto-complete popup: mirrors the input-line
     // boxing (base OR any per-side on, and enough room). When enabled, the popup
@@ -2027,16 +2092,29 @@ fn render_middle(
             // (SQ-0354). The command-bar path sets this too; in inline mode this is
             // the only place it's set, so a click can find the line at all.
             state.input_text_origin.set(Some((start_col, row_y)));
+            // SQ-0542: the completion hint, drawn on this very row after the typed
+            // text. This is the mode the bounce came from — the old bar took its row
+            // out of the transcript viewport, so the prompt row and every line above
+            // it shifted on each keystroke that gained or lost a candidate. Drawn
+            // before the caret so the caret can sit on its first glyph.
+            let drawn = input_trunc.chars().count();
+            let ghost = ghost_completion(state);
+            if let Some(g) = &ghost {
+                let gx = start_col + drawn as u16;
+                let gw = body_area.right().saturating_sub(gx) as usize;
+                let g_trunc = truncate_line(g, gw);
+                draw_str_clipped(buf, gx, row_y, g_trunc, state.colors.theme.get("suggestion").style, body_area);
+            }
             // Draw the caret where it actually IS, not always after the last char
             // (SQ-0354). Clamped to the drawn (truncated) text.
-            let drawn = input_trunc.chars().count();
             let cursor_x = start_col + state.input.cursor.min(drawn) as u16;
             if cursor_x < body_area.right() {
                 if let Some(cell) = buf.cell_mut((cursor_x, row_y)) {
                     let style = cursor_style(text_style, game_input);
-                    // Mid-line: reverse-video the char the caret sits on (keep the
-                    // text readable); at the end: draw the "_" block.
-                    if state.input.cursor < drawn {
+                    // Mid-line, or over the ghost's first glyph: reverse-video the
+                    // char the caret sits on (keep it readable); at the end of the
+                    // line with no hint: draw the "_" block.
+                    if state.input.cursor < drawn || ghost.is_some() {
                         cell.set_style(style);
                     } else {
                         cell.set_symbol(" ").set_style(style);
@@ -2647,7 +2725,10 @@ mod tests {
         use crate::render::paneframe::PaneSides;
         let machine = minimal_machine();
         let mut state = AppState::default();
-        state.suggestions = vec!["north".into(), "south".into()];
+        // SQ-0542: the bar is the COMMAND PALETTE's presentation now — a line
+        // starting with the command prefix. Story-word completions ghost instead.
+        state.input.set("/pan", true);
+        state.suggestions = vec!["panh".into(), "panv".into()];
         state.suggestion_idx = 0;
         state.colors.suggestion_line_style = BorderStyle::Single;
         state.colors.suggestion_line_sides = PaneSides::all(BorderStyle::Single);
@@ -2663,7 +2744,7 @@ mod tests {
                 .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
                 .collect();
             if row.contains('│') { has_border = true; }
-            if row.contains("north") { has_text = true; }
+            if row.contains("panh") { has_text = true; }
         }
         assert!(has_border, "boxed suggestion popup must draw a border glyph");
         assert!(has_text, "suggestion text must render inside the box");
@@ -2675,7 +2756,8 @@ mod tests {
         // one-row strip: the text renders but no box chrome is drawn.
         let machine = minimal_machine();
         let mut state = AppState::default();
-        state.suggestions = vec!["north".into(), "south".into()];
+        state.input.set("/pan", true);
+        state.suggestions = vec!["panh".into(), "panv".into()];
         state.suggestion_idx = 0;
 
         let area = Rect::new(0, 0, 40, 8);
@@ -2689,7 +2771,7 @@ mod tests {
                 .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
                 .collect();
             if row.contains('│') { has_border = true; }
-            if row.contains("north") { has_text = true; }
+            if row.contains("panh") { has_text = true; }
         }
         assert!(!has_border, "inline suggestion strip must not draw box chrome");
         assert!(has_text, "suggestion text must still render inline");
@@ -3864,6 +3946,110 @@ mod tests {
         assert!(bottom.contains("> look"), "command-bar bottom row shows '> look': {:?}", bottom);
     }
 
+    /// SQ-0542: a story-word completion must not move the input line — the bug that
+    /// started this. The old candidate bar took its row out of the transcript
+    /// viewport, so in inline-prompt mode (the default) every keystroke that gained
+    /// or lost a candidate shifted the prompt row and every scrollback line with it,
+    /// making the input bounce as you typed at the bottom of the pane.
+    ///
+    /// Renders the SAME state twice, once with candidates and once without, and
+    /// requires the two frames to differ ONLY by the ghost tail: same prompt row,
+    /// same scrollback, nothing reserved.
+    #[test]
+    fn story_word_completion_ghosts_without_moving_the_input_line() {
+        let machine = minimal_machine();
+        let render = |sugs: Vec<String>| -> Vec<String> {
+            let mut state = AppState::default();
+            state.config.command_bar = false; // inline prompt: the mode that bounced
+            state.transcript = (0..50).map(|i| format!("L{i}")).collect();
+            state.input.set("op", true);
+            state.focus = Focus::Game;
+            state.suggestions = sugs;
+            let area = Rect::new(0, 0, 40, 12);
+            let mut buf = Buffer::empty(area);
+            render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buf.cell((x, y)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
+                        .collect::<String>()
+                })
+                .collect()
+        };
+        let without = render(Vec::new());
+        let with = render(vec!["open".to_string(), "operate".to_string()]);
+
+        let prompt_row = |rows: &[String]| rows.iter().position(|r| r.contains("op")).expect("prompt row");
+        assert_eq!(
+            prompt_row(&without),
+            prompt_row(&with),
+            "the input line must not move when a completion appears\n  without: {:?}\n  with:    {:?}",
+            without,
+            with
+        );
+        // Every row above the prompt is untouched: no scrollback shifted, nothing reserved.
+        let p = prompt_row(&without);
+        for y in 0..p {
+            assert_eq!(without[y], with[y], "row {y} shifted when the completion appeared");
+        }
+        // And the hint itself rides on the prompt row as the candidate's tail.
+        assert!(with[p].contains("open"), "the ghost tail completes the typed word: {:?}", with[p]);
+        assert!(!without[p].contains("open"), "no hint without candidates: {:?}", without[p]);
+        // Nothing is drawn below the prompt row in either frame.
+        for (y, row) in with.iter().enumerate().skip(p + 1) {
+            assert!(row.trim().is_empty(), "row {y} below the prompt must stay empty: {row:?}");
+        }
+    }
+
+    /// SQ-0542: the hint is a tail, so it only makes sense at the end of the line.
+    /// Mid-line it would read as text you had typed.
+    #[test]
+    fn ghost_completion_hidden_when_the_caret_is_mid_line() {
+        let mut state = AppState::default();
+        state.focus = Focus::Game;
+        state.input.set("op", true);
+        state.suggestions = vec!["open".to_string()];
+        assert_eq!(ghost_completion(&state).as_deref(), Some("en"), "at end of line the tail shows");
+        state.input.home();
+        assert_eq!(ghost_completion(&state), None, "mid-line the hint is suppressed");
+    }
+
+    /// SQ-0542: once Tab has applied the candidate the input already IS the word, so
+    /// the tail is empty and the hint clears itself — no separate "applied" flag to
+    /// keep in sync.
+    #[test]
+    fn ghost_completion_clears_once_the_candidate_is_applied() {
+        let mut state = AppState::default();
+        state.focus = Focus::Game;
+        state.suggestions = vec!["open".to_string()];
+        state.input.set("op", true);
+        assert_eq!(ghost_completion(&state).as_deref(), Some("en"));
+        state.input.set("open", true); // what Tab leaves behind
+        assert_eq!(ghost_completion(&state), None);
+    }
+
+    /// SQ-0542: the command palette is deliberately untouched — its names match by
+    /// substring and have no tail to show, so it keeps the candidate bar.
+    #[test]
+    fn ghost_completion_never_applies_to_the_command_palette() {
+        let mut state = AppState::default();
+        state.focus = Focus::Game;
+        state.input.set("/set", true);
+        state.suggestions = vec!["set-v6-render".to_string()];
+        assert_eq!(ghost_completion(&state), None, "the palette keeps its bar, not a ghost");
+    }
+
+    /// SQ-0542: only the last WORD is completed, so a hint after an earlier word
+    /// completes that word's tail and never re-completes the whole line.
+    #[test]
+    fn ghost_completion_completes_only_the_word_being_typed() {
+        let mut state = AppState::default();
+        state.focus = Focus::Game;
+        state.input.set("take lan", true);
+        state.suggestions = vec!["lantern".to_string()];
+        assert_eq!(ghost_completion(&state).as_deref(), Some("tern"));
+    }
+
     #[test]
     fn inline_input_suppressed_when_scrolled_up() {
         // command_bar off but scrolled up (effective_transcript_scroll > 0): the
@@ -4065,8 +4251,9 @@ mod tests {
         let mut state = AppState::default();
         state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.focus = Focus::Game;
-        state.input.set("nor", true);
-        state.suggestions = vec!["north".to_string()];
+        // SQ-0542: the bar belongs to the command palette now.
+        state.input.set("/set", true);
+        state.suggestions = vec!["set-v6-render".to_string()];
         state.suggestion_idx = 0;
 
         // 10-row area: row 0=status, rows 1..7=transcript, row 8=suggestion, row 9=input
@@ -4078,13 +4265,13 @@ mod tests {
         let input_row: String = (0..40u16)
             .map(|x| buf.cell((x, 9)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
             .collect();
-        assert!(input_row.contains("> nor"), "input row: {:?}", input_row);
+        assert!(input_row.contains("> /set"), "input row: {:?}", input_row);
 
         // Row 8 must contain the suggestion.
         let sug_row: String = (0..40u16)
             .map(|x| buf.cell((x, 8)).map(|c| c.symbol().chars().next().unwrap_or(' ')).unwrap_or(' '))
             .collect();
-        assert!(sug_row.contains("north"), "suggestion row: {:?}", sug_row);
+        assert!(sug_row.contains("set-v6-render"), "suggestion row: {:?}", sug_row);
     }
 
     #[test]

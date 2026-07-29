@@ -137,10 +137,19 @@ know which side you're on).
   nouns; pick tokens to assemble a command (multi-noun sentences via
   prepositions), never typing a word.
 - **Tab autocomplete** from the story's own dictionary plus the nouns mentioned
-  in the current room. A live suggestion line shows the candidates with the
-  active one bracketed: **Tab** cycles forward, **Shift-Tab** back, the bracket
-  always tracks the word on the command line, and the line scrolls sideways to
-  keep the highlighted candidate in view when the list overflows the width.
+  in the current room, shown the way your shell shows it: the rest of the word
+  appears in dim ghost text right under the caret as you type. **Tab** cycles
+  forward through the candidates, **Shift-Tab** back, and **→** at the end of the
+  line takes the one on offer. Because the hint lives on the prompt row itself,
+  nothing shifts when a completion appears or vanishes — the prompt stays put
+  even when it is the very last line in the pane.
+- **The command palette** (type `/`) keeps its own presentation: a bracketed
+  candidate strip below the prompt, since command names match anywhere in the
+  word — `/config` finds `open-config` — and there is no single tail to ghost.
+  **Tab**/**Shift-Tab** cycle it, the bracket tracks the name on the command
+  line, and the strip scrolls sideways to keep the active candidate in view.
+  Give it a border with the `suggestion_line` style selector to float it as a
+  boxed popup.
 - **Command history** — press **↑**/**↓** at the prompt to recall and re-run
   earlier commands, shell-style. History persists across sessions inside the
   `.babelmap` archive; turn recording off with `record_history = false`.
