@@ -80,7 +80,40 @@ const ENTRY_PICTURES_PREFIX: &str = "pictures/win-";
 /// its art, not just its text (SQ-0518). Sibling metadata is `TranscriptData.images`.
 const ENTRY_TRANSCRIPT_IMG_PREFIX: &str = "transcript-img/";
 
-pub const CURRENT_FORMAT_VERSION: u32 = 4;
+pub const CURRENT_FORMAT_VERSION: u32 = 5;
+
+/// What asked for this archive to be written (SQ-0531). Both triggers produce the
+/// SAME `.babelmap` container — map, transcript, screen, aux and all — so an
+/// in-game `@save` is no longer a lesser save. What differs is the *convention* of
+/// the `game.<ext>` bytes inside, and it is this field that says which:
+///
+/// - [`SaveTrigger::Ingame`] — written while the VM is suspended on its own
+///   `@save`, so the saved PC sits at the save instruction's branch/store
+///   descriptor (Quetzal §5.8). Those bytes are interchange-grade: unzip
+///   `game.qzl` and any other interpreter reads it. Restoring one completes the
+///   descriptor (`Engine::restore_game_save` / `resume_restore`).
+/// - [`SaveTrigger::HostState`] — an emulator-style host snapshot taken *between*
+///   turns, so the PC points mid-`read` with no save instruction to store into.
+///   Structurally valid Quetzal, but a foreign interpreter would mis-store the
+///   restore result, so it is NOT advertised as portable. Restoring one resumes
+///   the whole session (`Engine::restore_state`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SaveTrigger {
+    /// The game's own `@save` (`SAVE` verb) asked for this file.
+    Ingame,
+    /// The host's Save State (Ctrl+S / `/save-state` / auto-save / exit snapshot).
+    #[default]
+    HostState,
+}
+
+impl SaveTrigger {
+    /// Whether the archive's inner game bytes follow the standard save-instruction
+    /// PC convention, i.e. can be unzipped and fed to another interpreter.
+    pub fn is_portable(self) -> bool {
+        matches!(self, SaveTrigger::Ingame)
+    }
+}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Meta {
@@ -103,6 +136,11 @@ pub struct Meta {
     /// None for v4+ Z-machine and Glulx, which have no engine-provided score.
     #[serde(default)]
     pub score: Option<i32>,
+    /// Which mechanism wrote this archive, and therefore which PC convention the
+    /// inner `game.<ext>` bytes follow (SQ-0531). Defaults to
+    /// [`SaveTrigger::HostState`] — the only kind that existed before the field.
+    #[serde(default)]
+    pub trigger: SaveTrigger,
 }
 
 /// Transcript payload written to `transcript.json` inside the archive.
@@ -430,6 +468,7 @@ pub fn save_archive(
         saved_at: String::new(),
         location: None,
         score: None,
+        trigger: SaveTrigger::HostState,
     }, transcript, transcript_kinds, transcript_runs, transcript_para, history, command_history)
 }
 
@@ -1081,7 +1120,7 @@ mod tests {
         let machine = dummy_machine();
         save_archive_meta_pics(
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
-            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None },
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
             &transcript, &kinds, &[], &[], &images, &[], &[], &[],
         )
         .expect("save with inline image");
@@ -1112,7 +1151,7 @@ mod tests {
         let machine = dummy_machine();
         save_archive_meta_pics(
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
-            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None },
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
             &transcript, &kinds, &[], &[], &[], &[], &[], &[],
         )
         .expect("save without inline images");
@@ -1171,7 +1210,7 @@ mod tests {
             &zvm_es(&machine),
             Some(&machine.screen),
             &machine.aux_data,
-            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None },
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
             &transcript,
             &kinds,
             &[],
@@ -1369,6 +1408,7 @@ mod tests {
                 saved_at: "2026-06-30T12:00:00Z".to_string(),
             location: None,
             score: None,
+            trigger: SaveTrigger::HostState,
             },
             &[],
             &[],
@@ -1416,7 +1456,7 @@ mod tests {
             let options = zip::write::SimpleFileOptions::default();
 
             // Write only meta.json; omit map.json and game.sav
-            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None };
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -1484,7 +1524,7 @@ mod tests {
                 .compression_method(zip::CompressionMethod::Deflated);
 
             // meta.json
-            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None };
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -1580,7 +1620,7 @@ mod tests {
             let options = zip::write::SimpleFileOptions::default();
 
             // Write an archive with no transcript.json entry.
-            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None };
+            let meta = Meta { format_version: 1, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -1606,11 +1646,57 @@ mod tests {
 
     // -------------------------------------------------------------------------
     // format freeze (docs/release/save-format-policy.md): the .babelmap archive
-    // version is frozen at 4. Changing this constant must be a deliberate bump
-    // (update this pin + a migration/release note), never accidental drift.
+    // version is frozen at 5 (bumped from 4 by SQ-0531, which added `Meta.trigger`
+    // so an archive says whether the game bytes inside it are the game's own
+    // `@save` or a host snapshot). Changing this constant must be a deliberate
+    // bump (update this pin + a migration/release note), never accidental drift.
     #[test]
     fn format_version_constant_is_frozen() {
-        assert_eq!(CURRENT_FORMAT_VERSION, 4, "archive format_version changed — see docs/release/save-format-policy.md");
+        assert_eq!(CURRENT_FORMAT_VERSION, 5, "archive format_version changed — see docs/release/save-format-policy.md");
+    }
+
+    // SQ-0531: `trigger` is persisted metadata, so its wire spelling is pinned —
+    // the strings go on a user's disk and a rename would silently reclassify
+    // every archive as a host snapshot (the serde default).
+    #[test]
+    fn save_trigger_wire_names_are_pinned_and_round_trip() {
+        let ingame = serde_json::to_string(&SaveTrigger::Ingame).unwrap();
+        let host = serde_json::to_string(&SaveTrigger::HostState).unwrap();
+        assert_eq!(ingame, "\"ingame\"");
+        assert_eq!(host, "\"hoststate\"");
+        assert_eq!(serde_json::from_str::<SaveTrigger>(&ingame).unwrap(), SaveTrigger::Ingame);
+        assert_eq!(serde_json::from_str::<SaveTrigger>(&host).unwrap(), SaveTrigger::HostState);
+        // Only the game's own `@save` is interchange-grade (Quetzal §5.8).
+        assert!(SaveTrigger::Ingame.is_portable());
+        assert!(!SaveTrigger::HostState.is_portable());
+        // A meta.json with no `trigger` at all reads as a host snapshot: the only
+        // kind that existed before the field.
+        let bare: Meta = serde_json::from_str(r#"{"format_version":5,"ifid":null}"#).unwrap();
+        assert_eq!(bare.trigger, SaveTrigger::HostState);
+    }
+
+    // The trigger survives a real archive write/read, not just serde in memory.
+    #[test]
+    fn trigger_round_trips_through_a_written_archive() {
+        let machine = dummy_machine();
+        for trigger in [SaveTrigger::Ingame, SaveTrigger::HostState] {
+            let path = temp_archive_path(if trigger.is_portable() { "trig-ingame" } else { "trig-host" });
+            let meta = Meta {
+                format_version: CURRENT_FORMAT_VERSION,
+                ifid: None,
+                name: None,
+                turns: 0,
+                saved_at: String::new(),
+                location: None,
+                score: None,
+                trigger,
+            };
+            save_archive_meta(&path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen),
+                &machine.aux_data, meta, &[], &[], &[], &[], &[], &[]).expect("write");
+            assert_eq!(read_archive_meta(&path).unwrap().trigger, trigger, "read_archive_meta");
+            assert_eq!(load_archive(&path).unwrap().meta.trigger, trigger, "load_archive");
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     // unknown format_version -> Err
@@ -1625,7 +1711,7 @@ mod tests {
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
 
-            let meta = Meta { format_version: 99, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None };
+            let meta = Meta { format_version: 99, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState };
             let meta_json = serde_json::to_string(&meta).unwrap();
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(meta_json.as_bytes()).unwrap();
@@ -1740,7 +1826,7 @@ mod tests {
             let file = std::fs::File::create(&path).unwrap();
             let mut zip = zip::ZipWriter::new(file);
             let options = zip::write::SimpleFileOptions::default();
-            let meta = Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None };
+            let meta = Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState };
             zip.start_file(ENTRY_META, options).unwrap();
             zip.write_all(serde_json::to_string(&meta).unwrap().as_bytes()).unwrap();
             zip.start_file(ENTRY_MAP, options).unwrap();
@@ -1826,7 +1912,7 @@ mod tests {
         let path = temp_archive_path("pics");
         save_archive_meta_pics(
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
-            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None },
+            Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
             &[], &[], &[], &[], &[], &[], &[],
             &[(7, png_a.clone()), (1, png_b.clone())],
         ).expect("save with pictures");

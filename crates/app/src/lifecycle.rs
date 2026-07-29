@@ -49,6 +49,7 @@ pub(crate) fn exit_auto_save(
         ),
         location,
         score,
+        trigger: app::archive::SaveTrigger::HostState,
     };
     let v6_pics = zvm_session_opt(session).map(|z| z.pictures_png()).unwrap_or_default();
     match app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics) {
@@ -93,6 +94,7 @@ pub(crate) fn quit_dialog_save(
         ),
         location,
         score,
+        trigger: app::archive::SaveTrigger::HostState,
     };
     let v6_pics = zvm_session_opt(session).map(|z| z.pictures_png()).unwrap_or_default();
     let _ = app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics);

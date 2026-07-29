@@ -15,33 +15,36 @@ let the game save itself, or never save at all.
   so you can bail out mid-sentence or mid-puzzle and land right back in it.
 - **Named slots.** Keep as many Save States as you like. The saves-manager modal
   lists them (Enter to load, `s` to save-as, `d` to delete, `i` to import), each
-  slot showing its name, turn count, and timestamp.
+  slot showing its name, type, turn count, and timestamp.
+- **One file format, whoever asked for it.** When a story runs its own `SAVE`,
+  babelmap writes the *same* `.babelmap` archive Ctrl+S writes — map, screen,
+  transcript and all. The old split, where an in-game save was a lesser file that
+  held VM state and nothing else, is gone: `restore` from inside the game now
+  brings your scrollback and its inline artwork back with it, even into a freshly
+  launched session. The archive quietly records which mechanism asked for it, and
+  that is the only difference between the two.
 - **Bring saves in from other interpreters — standard Quetzal.** Point the saves
   manager's built-in file browser at a `.qzl`/`.sav` game save from `dfrotz` (or
   any other interpreter), import it, and keep the map you've already accumulated.
-  It works the other way too: when a story runs its own `SAVE`, babelmap writes a
-  bare, portable standard Quetzal `.qzl` — the same file any other interpreter
-  reads — for every Z-machine version, right down to v3 (Zork-era) branch-form
-  `@save`/`@restore`. That interoperability is golden-tested against `dfrotz` in
-  both directions (`scripts/gen-interop-goldens.sh`, or
+  Drop one into the story's save folder and the in-game `restore` picker lists it
+  beside your own saves. That interoperability is golden-tested against `dfrotz`
+  in both directions (`scripts/gen-interop-goldens.sh`, or
   `cargo test -p zvm --test save_interop -- --ignored`).
 
-  This game-written `.qzl` is a genuinely different file from a `.babelmap` Save
-  State: the `.qzl` holds VM state only, while the Save State also carries the
-  map, screen, and transcript. Glulx games likewise write a real, standard
-  Glulx-Quetzal in-game save — VM state only, the same shape as the Z-machine's
-  `.qzl`. Its round-trip is verified internally; Glulx *cross-interpreter* save
-  interop isn't golden-tested yet (tracked in SQ-0229).
+  It works the other way too, and this is what the **Type** column in the saves
+  manager is telling you. A save marked **Game ↗** was written by the story's own
+  `SAVE`, which happens while the VM is suspended *inside* the save instruction —
+  exactly where the Quetzal standard says a saved program counter should point.
+  Unzip that archive, pull out `game.qzl` (or `game.glksave` for Glulx), and any
+  other interpreter reads it, for every Z-machine version right down to v3
+  (Zork-era) branch-form `@save`/`@restore`.
 
-  One practical consequence for graphical (v6) stories: an in-game `restore`
-  into a *fresh* session brings back the game state but not your scrollback —
-  the Quetzal format simply carries no transcript, so neither the prose history
-  nor the inline artwork woven through it can come back (every interpreter
-  behaves this way). Within a running session your scrollback — art included —
-  is untouched by an in-game `restore`. To get history back across a relaunch,
-  resume through a Save State or auto-load first (which restores the transcript
-  and its inline images), then `restore` in-game if you need a different
-  in-game save.
+  A save marked **State** is a host snapshot, taken *between* turns so you can
+  bail out mid-puzzle. There is no save instruction at that program counter for
+  another interpreter to hand a result back to, so babelmap doesn't pretend those
+  travel — the mark is there to be honest about it rather than to leave you
+  guessing. (Glulx *cross-interpreter* interop isn't golden-tested yet either;
+  tracked in SQ-0229.)
 - **Auto-save and auto-load.** Turn on auto-save and babelmap snapshots after
   every turn; leave auto-load on (the default) and launching a story drops you
   straight back where you quit, map and all. Both are configurable — start fresh

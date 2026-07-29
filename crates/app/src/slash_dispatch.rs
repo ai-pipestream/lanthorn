@@ -14,7 +14,7 @@ use app::state::{AppState, ExitTarget, Focus, SavesState, TranscriptFilter, Tran
 use mapper::mapper::Mapper;
 use ratatui::layout::Rect;
 
-use crate::engine_helpers::{restore_from_file, zvm_session_opt, zvm_session_opt_mut, RestoreOutcome};
+use crate::engine_helpers::{apply_archive_state, restore_from_file, zvm_session_opt, RestoreOutcome};
 use crate::reset::reset_game;
 use crate::{
     combined_saves, format_rfc3339, handle_map_export, map_pane_dims, open_hints, reobserve_location,
@@ -138,7 +138,7 @@ pub(crate) fn dispatch_slash_outcome(
             let result = match name_opt {
                 Some(ref name) => {
                     let (location, score) = crate::engine_helpers::save_summary(&*session, state);
-                    save_named(game_dir, ifid, name, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images)
+                    save_named(game_dir, ifid, name, app::archive::SaveTrigger::HostState, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images)
                         .map(|()| format!("saved as \"{}\"", name))
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -157,6 +157,7 @@ pub(crate) fn dispatch_slash_outcome(
                         ),
                         location,
                         score,
+                        trigger: app::archive::SaveTrigger::HostState,
                     };
                     save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default())
                         .map(|()| "saved".to_string())
@@ -196,41 +197,18 @@ pub(crate) fn dispatch_slash_outcome(
                     let restore_outcome = restore_from_file(path, &mut *session);
                     app::trace::hostio(&state.config.user_dir, state.config.trace.hostio, format!("restore_state({})", path.display()));
                     match restore_outcome {
-                        Ok(RestoreOutcome::DescriptorCompleted) => {
+                        Ok(RestoreOutcome::DescriptorCompleted(ac)) => {
+                            // An in-game @save archive carries the whole session
+                            // alongside its game bytes (SQ-0531); a bare .qzl has
+                            // nothing but the bytes.
+                            if let Some(ac) = ac {
+                                apply_archive_state(*ac, &mut *session, mapper, state);
+                            }
                             reobserve_location(state, mapper, &*session, map_rect);
                             state.set_status("restored");
                         }
                         Ok(RestoreOutcome::Resumed(ac)) => {
-                            if let Some(scr) = ac.screen.clone() {
-                                if let Some(z) = zvm_session_opt_mut(&mut *session) { app::session::restore_screen(&mut z.machine, scr); }
-                            }
-                            // v6 graphics canvases: mirror the startup auto-load path
-                            // (startup.rs) so a restored v6 story's pictures redraw in
-                            // every mode. Without this pictures_canvas stays empty and
-                            // the screen() adapter emits no Graphics leaves (SQ-0516).
-                            // No-op for non-v6 archives (ac.pictures empty).
-                            if let Some(z) = zvm_session_opt_mut(&mut *session) {
-                                z.load_pictures_png(&ac.pictures);
-                            }
-                            // Hand Glulx back the room it was saved in (SQ-0523); no-op for zvm.
-                            crate::engine_helpers::seed_resumed_location(&mut *session, &ac.meta);
-                            if state.config.aux_storage != app::config::AuxStorage::Global {
-                                session.set_aux_data(ac.aux.clone());
-                            }
-                            *mapper = ac.mapper;
-                            state.transcript = ac.transcript;
-                            state.clear_anchor = None;
-                            state.transcript_kinds = ac.transcript_kinds;
-                            state.transcript_runs = ac.transcript_runs;
-                            state.transcript_para = ac.transcript_para;
-                            state.reset_transcript_sidecars();
-                            // Re-attach inline images after the sidecar reset so a
-                            // restored transcript renders its embedded art (SQ-0518).
-                            state.transcript_images = ac.transcript_images;
-                            state.history = ac.history;
-                            if !ac.command_history.is_empty() {
-                                state.command_history = ac.command_history;
-                            }
+                            apply_archive_state(*ac, &mut *session, mapper, state);
                             reobserve_location(state, mapper, &*session, map_rect);
                             state.set_status("loaded");
                         }

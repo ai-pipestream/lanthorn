@@ -113,7 +113,7 @@ fn v6_host_save_state_restore_is_byte_identical() {
         &session.machine.aux_data,
         app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
-            ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None,
+            ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: app::archive::SaveTrigger::HostState,
         },
         &[], &[], &[], &[], &[], &[], &[],
         &pics,
@@ -222,7 +222,7 @@ fn inline_transcript_images_survive_archive_roundtrip_sq0518() {
         &session.machine.aux_data,
         app::archive::Meta {
             format_version: app::archive::CURRENT_FORMAT_VERSION,
-            ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None,
+            ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: app::archive::SaveTrigger::HostState,
         },
         &state.transcript,
         &state.transcript_kinds,

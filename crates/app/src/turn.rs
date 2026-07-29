@@ -359,6 +359,7 @@ fn post_turn_bookkeeping(
             ),
             location,
             score,
+            trigger: app::archive::SaveTrigger::HostState,
         };
         // v6 graphics canvases ride along so a resumed v6 story's pictures redraw
         // (SQ-0516); empty for non-v6 sessions, leaving the archive layout unchanged.
@@ -953,6 +954,7 @@ mod tests {
             saved_at: String::new(),
             location: None,
             score: None,
+            trigger: app::archive::SaveTrigger::HostState,
         };
         app::archive::save_archive_meta(
             &arc, &mapper::mapper::Mapper::default(), &save, None,
@@ -1031,6 +1033,7 @@ mod tests {
             saved_at: String::new(),
             location: None,
             score: None,
+            trigger: app::archive::SaveTrigger::HostState,
         };
         app::archive::save_archive_meta_pics(
             &arc, &mapper::mapper::Mapper::default(), &save, Some(&src.machine.screen),

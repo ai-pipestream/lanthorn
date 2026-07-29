@@ -3054,7 +3054,7 @@ mod tests {
                 saved_at: "2026-06-30T13:05:00Z".into(),
                 location: Some("The Troll Room".into()),
                 score: Some(10),
-                is_default: false,
+                is_default: false, trigger: app::archive::SaveTrigger::HostState,
             }],
             hints_available: false,
             game_dir: game_dir.clone(),
@@ -3065,7 +3065,7 @@ mod tests {
                 saved_at: "2026-06-29T00:00:00Z".into(),
                 location: None,
                 score: None,
-                is_default: false,
+                is_default: false, trigger: app::archive::SaveTrigger::HostState,
             }],
             auto_saves: vec![app::persist_files::SaveInfo {
                 path: game_dir.join("_startup.qzl"),
@@ -3074,7 +3074,7 @@ mod tests {
                 saved_at: "2026-06-28T00:00:00Z".into(),
                 location: None,
                 score: None,
-                is_default: false,
+                is_default: false, trigger: app::archive::SaveTrigger::HostState,
             }],
             sidecars: vec!["default.aux"],
         };

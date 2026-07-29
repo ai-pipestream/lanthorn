@@ -14,12 +14,16 @@ what each one captures, when it triggers, and what survives.
   and Ctrl+R / `/restore-state`. This is babelmap's own mechanism, not something
   the game knows about.
 - **`@save` / `@restore`** — the *game's* own in-game save, the standard path a
-  story invokes when the player types `SAVE` / `RESTORE`. On both engines this
-  produces a portable, standard **Quetzal** file — on the Z-machine, Quetzal
-  proper; on Glulx, standard **Glulx-Quetzal**.
+  story invokes when the player types `SAVE` / `RESTORE`. On both engines the VM
+  state it captures is a portable, standard **Quetzal** payload — on the Z-machine,
+  Quetzal proper; on Glulx, standard **Glulx-Quetzal**.
 
-The two are genuinely different files with different contents — keep the names
-straight.
+The two are different *mechanisms*, but in the app they are no longer different
+*files*: since SQ-0531 both write the same `.babelmap` archive, and `meta.json`'s
+`trigger` field (`"ingame"` / `"hoststate"`) records which one asked for it. Keep
+the names straight anyway — what a restore does with the file depends entirely on
+which trigger wrote it (see Layer 1 and Layer 2 below). The `zvm-cli`/`gvm-cli`
+front-ends have no archive to write and still emit bare Quetzal files.
 
 **A third engine, Scott Adams, has no Layer 1 at all.** The Scott VM has no
 in-game Quetzal `@save`/`@restore` suspension protocol; its in-game `SAVE GAME`
@@ -33,28 +37,41 @@ respectively.
 
 Player-initiated, from inside the story ("Type SAVE to save your position").
 
-- **Z-machine:** babelmap writes a bare, standard **Quetzal** save (`.qzl`) — the
-  same format other interpreters (e.g. `dfrotz`) read and write, all versions
-  including v3 branch-form `@save`/`@restore`. VM state only: no map, no screen,
-  no transcript. Implemented in `crates/zvm/src/quetzal.rs`.
-- **Glulx:** babelmap writes a bare, standard **Glulx-Quetzal** save
-  (`machine.save_quetzal()`) — `IFhd`/`CMem`/`Stks`/`MAll` only, no `GReg`, no
-  `Glk ` chunk. VM state only: no map, no screen, no VFS embed. Per the Glulx
+**What it captures (SQ-0531).** In the app, `@save` writes a `.babelmap` archive —
+byte for byte the container a host Save State writes, carrying the map, screen,
+transcript (inline art included), aux data and turn metadata alongside the VM
+state. What makes it a *Layer 1* save is not the wrapper but the **PC convention
+of the payload inside**, recorded as `meta.trigger = "ingame"`. The `zvm-cli` and
+`gvm-cli` front-ends have no archive layer and still write the bare payload alone.
+
+The payload is unchanged and stays interchange-grade — `game.qzl` / `game.glksave`
+inside the ZIP is byte-identical to what the bare file used to be, so unzipping it
+hands another interpreter a standard save:
+
+- **Z-machine:** a bare, standard **Quetzal** save — the same format other
+  interpreters (e.g. `dfrotz`) read and write, all versions including v3
+  branch-form `@save`/`@restore`. Implemented in `crates/zvm/src/quetzal.rs`.
+- **Glulx:** a bare, standard **Glulx-Quetzal** save (`machine.save_quetzal()`) —
+  `IFhd`/`CMem`/`Stks`/`MAll` only, no `GReg`, no `Glk ` chunk. Per the Glulx
   spec, `@save` pushes a call stub before suspending, so PC and FramePtr are
   recovered from the stack on restore rather than serialized as registers; the
-  save is the same shape as the Z-machine's `.qzl`. Implemented in
+  save is the same shape as the Z-machine's Quetzal. Implemented in
   `crates/gvm/src/exec.rs` (`save_quetzal`/`restore_quetzal`). Round-trip is
   verified internally (gvm unit tests); cross-interpreter golden-file interop is
-  tracked separately under SQ-0229.
+  tracked separately under SQ-0229. Note this is a *different byte shape* from
+  Glulx's host snapshot (`save_state`), which is why the archive writer consults
+  the trigger instead of always snapshotting.
 
-  **Two kinds of Glulx `@save`/`@restore`, routed by how the game made the
-  fileref (SQ-0296).** The VM carries the target file's name and a `by_prompt`
-  flag to the host on each save/restore request (`Machine::pending_saveload_request`
-  → `SaveLoadRequest { name, by_prompt, restore }`):
+**Two kinds of Glulx `@save`/`@restore`, routed by how the game made the fileref
+(SQ-0296).** The VM carries the target file's name and a `by_prompt` flag to the
+host on each save/restore request (`Machine::pending_saveload_request` →
+`SaveLoadRequest { name, by_prompt, restore }`):
+
   - **Player SAVE/RESTORE verb** — the game opens the file with
     `glk_fileref_create_by_prompt` (`by_prompt = true`). The host surfaces its
     save UI: `gvm-cli` prompts `Save to file:` / `Restore from file:`; the app
-    opens its saves dialog. Lands as `<slug>.qzl`.
+    opens its saves dialog. Lands as `<slug>.babelmap` in the app, `<slug>.qzl`
+    from `gvm-cli`.
   - **The game's OWN fixed-name saves** — `glk_fileref_create_by_name` /
     `create_by_usage` (`by_prompt = false`), e.g. Counterfeit Monkey's
     `_Counterfeit_Monkey-startup-data` init cache, its autosave, and undo slots.
@@ -64,7 +81,24 @@ Player-initiated, from inside the story ("Type SAVE to save your position").
     per-game `.save` dir, the next launch's boot `@restore` finds it and the game
     skips its (multi-second) init — measured for CM: ~3.5s first launch vs ~0.9s
     on relaunch. These internal `_`-prefixed files are hidden from the player
-    saves list (app) and never prompt (both hosts).
+    saves list (app) and never prompt (both hosts). These stay bare `.qzl` files:
+    they are the game's private storage, not player-facing save slots.
+
+**Restoring one.** The extension no longer decides: `restore_from_file`
+(`crates/app/src/engine_helpers.rs`) reads `meta.trigger` and, for `"ingame"`,
+completes the suspended `@save`/`@restore` descriptor (`Engine::restore_game_save`
+for a host load, `resume_restore` for the game's own `@restore`) and then reinstates
+the archive's map/transcript/screen around it. A bare `.qzl`/`.sav` carried in from
+another interpreter has no `meta.json` at all and takes the same descriptor path
+with nothing to reinstate — that interchange route is untouched.
+
+*One standing gap, unchanged by the unification:* a **Glulx** in-game save can only
+be restored through the game's own `restore` (`resume_restore` →
+`complete_restore_quetzal`), which preserves the live Glk window model per Glulx
+spec §1.8.5. Picking one from the host saves manager instead reports
+`Glulx has no game-save (.qzl) format` — `GlulxSession::restore_game_save` is
+unimplemented, because reinstating bare Quetzal into a *cold* Glk model has no
+safe general answer. Z-machine and Scott in-game saves host-load fine.
 
 ## Layer 2 — host Save State / Restore State (emulator snapshot)
 
@@ -132,8 +166,11 @@ that game side by side:
     default.aux        # Z-machine aux sidecar (Layer 3)
     default.glkvfs     # Glulx VFS sidecar (Layer 3)
     default.babelmap   # the auto/singleton Save State slot (Layer 2)
-    <slug>.babelmap     # named Save States (Layer 2, app only)
-    <slug>.qzl           # in-game @save files (Layer 1)
+    <slug>.babelmap     # named saves — Save States AND in-game @save (app only);
+                        #   meta.json's `trigger` says which wrote each one
+    <slug>.qzl           # bare in-game @save files: the CLI hosts, a game's own
+                        #   fixed-name storage (`_`-prefixed), and saves carried
+                        #   in from other interpreters
     style.toml          # per-game style override (app only, layered over global)
     config.toml         # per-game non-style overrides (honor/borders/map panel)
 ```
@@ -162,7 +199,8 @@ it:
 
 A save named `default` is a **reserved slug** — the app rejects an attempt to
 create a named Save State or in-game save called `default`, since that name
-is claimed by the auto/singleton slot.
+is claimed by the auto/singleton slot. (The rejection re-opens the save-name
+dialog so an in-game `SAVE` can be retried rather than lost.)
 
 ### Interactive `@save` / `@restore` in the CLIs
 
@@ -201,9 +239,9 @@ directory (renaming to the `default.*` / `<slug>.*` names above as needed).
 
 | Layer | Engine | Host | File |
 |-------|--------|------|------|
-| 1 — game's `@save`/`@restore` | Z-machine | app | `<base>/<story-key>.save/<slug>.qzl` (VM state only) |
+| 1 — game's `@save`/`@restore` | Z-machine | app | `<base>/<story-key>.save/<slug>.babelmap` (`trigger = "ingame"`; `game.qzl` inside is bare standard Quetzal) |
 | 1 — game's `@save`/`@restore` | Z-machine | `zvm-cli` | `<base>/<story-key>.save/<slug>.qzl` (bare name) or verbatim path |
-| 1 — player SAVE verb (`create_by_prompt`) | Glulx | app | `<base>/<story-key>.save/<slug>.qzl` (VM state only) |
+| 1 — player SAVE verb (`create_by_prompt`) | Glulx | app | `<base>/<story-key>.save/<slug>.babelmap` (`trigger = "ingame"`; `game.glksave` inside is bare standard Glulx-Quetzal) |
 | 1 — player SAVE verb (`create_by_prompt`) | Glulx | `gvm-cli` | `<base>/<story-key>.save/<slug>.qzl` (bare name) or verbatim path |
 | 1 — game's own save (`create_by_name`, SQ-0296) | Glulx | app & `gvm-cli` | `<base>/<story-key>.save/<name>.qzl` — silent, no prompt; hidden from the saves list |
 | 2 — Save State / Restore State | Z-machine | app | `<base>/<story-key>.save/default.babelmap` or `<slug>.babelmap` (`game.qzl` inside) |

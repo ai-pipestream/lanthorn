@@ -1491,8 +1491,8 @@ mod tests {
     }
 
     /// SQ-0283 Task 6: the Glulx in-game save/restore round-trip through the
-    /// bare standard `save_quetzal()` bytes (what `save_game_named_bytes` now
-    /// writes), NOT the full `save_state()` host snapshot. Also checks that the
+    /// bare standard `save_quetzal()` bytes (what the archive writer seals for an
+    /// in-game trigger), NOT the full `save_state()` host snapshot. Also checks that the
     /// live Glk window survives the restore (unlike `restore_state`, which
     /// would replace it from a `Glk ` chunk, `restore_quetzal` never touches
     /// `self.glk` — §1.8.5).
@@ -1519,7 +1519,7 @@ mod tests {
         assert_eq!(r1.pending_io, Some(PendingIo::Save), "@save bubbles a Save request");
         assert!(!r1.quit);
 
-        // The host would write these bytes to a .qzl file (save_game_named_bytes).
+        // The host seals these bytes into the archive's game.glksave entry.
         let blob = sess.save_quetzal();
         assert!(!blob.is_empty(), "save_quetzal produces bytes");
 
@@ -1544,6 +1544,72 @@ mod tests {
         // touches self.glk) -- the screen tree still has an open window, and
         // the session can keep driving turns through it.
         assert!(!matches!(sess.screen().root, WinNode::Blank), "the live window survives restore_quetzal");
+    }
+
+    /// SQ-0531: Glulx under the unified writer. `@save` now writes the same
+    /// `.babelmap` archive a host Save State writes, but the bytes it seals
+    /// inside must still be the BARE standard Glulx-Quetzal (`save_quetzal`) —
+    /// not the host snapshot, whose `GReg`/`Glk ` chunks would replace the live
+    /// display model on restore. The whole archive round-trips back through the
+    /// game's own `@restore`.
+    #[test]
+    fn glulx_unified_writer_seals_bare_quetzal_for_ingame_and_the_snapshot_for_hoststate() {
+        use crate::archive::SaveTrigger;
+        use crate::persist_files::game_save_bytes;
+        use E::*;
+        const SAVE_RES: u32 = 0x410;
+        const RESTORE_RES: u32 = 0x414;
+        let mut body = open_buffer_prelude();
+        body.extend(line_prompt());
+        body.extend(enc(0x123, &[Imm(0), MemLoad(SAVE_RES)])); // @save
+        body.extend(line_prompt());
+        body.extend(enc(0x124, &[Imm(0), MemLoad(RESTORE_RES)])); // @restore
+        body.extend(enc(0x120, &[])); // quit
+
+        let mut sess =
+            GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        assert_eq!(sess.submit("save").pending_io, Some(PendingIo::Save));
+
+        // The two triggers pick DIFFERENT bytes for Glulx — that is the whole
+        // reason the writer consults the trigger rather than always snapshotting.
+        let ingame = game_save_bytes(&sess, SaveTrigger::Ingame);
+        let host = game_save_bytes(&sess, SaveTrigger::HostState);
+        assert_eq!(ingame.bytes, sess.save_quetzal(), "@save seals the bare standard Glulx-Quetzal");
+        assert_eq!(host.bytes, sess.save_state().bytes, "Save State seals the host snapshot");
+        assert_ne!(ingame.bytes, host.bytes, "the two Glulx save shapes are genuinely different");
+        assert_eq!(ingame.engine, host.engine, "both carry the same engine tag");
+
+        // Write the @save archive exactly as `handle_save_as` does, then answer
+        // the game's own @restore with what comes back out of it.
+        let dir = std::env::temp_dir().join(format!("bm-sq0531-glulx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        crate::persist_files::save_named(
+            &dir, "GLULX-TEST-0531", "slot", SaveTrigger::Ingame, &mapper::mapper::Mapper::default(),
+            &ingame, None, &[], sess.aux_data(), 3, None, None, &[], &[], &[], &[], &[],
+        )
+        .expect("save_named writes the Glulx archive");
+        let path = dir.join("slot.babelmap");
+
+        // `game.glksave` — the Glulx interchange extension — holds those bytes verbatim.
+        assert_eq!(
+            crate::archive::read_quetzal_from_file(&path).expect("inner bytes"),
+            ingame.bytes,
+            "the archive's game.glksave is byte-identical to save_quetzal()"
+        );
+        assert_eq!(
+            crate::archive::read_archive_meta(&path).unwrap().trigger,
+            SaveTrigger::Ingame,
+        );
+
+        assert_eq!(sess.resume_save(true).pending_io, None);
+        assert_eq!(sess.submit("restore").pending_io, Some(PendingIo::Restore));
+        let bytes = crate::archive::read_quetzal_from_file(&path).expect("inner bytes");
+        let r = sess.resume_restore(Some(&bytes));
+        assert!(!r.quit, "restoring the archive returns to the save point, not the trailing quit");
+        assert_eq!(sess.pending_input(), InputKind::Line, "restored back to the turn-2 prompt");
+        assert!(!matches!(sess.screen().root, WinNode::Blank), "the live window survives");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

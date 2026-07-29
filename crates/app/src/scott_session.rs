@@ -500,6 +500,53 @@ mod tests {
         assert_eq!(s.current_location().unwrap().number, start, "restored to the saved room");
     }
 
+    /// SQ-0531: Scott under the unified writer. Scott has NO game-native save
+    /// format — its only bytes are the VM snapshot — so both triggers must seal
+    /// the same payload, and an archive written under either one must restore.
+    /// The trigger still round-trips, because it is what the saves list uses to
+    /// decide whether to advertise a save as portable.
+    #[test]
+    fn scott_saves_and_restores_under_both_triggers() {
+        use crate::archive::SaveTrigger;
+        use crate::persist_files::game_save_bytes;
+
+        let mut s = ScottSession::new(dat(), None).unwrap();
+        let start = s.current_location().unwrap().number;
+
+        let ingame = game_save_bytes(&s, SaveTrigger::Ingame);
+        let host = game_save_bytes(&s, SaveTrigger::HostState);
+        assert_eq!(ingame.bytes, host.bytes, "Scott has one save shape, not two");
+        assert_eq!(ingame.engine, SCOTT_ENGINE, "and the archive is tagged for Scott");
+
+        let dir = std::env::temp_dir().join(format!("bm-sq0531-scott-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (name, trigger, save) in [
+            ("from-the-game", SaveTrigger::Ingame, &ingame),
+            ("from-the-host", SaveTrigger::HostState, &host),
+        ] {
+            crate::persist_files::save_named(
+                &dir, "SCOTT-TEST-0531", name, trigger, &mapper::mapper::Mapper::default(),
+                save, None, &[], s.aux_data(), 1, None, None, &[], &[], &[], &[], &[],
+            )
+            .expect("save_named writes the Scott archive");
+            let path = dir.join(format!("{name}.babelmap"));
+            assert_eq!(crate::archive::read_archive_meta(&path).unwrap().trigger, trigger);
+
+            // Wander off, then restore through the path that trigger selects.
+            s.submit("down");
+            assert_ne!(s.current_location().unwrap().number, start, "moved before restore");
+            let ac = crate::archive::load_archive(&path).expect("load_archive");
+            if trigger.is_portable() {
+                s.restore_game_save(&ac.save).expect("game-save restore");
+            } else {
+                s.restore_state(&ac.engine_save()).expect("host resume");
+            }
+            assert_eq!(s.current_location().unwrap().number, start, "restored to the saved room");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn restore_state_rejects_foreign_engine() {
         let mut s = ScottSession::new(dat(), None).unwrap();

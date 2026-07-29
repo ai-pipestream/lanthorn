@@ -4362,14 +4362,14 @@ mod tests {
                     name: "(default)".to_string(),
                     turns: 0,
                     saved_at: String::new(),
-                    location: None, score: None, is_default: true,
+                    location: None, score: None, is_default: true, trigger: crate::archive::SaveTrigger::HostState,
                 },
                 SaveInfo {
                     path: PathBuf::from("/tmp/named.babelmap"),
                     name: "before-troll".to_string(),
                     turns: 10,
                     saved_at: "2026-06-18T10:00:00Z".to_string(),
-                    location: None, score: None, is_default: false,
+                    location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState,
                 },
             ],
             scroll: Default::default(),
@@ -4460,8 +4460,8 @@ mod tests {
         let mut s = AppState::default();
         s.overlays.saves = Some(SavesState {
             entries: vec![
-                SaveInfo { path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0, saved_at: String::new(), location: None, score: None, is_default: false },
-                SaveInfo { path: PathBuf::from("/tmp/b.babelmap"), name: "b".into(), turns: 0, saved_at: String::new(), location: None, score: None, is_default: false },
+                SaveInfo { path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0, saved_at: String::new(), location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState },
+                SaveInfo { path: PathBuf::from("/tmp/b.babelmap"), name: "b".into(), turns: 0, saved_at: String::new(), location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState },
             ],
             scroll: Default::default(),
         });
@@ -6298,7 +6298,7 @@ mod tests {
                 name: "a".into(),
                 turns: 0,
                 saved_at: String::new(),
-                location: None, score: None, is_default: false,
+                location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState,
             }],
             scroll: Default::default(),
         });
@@ -6450,7 +6450,7 @@ mod tests {
             let mut s = AppState::default();
             s.overlays.saves = Some(SavesState { entries: vec![SaveInfo {
                 path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
-                saved_at: String::new(), location: None, score: None, is_default: false,
+                saved_at: String::new(), location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState,
             }], scroll: Default::default() });
             let esc_action = key_to_action(&s, key(KeyCode::Esc));
             assert!(matches!(esc_action, Action::SavesClose),
@@ -6519,7 +6519,7 @@ mod tests {
             let mut s = AppState::default();
             s.overlays.saves = Some(SavesState { entries: vec![SaveInfo {
                 path: PathBuf::from("/tmp/a.babelmap"), name: "a".into(), turns: 0,
-                saved_at: String::new(), location: None, score: None, is_default: false,
+                saved_at: String::new(), location: None, score: None, is_default: false, trigger: crate::archive::SaveTrigger::HostState,
             }], scroll: Default::default() });
             let a = key_to_action(&s, key(KeyCode::Char('q')));
             assert!(!matches!(a, Action::SavesClose),

@@ -126,9 +126,11 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
 - **Sound & colour** — Z-machine bleeps + Blorb sampled audio and Glulx Glk sound
   channels (AIFF/Ogg/MOD, per-channel volume), plus game-driven `set_colour` /
   Glk style hints honored at 24-bit RGB. → [interpreter](docs/features/interpreter.md) · [remote audio](docs/remote-sound.md)
-- **Saves & rewind** — self-contained `.babelmap` Save States (map + VM + screen
-  + transcript), named slots, standard Quetzal import/export, auto-save/load, and
-  a per-turn **rewind/replay** history with the map reconstructed at each moment.
+- **Saves & rewind** — self-contained `.babelmap` saves (map + VM + screen +
+  transcript) written by Ctrl+S *and* by the story's own `SAVE`, so an in-game
+  restore brings your scrollback back too; named slots, standard Quetzal
+  import/export, auto-save/load, and a per-turn **rewind/replay** history with the
+  map reconstructed at each moment.
   → [saves](docs/features/saves.md) · [persistence model](docs/persistence.md)
 - **Deeply themeable** — a 7-role palette the whole UI derives from, first-class
   styling for all 11 Glk styles, per-game looks, a templated status bar, and a

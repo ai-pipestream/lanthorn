@@ -117,32 +117,97 @@ pub(crate) fn restore_error_msg(e: app::engine::EngineError) -> String {
 }
 
 /// Outcome of [`restore_from_file`]: either the pending `@save`/`@restore`
-/// descriptor was completed (`.qzl` game save — caller just re-observes the
-/// current location), or a full session was resumed from a Save State
-/// archive (`.babelmap` — caller also applies its mapper/screen/transcript/aux).
+/// descriptor was completed from game-save bytes, or a full session was resumed
+/// from a host Save State archive (`Engine::restore_state`). Either way the
+/// caller re-observes the current location; when an `ArchiveContents` comes back
+/// it also applies the archive's map/screen/transcript/aux via
+/// [`apply_archive_state`].
 pub(crate) enum RestoreOutcome {
-    DescriptorCompleted,
+    /// Descriptor-PC bytes were completed. `None` for a bare `.qzl` carried in
+    /// from another interpreter (it has no sidecars); `Some` for an in-game
+    /// `@save` `.babelmap`, which carries the full session alongside them.
+    DescriptorCompleted(Option<Box<app::archive::ArchiveContents>>),
     Resumed(Box<app::archive::ArchiveContents>),
 }
 
-/// Restore `path` into `session`, dispatching on its extension (SQ-0227): a
-/// `.qzl` game save completes the pending `@save` descriptor
-/// (`Engine::restore_game_save`); anything else (`.babelmap`) resumes a full
-/// Save State (`Engine::restore_state`). This is the fix for the SQ-0163
-/// regression — every host restore path used to call `restore_state`
-/// unconditionally, landing the VM on the descriptor instead of past it.
-/// Shared by every host load/restore site (saves-manager Load, `/restore-state`,
-/// and a `.babelmap` picked from the in-game restore picker).
+/// Restore `path` into `session`, dispatching on which PC convention its game
+/// bytes follow (SQ-0227, retargeted by SQ-0531).
+///
+/// A bare `.qzl` and an `@save`-triggered `.babelmap` both hold descriptor-PC
+/// bytes, so both complete the pending `@save` descriptor
+/// (`Engine::restore_game_save`); a host-Save-State `.babelmap` resumes the whole
+/// session (`Engine::restore_state`). The convention now comes from the archive's
+/// `Meta::trigger`, not from the file extension — `@save` writes a `.babelmap`
+/// too. This is still the fix for the SQ-0163 regression: every host restore path
+/// used to call `restore_state` unconditionally, landing the VM on the descriptor
+/// instead of past it. Shared by every host load/restore site (saves-manager Load,
+/// `/restore-state`, and a `.babelmap` picked from the in-game restore picker).
 pub(crate) fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine) -> Result<RestoreOutcome, String> {
     if app::persist_files::is_game_save(path) {
         let bytes = app::archive::read_quetzal_from_file(path).map_err(|e| e.to_string())?;
         session.restore_game_save(&bytes).map_err(restore_error_msg)?;
-        Ok(RestoreOutcome::DescriptorCompleted)
+        return Ok(RestoreOutcome::DescriptorCompleted(None));
+    }
+    let tag = engine_tag(&*session);
+    let ac = load_archive(path).map_err(|e| e.to_string())?;
+    if ac.meta.trigger.is_portable() {
+        // An in-game `@save`: the same guard `restore_state` applies internally,
+        // done by hand because `restore_game_save` takes bare bytes.
+        app::archive::restore_engine_allowed(&ac.engine, tag)?;
+        session.restore_game_save(&ac.save).map_err(restore_error_msg)?;
+        Ok(RestoreOutcome::DescriptorCompleted(Some(Box::new(ac))))
     } else {
-        let ac = load_archive(path).map_err(|e| e.to_string())?;
         session.restore_state(&ac.engine_save()).map_err(restore_error_msg)?;
         Ok(RestoreOutcome::Resumed(Box::new(ac)))
     }
+}
+
+/// Reinstate everything an archive carries OUTSIDE the VM: the map, the
+/// transcript (styles, paragraph layout, and inline art), the Z-machine screen,
+/// the v6 graphics canvases, aux data, turn history, and the turn counter.
+///
+/// The VM-side restore has already happened by the time this runs — either a full
+/// `restore_state` resume or a descriptor completion from an in-game `@save`
+/// archive (SQ-0531). Shared by every `.babelmap` restore site so the two never
+/// drift; the caller still owns its own notices and overlay bookkeeping.
+pub(crate) fn apply_archive_state(
+    ac: app::archive::ArchiveContents,
+    session: &mut dyn Engine,
+    mapper: &mut mapper::mapper::Mapper,
+    state: &mut app::state::AppState,
+) {
+    if let Some(scr) = ac.screen.clone() {
+        if let Some(z) = zvm_session_opt_mut(session) {
+            app::session::restore_screen(&mut z.machine, scr);
+        }
+    }
+    // v6 graphics canvases, in their persisted paint order; a no-op for
+    // non-v6 archives (`ac.pictures` empty) and for Glulx (SQ-0516).
+    if let Some(z) = zvm_session_opt_mut(session) {
+        z.load_pictures_png(&ac.pictures);
+    }
+    // Hand Glulx back the room it was saved in (SQ-0523); no-op for zvm.
+    seed_resumed_location(session, &ac.meta);
+    if state.config.aux_storage != app::config::AuxStorage::Global {
+        session.set_aux_data(ac.aux.clone());
+    }
+    *mapper = ac.mapper;
+    state.transcript = ac.transcript;
+    state.clear_anchor = None;
+    state.transcript_kinds = ac.transcript_kinds;
+    state.transcript_runs = ac.transcript_runs;
+    state.transcript_para = ac.transcript_para;
+    state.reset_transcript_sidecars();
+    // Re-attach inline images AFTER the sidecar reset so a restored transcript
+    // renders its embedded art, not just its text (SQ-0518).
+    state.transcript_images = ac.transcript_images;
+    state.history = ac.history;
+    // Named-slot archives carry no command history; only adopt it when present
+    // so loading a slot doesn't wipe the per-game history.
+    if !ac.command_history.is_empty() {
+        state.command_history = ac.command_history;
+    }
+    state.turns = ac.meta.turns;
 }
 
 /// Hand a resumed session the room the archive recorded (SQ-0523).
@@ -208,7 +273,7 @@ mod tests {
         // dispatch to descriptor completion, not a resume.
         let mut fresh = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
         let outcome = super::restore_from_file(&qzl_path, &mut fresh).expect("restore .qzl game save");
-        assert!(matches!(outcome, super::RestoreOutcome::DescriptorCompleted));
+        assert!(matches!(outcome, super::RestoreOutcome::DescriptorCompleted(None)));
         assert_eq!(fresh.machine.global(0), 2, "descriptor completion stores 2 into G0 (SQ-0163 fix)");
         // SQ-0233: the host .qzl restore now runs FORWARD past the @save
         // descriptor to the game's next input (like the in-game @restore),

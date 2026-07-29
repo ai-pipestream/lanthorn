@@ -317,6 +317,11 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("ifdb_result_meta", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     row("ifdb_download_marker", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
     row("ifdb_attribution", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
+    // ── saves manager (SQ-0531) — the Type cell's portability tint. A "Game"
+    // save carries standard save-instruction-PC bytes any interpreter reads and
+    // gets the accent + the ↗ glyph; a host "State" snapshot stays here. ──
+    row("saves_portable", Section::Elements, Kind::Style, Some("accent"), glyph("↗")),
+    row("saves_host_only", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
 ]);
 
 #[cfg(test)]
@@ -460,6 +465,8 @@ mod tests {
         "ifdb_result_selected",
         "ifdb_result_meta",
         "ifdb_download_marker",
+        "saves_portable",
+        "saves_host_only",
         "ifdb_attribution",
     ];
 

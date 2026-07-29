@@ -11,6 +11,36 @@ binary's `--version` at once.
 
 ---
 
+## Unreleased
+
+### Changed
+
+- **One save format, whoever asked for it (SQ-0531).** A story's own `SAVE` now
+  writes the same self-contained `.babelmap` archive Ctrl+S writes — map, screen,
+  transcript and inline art included — instead of a bare VM-state-only file. So an
+  in-game `restore` finally brings your scrollback back with it, even into a
+  freshly launched session. The saves manager's **Type** column is now driven by
+  which mechanism wrote the save rather than by its file extension, and marks the
+  portable ones (**Game ↗**) — those hold standard save-instruction-PC bytes that
+  unzip straight into another interpreter. Host snapshots are taken between turns,
+  where no save instruction is executing, so they are honestly left unmarked.
+  Restore still accepts a bare `.qzl`/`.sav` carried in from another interpreter,
+  in the saves manager and at the game's own `restore` prompt alike.
+- **Two new theme selectors** — `saves_portable` (accent + the `↗` glyph) and
+  `saves_host_only` (muted) style the saves manager's Type cell.
+
+### Save format
+
+- **`.babelmap` archive `format_version` 4 → 5.** `meta.json` gained
+  `trigger: "ingame" | "hoststate"`; restore dispatches on it instead of on the
+  file extension. Archives written before the bump still load and read as
+  `"hoststate"` — which is exactly what they were — but a version-5 archive is
+  rejected by older builds, as the format freeze intends. Bare Quetzal /
+  Glulx-Quetzal interchange files are untouched. See
+  [`docs/release/save-format-policy.md`](docs/release/save-format-policy.md).
+
+---
+
 ## v0.1.0-beta.1 — first public beta
 
 The first public build of babelmap: a terminal interactive-fiction interpreter

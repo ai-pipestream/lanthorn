@@ -61,8 +61,8 @@ use crate::ingame_io::{
 };
 use crate::reset::reset_game;
 use crate::engine_helpers::{
-    engine_supports_save, engine_tag, glulx_session_opt_mut, restore_error_msg, restore_from_file,
-    zvm_session_mut, zvm_session_opt, zvm_session_opt_mut, RestoreOutcome,
+    apply_archive_state, engine_supports_save, engine_tag, glulx_session_opt_mut, restore_error_msg,
+    restore_from_file, zvm_session_mut, zvm_session_opt, zvm_session_opt_mut, RestoreOutcome,
 };
 
 // ── Run outcome ─────────────────────────────────────────────────────────────
@@ -2442,6 +2442,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     },
                     location,
                     score,
+                    trigger: app::archive::SaveTrigger::HostState,
                 };
                 // v6 graphics canvases ride along (Lane P): empty for non-v6
                 // sessions, so the archive layout is unchanged for them.
@@ -2588,21 +2589,33 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 // Load the selected save (archive → mapper + machine restore).
                 // Clone path and name to release the borrow on state.overlays.saves before mutating state.
                 let load_info = state.overlays.saves.as_ref().and_then(|s| {
-                    s.entries.get(s.scroll.selected).map(|e| (e.path.clone(), e.name.clone()))
+                    s.entries.get(s.scroll.selected).map(|e| (e.path.clone(), e.name.clone(), e.trigger))
                 });
 
-                // In-game restore of a .qzl game save: feed Quetzal bytes back
-                // into the suspended VM, completing the @restore descriptor
-                // (unchanged). A .babelmap Save State picked here instead falls
-                // through below to a full session resume (SQ-0227 Task 3).
+                // In-game restore of a GAME save — a bare .qzl from another
+                // interpreter, or a .babelmap that babelmap's own @save wrote
+                // (SQ-0531): feed the descriptor-PC bytes back into the
+                // suspended VM, completing the @restore. When they came out of
+                // an archive, its map/transcript/screen ride along too. A host
+                // Save State picked here instead falls through below to a full
+                // session resume (SQ-0227 Task 3).
                 if state.ingame_io == Some(app::session::PendingIo::Restore)
-                    && load_info.as_ref().is_some_and(|(path, _)| app::persist_files::is_game_save(path))
+                    && load_info.as_ref().is_some_and(|(_, _, t)| t.is_portable())
                 {
-                    let Some((path, entry_name)) = load_info else { continue };
+                    let Some((path, entry_name, _)) = load_info else { continue };
                     state.overlays.saves = None;
                     state.ingame_io = None;
                     let result = match app::archive::read_quetzal_from_file(&path) {
                         Ok(bytes) => {
+                            // Reinstate the archive's session state BEFORE resuming,
+                            // so the game's own post-restore output lands at the end
+                            // of the restored scrollback instead of being wiped by it.
+                            if !app::persist_files::is_game_save(&path) {
+                                match app::archive::load_archive(&path) {
+                                    Ok(ac) => apply_archive_state(ac, &mut *session, &mut mapper, &mut state),
+                                    Err(e) => state.push_notice(&format!("[Save State sidecars unreadable: {}]", e)),
+                                }
+                            }
                             state.push_notice(&format!("[Game restored from {}]", entry_name));
                             session.resume_restore(Some(&bytes))
                         }
@@ -2627,46 +2640,23 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 // answered with resume_restore(None) so the VM isn't left
                 // blocked waiting for a result).
                 let ingame_restore_pending = state.ingame_io == Some(app::session::PendingIo::Restore);
-                if let Some((path, entry_name)) = load_info {
+                if let Some((path, entry_name, _)) = load_info {
                     match restore_from_file(&path, &mut *session) {
-                        Ok(RestoreOutcome::DescriptorCompleted) => {
+                        Ok(RestoreOutcome::DescriptorCompleted(ac)) => {
                             state.overlays.saves = None;
+                            // An in-game @save archive carries the whole session
+                            // alongside its game bytes (SQ-0531); a bare .qzl has
+                            // nothing but the bytes.
+                            if let Some(ac) = ac {
+                                state.ingame_io = None;
+                                apply_archive_state(*ac, &mut *session, &mut mapper, &mut state);
+                            }
                             reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
                             state.push_notice(&format!("[Game restored from {}]", entry_name));
                         }
                         Ok(RestoreOutcome::Resumed(ac)) => {
                             state.ingame_io = None;
-                            if let Some(scr) = ac.screen.clone() {
-                                if let Some(z) = zvm_session_opt_mut(&mut *session) { app::session::restore_screen(&mut z.machine, scr); }
-                            }
-                            // Restore the v6 graphics canvases in their persisted
-                            // paint order (Lane P); a no-op for non-v6 archives.
-                            if let Some(z) = zvm_session_opt_mut(&mut *session) {
-                                z.load_pictures_png(&ac.pictures);
-                            }
-                            // Hand Glulx back the room it was saved in (SQ-0523); no-op for zvm.
-                            crate::engine_helpers::seed_resumed_location(&mut *session, &ac.meta);
-                            if state.config.aux_storage != app::config::AuxStorage::Global {
-                                session.set_aux_data(ac.aux.clone());
-                            }
-                            mapper = ac.mapper;
-                            state.transcript = ac.transcript;
-                            state.clear_anchor = None;
-                            state.transcript_kinds = ac.transcript_kinds;
-                            state.transcript_runs = ac.transcript_runs;
-                            state.transcript_para = ac.transcript_para;
-                            state.reset_transcript_sidecars();
-                            // Re-attach inline images after the sidecar reset so a
-                            // restored transcript renders its embedded art (SQ-0518).
-                            state.transcript_images = ac.transcript_images;
-                            state.history = ac.history;
-                            // Named-slot archives carry no command history; only
-                            // adopt it when present so a slot load doesn't wipe it.
-                            if !ac.command_history.is_empty() {
-                                state.command_history = ac.command_history;
-                            }
-                            // Restore turn counter from the loaded archive.
-                            state.turns = ac.meta.turns;
+                            apply_archive_state(*ac, &mut *session, &mut mapper, &mut state);
                             // Re-observe current location.
                             reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
                             state.push_notice(&format!("[Loaded save: {}]", entry_name));
@@ -3356,7 +3346,7 @@ mod tests {
             name: name.to_string(),
             turns: 0,
             saved_at: ts.to_string(),
-            location: None, score: None, is_default: false,
+            location: None, score: None, is_default: false, trigger: app::archive::SaveTrigger::HostState,
         };
         let mut v = [mk("old", "2026-06-01T10:00:00Z"),
             mk("legacy", ""),

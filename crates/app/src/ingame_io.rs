@@ -5,13 +5,14 @@
 //! change. `finish_resumed_turn` and the `combined_saves`/persistence helpers
 //! stay in their homes and are reached via `crate::`.
 
+use app::archive::SaveTrigger;
 use app::engine::Engine;
-use app::persist_files::{delete_save, list_saves, save_game_named, save_named};
+use app::persist_files::{delete_save, list_saves, save_named};
 use app::state::{AppState, SavesState};
 use mapper::mapper::Mapper;
 use ratatui::layout::Rect;
 
-use crate::engine_helpers::{glulx_session_opt, zvm_session_opt};
+use crate::engine_helpers::zvm_session_opt;
 use crate::{combined_saves, turn};
 
 /// Resolve the confirm-delete dialog for the selected save. `confirmed` deletes
@@ -67,34 +68,21 @@ pub(crate) fn handle_save_as(
         }
         return;
     }
-    let result = if ingame {
-        // Game @save -> bare standard in-game save file (VM state only,
-        // call-stub resume). The Z-machine writes standard descriptor-PC
-        // Quetzal; Glulx writes `save_quetzal()` bytes (both land as
-        // `<ifid>-<slug>.qzl` so the in-game restore picker lists them).
-        match zvm_session_opt(&*session) {
-            Some(z) => save_game_named(dir, &buf, &z.machine).map(|_| ()),
-            None => {
-                // Glulx writes its own Quetzal; other host-snapshot engines
-                // (Scott, which has no game-native save format) write their VM
-                // snapshot, exactly what `restore_game_save` feeds back on load.
-                let bytes = match glulx_session_opt(&*session) {
-                    Some(g) => g.save_quetzal(),
-                    None => session.save_state().bytes,
-                };
-                app::persist_files::save_game_named_bytes(dir, &buf, &bytes).map(|_| ())
-            }
-        }
-    } else {
-        // Host "Save State" named slot -> rich .babelmap archive.
-        let (location, score) = crate::engine_helpers::save_summary(&*session, state);
-        save_named(dir, ifid, &buf, mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images)
-    };
+    // ONE writer for both triggers (SQ-0531): an in-game `@save` and a host
+    // "Save State" named slot both produce the same `.babelmap` archive — map,
+    // transcript (art included), screen, aux and all — so an in-game save is no
+    // longer a lesser save. What differs is the game bytes riding inside, and
+    // `Meta::trigger` is what records which convention they follow.
+    let trigger = if ingame { SaveTrigger::Ingame } else { SaveTrigger::HostState };
+    let save = app::persist_files::game_save_bytes(&*session, trigger);
+    let (location, score) = crate::engine_helpers::save_summary(&*session, state);
+    let result = save_named(dir, ifid, &buf, trigger, mapper, &save, zvm_session_opt(&*session).map(|z| &z.machine.screen), &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images);
     match result {
         Ok(()) => {
             state.push_notice(&format!("[Saved as: {}]", buf));
-            // A host Save-State named slot captures the current progress
-            // (an in-game @save writes a .qzl, a different mechanism).
+            // A host Save-State named slot captures the current progress.
+            // (An in-game @save now captures the same archive — whether it
+            // should clear this flag too is an open question, SQ-0531.)
             if !ingame {
                 state.unsaved_progress = false;
             }
@@ -257,4 +245,288 @@ pub(crate) fn resolve_filename_request(
         return quit;
     }
     false
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use app::archive::SaveTrigger;
+    use app::engine::Engine;
+    use app::session::{GameSession, PendingIo};
+    use mapper::direction::Direction;
+    use mapper::mapper::Mapper;
+
+    const IFID: &str = "ZCODE-1-TEST00-0531";
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "babelmap-sq0531-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A fresh minizork session, parked at its opening prompt.
+    fn minizork() -> GameSession {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/minizork.z3");
+        let story = std::fs::read(&fixture).expect("minizork.z3 fixture");
+        GameSession::new(story, true, false, None).expect("new minizork")
+    }
+
+    /// App state carrying a recognisable session: transcript lines and the turn
+    /// counter an archive is supposed to bring back.
+    fn state_with_session(io: Option<PendingIo>) -> app::state::AppState {
+        let mut s = app::state::AppState::default();
+        s.ingame_io = io;
+        s.unsaved_progress = true;
+        s.turns = 11;
+        s.push_transcript_internal("West of House", app::state::TranscriptKind::Story);
+        s.push_transcript_internal(
+            "Opening the small mailbox reveals a leaflet.",
+            app::state::TranscriptKind::Story,
+        );
+        s
+    }
+
+    fn mapper_with_room() -> Mapper {
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None);
+        m.observe(2, "North of House", Some(Direction::N));
+        m
+    }
+
+    /// Drive minizork to its `@save` suspension, so `save_quetzal()` is
+    /// descriptor-PC — exactly the state the host writes a game save from.
+    fn at_ingame_save() -> GameSession {
+        let mut sess = minizork();
+        assert!(!sess.submit("open mailbox").quit);
+        let r = sess.submit("save");
+        assert_eq!(r.pending_io, Some(PendingIo::Save), "'save' reaches @save");
+        sess
+    }
+
+    // ── The unified writer ───────────────────────────────────────────────────
+
+    #[test]
+    fn ingame_save_writes_a_full_archive_whose_game_bytes_stay_interchange_grade() {
+        // The heart of SQ-0531: `@save` no longer writes a bare `.qzl`. It writes
+        // the SAME `.babelmap` a host Save State writes — map, transcript, screen
+        // — while the bytes sealed inside stay byte-identical to
+        // `Machine::save_quetzal()`, so unzipping `game.qzl` still hands another
+        // interpreter a standard Quetzal save.
+        let dir = temp_dir("ingame-write");
+        let mut sess = at_ingame_save();
+        let expected = sess.machine.save_quetzal();
+        let mut state = state_with_session(Some(PendingIo::Save));
+        let mut mapper = mapper_with_room();
+
+        super::handle_save_as("chapter one".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+
+        let path = dir.join("chapter-one.babelmap");
+        assert!(path.exists(), "@save writes the archive");
+        assert!(!dir.join("chapter-one.qzl").exists(), "and no bare .qzl beside it");
+
+        let meta = app::archive::read_archive_meta(&path).expect("meta");
+        assert_eq!(meta.trigger, SaveTrigger::Ingame, "the trigger round-trips through meta.json");
+        assert!(meta.trigger.is_portable(), "an @save archive is advertised as portable");
+        assert_eq!(meta.turns, 11);
+
+        assert_eq!(
+            app::archive::read_quetzal_from_file(&path).expect("inner bytes"),
+            expected,
+            "game.qzl is byte-identical to machine.save_quetzal()"
+        );
+
+        // The whole session rode along — this is what the old bare .qzl could not do.
+        let ac = app::archive::load_archive(&path).expect("load_archive");
+        assert_eq!(ac.transcript, state.transcript, "the scrollback is in the archive");
+        assert_eq!(ac.mapper.graph.rooms().count(), mapper.graph.rooms().count(), "so is the map");
+        assert!(ac.screen.is_some(), "so is the Z-machine screen");
+
+        // Surrounding in-game behaviour is untouched: the flag-hop that resumes
+        // the VM fires, and the dialog is not re-opened.
+        assert_eq!(state.ingame_resume_save, Some(true));
+        assert!(state.overlays.save_name_dialog.is_none());
+        // OPEN QUESTION (SQ-0531): an in-game @save still leaves unsaved_progress
+        // set. Pinned so that changing it is a deliberate decision.
+        assert!(state.unsaved_progress, "in-game @save does not (yet) clear unsaved_progress");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_save_state_writes_the_same_archive_with_the_hoststate_trigger() {
+        let dir = temp_dir("host-write");
+        let mut sess = minizork();
+        let expected = sess.save_state().bytes;
+        let mut state = state_with_session(None); // not in-game -> host Save State
+        let mut mapper = mapper_with_room();
+
+        super::handle_save_as("chapter one".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+
+        let path = dir.join("chapter-one.babelmap");
+        let meta = app::archive::read_archive_meta(&path).expect("meta");
+        assert_eq!(meta.trigger, SaveTrigger::HostState);
+        assert!(!meta.trigger.is_portable(), "a between-turns snapshot is NOT advertised as portable");
+        assert_eq!(app::archive::read_quetzal_from_file(&path).unwrap(), expected);
+
+        // Host-save bookkeeping is unchanged by the unification.
+        assert!(!state.unsaved_progress, "a host Save State captures progress");
+        assert_eq!(state.ingame_resume_save, None, "no suspended VM to resume");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_name_and_write_errors_still_reopen_the_dialog_in_game() {
+        // Format unification must not disturb the retry loop.
+        let dir = temp_dir("retry");
+        let mut sess = at_ingame_save();
+        let mut state = state_with_session(Some(PendingIo::Save));
+        let mut mapper = Mapper::default();
+
+        super::handle_save_as(String::new(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+        assert!(state.overlays.save_name_dialog.is_some(), "empty name re-opens the dialog");
+        assert_eq!(state.ingame_resume_save, None, "and does not resume the VM");
+
+        // "default" is the reserved slug -> the writer errors -> retry.
+        state.overlays.save_name_dialog = None;
+        super::handle_save_as("default".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+        assert!(state.overlays.save_name_dialog.is_some(), "a write error re-opens the dialog");
+        assert_eq!(state.ingame_resume_save, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Restore: both containers, both directions ────────────────────────────
+
+    #[test]
+    fn ingame_restore_of_a_babelmap_round_trips_the_game() {
+        // Write an @save archive, play on, then answer the game's own @restore
+        // with that archive. Oracle: the same probe command after the restore
+        // reproduces the pre-restore transcript exactly.
+        let dir = temp_dir("ingame-restore");
+        let mut sess = at_ingame_save();
+        let mut state = state_with_session(Some(PendingIo::Save));
+        let mut mapper = mapper_with_room();
+        super::handle_save_as("slot".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+        let path = dir.join("slot.babelmap");
+
+        let _ = sess.resume_save(true); // @save completes; the game runs on
+        let t1 = sess.submit("north").transcript;
+
+        let r = sess.submit("restore");
+        assert_eq!(r.pending_io, Some(PendingIo::Restore), "'restore' reaches @restore");
+        let bytes = app::archive::read_quetzal_from_file(&path).expect("inner bytes");
+        sess.resume_restore(Some(&bytes));
+
+        let t2 = sess.submit("north").transcript;
+        assert_eq!(t2, t1, "in-game @restore of a .babelmap resumes the save point");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ingame_restore_of_a_foreign_raw_qzl_still_works() {
+        // The interchange path must not regress: a bare Quetzal file carried in
+        // from another interpreter still answers the game's @restore.
+        let dir = temp_dir("foreign");
+        let mut sess = at_ingame_save();
+        let foreign = dir.join("from-frotz.qzl");
+        std::fs::write(&foreign, sess.machine.save_quetzal()).unwrap();
+
+        let _ = sess.resume_save(true);
+        let t1 = sess.submit("north").transcript;
+
+        let r = sess.submit("restore");
+        assert_eq!(r.pending_io, Some(PendingIo::Restore));
+        let bytes = app::archive::read_quetzal_from_file(&foreign).expect("raw bytes");
+        sess.resume_restore(Some(&bytes));
+
+        let t2 = sess.submit("north").transcript;
+        assert_eq!(t2, t1, "a foreign raw .qzl still restores in-game");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_load_dispatches_on_the_trigger_not_the_extension() {
+        use crate::engine_helpers::{restore_from_file, RestoreOutcome};
+
+        let dir = temp_dir("host-load");
+        let mut mapper = mapper_with_room();
+
+        // (1) An @save archive -> descriptor completion, sidecars included.
+        let mut sess = at_ingame_save();
+        let mut state = state_with_session(Some(PendingIo::Save));
+        super::handle_save_as("game-slot".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+        let ingame_path = dir.join("game-slot.babelmap");
+
+        // (2) A host Save State archive -> full resume.
+        let mut host_sess = minizork();
+        let mut host_state = state_with_session(None);
+        super::handle_save_as("host-slot".into(), &dir, IFID, &mut mapper, &mut host_sess, &mut host_state);
+        let host_path = dir.join("host-slot.babelmap");
+
+        // (3) A bare foreign .qzl -> descriptor completion, no sidecars.
+        let raw = dir.join("foreign.qzl");
+        std::fs::write(&raw, at_ingame_save().machine.save_quetzal()).unwrap();
+
+        let mut fresh = minizork();
+        match restore_from_file(&ingame_path, &mut fresh).expect("load @save archive") {
+            RestoreOutcome::DescriptorCompleted(Some(ac)) => {
+                assert_eq!(ac.transcript, state.transcript, "the archive's scrollback comes back too");
+                assert_eq!(ac.meta.turns, 11);
+            }
+            _ => panic!("an @save archive must complete the descriptor, not resume"),
+        }
+
+        let mut fresh2 = minizork();
+        assert!(
+            matches!(restore_from_file(&host_path, &mut fresh2), Ok(RestoreOutcome::Resumed(_))),
+            "a host Save State archive still resumes the whole session"
+        );
+
+        let mut fresh3 = minizork();
+        assert!(
+            matches!(restore_from_file(&raw, &mut fresh3), Ok(RestoreOutcome::DescriptorCompleted(None))),
+            "a bare .qzl still completes the descriptor with no sidecars"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_saves_list_reports_the_trigger_for_every_kind() {
+        let dir = temp_dir("listing");
+        let mut mapper = mapper_with_room();
+
+        let mut sess = at_ingame_save();
+        let mut state = state_with_session(Some(PendingIo::Save));
+        super::handle_save_as("from the game".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+
+        let mut host_sess = minizork();
+        let mut host_state = state_with_session(None);
+        super::handle_save_as("from the host".into(), &dir, IFID, &mut mapper, &mut host_sess, &mut host_state);
+
+        std::fs::write(dir.join("from-frotz.qzl"), b"carried in from elsewhere").unwrap();
+
+        let entries = crate::combined_saves(&dir);
+        let find = |n: &str| {
+            entries.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("{n} should be listed"))
+        };
+        assert_eq!(find("from the game").trigger, SaveTrigger::Ingame);
+        assert_eq!(find("from the host").trigger, SaveTrigger::HostState);
+        assert_eq!(find("from-frotz").trigger, SaveTrigger::Ingame, "a bare .qzl IS a game save");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -23,6 +23,10 @@ pub struct SaveInfo {
     pub score: Option<i32>,
     /// True for the default (IFID-only) quick-save slot.
     pub is_default: bool,
+    /// What wrote this save, and therefore whether its game bytes are portable
+    /// (SQ-0531). A bare `.qzl` is always `Ingame` — it IS a standard game save;
+    /// a `.babelmap` reports the trigger recorded in its `meta.json`.
+    pub trigger: crate::archive::SaveTrigger,
 }
 
 /// List all Save-State files in a game dir (SQ-0284).
@@ -71,6 +75,7 @@ pub fn list_saves(game_dir: &Path) -> Vec<SaveInfo> {
             location: meta.location.clone(),
             score: meta.score,
             is_default,
+            trigger: meta.trigger,
         });
     }
 
@@ -92,11 +97,17 @@ pub fn list_saves(game_dir: &Path) -> Vec<SaveInfo> {
 /// hyphens). The IFID is retained only as archive metadata (identity/display).
 /// The reserved `default` slug is rejected so a named save never clobbers the
 /// auto/singleton slot.
+///
+/// `trigger` records WHO asked for the file (SQ-0531): the host's Save State, or
+/// the game's own `@save`. Both write the same archive; the trigger is what tells
+/// a later restore which PC convention `save.bytes` follows — and what lets the
+/// saves list say honestly which saves are portable to other interpreters.
 #[allow(clippy::too_many_arguments)]
 pub fn save_named(
     game_dir: &Path,
     ifid: &str,
     name: &str,
+    trigger: crate::archive::SaveTrigger,
     mapper: &Mapper,
     save: &crate::engine::EngineSave,
     screen: Option<&zvm::screen::ScreenState>,
@@ -129,9 +140,31 @@ pub fn save_named(
         saved_at,
         location,
         score,
+        trigger,
     };
     // Named saves are separate slots; command history is per-game, not per-slot.
     crate::archive::save_archive_meta_pics(&path, mapper, save, screen, aux, meta, transcript, transcript_kinds, transcript_runs, transcript_para, transcript_images, &[], &[], pics)
+}
+
+/// The engine state to seal into an archive's `game.<ext>` entry for `trigger`
+/// (SQ-0531).
+///
+/// [`SaveTrigger::Ingame`] picks the GAME's own save convention — the bytes a
+/// foreign interpreter can read. For the Z-machine that IS
+/// [`crate::engine::Engine::save_state`] (it returns `Machine::save_quetzal()`
+/// verbatim, descriptor PC and all, because the VM is suspended on its `@save`).
+/// Glulx keeps two shapes apart, so this reaches for the bare standard
+/// Glulx-Quetzal (`IFhd+CMem+Stks+MAll`) instead of the host snapshot's
+/// `GReg`+`Glk `-bearing one. Scott has no game-native save format at all, so both
+/// triggers seal its VM snapshot — the only bytes it has.
+pub fn game_save_bytes(session: &dyn crate::engine::Engine, trigger: crate::archive::SaveTrigger) -> crate::engine::EngineSave {
+    let host = session.save_state();
+    match session.as_any().downcast_ref::<crate::glulx_session::GlulxSession>() {
+        Some(g) if trigger.is_portable() => {
+            crate::engine::EngineSave::new(host.engine, host.format_version, g.save_quetzal())
+        }
+        _ => host,
+    }
 }
 
 /// Remove a save file.
@@ -252,6 +285,7 @@ pub fn list_qzl(game_dir: &Path) -> Vec<SaveInfo> {
                 let saved_at = rfc3339_mtime(&p);
                 out.push(SaveInfo {
                     path: p, name, turns: 0, saved_at, location: None, score: None, is_default: false,
+                    trigger: crate::archive::SaveTrigger::Ingame,
                 });
             }
         }
@@ -279,6 +313,7 @@ pub fn list_qzl_auto(game_dir: &Path) -> Vec<SaveInfo> {
                 let saved_at = rfc3339_mtime(&p);
                 out.push(SaveInfo {
                     path: p, name, turns: 0, saved_at, location: None, score: None, is_default: false,
+                    trigger: crate::archive::SaveTrigger::Ingame,
                 });
             }
         }
@@ -315,15 +350,6 @@ pub fn save_game_named(game_dir: &Path, name: &str, machine: &zvm::cpu::exec::Ma
     Ok(path)
 }
 
-/// Write a named in-game save from raw engine bytes: `<game_dir>/<slug>.qzl`.
-/// The engine-agnostic counterpart to [`save_game_named`] — the Glulx adapter has
-/// no `zvm::Machine`, so it passes its own `save_state()` snapshot bytes here.
-pub fn save_game_named_bytes(game_dir: &Path, name: &str, bytes: &[u8]) -> io::Result<PathBuf> {
-    let path = game_save_path(game_dir, name)?;
-    std::fs::write(&path, bytes)?;
-    Ok(path)
-}
-
 /// Resolve a named `.qzl` game-save path inside `game_dir`, rejecting an empty
 /// or reserved (`default`) slug.
 fn game_save_path(game_dir: &Path, name: &str) -> io::Result<PathBuf> {
@@ -337,9 +363,12 @@ fn game_save_path(game_dir: &Path, name: &str) -> io::Result<PathBuf> {
     Ok(game_dir.join(format!("{}.qzl", slug)))
 }
 
-/// A `.qzl` file is a game save (bare standard Quetzal, descriptor-PC
-/// convention); anything else (in practice, `.babelmap`) is a Save State
-/// (resume-PC convention). Restore/load sites dispatch on this.
+/// A `.qzl` file is a BARE game save: standard Quetzal with no wrapper, carried in
+/// from another interpreter (babelmap's own `@save` writes a `.babelmap` archive
+/// now — SQ-0531). Anything else is a `.babelmap`, whose PC convention is recorded
+/// in its `Meta::trigger`, not in its extension. Restore sites use this only to
+/// tell "raw bytes" from "archive"; which convention the bytes follow comes from
+/// the trigger.
 pub fn is_game_save(path: &Path) -> bool {
     path.extension().is_some_and(|e| e == "qzl")
 }
@@ -491,7 +520,7 @@ mod tests {
         mapper.observe(1, "Foyer", None);
 
         let ifid = "ZCODE-1-TEST00-0001";
-        super::save_named(&dir, ifid, "before-troll", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 42, None, None, &[], &[], &[], &[], &[])
+        super::save_named(&dir, ifid, "before-troll", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 42, None, None, &[], &[], &[], &[], &[])
             .expect("save_named ok");
 
         // Path is `<slug>.babelmap` inside the game dir (no ifid in the name).
@@ -522,7 +551,7 @@ mod tests {
         let dir = make_temp_dir("summary");
         let mapper = Mapper::default();
         let ifid = "ZCODE-1-TEST00-0411";
-        super::save_named(&dir, ifid, "at-troll", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 7, Some("The Troll Room".into()), Some(10), &[], &[], &[], &[], &[])
+        super::save_named(&dir, ifid, "at-troll", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 7, Some("The Troll Room".into()), Some(10), &[], &[], &[], &[], &[])
             .expect("save_named ok");
 
         let saves = super::list_saves(&dir);
@@ -545,7 +574,7 @@ mod tests {
         let ifid = "ZCODE-1-TEST00-0009";
 
         // "Default" slugifies to "default" — reserved for the auto/singleton slot.
-        let err = super::save_named(&dir, ifid, "Default", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 1, None, None, &[], &[], &[], &[], &[])
+        let err = super::save_named(&dir, ifid, "Default", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 1, None, None, &[], &[], &[], &[], &[])
             .expect_err("reserved slug must be rejected");
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(!dir.join("default.babelmap").exists(), "must not clobber the default slot");
@@ -566,11 +595,11 @@ mod tests {
             .expect("default save ok");
 
         // Write two named saves.
-        super::save_named(&dir, ifid, "save-a", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 10, None, None, &[], &[], &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "save-a", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 10, None, None, &[], &[], &[], &[], &[]).unwrap();
         // Small sleep between named saves so timestamps differ, but since we
         // can't sleep in tests, we directly patch the timestamps via the archive
         // — instead, just verify ordering constraint is maintained.
-        super::save_named(&dir, ifid, "save-b", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 20, None, None, &[], &[], &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "save-b", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 20, None, None, &[], &[], &[], &[], &[]).unwrap();
 
         let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 3, "should find 3 saves (1 default + 2 named)");
@@ -659,7 +688,7 @@ mod tests {
         let mapper = Mapper::default();
         let ifid = "ZCODE-1-TEST00-0004";
 
-        super::save_named(&dir, ifid, "to-delete", &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 5, None, None, &[], &[], &[], &[], &[]).unwrap();
+        super::save_named(&dir, ifid, "to-delete", crate::archive::SaveTrigger::HostState, &mapper, &es(&machine), Some(&machine.screen), &[], &machine.aux_data, 5, None, None, &[], &[], &[], &[], &[]).unwrap();
         let saves = super::list_saves(&dir);
         assert_eq!(saves.len(), 1);
         let path = saves[0].path.clone();
