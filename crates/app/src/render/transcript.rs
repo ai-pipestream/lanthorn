@@ -1269,7 +1269,7 @@ pub(crate) fn visible_suggestion_line(
 /// candidate adds nothing — which is exactly the state right after Tab applied it,
 /// so the hint clears itself without any extra bookkeeping.
 pub(crate) fn ghost_completion(state: &AppState) -> Option<String> {
-    if state.focus != Focus::Game || state.any_overlay_open() {
+    if state.focus != Focus::Game || state.any_modal_overlay_open() {
         return None;
     }
     if state.input.as_str().starts_with(state.config.command_prefix) {
@@ -1610,7 +1610,9 @@ fn render_input_content(
         draw_str_clipped(buf, gx, input_y, g_trunc, state.colors.theme.get("suggestion").style, region);
     }
 
-    if state.focus == Focus::Game && !state.any_overlay_open() {
+    // Not focus-gated: the caret shows what you typed and where, which stays true
+    // while the keyboard is on the map. A modal still suppresses it.
+    if !state.any_modal_overlay_open() {
         // Draw the caret where it actually IS, not always after the last char (SQ-0354). Clamped to
         // the drawn text: a long line is truncated to fit, and the caret must not be painted past
         // what is on screen.
@@ -2038,8 +2040,7 @@ fn render_middle(
     if !state.config.command_bar
         && !state.char_mode
         && !state.event_wait
-        && state.focus == Focus::Game
-        && !state.any_overlay_open()
+        && !state.any_modal_overlay_open()
         && effective_scroll == 0
         && !lines.is_empty()
     {
@@ -3790,20 +3791,59 @@ mod tests {
     }
 
     #[test]
-    fn render_transcript_no_cursor_when_not_focused() {
+    fn render_transcript_keeps_the_cursor_when_the_map_has_focus() {
+        // The caret used to be hidden whenever focus left the story pane. It shows
+        // what you typed and where, which stays true while the keyboard is on the
+        // map — and hiding it meant a half-typed command vanished with no sign it
+        // was still buffered, so Enter ran something invisible. A real MODAL still
+        // suppresses it (see `render_transcript_no_cursor_when_overlay_open`), and
+        // the raster/v6 path behaves the same way.
         let machine = minimal_machine();
         let mut state = AppState::default();
         state.config.command_bar = true; // this test exercises the dedicated bottom bar
         state.input.set("hi", true);
-        state.focus = Focus::Map; // not focused on game
+        state.focus = Focus::Map;
 
         let area = Rect::new(0, 0, 40, 5);
         let mut buf = Buffer::empty(area);
         render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
 
-        // Position x=4 should carry no cursor (no reverse-video block) in Map focus.
         let cell = buf.cell((4, 4)).expect("cell should exist");
-        assert!(!cell.modifier.contains(Modifier::REVERSED), "no cursor when focus is Map");
+        assert!(
+            cell.modifier.contains(Modifier::REVERSED),
+            "the caret must still be drawn with the map focused"
+        );
+    }
+
+    #[test]
+    fn a_room_panel_does_not_suppress_the_story_caret() {
+        // The regression the user hit playing advent.blb: `any_overlay_open()`
+        // counted the room panel, so opening Room Info or the inspector blanked the
+        // live input line AND its caret. Corner overlays let you keep playing, so
+        // only MODAL overlays may suppress the prompt.
+        use crate::state::{RoomPanel, RoomPanelMode};
+        let machine = minimal_machine();
+        for mode in [RoomPanelMode::Info, RoomPanelMode::Diagnostics] {
+            let mut state = AppState::default();
+            state.config.command_bar = true;
+            state.input.set("hi", true);
+            state.room_panel = Some(RoomPanel { id: 1, mode });
+            assert!(state.any_overlay_open(), "a room panel is still an overlay…");
+            assert!(!state.any_modal_overlay_open(), "…but not a MODAL one");
+
+            let area = Rect::new(0, 0, 40, 5);
+            let mut buf = Buffer::empty(area);
+            render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+            let row: String = (0..40u16)
+                .map(|x| buf.cell((x, 4)).unwrap().symbol().chars().next().unwrap_or(' '))
+                .collect();
+            assert!(row.contains("hi"), "the typed text must be visible with a {mode:?} panel open: {row:?}");
+            assert!(
+                buf.cell((4, 4)).unwrap().modifier.contains(Modifier::REVERSED),
+                "and so must the caret, with a {mode:?} panel open"
+            );
+        }
     }
 
     #[test]

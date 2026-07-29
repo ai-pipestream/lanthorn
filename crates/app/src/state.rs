@@ -2183,10 +2183,25 @@ impl AppState {
             .unwrap_or(self.transcript_scroll)
     }
 
-    /// Return true if any modal, dialog, or overlay is currently open.
+    /// Return true if any modal, dialog, or overlay is currently open — including
+    /// the CORNER overlays (room panel, tidy animation) that let you keep playing
+    /// underneath them.
     ///
-    /// Used to suppress the story input cursor while an overlay is covering the pane.
+    /// For anything about the story pane's live input — the line, its caret, its
+    /// suggestions — use [`any_modal_overlay_open`](Self::any_modal_overlay_open)
+    /// instead: a modal genuinely means you are not typing at the prompt, but a
+    /// corner panel does not.
     pub fn any_overlay_open(&self) -> bool {
+        self.any_modal_overlay_open() || self.room_panel.is_some() || self.tidy_anim.is_some()
+    }
+
+    /// [`any_overlay_open`](Self::any_overlay_open) minus the corner overlays.
+    ///
+    /// The room panel and the tidy animation live in the MAP pane and deliberately
+    /// do not swallow input, so they must not suppress the story pane's live input
+    /// line or caret — doing so hid a half-typed command with no sign it was still
+    /// buffered, and Enter would then run something the player could not see.
+    pub fn any_modal_overlay_open(&self) -> bool {
         self.overlays.saves.is_some()
             || self.overlays.file_browser.is_some()
             || self.overlays.file_picker.is_some()
@@ -2194,8 +2209,6 @@ impl AppState {
             || self.overlays.verb_menu.is_some()
             || self.overlays.palette.is_some()
             || self.overlays.hotkey_dialog
-            || self.room_panel.is_some()
-            || self.tidy_anim.is_some()
             || self.overlays.text_entry.is_some()
             || self.overlays.confirm_delete_save.is_some()
             || self.overlays.reset_dialog
