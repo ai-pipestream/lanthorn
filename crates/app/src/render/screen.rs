@@ -552,11 +552,15 @@ fn render_node(
                         // pixels then show the page, not the theme backdrop). Strictly
                         // gated on the story window's EXPLICIT bg, so a game that sets
                         // none — Journey's black picture panel, Arthur, Shogun's
-                        // gameplay screen — keeps today's theme backdrop, as does
-                        // `honor_game_colours = false` (the window's bg stays
-                        // `Default`, so `story_bg_rgba` is `None`).
-                        if let Some(p) = v6::story_bg_rgba(Some(story), &state.colors) {
-                            fill_pane_page(area, p, buf);
+                        // gameplay screen — keeps today's theme backdrop. Gated on
+                        // the LIVE `honor_game_colours` too: the model keeps the
+                        // pair the game recorded while colours were honored, so a
+                        // `/set-game-colours off` mid-game must skip the flood
+                        // here, not rely on the window reading `Default`.
+                        if state.config.honor_game_colours {
+                            if let Some(p) = v6::story_bg_rgba(Some(story), &state.colors) {
+                                fill_pane_page(area, p, buf);
+                            }
                         }
                         let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
                         let fs = picker.font_size();
@@ -888,7 +892,14 @@ fn render_node(
                 // The game's own page, when it set one (SQ-0532 wave-5). Resolved out
                 // here — not inside the gate — because the pane fill below runs on
                 // every frame, not just the frames that rebuild the canvas.
-                let game_page = v6::story_bg_rgba(layout.story, &state.colors);
+                // Gated on the LIVE honor config, like the hybrid flood above: a
+                // mid-game `/set-game-colours off` must drop the page even though
+                // the model still carries the pair the game set while honored.
+                let game_page = if state.config.honor_game_colours {
+                    v6::story_bg_rgba(layout.story, &state.colors)
+                } else {
+                    None
+                };
                 if state.graphics_render.borrow().v6_wants_build(gen, area) {
                     let (canvas, raster_metrics) = build_v6_raster_canvas(&layout, native, state);
                     // Cache the fresh metrics for skipped frames, then hand the
@@ -1426,9 +1437,13 @@ pub fn build_v6_raster_canvas(
     // host default. Zork Zero boots `set_colour(fg=2, bg=9)`, so taking its
     // white page while rasterizing the prose in the host's own light default
     // ink drew white-on-white — unreadable. The window's explicit fg wins over
-    // `default_fg` exactly as its bg wins over `default_bg`.
-    let game_page = v6::story_bg_rgba(layout.story, &state.colors);
-    let game_ink = v6::story_fg_rgba(layout.story, &state.colors);
+    // `default_fg` exactly as its bg wins over `default_bg`. Both are gated on
+    // the LIVE honor config: a mid-game `/set-game-colours off` leaves the
+    // recorded pair in the model, and the composite must fall back to the host
+    // pair rather than keep painting the game's page/ink.
+    let honor = state.config.honor_game_colours;
+    let game_page = if honor { v6::story_bg_rgba(layout.story, &state.colors) } else { None };
+    let game_ink = if honor { v6::story_fg_rgba(layout.story, &state.colors) } else { None };
     let page = game_page.unwrap_or(default_bg);
     let ink = game_ink.unwrap_or(default_fg);
     let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
@@ -1568,6 +1583,9 @@ pub fn v6_raster_gen(items: &[PositionedWindow], state: &AppState, area: Rect, p
     state.pager.active.hash(&mut h);
     // The themed colours the raster resolves (default fg/bg + the [more] prompt);
     // a theme switch changes these even when the model is byte-identical.
+    // A live `/set-game-colours` toggle changes the composite's page/ink
+    // resolution without touching the model — it must invalidate the canvas.
+    state.config.honor_game_colours.hash(&mut h);
     let tbg = state.colors.theme.get("transcript").style;
     style_fg_rgba(tbg, image::Rgba([220, 220, 220, 255])).0.hash(&mut h);
     style_bg_rgba(tbg, image::Rgba([0, 0, 0, 255])).0.hash(&mut h);

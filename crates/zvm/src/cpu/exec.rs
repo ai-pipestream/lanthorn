@@ -634,6 +634,28 @@ impl Machine {
         }
     }
 
+    /// ZMSD §7.4: games (all Infocom-era ones) turn transcription on by setting
+    /// bit 0 of Flags 2 rather than issuing `output_stream 2` — the interpreter
+    /// is expected to watch the bit. We support no transcript FILE, so on
+    /// seeing the bit set, warn once (same diagnostic as `output_stream 2`) and
+    /// CLEAR it — the game then honestly reports scripting as off instead of
+    /// believing a transcript is being written. Checked at every input request
+    /// (the turn boundary), which is where a SCRIPT verb's effect first
+    /// becomes observable.
+    fn check_transcript_bit(&mut self) {
+        const FLAGS2: u32 = 0x10;
+        let flags = self.mem.read_word(FLAGS2);
+        if flags & 1 != 0 {
+            self.mem.write_word(FLAGS2, flags & !1);
+            if !self.warned_stream2 {
+                self.warned_stream2 = true;
+                self.diagnostics.push(
+                    "transcript file output isn't supported — the game's script command will have no effect (the app keeps its own scrollback)".to_string(),
+                );
+            }
+        }
+    }
+
     /// Enable/disable honoring game-driven colour. Advertises (or clears) the
     /// Flags1 colour bit immediately so a not-yet-run game sees the capability.
     pub fn set_honor_game_colours(&mut self, on: bool) {
@@ -1477,6 +1499,7 @@ impl Machine {
             // v3: no store var. v4+: has a store var (terminating character).
             // Operands: text_buf, parse_buf, + optional time/routine (v4+).
             0x04 => {
+                self.check_transcript_bit();
                 let text_buf = ops.first().copied().unwrap_or(0) as u32;
                 let parse_buf = ops.get(1).copied().unwrap_or(0) as u32;
                 let interrupt_time = ops.get(2).copied().unwrap_or(0);
@@ -1490,6 +1513,7 @@ impl Machine {
             // 0x16 read_char — pause execution and wait for a single keypress (v4+).
             // Has a store var for the ZSCII code. Operands: device, + optional time/routine.
             0x16 => {
+                self.check_transcript_bit();
                 let interrupt_time = ops.get(1).copied().unwrap_or(0);
                 let interrupt_routine = ops.get(2).copied().unwrap_or(0);
                 self.pending_input = Some(PendingInput {
@@ -4184,6 +4208,33 @@ pub(crate) mod tests {
             (pristine_f2 ^ 0b11) & 0b11,
             "transcription + fixed-pitch bits preserved across @restart",
         );
+    }
+
+    #[test]
+    fn game_set_transcript_bit_warns_once_and_clears() {
+        // ZMSD §7.4: Infocom-era games turn transcription on by SETTING Flags 2
+        // bit 0 — not via `output_stream 2` — and the interpreter is expected to
+        // watch the bit. With no transcript file supported, the bit is cleared
+        // at the next input request (so the game honestly reports scripting
+        // off) and the unsupported-transcript warning fires ONCE per session.
+        // (SQ-0532 TTY-pass finding: typing `script` showed no warning because
+        // only the opcode path was hooked.)
+        let mut m = Machine::new(Memory::new(sample_story(3)).unwrap());
+        let count = |m: &Machine| {
+            m.diagnostics.iter().filter(|d| d.contains("transcript file")).count()
+        };
+        let f2 = m.mem.read_word(0x10);
+        m.mem.write_word(0x10, f2 | 1); // the game's SCRIPT verb sets the bit
+        m.exec_var(0x04, &[0x200, 0x220], None, None); // read → the turn boundary
+        assert_eq!(m.mem.read_word(0x10) & 1, 0, "unsupported transcription bit is cleared");
+        assert_eq!(count(&m), 1, "warning surfaced");
+        // The game sets it again (SCRIPT after UNSCRIPT): cleared again, but
+        // the warning stays once-per-session.
+        let f2 = m.mem.read_word(0x10);
+        m.mem.write_word(0x10, f2 | 1);
+        m.exec_var(0x04, &[0x200, 0x220], None, None);
+        assert_eq!(m.mem.read_word(0x10) & 1, 0, "cleared on every sighting");
+        assert_eq!(count(&m), 1, "still only one warning");
     }
 
     #[test]

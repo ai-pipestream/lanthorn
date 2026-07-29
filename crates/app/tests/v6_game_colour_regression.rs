@@ -137,7 +137,15 @@ fn bg_census(model: &ScreenModel, mode: app::config::V6RenderMode) -> (usize, us
 /// the HOST THEME's backdrop, i.e. every cell no game pixel or page reached.
 /// (SQ-0532 wave-5, defect 1: with a game-set page that count must be zero.)
 fn cell_census(model: &ScreenModel, mode: app::config::V6RenderMode) -> (usize, usize, usize) {
+    cell_census_honor(model, mode, true)
+}
+
+/// As [`cell_census`] but with the APP-side `honor_game_colours` set explicitly
+/// — independent of what the engine recorded (the live `/set-game-colours`
+/// toggle changes only the app config, never the model).
+fn cell_census_honor(model: &ScreenModel, mode: app::config::V6RenderMode, honor: bool) -> (usize, usize, usize) {
     let mut state = state_for(mode);
+    state.config.honor_game_colours = honor;
     state.push_transcript("West of House");
     let area = Rect::new(0, 0, 80, 30);
     let mut buf = Buffer::empty(area);
@@ -443,6 +451,41 @@ fn zork0_hybrid_keeps_the_theme_backdrop_when_colours_are_declined() {
         backdrop > 0,
         "with no game page the host theme must still own the pane surround; flooding it anyway \
          would repaint every v6 game's letterbox"
+    );
+}
+
+/// The LIVE toggle (`/set-game-colours off`) flips only the APP config — the
+/// engine model still carries the white pair Zork Zero recorded at boot. The
+/// render must gate the page/ink fills on the live config, not on what the
+/// model recorded, or the toggle recolours the text but leaves the white
+/// backdrop standing (SQ-0532 TTY-pass finding, 2026-07-28). Boots with the
+/// engine HONORING (pair present), then renders with the app config declined.
+#[test]
+fn live_toggle_off_repaints_backdrop_and_raster_page_without_reboot() {
+    let Some(s) = boot_v6("zork0-r393-s890714.z6", true) else { return };
+    let model = s.screen();
+    let (_, bg) = story_pair(&model);
+    assert!(bg.is_some(), "engine honored at boot: the story window carries its white page");
+
+    // Hybrid: with the app config declined the whole-pane page fill must not
+    // run — the theme backdrop owns the letterbox again.
+    let (_, _, backdrop) = cell_census_honor(&model, app::config::V6RenderMode::Hybrid, false);
+    assert!(
+        backdrop > 0,
+        "app-side honor off must skip the page flood even though the model still carries white"
+    );
+
+    // Raster: the composite's story page must fall back to the theme default,
+    // not the model's white.
+    let mut st = state_for(app::config::V6RenderMode::Raster);
+    st.config.honor_game_colours = false;
+    let (canvas, _) = raster_canvas(&model, &st);
+    let (sx, sy, sw, sh) = story_rect(&model);
+    let p = canvas.get_pixel(sx + sw / 2, sy + sh / 2);
+    assert_ne!(
+        (p[0], p[1], p[2]),
+        (255, 255, 255),
+        "app-side honor off must not paint the raster story page white"
     );
 }
 

@@ -383,6 +383,12 @@ pub(crate) fn dispatch_slash_outcome(
             match app::styles::write_per_game_honor(game_dir, opt) {
                 Ok(()) => {
                     let _ = app::reload::reload_style(state);
+                    // Follow through to the running Z-machine: future set_colour
+                    // ops and the Flags1 colour capability track the new setting.
+                    // (Render-side gates handle colours already recorded.)
+                    if let Some(zs) = session.as_any_mut().downcast_mut::<app::session::GameSession>() {
+                        zs.machine.set_honor_game_colours(state.config.honor_game_colours);
+                    }
                     let label = match opt {
                         Some(true) => "on",
                         Some(false) => "off",
