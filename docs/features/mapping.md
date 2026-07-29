@@ -84,14 +84,17 @@ The map is a place you can move through, not just a picture.
   come straight back when you toggle it off — styled by the `map.untried_exit` selector.
 - **Room inspector** — `toggle-inspector` opens an overlay for the selected room:
   its id, name, layer, position, and the per-edge layout constraints, so you can
-  see *why* a room landed where it did. It also draws a **compass rose** of the ways out —
-  lower-case italic for a direction never tried, upper case once you have — with `u`/`d` for
-  up and down and `i`/`o` for in and out beside it:
+  see *why* a room landed where it did. It also draws a **compass rose** of the ways out.
+  Exploration reads as colour: a direction you have never tried is drawn `muted`, and
+  turns `accent` once you have. Compass points additionally go from lower-case to
+  UPPER-case, while up, down, in and out keep the same glyphs the map itself uses —
+  whatever `portal_icons` and `[map.overrides]` give them — since a glyph has no case
+  to change:
 
   ```
-  nw  N  ne   u
-   w  +  E   i o
-  sw  s  se   D
+  nw  N  ne   ↑
+   w  +  E   ⊙ ⊗
+  sw  s  se   ↓
   ```
 - **Hand edits** — select rooms with `select-room next|prev`, `nudge-room` a stray
   box into place, `rename-room` / `rename-layer`, jot `edit-notes`, or clean up the

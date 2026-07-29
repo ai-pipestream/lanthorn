@@ -59,14 +59,30 @@ const ROSE_DIRS: [Direction; 12] = [
     Direction::Up, Direction::In, Direction::Out, Direction::Down,
 ];
 
-/// The rose's letter for a direction, lower-case. Up/Down are `u`/`d` rather than an arrow so
-/// they take one cell like every other entry and can carry the same tried/untried casing.
+/// The rose's compass letter for a direction, lower-case, or `""` for the four
+/// portal directions — those draw their assigned map glyph instead, via
+/// [`rose_cell`], so the inspector and the map name a staircase the same way.
 fn rose_label(d: Direction) -> &'static str {
     match d {
         Direction::N => "n", Direction::NE => "ne", Direction::E => "e", Direction::SE => "se",
         Direction::S => "s", Direction::SW => "sw", Direction::W => "w", Direction::NW => "nw",
-        Direction::Up => "u", Direction::Down => "d", Direction::In => "i", Direction::Out => "o",
+        Direction::Up | Direction::Down | Direction::In | Direction::Out => "",
         Direction::Unknown => "?",
+    }
+}
+
+/// One rose cell's text. Compass points use their letter — lower-case untried,
+/// UPPER-case once explored. The four portal directions use the themed glyph from
+/// `portal_icons` / `[map.overrides]` in BOTH states: a glyph has no case, so
+/// exploration is carried by style alone (muted → accent) for those.
+fn rose_cell(d: Direction, portal: &crate::symbols::PortalGlyphs, explored: bool) -> String {
+    match d {
+        Direction::Up => portal.up.to_string(),
+        Direction::Down => portal.down.to_string(),
+        Direction::In => portal.in_.to_string(),
+        Direction::Out => portal.out.to_string(),
+        _ if explored => rose_label(d).to_uppercase(),
+        _ => rose_label(d).to_string(),
     }
 }
 
@@ -115,7 +131,9 @@ pub fn room_diagnostics(graph: &MapGraph, id: RoomId) -> Option<RoomDiagnostics>
 /// fully obscure the selected room (which is typically centred in the pane).
 ///
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing).
-pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, dialog_style: &DialogStyle) -> Option<DialogRects> {
+/// `portal` supplies the up/down/in/out glyphs for the explored-directions rose,
+/// so the inspector names a staircase with the same character the map draws.
+pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, dialog_style: &DialogStyle, portal: &crate::symbols::PortalGlyphs) -> Option<DialogRects> {
     const WIDTH: u16 = 38;
     // rows: border top + id/name + layer + pos + blank + edges (≥1) + blank + summary + border bot
     const FIXED_ROWS: u16 = 13; // with at least 0 edge rows; +4 for the compass rose (SQ-0391)
@@ -203,7 +221,11 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, 
     if row + 3 <= max_y {
         row += 1; // breathing room under the detail lines
         let explored = |d: Direction| diag.explored.iter().any(|&(k, v)| k == d && v);
-        let untried_style = value_style.add_modifier(ratatui::style::Modifier::ITALIC);
+        // Exploration reads as colour, not emphasis: muted for a way out you have
+        // never taken, accent once you have. The four portal slots keep the same
+        // glyph in both states, so for them this styling is the whole signal.
+        let tried_style = dialog_style.theme.get("accent").style;
+        let untried_style = dialog_style.theme.get("muted").style;
         // (column, direction) per row; `None` is the rose's centre mark.
         let rows: [[(u16, Option<Direction>); 5]; 3] = [
             [(0, Some(Direction::NW)), (4, Some(Direction::N)), (7, Some(Direction::NE)),
@@ -216,11 +238,9 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, 
         for (dy, cells) in rows.iter().enumerate() {
             for &(dx, dir) in cells {
                 let Some(d) = dir else { continue };
-                let (text, style) = if explored(d) {
-                    (rose_label(d).to_uppercase(), value_style)
-                } else {
-                    (rose_label(d).to_string(), untried_style)
-                };
+                let tried = explored(d);
+                let text = rose_cell(d, portal, tried);
+                let style = if tried { tried_style } else { untried_style };
                 draw_str_clipped(buf, inner_x + dx, row + dy as u16, &text, style, clip);
             }
         }
@@ -437,7 +457,7 @@ mod tests {
         let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_inspector(&diag, area, f.buffer_mut(), &ds);
+            draw_inspector(&diag, area, f.buffer_mut(), &ds, &crate::symbols::SymbolSet::default().portal);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         assert!(buf_contains(&buf, "42"), "should contain room id");
@@ -460,13 +480,15 @@ mod tests {
         // Should not panic; the panel is silently skipped when area is too small.
         terminal.draw(|f| {
             let area = f.area();
-            draw_inspector(&diag, area, f.buffer_mut(), &ds);
+            draw_inspector(&diag, area, f.buffer_mut(), &ds, &crate::symbols::SymbolSet::default().portal);
         }).unwrap();
         // No assertions — just must not panic.
     }
 
-    /// SQ-0391: the rose says which ways OUT of this room have been explored — lower case for
-    /// never tried, upper case once tried — so what is left to do reads at a glance.
+    /// SQ-0391: the rose says which ways OUT of this room have been explored.
+    /// Compass points go lower-case → UPPER-case; the four portal slots keep their
+    /// themed glyph in both states, so for those exploration is style-only (muted →
+    /// accent), asserted separately below.
     #[test]
     fn inspector_rose_capitalises_the_directions_already_explored() {
         use mapper::graph::MapGraph;
@@ -481,12 +503,52 @@ mod tests {
         let diag = room_diagnostics(&g, 1).unwrap();
         let area = Rect::new(0, 0, 44, 24);
         let mut buf = Buffer::empty(area);
-        draw_inspector(&diag, area, &mut buf, &make_dialog_style());
+        draw_inspector(&diag, area, &mut buf, &make_dialog_style(), &crate::symbols::SymbolSet::default().portal);
 
-        // The rose, drawn as three rows. A walked edge and a foiled attempt both count.
-        assert!(buf_contains(&buf, "nw  N  ne   u"), "north walked -> N; up untried -> u");
-        assert!(buf_contains(&buf, " w  +  E   i o"), "east tried though it went nowhere -> E");
-        assert!(buf_contains(&buf, "sw  s  se   D"), "down tried -> D");
+        // The rose, drawn as three rows. A walked edge and a foiled attempt both
+        // count. Up/Down/In/Out show the default portal glyphs ↑/↓/⊙/⊗ regardless of
+        // whether they have been tried — only their colour moves.
+        assert!(buf_contains(&buf, "nw  N  ne   \u{2191}"), "north walked -> N; up keeps its glyph");
+        assert!(buf_contains(&buf, " w  +  E   \u{2299} \u{2297}"), "east tried though it went nowhere -> E");
+        assert!(buf_contains(&buf, "sw  s  se   \u{2193}"), "down tried -> still the glyph, not 'D'");
+    }
+
+    /// The rose signals exploration with COLOUR, not emphasis: muted for a way out
+    /// never taken, accent once taken. That is the only signal the four portal
+    /// slots have, since a glyph carries no case.
+    #[test]
+    fn inspector_rose_styles_untried_muted_and_tried_accent() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "West of House".into());
+        g.set_pos(1, (0, 0));
+        g.mark_tried(1, Direction::Down); // down taken; up never
+        let diag = room_diagnostics(&g, 1).unwrap();
+        let area = Rect::new(0, 0, 44, 24);
+        let mut buf = Buffer::empty(area);
+        let ds = make_dialog_style();
+        draw_inspector(&diag, area, &mut buf, &ds, &crate::symbols::SymbolSet::default().portal);
+
+        let accent = ds.theme.get("accent").style;
+        let muted = ds.theme.get("muted").style;
+        assert_ne!(accent, muted, "the test is meaningless if the two roles look alike");
+
+        let find = |glyph: char| -> Style {
+            for y in area.y..area.bottom() {
+                for x in area.x..area.right() {
+                    let c = buf.cell((x, y)).unwrap();
+                    if c.symbol().starts_with(glyph) {
+                        return c.style();
+                    }
+                }
+            }
+            panic!("glyph {glyph:?} not found in the rose");
+        };
+        // ↓ was taken, ↑ was not — same glyph family, opposite styling.
+        assert_eq!(find('\u{2193}').fg, accent.fg, "a tried portal draws in accent");
+        assert_eq!(find('\u{2191}').fg, muted.fg, "an untried portal draws in muted");
+        // A compass point never tried is muted too (and stays lower-case).
+        assert_eq!(find('w').fg, muted.fg, "an untried compass point draws in muted");
     }
 
     #[test]
@@ -503,7 +565,7 @@ mod tests {
         let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_inspector(&diag, area, f.buffer_mut(), &ds);
+            draw_inspector(&diag, area, f.buffer_mut(), &ds, &crate::symbols::SymbolSet::default().portal);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         // The distorted marker `!` should appear.
@@ -546,7 +608,7 @@ mod tests {
                     }
                 }
             }
-            draw_inspector(&diag, area, f.buffer_mut(), &ds);
+            draw_inspector(&diag, area, f.buffer_mut(), &ds, &crate::symbols::SymbolSet::default().portal);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         let panel_x = 80u16.saturating_sub(38);
@@ -577,7 +639,7 @@ mod tests {
         let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_inspector(&diag, area, f.buffer_mut(), &ds);
+            draw_inspector(&diag, area, f.buffer_mut(), &ds, &crate::symbols::SymbolSet::default().portal);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         // Panel is 38 wide, top-right corner: x = 80 - 38 = 42, y = 0.
@@ -605,7 +667,7 @@ mod tests {
         let ds = make_dialog_style();
         terminal.draw(|f| {
             let area = f.area();
-            draw_inspector(&diag, area, f.buffer_mut(), &ds);
+            draw_inspector(&diag, area, f.buffer_mut(), &ds, &crate::symbols::SymbolSet::default().portal);
         }).unwrap();
         let buf = terminal.backend().buffer().clone();
         assert!(buf_contains(&buf, "\u{2715}"), "inspector must show close symbol [X]");
@@ -619,7 +681,7 @@ mod tests {
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let diag = make_diag(1, "Start", vec![]);
         let ds = make_dialog_style();
-        let result = draw_inspector(&diag, area, &mut buf, &ds);
+        let result = draw_inspector(&diag, area, &mut buf, &ds, &crate::symbols::SymbolSet::default().portal);
         assert!(result.is_some(), "draw_inspector must return Some(DialogRects)");
         let dr = result.unwrap();
         assert!(dr.close.is_some(), "DialogRects.close must be Some (show_close=true)");

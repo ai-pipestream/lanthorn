@@ -692,7 +692,7 @@ fn draw_frame(
                     }
                     RoomPanelMode::Diagnostics => {
                         if let Some(diag) = room_diagnostics(graph, panel.id) {
-                            if let Some(dr) = draw_inspector(&diag, map_area, buf, &panel_ds) {
+                            if let Some(dr) = draw_inspector(&diag, map_area, buf, &panel_ds, &state.symbols.portal) {
                                 dialog_rects_out = Some(dr);
                             }
                         }
