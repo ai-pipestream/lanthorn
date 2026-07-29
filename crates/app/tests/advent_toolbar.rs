@@ -106,6 +106,57 @@ fn advent_toolbar_verb_buttons_prefill_the_input_line() {
     }
 }
 
+/// SQ-0564: the premise behind caching kitty uploads by canvas CONTENT. Pressing a
+/// toolbar button makes advent repaint the whole bar (pressed), and releasing it
+/// repaints the whole bar again — and that release is pixel-for-pixel the resting
+/// bar it started from, even though the canvas version has moved on twice. So the
+/// release costs a re-place, not a second 155 KiB upload.
+#[test]
+fn advent_toolbar_returns_to_a_pixel_identical_canvas_after_a_press() {
+    let Some(mut sess) = boot_advent() else {
+        eprintln!("SKIP: no advent.blb");
+        return;
+    };
+    let _ = sess.take_transcript();
+
+    fn toolbar(sess: &mut GlulxSession) -> (Vec<u8>, u64) {
+        fn find(node: &WinNode) -> Option<&app::engine::GraphicsWindow> {
+            match node {
+                WinNode::Graphics(gw) => Some(gw),
+                WinNode::Pair { first, second, .. } => find(first).or_else(|| find(second)),
+                _ => None,
+            }
+        }
+        let model = sess.screen();
+        let gw = find(&model.root).expect("toolbar window");
+        (gw.canvas.as_raw().clone(), gw.version)
+    }
+
+    let (resting, v_resting) = toolbar(&mut sess);
+    let windows = sess.mouse_windows();
+    let (win, _, _) = *windows.first().expect("the toolbar watches for clicks");
+
+    // Press "North" (canvas pixel 28,6) — a different picture, same size.
+    sess.deliver_mouse(win, 28, 6);
+    let (pressed, v_pressed) = toolbar(&mut sess);
+    assert_ne!(pressed, resting, "the pressed bar is a genuinely different picture");
+    assert!(v_pressed > v_resting, "and the repaint bumped the canvas version");
+
+    // Release: advent holds the press for a few 50ms ticks, then repaints.
+    let mut released = None;
+    for _ in 0..8 {
+        sess.deliver_timer();
+        let (pixels, version) = toolbar(&mut sess);
+        if version > v_pressed && pixels != pressed {
+            released = Some((pixels, version));
+            break;
+        }
+    }
+    let (released, v_released) = released.expect("the button releases within a few ticks");
+    assert!(v_released > v_pressed, "the release is a fresh repaint, not the same version");
+    assert_eq!(released, resting, "yet its pixels are the resting bar's, byte for byte");
+}
+
 /// The compass rose's W and E buttons sit in a canvas band that cell-granular
 /// clicks cannot reach: the toolbar is 2 cells of 18px, so a cell-centre click
 /// only ever reports canvas y 9 or 27, while W/E occupy y 12..24. Pinned as the
