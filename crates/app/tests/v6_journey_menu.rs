@@ -814,6 +814,78 @@ fn journey_hybrid_flank_panel_meets_the_menu_at_every_width() {
     }
 }
 
+/// SQ-0550: a click on a menu label must reach THAT label's game row.
+///
+/// The hybrid click map inverts the letterbox linearly, but the menu is a TEXT strip
+/// and `draw_chrome_text_strip` does not place its runs through that scale — it buckets
+/// them by game row and packs the buckets onto CONSECUTIVE terminal rows from the
+/// strip's top (SQ-0543). The two row pitches differ, so the linear inverse drifted:
+/// at a 138-column pane (scale 1.725) the letterbox spreads game rows 1.53 terminal
+/// rows apart while the strip draws them 1 apart, and every command below the first
+/// mapped a row high — "Game", five rows down, mapped two rows high. The player had to
+/// click one line BELOW the command they wanted.
+///
+/// Drives the real geometry: render, find where each label is actually drawn, click its
+/// first glyph cell, and require the recovered game pixel to fall inside that label's
+/// own 16px game row. Swept across widths because the drift scales with the letterbox —
+/// at w=96 (scale 1.2, ≈1 terminal row per game row) the old code was already correct,
+/// which is exactly why this needs more than one width to catch.
+#[test]
+#[allow(deprecated)]
+fn journey_hybrid_menu_clicks_hit_the_row_they_land_on() {
+    use app::engine::WinNode;
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+
+    // Every menu label the game painted, with the native row it belongs to. The
+    // arrows repeat verbatim on four rows, so they cannot be located by text search.
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+    let mut labels: Vec<(String, u16)> = Vec::new();
+    for pw in items {
+        if let WinNode::Grid(g) = &pw.node {
+            for t in &g.px_texts {
+                let row = (t.y.max(1) - 1) / 16;
+                if !t.text.trim().is_empty() && row >= 19 && t.text.trim() != "-->" {
+                    labels.push((t.text.trim().to_string(), row));
+                }
+            }
+        }
+    }
+    assert!(labels.len() >= 8, "the command menu paints its labels: {labels:?}");
+
+    for w in [96u16, 110, 122, 138, 150] {
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.game_picker =
+            Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+        state.config.v6_render = app::config::V6RenderMode::Hybrid;
+        let area = Rect::new(0, 0, w, 51);
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+        let map = state.graphics_render.borrow().last_v6_map.expect("the hybrid path records a click map");
+        let row_text = |y: u16| -> String {
+            (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+        };
+
+        for (label, native_row) in &labels {
+            let Some(sy) = (0..area.height).find(|&y| row_text(y).contains(label.as_str())) else {
+                panic!("w={w}: menu label {label:?} is drawn somewhere");
+            };
+            let sx = row_text(sy).find(label.as_str()).expect("column of the label") as u16;
+            let (_, gy) = map.map_click(sx, sy).unwrap_or_else(|| {
+                panic!("w={w}: clicking {label:?} at its drawn cell ({sx},{sy}) maps into the game")
+            });
+            assert_eq!(
+                (gy.max(1) - 1) / 16,
+                *native_row,
+                "w={w}: clicking {label:?} where it is DRAWN (cell {sx},{sy}) must reach its own \
+                 game row {native_row} — got game pixel y={gy} (row {})",
+                (gy.max(1) - 1) / 16
+            );
+        }
+    }
+}
+
 /// SQ-0540: Journey stamps its selected command-menu label ("Start", "Proceed",
 /// "Combat", "Cast", …) as a painted run with §8.7.1 style bit 2 — the one v6
 /// moment where a real game's BOLD reaches the raster path. The composite must

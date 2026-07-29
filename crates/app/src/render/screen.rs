@@ -852,7 +852,29 @@ fn render_node(
                             // through the menu offset, but the game reads only the
                             // menu pixels). Extend/Letterbox use one scale everywhere.
                             let click_scale = menu.as_ref().unwrap_or(&scale);
-                            gr.record_hybrid_click_map(area, click_scale, native, cell_px);
+                            // SQ-0550: that scale alone inverts the menu WRONG. The menu
+                            // is a TEXT strip, and `draw_chrome_text_strip` packs its game
+                            // rows onto CONSECUTIVE terminal rows from the strip's top
+                            // (SQ-0543) rather than placing them through the scale — so the
+                            // linear inverse drifts by the difference between the two row
+                            // pitches, and Journey's player had to click one line below the
+                            // command they wanted (two by the bottom row). Hand the map the
+                            // strip's row mapping so clicks inside it invert by row index.
+                            // The count is the strip's GAME rows, which can be fewer than
+                            // its classified height: the classifier places runs through the
+                            // scale (leaving gaps the bridge rule absorbs) while the draw
+                            // packs them tight, so anything past the last packed row falls
+                            // through to the letterbox.
+                            let text_rows = menu_strips.iter().find_map(|s| match s {
+                                ChromeStrip::Text(r, runs) => {
+                                    let rows = runs.iter().map(|t| (t.y.max(1) - 1) / 16);
+                                    let first = rows.clone().min()?;
+                                    let last = rows.max()?;
+                                    Some((r.y, r.height.min(last - first + 1), first))
+                                }
+                                ChromeStrip::Art(_) => None,
+                            });
+                            gr.record_hybrid_click_map(area, click_scale, native, cell_px, text_rows);
                         }
                         // The story window as real terminal text (primary-Buffer path).
                         let metrics = render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors);

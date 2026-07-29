@@ -72,6 +72,7 @@ fn zork0_v6_compass_click_maps_writes_header_and_does_not_fault() {
         img_y: 0.0,
         img_w: 320.0,
         img_h: 200.0,
+        text_rows: None,
         native_w: 320,
         native_h: 200,
     };

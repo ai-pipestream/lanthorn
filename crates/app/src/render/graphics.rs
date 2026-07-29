@@ -175,6 +175,19 @@ pub struct V6ClickMap {
     pub img_h: f32,
     pub native_w: u16,
     pub native_h: u16,
+    /// SQ-0550: the rows of a TEXT strip that is drawn with one terminal row per
+    /// GAME row, as `(top terminal row, row count, first game row)`.
+    ///
+    /// [`draw_chrome_text_strip`](crate::render::screen) does not place its runs
+    /// through the letterbox scale — it buckets them by game row and packs those
+    /// buckets onto CONSECUTIVE terminal rows from the strip's top (SQ-0543), so
+    /// the menu reads as a compact block instead of inheriting the scale's row
+    /// gaps. Inside this span the linear inverse below is therefore wrong, and
+    /// wrong by a growing amount: at a scale of 1.725 the letterbox spreads game
+    /// rows 1.53 terminal rows apart while the strip draws them 1 apart, so by the
+    /// fifth menu row the click lands two game rows high. `None` when no such
+    /// strip is on screen (every path but the hybrid Menu plan).
+    pub text_rows: Option<(u16, u16, u16)>,
 }
 
 impl V6ClickMap {
@@ -197,13 +210,27 @@ impl V6ClickMap {
         let dx = (col - self.pane_x) as f32 * self.cell_w as f32 + self.cell_w as f32 / 2.0;
         let dy = (row - self.pane_y) as f32 * self.cell_h as f32 + self.cell_h as f32 / 2.0;
         let fx = (dx - self.img_x) / self.img_w;
-        let fy = (dy - self.img_y) / self.img_h;
-        if !(0.0..1.0).contains(&fx) || !(0.0..1.0).contains(&fy) {
+        if !(0.0..1.0).contains(&fx) {
             return None;
         }
         let gx = (fx * self.native_w as f32).floor() as u16 + 1;
-        let gy = (fy * self.native_h as f32).floor() as u16 + 1;
-        Some((gx.min(self.native_w), gy.min(self.native_h)))
+        // A consecutively-packed text strip (see `text_rows`) inverts by row index,
+        // not by the letterbox: the clicked row's game row is its offset from the
+        // strip's top, and the game pixel is that row's VERTICAL MIDDLE, so the whole
+        // terminal row selects the menu line the player sees on it. The strip's own
+        // rows are drawn, so they need no `fy` range check.
+        let strip = self.text_rows.filter(|&(top, count, _)| row >= top && row < top.saturating_add(count));
+        let gy = match strip {
+            Some((top, _, first_game)) => (first_game as u32 + (row - top) as u32) * 16 + 8,
+            None => {
+                let fy = (dy - self.img_y) / self.img_h;
+                if !(0.0..1.0).contains(&fy) {
+                    return None;
+                }
+                (fy * self.native_h as f32).floor() as u32 + 1
+            }
+        };
+        Some((gx.min(self.native_w), (gy.min(self.native_h as u32)) as u16))
     }
 }
 
@@ -506,6 +533,7 @@ impl GraphicsRender {
             img_h: dest.height as f32 * ch as f32,
             native_w: ready.native_w,
             native_h: ready.native_h,
+            text_rows: None,
         });
     }
 
@@ -515,12 +543,15 @@ impl GraphicsRender {
     /// the chrome bands were placed through, so the recovered game pixel matches
     /// what the player sees. `pane` is the whole v6 pane's cell rect; `native` is
     /// the chrome canvas's game-pixel extent; `cell_px` is the font cell size.
+    /// `text_rows` carries the interactive text strip's consecutive-row mapping when
+    /// one is on screen — see [`V6ClickMap::text_rows`].
     pub fn record_hybrid_click_map(
         &mut self,
         pane: Rect,
         scale: &crate::render::v6_layout::Scale,
         native: (u16, u16),
         cell_px: (u16, u16),
+        text_rows: Option<(u16, u16, u16)>,
     ) {
         let (cw, ch) = (cell_px.0.max(1), cell_px.1.max(1));
         self.last_v6_map = Some(V6ClickMap {
@@ -534,6 +565,7 @@ impl GraphicsRender {
             img_h: native.1 as f32 * scale.s,
             native_w: native.0,
             native_h: native.1,
+            text_rows,
         });
     }
 
@@ -565,6 +597,7 @@ impl GraphicsRender {
             img_h: pane.height as f32 * ch as f32,
             native_w: native.0,
             native_h: native.1,
+            text_rows: None,
         });
     }
 
@@ -933,6 +966,7 @@ mod tests {
             img_h: 100.0,
             native_w: 100,
             native_h: 100,
+            text_rows: None,
         }
     }
 
@@ -968,6 +1002,7 @@ mod tests {
             img_y: 4.0,
             img_w: 80.0, // 40 native * 2
             img_h: 80.0,
+            text_rows: None,
             native_w: 40,
             native_h: 40,
         };
