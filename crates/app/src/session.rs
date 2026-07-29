@@ -1326,6 +1326,16 @@ fn location_to_snapshot(loc: &Location) -> zvm::ObjectSnapshot {
 /// observation so the live map never shows an illegal connector overlap.
 /// No-op when `result.location` is `None`.
 pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
+    // A direction typed in this room has been TRIED, whatever else the turn did, so the
+    // untried-exits overlay must stop offering it (SQ-0391). `Mapper::observe` records this for
+    // the ordinary path, but three turns never reach it: one where no location was detected at
+    // all, a suppressed unvalidated NameOnly, and a death that relocated the player. The last is
+    // the one that matters most — walking north into a grue is the strongest possible evidence
+    // that north has been tried. `mark_tried` is idempotent, so the overlap with `observe` costs
+    // nothing.
+    if let (Some(here), Some(d)) = (mapper.graph.current(), parse_direction(command)) {
+        mapper.graph.mark_tried(here, d);
+    }
     if let Some(snap) = &result.location {
         // Suppress an unvalidated NameOnly location until the map holds a real,
         // object-backed room. A NameOnly before any room is a pre-game
@@ -4731,5 +4741,50 @@ mod debugger_impl_tests {
         s.confirm_disasm();
         let second = s.disassemble(Debugger::pc(&s), 50);
         assert_eq!(first, second, "confirmation must not oscillate the disasm window");
+    }
+}
+
+#[cfg(test)]
+mod untried_turn_tests {
+    use super::*;
+    use mapper::direction::Direction;
+
+    fn turn(loc: Option<(u16, &str)>, transcript: &str) -> TurnResult {
+        TurnResult {
+            transcript: transcript.into(),
+            transcript_runs: Vec::new(),
+            location: loc.map(|(n, name)| zvm::ObjectSnapshot { number: n, parent: 0, name: name.into() }),
+            quit: false, erase_lower: false, info: None, sounds: Vec::new(),
+            glulx_sound_ops: Vec::new(), diagnostics: vec![], fault: None,
+            location_method: None, pending_io: None, timed_out: false,
+            pictures: Vec::new(), transcript_elems: Vec::new(),
+        }
+    }
+
+    /// SQ-0391: every direction the player types in a room is tried, including the ones that go
+    /// nowhere and the ones that get them killed. Each of these turns takes a different path
+    /// through `apply_turn`, and two of them never reach `Mapper::observe` at all.
+    #[test]
+    fn every_typed_direction_counts_as_tried_however_the_turn_ends() {
+        let mut m = Mapper::default();
+        apply_turn(&mut m, "", &turn(Some((1, "Hall")), ""));
+
+        // 1. A move that simply fails: the same room comes back.
+        apply_turn(&mut m, "north", &turn(Some((1, "Hall")), "You can't go that way."));
+        assert!(!m.graph.untried(1).contains(&Direction::N), "a foiled move is still a try");
+
+        // 2. A turn that detected no location at all — the mapper is otherwise skipped.
+        apply_turn(&mut m, "west", &turn(None, "It is pitch black."));
+        assert!(!m.graph.untried(1).contains(&Direction::W), "no location detected is still a try");
+
+        // 3. A death that teleported the player elsewhere. `observe_relocation` mints no edge, by
+        //    design — but the direction that killed you has emphatically been tried.
+        apply_turn(&mut m, "east", &turn(Some((2, "Forest")), "*** You have died ***"));
+        assert!(!m.graph.untried(1).contains(&Direction::E), "the move that killed you is a try");
+        assert_eq!(m.graph.connections().len(), 0, "and still mints no false edge (SQ-0259)");
+
+        // The ways never typed are all that remain on offer.
+        let left = m.graph.untried(1);
+        assert!(left.contains(&Direction::S) && left.contains(&Direction::Up), "{left:?}");
     }
 }
