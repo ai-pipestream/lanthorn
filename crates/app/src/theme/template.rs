@@ -97,6 +97,13 @@ pub fn commented_template() -> String {
             out.push_str(&row_line(section, row));
             out.push('\n');
         }
+        // `[map.overrides]` is a free-form table keyed by glyph slot, not a
+        // selector, so it has no registry row and must be appended by hand —
+        // and it has to come AFTER every `[map]` key line, or TOML would bind
+        // those keys to the sub-table instead (SQ-0561).
+        if section == Section::Map {
+            out.push_str(MAP_OVERRIDES_BLOCK);
+        }
         out.push('\n');
     };
 
@@ -266,6 +273,26 @@ fn toml_key(key: &str) -> String {
 /// Static commented examples with no registry row of their own: a
 /// `[[transcript.rule]]` pair and a `[statusbar]` + `[[statusbar.segment]]`
 /// block, copied (commented) from the design spec's example.
+/// The `[map.overrides]` table: swap ONE glyph without changing a whole preset.
+///
+/// Not a registry row — it is a free-form table keyed by glyph slot, so the
+/// generic row path can't emit it and it is spelled out here (SQ-0561). Slot
+/// names are validated against `symbols::apply_override`, which accepts 56 keys
+/// across the five families listed below; an unknown key, or a value that isn't
+/// exactly one narrow character, is ignored.
+const MAP_OVERRIDES_BLOCK: &str = r#"
+# ── One glyph at a time. An override beats the preset above it, so you can keep ─
+# ── a whole preset and change only the one corner you dislike. Values must be ───
+# ── exactly ONE narrow character; anything else is ignored. ─────────────────────
+[map.overrides]
+# "room.normal.tl" = "┌"     # room box corners/edges: room.<normal|current|selected|portal>.<tl|tr|bl|br|h|v>
+# "arrow.north" = "▲"        # connector arrowheads: arrow.<north|south|east|west|ne|nw|se|sw>
+# "path.ns" = "│"            # connector lines: path.<ns|ew|ne|nw|se|sw|nse|nsw|ews|ewn|cross>
+# "path.diag_ul" = "🮠"       # the four half-diagonals: path.<diag_ul|diag_ur|diag_ll|diag_lr>
+# "portal.up" = "↑"          # portal markers: portal.<up|down|in|out|marker|path|unknown>
+# "gutter.meta" = "▏"        # transcript gutter marks: gutter.<meta|warning>
+"#;
+
 const STATIC_EXAMPLES: &str = r#"# ── Story-line styling rules: recolour whole transcript lines matching a ────
 # ── regex. Rules are tried in order; the first match wins. ──────────────────
 # [[transcript.rule]]

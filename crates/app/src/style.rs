@@ -1077,6 +1077,45 @@ room = { fg = "white" }
     }
 
     #[test]
+    fn every_map_override_slot_the_example_file_documents_is_a_real_slot() {
+        // SQ-0561: `[map.overrides]` is hand-written into the template rather than
+        // generated from a registry row, so nothing structural stops it naming a
+        // slot `apply_override` doesn't accept — which is exactly how SQ-0558's
+        // documented-but-ignored keys shipped. Take every example key out of the
+        // file we ship, override it with one distinctive narrow char, and require
+        // the resolved SymbolSet to actually change. A typo'd slot is silently
+        // dropped by `apply_override`, so it would leave the set untouched here.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../style.example.toml");
+        let text = std::fs::read_to_string(&path).expect("read style.example.toml");
+
+        // Bounded to the block: skip to the header, then take only the commented
+        // quoted-key lines directly under it. Without the `take_while` this runs on
+        // to the end of the file and collects colour selectors from later sections.
+        let keys: Vec<String> = text
+            .lines()
+            .skip_while(|l| !l.starts_with("[map.overrides]"))
+            .skip(1)
+            .take_while(|l| l.starts_with("# \""))
+            .filter_map(|l| l.strip_prefix("# \""))
+            .filter_map(|l| l.split('"').next())
+            .map(str::to_string)
+            .collect();
+        assert!(!keys.is_empty(), "no documented [map.overrides] slots found");
+
+        let baseline = crate::symbols::SymbolSet::resolve(&crate::config::SymbolConfig::default());
+        for key in &keys {
+            let mut cfg = crate::config::SymbolConfig::default();
+            cfg.overrides.insert(key.clone(), "#".to_string());
+            let set = crate::symbols::SymbolSet::resolve(&cfg);
+            assert_ne!(
+                set, baseline,
+                "[map.overrides] documents slot {key:?}, but overriding it changed nothing — \
+                 apply_override does not accept that key"
+            );
+        }
+    }
+
+    #[test]
     fn style_example_toml_presets_take_effect_when_uncommented() {
         // The shipped reference file can never again document a key under a
         // section the parser does not read: uncomment its own lines (with a

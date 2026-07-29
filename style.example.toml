@@ -143,6 +143,17 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # portal_path_style = "dotted"   # light | heavy | dotted
 # diagonal_corners = true   # false = plain orthogonal corner exits, for fonts without Unicode 13 (🮠🮡🮢🮣)
 
+# ── One glyph at a time. An override beats the preset above it, so you can keep ─
+# ── a whole preset and change only the one corner you dislike. Values must be ───
+# ── exactly ONE narrow character; anything else is ignored. ─────────────────────
+[map.overrides]
+# "room.normal.tl" = "┌"     # room box corners/edges: room.<normal|current|selected|portal>.<tl|tr|bl|br|h|v>
+# "arrow.north" = "▲"        # connector arrowheads: arrow.<north|south|east|west|ne|nw|se|sw>
+# "path.ns" = "│"            # connector lines: path.<ns|ew|ne|nw|se|sw|nse|nsw|ews|ewn|cross>
+# "path.diag_ul" = "🮠"       # the four half-diagonals: path.<diag_ul|diag_ur|diag_ll|diag_lr>
+# "portal.up" = "↑"          # portal markers: portal.<up|down|in|out|marker|path|unknown>
+# "gutter.meta" = "▏"        # transcript gutter marks: gutter.<meta|warning>
+
 # ── Debug inspector disassembly selectors.
 [debug]
 # pc = { parent = "accent", reversed = true }
