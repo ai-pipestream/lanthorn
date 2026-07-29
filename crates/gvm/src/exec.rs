@@ -277,6 +277,12 @@ pub struct Machine {
     /// structural call, so the trace shows WHERE story text is printed (which
     /// window and whether it's a buffer that accumulates or a grid). (SQ-0405)
     text_run: Option<(u32, &'static str, String)>,
+    /// Text the game pre-loaded into the buffer of its latest line-input request
+    /// (Glk spec §4.2: the first `initlen` characters are "already in the input
+    /// line"). One-shot — the host takes it to seed its own editable input line,
+    /// so a toolbar button that primes a verb ("Examine ", advent.blb) shows the
+    /// partial command instead of an empty prompt. `None` when `initlen` was 0.
+    line_prefill: Option<String>,
     /// Set once execution has ended (outer return or quit/fault).
     pub(crate) halted: bool,
     /// Protected RAM range `(addr, len)` preserved across restore/restoreundo;
@@ -754,6 +760,7 @@ impl Machine {
             trace_screen: false,
             screen_trace: Vec::new(),
             text_run: None,
+            line_prefill: None,
             halted: false,
             protect: (0, 0),
             undo_stack: Vec::new(),
@@ -4646,12 +4653,41 @@ impl Machine {
         Ok(result.len() as u32)
     }
 
-    /// Record a pending line-input request; diagnose a bad window.
+    /// Record a pending line-input request; diagnose a bad window. When the game
+    /// pre-loaded the buffer (`initlen` > 0, Glk spec §4.2) the pre-filled text is
+    /// read out for [`Self::take_line_prefill`] so the host can start its input
+    /// line with it — read HERE, while the buffer still holds what the game just
+    /// wrote, rather than lazily later.
     fn glk_request_line(&mut self, win: u32, buf: u32, maxlen: u32, initlen: u32, unicode: bool) {
         if !self.glk.request_line_event(win, buf, maxlen, initlen, unicode) {
             self.diagnostics
                 .push(format!("glk_request_line_event: bad window {win}"));
+            return;
         }
+        self.line_prefill = self.read_line_prefill(buf, initlen.min(maxlen), unicode);
+    }
+
+    /// Read `n` characters of pre-filled line input from `buf` — Latin-1 bytes, or
+    /// 32-bit code points for a `_uni` request. `None` for an empty prefill or an
+    /// unreadable buffer (a bad address is the game's bug, not worth faulting the
+    /// turn over: the prompt just starts empty).
+    fn read_line_prefill(&self, buf: u32, n: u32, unicode: bool) -> Option<String> {
+        if n == 0 {
+            return None;
+        }
+        let mut s = String::with_capacity(n as usize);
+        for i in 0..n {
+            let cp = if unicode { self.m32(buf + i * 4) } else { self.m8(buf + i) }.ok()?;
+            s.push(char::from_u32(cp)?);
+        }
+        (!s.is_empty()).then_some(s)
+    }
+
+    /// Take the text the game pre-loaded into its latest line-input request (Glk
+    /// spec §4.2). One-shot: the host seeds its editable input line with this
+    /// exactly once per request, so re-polling never re-inserts it.
+    pub fn take_line_prefill(&mut self) -> Option<String> {
+        self.line_prefill.take()
     }
 
     /// `glk_set_terminators_line_event(win, keycodes, count)`: record the special
@@ -9239,6 +9275,85 @@ mod tests {
         assert_eq!(step_to_event(&mut m), StepResult::Quit, "cancel does not suspend");
         assert_eq!(read_event(&m, 0x100), (3, 1, 2, 0), "LineInput, win, initlen chars");
         assert_eq!(read_event(&m, 0x110).0, 0, "request was cleared → None");
+    }
+
+    // ── Pre-filled line input (Glk §4.2 `initlen`) ────────────────────────────
+
+    /// A game may pre-load the input buffer and pass a non-zero `initlen`, meaning
+    /// those characters are ALREADY in the input line. The host takes that text to
+    /// seed its own editable prompt (advent.blb's toolbar primes verbs this way:
+    /// clicking Examine asks for a line with `"Examine "` waiting). (SQ-0562)
+    #[test]
+    fn line_prefill_is_read_from_the_buffer_and_taken_once() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event(win=1, buf=0x180, maxlen=10, initlen=8) over "Examine ".
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(8)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        let mut m = machine_ram(body, 0x200);
+        poke(&mut m, 0x180, b"Examine ");
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        assert_eq!(m.take_line_prefill().as_deref(), Some("Examine "));
+        assert_eq!(m.take_line_prefill(), None, "one-shot: a second poll must not re-seed");
+    }
+
+    /// The prefill is capped at `maxlen` (the model clamps `initlen` the same way),
+    /// so a game over-declaring its prefill cannot make the host read past the
+    /// buffer it offered.
+    #[test]
+    fn line_prefill_is_capped_at_maxlen() {
+        use asm::Op::{C16, C8, Zero};
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(4), C8(8)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        let mut m = machine_ram(body, 0x200);
+        poke(&mut m, 0x180, b"Examine ");
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        assert_eq!(m.take_line_prefill().as_deref(), Some("Exam"));
+    }
+
+    /// A `_uni` request pre-loads 32-bit code points, not bytes.
+    #[test]
+    fn line_prefill_reads_unicode_code_points() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event_uni(win=1, buf=0x180, maxlen=10, initlen=2)
+        let mut body = glk_call(0x141, &[C8(1), C16(0x0180), C8(10), C8(2)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        let mut m = machine_ram(body, 0x200);
+        m.mem.write32(0x180, 'é' as u32).unwrap();
+        m.mem.write32(0x184, '—' as u32).unwrap();
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        assert_eq!(m.take_line_prefill().as_deref(), Some("é—"));
+    }
+
+    /// The overwhelmingly common request (`initlen` 0) leaves nothing to seed, so
+    /// an ordinary prompt never gains stray text.
+    #[test]
+    fn no_prefill_for_an_ordinary_line_request() {
+        use asm::Op::{C16, C8, Zero};
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(10), C8(0)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        let mut m = machine_ram(body, 0x200);
+        poke(&mut m, 0x180, b"stale bytes");
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        assert_eq!(m.take_line_prefill(), None, "initlen 0 → the buffer's stale bytes stay out");
+    }
+
+    /// Committing the line writes from index 0, so a host that submits the whole
+    /// line (prefill + what the player appended) does not double the verb.
+    #[test]
+    fn supplying_the_seeded_line_replaces_the_prefill_in_the_buffer() {
+        use asm::Op::{C16, C8, Zero};
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(20), C8(8)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_ram(body, 0x200);
+        poke(&mut m, 0x180, b"Examine ");
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        m.supply_line("Examine lamp");
+        step_to_event(&mut m);
+        assert_eq!(read_event(&m, 0x100), (3, 1, 12, 0), "LineInput, win, 12 chars");
+        let got: String =
+            (0..12).map(|i| m.mem.read8(0x180 + i).unwrap() as u8 as char).collect();
+        assert_eq!(got, "Examine lamp", "written from index 0 — no doubled verb");
     }
 
     #[test]

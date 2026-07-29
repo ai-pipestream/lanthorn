@@ -1080,7 +1080,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         needs_redraw |= loop_tick::poll_tidy_jobs(&mut state, &mut mapper, &last_panes);
         needs_redraw |= state.poll_render_job();
         needs_redraw |= state.poll_v6_encode_job();
-        needs_redraw |= loop_tick::refresh_engine_input(&mut state, &*session);
+        needs_redraw |= loop_tick::refresh_engine_input(&mut state, &mut *session);
         needs_redraw |= loop_tick::expire_sound_and_settle_dock(&mut state);
 
         // Draw — unless we're mid-drain of an input burst (skip_draw), in which

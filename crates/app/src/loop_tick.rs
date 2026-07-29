@@ -291,9 +291,23 @@ pub(crate) fn poll_tidy_jobs(
 /// re-arm never forces a redraw).
 pub(crate) fn refresh_engine_input(
     state: &mut AppState,
-    session: &dyn Engine,
+    session: &mut dyn Engine,
 ) -> bool {
     let mut redraw = false;
+
+    // A Glulx game that pre-loaded its line-input buffer (Glk spec §4.2 `initlen`)
+    // wants that text ALREADY IN the input line, editable — advent.blb's toolbar
+    // primes a verb this way, so clicking Examine must leave "Examine " at the
+    // prompt for the player to finish. Take it one-shot per request and replace
+    // the line: the game cancelled any half-typed input before re-requesting, so
+    // its prefill is the authoritative content. (SQ-0562)
+    if let Some(text) = crate::engine_helpers::glulx_session_opt_mut(session)
+        .and_then(|gs| gs.take_line_prefill())
+    {
+        state.input.clear();
+        state.input.insert_str(&text);
+        redraw = true;
+    }
 
     // Update char_mode flag so the renderer hides the prompt during read_char.
     let prev_char_mode = state.char_mode;
