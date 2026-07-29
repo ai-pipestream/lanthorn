@@ -29,6 +29,20 @@ binary's `--version` at once.
 - **Two new theme selectors** — `saves_portable` (accent + the `↗` glyph) and
   `saves_host_only` (muted) style the saves manager's Type cell.
 
+### Fixed
+
+- **A Glulx game's own `SAVE` now loads from the saves manager (SQ-0556).**
+  `SAVE` behaves the same on every engine again: on Z-machine, Glulx and Scott
+  Adams alike it writes a `.babelmap`, the archive appears in the manager, and it
+  restores through both the game's own `RESTORE` and the host's. Picking a Glulx
+  one from the manager used to answer `Glulx has no game-save (.qzl) format`
+  outright. The restore keeps the windows you're looking at exactly as they are —
+  the Glulx spec (§1.8.5) keeps Glk's window and stream state out of a save
+  deliberately, so nothing in the file can drag a stale screen layout back over a
+  live one. No archive format change: the bytes sealed for an in-game save are
+  the same standard Glulx-Quetzal as before, and still unzip straight into
+  another interpreter.
+
 ### Save format
 
 - **`.babelmap` archive `format_version` 4 → 5.** `meta.json` gained

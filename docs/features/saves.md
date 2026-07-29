@@ -23,6 +23,15 @@ let the game save itself, or never save at all.
   brings your scrollback and its inline artwork back with it, even into a freshly
   launched session. The archive quietly records which mechanism asked for it, and
   that is the only difference between the two.
+
+  And it's the same deal on every engine. Whether you're playing a Z-machine
+  story, a Glulx one, or a Scott Adams adventure, typing `SAVE` leaves a
+  `.babelmap` that shows up in the saves manager and loads from either
+  direction — the manager's Enter, or the game's own `RESTORE`. Glulx used to be
+  the odd one out here, answering the saves manager with a flat "no such format";
+  it isn't any more. A Glulx restore still leaves the windows you're looking at
+  exactly as they are, which is what the Glulx spec asks for and what stops a
+  save from dragging a stale screen layout back with it.
 - **Bring saves in from other interpreters — standard Quetzal.** Point the saves
   manager's built-in file browser at a `.qzl`/`.sav` game save from `dfrotz` (or
   any other interpreter), import it, and keep the map you've already accumulated.

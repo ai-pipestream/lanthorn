@@ -702,8 +702,18 @@ pub trait Engine {
     fn save_state(&self) -> EngineSave;
     /// Restore from an engine-tagged save.  Refuses a foreign-engine save.
     fn restore_state(&mut self, save: &EngineSave) -> Result<(), EngineError>;
-    /// Restore a bare standard Quetzal *game* save (`.qzl`) by completing the save
-    /// instruction's descriptor (v3 branch true / v4+ store 2). Z-machine only.
+    /// Restore the bytes an in-game `@save` seals — a bare standard Quetzal /
+    /// Glulx-Quetzal blob — through the HOST path (the saves manager,
+    /// `/restore-state`, an interchange file carried in), by completing the save
+    /// instruction's descriptor and running on to the next input prompt.
+    ///
+    /// Every engine implements this, and that is deliberate (SQ-0556): uniform
+    /// in-game-save semantics mean an `@save` archive is loadable from the saves
+    /// manager on ANY engine, not just through the game's own `@restore`. A new
+    /// engine is not done until its `@save` archive behaves like the others.
+    /// What "completing the descriptor" means is per-engine (the Z-machine
+    /// branches true / stores 2; Glulx pops `@save`'s call stub and stores the
+    /// `-1` sentinel; Scott has no descriptor and simply loads its snapshot).
     fn restore_game_save(&mut self, bytes: &[u8]) -> Result<(), EngineError>;
     /// Whether a game-initiated `@save`/`@restore` is currently suspended,
     /// awaiting host file I/O. Hosts must skip any unconditional host-snapshot

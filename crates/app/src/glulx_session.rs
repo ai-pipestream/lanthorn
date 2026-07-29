@@ -1070,8 +1070,48 @@ impl Engine for GlulxSession {
         Ok(())
     }
 
-    fn restore_game_save(&mut self, _bytes: &[u8]) -> Result<(), EngineError> {
-        Err(EngineError::BadSave("Glulx has no game-save (.qzl) format".into()))
+    fn restore_game_save(&mut self, bytes: &[u8]) -> Result<(), EngineError> {
+        // A HOST restore of in-game `@save` bytes: the saves-manager Load, the
+        // `/restore-state` command, or a bare `.glksave`/`.qzl` carried in from
+        // another interpreter. Uniform in-game-save semantics say every engine's
+        // `@save` archive must load here, not just through the game's own
+        // `@restore` (SQ-0556) — and the bytes are the same standard
+        // Glulx-Quetzal either way, so the semantics are too:
+        // `complete_restore_quetzal` reverts RAM/stack/heap to the save point,
+        // pops `@save`'s call stub and stores the `-1` "just restored" sentinel,
+        // and — per Glulx spec §1.8.5 — leaves the LIVE Glk model alone rather
+        // than reinstating a serialized one. The bare format has no `Glk ` chunk
+        // to reinstate a stale window tree from, which is exactly why it is the
+        // right shape to seal for `@save`.
+        //
+        // Runs before anything is abandoned: a foreign or corrupt blob fails on
+        // the `IFhd` identity check with the session still intact.
+        if !self.machine.complete_restore_quetzal(bytes) {
+            return Err(EngineError::BadSave(
+                "not a Glulx save for this story (or the file is corrupt)".into(),
+            ));
+        }
+        // The one thing the game's own `@restore` never faces: this arrives
+        // while the session is parked inside a `glk_select` belonging to the run
+        // we just left. §1.8.5 keeps that suspension out of the save file, so
+        // the host has to retire it — otherwise `step` re-reports it forever
+        // instead of resuming at the restored PC. The game re-requests its own
+        // line event on the way back to the prompt.
+        self.machine.abandon_pending_input();
+        // Run the save-verb tail out to the next prompt, so the session is
+        // re-armed at a clean input request rather than parked mid-verb
+        // (mirrors the Z-machine's `restore_game_save`).
+        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
+        self.pending = pending;
+        self.quit = quit;
+        self.pending_io = None;
+        self.pending_filename = None;
+        // That tail's output is redundant with the host's own "[Game restored]"
+        // notice, and an `@save` archive is about to reinstate its own
+        // transcript over the top of it — drain and discard.
+        let _ = self.take_transcript_elems();
+        self.refresh_screen();
+        Ok(())
     }
 
     fn is_saveload_pending(&self) -> bool {
@@ -1610,6 +1650,161 @@ mod tests {
         assert!(!matches!(sess.screen().root, WinNode::Blank), "the live window survives");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A test story that saves mid-play and then keeps printing landmarks, so a
+    /// restore is provable by what it prints next rather than by peeking at RAM:
+    ///
+    /// ```text
+    /// prompt 1  ->  @save  ->  "A"  ->  prompt 2  ->  "B"  ->  prompt 3  ->  "C" -> quit
+    /// ```
+    ///
+    /// A restore of the `@save` bytes resumes just past `@save`, so the run
+    /// reprints "A" and parks at prompt 2 — and the NEXT command prints "B"
+    /// again instead of "C". Nothing else can produce that sequence.
+    fn save_then_landmarks_story() -> Vec<u8> {
+        use E::*;
+        const SAVE_RES: u32 = 0x410;
+        let mut body = open_buffer_prelude();
+        body.extend(line_prompt()); // prompt 1
+        body.extend(enc(0x123, &[Imm(0), MemLoad(SAVE_RES)])); // @save
+        body.extend(streamchar(b'A'));
+        body.extend(line_prompt()); // prompt 2 — the save point's resume prompt
+        body.extend(streamchar(b'B'));
+        body.extend(line_prompt()); // prompt 3
+        body.extend(streamchar(b'C'));
+        body.extend(enc(0x120, &[])); // quit
+        image_for(body, 1)
+    }
+
+    /// SQ-0556 — the quest itself. `@save` must behave the same on every engine,
+    /// and "the same" includes being loadable from the SAVES MANAGER, not only
+    /// through the game's own `@restore`. Glulx used to refuse outright
+    /// (`BadSave("Glulx has no game-save (.qzl) format")`), which made it the one
+    /// engine whose in-game save was a second-class citizen.
+    ///
+    /// The host restore takes the identical bytes the archive seals and gives
+    /// them the identical semantics the game's own `@restore` gets — standard
+    /// Glulx-Quetzal via `restore_quetzal`, live Glk model preserved (§1.8.5).
+    #[test]
+    fn glulx_ingame_save_archive_restores_through_the_host_path() {
+        use crate::archive::SaveTrigger;
+        use crate::persist_files::game_save_bytes;
+
+        let mut sess = GlulxSession::new(save_then_landmarks_story(), 80, 24, true, false, false, (1, 1), None, &[])
+            .expect("new");
+        let _ = sess.take_transcript(); // drain the banner
+        assert_eq!(sess.pending_input(), InputKind::Line, "opens at prompt 1");
+
+        // Turn 1 drives into @save; the writer seals these bytes.
+        assert_eq!(sess.submit("save").pending_io, Some(PendingIo::Save));
+        let ingame = game_save_bytes(&sess, SaveTrigger::Ingame);
+        assert_eq!(sess.resume_save(true).pending_io, None);
+
+        // Play PAST the save point so a restore has something to undo.
+        let r = sess.submit("onwards");
+        assert!(r.transcript.contains('B'), "the run moved past the save point: {:?}", r.transcript);
+        assert_eq!(sess.pending_input(), InputKind::Line, "parked at prompt 3");
+
+        // The host restore that used to be a hard error.
+        sess.restore_game_save(&ingame.bytes).expect("a Glulx @save archive loads through the host path");
+        assert!(!sess.has_quit(), "the restore did not fall through to the trailing quit");
+        assert_eq!(sess.pending_input(), InputKind::Line, "re-armed at an input prompt, not parked mid-verb");
+
+        // Proof of WHERE we landed: the next command prints "B" (prompt 2 -> 3)
+        // rather than "C" (prompt 3 -> quit). A restore that failed silently, or
+        // that left the pre-restore `glk_select` suspension in place and
+        // swallowed this command, cannot produce this.
+        let after = sess.submit("again");
+        assert!(after.transcript.contains('B'), "resumed from the save point: {:?}", after.transcript);
+        assert!(!after.transcript.contains('C'), "did NOT continue from where we were: {:?}", after.transcript);
+        assert!(!after.quit, "still playable after a host restore");
+    }
+
+    /// SQ-0556's real hazard, pinned. The bytes an `@save` seals must never be
+    /// able to reinstate a STALE window model over a live one: Glulx §1.8.5 puts
+    /// Glk library state (windows, streams, output stream, window contents,
+    /// cursor positions) deliberately outside a save, and a host restore lands in
+    /// a session whose windows the player is looking at right now.
+    ///
+    /// This guards the shape as well as the behaviour, because the tempting fix
+    /// for this quest was to seal the richer `save_state()` (with its `GReg` +
+    /// `Glk ` chunks) into the `@save` archive so it would be `restore_state`-able.
+    /// That would have put a serialized window tree in the file — and this test
+    /// fails the moment one appears there OR gets applied.
+    #[test]
+    fn glulx_host_restore_of_an_ingame_save_never_reinstates_a_stale_window_model() {
+        use crate::archive::SaveTrigger;
+        use crate::persist_files::game_save_bytes;
+        use E::*;
+        const SAVE_RES: u32 = 0x410;
+
+        // prompt 1 -> @save -> prompt 2 -> split a status grid in -> prompt 3.
+        let mut body = open_buffer_prelude();
+        body.extend(line_prompt());
+        body.extend(enc(0x123, &[Imm(0), MemLoad(SAVE_RES)])); // @save
+        body.extend(line_prompt());
+        // glk_window_open(split=local0, method=Above|Fixed, size=2, wintype=Grid, rock=0)
+        for v in [Imm(0), Imm(4), Imm(2), Imm(0x12), LocLoad(0)] {
+            body.extend(enc(0x40, &[v, Push]));
+        }
+        body.extend(enc(0x130, &[Imm(0x23), Imm(5), Discard]));
+        body.extend(line_prompt());
+        body.extend(enc(0x120, &[])); // quit
+
+        let mut sess = GlulxSession::new(image_for(body, 1), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+        let _ = sess.take_transcript();
+        assert_eq!(sess.submit("save").pending_io, Some(PendingIo::Save));
+        let ingame = game_save_bytes(&sess, SaveTrigger::Ingame);
+        assert_eq!(sess.resume_save(true).pending_io, None);
+        assert!(!matches!(sess.screen().root, WinNode::Pair { .. }), "one window at save time");
+
+        // The shape half: the sealed bytes carry no serialized display state at
+        // all, so there is nothing for a restore to reinstate.
+        let has_chunk = |b: &[u8], id: &[u8; 4]| b.windows(4).any(|w| w == id);
+        assert!(has_chunk(&ingame.bytes, b"IFhd"), "sealed bytes are Glulx-Quetzal");
+        assert!(!has_chunk(&ingame.bytes, b"Glk "), "an @save archive must NOT carry a serialized window tree");
+        assert!(!has_chunk(&ingame.bytes, b"GReg"), "an @save archive must NOT carry serialized registers");
+
+        // The behaviour half: the game splits a second window in AFTER the save,
+        // and the host restore must leave it standing.
+        sess.submit("split");
+        assert!(matches!(sess.screen().root, WinNode::Pair { .. }), "the game split a status window in after the save");
+
+        sess.restore_game_save(&ingame.bytes).expect("host restore of the @save archive");
+        assert!(
+            matches!(sess.screen().root, WinNode::Pair { .. }),
+            "the LIVE window model survives the restore; a stale one-window tree was not applied"
+        );
+        assert_eq!(sess.pending_input(), InputKind::Line, "still at a prompt with the live windows");
+    }
+
+    /// SQ-0556: a foreign/corrupt blob must still be refused — and refused
+    /// CLEANLY, leaving the session playable rather than half-restored. The
+    /// identity check runs before anything is abandoned for exactly this.
+    #[test]
+    fn glulx_host_restore_refuses_a_foreign_game_save_and_leaves_the_session_playable() {
+        let mut sess = GlulxSession::new(save_then_landmarks_story(), 80, 24, true, false, false, (1, 1), None, &[])
+            .expect("new");
+        let _ = sess.take_transcript();
+
+        assert!(sess.restore_game_save(b"not a Glulx save at all").is_err(), "garbage is refused");
+        // Another story's save: same container, different IFhd.
+        let other = {
+            use E::*;
+            let mut b = open_buffer_prelude();
+            b.extend(line_prompt());
+            b.extend(enc(0x123, &[Imm(0), MemLoad(0x410)]));
+            b.extend(enc(0x120, &[]));
+            let mut o = GlulxSession::new(image_for(b, 2), 80, 24, true, false, false, (1, 1), None, &[]).expect("new");
+            assert_eq!(o.submit("save").pending_io, Some(PendingIo::Save));
+            o.save_quetzal()
+        };
+        assert!(sess.restore_game_save(&other).is_err(), "another story's save is refused");
+
+        // The refusals cost the session nothing: it still plays from where it was.
+        assert_eq!(sess.pending_input(), InputKind::Line, "still parked at its own prompt");
+        assert_eq!(sess.submit("save").pending_io, Some(PendingIo::Save), "still drives into its own @save");
     }
 
     #[test]

@@ -92,13 +92,30 @@ the archive's map/transcript/screen around it. A bare `.qzl`/`.sav` carried in f
 another interpreter has no `meta.json` at all and takes the same descriptor path
 with nothing to reinstate — that interchange route is untouched.
 
-*One standing gap, unchanged by the unification:* a **Glulx** in-game save can only
-be restored through the game's own `restore` (`resume_restore` →
-`complete_restore_quetzal`), which preserves the live Glk window model per Glulx
-spec §1.8.5. Picking one from the host saves manager instead reports
-`Glulx has no game-save (.qzl) format` — `GlulxSession::restore_game_save` is
-unimplemented, because reinstating bare Quetzal into a *cold* Glk model has no
-safe general answer. Z-machine and Scott in-game saves host-load fine.
+**Every engine, the same deal (SQ-0556).** `@save` behaves identically wherever you
+meet it: it writes a `.babelmap`, the archive shows up in the saves manager, and it
+comes back through *both* the game's own `restore` and the host restore path.
+Glulx used to be the exception — the saves manager answered
+`Glulx has no game-save (.qzl) format` — and no longer is. Its host restore now
+takes the same road the game's own `@restore` takes: `restore_quetzal`, which
+reverts RAM/stack/heap, pops `@save`'s call stub and stores the `-1` "just
+restored" sentinel, and leaves the **live** Glk window model exactly where it
+found it (Glulx spec §1.8.5 keeps windows, streams and I/O state out of a save
+on purpose). That is why the bare `IFhd`/`CMem`/`Stks`/`MAll` shape is the right
+thing to seal: it carries no serialized window tree, so there is nothing for a
+restore to snap a *stale* set of windows back from.
+
+One wrinkle is the host's alone. A saves-manager restore arrives while the session
+is parked inside a `glk_select` belonging to the run you are leaving, and the save
+file — by that same §1.8.5 — cannot say a word about it. Left in place it wedges
+the restore twice: the VM re-reports the old suspension instead of resuming at the
+restored PC, and your next command gets swallowed answering it. So the host
+retires it (`Machine::abandon_pending_input`) and runs the save-verb tail out to
+the next prompt, discarding that tail's output the way the Z-machine path does —
+the archive's own transcript is about to be laid down over it. Verified against
+real Adventure (Glulx) in `crates/app/tests/glulx_ingame_save_host_restore.rs`:
+save, play on, host-restore, and the game replays the reference run move for move
+with an inventory that has forgotten everything picked up afterwards.
 
 ## Layer 2 — host Save State / Restore State (emulator snapshot)
 

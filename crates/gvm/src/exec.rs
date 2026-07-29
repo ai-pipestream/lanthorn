@@ -4886,6 +4886,32 @@ impl Machine {
         }
     }
 
+    /// Abandon a live `glk_select` suspension (and the Glk input request behind
+    /// it) **without** delivering an event to the game, so the next
+    /// [`Machine::step`] executes at the current PC instead of re-reporting the
+    /// suspension.
+    ///
+    /// This exists for one caller: a HOST restore of a standard Glulx-Quetzal
+    /// blob (`restore_quetzal`) into a session that is parked at its input
+    /// prompt. Glulx spec §1.8.5 keeps Glk library state — windows, streams,
+    /// I/O state — **out** of the save file, so a save blob can say nothing
+    /// about the interpreter's own suspension; the host owns it. Leaving it in
+    /// place would wedge the restore twice over: `step` short-circuits on the
+    /// suspension and never reaches the restored PC, and a later `supply_line`
+    /// would post its event to the event address of the run that just went
+    /// away.
+    ///
+    /// The game's own `@restore` never needs this — it runs *between* selects,
+    /// with no suspension live — and neither does [`Machine::restore_state`],
+    /// which replaces the whole Glk model wholesale.
+    pub fn abandon_pending_input(&mut self) {
+        if let Some(pi) = self.pending_input.take() {
+            self.glk.take_line_request(pi.win);
+            self.glk.take_char_request(pi.win);
+        }
+        self.pending_event = None;
+    }
+
     /// Complete a suspended `glk_fileref_create_by_prompt`. `Some(name)` binds a
     /// fileref to that (sanitized) name and stores its id into the `@glk`'s S1;
     /// `None` (the player cancelled) stores 0 (the Glk NULL fileref). No-op if none
@@ -7800,6 +7826,76 @@ mod tests {
         assert_eq!(got, "AB", "the live VFS stream survives restore_quetzal with post-save writes intact");
 
         // Resuming steps into the trailing sentinel, just after the original @save.
+        assert_eq!(m.step(), StepResult::Continue, "resumes at the stub's PC, just after @save");
+        assert_eq!(m.mem.read32(0x184).unwrap(), 0x7F, "execution reached the trailing sentinel");
+    }
+
+    /// SQ-0556, the question the whole quest hung on: does `restore_quetzal`
+    /// TOLERATE the non-standard `GReg`/`Glk ` chunks — skipping them, the way
+    /// Quetzal §8.9 says any reader should treat an unknown chunk — rather than
+    /// applying them?
+    ///
+    /// It has to, and for a sharper reason than tidiness: a `Glk ` chunk carries
+    /// a window tree that was current at save time, and reinstating it over a
+    /// live session would hand the game a STALE window model — windows it has
+    /// since split or closed, snapping back. Glulx §1.8.5 puts Glk library state
+    /// (windows, filerefs, streams, output stream, window contents, cursor
+    /// positions) deliberately outside the save for exactly that reason.
+    ///
+    /// So: feed `restore_quetzal` the RICH `save_state()` blob, having first
+    /// moved the live model somewhere the chunk knows nothing about. The VM half
+    /// must revert; the display half must not budge.
+    #[test]
+    fn restore_quetzal_skips_greg_and_glk_chunks_and_never_reinstates_a_stale_window_model() {
+        use asm::Op::{C8, Mem32, Zero};
+        fn has_chunk(save: &[u8], id: &[u8; 4]) -> bool {
+            save.windows(4).any(|w| w == id)
+        }
+        // @save 0, -> mem[0x180]; copy 0x7F -> mem[0x184] (sentinel); quit.
+        let mut body = asm::ins(0x0123, &[Zero, Mem32(0x180)]);
+        body.extend(asm::ins(0x40, &[C8(0x7F), Mem32(0x184)]));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+
+        // One window at save time; that is what the `Glk ` chunk will describe.
+        let first = match m.glk.root() {
+            0 => m.glk.window_open(0, 0, 0, 3, 0).expect("root buffer window opens"),
+            existing => existing,
+        };
+        assert_eq!(m.glk.root(), first, "the lone window is the root at save time");
+        m.iosys_mode = 2;
+        m.mem.write32(0x190, 0xCAFE_BABE).unwrap();
+
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let rich = m.save_state();
+        assert!(has_chunk(&rich, b"GReg"), "the blob under test really does carry GReg");
+        assert!(has_chunk(&rich, b"Glk "), "the blob under test really does carry a Glk chunk");
+
+        // Move the LIVE display state on, past anything the blob describes: split
+        // a status window in (so the root is now a pair window the chunk has
+        // never heard of) and change the I/O system.
+        let status = m.glk.window_open(first, 0x12, 2, 4, 0).expect("status window splits in");
+        let live_root = m.glk.root();
+        assert_ne!(live_root, first, "the split moved the root to a pair window");
+        m.iosys_mode = 9;
+        m.mem.write32(0x190, 0).unwrap();
+
+        m.restore_quetzal(&rich).expect("restore_quetzal accepts a blob carrying GReg + Glk chunks");
+        m.pending_saveload = None;
+
+        // The VM half came back from the blob.
+        assert_eq!(m.mem.read32(0x190).unwrap(), 0xCAFE_BABE, "RAM reverted to the save point");
+        assert_eq!(m.mem.read32(0x180).unwrap(), 0xFFFF_FFFF, "@save's S1 got the -1 sentinel");
+
+        // The display half did NOT: the stale one-window tree in `Glk ` was
+        // skipped, not applied. Were it applied, `root` would snap back to
+        // `first` and the status window would vanish.
+        assert_eq!(m.glk.root(), live_root, "the live (post-save) window tree survives; no stale model applied");
+        assert!(m.glk.window_type(status).is_some(), "the window split in AFTER the save is still open");
+        // GReg was skipped too — iosys keeps its live value instead of the saved one.
+        assert_eq!(m.iosys_mode, 9, "GReg was skipped: iosys keeps its live value");
+
+        // And the machine really is runnable afterwards.
         assert_eq!(m.step(), StepResult::Continue, "resumes at the stub's PC, just after @save");
         assert_eq!(m.mem.read32(0x184).unwrap(), 0x7F, "execution reached the trailing sentinel");
     }
