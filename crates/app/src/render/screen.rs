@@ -625,12 +625,38 @@ fn render_node(
                                 let menu_scale = v6::Scale { s: scale_center.s, off_x: scale_center.off_x, off_y: slack };
                                 let vp = v6::story_viewport_box(Some(story), &top_scale, (area.width, area.height), cell_px);
                                 let (x, y) = (area.x + vp.x, area.y + vp.y);
-                                // The menu strip's top cell: the story's native bottom
-                                // mapped through the bottom-anchored menu scale (whose
-                                // native bottom lands exactly on the pane bottom).
+                                // The menu strip's top cell: the first terminal row that
+                                // actually CARRIES a menu run, mapped through the
+                                // bottom-anchored menu scale.
+                                //
+                                // SQ-0548: it used to be the story's native bottom through
+                                // that scale, rounded DOWN. The story scale and the menu
+                                // scale round independently, so at some pane widths that
+                                // floor landed one row ABOVE the first menu row, and the
+                                // leftover row entered the menu band carrying no runs.
+                                // `decompose_chrome_strips` classes a run-less row `Empty`
+                                // and coalesces it into an ART strip, so that row redrew a
+                                // squashed slice of the frame's bottom edge full-width
+                                // across the pane — on top of the flank panel fill and its
+                                // divider. That is the width-dependent dark bar under the
+                                // left picture column: at widths where the floor happened
+                                // to land on the first menu row there was no leftover row
+                                // and no bar, which is why it came and went with the pane.
+                                // Anchoring on the runs keeps the story viewport — and with
+                                // it the flank fill and divider — reaching the menu at every
+                                // width. A run below the story bottom can only map at or
+                                // below the old floor, so the viewport never shrinks.
                                 let story_bottom = story.y_px as u32 + story.h_px as u32;
-                                let menu_top_dev = slack as f32 + story_bottom as f32 * scale_center.s;
-                                let menu_top = (menu_top_dev / cell_px.1.max(1) as f32).floor() as u16;
+                                let menu_top = chrome_runs
+                                    .iter()
+                                    .filter(|t| !t.text.trim().is_empty() && (t.y.max(1) as u32 - 1) >= story_bottom)
+                                    .map(|t| run_cell(t, &menu_scale, cell_px, area).1)
+                                    .min()
+                                    .map(|r| r.clamp(0, u16::MAX as i32) as u16)
+                                    .unwrap_or_else(|| {
+                                        let dev = slack as f32 + story_bottom as f32 * scale_center.s;
+                                        (dev / cell_px.1.max(1) as f32).floor() as u16
+                                    });
                                 let menu_top = menu_top.clamp(y + 1, area.bottom());
                                 (top_scale, Rect::new(x, y, vp.width, menu_top.saturating_sub(y)), Some(menu_scale))
                             }

@@ -732,6 +732,88 @@ fn journey_hybrid_tall_pane_panel_fill_reaches_the_divider() {
     }
 }
 
+/// SQ-0548: no width-dependent dark bar between the flank panel and the command menu.
+///
+/// The menu strip's top cell used to be the story's native bottom mapped through the
+/// bottom-anchored menu scale and rounded DOWN. That scale and the story scale round
+/// independently, so at some pane widths the floor landed one row ABOVE the first menu
+/// row, and the leftover row joined the menu band carrying no runs. A run-less row is
+/// classed `Empty` and coalesces into an ART strip, so it redrew a squashed slice of the
+/// frame's bottom edge full-width across the pane — over the flank panel fill and its
+/// divider. That was the dark bar under the left picture column that grew and shrank
+/// with the window: at widths where the floor happened to land on the first menu row
+/// there was no leftover row and no bar.
+///
+/// **This must be probed at REAL cell metrics (8×18).** `Picker::halfblocks()` uses 1×2
+/// cells — a completely different layout regime that never reproduces the defect, and a
+/// halfblocks sweep reported every width clean while the TTY showed the bar.
+#[test]
+#[allow(deprecated)]
+fn journey_hybrid_flank_panel_meets_the_menu_at_every_width() {
+    use ratatui::style::Color;
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+
+    for w in [96u16, 104, 110, 116, 122, 128, 134, 138, 144, 150] {
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.game_picker =
+            Some(ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 18)));
+        state.config.v6_render = app::config::V6RenderMode::Hybrid;
+        let area = Rect::new(0, 0, w, 51);
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        let vp = state.transcript_geom.get().expect("hybrid transcript").area;
+        let row_text = |y: u16| -> String {
+            (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+        };
+        // The menu's own first row — its header, above "Proceed".
+        let header_y =
+            (0..area.height).find(|&y| row_text(y).contains("The Party")).expect("the menu header row");
+
+        // (a) The story viewport ends exactly where the menu begins: no leftover row
+        // between them for an Empty→Art strip to claim.
+        assert_eq!(
+            vp.bottom(),
+            header_y,
+            "w={w}: the story viewport must meet the menu with no leftover row \
+             (viewport bottom {}, menu header {header_y})",
+            vp.bottom()
+        );
+
+        // (b) And the flank column is continuous into the menu: the three rows above
+        // the header carry the SAME panel fill and the SAME divider colour. The bar
+        // showed up as the bottom one of these differing from the two above it.
+        let bg = |x: u16, y: u16| buf.cell((x, y)).unwrap().bg;
+        let (fill, edge) = (bg(2, header_y - 3), bg(vp.x - 1, header_y - 3));
+        assert!(
+            matches!(fill, Color::Rgb(..)) && matches!(edge, Color::Rgb(..)),
+            "w={w}: the flank column carries the game's panel fill and divider (fill {fill:?}, edge {edge:?})"
+        );
+        for y in (header_y - 2)..header_y {
+            assert_eq!(
+                bg(2, y),
+                fill,
+                "w={w}: the panel fill runs unbroken to the menu — row {y} interior is {:?}, \
+                 not the {fill:?} of row {} (row: {:?})",
+                bg(2, y),
+                header_y - 3,
+                row_text(y)
+            );
+            assert_eq!(
+                bg(vp.x - 1, y),
+                edge,
+                "w={w}: the divider runs unbroken to the menu — row {y} edge is {:?}, \
+                 not the {edge:?} of row {} (row: {:?})",
+                bg(vp.x - 1, y),
+                header_y - 3,
+                row_text(y)
+            );
+        }
+    }
+}
+
 /// SQ-0540: Journey stamps its selected command-menu label ("Start", "Proceed",
 /// "Combat", "Cast", …) as a painted run with §8.7.1 style bit 2 — the one v6
 /// moment where a real game's BOLD reaches the raster path. The composite must
