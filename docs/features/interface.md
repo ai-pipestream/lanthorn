@@ -121,6 +121,18 @@ know which side you're on).
   and never touches a normal launch.
 
 ## Playing aids
+- **`[more]` paging, the way the originals did it** — whenever a turn's output
+  runs past the story pane (a long description, a boot banner, a hint page,
+  even a "press any key" dump), the view stops at the *first* fresh screenful
+  with a reverse-video `[more]` bar instead of scrolling you straight to the
+  end. Space/PgDn/↓/Enter page onward; while the game is waiting on a single
+  keypress, *every* key pages and nothing reaches the game until you've caught
+  up — the key that lands at the bottom is consumed by the bar, the next one
+  answers the game, exactly like a real Infocom interpreter. Menus that clear
+  and repaint start you at the top; output that fits shows no bar; babelmap's
+  own output (`/help` and friends) never pages; and a game that asks for
+  `[MORE]` suppression (Zork Zero's demo mode) gets it. The bar is themeable
+  via `more_prompt`.
 - **Verb/noun menu** — a two-pane token palette of common verbs and in-scope
   nouns; pick tokens to assemble a command (multi-noun sentences via
   prepositions), never typing a word.
