@@ -698,6 +698,24 @@ fn journey_hybrid_tall_pane_panel_fill_reaches_the_divider() {
         );
     }
 
+    // (c) A column of panel fill separates the picture from the divider, so the panel
+    // frames the art on that side the way the art's own native left margin frames it
+    // on the other. Walk in from the divider: the first cell left of it must be fill
+    // (a plain space), not a halfblock of the picture.
+    let mid = vp.y + vp.height / 2;
+    let mut dx = vp.x;
+    while dx > 1 && lum(dx - 1, mid) > 400 {
+        dx -= 1;
+    }
+    let gap = buf.cell((dx - 1, mid)).unwrap();
+    assert!(
+        gap.symbol().trim().is_empty(),
+        "a panel-fill column must sit between the picture and the divider: col {} on row {mid} \
+         holds {:?} (divider starts at col {dx})",
+        dx - 1,
+        gap.symbol()
+    );
+
     // (a) Every flank cell carries SOMETHING the game painted — panel fill, picture
     // or divider — with no untouched theme-backdrop cells left behind. A `Reset`
     // background is the tell: that is a cell nothing drew.

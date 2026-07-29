@@ -773,8 +773,14 @@ fn render_node(
                                         // instead of top-anchoring the art over bare backdrop.
                                         // The divider extension below re-draws over this fill, and
                                         // the frame bands stay wherever their own strips put them.
+                                        // The flank's own divider extension, so the art can
+                                        // leave a column of panel fill beside it.
+                                        let div = divider_exts
+                                            .iter()
+                                            .map(|(e, _)| *e)
+                                            .find(|e| e.x >= r.x && e.x < r.right());
                                         let panel = (matches!(plan, BottomPlan::Menu) && r.width < area.width)
-                                            .then(|| menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx))
+                                            .then(|| menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx, div))
                                             .flatten();
                                         if let Some((bg, dest, crop)) = panel {
                                             fill_pane_page(*r, bg, buf);
@@ -2192,6 +2198,7 @@ fn menu_flank_panel(
     story: &crate::engine::PositionedWindow,
     native: (u16, u16),
     gfx: &image::RgbaImage,
+    divider: Option<Rect>,
 ) -> Option<FlankPanel> {
     if band.width == 0 || band.height == 0 {
         return None;
@@ -2243,9 +2250,23 @@ fn menu_flank_panel(
     // Horizontal placement is unchanged from the band mapping: the art's native left
     // edge through the same scale. Only the VERTICAL anchor moves (centred).
     let x = band.x + ((scale.off_x as f32 + ax0 as f32 * scale.s) / cw as f32).floor() as u16;
-    let cols = (((art_w as f32 * scale.s) / cw as f32).ceil() as u16)
+    let mut cols = (((art_w as f32 * scale.s) / cw as f32).ceil() as u16)
         .clamp(1, band.right().saturating_sub(x).max(1));
-    let rows = (((art_h as f32 * scale.s) / ch as f32).ceil() as u16).clamp(1, band.height);
+    let mut rows = (((art_h as f32 * scale.s) / ch as f32).ceil() as u16).clamp(1, band.height);
+    // Keep one column of panel fill between the picture and the divider, so the
+    // panel frames the art on that side the way the art's own native left margin
+    // frames it on the other. Both axes shrink by the SAME factor, so the aspect
+    // ratio is untouched (the draw stretches the crop into this rect). Only applies
+    // when the divider lies to the RIGHT of the art — i.e. a left-hand flank, the
+    // only kind any Menu-plan game has; a right-hand flank keeps today's placement.
+    if let Some(dx) = divider.map(|d| d.x).filter(|&dx| dx > x) {
+        let limit = dx.saturating_sub(x).saturating_sub(1);
+        if limit > 0 && cols > limit {
+            let f = limit as f32 / cols as f32;
+            cols = limit;
+            rows = ((rows as f32 * f).round() as u16).max(1);
+        }
+    }
     let y = band.y + (band.height - rows) / 2;
     Some((panel, Rect::new(x, y, cols, rows), (ax0, ay0, art_w, art_h)))
 }
