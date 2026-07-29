@@ -2380,11 +2380,30 @@ fn draw_chrome_text_strip(
         }
     }
 
-    // Bucket runs by their scale-mapped terminal row.
+    // Bucket runs by their GAME text row, laid out on CONSECUTIVE terminal rows
+    // from the strip's top (SQ-0543).
+    //
+    // The chrome ring's ART scales with the pane, but terminal TEXT does not —
+    // it is always one terminal cell tall. So the taller the pane, the more
+    // terminal rows one 16px game row spans, and at a large pane two adjacent
+    // status lines map two rows apart: Shogun's two-line band grew a blank row
+    // straight through its middle. Inside a TEXT strip there is no art to stay
+    // aligned with — having no frame graphics behind it is what MAKES it a text
+    // strip — so the game's own row structure is the truth to preserve, not the
+    // device-pixel position.
+    //
+    // The strip begins at its first text row (`decompose_chrome_strips` carves
+    // it that way), so offsetting each run's game row from the topmost one lands
+    // the first row exactly where it does today. Genuinely blank game rows
+    // survive, since their indices differ by more than one; and wherever the old
+    // mapping already produced consecutive rows — any pane small enough that a
+    // game row is about a terminal row — the result is byte-identical.
+    const FONT_H: i32 = 16; // the v6 text cell is 8×16 (SQ-0479)
+    let game_row = |t: &PxText| (t.y.max(1) as i32 - 1) / FONT_H;
+    let first_row = runs.iter().map(|t| game_row(t)).min().unwrap_or(0);
     let mut raw: BTreeMap<i32, Vec<&PxText>> = BTreeMap::new();
     for t in runs {
-        let (_, row) = run_cell(t, scale, cell_px, pane);
-        raw.entry(row).or_default().push(t);
+        raw.entry(rect.y as i32 + game_row(t) - first_row).or_default().push(t);
     }
     // SQ-0509: merge horizontally-contiguous same-style fragments before mapping.
     // A game (Arthur) that positions status text with proportional pixel metrics

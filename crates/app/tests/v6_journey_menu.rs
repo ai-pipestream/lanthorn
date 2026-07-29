@@ -320,11 +320,16 @@ fn journey_hybrid_header_bar_spans_full_pane_width() {
     );
 }
 
-/// (h, SQ-0508) At a pane size whose letterbox scale spreads the menu's native rows
-/// across MORE terminal rows (100×30 → scale 1.2, so native rows 19–24 map to
-/// terminal rows 23,24,25,26,gap-27,28,29), the whole menu panel reads as ONE solid
-/// black block and the reversed vertical column dividers stay CONTINUOUS through the
-/// scale-introduced gap row — no broken lines, no theme backdrop through the gaps.
+/// (h, SQ-0508 + SQ-0543) At a pane size whose letterbox scale USED to spread the
+/// menu's native rows across MORE terminal rows (100×30 → scale 1.2, which mapped
+/// six native rows onto seven terminal rows with a hole in the middle), the whole
+/// menu panel reads as ONE solid black block, its body rows land on CONSECUTIVE
+/// terminal rows, and the reversed vertical column dividers run continuously down
+/// the panel — no broken lines, no theme backdrop through the gaps.
+///
+/// SQ-0543 removed the spreading itself: a chrome TEXT strip has no art behind it
+/// to stay aligned with, so it lays its runs out by the game's own row structure
+/// instead of by scaled device pixels.
 #[test]
 fn journey_hybrid_menu_full_black_panel_dividers_continuous() {
     use ratatui::style::{Color, Modifier};
@@ -372,10 +377,16 @@ fn journey_hybrid_menu_full_black_panel_dividers_continuous() {
         .filter(|&x| reversed(x, proceed_y) && row_text(proceed_y).chars().nth(x as usize) == Some(' '))
         .collect();
     assert!(dividers.len() >= 4, "the menu body has ≥4 reversed column dividers; got {dividers:?}");
-    // The gap row: a menu body row whose text is entirely blank (no verb text) — it
-    // exists only because the scale spread the rows. It MUST still carry the dividers.
+    // SQ-0543: NO scale-introduced blank row may split the menu's body. The game
+    // drew these rows adjacent, and a text strip now lays out by the game's own row
+    // structure, so they arrive adjacent at every pane size. (The same spreading is
+    // what put a hole through the middle of Shogun's two-line status band.)
     let gap_y = ((header_y + 1)..game_y).find(|&y| row_text(y).trim().is_empty());
-    assert!(gap_y.is_some(), "the scale-spread menu has a blank gap row between body rows");
+    assert!(
+        gap_y.is_none(),
+        "menu body rows must be consecutive; found a blank row at {gap_y:?}\n{}",
+        (header_y..=game_y).map(|y| format!("  {y}: {:?}\n", row_text(y))).collect::<String>()
+    );
     for y in (header_y + 1)..=game_y {
         for &x in &dividers {
             assert!(

@@ -504,6 +504,160 @@ fn shogun_hybrid_status_band_floods_game_background() {
     }
 }
 
+/// SQ-0544: the live input caret belongs on the game's `>` prompt row, even when
+/// a tall margin float outlives the text beside it.
+///
+/// Shogun's opening floats the ship picture at the right margin and the prose
+/// wraps down its left. The picture is far taller than that prose, so the wrapped
+/// rows BELOW the `>` prompt are "leftover float rows" — they carry the float
+/// geometry but an EMPTY text string. The inline-input path drew the typed command
+/// and block cursor on `lines.last()` unconditionally, so the caret landed on one
+/// of those empty leftover rows, near the picture's bottom, instead of after the
+/// prompt (user report at the TTY, 2026-07-28). It must skip back over the
+/// text-less float tail to the real prompt row.
+#[test]
+fn shogun_input_caret_sits_on_the_prompt_row_beside_a_tall_float() {
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+    // Into the opening scene (splash → START), where the ship floats at the right
+    // margin, and on to the `>` prompt.
+    let mut elems: Vec<app::session::TranscriptElem> = session.submit_char(b' ').transcript_elems;
+    for _ in 0..8 {
+        if session.pending_input() == InputKind::Line {
+            break;
+        }
+        let r = match session.pending_input() {
+            InputKind::Char => session.submit_char(13),
+            _ => session.submit(""),
+        };
+        elems.extend(r.transcript_elems);
+    }
+    assert_eq!(session.pending_input(), InputKind::Line, "Shogun reached its line prompt");
+    assert!(
+        elems.iter().any(|e| matches!(e, app::session::TranscriptElem::Image(_))),
+        "the opening put its ship picture into the transcript as an inline image"
+    );
+
+    let model = session.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    state.focus = app::state::Focus::Game;
+    // Feed the turn's ordered elements exactly as the run loop does, so the ship
+    // arrives as a real inline float with the prose wrapped beside it.
+    app::state::apply_transcript_elems(&mut state, &elems);
+    // A string that cannot occur in Shogun's prose, so finding it locates the
+    // live input unambiguously.
+    state.input.value = "zzq".to_string();
+    state.input.cursor = 3;
+
+    let area = Rect::new(0, 0, 138, 49);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    // The live input is drawn flush after the prompt, so the row carrying the typed
+    // text must be the row carrying the game's `>` — not a text-less float row.
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    let typed_row = (0..area.height)
+        .find(|&y| row_text(y).contains("zzq"))
+        .expect("the live input is drawn somewhere in the pane");
+    let text = row_text(typed_row);
+    // The input is drawn FLUSH after the prompt row's own text, so the character
+    // immediately before it must be story text. On a text-less leftover float row
+    // the input starts at the left margin instead, preceded by blank (or by the
+    // float's halfblock art) — which is the bug.
+    let at = text.find("zzq").expect("located above");
+    let before = text[..at].chars().next_back().expect("the input never starts at column 0");
+    assert!(
+        !before.is_whitespace() && !"▀▄█".contains(before),
+        "the live input must sit flush after the prompt row's text, not at the left \
+         margin of a text-less leftover float row; row {typed_row} preceded it with \
+         {before:?}\n{}",
+        (typed_row.saturating_sub(4)..(typed_row + 3).min(area.height))
+            .map(|y| format!("  {y}: {:?}\n", row_text(y)))
+            .collect::<String>()
+    );
+}
+
+/// SQ-0543: at a LARGE pane the status band's two lines must stay ADJACENT.
+///
+/// Shogun's status grid is 2 cells / 32 native px tall, with its runs at native
+/// y=1 ("Erasmus : … SHOGUN … Score:") and y=17 ("Bridge … Moves:") — 16px apart,
+/// i.e. consecutive rows, no blank line. But chrome TEXT strips used to position
+/// runs by scaled device pixels, and the ring's art scales with the pane while
+/// terminal text does not: at 138×49 one 16px game row spans ~2.2 terminal rows,
+/// so the second line landed two rows down and a blank row opened through the
+/// middle of the white band (user report at the TTY, 2026-07-28). A text strip has
+/// no art behind it to stay aligned with, so it now lays out by the game's own row
+/// structure and the two lines arrive adjacent at any pane size.
+#[test]
+fn shogun_hybrid_status_band_rows_stay_adjacent_at_a_large_pane() {
+    let story_path = stories_dir().join("shogun-r322-s890706.z6");
+    let Ok(story_bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+            .expect("Shogun (v6) should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    for _turn in 0..6 {
+        match session.pending_input() {
+            InputKind::Line => { session.submit("look"); }
+            InputKind::Char => { session.submit_char(13); }
+            InputKind::Event => { session.submit(""); }
+        }
+    }
+
+    let model = session.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    // The reported geometry: a big pane, where the old device-pixel mapping spread
+    // the band. (Small panes never showed it — the scale was near 1.)
+    let area = Rect::new(0, 0, 138, 49);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row_text = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    let title_y = (0..area.height)
+        .find(|&y| row_text(y).contains("SHOGUN"))
+        .expect("a terminal row carries the SHOGUN status title");
+    let moves_y = (0..area.height)
+        .find(|&y| row_text(y).contains("Moves:"))
+        .expect("a terminal row carries the Moves counter");
+    assert_eq!(
+        moves_y,
+        title_y + 1,
+        "the band's second line must sit directly under the first (no scale-introduced \
+         blank row); got title at {title_y}, Moves at {moves_y}\n  {title_y}: {:?}\n  {}: {:?}\n  {moves_y}: {:?}",
+        row_text(title_y),
+        title_y + 1,
+        row_text(title_y + 1),
+        row_text(moves_y),
+    );
+}
+
 /// SQ-0511: Shogun's frame ENCLOSES the story to the native bottom (story bottom
 /// 400 of 400) and is flanked by full-height side art, so at a TALL pane it takes
 /// the `Frame` reclaim plan: the status band stays uniform-scaled + pane-top-

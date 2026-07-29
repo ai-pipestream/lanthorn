@@ -1978,14 +1978,32 @@ fn render_middle(
         && effective_scroll == 0
         && !lines.is_empty()
     {
-        let last_i = lines.len().min(transcript_rows) - 1;
+        // A tall margin float outlives the prose beside it: every wrapped row
+        // below the game's `>` carries the float geometry but an EMPTY text (see
+        // `WrappedRow::float`). The live input belongs on the PROMPT row, so walk
+        // back over that text-less tail — otherwise the typed command and its
+        // caret land at the left margin somewhere down the picture's flank, which
+        // is exactly what Shogun's opening did beside the ship (SQ-0544).
+        // Ordinary rows (no float, or a float row that still carries its text)
+        // stop the walk immediately, so nothing else moves.
+        let bottom_i = lines.len().min(transcript_rows) - 1;
+        let mut last_i = bottom_i;
+        while last_i > 0
+            && lines[last_i].text.is_empty()
+            && lines[last_i].band.is_none()
+            && lines[last_i].float.is_some()
+        {
+            last_i -= 1;
+        }
         let row_y = transcript_top + last_i as u16;
         let last = &lines[last_i];
         // Only draw when the true last wrapped row is the one visible at the
         // bottom, it fits inside the transcript region, and it is a text row
         // (never an inline-image band).
+        // The scroll test still asks about the TRUE bottom row (is the end of the
+        // transcript on screen?), not the prompt row the walk above settled on.
         if row_y < transcript_bottom
-            && first_abs_row + last_i == total_rows.saturating_sub(1)
+            && first_abs_row + bottom_i == total_rows.saturating_sub(1)
             && last.band.is_none()
         {
             // Flush after the last line's text — matching Task 3's flush command
