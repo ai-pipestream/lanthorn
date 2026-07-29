@@ -416,11 +416,24 @@ pub fn draw_dialog(buf: &mut Buffer, bounds: Rect, spec: &DialogSpec, st: &Dialo
         // Value chars; the char at `cursor` carries the caret style when shown.
         let value_style = if f.dim { f.dim_style } else { f.text_style };
         let chars: Vec<char> = f.value.chars().collect();
-        for (i, ch) in chars.iter().enumerate() {
+        // Horizontal scroll (SQ-0554). The field is a single row of `avail` cells,
+        // so a longer value has to be viewed through a window. Anchor that window
+        // on the caret: the cell being edited must always be on screen. Before
+        // this, drawing simply started at char 0 and stopped at `content.right()`,
+        // taking the caret with the overflow — so editing a value wider than the
+        // dialog left you unable to see either your text or your cursor.
+        //
+        // `caret` indexes 0..=len: at `len` it is the trailing end-of-text block,
+        // which occupies a cell of its own, hence `caret + 1` cells to reach it.
+        // While that fits, `start` is 0 and nothing scrolls.
+        let avail = content.right().saturating_sub(x) as usize;
+        let caret = f.cursor.min(chars.len());
+        let start = (caret + 1).saturating_sub(avail);
+        for (i, ch) in chars.iter().enumerate().skip(start) {
             if x >= content.right() {
                 break;
             }
-            let style = if f.show_caret && i == f.cursor { f.caret_style } else { value_style };
+            let style = if f.show_caret && i == caret { f.caret_style } else { value_style };
             if let Some(cell) = buf.cell_mut((x, row)) {
                 let mut tmp = [0u8; 4];
                 cell.set_symbol(ch.encode_utf8(&mut tmp)).set_style(style);
@@ -428,7 +441,7 @@ pub fn draw_dialog(buf: &mut Buffer, bounds: Rect, spec: &DialogSpec, st: &Dialo
             x += 1;
         }
         // Caret at end-of-text: a trailing block cell.
-        if f.show_caret && f.cursor >= chars.len() && x < content.right() {
+        if f.show_caret && caret >= chars.len() && x < content.right() {
             if let Some(cell) = buf.cell_mut((x, row)) {
                 cell.set_symbol(" ").set_style(f.caret_style);
             }
@@ -637,6 +650,74 @@ mod tests {
         let caret_x = fr.x + "Name: ab".chars().count() as u16;
         assert!(buf.cell((caret_x, fr.y)).unwrap().style().add_modifier.contains(Modifier::REVERSED),
             "end caret cell is reversed");
+    }
+
+    /// Render a field with `value`/`cursor` in a dialog narrow enough to overflow,
+    /// and return `(row_text, caret_column_within_row)`.
+    fn field_row(value: &str, cursor: usize, dialog_w: u16) -> (String, Option<usize>) {
+        use ratatui::{buffer::Buffer, layout::Rect, style::{Style, Modifier}};
+        let full = Rect::new(0, 0, 60, 8);
+        let mut buf = Buffer::empty(full);
+        let st = DialogStyle {
+            theme: &TEST_THEME,
+            frame: Style::default(), border: Style::default(), box_style: BorderStyle::Single, glyphs: PaneGlyphs::default(),
+            title: Style::default(), button: Style::default(), button_active: Style::default(),
+            shadow: Style::default(), shadow_on: false, placement: DialogPlacement::Center, margin: 0,
+        };
+        let field = DialogField {
+            label: "N: ", value, cursor, show_caret: true, dim: false,
+            text_style: Style::default(),
+            dim_style: Style::default().add_modifier(Modifier::DIM),
+            caret_style: Style::default().add_modifier(Modifier::REVERSED),
+        };
+        let spec = DialogSpec {
+            title: "T", placement: Placement::Centered { w: dialog_w, h: 6 },
+            buttons: &[DialogButton { id: ButtonId::Save, label: "Ok" }],
+            show_close: true, default: Some(ButtonId::Save), focus: None,
+            field: Some(field),
+        };
+        let rects = draw_dialog(&mut buf, full, &spec, &st);
+        let fr = rects.field.expect("field rect recorded");
+        let cells: Vec<_> = (fr.x..fr.right()).filter_map(|x| buf.cell((x, fr.y))).collect();
+        let row: String = cells.iter().map(|c| c.symbol().chars().next().unwrap_or(' ')).collect();
+        let caret = cells.iter().position(|c| c.style().add_modifier.contains(Modifier::REVERSED));
+        (row, caret)
+    }
+
+    #[test]
+    fn a_field_wider_than_the_dialog_scrolls_to_keep_the_caret_visible() {
+        // SQ-0554: the renderer used to draw from char 0 and stop at the content
+        // edge, so a long value lost both its tail AND its caret — you could not
+        // see what you were editing or where the cursor was. Prefilling
+        // edit-notes (SQ-0524) made this easy to hit.
+        let long = "abcdefghijklmnopqrstuvwxyz";
+
+        // Caret at end-of-text: the window must show the TAIL, not the head.
+        let (row, caret) = field_row(long, long.chars().count(), 20);
+        assert!(caret.is_some(), "the caret must be drawn somewhere in the row: {row:?}");
+        assert!(row.contains("xyz"), "the end of the value must be visible, got {row:?}");
+        assert!(!row.contains("abc"), "the head must have scrolled off, got {row:?}");
+
+        // Caret at the very start: the window shows the HEAD and the caret is on 'a'.
+        let (row, caret) = field_row(long, 0, 20);
+        assert!(row.contains("abc"), "with the caret at 0 the head is visible, got {row:?}");
+        let caret = caret.expect("caret drawn");
+        assert_eq!(row.chars().nth(caret), Some('a'), "caret sits on the first char: {row:?}");
+
+        // A mid-string caret is visible, and sits on the char it indexes.
+        let (row, caret) = field_row(long, 12, 20);
+        let caret = caret.expect("caret drawn");
+        assert_eq!(row.chars().nth(caret), Some('m'), "caret sits on chars[12] = 'm': {row:?}");
+    }
+
+    #[test]
+    fn a_field_that_fits_does_not_scroll() {
+        // Guards against the window sliding when there is nothing to scroll: the
+        // caret-anchored offset must be 0 while the caret still fits.
+        let (row, caret) = field_row("ab", 2, 30);
+        assert!(row.starts_with("N: ab"), "short value stays left-aligned, got {row:?}");
+        let caret = caret.expect("caret drawn");
+        assert_eq!(caret, "N: ab".chars().count(), "end caret directly follows the value");
     }
 
     #[test]
