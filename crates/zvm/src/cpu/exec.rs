@@ -245,10 +245,6 @@ pub struct Machine {
     /// the value is tracked purely so the opcode's store result (the OLD
     /// mode) is correct (ZMSD §15).
     buffer_screen_mode: u16,
-    /// True once a `scroll_window` (EXT:0x14) targeting window 0 has recorded
-    /// its "not modeled here" diagnostic — window 0's scrolling is owned by
-    /// the host's transcript renderer, not this grid model.
-    warned_scroll_window0: bool,
     /// True once `output_stream 2` (the transcript FILE stream) has recorded its
     /// "not supported" diagnostic — ZMSD §7.6.5.2 asks for one warning to the
     /// player, not one per request, and games re-select the stream every turn.
@@ -400,7 +396,6 @@ impl Machine {
             exec_pcs: std::collections::HashSet::new(),
             ever_exec_pcs: std::collections::HashSet::new(),
             buffer_screen_mode: 0,
-            warned_scroll_window0: false,
             warned_stream2: false,
             mouse_x: 0,
             mouse_y: 0,
@@ -2748,11 +2743,24 @@ impl Machine {
             // EXT:0x14 scroll_window(window, pixels) — ZMSD §15: "Scrolls the
             // given window by the given number of pixels (a negative value
             // scrolls backwards, i.e., down) writing in blank (background
-            // colour) pixels in the new lines." No store/branch. Window 0 (the
-            // main scrolling window) is owned by the host's transcript
-            // renderer, not this grid model — record a diagnostic once and
-            // otherwise no-op; grid windows 1–7 shift their pixel-positioned
-            // text runs and cell grid via `ZWindow::scroll_pixels`.
+            // colour) pixels in the new lines." No store/branch.
+            //
+            // Window 0 (the main scrolling window) is owned by the host's
+            // transcript renderer, not this grid model, so a scroll of it is a
+            // deliberate NO-OP — and a SILENT one. It is not an error case: it
+            // is the normal back half of Zork Zero's inline-picture idiom, which
+            // reads window 0's cursor, scrolls up to free vertical room for a
+            // room icon, homes the cursor into the freed band, draws there, and
+            // sets margins so prose flows beside the art. The host lays that
+            // picture out as an inline transcript band instead — the transcript
+            // has already scrolled by exactly the text it printed — so obeying
+            // the pixel scroll would double it. Warning about it would fire on
+            // essentially every illustrated room description; the `@scroll_window`
+            // trace line above is the diagnostic channel. (See docs/standards.md,
+            // "Where we knowingly differ".)
+            //
+            // Grid windows 1–7 DO shift their pixel-positioned text runs and cell
+            // grid, via `ZWindow::scroll_pixels`.
             0x14 => {
                 let win = self.v6_window_operand(ops.first().copied().unwrap_or(0));
                 let pixels = ops.get(1).copied().unwrap_or(0) as i16;
@@ -2760,12 +2768,7 @@ impl Machine {
                     self.screen_trace.push(format!("@scroll_window(win={win}, pixels={pixels})"));
                 }
                 if win == 0 {
-                    if !self.warned_scroll_window0 {
-                        self.warned_scroll_window0 = true;
-                        self.diagnostics.push(
-                            "scroll_window(0, ...) ignored — host transcript owns window-0 scrolling".to_string(),
-                        );
-                    }
+                    // Intentionally silent — see above.
                 } else if let Some(v6) = self.screen.v6.as_mut() {
                     if let Some(w) = v6.windows.get_mut(win as usize) {
                         w.scroll_pixels(pixels);
@@ -9578,14 +9581,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn v6_scroll_window_on_window_zero_records_diagnostic_once_and_no_ops() {
+    fn v6_scroll_window_on_window_zero_no_ops_silently() {
+        // Window 0's scrolling belongs to the host transcript, so the opcode is
+        // a no-op — and must stay SILENT. It is not an error path: it is the
+        // back half of Zork Zero's inline-picture idiom (read cursor → scroll up
+        // to free room → home into the freed band → draw the room icon → set
+        // margins so prose flows beside it), which runs on essentially every
+        // illustrated room description. The warning it used to push surfaced as
+        // a player-facing Warning line mid-game (user report, 2026-07-28); the
+        // `@scroll_window` trace line is the diagnostic channel instead.
         let mut m = v6_exec_machine();
         m.exec_ext(0x14, &[0, 8], None, None);
-        m.exec_ext(0x14, &[0, 8], None, None); // second call must not duplicate
+        m.exec_ext(0x14, &[0, 8], None, None);
         assert_eq!(
             m.diagnostics.iter().filter(|d| d.contains("scroll_window")).count(),
-            1,
-            "window-0 scroll diagnostic recorded exactly once"
+            0,
+            "a window-0 scroll must not surface a player-facing diagnostic"
         );
     }
 
