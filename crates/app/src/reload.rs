@@ -248,4 +248,31 @@ mod tests {
         assert_eq!(r.provenance, crate::theme::resolve::Provenance::PerGame);
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn reload_layers_per_game_map_glyph_presets_over_the_global() {
+        // The `[map]` glyph knobs must layer through real files exactly like
+        // colours do (SQ-0557/0558): the per-game file wins where it speaks, the
+        // global stands where it is silent.
+        let dir = temp_dir("map-presets");
+        let global = dir.join("style.toml");
+        std::fs::write(&global, "[map]\nbox_style = \"double\"\ndiagonal_corners = false\n").unwrap();
+        let game_dir = dir.join("game.save");
+        std::fs::create_dir_all(&game_dir).unwrap();
+        std::fs::write(game_dir.join("style.toml"), "[map]\nbox_style = \"ascii\"\n").unwrap();
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.style = Some(global.to_string_lossy().to_string());
+        state.game_dir = game_dir.clone();
+
+        assert!(matches!(reload_style(&mut state), ReloadOutcome::Reloaded { .. }));
+        assert_eq!(
+            state.symbols.room_normal,
+            crate::symbols::BoxStyle::preset("ascii").unwrap(),
+            "per-game box_style wins"
+        );
+        assert!(!state.symbols.diagonal_corners, "global diagonal_corners stands");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -158,21 +158,25 @@ mesmerising.
 
 ## Making it yours
 
-Every glyph the map draws is a themeable preset in the `[symbols]` section of
-`style.toml` — swap the whole look without touching a line of code:
+Every glyph the map draws is a themeable preset in the `[map]` section of
+`style.toml`, right alongside the map's colours — swap the whole look without
+touching a line of code:
 
 - `box_style` — room outlines: `rounded` (default), `thick`, `double`, `solid`,
   `super-thick`, `ascii`, or `borderless`.
 - `arrow_set` — connector arrowheads: `filled` (default), `line`, or a family of
   Nerd Font sets (`nerdfont`, `nf-bold`, `nf-box`, `nf-circle`, `nf-outline`) for
   patched fonts.
-- `path_style` — the line-art that draws the connectors: `light` (default),
-  `heavy`, or `dotted`.
+- `path_style` — the line-art that draws the cardinal (N/S/E/W) connectors:
+  `light` (default), `heavy`, or `dotted`.
+- `portal_path_style` — the same three presets, applied on their own to the
+  up/down/in/out portal links: `dotted` (default) keeps the familiar ┊/┄ threads.
 - `portal_icons` — up/down/in/out markers: `ascii` (default), `nerdfont`, or
   `nerdfont-stairs` for distinct stairway icons.
 
-Individual glyphs can be overridden one at a time in `[symbols.overrides]`, and
-`diagonal_corners` toggles the half-diagonal corner stubs off for fonts without
-Unicode 13 coverage. Reload changes live with `reload-style`. See
+Individual glyphs can be overridden one at a time in `[map.overrides]`, and
+`diagonal_corners = false` drops the half-diagonal corner stubs (🮠🮡🮢🮣, Unicode 13
+Legacy Computing) in favour of plain orthogonal corner exits — the escape hatch
+for a font that has no glyphs for them. Reload changes live with `reload-style`. See
 [customization & configuration](customization.md) for the full styling surface, and
 [interface](interface.md) for mouse-driven map navigation.

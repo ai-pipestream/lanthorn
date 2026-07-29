@@ -116,7 +116,7 @@ pub fn decl_to_style(d: &Decl, scheme: &colors::GhosttyScheme) -> Style {
 
 // ── StyleSymbols ──────────────────────────────────────────────────────────────
 
-/// Partial symbol configuration from a style file.
+/// Partial symbol configuration from a style file's `[map]` section.
 ///
 /// Every preset field is `Option` so unset fields are distinguished from
 /// explicitly set ones. [`finalize_symbols`] fills `None` fields with the
@@ -127,6 +127,9 @@ pub struct StyleSymbols {
     pub arrow_set: Option<String>,
     pub portal_icons: Option<String>,
     pub path_style: Option<String>,
+    /// Line-art preset for the up/down/in/out portal connectors, styled
+    /// separately from the cardinal `path_style`.
+    pub portal_path_style: Option<String>,
     pub badge_zcode: Option<String>,
     pub badge_glulx: Option<String>,
     pub badge_blorb: Option<String>,
@@ -153,6 +156,7 @@ pub fn finalize_symbols(s: &StyleSymbols) -> crate::config::SymbolConfig {
         arrow_set: s.arrow_set.clone().unwrap_or_else(crate::config::default_arrow_set),
         portal_icons: s.portal_icons.clone().unwrap_or_else(crate::config::default_portal_icons),
         path_style: s.path_style.clone().unwrap_or_else(crate::config::default_path_style),
+        portal_path_style: s.portal_path_style.clone().unwrap_or_else(crate::config::default_portal_path_style),
         badge_zcode: s.badge_zcode.clone().unwrap_or_else(crate::config::default_badge_zcode),
         badge_glulx: s.badge_glulx.clone().unwrap_or_else(crate::config::default_badge_glulx),
         badge_blorb: s.badge_blorb.clone().unwrap_or_else(crate::config::default_badge_blorb),
@@ -283,6 +287,7 @@ pub fn merge(base: &StyleDoc, over: &StyleDoc) -> StyleDoc {
         arrow_set: over.symbols.arrow_set.clone().or(base.symbols.arrow_set.clone()),
         portal_icons: over.symbols.portal_icons.clone().or(base.symbols.portal_icons.clone()),
         path_style: over.symbols.path_style.clone().or(base.symbols.path_style.clone()),
+        portal_path_style: over.symbols.portal_path_style.clone().or(base.symbols.portal_path_style.clone()),
         badge_zcode: over.symbols.badge_zcode.clone().or(base.symbols.badge_zcode.clone()),
         badge_glulx: over.symbols.badge_glulx.clone().or(base.symbols.badge_glulx.clone()),
         badge_blorb: over.symbols.badge_blorb.clone().or(base.symbols.badge_blorb.clone()),
@@ -358,7 +363,11 @@ fn merge_decl(base: &Decl, over: &Decl) -> Decl {
 /// Accepts the format used by BOTH style files and `config.toml` override sections:
 /// - `[colors]` with optional `scheme` string and selector keys as inline tables
 ///   (e.g. `"room:current" = { reversed = true }`).
-/// - `[symbols]` with optional preset string keys and a `[symbols.overrides]` table.
+/// - `[map]` with the glyph-set preset keys (`box_style`, `arrow_set`,
+///   `portal_icons`, `path_style`, `portal_path_style`), the `diagonal_corners`
+///   flag, and a `[map.overrides]` per-slot glyph table. `[map]`'s remaining
+///   keys are colour selectors, read by [`theme::toml_schema`](crate::theme::toml_schema),
+///   and ignored here.
 ///
 /// Unknown keys are ignored. Returns `Err(msg)` on TOML parse failure.
 pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
@@ -382,13 +391,19 @@ pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
         }
     }
 
-    if let Some(toml::Value::Table(sym_table)) = root.get("symbols") {
-        for (key, val) in sym_table {
+    // The glyph-set presets live in `[map]` alongside the map's colour selectors
+    // (the registry's `map.*` rows). Colour selectors are inline TABLES and are
+    // resolved by `theme::toml_schema`; only the scalar preset keys and the
+    // `overrides` table concern us here.
+    if let Some(toml::Value::Table(map_table)) = root.get("map") {
+        for (key, val) in map_table {
             match key.as_str() {
                 "box_style"    => symbols.box_style    = val.as_str().map(str::to_string),
                 "arrow_set"    => symbols.arrow_set    = val.as_str().map(str::to_string),
                 "portal_icons" => symbols.portal_icons = val.as_str().map(str::to_string),
                 "path_style"   => symbols.path_style   = val.as_str().map(str::to_string),
+                "portal_path_style" => symbols.portal_path_style = val.as_str().map(str::to_string),
+                "diagonal_corners"  => symbols.diagonal_corners  = val.as_bool(),
                 "overrides" => {
                     if let toml::Value::Table(ov) = val {
                         for (ok, ov_val) in ov {
@@ -398,7 +413,7 @@ pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
                         }
                     }
                 }
-                _ => {} // unknown symbol keys ignored
+                _ => {} // colour selectors + unknown keys: not symbol config
             }
         }
     }
@@ -546,10 +561,10 @@ pub fn resolve(
 /// The embedded built-in `default` style.
 ///
 /// Sets single-line map and story borders as the default look.
-/// An empty `[symbols]` means all presets resolve to their factory defaults via finalize_symbols.
+/// An absent `[map]` means all glyph presets resolve to their factory defaults via finalize_symbols.
 pub const DEFAULT_STYLE_TOML: &str = r#"# babelmap built-in default style
 # map_border / story_border = single; other selectors use terminal defaults.
-# Empty [symbols] means all presets resolve to their factory defaults via finalize_symbols.
+# No [map] section: all glyph presets resolve to their factory defaults via finalize_symbols.
 
 [colors]
 "map_border" = { style = "single" }
@@ -559,8 +574,6 @@ pub const DEFAULT_STYLE_TOML: &str = r#"# babelmap built-in default style
 "dialog:button" = { fg = "white" }
 "dialog:button:active" = { fg = "black", bg = "cyan" }
 "dialog:shadow" = { bg = "dark-gray" }
-
-[symbols]
 "#;
 
 // ── load_style ────────────────────────────────────────────────────────────────
@@ -924,9 +937,10 @@ scheme = "tomorrow-night"
 "room:current" = { reversed = true }
 "suggestion" = { fg = "#7a7a7a" }
 
-[symbols]
+[map]
 box_style = "rounded"
-[symbols.overrides]
+room = { fg = "white" }
+[map.overrides]
 "arrow.north" = "^"
 "##;
         let doc = parse_style_toml(text).unwrap();
@@ -956,6 +970,128 @@ box_style = "rounded"
     fn personal_style_path_is_user_dir_style_toml() {
         let p = personal_style_path(std::path::Path::new("/home/u/.babelmap"));
         assert_eq!(p, std::path::Path::new("/home/u/.babelmap/style.toml"));
+    }
+
+    // ── TOML → SymbolSet (SQ-0557 / SQ-0558) ─────────────────────────────────
+    //
+    // The tests above stop at `StyleDoc`, and `symbols.rs`'s stop at
+    // `SymbolConfig` → `SymbolSet`. Nothing joined the two, which is exactly how
+    // `diagonal_corners` shipped unparsed and how the presets came to be
+    // documented under a section the parser never read. These walk the whole
+    // path — style.toml TEXT → the `SymbolSet` the renderer draws with.
+
+    /// Resolve a style.toml string straight to the renderer's `SymbolSet`.
+    fn symbols_from_toml(text: &str) -> crate::symbols::SymbolSet {
+        let doc = parse_style_toml(text).expect("style text must parse");
+        crate::symbols::SymbolSet::resolve(&finalize_symbols(&doc.symbols))
+    }
+
+    #[test]
+    fn map_diagonal_corners_false_reaches_the_symbol_set() {
+        // SQ-0557: the escape hatch for fonts without Unicode 13 Legacy
+        // Computing coverage. Before the `[map]` parser arm existed, the key was
+        // dropped and the default `true` always won.
+        assert!(
+            crate::symbols::SymbolSet::default().diagonal_corners,
+            "guard: the default is on, so `false` below is a real change"
+        );
+        let set = symbols_from_toml("[map]\ndiagonal_corners = false\n");
+        assert!(!set.diagonal_corners, "[map] diagonal_corners = false must reach the renderer");
+    }
+
+    #[test]
+    fn map_glyph_presets_reach_the_symbol_set() {
+        // SQ-0558: every preset, set from the canonical `[map]` section, must
+        // change the resolved glyphs.
+        let set = symbols_from_toml(
+            "[map]\n\
+             box_style = \"double\"\n\
+             arrow_set = \"line\"\n\
+             portal_icons = \"nerdfont-stairs\"\n\
+             path_style = \"heavy\"\n\
+             portal_path_style = \"light\"\n",
+        );
+        let default = crate::symbols::SymbolSet::default();
+
+        assert_eq!(set.room_normal, crate::symbols::BoxStyle::preset("double").unwrap());
+        assert_ne!(set.room_normal, default.room_normal);
+        assert_eq!(set.arrows, crate::symbols::Arrows::preset("line").unwrap());
+        assert_ne!(set.arrows, default.arrows);
+        assert_eq!(set.path, crate::symbols::PathGlyphs::preset("heavy").unwrap());
+        assert_ne!(set.path, default.path);
+        assert_eq!(set.portal.up, crate::symbols::PortalGlyphs::preset("nerdfont-stairs").unwrap().up);
+        assert_ne!(set.portal.up, default.portal.up);
+        // portal_path_style styles the up/down/in/out links on their own, so it
+        // must win over the icon set's own ┊/┄ pair.
+        assert_eq!((set.portal.path, set.portal.path_h), ('│', '─'));
+        assert_ne!(set.portal.path, default.portal.path);
+    }
+
+    #[test]
+    fn map_overrides_still_beat_the_preset() {
+        let set = symbols_from_toml(
+            "[map]\nbox_style = \"double\"\n[map.overrides]\n\"arrow.north\" = \"^\"\n",
+        );
+        assert_eq!(set.arrows.north, '^');
+        assert_eq!(set.room_normal, crate::symbols::BoxStyle::preset("double").unwrap());
+    }
+
+    #[test]
+    fn per_game_style_layers_over_the_global_presets() {
+        // The `<game_dir>/style.toml` layering (`merge`) must carry the glyph
+        // knobs too: the per-game file wins where it speaks, the global stands
+        // where it is silent.
+        let global = parse_style_toml(
+            "[map]\nbox_style = \"double\"\npath_style = \"heavy\"\ndiagonal_corners = false\n",
+        )
+        .unwrap();
+        let per_game = parse_style_toml("[map]\npath_style = \"dotted\"\n").unwrap();
+
+        let set = crate::symbols::SymbolSet::resolve(&finalize_symbols(&merge(&global, &per_game).symbols));
+        assert_eq!(set.path, crate::symbols::PathGlyphs::preset("dotted").unwrap()); // per-game wins
+        assert_eq!(set.room_normal, crate::symbols::BoxStyle::preset("double").unwrap()); // global stands
+        assert!(!set.diagonal_corners); // global stands
+    }
+
+    #[test]
+    fn style_example_toml_presets_take_effect_when_uncommented() {
+        // The shipped reference file can never again document a key under a
+        // section the parser does not read: uncomment its own lines (with a
+        // non-default value, so the effect is visible) and assert they land.
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../style.example.toml");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+
+        // Rewrite `# key = <default>` in place as `key = <value>`.
+        let uncomment = |text: &str, key: &str, value: &str| -> String {
+            let mut hit = false;
+            let out = text
+                .lines()
+                .map(|line| {
+                    if line.starts_with(&format!("# {key} = ")) {
+                        hit = true;
+                        return format!("{key} = {value}");
+                    }
+                    line.to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(hit, "style.example.toml no longer documents a `{key}` line");
+            out
+        };
+
+        let text = uncomment(&text, "box_style", "\"double\"");
+        let text = uncomment(&text, "arrow_set", "\"line\"");
+        let text = uncomment(&text, "path_style", "\"heavy\"");
+        let text = uncomment(&text, "portal_path_style", "\"light\"");
+        let text = uncomment(&text, "diagonal_corners", "false");
+
+        let set = symbols_from_toml(&text);
+        assert_eq!(set.room_normal, crate::symbols::BoxStyle::preset("double").unwrap());
+        assert_eq!(set.arrows, crate::symbols::Arrows::preset("line").unwrap());
+        assert_eq!(set.path, crate::symbols::PathGlyphs::preset("heavy").unwrap());
+        assert_eq!((set.portal.path, set.portal.path_h), ('│', '─'));
+        assert!(!set.diagonal_corners);
     }
 
     #[test]

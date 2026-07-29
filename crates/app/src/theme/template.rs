@@ -9,7 +9,9 @@
 //! `style.toml` on first run, and the file is then edited by hand + applied
 //! live with `/reload`.
 
-use super::registry::{Kind, RegRow, Section, LAYER_CYCLE_DEFAULT, REGISTRY};
+use super::registry::{
+    Kind, RegRow, Section, DIAGONAL_CORNERS_DEFAULT, LAYER_CYCLE_DEFAULT, REGISTRY,
+};
 use crate::style::{color_to_str, personal_style_path};
 
 /// Auto-seed `user_dir/style.toml` with [`commented_template`] if it does not
@@ -125,6 +127,14 @@ fn row_line(section: Section, row: &RegRow) -> String {
     // plus a one-line description of what it's for.
     if section == Section::Roles {
         return role_line(row.name);
+    }
+
+    // The two map rows whose value `Delta` cannot carry: a list and a bool.
+    if row.name == "map.diagonal_corners" {
+        return format!(
+            "# diagonal_corners = {DIAGONAL_CORNERS_DEFAULT}   \
+             # false = plain orthogonal corner exits, for fonts without Unicode 13 (🮠🮡🮢🮣)"
+        );
     }
 
     if row.name == "map.layer_cycle" {

@@ -56,8 +56,10 @@ pub(crate) fn default_badge_save() -> String { "S".into() }
 pub(crate) fn default_badge_hint() -> String { "H".into() }
 pub(crate) fn default_badge_hint_available() -> String { "h".into() }
 pub(crate) fn default_diagonal_corners() -> bool { true }
+pub(crate) fn default_portal_path_style() -> String { "dotted".into() }
 
-/// The `[symbols]` section of config.toml.  All fields default to the preset
+/// The resolved map glyph configuration, built from style.toml's `[map]`
+/// section by `style::finalize_symbols`.  All fields default to the preset
 /// names that match today's hardcoded glyphs, so an absent section is a no-op.
 #[derive(Debug, Deserialize, Clone)]
 pub struct SymbolConfig {
@@ -73,6 +75,11 @@ pub struct SymbolConfig {
     /// Path line-art preset name.
     #[serde(default = "default_path_style")]
     pub path_style: String,
+    /// Line-art preset for the up/down/in/out portal connectors, chosen
+    /// separately from the cardinal `path_style` (default "dotted" — the
+    /// ┊/┄ connectors the map has always drawn).
+    #[serde(default = "default_portal_path_style")]
+    pub portal_path_style: String,
     /// Row story-type badge glyph for Z-code stories (default "Z").
     #[serde(default = "default_badge_zcode")]
     pub badge_zcode: String,
@@ -109,6 +116,7 @@ impl Default for SymbolConfig {
             arrow_set: default_arrow_set(),
             portal_icons: default_portal_icons(),
             path_style: default_path_style(),
+            portal_path_style: default_portal_path_style(),
             badge_zcode: default_badge_zcode(),
             badge_glulx: default_badge_glulx(),
             badge_blorb: default_badge_blorb(),

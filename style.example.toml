@@ -135,6 +135,7 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # portal_icons = "ascii"   # ascii | nerdfont | nerdfont-stairs
 # path_style = "light"   # light | heavy | dotted
 # portal_path_style = "dotted"   # light | heavy | dotted
+# diagonal_corners = true   # false = plain orthogonal corner exits, for fonts without Unicode 13 (🮠🮡🮢🮣)
 
 # ── Debug inspector disassembly selectors.
 [debug]

@@ -59,10 +59,11 @@ still reach in and override any single selector by name.
   Font Material Design families), `portal_icons` (including a 4-icon stairs
   set), `path_style` for cardinal (N/S/E/W) connectors, and a separate
   `portal_path_style` for vertical/portal (up/down/in/out) connectors so they
-  can render distinctly (e.g. dotted). Individual glyphs are overridden with a
-  `glyphs` sub-map on the selector they belong to — `glyphs = { tl = "+" }` on
-  `map.room` for box corners, `glyphs = { north = "^" }` on `map.connector` for
-  arrows — there is no separate override table.
+  can render distinctly (dotted by default). `diagonal_corners = false` turns
+  the half-diagonal corner stubs (🮠🮡🮢🮣) back into plain orthogonal exits, for
+  fonts without Unicode 13 Legacy Computing coverage. Individual glyphs are
+  overridden one slot at a time in a `[map.overrides]` table keyed by slot name
+  — `"room.normal.tl" = "+"`, `"arrow.north" = "^"`, `"path.diag_ul" = "/"`.
 - **`[debug]`** holds only the disassembly-specific selectors for the debug
   inspector: `pc` and the four confidence tiers that shade how sure the
   disassembler is that a byte is really code. The defaults read as a risk

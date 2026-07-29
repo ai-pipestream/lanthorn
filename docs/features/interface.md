@@ -263,9 +263,10 @@ or `Shift`+`↑`/`↓`/PgUp/PgDn — plain arrows keep navigating the list — a
 scroll resets whenever the highlighted story changes.
 
 `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End navigate, `Enter` or a click opens the story,
-`q`/`Esc` quits back to the shell. The badge glyphs are configurable under
-`[symbols]` (`badge_save`/`badge_hint`/`badge_hint_available`, plus `badge_zcode`/
-`badge_glulx`/`badge_blorb`), and the badge cluster, sortable headers, and info panel are all
+`q`/`Esc` quits back to the shell. The badge glyphs
+(`badge_save`/`badge_hint`/`badge_hint_available`, plus `badge_zcode`/
+`badge_glulx`/`badge_blorb`) are built-in defaults today — no style-file key
+reaches them yet — but the badge cluster, sortable headers, and info panel are all
 themeable through the `story_badge`, `story_header`/`story_header:active` (the
 active sort column), `story_author`, `story_year`, `story_rating` (the IFDB
 average in the RATE column), `story_no_metadata` (the

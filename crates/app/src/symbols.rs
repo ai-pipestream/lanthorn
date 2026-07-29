@@ -330,6 +330,23 @@ impl PortalGlyphs {
         &["ascii", "nerdfont", "nerdfont-stairs"]
     }
 
+    /// The `(vertical, horizontal)` connector pair for a named portal-path
+    /// preset, or `None` for an unknown name. Chosen by `portal_path_style`
+    /// independently of the icon set, so the up/down/in/out links can be styled
+    /// apart from the cardinal paths (`path_style`).
+    ///
+    /// - "light"  — │ / ─
+    /// - "heavy"  — ┃ / ━
+    /// - "dotted" — ┊ / ┄ (the default: the connectors the map has always drawn)
+    pub fn path_preset(name: &str) -> Option<(char, char)> {
+        Some(match name {
+            "light" => ('│', '─'),
+            "heavy" => ('┃', '━'),
+            "dotted" => ('┊', '┄'),
+            _ => return None,
+        })
+    }
+
     /// Return a named preset, or `None` for an unknown name.
     ///
     /// Presets:
@@ -404,6 +421,14 @@ impl SymbolSet {
             diagonal_corners: cfg.diagonal_corners,
         };
 
+        // The portal connectors are a preset of their own, layered on the icon
+        // set: every icon preset ships the same ┊/┄ pair, so `portal_path_style`
+        // is what actually chooses them (unknown name → keep the icon set's).
+        if let Some((v, h)) = PortalGlyphs::path_preset(&cfg.portal_path_style) {
+            s.portal.path = v;
+            s.portal.path_h = h;
+        }
+
         for (key, val) in &cfg.overrides {
             // Validate: exactly one char, estimated single display width.
             let mut chars = val.chars();
@@ -425,6 +450,7 @@ impl SymbolSet {
             arrow_set: arrow.to_owned(),
             portal_icons: portal.to_owned(),
             path_style: path.to_owned(),
+            portal_path_style: crate::config::default_portal_path_style(),
             badge_zcode: crate::config::default_badge_zcode(),
             badge_glulx: crate::config::default_badge_glulx(),
             badge_blorb: crate::config::default_badge_blorb(),
@@ -680,6 +706,7 @@ mod tests {
             arrow_set: "filled".into(),
             portal_icons: "ascii".into(),
             path_style: "light".into(),
+            portal_path_style: crate::config::default_portal_path_style(),
             badge_zcode: crate::config::default_badge_zcode(),
             badge_glulx: crate::config::default_badge_glulx(),
             badge_blorb: crate::config::default_badge_blorb(),

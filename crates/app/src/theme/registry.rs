@@ -116,6 +116,11 @@ pub const ROLE_NAMES: [&str; 7] =
 /// [`Delta`]; the `map.layer_cycle` registry row exists only for completeness.
 pub const LAYER_CYCLE_DEFAULT: [&str; 5] = ["cyan", "green", "magenta", "yellow", "blue"];
 
+/// The default for `map.diagonal_corners` (§4) — the sole bool-valued selector,
+/// so its value lives here rather than in a [`Delta`], as with
+/// [`LAYER_CYCLE_DEFAULT`]. Must equal `config::default_diagonal_corners()`.
+pub const DIAGONAL_CORNERS_DEFAULT: bool = true;
+
 /// Build a row concisely.
 fn row(
     name: &'static str,
@@ -247,6 +252,12 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("map.portal_icons", Section::Map, Kind::Placement, None, glyph("ascii")),
     row("map.path_style", Section::Map, Kind::Placement, None, glyph("light")),
     row("map.portal_path_style", Section::Map, Kind::Placement, None, glyph("dotted")),
+    // diagonal_corners is the one map knob that is a BOOL, not a preset name.
+    // `Delta`'s only value channels are colours, text modifiers and `glyph:
+    // Option<String>` — none can carry it — so, exactly like `map.layer_cycle`
+    // (the sole list-valued row), the row exists for completeness and its value
+    // lives in `DIAGONAL_CORNERS_DEFAULT`, emitted by a `template::row_line` case.
+    row("map.diagonal_corners", Section::Map, Kind::Placement, None, Delta::EMPTY),
     // ── §4b debug.* (disasm-only; each tier carries a gutter glyph) ───────────
     row("debug.pc", Section::Debug, Kind::Style, Some("accent"), mods(false, false, false, true)),
     // Default tier colours read as a risk gradient: blue = verified (executed),
@@ -410,6 +421,7 @@ mod tests {
         "map.portal_icons",
         "map.path_style",
         "map.portal_path_style",
+        "map.diagonal_corners",
         // §4b debug.*
         "debug.pc",
         "debug.disasm_executed",

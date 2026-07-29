@@ -625,7 +625,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     if let Ok(raw_cfg) = std::fs::read_to_string(app::config::config_path(cli)) {
         if app::config::config_has_style_sections(&raw_cfg) {
             state.push_transcript_internal(
-                "config.toml [colors]/[symbols] are no longer used — move them into style.toml",
+                "config.toml [colors]/[symbols] are no longer used — styling lives in style.toml ([colors] there; map glyph presets are now [map] keys)",
                 app::state::TranscriptKind::Warning,
             );
         }
