@@ -34,10 +34,46 @@ pub(crate) fn reset_game(
     // place (restart re-runs the SAME story, so the engine type is unchanged).
     let rebuilt: Result<(), String> = match hints::extract_story(story_bytes.to_vec()) {
         Ok(app::hints::LoadedStory::ZCode(bytes)) => {
-            // Match the prior in-place restart exactly (no screen-dim write) so a
-            // Z-machine restart stays byte-for-byte identical.
-            GameSession::new(bytes, state.config.honor_game_colours, state.config.enable_sound, state.config.interpreter_number).map_err(|e| format!("{e:?}")).map(|mut new_session| {
+            // Rebuild through the SAME construction startup uses, not the bare
+            // `GameSession::new` (SQ-0546). A v6 game needs all of it before and
+            // after its boot run: the Pict dimension table (`picture_data` is
+            // called DURING boot, inside the constructor), the Blorb `Reso`
+            // standard window that sizes the 640×400 unit screen its windows and
+            // hardcoded art align to, the host default colour pair, then the Pict
+            // source and a boot-picture flush to drain the art the boot drew
+            // before that source existed. Restarting without them left Shogun
+            // with a mis-sized status band and no inline graphics at all.
+            let mut picts = app::graphics::PictSource::new(
+                if state.config.images { blorb::resolve_resource_blorb(story_path).map(|(b, _)| b) } else { None }
+            );
+            let picture_dims = picts.all_pict_dims();
+            let v6_screen_px = picts.std_window();
+            let host_default_colours = if state.config.honor_game_colours {
+                app::colors::host_default_colour_pair(
+                    state.colors.theme.get("transcript").style,
+                    state.term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
+                    state.term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
+                )
+            } else {
+                None
+            };
+            GameSession::new_with_trace(
+                bytes,
+                state.config.honor_game_colours,
+                state.config.enable_sound,
+                state.config.interpreter_number,
+                // Keep boot tracing across a restart in a `--debug` session, as
+                // the Glulx arm below does.
+                state.persist_debug_trace,
+                picture_dims,
+                v6_screen_px,
+                host_default_colours,
+            )
+            .map_err(|e| format!("{e:?}"))
+            .map(|mut new_session| {
                 new_session.machine.undo_cap = state.config.undo_levels;
+                new_session.set_pict_source(Some(picts));
+                new_session.flush_boot_pictures();
                 *zvm_session_mut(session) = new_session;
             })
         }
@@ -176,6 +212,86 @@ pub(crate) fn reset_game(
 
 #[cfg(test)]
 mod tests {
+    /// SQ-0546: restarting a v6 story must rebuild it the way LAUNCH does.
+    ///
+    /// `reset_game`'s Z-machine arm used the bare `GameSession::new`, which
+    /// carries no Pict dimension table, no Blorb `Reso` standard window and no
+    /// host colour pair, and never attached a Pict source or flushed the boot
+    /// pictures. A v6 game needs every one of those: `picture_data` is answered
+    /// DURING the boot run inside the constructor, the `Reso` window sizes the
+    /// 640×400 unit screen its windows and hardcoded art align to, and the art
+    /// drawn during boot has to be drained once afterwards. So `/reset-game` on
+    /// Shogun came back with a mis-sized status band and no graphics at all
+    /// (user report at the TTY, 2026-07-28).
+    ///
+    /// Pins the observable half: after a reset the v6 screen model is present at
+    /// its native size and the boot art has been rasterized.
+    #[test]
+    fn reset_game_rebuilds_a_v6_story_with_its_pictures_and_screen() {
+        use app::engine::{Engine, WinNode};
+        let story = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../stories/shogun-r322-s890706.z6");
+        let Ok(bytes) = std::fs::read(&story) else {
+            eprintln!("SKIP: gitignored story missing at {}", story.display());
+            return;
+        };
+        // Build the session the way launch does, so the "before" state is real.
+        let mut picts = app::graphics::PictSource::new(
+            blorb::resolve_resource_blorb(&story).map(|(b, _)| b),
+        );
+        let dims = picts.all_pict_dims();
+        let std_window = picts.std_window();
+        let mut s = app::session::GameSession::new_with_trace(
+            bytes.clone(), true, false, None, false, dims, std_window, None,
+        )
+        .expect("Shogun boots");
+        s.set_pict_source(Some(picts));
+        s.flush_boot_pictures();
+        let mut engine: Box<dyn Engine> = Box::new(s);
+
+        let native_before = match &engine.screen().root {
+            WinNode::Layered(items) => app::render::v6_layout::native_extent(items),
+            other => panic!("expected a v6 Layered root before reset, got {other:?}"),
+        };
+        assert_eq!(native_before, (640, 400), "launch sizes the v6 unit screen");
+
+        let mut mapper = mapper::mapper::Mapper::default();
+        let mut state = app::state::AppState::default();
+        state.config.images = true;
+        state.turns = 5;
+        super::reset_game(
+            &mut *engine, &mut mapper, &mut state, &bytes, &story,
+            std::path::Path::new(""), false, false,
+        );
+
+        assert_eq!(state.turns, 0, "restart resets the turn counter");
+        let model = engine.screen();
+        let items = match &model.root {
+            WinNode::Layered(items) => items,
+            other => panic!("v6 story must still present a Layered root after reset, got {other:?}"),
+        };
+        assert_eq!(
+            app::render::v6_layout::native_extent(items),
+            native_before,
+            "the restarted v6 screen keeps its native size (the Reso standard window \
+             reached the constructor)"
+        );
+        // The boot art was rasterized again: at least one graphics window carries
+        // opaque pixels. Without the Pict source + boot flush every canvas is empty.
+        fn painted(node: &WinNode) -> bool {
+            match node {
+                WinNode::Graphics(g) => g.canvas.pixels().any(|p| p.0[3] != 0),
+                WinNode::Pair { first, second, .. } => painted(first) || painted(second),
+                WinNode::Layered(items) => items.iter().any(|i| painted(&i.node)),
+                _ => false,
+            }
+        }
+        assert!(
+            painted(&model.root),
+            "the restarted boot re-drew its graphics (Pict source attached + boot flush)"
+        );
+    }
+
     #[test]
     fn reset_game_rebuilds_zcode_engine() {
         // Restart rebuilds a working Z-machine engine via the story factory and
