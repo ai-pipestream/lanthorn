@@ -194,12 +194,21 @@ essentially everywhere. **The half-diagonals are the one modern ask** — Symbol
 for Legacy Computing arrived in Unicode 13 (2020), and plenty of otherwise
 excellent fonts still don't cover it. If your diagonal *passages* come out blank
 while everything else draws fine, that block is your culprit. Turn the stubs off
-and those connectors route orthogonally instead:
+and those connectors route orthogonally instead — put this in
+`~/.babelmap/style.toml`:
 
 ```toml
 [symbols]
 diagonal_corners = false
 ```
+
+Create the file if it isn't there yet; every setting has a default, so it only
+needs the lines you want to change. Run `reload-style` to apply it without
+restarting. To change it for one game only, drop the same snippet in that story's
+save directory (`~/.babelmap/saves/<story-filename>.save/style.toml`) — a
+per-game style file layers over the global one. Note that styling lives in
+`style.toml`, **not** `config.toml`; `[symbols]` in a config file is a legacy
+location and babelmap will tell you to move it.
 
 Diagonal *arrowheads* are a different thing entirely — they live in the ancient
 Arrows block, so if those are missing, something else is wrong. Individual glyphs
