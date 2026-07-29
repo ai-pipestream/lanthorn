@@ -222,3 +222,63 @@ fn arthur_hybrid_tall_pane_extends_story_to_bottom() {
     let deep = buf.cell((vp.x - 1, area.height - 2)).unwrap();
     assert_eq!(deep.bg, Color::Reset, "the flank below the side art is the theme backdrop, not stretched art: {deep:?}");
 }
+
+/// (SQ-0549) FRAMELESS: Arthur's status bar must ANCHOR TO THE TOP of the pane.
+///
+/// Frameless drops the pixel chrome, so the 12-row graphics panel above the bar is
+/// never drawn — but the bar itself used to be stamped absolutely at its NATIVE row
+/// 12, leaving it floating about a quarter of the way down an otherwise blank pane.
+/// The frameless band split is now a RELATION ("the chrome text above the story
+/// window"), not the old `native row < 4` constant, so the bar lands on row 0 with
+/// the transcript starting beneath it. Pinned at two pane sizes so the position
+/// can't be re-derived from the pane geometry, and in BOTH `honor_game_colours`
+/// modes — the reverse bar is a style bit, not a game colour, so it must read solid
+/// either way.
+#[test]
+fn arthur_frameless_status_bar_anchors_to_the_top() {
+    let Some(session) = arthur_at_status() else { return };
+    let model = session.screen();
+
+    for honor in [true, false] {
+        for (w, h) in [(80u16, 25u16), (100, 40)] {
+            let mut state = app::state::AppState::default();
+            state.colors = app::colors::ColorScheme::terminal_default();
+            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.config.v6_render = app::config::V6RenderMode::Frameless;
+            state.config.honor_game_colours = honor;
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+            let row_text = |y: u16| -> String {
+                (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+            };
+            let status_y = (0..area.height)
+                .find(|&y| row_text(y).contains("Anne"))
+                .unwrap_or_else(|| panic!("status date renders as terminal cells (honor={honor}, {w}x{h})"));
+            assert_eq!(status_y, 0, "the status bar is the TOP row, not floating at its native row 12 (honor={honor}, {w}x{h})");
+
+            // A classic anchored status line: location flush left, date flush right.
+            let row = row_text(0);
+            assert!(row.starts_with("Churchyard"), "location flush at col 0 (honor={honor}, {w}x{h}): {row:?}");
+            // The SQ-0509 fragment merge reaches the band too: Arthur emits one run
+            // per GLYPH, so without it every letter became its own anchor group.
+            let date = "St Anne's Day, Compline";
+            let date_at = row
+                .find(date)
+                .unwrap_or_else(|| panic!("the date reads as one contiguous field (honor={honor}, {w}x{h}): {row:?}"));
+            assert_eq!(date_at + date.len(), area.width as usize, "the date is flush RIGHT: {row:?}");
+
+            // The bar reads solid edge to edge, and nothing is stranded at row 12.
+            let holes: Vec<u16> = (0..area.width)
+                .filter(|&x| !buf.cell((x, 0)).unwrap().modifier.contains(Modifier::REVERSED))
+                .collect();
+            assert!(holes.is_empty(), "the reverse bar spans the pane (honor={honor}, {w}x{h}); holes at {holes:?}");
+            assert!(
+                row_text(12).trim().is_empty(),
+                "nothing is stamped at the old absolute native row 12 (honor={honor}, {w}x{h}): {:?}",
+                row_text(12)
+            );
+        }
+    }
+}

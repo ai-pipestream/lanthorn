@@ -940,3 +940,80 @@ fn journey_bold_menu_label_rasterizes_emboldened() {
         assert!(x > 0 && r.contains(&(x - 1, y)), "bold pixel ({x},{y}) is not a +1 double-strike of the roman face");
     }
 }
+
+/// (SQ-0491) FRAMELESS, both defects at once.
+///
+/// (a) Journey's half-screen LEFT PICTURE COLUMN (win3 graphics, native
+///     0,0–232×304) rendered in raster and hybrid but was dropped entirely by the
+///     frameless cell path, which only ever drew chrome TEXT. A chrome graphics
+///     window that lies wholly BESIDE the story window is story content, not frame
+///     art, so it now gets its own native-proportional column and the transcript is
+///     inset beside it. (Frame art that spans or overlaps the story — Arthur's
+///     header panel, every game's backdrop — is still dropped: that is what
+///     frameless means.)
+/// (b) The command MENU was stamped at its absolute native rows 19–24, so it landed
+///     over the story text at any pane taller than the native 25 rows. It is now
+///     packed against the pane's BOTTOM edge, with the story stopping above it.
+///
+/// Checked at the native height (80×25, where the old absolute stamp happened to
+/// coincide) and at a taller pane (80×40, where it did not), in BOTH
+/// `honor_game_colours` modes.
+#[test]
+fn journey_frameless_shows_picture_column_and_pins_menu_to_the_bottom() {
+    use ratatui::style::Color;
+    let Some(session) = journey_at_menu() else { return };
+    let model = session.screen();
+
+    for honor in [true, false] {
+        for (w, h) in [(80u16, 25u16), (80, 40)] {
+            let mut state = app::state::AppState::default();
+            state.colors = app::colors::ColorScheme::terminal_default();
+            state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+            state.config.v6_render = app::config::V6RenderMode::Frameless;
+            state.config.honor_game_colours = honor;
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+            let row_text = |y: u16| -> String {
+                (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+            };
+            let ctx = format!("(honor={honor}, {w}x{h})");
+
+            // (b) The menu is locked to the bottom: its header is `menu_rows` up
+            // from the pane bottom and its last verb ("Game") is on the LAST row.
+            let header_y = (0..area.height)
+                .find(|&y| row_text(y).contains("The Party"))
+                .unwrap_or_else(|| panic!("the menu header renders as terminal cells {ctx}"));
+            assert_eq!(
+                header_y,
+                area.height - 6,
+                "the 6-row menu band is packed against the pane bottom {ctx}"
+            );
+            assert!(
+                row_text(area.height - 1).contains("Game"),
+                "the menu's last row sits on the pane's last row {ctx}: {:?}",
+                row_text(area.height - 1)
+            );
+            for verb in ["Proceed", "Praxix", "Inventory"] {
+                let y = (0..area.height).find(|&y| row_text(y).contains(verb)).unwrap_or_else(|| panic!("{verb} present {ctx}"));
+                assert!(y >= area.height - 6, "'{verb}' is inside the bottom menu band (row {y}) {ctx}");
+            }
+
+            // (a) The left picture column is drawn, and the story transcript is
+            // inset to its RIGHT rather than spanning the whole pane.
+            let vp = state.transcript_geom.get().expect("frameless publishes transcript geometry").area;
+            assert!(vp.x >= 29, "the transcript is inset beside the picture column (x {}) {ctx}", vp.x);
+            assert!(vp.bottom() <= header_y, "the story stops above the menu (bottom {}, menu at {header_y}) {ctx}", vp.bottom());
+            let picture_ink = (0..header_y)
+                .flat_map(|y| (0..29u16).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let c = buf.cell((x, y)).unwrap();
+                    let s = c.symbol();
+                    s == "\u{2580}" || s == "\u{2584}" || c.bg != Color::Reset
+                })
+                .count();
+            assert!(picture_ink > 100, "the left picture column renders (only {picture_ink} inked cells) {ctx}");
+        }
+    }
+}

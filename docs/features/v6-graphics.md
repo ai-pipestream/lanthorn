@@ -115,13 +115,26 @@ session-only switch that never touches your saved config:
 - **`frameless`** — a deliberate "classic terminal interpreter, but the
   pictures still show" presentation: **no decorative frame at all**. The story
   runs as a normal full-pane terminal transcript at full size with native
-  scrollback, the game's chrome/status text collapses to a compact terminal
-  status band across the top of the pane, and window-0's inline story pictures
-  (drop-caps, room icons) still render via the transcript image path. The
-  decorative borders, compass, and banner are simply not drawn — but a
-  full-screen **splash** (a title screen, a cutscene illustration) *does* show,
-  inline, once, in the flow of the transcript (see below). With `--no-images`
-  this is identical to the cell fallback below.
+  scrollback, the game's chrome/status text collapses to compact terminal bands,
+  and window-0's inline story pictures (drop-caps, room icons) still render via
+  the transcript image path. The decorative borders, compass, and banner are
+  simply not drawn — but a full-screen **splash** (a title screen, a cutscene
+  illustration) *does* show, inline, once, in the flow of the transcript (see
+  below). With `--no-images` this is identical to the cell fallback below.
+  - The pane is laid out by **relation to the story window**, never by absolute
+    pixel row — because v6 games put their chrome wherever their artwork leaves
+    room. Chrome text *above* the story becomes the status band and pins to the
+    **top** (Zork Zero and Shogun paint theirs on native row 0; Arthur paints his
+    on row 12, under a twelve-row art panel frameless doesn't draw — and it still
+    lands on line one, not a quarter of the way down an empty pane). Chrome text
+    *below* the story becomes a command band pinned to the **bottom**, so
+    Journey's verb menu stays welded to the last row at any pane height instead
+    of floating over the prose. Chrome text *inside* the story box — Shogun's
+    boot menu, a hint screen — paints over the transcript where the game put it.
+  - A graphics window sitting wholly **beside** the story is story content, not
+    frame, so it keeps its column: Journey's half-screen character portrait
+    renders at its native proportion with the prose inset alongside it. Art that
+    spans or overlaps the story stays undrawn — that's what frameless means.
   - Because native 320×200-era art is postage-stamp tiny on a modern display,
     frameless **resizes inline images to taste**: a drop-cap floats at about
     **3–4 text rows** tall, and any band-rendered picture (splashes included)
@@ -140,8 +153,9 @@ session-only switch that never touches your saved config:
   makes the *deliberate, always-on* choice even when an image protocol is
   available.
 
-The status band in `frameless` and the cell fallback is themed by the
-`upper_window` style selector (the same one that colours a v4+ status line).
+The status and command bands in `frameless` and the cell fallback are themed by
+the `upper_window` style selector (the same one that colours a v4+ status line);
+a beside-the-story picture column letterboxes in the `graphics` selector's style.
 
 ## Illuminated drop-caps and room icons, inline
 
@@ -170,8 +184,9 @@ full-width band.
 
 Some v6 titles paint a big picture straight into a graphics window: Shogun's
 320×200 title screen, Zork Zero's cutscene illustrations. `hybrid` and
-`raster` draw those windows directly, but `frameless` drops graphics windows —
-so it would lose the splash entirely. Instead, frameless recognizes a
+`raster` draw those windows directly, but `frameless` drops the graphics windows
+that frame the story — so it would lose the splash entirely. Instead, frameless
+recognizes a
 *content-sized* draw and re-emits it as a one-off inline image band in the
 transcript, upscaled by the sizing policy above, anchored at the point in the
 story where the game drew it. It scrolls away with the rest of the turn.

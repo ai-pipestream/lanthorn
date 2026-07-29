@@ -940,7 +940,7 @@ fn render_node(
                         .flatten()
                         .collect();
                     if runs.iter().any(|t| !t.text.trim().is_empty()) {
-                        draw_painted_screen(&runs, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native.0);
+                        draw_painted_screen(&runs, 0..u16::MAX, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native.0);
                         return None;
                     }
                 }
@@ -1064,21 +1064,103 @@ fn render_node(
                     .flatten()
                     .collect();
                 if let Some(story) = layout.story {
-                    let rows_used = draw_anchored_status_band(&runs, ncols, area, buf, status_style, state.config.honor_game_colours, &state.colors);
-                    let story_area = Rect::new(
-                        area.x,
-                        area.y + rows_used,
-                        area.width,
-                        area.height.saturating_sub(rows_used),
-                    );
+                    // The frameless pane is composed by RELATION to the story
+                    // window, never by an absolute native row (SQ-0549/SQ-0491).
+                    // A v6 game puts its chrome wherever its artwork leaves room —
+                    // Zork0 and Shogun status at rows 0–1, Arthur's at row 12 under
+                    // a 12-row art panel, Journey's command menu at rows 19–24
+                    // below a story that starts at row 0 — so the three regions are
+                    // defined by where the story box IS:
+                    //   above it  → the anchored status band, pinned to the pane TOP
+                    //   below it  → the command band, pinned to the pane BOTTOM
+                    //   inside it → a painted menu overlay at its own native rows
+                    // The story transcript fills whatever is left between them.
+                    let story_top = story.y_px / 16;
+                    let story_bot =
+                        ((story.y_px as u32 + story.h_px as u32).div_ceil(16)).min(u16::MAX as u32) as u16;
+                    let top_used = draw_anchored_status_band(&runs, ncols, story_top, area, buf, status_style, state.config.honor_game_colours, &state.colors);
+                    // The command band below the story (Journey's menu): its own
+                    // inked native rows, packed against the pane's bottom edge so
+                    // it stays locked there at any pane height instead of floating
+                    // at its native row over the story text.
+                    let below: Vec<u16> = runs
+                        .iter()
+                        .filter(|t| !t.text.trim().is_empty())
+                        .map(|t| (t.y.max(1) - 1) / 16)
+                        .filter(|&r| r >= story_bot)
+                        .collect();
+                    let bottom_span = match (below.iter().min(), below.iter().max()) {
+                        (Some(&f), Some(&l)) => Some((f, l - f + 1)),
+                        _ => None,
+                    };
+                    let bottom_used = bottom_span
+                        .map(|(_, n)| n)
+                        .unwrap_or(0)
+                        .min(area.height.saturating_sub(top_used));
+                    // A chrome GRAPHICS window entirely BESIDE the story (Journey's
+                    // half-screen picture column) is story content, not frame art —
+                    // frameless drops the surrounding chrome, but dropping this lost
+                    // the illustration the raster and hybrid paths both show. Give it
+                    // its native-proportional column and inset the story beside it.
+                    // Frame art that spans or overlaps the story (Arthur's header
+                    // panel, every game's full-screen backdrop) is NOT beside it and
+                    // stays dropped — that is what frameless means.
+                    let col_of = |px: u16| (area.width as u32 * px as u32 / native_w.max(1) as u32) as u16;
+                    let story_l = story.x_px;
+                    let story_r = story.x_px.saturating_add(story.w_px);
+                    let sides: Vec<(&&PositionedWindow, bool)> = layout
+                        .chrome
+                        .iter()
+                        .filter(|pw| matches!(&pw.node, WinNode::Graphics(_)))
+                        .filter(|pw| pw.y_px < story.y_px.saturating_add(story.h_px) && pw.y_px.saturating_add(pw.h_px) > story.y_px)
+                        .filter_map(|pw| {
+                            let right_edge = pw.x_px.saturating_add(pw.w_px);
+                            if right_edge <= story_l {
+                                Some((pw, true))
+                            } else if pw.x_px >= story_r {
+                                Some((pw, false))
+                            } else {
+                                None
+                            }
+                        })
+                        // A side column never takes more than half the pane — the
+                        // story stays the larger half whatever the game declares.
+                        .filter(|(pw, _)| {
+                            let w = col_of(pw.x_px.saturating_add(pw.w_px)).saturating_sub(col_of(pw.x_px));
+                            w > 0 && w * 2 <= area.width
+                        })
+                        .collect();
+                    let mut story_x = area.x;
+                    let mut story_right = area.right();
+                    for (_, left) in &sides {
+                        if *left {
+                            story_x = story_x.max(area.x + col_of(story_l));
+                        } else {
+                            story_right = story_right.min(area.x + col_of(story_r));
+                        }
+                    }
+                    let mid_y = area.y + top_used;
+                    let mid_h = area.height.saturating_sub(top_used + bottom_used);
+                    for (pw, _) in &sides {
+                        let x = area.x + col_of(pw.x_px);
+                        let w = col_of(pw.x_px.saturating_add(pw.w_px)).saturating_sub(col_of(pw.x_px));
+                        let rect = Rect::new(x, mid_y, w.min(area.right().saturating_sub(x)), mid_h);
+                        render_node(&pw.node, status, char_mode, introspect, state, rect, buf, game_input, links, grid_colors);
+                    }
+                    let story_area = Rect::new(story_x, mid_y, story_right.saturating_sub(story_x), mid_h);
                     let m = render_node(&story.node, status, char_mode, introspect, state, story_area, buf, game_input, links, grid_colors);
-                    // Painted-screen overlay (SQ-0478): stamp any DEEP paint runs
-                    // (native row ≥ 4, below the status band) as absolutely-
-                    // positioned terminal text on TOP of the story transcript.
-                    // A no-op in normal gameplay (chrome grids carry only the
-                    // top status runs); on a menu screen it draws the items +
-                    // the reverse-video selection caret the anchored band drops.
-                    draw_painted_screen(&runs, STATUS_BAND_ROWS, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w);
+                    // Painted-screen overlay (SQ-0478): stamp the paint runs INSIDE
+                    // the story box as absolutely-positioned terminal text on TOP of
+                    // the transcript. A no-op in normal gameplay (chrome grids carry
+                    // only the band runs); on a menu screen it draws the items + the
+                    // reverse-video selection caret the anchored band drops.
+                    draw_painted_screen(&runs, story_top..story_bot, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w);
+                    if let Some((first, n)) = bottom_span {
+                        // Pack the command band's native rows against the pane
+                        // bottom: native `first` lands on the first band row.
+                        let shift = area.height as i32 - n as i32 - first as i32;
+                        draw_painted_screen(&runs, story_bot..u16::MAX, shift, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w);
+                    }
                     return m;
                 }
                 // No streaming story window (a painted menu with win0 in paint
@@ -1087,7 +1169,7 @@ fn render_node(
                 // z-ordered cell composite, which renders the native geometry as
                 // an unreadable postage stamp (SQ-0478).
                 if runs.iter().any(|t| !t.text.trim().is_empty()) {
-                    draw_painted_screen(&runs, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w);
+                    draw_painted_screen(&runs, 0..u16::MAX, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w);
                     return None;
                 }
             }
@@ -1907,9 +1989,10 @@ pub struct RasterMetrics {
     pub first_visible_row: u16,
 }
 
-/// The number of native cell rows the top status band owns (rows 0..N). Paint
-/// runs at or below this row are the DEEP menu/hint content the painted-screen
-/// overlay handles; rows above it are the anchored status line. (SQ-0478)
+/// How deep a chrome run must sit before the HYBRID path will treat a screen as a
+/// painted MENU takeover (see the `has_menu` gate in the `Layered` arm). A run
+/// this shallow is ordinary top-of-screen status chrome even when it happens to
+/// land inside a story box that starts at row 0. (SQ-0478/SQ-0494)
 const STATUS_BAND_ROWS: u16 = 4;
 
 /// Render a v6 PAINTED text screen (menus, hints — SQ-0477/0478) as absolutely-
@@ -1919,11 +2002,15 @@ const STATUS_BAND_ROWS: u16 = 4;
 /// so this is what makes the selection caret visible. Menus are absolutely
 /// positioned (NOT left/center/right anchor groups like the status band).
 ///
-/// Only runs at native `row >= min_row` are drawn: the frameless path overlays
-/// the DEEP runs (`min_row = STATUS_BAND_ROWS`) above the anchored status band
-/// which owns the top rows, while a story-less menu screen passes `min_row = 0`
-/// to stamp the whole pane. Shared by the frameless and hybrid (no story window)
-/// paths so both present a painted screen identically.
+/// Only native rows inside `rows` are drawn, each placed at `area.y + row +
+/// shift`. The frameless path calls this twice (SQ-0491): once for the runs
+/// INSIDE the story box (`shift = 0` — Shogun's boot menu keeps its native rows
+/// over the transcript) and once for the command band BELOW it (a negative or
+/// positive `shift` that packs those rows against the pane's bottom edge, so
+/// Journey's menu stays locked to the bottom at any pane height). A story-less
+/// menu screen passes the whole range with no shift to stamp the entire pane.
+/// Shared by the frameless and hybrid (no story window) paths so both present a
+/// painted screen identically.
 /// Resolve a v6 painted run's packed fg/bg (see [`crate::engine::PxText`]) plus
 /// its reverse bit onto a `base` theme [`Style`], for the CELL render paths (the
 /// frameless status band, the painted-screen overlay, and the hybrid story-strip
@@ -2020,7 +2107,8 @@ fn full_width_reverse_flood_rows(
 
 fn draw_painted_screen(
     runs: &[&crate::engine::PxText],
-    min_row: u16,
+    rows: std::ops::Range<u16>,
+    shift: i32,
     area: Rect,
     buf: &mut Buffer,
     base: ratatui::style::Style,
@@ -2029,6 +2117,15 @@ fn draw_painted_screen(
     chrome: &[&PositionedWindow],
     native_w: u16,
 ) {
+    // A native row's terminal row, or `None` when it is outside this call's row
+    // range or the shift pushes it off the pane.
+    let place = |row: u16| -> Option<u16> {
+        if !rows.contains(&row) {
+            return None;
+        }
+        let y = area.y as i32 + row as i32 + shift;
+        (y >= area.y as i32 && y < area.bottom() as i32).then_some(y as u16)
+    };
     // SQ-0515: a native row whose non-blank runs are ALL reverse-video and all
     // belong to a (near-)full-native-width grid window is a title/status bar —
     // flood the whole terminal row edge to edge with the reversed style before
@@ -2038,13 +2135,7 @@ fn draw_painted_screen(
     // text-width highlight block below.
     let flood = full_width_reverse_flood_rows(chrome, native_w, base, honor, colors);
     for (&row, &style) in &flood {
-        if row < min_row {
-            continue;
-        }
-        let y = area.y + row;
-        if y >= area.bottom() {
-            continue;
-        }
+        let Some(y) = place(row) else { continue };
         for x in area.x..area.right() {
             if let Some(cell) = buf.cell_mut((x, y)) {
                 cell.set_symbol(" ").set_style(style);
@@ -2060,11 +2151,9 @@ fn draw_painted_screen(
         // (SQ-0490).
         // 8×16 v6 cell (SQ-0479): quantize Y by FONT_H(16), X by FONT_W(8).
         let row = (t.y.max(1) - 1) / 16;
-        if row < min_row {
-            continue;
-        }
+        let Some(y) = place(row) else { continue };
         let col = (t.x.max(1) - 1) / 8;
-        if area.y + row >= area.bottom() || area.x + col >= area.right() {
+        if area.x + col >= area.right() {
             continue;
         }
         // Cell styles PATCH — a repaint must explicitly clear the reverse bit,
@@ -2073,7 +2162,7 @@ fn draw_painted_screen(
         // base per channel; inherited/Default channels keep it (SQ-0488).
         let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
         let max_w = (area.right() - (area.x + col)) as usize;
-        buf.set_stringn(area.x + col, area.y + row, &t.text, max_w, style);
+        buf.set_stringn(area.x + col, y, &t.text, max_w, style);
     }
 }
 
@@ -2586,36 +2675,13 @@ fn draw_chrome_text_strip(
         raw.entry(rect.y as i32 + game_row(t) - first_row).or_default().push(t);
     }
     // SQ-0509: merge horizontally-contiguous same-style fragments before mapping.
-    // A game (Arthur) that positions status text with proportional pixel metrics
-    // emits word fragments as separate runs whose pixel start abuts the previous
-    // run's pixel end; mapping each fragment independently through the letterbox
-    // scale rounds them into stray cell gaps ("Chu rch yard"). Runs within
-    // `FRAG_TOL` px of the previous end (and identical style/colours) concatenate
-    // into one run stamped contiguously from a single mapped cell; runs separated
-    // by a genuine gap (Journey's menu items / column dividers, 8px apart) stay
-    // distinct and keep their proportional spacing.
-    const FRAG_TOL: i32 = 4;
+    // Runs separated by a genuine gap (Journey's menu items / column dividers,
+    // 8px apart) stay distinct and keep their proportional spacing, so the strip
+    // bridges only ABUTTING fragments.
     let mut by_row: BTreeMap<i32, Vec<PxText>> = BTreeMap::new();
     for (row, mut rr) in raw {
         rr.sort_by_key(|t| t.x);
-        let mut merged: Vec<PxText> = Vec::new();
-        for t in rr {
-            if let Some(last) = merged.last_mut() {
-                let last_end = (last.x.max(1) as i32 - 1) + last.text.chars().count() as i32 * 8;
-                let start = t.x.max(1) as i32 - 1;
-                if start >= last_end
-                    && start - last_end <= FRAG_TOL
-                    && last.style == t.style
-                    && last.fg == t.fg
-                    && last.bg == t.bg
-                {
-                    last.text.push_str(&t.text);
-                    continue;
-                }
-            }
-            merged.push((*t).clone());
-        }
-        by_row.insert(row, merged);
+        by_row.insert(row, merge_row_fragments(&rr, 4));
     }
 
     // SQ-0508(b): divider columns to draw continuously. A reversed WHITESPACE run in
@@ -2692,15 +2758,59 @@ fn draw_chrome_text_strip(
     }
 }
 
+/// SQ-0509: merge horizontally-contiguous same-style fragments of ONE native text
+/// row (`row_runs` sorted by `x`) into single runs. A game that positions status
+/// text with proportional pixel metrics — Arthur — emits word fragments as
+/// separate runs whose pixel start abuts the previous run's pixel end; placing
+/// each fragment independently scatters them ("Chu rch yard", or one anchor group
+/// per glyph). A run starting within `tol_px` of the previous run's end, with
+/// identical style and colours, is concatenated onto it, the intervening pixel gap
+/// becoming `gap / 8` spaces — so a `tol_px` of 4 bridges only ABUTTING fragments
+/// (adding nothing) while 8 also closes a one-cell word gap with a real space.
+/// Runs separated by a wider gap stay distinct and keep their own positions.
+fn merge_row_fragments(row_runs: &[&crate::engine::PxText], tol_px: i32) -> Vec<crate::engine::PxText> {
+    let mut merged: Vec<crate::engine::PxText> = Vec::new();
+    for t in row_runs {
+        if let Some(last) = merged.last_mut() {
+            let last_end = (last.x.max(1) as i32 - 1) + last.text.chars().count() as i32 * 8;
+            let start = t.x.max(1) as i32 - 1;
+            if start >= last_end
+                && start - last_end <= tol_px
+                && last.style == t.style
+                && last.fg == t.fg
+                && last.bg == t.bg
+            {
+                for _ in 0..(start - last_end) / 8 {
+                    last.text.push(' ');
+                }
+                last.text.push_str(&t.text);
+                continue;
+            }
+        }
+        merged.push((*t).clone());
+    }
+    merged
+}
+
 /// Render the v6 frameless status band as a classic full-width status line
 /// ("anchored bar", SQ-0467). `runs` are all the chrome grids' pixel-text runs;
 /// `ncols` is the native screen width in cells (so anchor thresholds scale to the
-/// game's own screen, not a hardcoded 40). Each native row (`(y-1)/16`, capped at
-/// 4) is classified into LEFT/CENTER/RIGHT anchor groups and painted across the
-/// full pane width. Returns the number of band rows used (for the story offset).
+/// game's own screen, not a hardcoded 40). Each native row (`(y-1)/16`) below
+/// `band_rows` is classified into LEFT/CENTER/RIGHT anchor groups and painted
+/// across the full pane width. Returns the number of band rows used (for the
+/// story offset).
+///
+/// `band_rows` is the story window's TOP native row, not a constant (SQ-0549):
+/// the status band is whatever chrome text sits ABOVE the story, wherever the
+/// game put it. The band is ANCHORED to the pane top — its first inked native row
+/// draws at `area.y`, and the rows below keep their relative spacing — so Arthur's
+/// row-12 bar (its story buffer starts at row 13, under a 12-row art panel that
+/// frameless mode drops) reads as a top status line instead of floating a quarter
+/// of the way down the pane.
 fn draw_anchored_status_band(
     runs: &[&crate::engine::PxText],
     ncols: u32,
+    band_rows: u16,
     area: Rect,
     buf: &mut Buffer,
     style: ratatui::style::Style,
@@ -2709,10 +2819,20 @@ fn draw_anchored_status_band(
 ) -> u16 {
     let left_bound = ncols / 3; // left-third boundary (cells)
     let right_bound = ncols * 2 / 3; // right two-thirds boundary (cells)
+    // The band's own origin: the topmost inked native row inside it.
+    let Some(first_row) = runs
+        .iter()
+        .filter(|t| !t.text.trim().is_empty())
+        .map(|t| (t.y.max(1) - 1) / 16)
+        .filter(|&r| r < band_rows)
+        .min()
+    else {
+        return 0;
+    };
     let mut rows_used = 0u16;
-    for row in 0..4u16 {
-        if area.y + row >= area.bottom() {
-            break; // status band is at most 4 rows and must stay in-pane
+    for row in first_row..band_rows {
+        if area.y + (row - first_row) >= area.bottom() {
+            break; // the band must stay in-pane
         }
         // This native row's non-blank runs, across ALL chrome grids, left→right.
         let mut row_runs: Vec<&crate::engine::PxText> = runs
@@ -2724,6 +2844,13 @@ fn draw_anchored_status_band(
             continue;
         }
         row_runs.sort_by_key(|t| t.x);
+        // Glue the row's word fragments back together before classifying (SQ-0509,
+        // reached here by SQ-0549): Arthur paints its bar one GLYPH per run, which
+        // would otherwise put every letter in its own anchor group and join them
+        // with two spaces apiece. The 8px tolerance also restores the single-cell
+        // word gaps inside its date field ("St Anne's Day, Compline"), which a
+        // group join would likewise have doubled.
+        let row_runs = merge_row_fragments(&row_runs, 8);
         // Classify each run into an anchor group by its native position. A run
         // spanning most of the row (a full-width bar) counts LEFT; otherwise a
         // start in the left third is LEFT, an end past the right two-thirds is
@@ -2757,8 +2884,8 @@ fn draw_anchored_status_band(
         let row_bg = row_runs.iter().map(|t| t.bg).find(|&p| crate::render::v6_layout::packed_explicit(p)).unwrap_or(0);
         let row_rev = row_runs.iter().any(|t| t.style & 1 != 0) as u8;
         let row_style = v6_run_style(style, row_fg, row_bg, row_rev, honor, colors);
-        if place_anchored_row(buf, area, area.y + row, &left_str, &center_str, &right_str, row_style) {
-            rows_used = rows_used.max(row + 1);
+        if place_anchored_row(buf, area, area.y + (row - first_row), &left_str, &center_str, &right_str, row_style) {
+            rows_used = rows_used.max(row - first_row + 1);
         }
     }
     rows_used
@@ -4811,7 +4938,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 80, 10);
         let mut buf = Buffer::empty(area);
-        draw_painted_screen(&runs, 0, area, &mut buf, base, true, &colors, &chrome, native_w);
+        draw_painted_screen(&runs, 0..u16::MAX, 0, area, &mut buf, base, true, &colors, &chrome, native_w);
 
         let reversed_count = |y: u16| -> u16 {
             (0..area.width).filter(|&x| buf.cell((x, y)).unwrap().modifier.contains(Modifier::REVERSED)).count() as u16
@@ -4937,10 +5064,13 @@ mod tests {
 
     /// A synthetic v6 `Layered` model for the frameless-mode tests: a chrome
     /// `Grid` carrying one status px-run at native (1,1) → cell (0,0), plus a
-    /// primary story `Buffer`. No decorative graphics window.
+    /// primary story `Buffer` one native row below it. No decorative graphics
+    /// window. Pixel geometry is the authentic 8×16 v6 text cell (SQ-0479), so
+    /// the status window really does occupy the row ABOVE the story — the
+    /// relation the frameless band split reads (SQ-0549).
     fn frameless_v6_model() -> ScreenModel {
         let status = PositionedWindow {
-            x: 0, y: 0, w: 40, h: 1, x_px: 0, y_px: 0, w_px: 320, h_px: 8,
+            x: 0, y: 0, w: 40, h: 1, x_px: 0, y_px: 0, w_px: 320, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
                 cols: 40, rows: 1, cells: vec![], active_rows: 1, cursor: (1, 1),
@@ -4952,7 +5082,7 @@ mod tests {
             }),
         };
         let story = PositionedWindow {
-            x: 0, y: 1, w: 40, h: 24, x_px: 0, y_px: 8, w_px: 320, h_px: 192,
+            x: 0, y: 1, w: 40, h: 24, x_px: 0, y_px: 16, w_px: 320, h_px: 384,
             left_margin: 0, right_margin: 0,
             node: WinNode::Buffer(BufferWindow { primary: true, ..Default::default() }),
         };
@@ -5104,7 +5234,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let style = ratatui::style::Style::default();
         let colors = crate::colors::ColorScheme::terminal_default();
-        let rows_used = draw_anchored_status_band(&refs, ncols, area, &mut buf, style, true, &colors);
+        let rows_used = draw_anchored_status_band(&refs, ncols, 4, area, &mut buf, style, true, &colors);
         let text: String = (0..w).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
         (text, rows_used)
     }
@@ -5178,7 +5308,7 @@ mod tests {
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
         let colors = crate::colors::ColorScheme::terminal_default();
-        let rows_used = draw_anchored_status_band(&refs, 40, area, &mut buf, ratatui::style::Style::default(), true, &colors);
+        let rows_used = draw_anchored_status_band(&refs, 40, 4, area, &mut buf, ratatui::style::Style::default(), true, &colors);
         assert_eq!(rows_used, 2, "two native rows populated");
         let r0: String = (0..80).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect();
         let r1: String = (0..80).map(|x| buf.cell((x, 1)).unwrap().symbol().to_string()).collect();
@@ -5240,7 +5370,7 @@ mod tests {
         let area = Rect::new(0, 0, 20, 6);
         let mut buf = Buffer::empty(area);
         let colors = crate::colors::ColorScheme::terminal_default();
-        draw_painted_screen(&refs, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors, &[], 0);
+        draw_painted_screen(&refs, 0..u16::MAX, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors, &[], 0);
         // Every cell of the bar (cols 0..5) is REVERSED — including the gap at col 2.
         for x in 0..5u16 {
             assert!(
@@ -5257,7 +5387,7 @@ mod tests {
             .map(|t| crate::engine::PxText { style: 0, ..t.clone() })
             .collect();
         let prefs: Vec<&crate::engine::PxText> = plain.iter().collect();
-        draw_painted_screen(&prefs, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors, &[], 0);
+        draw_painted_screen(&prefs, 0..u16::MAX, 0, area, &mut buf, ratatui::style::Style::default(), true, &colors, &[], 0);
         assert!(
             !buf.cell((2, 1)).unwrap().modifier.contains(Modifier::REVERSED),
             "the gap cell is repainted plain once the selection moves away (SQ-0490)"
@@ -5365,7 +5495,7 @@ mod tests {
         let refs: Vec<&crate::engine::PxText> = vec![&coloured, &plain];
         let area = Rect::new(0, 0, 20, 6);
         let mut buf = Buffer::empty(area);
-        draw_painted_screen(&refs, 0, area, &mut buf, base, true, &colors, &[], 0);
+        draw_painted_screen(&refs, 0..u16::MAX, 0, area, &mut buf, base, true, &colors, &[], 0);
         assert_eq!(
             buf.cell((0, 0)).unwrap().fg,
             crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(3), &colors),
@@ -5388,7 +5518,7 @@ mod tests {
         let refs: Vec<&crate::engine::PxText> = vec![&coloured];
         let area = Rect::new(0, 0, 80, 6);
         let mut buf = Buffer::empty(area);
-        draw_anchored_status_band(&refs, 40, area, &mut buf, base, true, &colors);
+        draw_anchored_status_band(&refs, 40, 4, area, &mut buf, base, true, &colors);
         assert_eq!(
             buf.cell((0, 0)).unwrap().fg,
             crate::render::resolve_zcolour(zvm::screen::ZColour::Standard(4), &colors),
@@ -5398,7 +5528,7 @@ mod tests {
         let plain = crate::engine::PxText { y: 1, x: 1, text: "Shogun".into(), style: 0, fg: 0, bg: 0 };
         let prefs: Vec<&crate::engine::PxText> = vec![&plain];
         let mut buf2 = Buffer::empty(area);
-        draw_anchored_status_band(&prefs, 40, area, &mut buf2, base, true, &colors);
+        draw_anchored_status_band(&prefs, 40, 4, area, &mut buf2, base, true, &colors);
         assert_eq!(buf2.cell((0, 0)).unwrap().fg, base.fg.unwrap_or(ratatui::style::Color::Reset), "Default band stays theme-styled");
     }
 

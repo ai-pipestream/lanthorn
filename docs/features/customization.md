@@ -259,8 +259,9 @@ re-seed the new template, or hand-write the new shape from
   chrome ring; `raster` bakes the whole pane — frame, status, and story text —
   into one scaled pixel image instead; `frameless` drops the decorative frame
   entirely and shows the story as a normal full-pane terminal transcript (full
-  size, native scrollback) with a compact status band and inline pictures — the
-  most legible mode, at the cost of the compass and border art. It also cycles
+  size, native scrollback) with compact status/command bands pinned to the pane
+  edges, any beside-the-story picture column, and inline pictures — the most
+  legible mode, at the cost of the compass and border art. It also cycles
   in the settings screen, and `/set-v6-render` switches modes live mid-game
   (session-only) for quick comparisons. (Applies only to graphical v6 stories;
   other games are unaffected.) See [Graphical v6](v6-graphics.md) for the full
