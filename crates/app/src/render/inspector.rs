@@ -41,6 +41,9 @@ pub struct RoomDiagnostics {
     pub edge_count: usize,
     /// Number of outgoing edges with `distorted == true`.
     pub distorted_count: usize,
+    /// How the mapper first worked out the player was here (SQ-0527), recorded on
+    /// the room at discovery. `None` for rooms mapped before it was recorded.
+    pub loc_method: Option<String>,
 }
 
 /// Gather layout diagnostics for `id` from the public `MapGraph` API.
@@ -74,7 +77,8 @@ pub fn room_diagnostics(graph: &MapGraph, id: RoomId) -> Option<RoomDiagnostics>
     let edge_count = edges.len();
     let distorted_count = edges.iter().filter(|e| e.distorted).count();
 
-    Some(RoomDiagnostics { id, name, layer_id, layer_name, pos, edges, edge_count, distorted_count })
+    let loc_method = room.loc_method.clone();
+    Some(RoomDiagnostics { id, name, layer_id, layer_name, pos, edges, edge_count, distorted_count, loc_method })
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -154,6 +158,13 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, 
     if row <= max_y {
         let line = format!("Pos {}", pos_str);
         draw_str_clipped(buf, inner_x, row, &line, value_style, clip);
+        row += 1;
+    }
+    // How this room was first detected (SQ-0527). Kept on the room, so it is
+    // still here long after the turn that discovered it — which the old map-corner
+    // indicator never was.
+    if let (Some(m), true) = (diag.loc_method.as_deref(), row <= max_y) {
+        draw_str_clipped(buf, inner_x, row, &format!("Found by {m}"), value_style, clip);
         row += 1;
     }
     // blank separator
@@ -340,9 +351,13 @@ mod tests {
             edges,
             edge_count,
             distorted_count,
+            loc_method: Some("via status variable".to_owned()),
         }
     }
 
+    /// SQ-0527: the inspector reports how the mapper first found the room. It
+    /// used to be a transient corner indicator describing only the LAST detection,
+    /// which was gone by the time you wanted to know about a given room.
     fn buf_contains(buf: &ratatui::buffer::Buffer, s: &str) -> bool {
         let all: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
         all.contains(s)
@@ -361,6 +376,13 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         assert!(buf_contains(&buf, "42"), "should contain room id");
         assert!(buf_contains(&buf, "Clearing"), "should contain room name");
+        // SQ-0527: and how the mapper first found the room. This used to be a
+        // transient corner indicator describing only the LAST detection, gone by
+        // the time you wanted to know about a given room.
+        assert!(
+            buf_contains(&buf, "Found by via status variable"),
+            "the inspector names the detection method recorded on the room"
+        );
     }
 
     #[test]

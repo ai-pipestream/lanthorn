@@ -703,7 +703,14 @@ impl GlulxSession {
     /// Z-machine needs no equivalent: its `current_location` reads the restored
     /// object tree.
     pub fn seed_last_room(&mut self, name: &str) {
-        self.last_room = Some(heading_to_room(name));
+        // Resolve the id exactly as a live turn does (SQ-0526): once the location
+        // global is known, rooms are keyed by the room's own address, and the
+        // restored VM already holds the right value. Building a NAME-derived id
+        // here instead produced a second, disconnected node for the room the
+        // player was actually standing in — the map jumped to the real one on the
+        // next turn and left the impostor behind.
+        let ram = self.scan_ram();
+        self.last_room = Some(self.room_for(name, &ram));
     }
 
     /// The Glk timer interval the game has requested (via

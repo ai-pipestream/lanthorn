@@ -1545,9 +1545,14 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 state.notifications.push("peel-layer: no room selected");
                 return;
             };
-            // With a direction, the player names the seam; without one, peel looks for a portal
-            // seam already dividing the layer (SQ-0360).
-            let peeled = match dir {
+            // With a direction, the player names the seam. Without one, cut at the passage
+            // they just walked in THROUGH (SQ-0552): the seam is the OPPOSITE of the
+            // direction travelled, since walking north into a room leaves by its south
+            // exit — that is what separates the area just entered from the one behind.
+            // Falls back to the portal-seam search (SQ-0360) when no passage was walked
+            // to get here: the first room of a game, a death or teleport, a move whose
+            // command named no direction, or a freshly loaded map.
+            let peeled = match dir.or_else(|| mapper.arrived_via().map(mapper::direction::opposite)) {
                 Some(d) => mapper::layer::peel_at_edge(&mut mapper.graph, room, d),
                 None => mapper::layer::peel_region(&mut mapper.graph, room),
             };
@@ -6544,6 +6549,10 @@ mod tests {
         m.observe(1, "Hall", None);
         m.observe(2, "Cellar", Some(Direction::Down));
         let mut s = AppState::default();
+        // SQ-0552 made a bare peel cut the passage just walked through. This test
+        // predates that and wants the portal-seam search, so clear the arrival:
+        // a relocation is by definition not a walked passage.
+        m.observe_relocation(2, "Cellar");
         apply_action(Action::PeelLayer(None), &mut s, &mut m); // Cellar -> L1
         m.observe(3, "Vault", Some(Direction::E)); // joins L1
         m.observe(2, "Cellar", Some(Direction::W)); // walk back, so the Vault has a way out to cut
@@ -6581,6 +6590,9 @@ mod tests {
         m.observe(3, "Damp Cave", Some(Direction::E));
         let mut s = AppState::default();
         s.select_room(Some(1));
+        // SQ-0552: with a walked arrival a bare peel cuts THAT seam instead. This
+        // case is the fallback — no passage was walked to get here — so clear it.
+        m.observe_relocation(3, "Damp Cave");
 
         // Plain peel: one connected region, so it refuses — and now explains itself.
         apply_action(Action::PeelLayer(None), &mut s, &mut m);

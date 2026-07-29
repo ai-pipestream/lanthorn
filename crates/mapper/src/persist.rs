@@ -38,7 +38,9 @@ pub fn from_json(s: &str) -> Result<Mapper, serde_json::Error> {
     // Collapse `?` stubs that a real directional edge already covers, so existing saved maps
     // clean up on load. (SQ-0220)
     graph.collapse_unknown_edges();
-    Ok(Mapper { graph, mode: state.mode })
+    // A loaded map has no walked arrival: the player has not moved yet this
+    // session, so a bare peel falls back to the portal-seam search until they do.
+    Ok(Mapper { graph, mode: state.mode, arrived_via: None })
 }
 
 #[cfg(test)]

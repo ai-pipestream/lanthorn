@@ -75,8 +75,7 @@ pub fn draw_room_info(
 
     // Panel sizing.
     const WIDTH: u16 = 36;
-    // border-top + name + found-by + exits-header + border-bot + OK button row + 2 spare
-    const FIXED_ROWS: u16 = 8;
+    const FIXED_ROWS: u16 = 7; // border-top + name + exits-header + border-bot + OK button row + 2 spare
     let notes_lines = if room.notes.is_empty() { 0u16 } else {
         // Wrap notes to panel inner width.
         let inner_w = WIDTH.saturating_sub(2) as usize;
@@ -127,13 +126,6 @@ pub fn draw_room_info(
     // Room name.
     if row <= max_y {
         draw_str_clipped(buf, inner_x, row, room.label(), label_style, clip);
-        row += 1;
-    }
-
-    // How the mapper first identified this room (SQ-0527). Recorded per room at
-    // discovery, so it is still here long after the turn that found it.
-    if let (Some(m), true) = (room.loc_method.as_deref(), row <= max_y) {
-        draw_str_clipped(buf, inner_x, row, &format!("Found by: {m}"), value_style, clip);
         row += 1;
     }
 
