@@ -277,10 +277,17 @@ struct KittyWindowImage {
     w: u16,
     h: u16,
     id: u32,
-    /// The transmit escape (plus a delete of the id it replaces), prepended to
-    /// the first placeholder row of the next emitted frame, then dropped — the
-    /// terminal keeps the image by id after that.
+    /// The transmit escape (plus a delete of a retired predecessor), prepended
+    /// to the first placeholder row of the next emitted frame, then dropped —
+    /// the terminal keeps the image by id after that.
     pending_transmit: Option<String>,
+    /// The id this one displaced ON SCREEN, freed with the NEXT replacement —
+    /// never together with our own transmit. Deleting it immediately blanked
+    /// the window while the (large) replacement was still being parsed, which
+    /// read as background flashing between the frames of an animated sequence
+    /// (Kerkerkruip's opening). Deferring one generation keeps the visible
+    /// frame alive until the new placeholders have landed.
+    retired: Option<u32>,
 }
 
 impl std::fmt::Debug for GraphicsRender {
@@ -358,15 +365,20 @@ impl GraphicsRender {
         let fresh = matches!(self.kitty_wins.get(&gw.win),
             Some(e) if e.version == gw.version && e.w == area.width && e.h == area.height);
         if !fresh {
-            let old_id = self.kitty_wins.get(&gw.win).map(|e| e.id);
+            let old = self.kitty_wins.get(&gw.win);
+            // Free only the id retired TWO generations back — the one the
+            // still-visible image displaced. Deleting the visible id here would
+            // blank the window until the new transmit finishes parsing (the
+            // between-frames background flash). d=I frees data + placements.
+            let free_now = old.and_then(|e| e.retired);
+            let retired = old.map(|e| e.id);
             // Private id range, disjoint from ratatui-image's random ids in
             // practice; top byte stays 0 so the id_extra diacritic is 0.
             self.next_kitty_id = self.next_kitty_id.wrapping_add(1) & 0x000F_FFFF;
             let id = 0x00B0_0000 | self.next_kitty_id;
             let mut transmit = String::new();
-            if let Some(old) = old_id {
-                // d=I frees the replaced image's data and placements.
-                write!(transmit, "\x1b_Gq=2,a=d,d=I,i={old}\x1b\\").unwrap();
+            if let Some(g) = free_now {
+                write!(transmit, "\x1b_Gq=2,a=d,d=I,i={g}\x1b\\").unwrap();
             }
             transmit.push_str(&kitty_transmit_virtual(&gw.canvas, id, area.height, area.width));
             self.kitty_wins.insert(
@@ -377,6 +389,7 @@ impl GraphicsRender {
                     h: area.height,
                     id,
                     pending_transmit: Some(transmit),
+                    retired,
                 },
             );
         }
@@ -1091,13 +1104,24 @@ mod tests {
         assert!(!second.contains("a=T"), "unchanged canvas is not re-transmitted");
         assert!(second.contains('\u{10EEEE}'), "placeholders still placed every frame");
 
-        // Version bump (the game repainted): new transmit deleting the old id.
+        // Version bump (the game repainted / an animation frame): the canvas is
+        // re-transmitted, but the id still ON SCREEN must NOT be deleted with
+        // it — deleting it before the big replacement transmit finishes parsing
+        // blanks the window (the between-frames background flash Kerkerkruip's
+        // opening sequence showed). It is freed one generation later.
         let gw2 = GraphicsWindow { win: 7, canvas: gw.canvas.clone(), version: 4, upscale: false };
         let mut buf3 = Buffer::empty(area);
         gr.render(&picker, &gw2, area, Style::default(), &mut buf3);
         let third = buf3.cell((0, 0)).unwrap().symbol().to_string();
-        assert!(third.contains("a=d,d=I"), "replaced image id is deleted");
         assert!(third.contains("a=T,U=1"), "repainted canvas is re-transmitted");
+        assert!(!third.contains("a=d"), "the still-visible predecessor is NOT deleted yet");
+
+        // Next repaint: NOW the two-generations-old id is freed.
+        let gw3 = GraphicsWindow { win: 7, canvas: gw.canvas.clone(), version: 5, upscale: false };
+        let mut buf4 = Buffer::empty(area);
+        gr.render(&picker, &gw3, area, Style::default(), &mut buf4);
+        let fourth = buf4.cell((0, 0)).unwrap().symbol().to_string();
+        assert!(fourth.contains("a=d,d=I"), "the id retired two generations back is freed");
     }
 
     #[test]
