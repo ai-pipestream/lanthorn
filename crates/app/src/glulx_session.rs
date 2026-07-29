@@ -379,8 +379,17 @@ impl GlulxSession {
                 session.scan_words(),
             ),
         };
+        // Resolve the opening room's id the way a live TURN does, not with a bare
+        // name hash. When this story's `location` global was learned in an earlier
+        // run the lock is already restored above, so a turn keys rooms by the room's
+        // own address while the boot keyed them by name — two ids for the room you
+        // are standing in, so the first action you took spawned a duplicate of the
+        // opening room. Same defect `seed_last_room` fixes for a resume (SQ-0526);
+        // the boot path had its own copy. `room_for` still falls back to the name
+        // hash when nothing is locked, which is every game that never learns.
+        let ram = session.scan_ram();
         session.last_room =
-            session.appglk().take_room_heading().map(|n| heading_to_room(&n));
+            session.appglk().take_room_heading().map(|n| session.room_for(&n, &ram));
         Ok(session)
     }
 
