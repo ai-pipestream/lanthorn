@@ -3545,8 +3545,13 @@ impl Machine {
     ///
     /// Gating keeps this faithful and non-regressive:
     ///   * Only when the header interpreter number is actually 6.
-    ///   * The Z-machine output control codes NUL (0), tab (9) and newline (13)
-    ///     keep their ZSCII meaning (they are NOT remapped to CP437 glyphs).
+    ///   * The Z-machine output codes that mean SPACING rather than a glyph keep
+    ///     their ZSCII meaning and are never remapped to CP437 glyphs: NUL (0),
+    ///     tab (9), the invisible spacer (10), sentence space (11) and newline
+    ///     (13). ZMSD §3.8 defines 9 and 11 for output in Version 6 — a sentence
+    ///     space is "a suitable gap between two sentences" — and every v6 story
+    ///     gets interpreter 6 by default, so without this Shogun's prose printed
+    ///     CP437's 0x0B glyph (♂) between its sentences.
     ///   * Values > 255 (10-bit ZSCII) fall back to the standard mapping.
     ///   * 0x20–0x7E is ASCII either way, so ordinary text is unaffected.
     ///
@@ -3555,7 +3560,7 @@ impl Machine {
     /// standard ZSCII path, so accented prose in other games is never garbled.
     fn print_char_to_unicode(&self, zscii: u16) -> char {
         let interp_ibm_pc = self.mem.read_byte(0x1E) == 6;
-        let is_control = zscii == 0 || zscii == 9 || zscii == 13;
+        let is_control = matches!(zscii, 0 | 9 | 10 | 11 | 13);
         if interp_ibm_pc && !is_control && zscii <= 255 {
             cp437_to_char(zscii as u8)
         } else {
@@ -8493,6 +8498,28 @@ pub(crate) mod tests {
         run_print_char(&mut m, 13); // newline, NOT CP437 ♪
         run_print_char(&mut m, b'!' as u16);
         assert_eq!(buf_output(&m), "Hi\n!");
+    }
+
+    #[test]
+    fn print_char_spacing_codes_survive_cp437_under_ibm_pc() {
+        // ZMSD §3.8: tab (9) and SENTENCE SPACE (11) are defined for output in
+        // Version 6 — 11 is "a suitable gap between two sentences" — and 10 is
+        // the invisible spacer Beyond Zork uses. They mean SPACING, not glyphs,
+        // so the CP437 table must never claim them. Every v6 story gets
+        // interpreter 6 by default, and Shogun prints 11 between its sentences,
+        // so before this Shogun's cabin read "…sea chest here.♂Sitting on the
+        // desk…" — CP437's 0x0B glyph (user report at the TTY, 2026-07-28).
+        let mut m = Machine::new(Memory::new(sample_story(5)).unwrap());
+        m.mem.write_byte(0x1E, 6); // IBM PC → CP437 active
+        run_print_char(&mut m, b'.' as u16);
+        run_print_char(&mut m, 11); // sentence space, NOT ♂ (U+2642)
+        run_print_char(&mut m, b'S' as u16);
+        run_print_char(&mut m, 9); // tab, NOT ○
+        run_print_char(&mut m, 10); // invisible spacer, NOT ◙
+        run_print_char(&mut m, b'!' as u16);
+        // '.' + one space (11) + 'S' + two spaces (9, 10) + '!'
+        assert_eq!(buf_output(&m), ". S  !");
+        assert!(!buf_output(&m).contains('\u{2642}'), "no CP437 ♂ for the sentence space");
     }
 
     #[test]

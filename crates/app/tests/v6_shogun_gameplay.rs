@@ -80,6 +80,19 @@ fn shogun_boots_plays_and_emits_no_control_chars() {
             "turn {turn}: typed command arrived empty (v6 window font-prop init bug): {:?}",
             result.transcript
         );
+        // ZMSD §3.8's v6 SPACING codes — tab (9), the invisible spacer (10) and
+        // sentence space (11) — must reach the transcript as spacing, never as
+        // the CP437 glyphs their byte values carry. Every v6 story defaults to
+        // interpreter 6 (IBM PC), which turns CP437 translation on, and Shogun
+        // prints 11 between sentences: its cabin once read "…sea chest here.♂
+        // Sitting on the desk…". (SQ-0545)
+        for g in ['\u{2642}', '\u{25D9}', '\u{25CB}'] {
+            assert!(
+                !result.transcript.contains(g),
+                "turn {turn}: CP437 glyph {g:?} leaked in place of a v6 spacing code: {:?}",
+                result.transcript
+            );
+        }
         if result.transcript.contains("Bridge") {
             saw_bridge_look = true;
         }
