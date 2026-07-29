@@ -173,6 +173,51 @@ impl MapGraph {
         before - self.conns.len()
     }
 
+    /// Give room `old` the id `new`, rewriting every reference to it (SQ-0526).
+    ///
+    /// The Glulx side identifies a room by hashing its printed NAME until it has
+    /// worked out where the game keeps its `location` global, then switches to the
+    /// room's real object address. The handful of rooms mapped during that
+    /// learning window carry name-derived ids, and would otherwise reappear as
+    /// duplicate nodes the moment the player walked back into them. Re-keying them
+    /// keeps one node per room across the switch.
+    ///
+    /// Returns `false` and changes nothing when `old` is unknown, when the ids are
+    /// equal, or when `new` is ALREADY a room — that last case is a merge, not a
+    /// rename, and silently folding two mapped rooms together could destroy real
+    /// structure. The caller is left with the duplicate rather than a guess.
+    pub fn rekey_room(&mut self, old: RoomId, new: RoomId) -> bool {
+        if old == new || !self.rooms.contains_key(&old) || self.rooms.contains_key(&new) {
+            return false;
+        }
+        let Some(mut room) = self.rooms.remove(&old) else { return false };
+        room.id = new;
+        self.rooms.insert(new, room);
+        for c in &mut self.conns {
+            if c.origin == old {
+                c.origin = new;
+            }
+            if c.dest == old {
+                c.dest = new;
+            }
+        }
+        // A rename can make two edges identical (both ends re-keyed onto the same
+        // pair); keep the first of each.
+        let mut seen: Vec<(RoomId, Direction, RoomId)> = Vec::new();
+        self.conns.retain(|c| {
+            let key = (c.origin, c.dir, c.dest);
+            let fresh = !seen.contains(&key);
+            if fresh {
+                seen.push(key);
+            }
+            fresh
+        });
+        if self.current == Some(old) {
+            self.current = Some(new);
+        }
+        true
+    }
+
     pub fn set_current(&mut self, id: RoomId) {
         self.current = Some(id);
     }
@@ -270,6 +315,42 @@ impl MapGraph {
 
 #[cfg(test)]
 mod tests {
+    /// SQ-0526: re-keying a room must move every reference with it, and must
+    /// refuse the cases where it would destroy structure.
+    #[test]
+    fn rekey_room_moves_edges_and_current_and_refuses_a_merge() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Hall".into());
+        g.upsert_room(2, "Cave".into());
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::S, 1);
+        g.set_current(1);
+
+        assert!(g.rekey_room(1, 99), "a plain rename succeeds");
+        assert!(g.room(1).is_none(), "the old id is gone");
+        assert_eq!(g.room(99).map(|r| r.name.as_str()), Some("Hall"), "the room came with it");
+        assert_eq!(g.room(99).map(|r| r.id), Some(99), "and its own id field was updated");
+        assert_eq!(g.current(), Some(99), "the current pointer followed");
+        assert!(
+            g.connections().iter().any(|c| c.origin == 99 && c.dest == 2),
+            "the outgoing edge followed: {:?}",
+            g.connections()
+        );
+        assert!(
+            g.connections().iter().any(|c| c.origin == 2 && c.dest == 99),
+            "and the incoming edge: {:?}",
+            g.connections()
+        );
+
+        assert!(!g.rekey_room(99, 99), "renaming to itself is a no-op");
+        assert!(!g.rekey_room(1234, 5678), "an unknown room is a no-op");
+        assert!(
+            !g.rekey_room(99, 2),
+            "re-keying ONTO an existing room would be a merge, not a rename, and must be refused"
+        );
+        assert_eq!(g.room(2).map(|r| r.name.as_str()), Some("Cave"), "the refused merge changed nothing");
+    }
+
     use super::*;
     use crate::direction::Direction;
 

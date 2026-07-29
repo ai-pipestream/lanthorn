@@ -106,6 +106,20 @@ pub(crate) fn finish_command_turn(
     let rooms_before = mapper.graph.rooms().count();
     let conns_before = mapper.graph.connections().len();
 
+    // SQ-0526: the Glulx side identifies rooms by hashing their printed NAME until
+    // it has worked out where the game keeps its `location` global, then switches
+    // to the room's real object address. On the turn that switch happens it hands
+    // back the rooms mapped during the learning window; re-key them so they are
+    // the same nodes afterwards instead of duplicates the player walks back into.
+    // Empty on every other turn, and always empty for the Z-machine.
+    if let Some(g) = crate::engine_helpers::glulx_session_opt_mut(&mut *session) {
+        for (name, addr) in g.take_room_remap() {
+            let old_id = app::roomid::synthetic_room_id(&name);
+            let new_id = app::roomid::glulx_room_id(addr);
+            mapper.graph.rekey_room(old_id, new_id);
+        }
+    }
+
     apply_turn(mapper, cmd, &result);
 
     // Bump the graph generation ONLY when the turn actually changed the map's
