@@ -212,6 +212,8 @@ pub(crate) fn dispatch_slash_outcome(
                             if let Some(z) = zvm_session_opt_mut(&mut *session) {
                                 z.load_pictures_png(&ac.pictures);
                             }
+                            // Hand Glulx back the room it was saved in (SQ-0523); no-op for zvm.
+                            crate::engine_helpers::seed_resumed_location(&mut *session, &ac.meta);
                             if state.config.aux_storage != app::config::AuxStorage::Global {
                                 session.set_aux_data(ac.aux.clone());
                             }

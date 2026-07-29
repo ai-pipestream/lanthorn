@@ -461,6 +461,9 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                             if let Some(zs) = zvm_session_opt_mut(&mut *session) {
                                 zs.load_pictures_png(&ac.pictures);
                             }
+                            // Hand Glulx back the room it was saved in (SQ-0523);
+                            // no-op for zvm.
+                            crate::engine_helpers::seed_resumed_location(&mut *session, &ac.meta);
                             startup_transcript = Some((ac.transcript, ac.transcript_kinds, ac.transcript_runs, ac.transcript_para, ac.transcript_images));
                             startup_history = ac.history;
                             // Restore the turn counter from the same archive (SQ-0429):

@@ -145,6 +145,21 @@ pub(crate) fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine
     }
 }
 
+/// Hand a resumed session the room the archive recorded (SQ-0523).
+///
+/// A no-op for the Z-machine, whose `current_location` reads the restored object
+/// tree. Glulx has no object tree: it recovers the room from the heading the game
+/// prints and caches it OUTSIDE the VM snapshot, so a resume left that cache
+/// holding the fresh boot's opening room and the map selected the wrong room
+/// until the next turn reprinted a heading. Call at every site that resumes a
+/// `.babelmap`, beside `restore_screen` — before `reobserve_location`, which is
+/// what reads the location back out.
+pub(crate) fn seed_resumed_location(session: &mut dyn Engine, meta: &app::archive::Meta) {
+    if let (Some(name), Some(g)) = (meta.location.as_deref(), glulx_session_opt_mut(session)) {
+        g.seed_last_room(name);
+    }
+}
+
 /// Whether the active engine is the Z-machine `GameSession` required by the
 /// standard `.qzl`/`.sav` Quetzal **import** path.
 ///

@@ -510,6 +510,8 @@ pub(crate) fn apply_launch_resume(
                 if let Some(z) = zvm_session_opt_mut(&mut *session) {
                     z.load_pictures_png(&ac.pictures);
                 }
+                // Hand Glulx back the room it was saved in (SQ-0523); no-op for zvm.
+                crate::engine_helpers::seed_resumed_location(&mut *session, &ac.meta);
                 resumed_images = ac.transcript_images;
             }
             // Reinstate the saved screen too (mirrors the auto-load path, zvm-only),

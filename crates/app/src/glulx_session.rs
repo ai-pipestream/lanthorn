@@ -556,6 +556,26 @@ impl GlulxSession {
         }
     }
 
+    /// Seed the cached location after a host Save State resume (SQ-0523).
+    ///
+    /// Glulx has no object tree to interrogate, so the current room is recovered
+    /// from the room HEADING the game prints (`Subheader` style) and cached in
+    /// `last_room` — host-side state that lives outside the VM snapshot. A resume
+    /// therefore restored the VM correctly but left this cache holding the room
+    /// the FRESH BOOT printed, so the map selected and centred on the game's
+    /// opening room until the next turn produced a heading and corrected it: save
+    /// deep in Adventure's maze, resume, and the map jumped to "At End Of Road"
+    /// until you typed `look`.
+    ///
+    /// `name` is the room name the archive recorded (`Meta::location`), and the id
+    /// is rebuilt with the same [`heading_to_room`] the live path uses, so the
+    /// seeded room is identical to the one the next heading would produce. The
+    /// Z-machine needs no equivalent: its `current_location` reads the restored
+    /// object tree.
+    pub fn seed_last_room(&mut self, name: &str) {
+        self.last_room = Some(heading_to_room(name));
+    }
+
     /// The Glk timer interval the game has requested (via
     /// `glk_request_timer_events`), or `None` when timer events are off. The host
     /// reads this to arm its own clock and calls [`Self::deliver_timer`] once per
