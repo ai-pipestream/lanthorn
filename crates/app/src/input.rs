@@ -1545,17 +1545,30 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 state.notifications.push("peel-layer: no room selected");
                 return;
             };
-            // With a direction, the player names the seam. Without one, cut at the passage
-            // they just walked in THROUGH (SQ-0552): the seam is the OPPOSITE of the
-            // direction travelled, since walking north into a room leaves by its south
-            // exit — that is what separates the area just entered from the one behind.
-            // Falls back to the portal-seam search (SQ-0360) when no passage was walked
-            // to get here: the first room of a game, a death or teleport, a move whose
-            // command named no direction, or a freshly loaded map.
-            let peeled = match dir.or_else(|| mapper.arrived_via().map(mapper::direction::opposite)) {
-                Some(d) => mapper::layer::peel_at_edge(&mut mapper.graph, room, d),
-                None => mapper::layer::peel_region(&mut mapper.graph, room),
+            // With a direction, the player names a seam leading OUT of the room. Without one,
+            // cut the passage they walked IN through (SQ-0552) — that is what separates the
+            // area just entered from the one behind, and unlike an outgoing seam it works when
+            // the way in was one-way or the way back is some other direction entirely.
+            //
+            // The arrival only describes the room the player is standing in, so a peel aimed at
+            // some other selected room ignores it. Nor does it help when the passage walked was
+            // a portal: the region walk already treats those as cuts, which is exactly what the
+            // portal-seam search (SQ-0360) is for. That search is also the fallback when nothing
+            // was walked to get here — the first room of a game, a death or teleport, a move
+            // whose command named no direction, or a freshly loaded map.
+            let arrival = mapper
+                .arrived_via()
+                .filter(|_| Some(room) == mapper.graph.current())
+                .filter(|&(_, d)| mapper::direction::grid_offset(d).is_some());
+            let peeled = match (dir, arrival) {
+                (Some(d), _) => mapper::layer::peel_at_edge(&mut mapper.graph, room, d),
+                (None, Some((prev, d))) => mapper::layer::peel_at_arrival(&mut mapper.graph, prev, d),
+                (None, None) => mapper::layer::peel_region(&mut mapper.graph, room),
             };
+            // The seam actually attempted, for the refusal message: the named passage out of the
+            // room, else the one walked in through. Reporting the raw `dir` instead named
+            // "Unknown" for every bare peel — a direction nothing had tried.
+            let seam = dir.map(|d| (room, d)).or(arrival);
             match peeled {
                 Ok(new) => {
                     state.bump_graph_gen(); // rooms peeled into a new layer → invalidate memo (SQ-0305)
@@ -1563,7 +1576,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 }
                 // A refusal used to be silent, which reads as a broken command — say which of the
                 // several quite different reasons it was (SQ-0360).
-                Err(why) => state.notifications.push(peel_refusal_message(&mapper.graph, room, dir, why)),
+                Err(why) => state.notifications.push(peel_refusal_message(&mapper.graph, room, seam, why)),
             }
         }
         Action::MergeLayer => {
@@ -2833,33 +2846,48 @@ fn select_adjacent(state: &mut AppState, mapper: &Mapper, delta: i32) {
 /// (`peel-layer <dir>`), while a passage that is not a seam means the boundary the player picked
 /// is not real. Each message therefore names the room or passage at issue and, where there is a
 /// way forward, points at it.
+/// Say which of the several quite different reasons a peel refused (SQ-0360). `seam` is the
+/// passage that was actually tried — `(the room it leads out of, its direction)` — which for a
+/// bare peel is the one the player walked IN through, and so is anchored at the room they came
+/// FROM, not the one they are standing in (SQ-0552).
 fn peel_refusal_message(
     graph: &mapper::graph::MapGraph,
     room: mapper::graph::RoomId,
-    dir: Option<Direction>,
+    seam: Option<(mapper::graph::RoomId, Direction)>,
     why: mapper::layer::PeelRefusal,
 ) -> String {
     use mapper::layer::PeelRefusal as R;
-    let here = graph.room(room).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{room}"));
+    let name = |id: mapper::graph::RoomId| {
+        graph.room(id).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{id}"))
+    };
+    let here = name(room);
     let layer = graph.layer_name(graph.layer_of(room));
-    match why {
-        R::WholeLayer => format!(
+    match (why, seam) {
+        (R::WholeLayer, _) => format!(
             "peel-layer: {layer} is one connected region — nothing to separate. \
              Use peel-layer <direction> to cut at a passage."
         ),
-        R::NoSuchPassage => match dir {
-            Some(d) => format!("peel-layer: {here} has no {d:?} passage."),
-            None => format!("peel-layer: {here} has no passage to cut."),
-        },
-        R::NotASeam => format!(
-            "peel-layer: {here}'s {:?} passage is not a boundary — both sides stay connected \
+        (R::NoSuchPassage, Some((from, d))) => {
+            format!("peel-layer: {} has no {d:?} passage.", name(from))
+        }
+        (R::NoSuchPassage, None) => format!("peel-layer: {here} has no passage to cut."),
+        (R::NotASeam, Some((from, d))) => format!(
+            "peel-layer: the {d:?} passage from {} is not a boundary — both sides stay connected \
              another way.",
-            dir.unwrap_or(Direction::Unknown)
+            name(from)
         ),
-        R::LeavesLayer => format!(
-            "peel-layer: {here}'s {:?} passage already leaves {layer}. Peeling divides one layer.",
-            dir.unwrap_or(Direction::Unknown)
+        (R::NotASeam, None) => format!(
+            "peel-layer: {here} has no passage that is a boundary — every way out stays connected \
+             another way."
         ),
+        (R::LeavesLayer, Some((from, d))) => format!(
+            "peel-layer: the {d:?} passage from {} already leaves {layer}. Peeling divides one \
+             layer.",
+            name(from)
+        ),
+        (R::LeavesLayer, None) => {
+            format!("peel-layer: {here}'s passage already leaves {layer}. Peeling divides one layer.")
+        }
     }
 }
 
@@ -6633,6 +6661,81 @@ mod tests {
         apply_action(Action::PeelLayer(Some(Direction::W)), &mut s, &mut m);
         let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
         assert!(msg.contains("no W passage"), "{msg:?}");
+    }
+
+    // ── SQ-0552: a bare peel cuts the passage walked in through ──────────────
+
+    /// The user's Adventure map, in miniature: walk SOUTH out of the Long Hall into the maze,
+    /// whose only ways out are DOWN back to the hall and an Unknown link to the Inside Building.
+    /// A bare peel used to cut `opposite(S)` OUT of the maze room — an edge to another maze room —
+    /// and refuse with "not a boundary". The seam is the edge that was walked.
+    fn advent_maze() -> (AppState, Mapper) {
+        let mut m = Mapper::default();
+        m.observe(1, "Inside Building", None);
+        m.observe(2, "At West End of Long Hall", Some(Direction::Down));
+        m.observe(3, "Maze", Some(Direction::S)); // the passage the peel must cut
+        m.graph.upsert_room(4, "Maze".into());
+        for (a, d, b) in [
+            (3, Direction::Down, 2), // the way back: one-way, and a portal at that
+            (3, Direction::N, 4),    // maze innards, all sharing the name
+            (4, Direction::S, 3),
+            (4, Direction::Unknown, 1), // the maze's other exit — also a portal
+        ] {
+            m.graph.add_edge(a, d, b);
+        }
+        (AppState::default(), m)
+    }
+
+    #[test]
+    fn a_bare_peel_cuts_the_passage_walked_in_through() {
+        let (mut s, mut m) = advent_maze();
+        apply_action(Action::PeelLayer(None), &mut s, &mut m);
+        assert_eq!(s.notifications.latest_text(), None, "no complaint — the walked passage is a seam");
+        let new = s.viewed_layer.expect("the peeled layer is in view");
+        assert_eq!(m.graph.rooms_in_layer(new), vec![3, 4], "the maze leaves, both its rooms");
+        assert_eq!(
+            m.graph.rooms_in_layer(0),
+            vec![1, 2],
+            "the hall and the building behind stay put"
+        );
+    }
+
+    /// The arrival describes the room the player is IN. Aiming the peel at some other selected
+    /// room must not cut a passage that has nothing to do with it.
+    #[test]
+    fn a_bare_peel_at_another_selected_room_ignores_the_arrival() {
+        let (mut s, mut m) = advent_maze();
+        s.select_room(Some(2)); // the hall, not the maze room we are standing in
+        apply_action(Action::PeelLayer(None), &mut s, &mut m);
+        // The portal-seam search takes over and peels the SELECTION's own planar region — which
+        // reaches through the walked passage into the maze, so the hall leaves with it. That is
+        // the pre-SQ-0552 behaviour, and the point: the arrival did not steer this peel.
+        let new = s.viewed_layer.expect("the portal-seam search still has something to cut");
+        assert_eq!(m.graph.rooms_in_layer(new), vec![2, 3, 4], "the selected room's region peels");
+        assert_eq!(
+            m.graph.rooms_in_layer(0),
+            vec![1],
+            "the walked passage was never cut — the hall and maze stayed one region"
+        );
+    }
+
+    /// The refusal used to name the direction the player TYPED — `None` for a bare peel, which
+    /// printed as "Unknown": a passage nothing had tried. It must name the seam actually cut at.
+    #[test]
+    fn a_bare_peel_refusal_names_the_passage_it_tried() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cave", Some(Direction::E)); // walked east...
+        m.graph.upsert_room(3, "Tunnel".into());
+        m.graph.add_edge(1, Direction::N, 3); // ...but Hall→Tunnel→Cave goes round the back
+        m.graph.add_edge(3, Direction::E, 2);
+        let mut s = AppState::default();
+
+        apply_action(Action::PeelLayer(None), &mut s, &mut m);
+        let msg = s.notifications.latest_text().expect("refusal must speak").to_string();
+        assert!(msg.contains("not a boundary"), "{msg:?}");
+        assert!(msg.contains("E passage from Hall"), "names the seam it tried: {msg:?}");
+        assert!(!msg.contains("Unknown"), "and never a direction nothing tried: {msg:?}");
     }
 
     #[test]

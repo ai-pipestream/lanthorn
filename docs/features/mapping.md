@@ -57,8 +57,12 @@ The map is a place you can move through, not just a picture.
 - **Layer tabs** — multi-level areas are split into named **layers** shown as a tab
   strip across the top of the map (e.g. `Main  Cellar  Maze`, each with its room
   count); the active tab is highlighted. `cycle-layer next|prev` switches between
-  them. Carve a region off with `peel-layer` (optionally at a chosen passage) or
-  fold one back with `merge-layer`.
+  them. Carve a region off with `peel-layer` or fold one back with `merge-layer`.
+  A bare `peel-layer` cuts at the passage you just walked in through — step into the
+  maze, peel, and the maze goes to its own layer — which works even when the entrance
+  is one-way or the way back is some other direction entirely. `peel-layer <direction>`
+  names the seam yourself; with neither, it falls back to hunting for a stairway or
+  other portal to cut at.
 - **Room inspector** — `toggle-inspector` opens an overlay for the selected room:
   its id, name, layer, position, and the per-edge layout constraints, so you can
   see *why* a room landed where it did.

@@ -8,15 +8,17 @@ use crate::layout::mark_distorted;
 pub struct Mapper {
     pub graph: MapGraph,
     pub mode: LayoutMode,
-    /// The direction the player last MOVED to reach the current room (SQ-0552),
-    /// or `None` when the current room was not arrived at by a walked passage —
-    /// the first room of a game, an involuntary relocation, or a move whose
-    /// command named no direction.
+    /// The passage the player last WALKED to reach the current room: the room they
+    /// left and the direction they took (SQ-0552). `None` when the current room was
+    /// not arrived at by a walked passage — the first room of a game, an involuntary
+    /// relocation, or a move whose command named no direction.
     ///
-    /// The graph alone cannot answer this: several edges can lead into one room,
-    /// and the one just used is not recoverable from them. It is only knowable at
-    /// the moment of the move, so it is recorded there.
-    pub(crate) arrived_via: Option<Direction>,
+    /// The graph alone cannot answer this: several edges can lead into one room, and
+    /// the one just used is not recoverable from them. It is only knowable at the
+    /// moment of the move, so it is recorded there. The room is recorded alongside the
+    /// direction because the passage is not reliably reciprocal — a bare peel needs the
+    /// edge itself, not a guess at the way back.
+    pub(crate) arrived_via: Option<(RoomId, Direction)>,
 }
 
 impl Mapper {
@@ -35,7 +37,7 @@ impl Mapper {
             Some(prev_id) => {
                 if location != prev_id {
                     let edge_dir = via.unwrap_or(Direction::Unknown);
-                    self.arrived_via = via;
+                    self.arrived_via = via.map(|d| (prev_id, d));
                     self.graph.add_edge(prev_id, edge_dir, location);
                     // Drop a now-redundant `?` stub: fires whether the Unknown came first and a
                     // directional move just followed, or a directional edge already existed and
@@ -54,9 +56,10 @@ impl Mapper {
         }
     }
 
-    /// The direction the player last moved to reach the current room, if it was
-    /// reached by a walked passage at all. See [`Mapper::arrived_via`].
-    pub fn arrived_via(&self) -> Option<Direction> {
+    /// The passage the player last walked to reach the current room — `(room left,
+    /// direction taken)` — if it was reached by a walked passage at all. See
+    /// [`Mapper::arrived_via`].
+    pub fn arrived_via(&self) -> Option<(RoomId, Direction)> {
         self.arrived_via
     }
 
@@ -155,29 +158,28 @@ impl Mapper {
 mod arrival_tests {
     use super::*;
 
-    /// SQ-0552: a bare `/peel-layer` cuts the passage the player arrived through,
-    /// so the mapper has to remember which direction that was. The graph cannot
-    /// answer it — several edges can lead into one room and the one just used is
-    /// not recoverable from them.
+    /// SQ-0552: a bare `/peel-layer` cuts the passage the player arrived through, so the
+    /// mapper has to remember the whole passage — the room left AND the direction. The
+    /// graph cannot answer it: several edges can lead into one room and the one just used
+    /// is not recoverable from them.
     #[test]
-    fn arrival_direction_is_remembered_and_reset_when_nothing_was_walked() {
+    fn arrival_passage_is_remembered_and_reset_when_nothing_was_walked() {
         let mut m = Mapper::default();
         m.observe(1, "Hall", Some(Direction::N));
         assert_eq!(m.arrived_via(), None, "the first room was not reached by walking");
 
         m.observe(2, "Cave", Some(Direction::N));
-        assert_eq!(m.arrived_via(), Some(Direction::N), "walked north to get here");
         assert_eq!(
-            crate::direction::opposite(m.arrived_via().unwrap()),
-            Direction::S,
-            "so the passage back out — the seam a bare peel cuts — is south"
+            m.arrived_via(),
+            Some((1, Direction::N)),
+            "walked north out of the Hall to get here — that edge is the seam a bare peel cuts"
         );
 
         m.observe(3, "Vault", None);
         assert_eq!(m.arrived_via(), None, "a move naming no direction leaves no seam to cut");
 
         m.observe(4, "Crypt", Some(Direction::E));
-        assert_eq!(m.arrived_via(), Some(Direction::E));
+        assert_eq!(m.arrived_via(), Some((3, Direction::E)));
         m.observe_relocation(5, "Forest");
         assert_eq!(m.arrived_via(), None, "death or teleport is not a walked passage");
     }

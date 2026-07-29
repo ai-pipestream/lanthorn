@@ -105,6 +105,38 @@ pub fn peel_at_edge(
     from: RoomId,
     dir: Direction,
 ) -> Result<LayerId, PeelRefusal> {
+    peel_across(graph, from, dir, false)
+}
+
+/// Peel at the passage the player just WALKED IN THROUGH: sever the `from -dir-> dest` pair and
+/// peel `dest`'s region — `dest` being the room the player now stands in (SQ-0552).
+///
+/// A bare `peel-layer` means "separate the area I just entered from the one behind me", so the
+/// seam is the incoming edge. [`peel_at_edge`] cannot express it: the passage may be one-way, and
+/// even when it is not, the way back is often not the reciprocal — Adventure's maze is entered
+/// SOUTH from the Long Hall and left by going DOWN, so cutting the current room's north exit cuts
+/// a maze-internal edge and separates nothing.
+///
+/// The kept side is still the region containing the room the player is standing in, exactly as for
+/// [`peel_at_edge`] and [`peel_region`] — only the seam differs. Keeping the other end instead
+/// would leave the player looking at a layer they are not in, the mirror of the SQ-0364 mistake.
+pub fn peel_at_arrival(
+    graph: &mut MapGraph,
+    from: RoomId,
+    dir: Direction,
+) -> Result<LayerId, PeelRefusal> {
+    peel_across(graph, from, dir, true)
+}
+
+/// Shared body of [`peel_at_edge`] and [`peel_at_arrival`]: cut the `from -dir-> dest` passage and
+/// peel the region on one of its ends into a fresh layer. `keep_far` picks which end is kept —
+/// `dest`'s region when true, `from`'s when false.
+fn peel_across(
+    graph: &mut MapGraph,
+    from: RoomId,
+    dir: Direction,
+    keep_far: bool,
+) -> Result<LayerId, PeelRefusal> {
     if grid_offset(dir).is_none() {
         // A portal is already a cut: `peel_region` is the operation for those.
         return Err(PeelRefusal::NoSuchPassage);
@@ -120,13 +152,14 @@ pub fn peel_at_edge(
         return Err(PeelRefusal::LeavesLayer);
     }
     let back = opposite(dir);
-    let region = region_with_cut(graph, from, &|c: &Connection| {
+    let (keep, shed) = if keep_far { (dest, from) } else { (from, dest) };
+    let region = region_with_cut(graph, keep, &|c: &Connection| {
         (c.origin == from && c.dir == dir) || (c.origin == dest && c.dir == back)
     });
-    if region.contains(&dest) {
+    if region.contains(&shed) {
         return Err(PeelRefusal::NotASeam);
     }
-    let name = graph.room(from).map(|r| r.label().to_string()).unwrap_or_default();
+    let name = graph.room(keep).map(|r| r.label().to_string()).unwrap_or_default();
     let new = graph.new_layer(Some(src), name);
     for id in region {
         graph.set_room_layer(id, new);
@@ -338,6 +371,44 @@ mod tests {
         g.add_edge(2, Direction::W, 1); // the reciprocal
         let l = peel_at_edge(&mut g, 1, Direction::E).expect("a lone passage is a seam");
         assert_eq!(g.rooms_in_layer(l), vec![1], "A peels itself off; B stays");
+    }
+
+    // ── SQ-0552: peel at the passage walked IN through ───────────────────────
+
+    /// Adventure's maze in miniature: entered SOUTH from the Long Hall, left by going DOWN.
+    /// The way back is neither the reciprocal of the way in nor even a planar edge, so
+    /// [`peel_at_edge`] on the current room cannot name the passage that was walked — its north
+    /// exit is another maze room, and cutting that separates nothing. Naming the INCOMING edge
+    /// cuts the real boundary, and still peels the side the player is standing on.
+    #[test]
+    fn a_one_way_entrance_peels_from_the_passage_walked_in_through() {
+        let mut g = MapGraph::new();
+        for (id, n) in [(1, "At West End of Long Hall"), (2, "Maze"), (3, "Maze"), (4, "Maze")] {
+            g.upsert_room(id, n.into());
+        }
+        g.add_edge(1, Direction::S, 2); // walked in
+        g.add_edge(2, Direction::Down, 1); // the way back — a portal, and not the reciprocal
+        // Maze innards, cross-linked as a maze is: cutting any one of these leaves a way round.
+        g.add_edge(2, Direction::N, 3);
+        g.add_edge(3, Direction::S, 2);
+        g.add_edge(2, Direction::E, 4);
+        g.add_edge(4, Direction::N, 3);
+
+        assert_eq!(
+            peel_at_edge(&mut g, 2, Direction::N),
+            Err(PeelRefusal::NotASeam),
+            "cutting the current room's north exit cuts a maze-internal edge — the old behaviour"
+        );
+
+        let l = peel_at_arrival(&mut g, 1, Direction::S).expect("the walked passage IS the boundary");
+        assert_eq!(g.rooms_in_layer(l), vec![2, 3, 4], "the maze leaves — the side the player is on");
+        assert_eq!(g.rooms_in_layer(MAIN_LAYER), vec![1], "the hall behind stays put");
+        assert_eq!(g.layer_name(l), "Maze", "named for the room entered, not the one left");
+        assert_eq!(
+            g.layers()[&l].parent,
+            Some(MAIN_LAYER),
+            "and hangs off the layer it left, so merging puts it back beside the hall"
+        );
     }
 
     /// A passage whose ends stay connected another way is not a boundary, and says so.
