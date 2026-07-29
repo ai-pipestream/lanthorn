@@ -79,3 +79,4 @@ fn marks_cover_the_whole_rose_and_never_replace_a_real_exit() {
         "and the outline returns intact the moment it is off"
     );
 }
+

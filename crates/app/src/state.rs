@@ -2284,6 +2284,14 @@ impl AppState {
                 r.is_current = Some(r.id) == current;
                 if let Some(room) = graph.room(r.id) {
                     r.label = room.label().to_string();
+                    // Untried exits belong here too (SQ-0391). A direction that goes NOWHERE
+                    // adds no room and no connection, so `graph_gen` deliberately does not bump
+                    // for it — which left the overlay showing a `?` on a direction just tried,
+                    // until some later move happened to change the geometry. It is exactly the
+                    // per-move-changeable kind of field this refresh exists for.
+                    if self.show_untried_exits {
+                        r.untried = graph.untried(r.id);
+                    }
                 }
             }
         }
@@ -4520,6 +4528,43 @@ mod tests {
             std::thread::yield_now();
         }
         s.poll_render_job();
+    }
+
+    /// SQ-0391: a direction that goes NOWHERE adds no room and no connection, so `graph_gen`
+    /// deliberately does not bump for it (SQ-0378 keeps a plain step from re-routing the whole
+    /// map). The map render is memoised on that generation, so the untried-exits overlay kept
+    /// showing a `?` on a direction the player had just tried, until some later move happened to
+    /// change the geometry. It has to be refreshed on the cached model, beside the current-room
+    /// highlight.
+    #[test]
+    fn a_foiled_move_clears_its_untried_mark_without_a_geometry_change() {
+        use mapper::direction::Direction;
+        use mapper::mapper::Mapper;
+
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        let mut s = AppState::default();
+        s.show_untried_exits = true;
+        let _ = s.cached_map_render(0, &m.graph);
+        drain_render_job(&mut s);
+
+        let marks = |s: &AppState, m: &Mapper| {
+            let rm = s.cached_map_render(0, &m.graph);
+            rm.rooms.iter().find(|r| r.id == 1).map(|r| r.untried.clone()).unwrap_or_default()
+        };
+        assert!(marks(&s, &m).contains(&Direction::N), "north starts untried");
+
+        let (gen, rooms, conns) =
+            (s.graph_gen, m.graph.rooms().count(), m.graph.connections().len());
+        m.observe(1, "Hall", Some(Direction::N)); // typed, went nowhere
+        assert_eq!(m.graph.rooms().count(), rooms, "a foiled move adds no room");
+        assert_eq!(m.graph.connections().len(), conns, "and no connection");
+        assert_eq!(s.graph_gen, gen, "so the map memo is NOT invalidated");
+
+        assert!(
+            !marks(&s, &m).contains(&Direction::N),
+            "the mark clears anyway — the overlay cannot wait for the geometry to change"
+        );
     }
 
     /// SQ-0379: no routing runs on the main thread — even the first build. The
