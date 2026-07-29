@@ -767,7 +767,19 @@ fn render_node(
                                     // flanks and every band under the non-stretch plans draw
                                     // at the uniform scale (aspect preserved).
                                     ChromeStrip::Art(r) => {
-                                        if let Some(crop) = (matches!(plan, BottomPlan::Frame) && r.width < area.width)
+                                        // SQ-0547: a Menu-plan SIDE flank is a panel — flood the
+                                        // whole column with the game's own panel colour (sampled
+                                        // from the art's outer edge) and centre the art in it,
+                                        // instead of top-anchoring the art over bare backdrop.
+                                        // The divider extension below re-draws over this fill, and
+                                        // the frame bands stay wherever their own strips put them.
+                                        let panel = (matches!(plan, BottomPlan::Menu) && r.width < area.width)
+                                            .then(|| menu_flank_panel(*r, viewport, &scale, cell_px, story, native, &gfx))
+                                            .flatten();
+                                        if let Some((bg, dest, crop)) = panel {
+                                            fill_pane_page(*r, bg, buf);
+                                            gr.draw_chrome_band_stretched(picker, &canvas, dest, crop, buf);
+                                        } else if let Some(crop) = (matches!(plan, BottomPlan::Frame) && r.width < area.width)
                                             .then(|| flank_crop(*r, area, &scale, cell_px, flank_native_bottom, native))
                                             .flatten()
                                         {
@@ -2143,6 +2155,79 @@ fn flank_crop(
 /// backdrop, matching the flank's own never-painted background beside the divider).
 /// Returns `None` when the flank has no border column abutting the story or the gap is
 /// empty. `menu_top_row` is the bottom-anchored menu strip's top cell (viewport bottom).
+/// What [`menu_flank_panel`] resolves for a side flank: the panel background to
+/// flood the column with, the destination rect for the vertically centred art,
+/// and the native `(x, y, w, h)` crop of the canvas to draw into it.
+type FlankPanel = (image::Rgba<u8>, Rect, (u32, u32, u32, u32));
+
+/// SQ-0547: treat a Menu-plan side flank as a PANEL rather than a top-anchored
+/// strip of art over bare backdrop.
+///
+/// Journey's left column holds an illustration far shorter than the column is at
+/// a tall pane, so the reclaimed space below it showed the theme backdrop and the
+/// column stopped reading as part of the game. Returns
+/// `(panel background, destination rect for the art, native crop)`:
+///
+///   * the background is the game's OWN panel colour, sampled from the outer edge
+///     of the flank art — the colour Journey paints around its picture (rgb 34,34,34)
+///     — so the filled column matches the art instead of the theme or the letterbox;
+///   * the destination rect keeps the band's horizontal placement exactly and
+///     centres the art VERTICALLY in the column, at the uniform scale (the art's
+///     own aspect ratio is preserved — SQ-0511's fix must not regress);
+///   * the crop is the art's opaque row span across the flank's native columns.
+///
+/// `None` when the flank carries no art at all: there is then nothing to centre
+/// and no colour to sample, so the caller keeps today's behaviour.
+///
+/// Measured against the GRAPHICS-only canvas (`gfx`), never the full chrome
+/// canvas: the latter has the game's text rasterized into it, so its first opaque
+/// pixel in this column is a light text band and both the row span and the
+/// sampled panel colour would come out wrong. Same canvas the strip decomposition
+/// consults to answer "is there art behind this strip?".
+fn menu_flank_panel(
+    band: Rect,
+    viewport: Rect,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    story: &crate::engine::PositionedWindow,
+    native: (u16, u16),
+    gfx: &image::RgbaImage,
+) -> Option<FlankPanel> {
+    if band.width == 0 || band.height == 0 {
+        return None;
+    }
+    // The flank's native column range: left of the story box, or right of it.
+    let story_x0 = story.x_px as u32;
+    let story_x1 = (story.x_px as u32 + story.w_px as u32).min(native.0 as u32);
+    let (nx0, nx1) = if band.x < viewport.x {
+        (0, story_x0.min(gfx.width()))
+    } else {
+        (story_x1.min(gfx.width()), (native.0 as u32).min(gfx.width()))
+    };
+    if nx1 <= nx0 {
+        return None;
+    }
+    // The art's opaque row span in that column, plus the first opaque pixel on its
+    // top row — the art's outer edge, i.e. the panel colour the game painted.
+    let mut top: Option<(u32, image::Rgba<u8>)> = None;
+    let mut bottom = 0u32;
+    for y in 0..gfx.height() {
+        if let Some(x) = (nx0..nx1).find(|&x| gfx.get_pixel(x, y)[3] >= 128) {
+            if top.is_none() {
+                top = Some((y, *gfx.get_pixel(x, y)));
+            }
+            bottom = y;
+        }
+    }
+    let (ny0, panel) = top?;
+    let art_h = bottom - ny0 + 1;
+    let ch = cell_px.1.max(1) as u32;
+    // The art's height in cells at the uniform scale, capped to the column.
+    let rows = (((art_h as f32 * scale.s) / ch as f32).ceil() as u16).clamp(1, band.height);
+    let y = band.y + (band.height - rows) / 2;
+    Some((panel, Rect::new(band.x, y, band.width, rows), (nx0, ny0, nx1 - nx0, art_h)))
+}
+
 fn flank_divider_extension(
     band: Rect,
     pane: Rect,

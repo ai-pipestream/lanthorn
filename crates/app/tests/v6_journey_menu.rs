@@ -598,11 +598,29 @@ fn journey_hybrid_tall_pane_divider_reaches_menu() {
         s == "\u{2580}" || s == "\u{2584}"
     };
     let picture_row = |y: u16| (0..vp.x).filter(|&x| is_glyph(x, y)).count() as u16 > vp.x / 2;
-    let picture_bottom = (0..proceed_y).filter(|&y| picture_row(y)).max().expect("picture rows present");
+    let picture_rows: Vec<u16> = (0..proceed_y).filter(|&y| picture_row(y)).collect();
+    let picture_top = *picture_rows.first().expect("picture rows present");
+    let picture_bottom = *picture_rows.last().expect("picture rows present");
+    let picture_h = picture_bottom - picture_top + 1;
+    // The picture's HEIGHT is what proves the aspect is kept: at the uniform scale
+    // it can never exceed the story's native bottom mapped through that scale, and
+    // the old stretch filled the whole column with picture glyphs down to the menu.
     assert!(
-        picture_bottom <= story_bottom_row + 1,
-        "the picture keeps its aspect (uniform scale): its glyph coverage bottoms out at row {picture_bottom}, \
-         within the story's uniform-scaled native bottom (row {story_bottom_row}); NOT stretched to the menu {proceed_y}"
+        picture_h <= story_bottom_row + 2,
+        "the picture keeps its aspect (uniform scale): it occupies {picture_h} rows \
+         ({picture_top}..={picture_bottom}), which must stay within the story's \
+         uniform-scaled native height ({story_bottom_row} rows); NOT stretched to the menu {proceed_y}"
+    );
+    // SQ-0547: and it is CENTRED vertically in the flank column rather than
+    // top-anchored, with the game's own panel background filling above and below.
+    let above = picture_top.saturating_sub(vp.y);
+    let below = (vp.y + vp.height).saturating_sub(1).saturating_sub(picture_bottom);
+    assert!(
+        above.abs_diff(below) <= 2,
+        "the picture is centred in the flank column: {above} rows above vs {below} below \
+         (picture {picture_top}..={picture_bottom}, column {}..{})",
+        vp.y,
+        vp.y + vp.height
     );
     // A genuine reclaimed gap remains below the aspect-correct picture, and NO wide
     // picture glyphs bleed into it (the old stretch put picture glyphs on every row).
