@@ -45,9 +45,10 @@ pub(crate) fn delete_save_confirmed(
 
 /// Handle a submitted save name (host "Save State" slot or in-game `@save`).
 /// Called directly from the save-name dialog submit. On success it refreshes the
-/// saves list; a host save also clears `unsaved_progress`, while an in-game save
-/// sets `ingame_resume_save` so the run loop resumes the VM. An empty name or a
-/// write error re-opens the dialog when in-game so the user can retry.
+/// saves list and clears `unsaved_progress` (both triggers capture the same
+/// archive); an in-game save also sets `ingame_resume_save` so the run loop
+/// resumes the VM. An empty name or a write error re-opens the dialog when
+/// in-game so the user can retry.
 pub(crate) fn handle_save_as(
     buf: String,
     dir: &std::path::Path,
@@ -80,12 +81,10 @@ pub(crate) fn handle_save_as(
     match result {
         Ok(()) => {
             state.push_notice(&format!("[Saved as: {}]", buf));
-            // A host Save-State named slot captures the current progress.
-            // (An in-game @save now captures the same archive — whether it
-            // should clear this flag too is an open question, SQ-0531.)
-            if !ingame {
-                state.unsaved_progress = false;
-            }
+            // Either trigger captures the current progress: an in-game @save
+            // now writes the same archive with the same session content, so
+            // nagging about unsaved work the player just saved would be a lie.
+            state.unsaved_progress = false;
             // Refresh saves list.
             if let Some(s) = &mut state.overlays.saves {
                 s.entries = list_saves(dir);
@@ -355,9 +354,10 @@ mod tests {
         // the VM fires, and the dialog is not re-opened.
         assert_eq!(state.ingame_resume_save, Some(true));
         assert!(state.overlays.save_name_dialog.is_none());
-        // OPEN QUESTION (SQ-0531): an in-game @save still leaves unsaved_progress
-        // set. Pinned so that changing it is a deliberate decision.
-        assert!(state.unsaved_progress, "in-game @save does not (yet) clear unsaved_progress");
+        // An in-game @save writes the same archive as a host Save State, so it
+        // clears the unsaved-work flag too (SQ-0531) — no quit-time nag about
+        // progress the player just saved in full.
+        assert!(!state.unsaved_progress, "in-game @save captures progress");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
