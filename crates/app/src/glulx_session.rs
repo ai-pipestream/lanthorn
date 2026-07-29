@@ -856,9 +856,14 @@ impl GlulxSession {
 /// [`GlulxSession::mouse_windows`]). `story = (x, y, w, h)` is the story-pane
 /// rect: the Glk screen is sized to exactly the story pane, so a click cell maps
 /// to a Glk screen cell by subtracting the pane origin. `val1`/`val2` are then
-/// window-relative col/row for a grid window, or pixels (relative cells ×
-/// `char_px`) for a graphics window — cell-granular in a TUI, the best a
-/// terminal can offer.
+/// window-relative col/row for a grid window, or pixels for a graphics window.
+///
+/// `sub_px` is the click's offset WITHIN its cell, which a terminal only knows
+/// under pixel mouse reporting (SQ-0563). With it, a graphics window hears the
+/// exact pixel clicked — the only way to reach a button that occupies part of a
+/// cell, like advent.blb's W/E compass buttons. Without it (`None`), the cell's
+/// centre is reported: the player aimed at the middle of what the cell shows, and
+/// a top-left corner could land one button up or left on a packed toolbar.
 pub fn glk_mouse_target(
     overlay_open: bool,
     col: u16,
@@ -866,6 +871,7 @@ pub fn glk_mouse_target(
     story: (u16, u16, u16, u16),
     windows: &[(u32, WinType, GlkRect)],
     char_px: (u32, u32),
+    sub_px: Option<(u16, u16)>,
 ) -> Option<(u32, u32, u32)> {
     if overlay_open {
         return None;
@@ -882,13 +888,19 @@ pub fn glk_mouse_target(
         .find(|&(_, _, r)| sx >= r.left && sx < r.left + r.width && sy >= r.top && sy < r.top + r.height)?;
     let (rel_x, rel_y) = (sx - rect.left, sy - rect.top);
     let (vx, vy) = if wintype == WinType::Graphics {
-        // Report the CENTRE of the clicked cell in window pixels: the player
-        // aimed at the middle of what the cell shows, and a top-left corner
-        // could land one button to the left/above on a packed toolbar
-        // (advent.blb, SQ-0520). The kitty render scales the canvas to exactly
-        // the window's cell rect (`render_kitty_virtual`), so cells and canvas
-        // pixels stay in proportion.
-        (rel_x * char_px.0 + char_px.0 / 2, rel_y * char_px.1 + char_px.1 / 2)
+        // The kitty render scales the canvas to exactly the window's cell rect
+        // (`render_kitty_virtual`), so cells and canvas pixels stay in proportion
+        // and a cell offset converts straight to a canvas pixel. Clamped inside
+        // the cell in case the terminal's cell size and the one the game was told
+        // ever disagree.
+        let (ox, oy) = match sub_px {
+            Some((x, y)) => (
+                (x as u32).min(char_px.0.saturating_sub(1)),
+                (y as u32).min(char_px.1.saturating_sub(1)),
+            ),
+            None => (char_px.0 / 2, char_px.1 / 2),
+        };
+        (rel_x * char_px.0 + ox, rel_y * char_px.1 + oy)
     } else {
         (rel_x, rel_y)
     };
@@ -2401,7 +2413,7 @@ mod tests {
         // Story pane at (3, 2); a grid window filling the top row at rect(0,0,80,1).
         let windows = [(2u32, WinType::TextGrid, GlkRect { left: 0, top: 0, width: 80, height: 1 })];
         // Click at absolute (10, 2) → story cell (7, 0) → grid-relative (7, 0).
-        let got = super::glk_mouse_target(false, 10, 2, (3, 2, 80, 24), &windows, (9, 19));
+        let got = super::glk_mouse_target(false, 10, 2, (3, 2, 80, 24), &windows, (9, 19), None);
         assert_eq!(got, Some((2, 7, 0)), "grid reports window-relative col/row");
     }
 
@@ -2412,8 +2424,33 @@ mod tests {
         // Story pane at origin (0,0); click at (6, 3) → story cell (6,3) →
         // window-relative (2, 2) → CELL-CENTRE pixels (2×9+4, 2×19+9) = (22, 47)
         // (SQ-0520: centre, not top-left, so packed toolbar buttons hit true).
-        let got = super::glk_mouse_target(false, 6, 3, (0, 0, 80, 24), &windows, (9, 19));
+        let got = super::glk_mouse_target(false, 6, 3, (0, 0, 80, 24), &windows, (9, 19), None);
         assert_eq!(got, Some((5, 22, 47)), "graphics reports cell-centre pixels");
+    }
+
+    /// SQ-0563: with pixel mouse reporting the click's offset inside its cell is
+    /// known, so a graphics window hears the exact pixel — the only way to name a
+    /// band that lies between two cell centres.
+    #[test]
+    fn glk_mouse_target_graphics_uses_the_sub_cell_offset_when_known() {
+        let windows = [(5u32, WinType::Graphics, GlkRect { left: 0, top: 0, width: 20, height: 2 })];
+        // advent.blb's toolbar geometry: 8×18 cells. Cell row 0, 14px down — the
+        // W/E compass band, which cell-centre reporting (y=9 or 27) cannot reach.
+        let got = super::glk_mouse_target(false, 2, 0, (0, 0, 80, 24), &windows, (8, 18), Some((3, 14)));
+        assert_eq!(got, Some((5, 2 * 8 + 3, 14)), "the exact pixel clicked");
+
+        // Second cell row: the offset is relative to the cell, so it adds on top.
+        let got = super::glk_mouse_target(false, 2, 1, (0, 0, 80, 24), &windows, (8, 18), Some((0, 4)));
+        assert_eq!(got, Some((5, 16, 18 + 4)), "row offset plus in-cell offset");
+    }
+
+    /// An offset can never escape its cell, even if the terminal's idea of the cell
+    /// size disagrees with the one the game was told.
+    #[test]
+    fn glk_mouse_target_clamps_a_sub_cell_offset_inside_the_cell() {
+        let windows = [(5u32, WinType::Graphics, GlkRect { left: 0, top: 0, width: 20, height: 2 })];
+        let got = super::glk_mouse_target(false, 1, 0, (0, 0, 80, 24), &windows, (8, 18), Some((99, 99)));
+        assert_eq!(got, Some((5, 8 + 7, 17)), "clamped to the cell's last pixel");
     }
 
     #[test]
@@ -2421,19 +2458,19 @@ mod tests {
         let windows = [(2u32, WinType::TextGrid, GlkRect { left: 0, top: 0, width: 80, height: 1 })];
         // Click below the grid (row 5) but inside the pane → misses every window.
         assert_eq!(
-            super::glk_mouse_target(false, 10, 5, (0, 0, 80, 24), &windows, (1, 1)),
+            super::glk_mouse_target(false, 10, 5, (0, 0, 80, 24), &windows, (1, 1), None),
             None,
             "a click outside every watching window falls through",
         );
         // Click outside the story pane entirely.
         assert_eq!(
-            super::glk_mouse_target(false, 90, 0, (0, 0, 80, 24), &windows, (1, 1)),
+            super::glk_mouse_target(false, 90, 0, (0, 0, 80, 24), &windows, (1, 1), None),
             None,
             "a click outside the story pane falls through",
         );
         // Same in-window click, but an overlay is open → declined.
         assert_eq!(
-            super::glk_mouse_target(true, 10, 0, (0, 0, 80, 24), &windows, (1, 1)),
+            super::glk_mouse_target(true, 10, 0, (0, 0, 80, 24), &windows, (1, 1), None),
             None,
             "an open overlay keeps the click",
         );

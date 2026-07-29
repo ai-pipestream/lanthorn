@@ -157,29 +157,66 @@ fn advent_toolbar_returns_to_a_pixel_identical_canvas_after_a_press() {
     assert_eq!(released, resting, "yet its pixels are the resting bar's, byte for byte");
 }
 
-/// The compass rose's W and E buttons sit in a canvas band that cell-granular
-/// clicks cannot reach: the toolbar is 2 cells of 18px, so a cell-centre click
-/// only ever reports canvas y 9 or 27, while W/E occupy y 12..24. Pinned as the
-/// measured geometry behind the report — the buttons are unreachable by
-/// construction, not by a mapping mistake. (SQ-0563)
+/// SQ-0563: the compass rose's W and E buttons sit in a canvas band that
+/// cell-granular clicks cannot reach. The toolbar is two 18px cell rows, so a
+/// cell-CENTRE click only ever names canvas y 9 or 27, while W/E occupy y 12..24 —
+/// the buttons were unreachable by construction, however carefully you aimed.
+/// Under pixel mouse reporting the click's offset within its cell is known, and
+/// the same physical click reaches them.
+///
+/// Drives the real game both ways and compares what it actually does: the moves
+/// the buttons produce ("West"/"East") only appear with the offset supplied.
 #[test]
-fn advent_compass_w_e_fall_between_the_two_cell_rows() {
-    let Some(mut sess) = boot_advent() else {
+fn pixel_offsets_make_the_compass_w_e_buttons_clickable() {
+    if boot_advent().is_none() {
         eprintln!("SKIP: no advent.blb");
         return;
-    };
-    let _ = sess.take_transcript();
-    let windows = sess.mouse_windows();
-    let (_, _, rect) = *windows.first().expect("the toolbar watches for clicks");
-    let char_px = sess.char_pixels();
-    // Every canvas y a click can name, for a window this tall.
-    let reachable: Vec<u32> =
-        (0..rect.height).map(|r| r * char_px.1 + char_px.1 / 2).collect();
-    assert_eq!(reachable, vec![9, 27], "two cell rows → two addressable canvas rows");
-    // The middle compass row (drawn at canvas y=12, ~12px tall) contains neither.
-    let w_e_band = 12..24;
-    assert!(
-        !reachable.iter().any(|y| w_e_band.contains(y)),
-        "W/E band {w_e_band:?} is unreachable from {reachable:?}"
-    );
+    }
+    // Canvas positions from the boot draw trace: W is image 9 at (14, 12) and E is
+    // image 10 at (36, 12), each ~12px square. Aim at the middle of each.
+    for (label, canvas_x, canvas_y) in [("West", 20u16, 17u16), ("East", 42, 17)] {
+        // The same physical click, expressed as the terminal would report it:
+        // a cell plus the offset inside that cell.
+        let (cell_col, cell_row) = (canvas_x / 8, canvas_y / 18);
+        let sub = (canvas_x % 8, canvas_y % 18);
+        assert_eq!(cell_row, 0, "{label} lies in the toolbar's FIRST cell row");
+
+        let mut moves = Vec::new();
+        for sub_px in [None, Some(sub)] {
+            let mut sess = boot_advent().expect("story present");
+            let _ = sess.take_transcript();
+            let windows = sess.mouse_windows();
+            let story = (0u16, 0u16, 138u16, 51u16);
+            let target = app::glulx_session::glk_mouse_target(
+                false,
+                cell_col,
+                cell_row,
+                story,
+                &windows,
+                sess.char_pixels(),
+                sub_px,
+            );
+            let (win, vx, vy) = target.expect("the click lands in the toolbar window");
+            sess.deliver_mouse(win, vx, vy);
+            // The press is animated: the command lands a few 50ms ticks later, and
+            // each turn's output arrives on that turn's result.
+            let mut echoed = String::new();
+            for _ in 0..8 {
+                echoed.push_str(&sess.deliver_timer().transcript);
+                if !echoed.trim().is_empty() {
+                    break;
+                }
+            }
+            moves.push(echoed);
+        }
+        let (without, with) = (&moves[0], &moves[1]);
+        assert!(
+            !without.contains(label),
+            "cell-centre reporting cannot reach {label} (it hit: {without:?})"
+        );
+        assert!(
+            with.contains(label),
+            "the pixel offset reaches {label} (got: {with:?})"
+        );
+    }
 }

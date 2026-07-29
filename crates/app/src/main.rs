@@ -126,7 +126,15 @@ fn withhold_arrow_from_v6(
 /// DisableMouseCapture MUST be issued here so both paths release the mouse.
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
+    // Mode 1016 (pixel mouse reporting) is terminal state that outlives us, and
+    // DisableMouseCapture does not clear it — a shell left in PixelMode would hand
+    // pixel coordinates to the next program that reads the mouse. (SQ-0563)
+    let _ = execute!(
+        stdout(),
+        crossterm::style::Print(app::pixel_mouse::RESET),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
 }
 
 /// Set by an external termination signal; the main loops poll
@@ -1385,6 +1393,18 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 std::process::exit(1);
             }
         };
+        // Pixel mouse reporting (SQ-0563): normalise ONCE, here, before the event
+        // reaches any handler. Coordinates become cells — so every hit test in the
+        // app is unchanged — and the offset within the cell rides alongside for the
+        // one consumer that wants it, a Glk graphics window's pixel hit test.
+        // `None` in cell mode, which is every terminal that declined the mode.
+        let (event, mouse_sub_px) = match event {
+            Event::Mouse(m) => {
+                let (m, sub) = app::pixel_mouse::normalise(m);
+                (Event::Mouse(m), sub)
+            }
+            other => (other, None),
+        };
 
         // An event was read and will be dispatched (key/mouse/paste/resize, or a
         // dialog/overlay intercept) — the frame may change, so redraw next pass.
@@ -2161,6 +2181,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                 (s.x, s.y, s.width, s.height),
                                 &windows,
                                 gs.char_pixels(),
+                                mouse_sub_px,
                             );
                             if let Some((win, vx, vy)) = target {
                                 let result = gs.deliver_mouse(win, vx, vy);

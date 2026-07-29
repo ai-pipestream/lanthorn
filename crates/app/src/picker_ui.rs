@@ -1242,6 +1242,11 @@ pub(crate) fn run_story_picker(
             }
             Ok(Event::Mouse(m)) => {
                 use crossterm::event::{MouseButton, MouseEventKind};
+                // Pixel mouse reporting (SQ-0563) is terminal-wide state: once a
+                // game has switched it on, coming back here (Change Story) would
+                // otherwise hand this loop pixel coordinates. The launcher has no
+                // use for sub-cell precision, so take the cells and drop the rest.
+                let (m, _) = app::pixel_mouse::normalise(m);
                 if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                     let pt = ratatui::layout::Position { x: m.column, y: m.row };
                     if search_modal.is_some() {

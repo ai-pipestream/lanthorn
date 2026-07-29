@@ -42,24 +42,38 @@ pub struct TermDefaultColors {
 /// query window (before the app's own raw-mode/alternate-screen, alongside the
 /// image-protocol Picker probe). Never hangs; never leaks reply bytes.
 pub fn query_terminal_default_colors() -> TermDefaultColors {
-    // A non-tty (piped) stdout/stdin never answers; skip to avoid the timeout.
-    if crossterm::terminal::enable_raw_mode().is_err() {
-        return TermDefaultColors::default();
-    }
-    let reply = read_query_reply();
-    let _ = crossterm::terminal::disable_raw_mode();
-    parse_osc_colors(&reply)
-}
-
-/// Write the OSC 10/11 + DSR query and read the reply, bounded by a timeout.
-fn read_query_reply() -> String {
     // OSC 10 (fg) + OSC 11 (bg), each `?`-queried and BEL-terminated, then a DSR
     // that responding terminals answer last — its reply (`ESC[0n`) marks the end
     // of the drain.
-    const QUERY: &[u8] = b"\x1b]10;?\x07\x1b]11;?\x07\x1b[5n";
+    match query_with(b"\x1b]10;?\x07\x1b]11;?\x07\x1b[5n") {
+        Some(reply) => parse_osc_colors(&reply),
+        None => TermDefaultColors::default(),
+    }
+}
+
+/// Run any terminal query that ends in a DSR (`ESC[5n`) and return the raw reply.
+/// Shared by every pre-UI probe (default colours, SGR-Pixels mouse support) so
+/// they all inherit the same safety: raw mode only for the duration, a read that
+/// stops at the DSR reply — which drains every earlier reply with it — and a
+/// bounded wait so a silent terminal costs one timeout rather than a hang.
+///
+/// `None` when the terminal cannot be put in raw mode (a piped stdio never
+/// answers) or answered nothing at all.
+pub(crate) fn query_with(query: &[u8]) -> Option<String> {
+    // A non-tty (piped) stdout/stdin never answers; skip to avoid the timeout.
+    if crossterm::terminal::enable_raw_mode().is_err() {
+        return None;
+    }
+    let reply = read_query_reply(query);
+    let _ = crossterm::terminal::disable_raw_mode();
+    (!reply.is_empty()).then_some(reply)
+}
+
+/// Write `query` and read the reply, bounded by a timeout.
+fn read_query_reply(query: &[u8]) -> String {
     {
         let mut out = std::io::stdout();
-        if out.write_all(QUERY).and_then(|_| out.flush()).is_err() {
+        if out.write_all(query).and_then(|_| out.flush()).is_err() {
             return String::new();
         }
     }

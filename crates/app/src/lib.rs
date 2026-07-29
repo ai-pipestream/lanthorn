@@ -42,6 +42,7 @@ pub mod map_dump;
 pub mod notify;
 pub mod pager;
 pub mod pcset_store;
+pub mod pixel_mouse;
 pub mod persist_files;
 pub mod picker;
 pub mod reload;
