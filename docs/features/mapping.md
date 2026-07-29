@@ -37,6 +37,18 @@ still there long after the turn that discovered it.
   Games that **center** their room title in a custom status display (Beyond Zork,
   Trinity) are parsed too — the centered heading is accepted only once it
   validates against the player's room — so those now automap as well.
+- **Graphical v6 Z-machine** (Zork Zero, Shogun, Arthur) has no status line at
+  all: the bar is *painted* pixel by pixel wherever the game feels like putting
+  it. babelmap finds it by asking where the prose window starts and reading the
+  band directly above it — which is how Arthur works, since it hides its bar
+  twelve rows down the screen, tucked under a full-width panel of artwork. The
+  glyphs are laid back onto their columns first, because Arthur paints its bar one
+  letter at a time; the room then goes through exactly the same checks as every
+  other Z-machine game (`via player object`, or `via name match` when the game
+  doesn't re-parent you, as Shogun doesn't). A title banner or a right-hand date
+  field is never promoted to a room on a name match alone, and Journey — whose
+  story window owns the top of the screen and whose menus sit below it — correctly
+  reports no room at all.
 - **Glulx (Inform 7)** games often keep the room out of the status bar entirely,
   so babelmap reads the **Inform room heading** — the bold title line printed as
   you enter a room (`via room heading`). Games like FooFoo and Superluminal

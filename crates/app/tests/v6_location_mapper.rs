@@ -9,6 +9,8 @@
 //!     CHANGES on a movement command (→ Scullery via "ne").
 //!   - Shogun: a validated location (Bridge) once past the boot menu, with the
 //!     "Erasmus" ship label and "SHOGUN" banner NEVER becoming the room.
+//!   - Arthur (SQ-0530): a validated room (Churchyard) that changes on a move,
+//!     from a status bar hung TWELVE rows down the screen rather than at the top.
 //!
 //! Skip-if-missing per the other gitignored-story smokes.
 
@@ -106,4 +108,86 @@ fn shogun_v6_location_validated_no_banner_no_ship() {
         !names.iter().any(|n| n.contains("Erasmus") || n.contains("SHOGUN")),
         "a banner/ship label leaked in as a room: {names:?}"
     );
+}
+
+/// Boot Arthur past the sword-in-the-stone intro into ordinary gameplay, where
+/// the status bar (location + date) is painted. Arthur is booted with the game's
+/// colours HONOURED — the app's shipped default, and the mode a real player runs.
+fn boot_arthur() -> Option<GameSession> {
+    let story_path = stories_dir().join("arthur-r74-s890714.z6");
+    let story_bytes = std::fs::read(&story_path).ok()?;
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let picture_dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+            .expect("Arthur (v6) should load and boot without a ZError");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+
+    // Tap through the intro; answer 'n' to the "restore a saved position?" prompt.
+    for _ in 0..12 {
+        let r = match session.pending_input() {
+            InputKind::Line => session.submit(""),
+            InputKind::Char => session.submit_char(13),
+            InputKind::Event => session.submit(""),
+        };
+        if r.transcript.to_lowercase().contains("y or n") {
+            let _ = session.submit_char(b'n');
+        }
+    }
+    Some(session)
+}
+
+/// (SQ-0530) Arthur is the title that breaks "the status bar lives at the top of
+/// the screen": it reserves the first twelve native rows for a graphics panel and
+/// hangs its reverse-video bar at y=193, immediately above a story window opening
+/// at y=209. Room detection therefore has to find the band by looking just above
+/// the STORY window, not by scanning the first few rows of the screen. It must
+/// also reassemble the location from single-glyph paint runs — Arthur emits the
+/// whole bar one letter per run — and keep the "St Anne's Day, Compline" date on
+/// the right out of the room name.
+#[test]
+fn arthur_v6_location_detected_below_the_graphics_panel_and_changes_on_move() {
+    let Some(mut session) = boot_arthur() else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+
+    let start = session.current_location().expect("Arthur's opening room must be detected");
+    assert!(
+        start.name.to_lowercase().contains("churchyard"),
+        "expected the opening room Churchyard, got {:?}",
+        start.name
+    );
+    // The room is object-backed, so the avatar's own ancestor chain validated it —
+    // this is not a name plucked off a banner.
+    assert_ne!(start.number, 0, "the detected room must be a real object, got {start:?}");
+
+    // "in" walks up the steps into the church: a DIFFERENT room.
+    assert_eq!(session.pending_input(), InputKind::Line, "expected a line prompt before the move");
+    let result = session.submit("in");
+    assert!(!result.quit && result.fault.is_none(), "the \"in\" move faulted/quit: {:?}", result.fault);
+
+    let after = session.current_location().expect("a room must still be detected after the move");
+    assert_ne!(
+        after.number, start.number,
+        "the room id must change across the move (was #{} {:?}, still #{} {:?})",
+        start.number, start.name, after.number, after.name
+    );
+    assert!(
+        after.name.to_lowercase().contains("church"),
+        "expected the church after \"in\", got {:?}",
+        after.name
+    );
+
+    // The right-hand date field must never be mistaken for a room.
+    let _ = session.submit("out");
+    let back = session.current_location().expect("back in the churchyard");
+    assert!(
+        !back.name.contains("Anne") && !back.name.contains("Compline"),
+        "the date field leaked in as a room: {:?}",
+        back.name
+    );
+    assert_eq!(back.number, start.number, "\"out\" returns to the opening room");
 }

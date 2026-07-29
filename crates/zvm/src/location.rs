@@ -46,7 +46,7 @@
 
 use crate::cpu::exec::Machine;
 use crate::objects::{entries_base, entry_size, get_parent, object_snapshot, prop_table_ptr_offset, short_name, ObjectSnapshot};
-use crate::screen::{UpperWindow, V6_FONT_WIDTH};
+use crate::screen::{UpperWindow, V6_FONT_HEIGHT, V6_FONT_WIDTH};
 
 /// Normalize for matching/hashing: trim, collapse whitespace, lowercase.
 pub(crate) fn normalize_name(s: &str) -> String {
@@ -157,38 +157,37 @@ fn centered_status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Opti
 // those paint runs and yields ordered room-name candidates for the SAME
 // validation ladder the grid path uses.
 //
-// Grounded in the four real v6 titles at the 640×400 geometry (SQ-0479 re-trace;
-// coords roughly double the old 320×200 values):
-//   - Zork Zero: window 1 status band at y_coord=1. Room name is the LEFT run on
-//     the top text row (y=11, x=71 → dx=70): "Banquet Hall" → "Scullery".
-//     Score/Moves on the next row (y=27). The kingdom "Flatheadia" is a
-//     RIGHT-anchored field (x=489, dx=488).
-//   - Shogun: window 1 (x_coord=47), two rows. Row 1 (y=1): "Erasmus:" (the ship,
-//     a LABELLED field — a ":" run abuts it, x=49 dx=2) + "SHOGUN" (a CENTERED
-//     banner, x=296 dx=249) + Score (x=504 dx=457). Row 2 (y=17): "Bridge" (the
-//     room, left, x=49 dx=2) + Moves. The avatar is NOT parented to the room
-//     object here, so only StatusName (resolve_room_object) recovers "Bridge";
-//     "Erasmus" and "SHOGUN" must be rejected.
-//   - Arthur / Journey: no room-status text painted in the top band → no
-//     candidates → None (correct; Journey is menu-driven, Arthur's boot intro
-//     paints no status line).
+// Grounded in the four real v6 titles at the 640×400 geometry (SQ-0479 re-trace,
+// re-probed headlessly for SQ-0530; `story_top` is window 0's `y_coord`):
+//   - Zork Zero: story_top=79; window 1 status band at y_coord=1. Room name is
+//     the LEFT run on the top text row (y=11, x=71 → dx=70): "Banquet Hall" →
+//     "Scullery". Score/Moves on the next row (y=27). The kingdom "Flatheadia" is
+//     a RIGHT-anchored field (x=489, dx=488).
+//   - Shogun: story_top=33; window 1 (x_coord=47), two rows. Row 1 (y=1):
+//     "Erasmus:" (the ship, a LABELLED field — a ":" glyph abuts it, x=49 dx=2) +
+//     "SHOGUN" (a CENTERED banner, x=296 dx=249) + Score (x=504 dx=457). Row 2
+//     (y=17): "Bridge" (the room, left, x=49 dx=2) + Moves. The avatar is NOT
+//     parented to the room object here, so only StatusName (resolve_room_object)
+//     recovers "Bridge"; "Erasmus" and "SHOGUN" must be rejected.
+//   - Arthur: story_top=209 — the status band is NOT at the top of the screen.
+//     Arthur reserves native rows 0–11 for a graphics panel and paints its status
+//     into a one-row window 1 (y_coord=193, y_size=16) sandwiched directly above
+//     the story window. The room is the LEFT field ("Churchyard", x=37 dx=8) and
+//     the date ("St Anne's Day, Compline", x=420 dx=391) the right one — emitted
+//     as 72 SINGLE-GLYPH runs, one per cell, not as whole words.
+//   - Journey: story_top=1 — the story window owns the top of the screen, so the
+//     band is empty and there are no candidates → None (correct; Journey is
+//     menu-driven and paints its command menu at y≥305, BELOW the story).
 
-/// Top of the v6 status band: runs whose absolute screen `y` is within the first
-/// four native text rows (4 × `V6_FONT_HEIGHT` = 64px). Re-grounded on fresh
-/// 640×400 traces (SQ-0479): the status text now paints at 16px row pitch — Zork0
-/// room name y=11, Score/Moves y=27; Shogun room y=17, Score/banner y=1 — so the
-/// band spans rows 0–1 (y ≤ 32) with headroom to 4 rows. Journey's menu (y≥305)
-/// and any deeper content stay well outside.
-const V6_STATUS_BAND_MAX_Y: u16 = 64;
-
-/// A run is "left-anchored" (a classic room-name slot, eligible for the weaker
+/// A field is "left-anchored" (a classic room-name slot, eligible for the weaker
 /// StatusName path) when it starts within this many pixels of its window's left
-/// edge. Re-grounded on fresh 640×400 traces (SQ-0479): room names sit dx≤~70
-/// (Zork0 "Banquet Hall"/"Scullery" x=71 in a x_coord=1 window → dx=70; Shogun
-/// "Bridge" x=49 in a x_coord=47 window → dx=2); centered/right fields sit far
-/// out (Shogun "SHOGUN" banner dx=249, Score dx=457; Zork0 "Flatheadia" dx=488).
-/// 96px (12 cells) divides them with margin — above every room name, below every
-/// banner/score.
+/// edge. Re-grounded on fresh 640×400 traces (SQ-0479/SQ-0530): room names sit
+/// dx≤~72 (Zork0 "Banquet Hall"/"Scullery" x=73 in a x_coord=1 window → dx=72;
+/// Shogun "Bridge" x=49 in a x_coord=47 window → dx=2; Arthur "Churchyard" x=41
+/// in a x_coord=29 window → dx=12); centered/right fields sit far out (Shogun
+/// "SHOGUN" banner dx=250, Score dx=457; Zork0 "Flatheadia" dx=488; Arthur's
+/// date dx=392). 96px (12 cells) divides them with margin — above every room
+/// name, below every banner/score.
 const V6_LEFT_ANCHOR_MAX_DX: u16 = 96;
 
 /// One v6 status-band candidate: the cleaned room text and whether it was
@@ -212,49 +211,130 @@ fn is_v6_stat_field(s: &str) -> bool {
     !n.chars().any(|c| c.is_alphabetic())
 }
 
-/// Ordered v6 status-band room candidates: left-anchored runs first (top rows
-/// first), then centered/other runs. A pure read of the v6 paint model; empty
-/// when the story is not v6 or paints no top-band text.
+/// Global 8-px cell column holding the glyph painted at 1-based screen pixel `x`.
+/// Nearest cell, not floor: games paint on their own sub-cell offsets (Zork Zero
+/// starts its status text at x=71, Shogun at x=49), so a floor would smear runs
+/// that are really side by side into overlapping columns.
+fn v6_cell_of(x: u16) -> usize {
+    ((x.max(1) - 1 + V6_FONT_WIDTH / 2) / V6_FONT_WIDTH) as usize
+}
+
+/// One field of a rasterized status row: its text, the screen pixel `x` of its
+/// first glyph, and the left edge of the window that painted it.
+struct V6Segment {
+    text: String,
+    x: u16,
+    win_x: u16,
+}
+
+/// Rasterize one paint row into a virtual character line, then cut it into the
+/// same 2+-space-separated FIELDS the v4+ grid path uses.
+///
+/// v6 text is paint, not a grid, and games are free to emit a status row however
+/// they like: Zork Zero paints whole words ("Banquet Hall"), while Arthur emits
+/// the SAME row as 72 single-glyph runs, one per cell. Reading runs individually
+/// therefore turns Arthur's "Churchyard" into ten one-letter candidates. Laying
+/// the glyphs back down on their 8-px columns recovers the row the player
+/// actually sees, and then the ordinary "two or more spaces separate fields"
+/// rule splits the location from the score/date block for every title at once.
+/// Overlapping repaint is handled naturally — the later glyph wins the cell.
+fn v6_row_segments(runs: &[(&crate::screen::V6Text, u16)]) -> Vec<V6Segment> {
+    let mut line: Vec<char> = Vec::new();
+    let mut owner: Vec<u16> = Vec::new();
+    for (t, win_x) in runs {
+        let start = v6_cell_of(t.x);
+        for (i, ch) in t.text.chars().enumerate() {
+            let c = start + i;
+            if c >= line.len() {
+                line.resize(c + 1, ' ');
+                owner.resize(c + 1, *win_x);
+            }
+            line[c] = deframe(ch);
+            owner[c] = *win_x;
+        }
+    }
+
+    let mut out = Vec::new();
+    let n = line.len();
+    let mut i = 0usize;
+    while i < n {
+        if line[i] == ' ' {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut last = i;
+        let mut j = i;
+        while j < n {
+            if line[j] != ' ' {
+                last = j;
+                j += 1;
+            } else if j + 1 < n && line[j + 1] == ' ' {
+                break; // two or more spaces end the field
+            } else {
+                j += 1; // a single space is part of the field ("Banquet Hall")
+            }
+        }
+        out.push(V6Segment {
+            text: line[start..=last].iter().collect(),
+            x: (start as u16).saturating_mul(V6_FONT_WIDTH) + 1,
+            win_x: owner[start],
+        });
+        i = last + 1;
+    }
+    out
+}
+
+/// Ordered v6 status-band room candidates: left-anchored fields first (top rows
+/// first), then centered/other fields. A pure read of the v6 paint model; empty
+/// when the story is not v6 or paints no text above the story window.
+///
+/// The band is **everything painted above the story window's top edge** — window
+/// 0 is v6's main text window (ZMSD §8.4), so its `y_coord` is where the prose
+/// begins and the status furniture necessarily sits above it. That is derived per
+/// game rather than assumed: Zork Zero and Shogun open the story at y=79/33 and
+/// really do put the bar at the top of the screen, but Arthur reserves the top
+/// twelve rows for a graphics panel and hangs its bar at y=193, immediately above
+/// a story window that starts at y=209. A fixed "first N rows" cut-off finds the
+/// first two and never finds Arthur (SQ-0530). Journey falls out for free: its
+/// story window owns y=1, so nothing is above it and a menu screen yields no room.
 fn v6_status_candidates(machine: &Machine) -> Vec<V6Candidate> {
     let Some(v6) = machine.screen.v6.as_ref() else {
         return Vec::new();
     };
+    let story_top = v6.windows[0].y_coord.max(1);
+
     use std::collections::BTreeMap;
-    // Group top-band runs by row (absolute y), carrying each run's window left
-    // edge so left-anchoring is measured relative to the window, not the screen.
+    // Group band runs by row (absolute y), carrying each run's window left edge
+    // so left-anchoring is measured relative to the window, not the screen.
     let mut rows: BTreeMap<u16, Vec<(&crate::screen::V6Text, u16)>> = BTreeMap::new();
     for w in v6.windows.iter() {
         for t in w.texts.iter() {
-            if t.y <= V6_STATUS_BAND_MAX_Y && !t.text.trim().is_empty() {
+            // Wholly above the story text: a run straddling the boundary is prose.
+            if t.y + V6_FONT_HEIGHT <= story_top && !t.text.is_empty() {
                 rows.entry(t.y).or_default().push((t, w.x_coord));
             }
         }
     }
-    let fw = V6_FONT_WIDTH as i32;
     let mut left = Vec::new();
     let mut other = Vec::new();
     for (_y, mut runs) in rows {
         runs.sort_by_key(|(t, _)| t.x);
-        for (i, (t, xc)) in runs.iter().enumerate() {
-            let text = t.text.trim();
-            if is_v6_stat_field(text) {
+        for seg in v6_row_segments(&runs) {
+            if is_v6_stat_field(&seg.text) {
                 continue;
             }
-            // Label field (e.g. Shogun's "Erasmus:"): the next run on the row
-            // abuts this one's right edge and begins with ':'. Labels are not
-            // rooms — skip, mirroring the grid path's "Location:" handling.
-            let is_label = runs.get(i + 1).is_some_and(|(nx, _)| {
-                let right_edge = t.x as i32 + t.text.chars().count() as i32 * fw;
-                nx.text.trim_start().starts_with(':') && (nx.x as i32 - right_edge).abs() <= fw
-            });
-            if is_label {
+            // Label field (e.g. Shogun's "Erasmus:"): a field ending in a colon
+            // names the value beside it, so it is never itself a room — skip,
+            // mirroring the grid path's "Location:" handling.
+            if seg.text.ends_with(':') {
                 continue;
             }
-            let cand = clean_room_text(&text.chars().map(deframe).collect::<String>());
+            let cand = clean_room_text(&seg.text);
             if cand.is_empty() {
                 continue;
             }
-            let left_anchored = t.x.saturating_sub(*xc) <= V6_LEFT_ANCHOR_MAX_DX;
+            let left_anchored = seg.x.saturating_sub(seg.win_x) <= V6_LEFT_ANCHOR_MAX_DX;
             if left_anchored {
                 left.push(V6Candidate { name: cand, left_anchored: true });
             } else {
@@ -979,9 +1059,18 @@ mod tests {
     use crate::screen::{V6Text, V6Windows, ZColour};
 
     /// A v6 status band in window 1 (y_coord=1) painted with the given
-    /// `(y, x, text)` runs at their absolute screen pixel positions.
+    /// `(y, x, text)` runs at their absolute screen pixel positions, with the
+    /// story window (0) opening at Zork Zero's real y=79 so the band above it is
+    /// the top five native rows.
     fn v6_band(runs: &[(u16, u16, &str)]) -> V6Windows {
+        v6_band_below(79, runs)
+    }
+
+    /// As `v6_band`, but with the story window (0) opening at `story_top` —
+    /// Arthur hangs its bar just above a story window at y=209.
+    fn v6_band_below(story_top: u16, runs: &[(u16, u16, &str)]) -> V6Windows {
         let mut v = V6Windows::default();
+        v.windows[0].y_coord = story_top;
         v.windows[1].y_coord = 1;
         v.windows[1].x_coord = 1;
         for &(y, x, text) in runs {
@@ -1042,13 +1131,68 @@ mod tests {
 
     #[test]
     fn v6_candidates_below_band_and_blanks_ignored() {
-        // Runs below the 64px band (Journey's menu at y=305) and blank padding
-        // never become candidates → menu screens yield nothing. y=65 is one pixel
-        // past the 4-row (64px) band.
+        // Runs at or below the story window's top edge (Journey's menu at y=305)
+        // and blank padding never become candidates → menu screens yield nothing.
+        // With the story opening at y=79, a run at y=65 straddles the boundary
+        // (65+16 = 81 > 79), so it is prose, not status furniture.
         let v = v6_band(&[(9, 121, " "), (305, 75, "START the game"), (65, 26, "TooLow")]);
         let mut m = make_machine(build_v5_forests());
         m.screen.v6 = Some(v);
         assert!(v6_status_room_candidates(&m).is_empty());
+    }
+
+    // ── SQ-0530: the band is derived from the story window, not the screen top ──
+
+    #[test]
+    fn v6_candidates_arthur_deep_band_single_glyph_runs() {
+        // Arthur's real layout: a one-row status window hung at y=193, directly
+        // above a story window that opens at y=209 — twelve native rows BELOW the
+        // top of the screen, where a fixed "first N rows" band never looked. The
+        // row arrives as SINGLE-GLYPH runs (one per 8px cell), so the location
+        // must be reassembled from its letters rather than read run by run.
+        let mut runs: Vec<(u16, u16, String)> = Vec::new();
+        for (i, ch) in " Churchyard                                     ".chars().enumerate() {
+            runs.push((193, 29 + 8 * i as u16, ch.to_string()));
+        }
+        for (i, ch) in "St Anne's Day, Compline ".chars().enumerate() {
+            runs.push((193, 420 + 8 * i as u16, ch.to_string()));
+        }
+        let borrowed: Vec<(u16, u16, &str)> = runs.iter().map(|(y, x, s)| (*y, *x, s.as_str())).collect();
+        let mut v = v6_band_below(209, &borrowed);
+        v.windows[1].y_coord = 193;
+        v.windows[1].x_coord = 29;
+        let mut m = make_machine(build_v5_forests());
+        m.screen.v6 = Some(v);
+        // The location is one word (not ten letters), the date is a separate
+        // field, and the location comes first because it is left-anchored.
+        assert_eq!(
+            v6_status_room_candidates(&m),
+            vec!["Churchyard".to_string(), "St Anne's Day".to_string()]
+        );
+    }
+
+    #[test]
+    fn v6_band_floor_follows_the_story_window() {
+        // The same painted row is status furniture when the story opens BELOW it
+        // and prose when the story opens ABOVE it — nothing about the row itself
+        // changes, only where the story window starts.
+        let runs = [(193u16, 37u16, "Churchyard")];
+        let mut m = make_machine(build_v5_forests());
+
+        m.screen.v6 = Some(v6_band_below(209, &runs));
+        assert_eq!(v6_status_room_candidates(&m), vec!["Churchyard".to_string()]);
+
+        m.screen.v6 = Some(v6_band_below(1, &runs));
+        assert!(v6_status_room_candidates(&m).is_empty(), "text inside the story window is prose, not status");
+    }
+
+    #[test]
+    fn v6_row_segments_split_fields_but_keep_multiword_names() {
+        // Two or more spaces separate FIELDS; a single space stays inside a name.
+        let v = v6_band(&[(11, 1, "Palace Gate"), (11, 401, "Score: 0")]);
+        let mut m = make_machine(build_v5_forests());
+        m.screen.v6 = Some(v);
+        assert_eq!(v6_status_room_candidates(&m), vec!["Palace Gate".to_string()]);
     }
 
     #[test]
