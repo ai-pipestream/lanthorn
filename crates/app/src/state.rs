@@ -1723,7 +1723,6 @@ pub struct AppState {
     /// across turns. Drives the built-in `transcript:location` story rule.
     pub current_room_name: Option<String>,
     /// Whether the detection-method indicator is shown. Default false.
-    pub show_loc_method: bool,
     /// Whether the status/score bar (top row of the story pane) is shown.
     /// Default true; toggled by ToggleStatusBar. Hidden, the row collapses into
     /// the transcript but still pops up briefly for a transient status message.
@@ -1898,7 +1897,6 @@ impl Default for AppState {
             show_room_numbers: false,
             loc_method: None,
             current_room_name: None,
-            show_loc_method: false,
             show_status_bar: true,
             search_query: None,
             search_matches: Vec::new(),

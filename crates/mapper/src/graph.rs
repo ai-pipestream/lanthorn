@@ -14,6 +14,13 @@ pub struct Room {
     pub pos: Option<(i32, i32)>,
     #[serde(default)]
     pub layer: crate::layer::LayerId,
+    /// How the mapper worked out that the player was here, recorded the first
+    /// time the room was discovered and kept thereafter (SQ-0527). Stored as the
+    /// display label rather than an engine enum, so the map file stays readable
+    /// and the mapper keeps no dependency on any particular VM crate. `None` for
+    /// rooms mapped before this was recorded.
+    #[serde(default)]
+    pub loc_method: Option<String>,
 }
 
 impl Room {
@@ -139,6 +146,7 @@ impl MapGraph {
                     notes: String::new(),
                     pos: None,
                     layer: MAIN_LAYER,
+                    loc_method: None,
                 });
             }
         }
@@ -216,6 +224,19 @@ impl MapGraph {
             self.current = Some(new);
         }
         true
+    }
+
+    /// Record how this room was detected, the FIRST time it is discovered
+    /// (SQ-0527). Later visits leave it alone: the interesting fact is how the
+    /// mapper first came to know the room, and a later visit may well be resolved
+    /// by a weaker method (a name match rather than the object) without that
+    /// saying anything new. A no-op for an unknown room.
+    pub fn set_loc_method(&mut self, id: RoomId, method: &str) {
+        if let Some(r) = self.rooms.get_mut(&id) {
+            if r.loc_method.is_none() {
+                r.loc_method = Some(method.to_string());
+            }
+        }
     }
 
     pub fn set_current(&mut self, id: RoomId) {

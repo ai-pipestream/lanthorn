@@ -197,7 +197,6 @@ pub enum Action {
     /// Set the master audio volume 0..=100 (config.volume).
     SetVolume(u8),
     /// Toggle the room-detection-method indicator in the map corner.
-    ToggleLocMethod,
     /// Toggle the per-room diagnostics inspector overlay (palette-only since
     /// SQ-0446 gave `i` to toggle-inventory).
     ToggleInspector,
@@ -1720,7 +1719,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
         Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
         Action::ToggleRoomNumbers => state.show_room_numbers = !state.show_room_numbers,
-        Action::ToggleLocMethod => state.show_loc_method = !state.show_loc_method,
         Action::ToggleStatusBar => state.show_status_bar = !state.show_status_bar,
         Action::ToggleTimedInput => {
             state.config.honor_timed_input = !state.config.honor_timed_input;
@@ -2926,13 +2924,12 @@ fn config_toggle_or_edit(selected: usize, state: &mut AppState) {
         12 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.mouse = !cs.working.mouse; } }
         13 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.command_bar = !cs.working.command_bar; } }
         14 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.mouse_wheel_invert = !cs.working.mouse_wheel_invert; } }
-        15 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.show_loc_method = !cs.working.show_loc_method; } }
-        16 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.show_status_bar = !cs.working.show_status_bar; } }
-        17 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.watch_style = !cs.working.watch_style; } }
-        18 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.record_turn_history = !cs.working.record_turn_history; } }
-        21 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hint_skip_screen_warning = !cs.working.hint_skip_screen_warning; } }
-        24 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_v6_render(&mut cs.working.v6_render, 1); } }
-        25 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_arrow_keys = !cs.working.v6_arrow_keys; } }
+        15 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.show_status_bar = !cs.working.show_status_bar; } }
+        16 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.watch_style = !cs.working.watch_style; } }
+        17 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.record_turn_history = !cs.working.record_turn_history; } }
+        20 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.hint_skip_screen_warning = !cs.working.hint_skip_screen_warning; } }
+        23 => { if let Some(cs) = &mut state.overlays.config_screen { config_cycle_v6_render(&mut cs.working.v6_render, 1); } }
+        24 => { if let Some(cs) = &mut state.overlays.config_screen { cs.working.v6_arrow_keys = !cs.working.v6_arrow_keys; } }
         _ => {}
     }
 }
@@ -2980,22 +2977,21 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         12 => working.mouse = !working.mouse,
         13 => working.command_bar = !working.command_bar,
         14 => working.mouse_wheel_invert = !working.mouse_wheel_invert,
-        15 => working.show_loc_method = !working.show_loc_method,
-        16 => working.show_status_bar = !working.show_status_bar,
-        17 => working.watch_style = !working.watch_style,
-        18 => working.record_turn_history = !working.record_turn_history,
-        19 => working.undo_levels = (working.undo_levels as i32 + delta).clamp(0, 256) as usize,
+        15 => working.show_status_bar = !working.show_status_bar,
+        16 => working.watch_style = !working.watch_style,
+        17 => working.record_turn_history = !working.record_turn_history,
+        18 => working.undo_levels = (working.undo_levels as i32 + delta).clamp(0, 256) as usize,
         // Position 0 == None (babelmap's default); 1..=10 are explicit interpreter numbers.
         // ← from 1 returns to "default"; → from "default" goes to 1.
-        20 => {
+        19 => {
             let pos = (working.interpreter_number.map(|n| n as i32).unwrap_or(0) + delta).clamp(0, 10);
             working.interpreter_number = if pos == 0 { None } else { Some(pos as u8) };
         }
-        21 => working.hint_skip_screen_warning = !working.hint_skip_screen_warning,
-        25 => working.v6_arrow_keys = !working.v6_arrow_keys,
-        22 => working.text_margin_x = (working.text_margin_x as i32 + delta).clamp(0, 8) as u16,
-        23 => working.text_margin_y = (working.text_margin_y as i32 + delta).clamp(0, 8) as u16,
-        24 => config_cycle_v6_render(&mut working.v6_render, delta),
+        20 => working.hint_skip_screen_warning = !working.hint_skip_screen_warning,
+        24 => working.v6_arrow_keys = !working.v6_arrow_keys,
+        21 => working.text_margin_x = (working.text_margin_x as i32 + delta).clamp(0, 8) as u16,
+        22 => working.text_margin_y = (working.text_margin_y as i32 + delta).clamp(0, 8) as u16,
+        23 => config_cycle_v6_render(&mut working.v6_render, delta),
         _ => {}
     }
 }
@@ -3380,14 +3376,6 @@ mod tests {
         assert_eq!(s.focus, crate::state::Focus::Map);
         apply_action(Action::ToggleFocus, &mut s, &mut m);
         assert_eq!(s.focus, crate::state::Focus::Game);
-    }
-
-    #[test]
-    fn toggle_loc_method_flips_state() {
-        let mut s = AppState::default();
-        assert!(!s.show_loc_method);
-        apply_action(Action::ToggleLocMethod, &mut s, &mut mapper::mapper::Mapper::default());
-        assert!(s.show_loc_method);
     }
 
     #[test]
@@ -6896,14 +6884,14 @@ mod tests {
     fn config_cycle_interpreter_number_reaches_default() {
         let mut c = crate::config::Config::default();
         c.interpreter_number = None;
-        config_cycle(&mut c, 20, 1); // default → 1
+        config_cycle(&mut c, 19, 1); // default → 1
         assert_eq!(c.interpreter_number, Some(1));
-        config_cycle(&mut c, 20, -1); // 1 → default
+        config_cycle(&mut c, 19, -1); // 1 → default
         assert_eq!(c.interpreter_number, None);
-        config_cycle(&mut c, 20, -1); // default clamps, stays default
+        config_cycle(&mut c, 19, -1); // default clamps, stays default
         assert_eq!(c.interpreter_number, None);
         for _ in 0..20 {
-            config_cycle(&mut c, 20, 1); // climbs then clamps at 10
+            config_cycle(&mut c, 19, 1); // climbs then clamps at 10
         }
         assert_eq!(c.interpreter_number, Some(10));
     }

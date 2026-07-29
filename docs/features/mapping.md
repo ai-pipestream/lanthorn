@@ -21,10 +21,10 @@ Adams adventure. One map builder, three engines, zero special cases.
 ## Knowing where you are — across three engines
 
 Before the mapper can place a room it has to be told which room you're in, and
-each engine surfaces that differently. babelmap handles all of it, and a hideable
-indicator in the map's bottom-right corner tells you *how* it worked out the
-current room (`toggle-loc-method`, persisted via `show_loc_method`, styled by the
-`loc_indicator` selector).
+each engine surfaces that differently. babelmap handles all of it, and records
+*how* it worked out each room the first time it finds it — click a room to see
+"Found by:" in the room inspector. It is kept with the room, so the answer is
+still there long after the turn that discovered it.
 
 - **Classic Z-machine (v3)** reports the room in the status-line variable —
   `via status variable`.

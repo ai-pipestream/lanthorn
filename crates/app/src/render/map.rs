@@ -729,28 +729,6 @@ pub fn render_map_layered(
     };
     render_map(rm, state, body_area, buf);
 
-    // Detection-method indicator: bottom-right corner, hidden by default.
-    if state.show_loc_method {
-        if let Some(m) = state.loc_method {
-            let label = loc_method_label(m);
-            let w = label.chars().count() as u16;
-            if area.width >= 1 && area.height >= 1 {
-                let y = area.bottom() - 1;
-                let x = area.right().saturating_sub(w.min(area.width));
-                let style = state.colors.theme.get("map.loc_indicator").style;
-                for (cx, ch) in (x..).zip(label.chars()) {
-                    if cx >= area.right() {
-                        break;
-                    }
-                    if let Some(cell) = buf.cell_mut((cx, y)) {
-                        let mut b = [0u8; 4];
-                        cell.set_symbol(ch.encode_utf8(&mut b)).set_style(style);
-                    }
-                }
-            }
-        }
-    }
-
     // Progress bar while the `animate-tidy` frames are built on a worker thread.
     // The bar vanishes when the build completes and `anim_build_job` becomes None.
     if let Some(job) = &state.anim_build_job {
@@ -3055,23 +3033,6 @@ mod tests {
             Some((140, 48)),
             "the pane actually drawn into is what a later recentre must measure"
         );
-    }
-
-    #[test]
-    fn indicator_drawn_bottom_right_when_enabled() {
-        use mapper::graph::MapGraph;
-        let g = MapGraph::default();
-        let rm = mapper::render::render(&g);
-        let mut state = AppState::default();
-        state.show_loc_method = true;
-        state.loc_method = Some(zvm::location::LocationMethod::StatusName);
-        let area = Rect::new(0, 0, 40, 10);
-        let mut buf = Buffer::empty(area);
-        render_map_layered(&rm, &g, &state, area, &mut buf);
-        // The label "via name match" ends at the bottom-right; check its last char.
-        let row = area.bottom() - 1;
-        let last = buf.cell((area.right() - 1, row)).unwrap().symbol().to_string();
-        assert_eq!(last, "h", "expected the 'h' of 'via name match' in the corner");
     }
 
     #[test]

@@ -526,9 +526,6 @@ pub struct Config {
     /// Default false (hidden); toggled at runtime by ToggleRoomNumbers.
     #[serde(default)]
     pub show_room_numbers: bool,
-    /// Show the room-detection-method indicator in the map corner. Default false.
-    #[serde(default)]
-    pub show_loc_method: bool,
     /// Show the status/score bar (top row of the story pane). Default true.
     /// The v3 status line (location/score/moves) is only meaningful for v3
     /// games; for v4+ (which draw their own upper-window status) it reads
@@ -639,7 +636,6 @@ impl Default for Config {
             undo_levels: default_undo_levels(),
             command_prefix: default_command_prefix(),
             show_room_numbers: false,
-            show_loc_method: false,
             show_status_bar: true,
             search: SearchConfig::default(),
             virtual_screen_cols: None,
@@ -727,7 +723,6 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.undo_levels = from_file.undo_levels;
             cfg.command_prefix = from_file.command_prefix;
             cfg.show_room_numbers = from_file.show_room_numbers;
-            cfg.show_loc_method = from_file.show_loc_method;
             cfg.show_status_bar = from_file.show_status_bar;
             cfg.honor_game_colours = from_file.honor_game_colours;
             cfg.honor_timed_input = from_file.honor_timed_input;
@@ -827,7 +822,6 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["v6_render"] = toml_edit::value(v6_str);
     doc["v6_arrow_keys"] = toml_edit::value(cfg.v6_arrow_keys);
     doc["show_room_numbers"] = toml_edit::value(cfg.show_room_numbers);
-    doc["show_loc_method"] = toml_edit::value(cfg.show_loc_method);
     doc["show_status_bar"] = toml_edit::value(cfg.show_status_bar);
     doc["hint_skip_screen_warning"] = toml_edit::value(cfg.hint_skip_screen_warning);
     doc["watch_style"] = toml_edit::value(cfg.watch_style);
@@ -947,12 +941,6 @@ mod tests {
         assert!(cfg.show_room_numbers);
     }
 
-    #[test]
-    fn config_show_loc_method_default_false_and_round_trips() {
-        assert!(!Config::default().show_loc_method);
-        let cfg: Config = toml::from_str("show_loc_method = true\n").unwrap();
-        assert!(cfg.show_loc_method);
-    }
 
     #[test]
     fn config_show_status_bar_default_true_and_round_trips() {
@@ -1237,7 +1225,6 @@ use_defaults = false
             undo_levels: 16,
             command_prefix: '/',
             show_room_numbers: false,
-            show_loc_method: false,
             show_status_bar: true,
             honor_game_colours: true,
             honor_timed_input: true,

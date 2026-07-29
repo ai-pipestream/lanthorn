@@ -1349,6 +1349,13 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
         } else {
             mapper.observe(snap.number, &snap.name, parse_direction(command));
         }
+        // SQ-0527: remember how the mapper knew where the player was, the first
+        // time each room is discovered, so the room inspector can show it. Kept on
+        // the room rather than a transient corner indicator, which only ever
+        // described the LAST detection and was gone by the time you wanted it.
+        if let Some(m) = result.location_method {
+            mapper.graph.set_loc_method(snap.number, crate::render::map::loc_method_label(m));
+        }
         // Overlap cleanup is NOT done here: it is map-layout work and must never run
         // on the interpreter thread. On a geometry change the run loop schedules a
         // background cleanup (or full tidy) job — see `finish_command_turn` and

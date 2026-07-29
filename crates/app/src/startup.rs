@@ -538,7 +538,6 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
         state.push_notice(&format!("[{}]", w));
     }
     state.show_room_numbers = cfg.show_room_numbers;
-    state.show_loc_method = cfg.show_loc_method;
     state.show_status_bar = cfg.show_status_bar;
     state.game_picker = game_picker;
     state.term_default_colors = term_default_colors;

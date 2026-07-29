@@ -330,10 +330,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "toggle-room-numbers", category: Category::Map, context: Context::Global,
         usage: "toggle-room-numbers", description: "toggle room-number labels",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleRoomNumbers) },
-    CommandSpec { name: "toggle-loc-method", category: Category::Map, context: Context::Global,
-        usage: "toggle-loc-method", description: "toggle the room-detection-method indicator",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleLocMethod) },
-    CommandSpec { name: "toggle-alignment", category: Category::Map, context: Context::Global,
+        CommandSpec { name: "toggle-alignment", category: Category::Map, context: Context::Global,
         usage: "toggle-alignment", description: "toggle alignment guides",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleAlignment) },
     CommandSpec { name: "toggle-portal-labels", category: Category::Map, context: Context::Global,
@@ -767,7 +764,7 @@ mod tests {
         // gallery/style-editor UIs are gone; `reload-style` remains.
         // `quit-to-library` (SQ-0435) exits to the story picker.
         // `set-v6-render` switches/cycles the v6 render mode live.
-        assert_eq!(COMMANDS.len(), 60, "registry must match the spec's Full command table");
+        assert_eq!(COMMANDS.len(), 59, "registry must match the spec's Full command table");
     }
 
     #[test]
