@@ -604,9 +604,8 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
         let current_room = rm.rooms.iter().find(|r| r.is_current).map(|r| r.id);
         draw_connector_arrows(&arrowheads, (off_x, off_y), area, buf, &state.colors, state.selected_room, current_room);
         // Stack the collapsed passages' icons beside the line that survived. This is what keeps
-        // a staircase visible now that a pair draws only one connector (SQ-0522) — and unlike
-        // SQ-0219's border re-stamp, which it replaces, it sits BESIDE the compass arrowhead
-        // instead of overwriting it, so both directions read.
+        // a collapsed compass passage visible now that a pair draws one connector per channel
+        // (SQ-0522). It sits BESIDE the retained arrowhead, never on it.
         if boxes {
             if let Some((cols, rows)) = &axes {
                 draw_secondary_markers(rm, cols, rows, state, (off_x, off_y), area, buf);
@@ -1511,7 +1510,7 @@ fn arrow_for_direction(
         Direction::SE => arrows.se,
         Direction::SW => arrows.sw,
         // A collapsed staircase keeps its portal icon rather than borrowing a compass arrow:
-        // secondaries cover every passage since SQ-0522, not just the compass ones.
+        // the portal arms serve `dir_glyph` below; secondaries themselves are compass-only.
         Direction::Up => portal.up,
         Direction::Down => portal.down,
         Direction::In => portal.in_,
@@ -1546,8 +1545,8 @@ fn draw_secondary_markers(
     // the border cell its arrowhead is drawn on. A secondary marker may never take one of these.
     // A room's side is only BOX_H-2 cells tall and several connectors can anchor along it at
     // distinct slots, so "the cells beside MY arrowhead" is not the same as "the free cells" —
-    // marking one of them erased another passage's arrowhead outright, which is how a collapsed
-    // staircase came to sit where a compass exit belonged (SQ-0522).
+    // marking one of them erased another passage's arrowhead outright — a room visibly lost a
+    // compass exit to a collapsed passage's icon (SQ-0522).
     let anchored: std::collections::HashSet<(i32, i32)> = rm
         .plan
         .connectors
@@ -1584,8 +1583,8 @@ fn draw_secondary_markers(
                 // stranded them on the room's side — zork1 #143/#217, SQ-0414 follow-up).
                 let (mut sx, mut sy) = (0, 0);
                 for dir in dirs {
-                    // A portal secondary has no grid offset; it slides along the horizontal edge
-                    // like a cardinal one rather than being dropped (SQ-0522).
+                    // Defensive: a direction with no grid offset slides along the horizontal edge
+                    // like a cardinal one rather than being silently dropped.
                     let go = mapper::direction::grid_offset(*dir).unwrap_or((0, 0));
                     let (mx, my) = if go.0 != 0 && go.1 != 0 {
                         sy += 1;
@@ -1631,37 +1630,18 @@ fn draw_secondary_markers(
         }
     };
 
-    // Compass secondaries stack beside the arrowhead; a collapsed STAIRCASE does not join them.
-    // It gets the room's own vertical slot instead — top border for Up, bottom for Down — which is
-    // where a reader looks for vertical access anyway. Stacking it with the compass exits competed
-    // for the handful of cells they need (a vertical side has three) and put an `↑` wherever the
-    // retained arrowhead happened to land, including a room's SOUTH edge, which reads as "up is
-    // south". Keeping the two apart is what makes collapsing every pair survivable.
-    let portal_style = state.colors.theme.get("map.connector_portal").style;
-    let sym_portal = &state.symbols.portal;
+    // Secondaries are COMPASS directions only: a staircase is never collapsed (SQ-0522), so it
+    // still draws its own trunk and carries its own end glyph. Stacking one here instead lost the
+    // one thing the passage has to say — where it goes — since an icon has no line to follow.
     for conn in &rm.plan.connectors {
-        for (end, secs, side, slot, diag) in [
-            (conn.origin, &conn.secondary_exit, conn.exit, conn.exit_slot, Some(conn.exit_dir)),
-            (conn.dest, &conn.secondary_entry, conn.entry, conn.entry_slot, conn.entry_dir),
-        ] {
-            let Some(cell) = cell_of(end) else { continue };
-            let (compass, portals): (Vec<Direction>, Vec<Direction>) =
-                secs.iter().copied().partition(|d| mapper::direction::grid_offset(*d).is_some());
-            if !compass.is_empty() {
-                stamp(&compass, cell, side, slot, diag, buf);
+        if !conn.secondary_exit.is_empty() {
+            if let Some(cell) = cell_of(conn.origin) {
+                stamp(&conn.secondary_exit, cell, conn.exit, conn.exit_slot, Some(conn.exit_dir), buf);
             }
-            for d in portals {
-                let (bx, by) = (cols.room_pixel(cell.0), rows.room_pixel(cell.1));
-                let row = if d == Direction::Up { by } else { by + BOX_H - 1 };
-                // Centre of that border, or the nearest free cell along it: the centre is a
-                // popular anchor, and taking it from a compass connector is exactly the swap
-                // this is here to avoid.
-                let mut spots: Vec<i32> =
-                    (bx + 1..=bx + BOX_W - 2).filter(|&x| !anchored.contains(&(x, row))).collect();
-                spots.sort_by_key(|&x| ((x - (bx + BOX_W / 2)).abs(), x));
-                let Some(&x) = spots.first() else { continue };
-                let glyph = if d == Direction::Up { sym_portal.up } else { sym_portal.down };
-                put_char(buf, x + off_x, row + off_y, glyph, portal_style, area);
+        }
+        if !conn.secondary_entry.is_empty() {
+            if let Some(cell) = cell_of(conn.dest) {
+                stamp(&conn.secondary_entry, cell, conn.entry, conn.entry_slot, conn.entry_dir, buf);
             }
         }
     }
@@ -4928,12 +4908,22 @@ mod tests {
         assert!(has_dotted, "an Up portal with no compass edge draws a dotted connector");
     }
 
-    /// SQ-0522 supersedes SQ-0224: a pair joined by BOTH a compass edge and a staircase draws
-    /// ONE line — the compass one, because it is a passage you walk — and the staircase collapses
-    /// to a single stacked icon beside it. SQ-0224's "both draw" left the two as separate trunks
-    /// that then had to cross each other; Adventure's maze is full of such pairs.
+    /// SQ-0224 reverses SQ-0219's suppression: when a compass edge AND an up/down edge join the
+    /// same room pair, BOTH draw (the compass path plus a dotted up/down body), and the room-level
+    /// up glyph still renders on the border. Even in the same-axis case here (N compass + Up,
+    /// vertically adjacent — the worst case, both vertical) the two connectors share the side at
+    /// distinct slots and must not form an ILLEGAL overlap.
+    ///
+    /// SQ-0522 folded the staircase into the compass line and was reverted: collapsing it turns it
+    /// into an ICON, and an icon has no line to follow, so the passage could no longer say WHERE it
+    /// went. The dotted trunk costs crossings and earns them back in meaning.
     #[test]
-    fn compass_and_updown_on_same_pair_draw_one_line_with_a_stacked_icon() {
+    fn compass_and_updown_on_same_pair_both_draw_without_illegal_overlap() {
+        // SQ-0224 reverses SQ-0219's suppression: when a compass edge AND an up/down edge join the
+        // same room pair, BOTH draw (the compass path plus a dotted up/down body), and the
+        // room-level up glyph still renders on the border. Even in the same-axis case here (N
+        // compass + Up, vertically adjacent — the worst case, both vertical) the two connectors
+        // share the side at distinct slots and must not form an ILLEGAL overlap.
         use mapper::graph::MapGraph;
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
@@ -4942,51 +4932,18 @@ mod tests {
         g.set_pos(2, (1, 0)); // due north of room 1
         g.add_edge(1, Direction::Up, 2);
         g.add_edge(1, Direction::N, 2); // a compass connector also joins the pair
-        assert_eq!(render_overlap_stats(&g).0, 0, "the single retained connector overlaps nothing");
-
+        assert_eq!(render_overlap_stats(&g).0, 0,
+            "both-drawn same-pair connectors must not form an illegal overlap");
         let rm = render(&g);
-        let pair: Vec<_> = rm.plan.connectors.iter().collect();
-        assert_eq!(pair.len(), 1, "one line per pair, whatever the directions: {pair:?}");
-        assert_eq!(pair[0].exit_dir, Direction::N, "the compass passage holds the line");
-        assert_eq!(pair[0].secondary_exit, vec![Direction::Up], "the staircase collapses to an icon");
-        let conn = &rm.plan.connectors[0];
-
         let mut st = AppState::default();
         st.scroll = rm.bounds.0;
         let area = Rect::new(0, 0, 120, 60);
         let mut buf = Buffer::empty(area);
         render_map(&rm, &st, area, &mut buf);
-        let dotted = buf.content.iter().filter(|c| matches!(c.symbol(), "┊" | "┄")).count();
-        assert_eq!(dotted, 0, "no separate dotted body — the staircase is an icon now, not a line");
-
-        // The collapsed staircase must land on room 1's TOP border (Up reads at the top), exactly
-        // once, and must NOT take the cell the compass connector anchors on. Taking an arrowhead's
-        // cell is what sank the first attempt at this: the room lost a compass exit to a staircase
-        // icon because the border had no room for both.
-        let (cols, rows) = boxes_axes(&rm.plan, rm.bounds);
-        let cell = rm.rooms.iter().find(|r| r.id == 1).expect("room 1 placed").cell;
-        let (bx, by) = (cols.room_pixel(cell.0), rows.room_pixel(cell.1));
-        // Screen space: the buffer is drawn offset by the scrolled-to cell's pixel origin.
-        let (ox, oy) = (cols.room_pixel(rm.bounds.0 .0), rows.room_pixel(rm.bounds.0 .1));
-        let (sx, sy) = (bx - ox, by - oy);
-        let ups: Vec<(u16, u16)> = (0..area.width)
-            .flat_map(|x| (0..area.height).map(move |y| (x, y)))
-            .filter(|&(x, y)| buf.cell((x, y)).is_some_and(|c| c.symbol() == "↑"))
-            .collect();
-        assert_eq!(ups.len(), 1, "the up glyph is drawn exactly ONCE, not duplicated: {ups:?}");
-        let anchor = box_edge_anchor(&cols, &rows, cell, conn.exit, conn.exit_slot);
-        let anchor_screen = ((anchor.0 - ox) as u16, (anchor.1 - oy) as u16);
-        assert_ne!(ups[0], anchor_screen, "the staircase must not sit on the compass arrowhead");
-        assert_eq!(
-            i32::from(ups[0].1),
-            sy,
-            "Up belongs on the room's TOP border row, not wherever the arrowhead happened to land"
-        );
-        assert!(
-            (sx + 1..sx + BOX_W - 1).contains(&i32::from(ups[0].0)),
-            "and along that border, off the corners: {:?} vs box at x={sx}",
-            ups[0]
-        );
+        let has_dotted = buf.content.iter().any(|c| matches!(c.symbol(), "┊" | "┄"));
+        assert!(has_dotted, "the up/down connector now draws its dotted body alongside the compass path");
+        let has_up_glyph = buf.content.iter().any(|c| c.symbol() == "↑");
+        assert!(has_up_glyph, "the room still shows the up glyph on its border");
     }
 
     #[test]

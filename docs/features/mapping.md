@@ -87,9 +87,9 @@ and it understands the awkward cases:
   connectors with up/down (or stairs) glyphs — never as arrows, never as "distorted"
   red edges. A matching Up+Down pair between two rooms collapses to a single dotted
   path marked at both ends. Where a room pair is joined by *both* a compass direction
-  and a staircase, the compass passage wins the line — it's the one you walk — and the
-  staircase rides along as a `↑` on the room's top border or a `↓` on its bottom one,
-  keeping its portal colour so vertical access still reads at a glance.
+  and a staircase, both draw: a staircase gets its own dotted trunk rather than folding
+  into the compass line, because a line reaches the room it leads to and an icon can only
+  say that a way up exists.
 - **Nautical directions** — ship games (Seastalker and kin) that steer by
   *fore / aft / port / starboard* (plus *bow* / *stern* / *forward*) instead of the
   compass are understood: those map onto north / south / west / east so the vessel's
@@ -100,11 +100,10 @@ and it understands the awkward cases:
   rooms four different ways. Rather than draw four lines that then have to cross each
   other, babelmap keeps one — preferring the pair that runs straight — and stacks every
   other compass direction as a small arrow in the border slots beside the retained
-  arrowhead (styled by the `shared_path` selector). A collapsed **staircase** doesn't
-  join that stack: it takes the room's own vertical slot instead, `↑` on the top border
-  and `↓` on the bottom, where you'd look for it anyway — and never the cell another
-  passage's arrowhead sits on. No command is ever hidden: on Adventure's maze this
-  removes a quarter of the crossings on the map.
+  arrowhead — never on the cell another passage's arrowhead sits on — styled by the
+  `shared_path` selector. No command is ever hidden. Staircases are deliberately left
+  out of this: they keep their own dotted line, since collapsing one to an icon would
+  drop the only thing it has to tell you, which room it goes to.
 
 Confirmed reciprocal N/S and E/W adjacencies are treated as inviolable: an up/down
 move yields rather than shove a reciprocal partner off its shared column or row, and
