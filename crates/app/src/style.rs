@@ -368,6 +368,9 @@ fn merge_decl(base: &Decl, over: &Decl) -> Decl {
 ///   flag, and a `[map.overrides]` per-slot glyph table. `[map]`'s remaining
 ///   keys are colour selectors, read by [`theme::toml_schema`](crate::theme::toml_schema),
 ///   and ignored here.
+/// - `[elements]` with the six story-picker `badge_*` glyph keys, which sit
+///   beside the `story_badge` selector that colours them. As with `[map]`, the
+///   section's remaining keys are colour selectors and are ignored here.
 ///
 /// Unknown keys are ignored. Returns `Err(msg)` on TOML parse failure.
 pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
@@ -412,6 +415,26 @@ pub fn parse_style_toml(text: &str) -> Result<StyleDoc, String> {
                             }
                         }
                     }
+                }
+                _ => {} // colour selectors + unknown keys: not symbol config
+            }
+        }
+    }
+
+    // The story picker's row badges live in `[elements]`, next to the
+    // `story_badge` selector that colours them (SQ-0559) — one concept, one
+    // place. Everything else under the header is a colour selector (an inline
+    // TABLE) resolved by `theme::toml_schema`.
+    if let Some(toml::Value::Table(el_table)) = root.get("elements") {
+        for (key, val) in el_table {
+            match key.as_str() {
+                "badge_zcode" => symbols.badge_zcode = val.as_str().map(str::to_string),
+                "badge_glulx" => symbols.badge_glulx = val.as_str().map(str::to_string),
+                "badge_blorb" => symbols.badge_blorb = val.as_str().map(str::to_string),
+                "badge_save"  => symbols.badge_save  = val.as_str().map(str::to_string),
+                "badge_hint"  => symbols.badge_hint  = val.as_str().map(str::to_string),
+                "badge_hint_available" => {
+                    symbols.badge_hint_available = val.as_str().map(str::to_string)
                 }
                 _ => {} // colour selectors + unknown keys: not symbol config
             }
@@ -1085,6 +1108,15 @@ room = { fg = "white" }
         let text = uncomment(&text, "path_style", "\"heavy\"");
         let text = uncomment(&text, "portal_path_style", "\"light\"");
         let text = uncomment(&text, "diagonal_corners", "false");
+        // …and the `[elements]` badge glyphs (SQ-0559), which the same broken
+        // link kept unreachable for even longer — they were never read from any
+        // section at all.
+        let text = uncomment(&text, "badge_zcode", "\"z\"");
+        let text = uncomment(&text, "badge_glulx", "\"g\"");
+        let text = uncomment(&text, "badge_blorb", "\"b\"");
+        let text = uncomment(&text, "badge_save", "\"s\"");
+        let text = uncomment(&text, "badge_hint", "\"?\"");
+        let text = uncomment(&text, "badge_hint_available", "\"¿\"");
 
         let set = symbols_from_toml(&text);
         assert_eq!(set.room_normal, crate::symbols::BoxStyle::preset("double").unwrap());
@@ -1092,6 +1124,111 @@ room = { fg = "white" }
         assert_eq!(set.path, crate::symbols::PathGlyphs::preset("heavy").unwrap());
         assert_eq!((set.portal.path, set.portal.path_h), ('│', '─'));
         assert!(!set.diagonal_corners);
+
+        let cfg = badges_from_toml(&text);
+        assert_eq!(
+            (
+                cfg.badge_zcode.as_str(),
+                cfg.badge_glulx.as_str(),
+                cfg.badge_blorb.as_str(),
+                cfg.badge_save.as_str(),
+                cfg.badge_hint.as_str(),
+                cfg.badge_hint_available.as_str(),
+            ),
+            ("z", "g", "b", "s", "?", "¿"),
+        );
+    }
+
+    // ── TOML → picker badge glyphs (SQ-0559) ─────────────────────────────────
+    //
+    // The six `badge_*` fields have existed on `StyleSymbols`/`SymbolConfig` and
+    // fed `picker::BadgeGlyphs` since the picker landed, but no parser arm ever
+    // read them — not under `[symbols]`, not anywhere — so they were always the
+    // built-in letters. They now live in `[elements]`, beside the `story_badge`
+    // selector that colours them.
+
+    /// Resolve a style.toml string straight to the `SymbolConfig` the story
+    /// picker reads its badge glyphs from.
+    fn badges_from_toml(text: &str) -> crate::config::SymbolConfig {
+        finalize_symbols(&parse_style_toml(text).expect("style text must parse").symbols)
+    }
+
+    #[test]
+    fn elements_badge_glyphs_reach_the_symbol_config() {
+        // Every badge gets its OWN value, so a parser arm that wired all six to
+        // one key — or to each other — cannot pass.
+        let cfg = badges_from_toml(
+            "[elements]\n\
+             badge_zcode = \"\u{e795}\"\n\
+             badge_glulx = \"\u{f188}\"\n\
+             badge_blorb = \"\u{f1c6}\"\n\
+             badge_save = \"\u{f0c7}\"\n\
+             badge_hint = \"\u{f059}\"\n\
+             badge_hint_available = \"\u{f05a}\"\n",
+        );
+        assert_eq!(cfg.badge_zcode, "\u{e795}");
+        assert_eq!(cfg.badge_glulx, "\u{f188}");
+        assert_eq!(cfg.badge_blorb, "\u{f1c6}");
+        assert_eq!(cfg.badge_save, "\u{f0c7}");
+        assert_eq!(cfg.badge_hint, "\u{f059}");
+        assert_eq!(cfg.badge_hint_available, "\u{f05a}");
+
+        // …and through to the borrowed view the picker rows actually draw with.
+        let glyphs = crate::picker::BadgeGlyphs::from_symbols(&cfg);
+        assert_eq!(glyphs.zcode, "\u{e795}");
+        assert_eq!(glyphs.hint_available, "\u{f05a}");
+    }
+
+    #[test]
+    fn one_badge_set_leaves_the_other_five_at_their_defaults() {
+        // The absent keys must still fall back to the built-in letters, and the
+        // one that IS set must not bleed into its neighbours.
+        let cfg = badges_from_toml("[elements]\nbadge_save = \"💾\"\n");
+        assert_eq!(cfg.badge_save, "💾");
+        assert_eq!(cfg.badge_zcode, "Z");
+        assert_eq!(cfg.badge_glulx, "G");
+        assert_eq!(cfg.badge_blorb, "B");
+        assert_eq!(cfg.badge_hint, "H");
+        assert_eq!(cfg.badge_hint_available, "h");
+    }
+
+    #[test]
+    fn absent_elements_section_leaves_every_badge_at_its_default() {
+        let cfg = badges_from_toml("[colors]\n\"transcript\" = { fg = \"red\" }\n");
+        assert_eq!(
+            (
+                cfg.badge_zcode.as_str(),
+                cfg.badge_glulx.as_str(),
+                cfg.badge_blorb.as_str(),
+                cfg.badge_save.as_str(),
+                cfg.badge_hint.as_str(),
+                cfg.badge_hint_available.as_str(),
+            ),
+            ("Z", "G", "B", "S", "H", "h"),
+        );
+    }
+
+    #[test]
+    fn per_game_style_layers_over_the_global_badges() {
+        // `merge` already carried the badge fields; now that the parser fills
+        // them, pin that the layering actually works end to end.
+        let global = parse_style_toml("[elements]\nbadge_zcode = \"z\"\nbadge_save = \"s\"\n").unwrap();
+        let per_game = parse_style_toml("[elements]\nbadge_save = \"★\"\n").unwrap();
+        let cfg = finalize_symbols(&merge(&global, &per_game).symbols);
+        assert_eq!(cfg.badge_save, "★"); // per-game wins
+        assert_eq!(cfg.badge_zcode, "z"); // global stands
+        assert_eq!(cfg.badge_hint, "H"); // neither spoke → default
+    }
+
+    #[test]
+    fn element_colour_selectors_are_not_mistaken_for_badge_glyphs() {
+        // `[elements]` is mostly colour selectors (inline tables). They must pass
+        // straight through the badge arms without disturbing anything.
+        let cfg = badges_from_toml(
+            "[elements]\nstory_badge = { fg = \"cyan\" }\nbadge_hint = \"¡\"\n",
+        );
+        assert_eq!(cfg.badge_hint, "¡");
+        assert_eq!(cfg.badge_zcode, "Z");
     }
 
     #[test]

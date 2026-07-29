@@ -263,11 +263,13 @@ or `Shift`+`↑`/`↓`/PgUp/PgDn — plain arrows keep navigating the list — a
 scroll resets whenever the highlighted story changes.
 
 `↑`/`↓`/`j`/`k`/PgUp/PgDn/Home/End navigate, `Enter` or a click opens the story,
-`q`/`Esc` quits back to the shell. The badge glyphs
-(`badge_save`/`badge_hint`/`badge_hint_available`, plus `badge_zcode`/
-`badge_glulx`/`badge_blorb`) are built-in defaults today — no style-file key
-reaches them yet — but the badge cluster, sortable headers, and info panel are all
-themeable through the `story_badge`, `story_header`/`story_header:active` (the
+`q`/`Esc` quits back to the shell. The badge glyphs are yours to change: set
+`badge_zcode`, `badge_glulx`, `badge_blorb`, `badge_save`, `badge_hint` or
+`badge_hint_available` under `[elements]` in `style.toml` — they default to the
+plain letters `Z`/`G`/`B`/`S`/`H`/`h`, and a patched font can swap in real icons.
+They live beside the `story_badge` selector that colours them. The badge cluster,
+sortable headers, and info panel are all themeable through
+`story_badge`, `story_header`/`story_header:active` (the
 active sort column), `story_author`, `story_year`, `story_rating` (the IFDB
 average in the RATE column), `story_no_metadata` (the
 "(no metadata yet)" placeholder), `story_tile`/`story_tile:selected` (the

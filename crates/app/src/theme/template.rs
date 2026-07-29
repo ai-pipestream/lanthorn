@@ -186,6 +186,14 @@ fn enum_hint(row: &RegRow) -> &'static str {
         "map.arrow_set" => "   # filled | line | nerdfont | nf-bold | nf-box | nf-circle | nf-outline",
         "map.portal_icons" => "   # ascii | nerdfont | nerdfont-stairs",
         "map.path_style" | "map.portal_path_style" => "   # light | heavy | dotted",
+        // Story-list row badges (SQ-0559). Free-form, not enumerated — any string,
+        // so a patched font can use a real icon instead of a bare letter.
+        "badge_zcode" => "   # story-list badge: a Z-machine story",
+        "badge_glulx" => "   # story-list badge: a Glulx story",
+        "badge_blorb" => "   # story-list badge: resources in a Blorb",
+        "badge_save" => "   # story-list badge: the story has a save",
+        "badge_hint" => "   # story-list badge: hints are installed",
+        "badge_hint_available" => "   # story-list badge: hints exist but aren't downloaded",
         _ if row.default_delta.border.is_some() => "   # style: none | single | double | thick | rounded",
         _ => "",
     }

@@ -54,8 +54,10 @@ pub enum Kind {
 ///
 /// - `glyph` is a single glyph a selector carries (gutter marks, tab dividers,
 ///   terminator caps) or, for a [`Kind::Placement`] preset row, the preset name.
-/// - `glyphs` is a small named-glyph slot list for selectors that own a set
-///   (e.g. box/arrow slots on `map.room`/`map.connector`). Empty for the defaults.
+///
+/// There is deliberately no named-slot list: a `glyphs = { tl = "+" }` sub-map
+/// used to parse into every layer and then reach no renderer (SQ-0560). Single
+/// map glyphs are overridden through `[map.overrides]`.
 ///
 /// Owns its string/glyph channels (not `&'static`) so a runtime user override —
 /// parsed from `style.toml` and lowered into a layer `Delta` — uses the same type
@@ -72,14 +74,12 @@ pub struct Delta {
     pub reversed: bool,
     pub dim: bool,
     pub glyph: Option<String>,
-    pub glyphs: Vec<(String, String)>,
     pub border: Option<crate::render::paneframe::BorderStyle>,
     pub parent: Option<String>,
 }
 
 impl Delta {
-    /// The zero delta: same as the parent, no glyph. `Vec::new()` is a const fn, so
-    /// this stays a `const` even though `Delta` is no longer `Copy`.
+    /// The zero delta: same as the parent, no glyph.
     pub const EMPTY: Delta = Delta {
         fg: None,
         bg: None,
@@ -89,7 +89,6 @@ impl Delta {
         reversed: false,
         dim: false,
         glyph: None,
-        glyphs: Vec::new(),
         border: None,
         parent: None,
     };
@@ -179,6 +178,14 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("scrollbar", Section::Elements, Kind::Style, Some("line"), Delta::EMPTY),
     row("transcript_location", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
     row("story_badge", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    // The badge GLYPHS sit beside the `story_badge` selector that colours them —
+    // one concept, one place (SQ-0559). Presets, so the letter rides in `glyph`.
+    row("badge_zcode", Section::Elements, Kind::Placement, None, glyph("Z")),
+    row("badge_glulx", Section::Elements, Kind::Placement, None, glyph("G")),
+    row("badge_blorb", Section::Elements, Kind::Placement, None, glyph("B")),
+    row("badge_save", Section::Elements, Kind::Placement, None, glyph("S")),
+    row("badge_hint", Section::Elements, Kind::Placement, None, glyph("H")),
+    row("badge_hint_available", Section::Elements, Kind::Placement, None, glyph("h")),
     row("hyperlink", Section::Elements, Kind::Style, Some("accent"), mods(false, false, true, false)),
     row("story_info_label", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     row("suggestion", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
@@ -364,6 +371,12 @@ mod tests {
         "scrollbar",
         "transcript_location",
         "story_badge",
+        "badge_zcode",
+        "badge_glulx",
+        "badge_blorb",
+        "badge_save",
+        "badge_hint",
+        "badge_hint_available",
         "hyperlink",
         "story_info_label",
         "suggestion",

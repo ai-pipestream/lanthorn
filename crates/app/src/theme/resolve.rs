@@ -106,19 +106,22 @@ impl Roles {
     }
 }
 
-/// The glyph(s) a resolved selector carries. Mirrors [`Delta`]'s two glyph slots:
-/// `single` is one glyph (gutter marks, tab dividers, terminator caps, or a
-/// [`Kind::Placement`](super::registry::Kind::Placement) preset name); `slots` is
-/// a small named-glyph set (box/arrow slots). Owned so a [`Theme`] is self-contained.
+/// The glyph a resolved selector carries: a gutter mark, tab divider, terminator
+/// cap, or a [`Kind::Placement`](super::registry::Kind::Placement) preset name.
+/// Owned so a [`Theme`] is self-contained.
+///
+/// There is deliberately no named-slot sub-map here. A `glyphs = { tl = "+" }`
+/// table used to parse this far and then reach no renderer at all (SQ-0560);
+/// individual map glyphs are overridden through `[map.overrides]`, which is the
+/// one mechanism for that job.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct GlyphSet {
     pub single: Option<String>,
-    pub slots: Vec<(String, String)>,
 }
 
 impl GlyphSet {
     fn is_empty(&self) -> bool {
-        self.single.is_none() && self.slots.is_empty()
+        self.single.is_none()
     }
 }
 
@@ -200,15 +203,12 @@ fn apply_style(base: Style, d: &Delta) -> Style {
     s
 }
 
-/// Layer a [`Delta`]'s glyph channels onto an inherited [`GlyphSet`]: a set glyph
-/// or glyph-slot list overrides the inherited one; otherwise it carries through.
+/// Layer a [`Delta`]'s glyph channel onto an inherited [`GlyphSet`]: a set glyph
+/// overrides the inherited one; otherwise it carries through.
 fn apply_glyph(inherited: Option<GlyphSet>, d: &Delta) -> Option<GlyphSet> {
     let mut g = inherited.unwrap_or_default();
     if let Some(single) = &d.glyph {
         g.single = Some(single.clone());
-    }
-    if !d.glyphs.is_empty() {
-        g.slots = d.glyphs.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     }
     if g.is_empty() {
         None
@@ -441,10 +441,10 @@ fn lower_decls(
             underline: raw.underline.unwrap_or(false),
             reversed: raw.reversed.unwrap_or(false),
             dim: raw.dim.unwrap_or(false),
-            // SQ-0440: glyph / glyph-slot / border-style / parent overrides now flow
-            // through (the registry `Delta` owns these channels).
+            // SQ-0440: glyph / border-style / parent overrides flow through (the
+            // registry `Delta` owns these channels). There is no glyph-SLOT channel:
+            // a `glyphs = { … }` sub-map reached no renderer, so it is gone (SQ-0560).
             glyph: raw.glyph.clone(),
-            glyphs: raw.glyphs.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
             border: raw.style.as_deref().map(crate::render::paneframe::parse_border_style),
             parent: raw.parent.clone(),
         };
@@ -571,6 +571,78 @@ mod tests {
         assert_eq!(
             theme.get("panel.tab_divider").glyph.and_then(|g| g.single),
             Some("┃".to_string()),
+        );
+    }
+
+    // ── SQ-0560: the map selectors' dead `glyphs` sub-map ────────────────────
+
+    #[test]
+    fn map_selectors_do_not_carry_a_glyph_slot_submap() {
+        // `glyphs = { tl = "+" }` on map.room / map.connector used to parse all
+        // the way into the Theme and then go nowhere: render/map.rs reads only
+        // `.style` and draws from `state.symbols`. Silently accepting input that
+        // reaches no renderer is the defect — `[map.overrides]` is the one
+        // mechanism for a single map glyph — so the sub-map is no longer part of
+        // the schema at all, on ANY selector.
+        let scheme = terminal_default_scheme();
+        let parsed = super::super::toml_schema::parse(
+            "[map]\n\
+             room = { fg = \"white\", glyphs = { tl = \"+\" } }\n\
+             connector = { fg = \"cyan\", glyphs = { north = \"^\" } }\n",
+        )
+        .unwrap();
+        let theme = resolve_theme(&scheme, &parsed);
+
+        // The colour on the same line still lands — only the glyph slots are gone.
+        assert_eq!(theme.get("map.room").style.fg, Some(Color::White));
+        assert_eq!(theme.get("map.connector").style.fg, Some(Color::Cyan));
+        assert!(
+            theme.get("map.room").glyph.is_none(),
+            "map.room must carry no glyph channel from a `glyphs` sub-map"
+        );
+        assert!(
+            theme.get("map.connector").glyph.is_none(),
+            "map.connector must carry no glyph channel from a `glyphs` sub-map"
+        );
+    }
+
+    #[test]
+    fn single_glyph_overrides_are_untouched_by_the_slot_removal() {
+        // The `glyph = "…"` channel is live and load-bearing — panel terminator
+        // caps and tab dividers, the dialog/saves markers, the debug gutter
+        // tiers all read it. Dropping the slot sub-map must not graze it.
+        let scheme = terminal_default_scheme();
+        let parsed = super::super::toml_schema::parse(
+            "[panel]\n\
+             tab_divider = { glyph = \"┃\" }\n\
+             terminator_left = { glyph = \"«\" }\n\
+             [debug]\n\
+             disasm_soft = { glyph = \"?\" }\n\
+             [elements]\n\
+             saves_portable = { glyph = \"»\" }\n",
+        )
+        .unwrap();
+        let theme = resolve_theme(&scheme, &parsed);
+
+        let single = |sel: &str| theme.get(sel).glyph.and_then(|g| g.single);
+        assert_eq!(single("panel.tab_divider"), Some("┃".to_string()));
+        assert_eq!(single("panel.terminator_left"), Some("«".to_string()));
+        assert_eq!(single("debug.disasm_soft"), Some("?".to_string()));
+        assert_eq!(single("saves_portable"), Some("»".to_string()));
+
+        // …and the registry defaults for the untouched ones still resolve.
+        let plain = resolve_theme(&scheme, &super::super::toml_schema::ParsedStyle::default());
+        assert_eq!(
+            plain.get("panel.terminator_right").glyph.and_then(|g| g.single),
+            Some("├".to_string())
+        );
+        assert_eq!(
+            plain.get("transcript_warning").glyph.and_then(|g| g.single),
+            Some("!".to_string())
+        );
+        assert_eq!(
+            plain.get("debug.disasm_executed").glyph.and_then(|g| g.single),
+            Some("|".to_string())
         );
     }
 

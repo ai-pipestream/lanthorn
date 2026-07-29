@@ -24,8 +24,6 @@ pub struct RawDelta {
     /// A single glyph the selector carries (gutter mark, tab divider, terminator
     /// cap) OR — for a map preset key like `box_style = "rounded"` — the preset name.
     pub glyph: Option<String>,
-    /// Named glyph-slot overrides: `glyphs = { tl = "+", h = "-" }` on map selectors.
-    pub glyphs: BTreeMap<String, String>,
     /// A list value — only `map.layer_cycle = ["cyan", ...]` uses this.
     pub list: Option<Vec<String>>,
     /// Border keys (carried raw; applied later): `style`, `style_<side>`, `header`, `shadow`.
@@ -219,15 +217,6 @@ pub fn parse(text: &str) -> Result<ParsedStyle, Vec<String>> {
 /// Parse a [`RawDelta`] from a TOML inline table (field-by-field). Unknown keys
 /// are ignored (forward-compat), same as the old parser.
 fn delta_from_table(t: &toml::value::Table) -> RawDelta {
-    let mut glyphs = BTreeMap::new();
-    if let Some(toml::Value::Table(g)) = t.get("glyphs") {
-        for (key, val) in g {
-            if let Some(s) = val.as_str() {
-                glyphs.insert(key.clone(), s.to_string());
-            }
-        }
-    }
-
     RawDelta {
         parent: t.get("parent").and_then(toml::Value::as_str).map(String::from),
         fg: t.get("fg").and_then(toml::Value::as_str).map(String::from),
@@ -238,7 +227,6 @@ fn delta_from_table(t: &toml::value::Table) -> RawDelta {
         dim: t.get("dim").and_then(toml::Value::as_bool),
         reversed: t.get("reversed").and_then(toml::Value::as_bool),
         glyph: t.get("glyph").and_then(toml::Value::as_str).map(String::from),
-        glyphs,
         list: None,
         style: t.get("style").and_then(toml::Value::as_str).map(String::from),
         style_top: t.get("style_top").and_then(toml::Value::as_str).map(String::from),
@@ -340,17 +328,17 @@ user2        = { parent = "chrome" }
 # ── (map.* model still an open question §4 — this shows the recommended shape.) ─
 [map]
 background            = { bg = "background" }        # overrides panel.background for the map canvas (frame = panel.border)
-room                 = { fg = "white", glyphs = { tl = "+" } }             # box glyphs: add glyphs = { tl = "+", h = "-" } to override individual slots
+room                 = { fg = "white" }
 room_current         = { parent = "accent" }
 room_selected        = { parent = "accent", reversed = true }
-connector            = { fg = "cyan" }              # arrow glyphs: add glyphs = { north = "^", up = "↑" } to override
+connector            = { fg = "cyan" }
 connector_distorted  = { fg = "magenta" }
 connector_portal     = { fg = "cyan" }
 shared_path          = { fg = "light-cyan" }
 layer_cycle          = ["cyan", "green", "magenta", "yellow", "blue"]  # per-layer edge colour cycle
 loc_indicator        = { parent = "muted" }
-# ── Map-wide glyph SET presets (the old [symbols] section, merged in). Per-glyph─
-# ── overrides attach to the selectors above via a `glyphs` sub-map, not a table.─
+# ── Map-wide glyph SET presets. A single glyph is overridden by slot name in ───
+# ── the [map.overrides] table below — selectors carry colours, not glyphs. ─────
 box_style            = "rounded"    # room boxes: rounded | thick | double | solid | super-thick | ascii | borderless
 arrow_set            = "filled"     # cardinal connector arrows: filled | line | nerdfont | nf-bold | nf-box | nf-circle | nf-outline
 portal_icons         = "ascii"      # up/down/in/out endpoint icons: ascii | nerdfont | nerdfont-stairs
@@ -434,7 +422,6 @@ align = "right"
         );
 
         assert!(p.decls.contains_key("map.room"));
-        assert_eq!(p.decls["map.room"].glyphs["tl"], "+");
 
         assert_eq!(p.decls["debug.disasm_executed"].glyph, Some("|".to_string()));
 
