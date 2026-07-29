@@ -86,20 +86,25 @@ and it understands the awkward cases:
   move but yielding to confirmed reciprocal N/S adjacencies. They render as dotted
   connectors with up/down (or stairs) glyphs — never as arrows, never as "distorted"
   red edges. A matching Up+Down pair between two rooms collapses to a single dotted
-  path marked at both ends. Where a room pair is joined by *both* a compass
-  direction and an up/down link, only the compass path is drawn, but the room still
-  shows its up/down symbol so vertical access stays visible.
+  path marked at both ends. Where a room pair is joined by *both* a compass direction
+  and a staircase, the compass passage wins the line — it's the one you walk — and the
+  staircase rides along as a `↑` on the room's top border or a `↓` on its bottom one,
+  keeping its portal colour so vertical access still reads at a glance.
 - **Nautical directions** — ship games (Seastalker and kin) that steer by
   *fore / aft / port / starboard* (plus *bow* / *stern* / *forward*) instead of the
   compass are understood: those map onto north / south / west / east so the vessel's
   decks lay out correctly.
-- **Combined multi-direction paths** — when two rooms are reachable by more than one
-  compass direction each way (Zork's around-the-house ring, where each pair links by
-  both a cardinal and a diagonal), the redundant edges collapse into one brighter
-  "shared path" connector instead of a crossing tangle. Every hidden command is
-  preserved — the collapsed direction is drawn as a small arrow in the border slot
-  beside the retained arrowhead (styled by the `shared_path` selector). One-sided
-  redundancy is left as clean merge stubs.
+- **Combined multi-direction paths** — two rooms get **one** line between them, however
+  many ways you can actually walk it. Zork's around-the-house ring links each pair by
+  both a cardinal and a diagonal; Adventure's maze will happily connect the same two
+  rooms four different ways. Rather than draw four lines that then have to cross each
+  other, babelmap keeps one — preferring the pair that runs straight — and stacks every
+  other compass direction as a small arrow in the border slots beside the retained
+  arrowhead (styled by the `shared_path` selector). A collapsed **staircase** doesn't
+  join that stack: it takes the room's own vertical slot instead, `↑` on the top border
+  and `↓` on the bottom, where you'd look for it anyway — and never the cell another
+  passage's arrowhead sits on. No command is ever hidden: on Adventure's maze this
+  removes a quarter of the crossings on the map.
 
 Confirmed reciprocal N/S and E/W adjacencies are treated as inviolable: an up/down
 move yields rather than shove a reciprocal partner off its shared column or row, and

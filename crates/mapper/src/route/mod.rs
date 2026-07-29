@@ -8,19 +8,35 @@ use crate::direction::{grid_offset, is_diagonal, layout_offset, opposite, Direct
 use crate::graph::{Connection, MapGraph, RoomId};
 use crate::router::{route_side, side_for, Side};
 
-/// One collapsed (secondary) compass edge: its unordered pair, its origin room, and its direction.
+/// One collapsed (secondary) edge: its unordered pair, its origin room, and its direction.
 struct Secondary {
     pair: (RoomId, RoomId),
     origin: RoomId,
     dir: Direction,
 }
 
-/// For each unordered room pair, keep the best compass edge in each direction-of-travel
-/// bucket (forward = origin is the lower id, backward = the higher id); the rest are
-/// secondaries. "Best" = geometrically satisfied first, then the exact-opposite of the
-/// other bucket's pick (straightness), then lowest connection index. Returns the set of
-/// secondary indices into `graph.connections()` and the secondary records. Up/Down and
-/// non-compass edges are excluded (only `grid_offset` 8-way edges are considered).
+/// Decide which edges are DRAWN and which collapse into direction icons beside the line that
+/// is (SQ-0225, widened to every passage by SQ-0522).
+///
+/// ONE line per unordered room pair, whatever the directions involved. Per pair this keeps at
+/// most one edge in each direction-of-travel bucket (forward = origin is the lower id, backward
+/// = the higher id) — the two the routing loop then pairs into a single bidirectional connector
+/// — and makes every other edge of that pair a `Secondary`: a direction icon stamped at its own
+/// end of that one line. Returns the secondary indices into `graph.connections()` plus the
+/// records.
+///
+/// "Best" within a bucket = geometrically satisfied first, then the exact opposite of the other
+/// bucket's pick (straightness), then lowest connection index.
+///
+/// A COMPASS passage always wins the line over a staircase: when a pair carries any compass
+/// edge, all its Up/Down edges collapse to icons, so a passage you walk is never drawn as a
+/// dotted portal run. A pair with nothing but Up/Down keeps its dotted line. That replaces the
+/// separate compass/Up-Down trunks of SQ-0224, which drew a pair connected both ways as two
+/// lines that then had to cross each other — Adventure's maze is full of them (`54760 -E-> 33457`
+/// alongside `33457 -Down-> 54760`).
+///
+/// In/Out/Unknown are absent here: they carry no layout offset, are never routed, and draw as
+/// portal badges anchored on the room.
 fn select_shared_paths(
     graph: &MapGraph,
 ) -> (std::collections::BTreeSet<usize>, Vec<Secondary>) {
@@ -28,8 +44,8 @@ fn select_shared_paths(
     let conns = graph.connections();
     let mut by_pair: BTreeMap<(RoomId, RoomId), Vec<usize>> = BTreeMap::new();
     for (i, c) in conns.iter().enumerate() {
-        if grid_offset(c.dir).is_none() {
-            continue; // compass 8-way only; Up/Down/In/Out/Unknown excluded
+        if layout_offset(c.dir).is_none() {
+            continue; // In/Out/Unknown: portal badges, never routed
         }
         let pair = (c.origin.min(c.dest), c.origin.max(c.dest));
         by_pair.entry(pair).or_default().push(i);
@@ -37,15 +53,13 @@ fn select_shared_paths(
     let mut secondary_idx: BTreeSet<usize> = BTreeSet::new();
     let mut records: Vec<Secondary> = Vec::new();
     for (pair, idxs) in by_pair {
-        let fwd: Vec<usize> = idxs.iter().copied().filter(|&i| conns[i].origin == pair.0).collect();
-        let bwd: Vec<usize> = idxs.iter().copied().filter(|&i| conns[i].origin == pair.1).collect();
-        // Collapse ONLY true bidirectional redundancy: both directions have 2+ ways, so the
-        // leftovers after one reciprocal pairing would form a SECOND crossing connector (the
-        // house-ring mess). One-sided redundancy (e.g. 1 out, 3 back — the #33/#175 shape)
-        // stays as merge stubs; it already renders cleanly and existing tests lock that in.
-        if fwd.len() < 2 || bwd.len() < 2 {
-            continue;
-        }
+        let has_compass = idxs.iter().any(|&i| grid_offset(conns[i].dir).is_some());
+        // Only compass edges may hold the line once the pair has one.
+        let eligible = |i: usize| !has_compass || grid_offset(conns[i].dir).is_some();
+        let bucket = |origin: RoomId| -> Vec<usize> {
+            idxs.iter().copied().filter(|&i| conns[i].origin == origin && eligible(i)).collect()
+        };
+        let (fwd, bwd) = (bucket(pair.0), bucket(pair.1));
         // Pick the retained edge of a bucket: satisfied first, optional opposite-direction
         // preference (straightness), then lowest index.
         let pick = |bucket: &[usize], prefer_opp: Option<Direction>| -> Option<usize> {
@@ -57,7 +71,18 @@ fn select_shared_paths(
         };
         let ret_fwd = pick(&fwd, None);
         let ret_bwd = pick(&bwd, ret_fwd.map(|i| opposite(conns[i].dir)));
-        for &i in fwd.iter().chain(bwd.iter()) {
+        // Keep the back-edge only where the router will actually PAIR it with the retained
+        // forward edge; otherwise it would draw the second line this whole pass exists to
+        // avoid. An Up/Down edge pairs only with its exact opposite (`back_edge_idx`), while a
+        // compass edge accepts any compass edge coming back.
+        let ret_bwd = ret_bwd.filter(|&b| match ret_fwd {
+            None => true,
+            Some(f) => {
+                let fd = conns[f].dir;
+                !matches!(fd, Direction::Up | Direction::Down) || conns[b].dir == opposite(fd)
+            }
+        });
+        for &i in &idxs {
             if Some(i) != ret_fwd && Some(i) != ret_bwd {
                 secondary_idx.insert(i);
                 records.push(Secondary { pair, origin: conns[i].origin, dir: conns[i].dir });
@@ -1128,10 +1153,15 @@ fn route_topology_with(graph: &MapGraph, greedy: bool) -> Vec<RoutedConnector> {
         }
     }
     for rec in &secondary_records {
-        if let Some(conn) = out.iter_mut().find(|c| {
-            (c.origin.min(c.dest), c.origin.max(c.dest)) == rec.pair
-                && grid_offset(c.exit_dir).is_some() // the compass connector, not an Up/Down one
-        }) {
+        let same_pair =
+            |c: &RoutedConnector| (c.origin.min(c.dest), c.origin.max(c.dest)) == rec.pair;
+        // Prefer the pair's compass connector; a pair with nothing but Up/Down has only its
+        // dotted one to hang the icons on (SQ-0522).
+        let idx = out
+            .iter()
+            .position(|c| same_pair(c) && grid_offset(c.exit_dir).is_some())
+            .or_else(|| out.iter().position(same_pair));
+        if let Some(conn) = idx.map(|i| &mut out[i]) {
             if rec.origin == conn.origin {
                 conn.secondary_exit.push(rec.dir);
             } else if rec.origin == conn.dest {
@@ -1530,12 +1560,12 @@ mod tests {
     }
 
     #[test]
-    fn reciprocal_pairs_with_geometric_opposite_keeping_merge_stubs_intact() {
+    fn reciprocal_pairing_picks_the_geometric_opposite_added_last() {
         // Adjacent #77/#239 with a reciprocal E/W edge plus extra N and S edges, where the geometric
-        // opposite (W) of the forward E edge is added LAST. The reciprocal must pair E with W (not the
-        // first reverse edge N), so the trunk stays straight and the N/S edges become real C-shaped
-        // merge stubs. Pairing with N would bend the trunk up-and-over and collapse the S/W stubs to
-        // degenerate zero-width lines — the "missing southern path" bug.
+        // opposite (W) of the forward E edge is added LAST. The pairing must pick E with W (not the
+        // first reverse edge N), so the retained line stays straight. Pairing with N would bend it
+        // up-and-over — the "missing southern path" bug. Since SQ-0522 the extras collapse to icons
+        // rather than merge stubs, but which edge holds the line is the same guarantee.
         let mut g = MapGraph::new();
         g.upsert_room(77, "f".into());
         g.upsert_room(239, "g".into());
@@ -1546,15 +1576,14 @@ mod tests {
         g.add_edge(239, Direction::S, 77);
         g.add_edge(239, Direction::W, 77); // opposite of E, added last on purpose
         let plan = route_lanes(&g);
-        let trunk = plan.connectors.iter().find(|c| !c.merge).expect("a trunk connector");
-        assert!(is_collinear(&trunk.points), "trunk must stay a straight E/W line: {:?}", trunk.points);
-        let stubs: Vec<_> = plan.connectors.iter().filter(|c| c.merge).collect();
-        assert_eq!(stubs.len(), 2, "the two extra edges become merge stubs");
-        for s in &stubs {
-            assert!(s.points.len() >= 4,
-                "{:?} stub must keep its C-path, not collapse to a degenerate line: {:?}",
-                s.exit_dir, s.points);
-        }
+        assert_eq!(plan.connectors.len(), 1, "one line for the pair");
+        let trunk = &plan.connectors[0];
+        assert!(!trunk.merge, "it is a real connector, not a stub");
+        assert_eq!(trunk.entry_dir, Some(Direction::W), "W held the line, not the first reverse edge N");
+        assert!(is_collinear(&trunk.points), "so the line stays straight E/W: {:?}", trunk.points);
+        let mut secs = trunk.secondary_entry.clone();
+        secs.sort_by_key(|d| format!("{d:?}"));
+        assert_eq!(secs, vec![Direction::N, Direction::S], "the extras collapse to icons at #239");
     }
 
     #[test]
@@ -1834,11 +1863,13 @@ mod tests {
         assert!(conns[0].reciprocal, "collapsed true-opposite connector must have reciprocal == true");
     }
 
-    /// Regression (A129 #239↔#77): three edges between one pair — `1→E→2`, `2→N→1`,
-    /// `2→S→1`. Exactly ONE pairing collapses (1↔2); the extra `2→S→1` must still be
-    /// drawn as its own connector, not dropped because the room-pair was already seen.
+    /// Regression (A129 #239↔#77): three edges between one pair — `1→E→2`, `2→N→1`, `2→S→1`.
+    /// One pairing holds the line; the third edge must not be silently DROPPED. Before SQ-0522 it
+    /// was drawn as a second connector; now it is recorded as a stacked icon on the one line. What
+    /// this test guards either way is that the passage does not vanish because its room pair had
+    /// already been seen.
     #[test]
-    fn third_edge_between_pair_is_not_dropped() {
+    fn third_edge_between_pair_becomes_an_icon_not_a_dropped_edge() {
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
@@ -1848,12 +1879,14 @@ mod tests {
         g.add_edge(2, Direction::N, 1);
         g.add_edge(2, Direction::S, 1);
         let conns = route_topology(&g);
-        assert_eq!(conns.len(), 2, "one pairing collapses, the third edge stays; got {}", conns.len());
-        assert_eq!(conns.iter().filter(|c| c.reciprocal).count(), 1, "exactly one reciprocal pairing");
-        let s = conns.iter().find(|c| {
-            c.origin == 2 && c.dest == 1 && c.exit == side_for(Direction::S).unwrap()
-        });
-        assert!(s.is_some(), "the third edge (2→S→1) must still be drawn, not dropped");
+        assert_eq!(conns.len(), 1, "one line for the pair; got {}", conns.len());
+        assert!(conns[0].reciprocal, "the retained pairing is bidirectional");
+        // Whichever of N/S held the line, the other must be recorded at room 2's end.
+        let held = conns[0].entry_dir.unwrap_or(conns[0].exit_dir);
+        let other = if held == Direction::N { Direction::S } else { Direction::N };
+        let at_two =
+            if conns[0].origin == 2 { &conns[0].secondary_exit } else { &conns[0].secondary_entry };
+        assert!(at_two.contains(&other), "the third edge ({other:?}) survives as an icon: {at_two:?}");
     }
 
     #[test]
@@ -1928,31 +1961,26 @@ mod tests {
     }
 
     #[test]
-    fn extra_same_pair_edges_become_merge_stubs() {
-        // 77↔239 E/W reciprocal trunk, plus 239→N→77 and 239→S→77 (the A129 tangle).
+    fn extra_same_pair_edges_become_stacked_icons() {
+        // 77↔239 E/W reciprocal line, plus 239→N→77 and 239→S→77 (the A129 tangle). These used to
+        // draw as two merge stubs joining the trunk at T-junctions; SQ-0522 collapses them.
         let mut g = MapGraph::new();
         g.upsert_room(77, "a".into());
         g.upsert_room(239, "b".into());
         g.set_pos(77, (0, 0));
         g.set_pos(239, (2, 0)); // east of 77, a gap of one cell
         g.add_edge(77, Direction::E, 239);
-        g.add_edge(239, Direction::W, 77); // reciprocal → the trunk
+        g.add_edge(239, Direction::W, 77); // reciprocal → holds the line
         g.add_edge(239, Direction::N, 77);
         g.add_edge(239, Direction::S, 77);
         let conns = route_topology(&g);
-        let trunks: Vec<_> = conns.iter().filter(|c| !c.merge).collect();
-        let stubs: Vec<_> = conns.iter().filter(|c| c.merge).collect();
-        assert_eq!(trunks.len(), 1, "one trunk for the pair; got {}", trunks.len());
-        assert_eq!(stubs.len(), 2, "the two extra edges are merge stubs; got {}", stubs.len());
-        // Each stub carries its own box-edge exit direction (N / S).
-        assert!(stubs.iter().any(|c| c.exit == side_for(Direction::N).unwrap()), "N stub");
-        assert!(stubs.iter().any(|c| c.exit == side_for(Direction::S).unwrap()), "S stub");
-        // Each stub ENDS on the trunk (its last point is one of the trunk's points).
-        let trunk_pts = &trunks[0].points;
-        for s in &stubs {
-            let last = *s.points.last().unwrap();
-            assert!(trunk_pts.contains(&last), "merge stub must end on the trunk: {last:?} not in {trunk_pts:?}");
-        }
+        assert_eq!(conns.len(), 1, "one line for the pair; got {}", conns.len());
+        assert!(!conns[0].merge, "and no merge stubs are left to join it");
+        let at_239 =
+            if conns[0].origin == 239 { &conns[0].secondary_exit } else { &conns[0].secondary_entry };
+        let mut secs = at_239.clone();
+        secs.sort_by_key(|d| format!("{d:?}"));
+        assert_eq!(secs, vec![Direction::N, Direction::S], "both extras ride #239's end as icons");
     }
 
     #[test]
@@ -2107,13 +2135,12 @@ mod tests {
     }
 
     #[test]
-    fn updown_does_not_pair_with_a_compass_edge_but_still_draws() {
-        // A--Up-->B and B--S-->A: B--S-->A is geometrically the "reverse" edge between the same
-        // two rooms, but up/down must NEVER PAIR (collapse into a reciprocal) with a compass edge
-        // — it pairs only with the exact opposite up/down direction. Since SQ-0224 the up/down
-        // edge still DRAWS as its own connector alongside the compass one (no longer suppressed),
-        // on a SEPARATE trunk, so it must not steal the compass edge's trunk (turning the S
-        // connector into a merge stub). The Up edge is listed FIRST to exercise that ordering.
+    fn a_staircase_never_pairs_with_a_compass_edge_it_collapses_beside_it() {
+        // A--Up-->B and B--S-->A: B--S-->A is geometrically the "reverse" edge between the same two
+        // rooms, but up/down must NEVER PAIR (collapse into a reciprocal) with a compass edge — it
+        // pairs only with the exact opposite up/down direction. The Up edge is listed FIRST to
+        // exercise that ordering. Since SQ-0522 it does not draw its own trunk either: the compass
+        // edge takes the line and Up becomes an icon, which is a stronger form of the same rule.
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
@@ -2123,14 +2150,12 @@ mod tests {
         g.add_edge(2, Direction::S, 1);
 
         let plan = route_lanes(&g);
-        let up = plan.connectors.iter().find(|c| c.exit_dir == Direction::Up)
-            .expect("the up/down edge draws as its own connector (SQ-0224)");
-        assert_ne!(up.entry_dir, Some(Direction::S),
-            "the up/down connector did not pair with the compass S edge");
-        let s = plan.connectors.iter().find(|c| c.exit_dir == Direction::S)
-            .expect("the compass edge is still routed");
-        assert!(!s.merge,
-            "the S connector stays a full connector, not a merge stub of the up/down trunk");
+        assert_eq!(plan.connectors.len(), 1, "one line for the pair");
+        let c = &plan.connectors[0];
+        assert_eq!(c.exit_dir, Direction::S, "the compass edge holds the line");
+        assert!(!c.merge, "and stays a full connector, never a merge stub of an up/down trunk");
+        assert_eq!(c.entry_dir, None, "it did NOT pair with the Up edge");
+        assert_eq!(c.secondary_entry, vec![Direction::Up], "Up collapses to an icon at A, its own end");
     }
 
     #[test]
@@ -2536,13 +2561,14 @@ mod tests {
     }
 
     #[test]
-    fn compass_and_updown_on_same_pair_both_draw() {
+    fn compass_wins_the_line_over_a_staircase_on_the_same_pair() {
         use crate::direction::Direction;
         use crate::graph::MapGraph;
 
-        // A--East-->B AND A--Up-->B on the same pair: BOTH a compass connector and an up/down
-        // connector are drawn, on their own sides (SQ-0224 reverses SQ-0219's suppression — a
-        // horizontal and a vertical passage between the same two rooms are distinct).
+        // A--East-->B AND A--Up-->B on the same pair. SQ-0224 drew BOTH, on separate trunks, which
+        // is how a pair connected two ways ended up as two lines that crossed each other. SQ-0522
+        // draws ONE — the compass passage, because it is the one you walk — and the staircase
+        // collapses to an icon beside it.
         let mut g = MapGraph::new();
         g.upsert_room(1, "A".into());
         g.upsert_room(2, "B".into());
@@ -2552,16 +2578,10 @@ mod tests {
         g.add_edge(1, Direction::Up, 2);
 
         let plan = route_lanes(&g);
-        let updown: Vec<_> = plan.connectors.iter()
-            .filter(|c| matches!(c.exit_dir, Direction::Up | Direction::Down))
-            .collect();
-        assert_eq!(updown.len(), 1, "the up/down connector is now drawn alongside the compass one");
-        let compass: Vec<_> = plan.connectors.iter()
-            .filter(|c| matches!(c.exit_dir, Direction::E | Direction::W))
-            .collect();
-        assert_eq!(compass.len(), 1, "the compass connector is drawn");
-        assert_ne!(updown[0].exit, compass[0].exit,
-            "the two passages leave on different sides (Top for Up vs Right for E)");
+        assert_eq!(plan.connectors.len(), 1, "one line for the pair, whatever the directions");
+        let c = &plan.connectors[0];
+        assert_eq!(c.exit_dir, Direction::E, "the compass passage holds the line, not the staircase");
+        assert_eq!(c.secondary_exit, vec![Direction::Up], "the staircase collapses to an icon at A");
     }
 
     #[test]
@@ -2569,8 +2589,9 @@ mod tests {
         // `direct_route_losers` decides which connector keeps a contested straight room-line: the
         // LONGER one wins, the shorter weaves. An up/down edge sharing a pair with a compass edge
         // must stay OUT of that contest (SQ-0224) so it cannot steal the pair's representative slot
-        // and flip who wins — even though, since SQ-0224, the up/down edge now DRAWS as its own
-        // connector.
+        // and flip who wins. Since SQ-0522 it is out of the routing set entirely — it collapses to
+        // an icon on the compass edge that shares its pair — which is a stronger version of the
+        // same guarantee, so the contest winner must still be byte-identical either way.
         //
         // T(1) is the contested destination. A(2, far) and B(3, near) both want a straight W line
         // into T. The LONGER connector (A) must keep the straight line. B also carries an Up edge
@@ -2598,8 +2619,13 @@ mod tests {
         assert_eq!(a_with.points, a_without.points,
             "the contest winner A->T's straight line must be unaffected by B's Up edge staying out \
              of the contest: {:?} vs {:?}", a_with.points, a_without.points);
-        assert!(with_up.connectors.iter().any(|c| c.origin == 3 && c.exit_dir == Direction::Up),
-            "B's Up edge now draws as its own connector (SQ-0224)");
+        assert!(
+            with_up.connectors.iter().any(|c| {
+                (c.origin.min(c.dest), c.origin.max(c.dest)) == (1, 3)
+                    && c.secondary_exit.contains(&Direction::Up)
+            }),
+            "B's Up edge is not lost — it rides the pair's compass line as a stacked icon (SQ-0522)"
+        );
     }
 
     #[test]
@@ -2655,10 +2681,10 @@ mod tests {
     }
 
     #[test]
-    fn one_sided_redundancy_is_not_collapsed() {
-        // #33/#175 shape: one way out (E), three back (W/N/S). Only the backward bucket is
-        // redundant, so this is NOT the bidirectional crossing case — it must stay as-is
-        // (merge stubs, no secondaries), matching today's clean rendering.
+    fn one_sided_redundancy_collapses_too() {
+        // #33/#175 shape: one way out (E), three back (W/N/S). SQ-0225 collapsed only TRUE
+        // bidirectional redundancy (2+ each way) and left this shape as merge stubs. SQ-0522
+        // collapses every pair: one-sided redundancy is still several lines between two rooms.
         use crate::graph::MapGraph;
         use crate::direction::Direction;
         let mut g = MapGraph::new();
@@ -2671,11 +2697,13 @@ mod tests {
         g.add_edge(175, Direction::N, 33);
         g.add_edge(175, Direction::S, 33);
         let plan = route_lanes(&g);
-        for c in plan.connectors.iter()
-            .filter(|c| (c.origin.min(c.dest), c.origin.max(c.dest)) == (33, 175)) {
-            assert!(c.secondary_exit.is_empty() && c.secondary_entry.is_empty(),
-                "one-sided redundancy must not collapse");
-        }
+        assert_eq!(plan.connectors.len(), 1, "one line for the pair");
+        let c = &plan.connectors[0];
+        assert_eq!(c.entry_dir, Some(Direction::W), "W is the opposite of E, so it holds the line");
+        let at_175 = if c.origin == 175 { &c.secondary_exit } else { &c.secondary_entry };
+        let mut secs = at_175.clone();
+        secs.sort_by_key(|d| format!("{d:?}"));
+        assert_eq!(secs, vec![Direction::N, Direction::S], "the other two ways back become icons");
     }
 
     #[test]
