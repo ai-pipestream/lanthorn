@@ -9,7 +9,11 @@ inspecting the machine, and firing commands — without ever leaving the story.
 ## Map navigation & inspection
 - **Mouse support** — left-click a room to pop its info panel (name, notes,
   exits, objects); right-click a room for layout diagnostics; middle-drag
-  anywhere to pan the whole map around.
+  anywhere to pan the whole map around. Neither panel interrupts the game: they
+  are corner overlays, so the keyboard stays on the story prompt and you can keep
+  typing and pressing Enter with one open — handy for watching a room's compass
+  rose fill in as you walk. Close one with **Esc**, its **✕**, or a click on empty
+  map space.
 - **Mouse wheel** pans the map (hold Shift for horizontal, Ctrl to zoom) and
   scrolls every other scrollable surface too — the transcript and the lists
   inside modals (saves, file browser, gallery, hotkey dialog, …).
@@ -20,7 +24,8 @@ inspecting the machine, and firing commands — without ever leaving the story.
   story pane's columns, so a drag never scoops up the map beside the text.
 - **Room inspector overlay** — id, name, layer, position, and the per-edge
   dropped-constraint flags, so you can see *why* the layout engine placed a room
-  where it did.
+  where it did. **Tab** hands the keyboard to the map when you do want to step or
+  nudge rooms, and the panel stays open while you do.
 - **Pane focus** is always visibly highlighted. **Tab** / **Shift-Tab** step
   keyboard focus through the panes — story pane ↔ map, and, when the debug
   inspector is open, each of its windows in turn. Show or hide the map entirely

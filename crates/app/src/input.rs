@@ -486,12 +486,18 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
         return hotkey_dialog_key_to_action(state, key);
     }
 
-    // 6.5. Room panel close: Esc or Enter while a panel is open.
+    // 6.5. Room panel close: Esc while a panel is open.
     // Comes after steps 2-6 (prompt/anim/saves/hotkey_dialog checks) so those
     // modes still take priority, but before the prefix key and normal dispatch.
-    // Room panel is read-only (no text input), so Enter is safe as a close key.
+    //
+    // Enter is deliberately NOT a close key. These are corner overlays, not
+    // modals — typing already reaches the story prompt underneath one (a letter
+    // resolves to `InputChar`), so stealing Enter meant you could compose a
+    // command with the inspector open but never submit it. Now Enter submits and
+    // the panel stays put, so the compass rose updates as you walk. Close it with
+    // Esc, the ✕, or a click on empty map space (`ActivatePane` clears it).
     if state.room_panel.is_some() && key.modifiers == KeyModifiers::NONE
-        && matches!(key.code, KeyCode::Esc | KeyCode::Enter) {
+        && matches!(key.code, KeyCode::Esc) {
             return KeyResolve::Action(Action::CloseRoomPanel);
         }
 
@@ -2105,8 +2111,12 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.room_panel = Some(RoomPanel { id, mode: RoomPanelMode::Info });
             state.selected_room = Some(id);
             state.show_inspector = false;
-            // Switch to Map focus so the selected room is rendered as selected (not dimmed).
-            state.focus = Focus::Map;
+            // Focus deliberately STAYS on the story pane. These are corner overlays
+            // you read while you keep playing: taking map focus made every letter a
+            // map command (so typing reached nothing) and dimmed the story pane on
+            // top of that. The selected-room highlight does not need focus —
+            // `render/map.rs` reads only `selected_room` — so the clicked room still
+            // draws as selected. Tab to the map when you want to nudge or step rooms.
         }
 
         Action::ShowRoomDiagnostics(id) => {
@@ -2114,8 +2124,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.room_panel = Some(RoomPanel { id, mode: RoomPanelMode::Diagnostics });
             state.selected_room = Some(id);
             state.show_inspector = true;
-            // Switch to Map focus so the selected room is rendered as selected (not dimmed).
-            state.focus = Focus::Map;
+            // Focus stays on the story pane — see `ShowRoomInfo` above.
         }
 
         Action::CloseRoomPanel => {
@@ -5379,24 +5388,30 @@ mod tests {
     }
 
     #[test]
-    fn show_room_info_sets_focus_to_map() {
-        // ShowRoomInfo should switch focus to Map so the room is rendered as selected.
+    fn show_room_info_keeps_story_focus_so_you_can_keep_typing() {
+        // Opening a room panel used to hand the keyboard to the map, which made
+        // every letter a map command and dimmed the story pane — so you could not
+        // type while reading the panel. The room still selects; focus does not move.
         let mut s = AppState::default(); // starts as Focus::Game
         assert_eq!(s.focus, Focus::Game);
         let mut m = Mapper::default();
         apply_action(Action::ShowRoomInfo(1), &mut s, &mut m);
-        assert_eq!(s.focus, Focus::Map, "ShowRoomInfo must set focus to Map");
-        assert_eq!(s.selected_room, Some(1));
+        assert_eq!(s.focus, Focus::Game, "ShowRoomInfo must NOT steal keyboard focus");
+        assert_eq!(s.selected_room, Some(1), "the room is still selected for rendering");
+        // And a letter now reaches the story prompt rather than the map.
+        assert!(
+            matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::InputChar('n')),
+            "with the panel open a letter must type, not drive the map"
+        );
     }
 
     #[test]
-    fn show_room_diagnostics_sets_focus_to_map() {
-        // ShowRoomDiagnostics should switch focus to Map so the room renders selected.
+    fn show_room_diagnostics_keeps_story_focus() {
         let mut s = AppState::default(); // starts as Focus::Game
         let mut m = Mapper::default();
         apply_action(Action::ShowRoomDiagnostics(2), &mut s, &mut m);
-        assert_eq!(s.focus, Focus::Map, "ShowRoomDiagnostics must set focus to Map");
-        assert_eq!(s.selected_room, Some(2));
+        assert_eq!(s.focus, Focus::Game, "ShowRoomDiagnostics must NOT steal keyboard focus");
+        assert_eq!(s.selected_room, Some(2), "the room is still selected for rendering");
     }
 
     // ── Leaf 1: ToggleMap ─────────────────────────────────────────────────────
@@ -7175,16 +7190,26 @@ mod tests {
     // ── Task 5: read-only / single-button panels ──────────────────────────────
 
     #[test]
-    fn room_panel_enter_closes() {
+    fn room_panel_enter_submits_and_leaves_the_panel_open() {
         use crate::state::{RoomPanel, RoomPanelMode};
-        let mut s = AppState::default();
-        s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
-        let a = key_to_action(&s, key(KeyCode::Enter));
-        assert!(
-            matches!(a, Action::CloseRoomPanel),
-            "Enter must close the room panel (got {:?})",
-            a
-        );
+        // Enter used to close the panel, on the since-expired assumption that a
+        // read-only panel meant no text input underneath it. It submits now, so the
+        // rose keeps updating as you walk. Esc, the ✕, or a click on empty map space
+        // are the ways out.
+        for mode in [RoomPanelMode::Info, RoomPanelMode::Diagnostics] {
+            let mut s = AppState::default();
+            s.room_panel = Some(RoomPanel { id: 1, mode });
+            let a = key_to_action(&s, key(KeyCode::Enter));
+            assert!(
+                matches!(a, Action::SubmitCommand(_)),
+                "Enter must submit the story command, not close the panel (got {a:?})"
+            );
+            // Esc remains the keyboard close.
+            assert!(
+                matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomPanel),
+                "Esc must still close the panel"
+            );
+        }
     }
 
     #[test]

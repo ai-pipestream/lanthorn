@@ -10,7 +10,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use super::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
+use super::dialog::{DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use super::draw_str_clipped;
 
 // Direction display labels (cardinal + diagonal + portal).
@@ -95,13 +95,15 @@ pub fn draw_room_info(
     let panel = Rect::new(map_area.x, map_area.y, panel_w, panel_h);
 
     // Render via shared dialog chrome (positioned at the computed rect).
-    let ok_btn = DialogButton { id: ButtonId::Ok, label: "OK" };
+    // No buttons: this is a corner overlay you read while you keep playing, not a
+    // modal to dismiss, and an OK button implied otherwise. Closing is the ✕, Esc,
+    // or a click on empty map space.
     let spec = DialogSpec {
         title: " Room Info ",
         placement: Placement::Positioned(panel),
-        buttons: &[ok_btn],
+        buttons: &[],
         show_close: true,
-        default: Some(ButtonId::Ok),
+        default: None,
         focus: None,
         field: None,
     };
