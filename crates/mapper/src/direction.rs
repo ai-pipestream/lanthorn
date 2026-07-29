@@ -53,15 +53,23 @@ pub fn is_diagonal(d: Direction) -> bool {
     matches!(d, Direction::NE | Direction::NW | Direction::SE | Direction::SW)
 }
 
-/// The directions a room can be asked "have you tried this way?" about (SQ-0391): the four
-/// CARDINALS, in reading order.
+/// The directions a room can be asked "have you tried this way?" about (SQ-0391): all eight
+/// compass points plus Up and Down.
 ///
-/// Deliberately not all eight. Marking every compass point put a `?` on all four box corners as
-/// well as the edge midpoints, which erased the outline — the markers stopped reading as exits
-/// and started reading as the border itself. Four leaves the box intact and still answers the
-/// question, since a game with diagonal exits almost always has cardinal ones too. Up/Down/In/Out
-/// are excluded for a different reason: they are not part of the rose a player scans.
-pub const UNTRIED_DIRS: [Direction; 4] = [Direction::N, Direction::E, Direction::S, Direction::W];
+/// In/Out are excluded — they are not part of the rose a player scans, and a game that has them
+/// usually has one obvious way in.
+pub const UNTRIED_DIRS: [Direction; 10] = [
+    Direction::N,
+    Direction::NE,
+    Direction::E,
+    Direction::SE,
+    Direction::S,
+    Direction::SW,
+    Direction::W,
+    Direction::NW,
+    Direction::Up,
+    Direction::Down,
+];
 
 pub fn grid_offset(d: Direction) -> Option<(i32, i32)> {
     match d {

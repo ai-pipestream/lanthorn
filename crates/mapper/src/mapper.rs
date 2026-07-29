@@ -409,12 +409,12 @@ mod untried_tests {
     fn a_direction_that_goes_nowhere_still_counts_as_tried() {
         let mut m = Mapper::default();
         m.observe(1, "Hall", None);
-        assert_eq!(m.graph.untried(1).len(), 4, "a fresh room has all four cardinals untried");
+        assert_eq!(m.graph.untried(1).len(), 10, "a fresh room has all ten ways untried");
 
         // A move that WORKS is tried, and so is the edge it minted.
         m.observe(2, "Cave", Some(Direction::N));
         assert!(!m.graph.untried(1).contains(&Direction::N), "north led somewhere");
-        assert_eq!(m.graph.untried(1).len(), 3);
+        assert_eq!(m.graph.untried(1).len(), 9);
 
         // A move that goes NOWHERE — same room back — is the case worth recording: without it the
         // map would keep offering a wall forever.

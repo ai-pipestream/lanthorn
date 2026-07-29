@@ -1795,13 +1795,16 @@ fn mid_precedence(dir: Direction) -> u8 {
 /// `(glyph_char, dest_label)` pair chosen with `mid_precedence` for the shared mid slot.
 type PortalSlots<'a> = [Option<(char, Option<&'a str>)>; 3];
 
-/// Mark each compass direction never tried from a room with a `?` on the box outline, laid out as
-/// a compass rose: N at top centre, NE at the top-right corner, E at the right centre, and so on
-/// (SQ-0391).
+/// Mark each direction never tried from a room on the box outline, laid out as a compass rose:
+/// N at top centre, NE at the top-right corner, E at the right centre, and so on, with a
+/// lower-case `u`/`d` beside the N/S marks for an unexplored way up or down (SQ-0391).
 ///
 /// Off by default and reached with `toggle-untried-exits` — it answers "where haven't I been?",
-/// which is a question you ask now and then rather than one worth eight glyphs per room all the
-/// time. Placement is by MEANING, not by where a connector happens to sit: a `?` in the top-right
+/// which is a question you ask now and then rather than one worth ten glyphs per room all the
+/// time. Because it is transient, the diagonals sit ON the box corners: that is where a reader
+/// looks for them, and the outline coming back the moment you toggle it off costs nothing.
+///
+/// Placement is by MEANING, not by where a connector happens to sit: a mark in the top-right
 /// corner is the north-east you have not walked, wherever this room's other passages leave from.
 ///
 /// Drawn before the arrowheads, so a direction that turns out to have a passage keeps its arrow.
@@ -1815,21 +1818,24 @@ fn draw_untried_exits(
 ) {
     let (off_x, off_y) = offset;
     let style = state.colors.theme.get("map.untried_exit").style;
-    let glyph = state.symbols.portal.unknown;
+    let unknown = state.symbols.portal.unknown;
     for room in &rm.rooms {
         let Some(&rect) = placed.get(&room.id) else { continue };
         let (bx, by) = (rect.x, rect.y);
         for dir in &room.untried {
-            // The rose, on the outline: corners for the diagonals, edge centres for the cardinals.
-            let (dx, dy) = match *dir {
-                Direction::N => (BOX_W / 2, 0),
-                Direction::NE => (BOX_W - 1, 0),
-                Direction::E => (BOX_W - 1, BOX_H / 2),
-                Direction::SE => (BOX_W - 1, BOX_H - 1),
-                Direction::S => (BOX_W / 2, BOX_H - 1),
-                Direction::SW => (0, BOX_H - 1),
-                Direction::W => (0, BOX_H / 2),
-                Direction::NW => (0, 0),
+            // The rose, on the outline: corners for the diagonals, edge centres for the cardinals,
+            // and the vertical pair tucked in beside N and S where they read as a matched set.
+            let (dx, dy, glyph) = match *dir {
+                Direction::NW => (0, 0, unknown),
+                Direction::N => (BOX_W / 2, 0, unknown),
+                Direction::NE => (BOX_W - 1, 0, unknown),
+                Direction::W => (0, BOX_H / 2, unknown),
+                Direction::E => (BOX_W - 1, BOX_H / 2, unknown),
+                Direction::SW => (0, BOX_H - 1, unknown),
+                Direction::S => (BOX_W / 2, BOX_H - 1, unknown),
+                Direction::SE => (BOX_W - 1, BOX_H - 1, unknown),
+                Direction::Up => (BOX_W / 2 + 1, 0, 'u'),
+                Direction::Down => (BOX_W / 2 + 1, BOX_H - 1, 'd'),
                 _ => continue,
             };
             put_char(buf, bx + dx + off_x, by + dy + off_y, glyph, style, area);

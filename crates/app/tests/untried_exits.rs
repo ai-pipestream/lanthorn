@@ -57,16 +57,25 @@ fn a_direction_that_bounced_off_a_wall_is_not_offered_again() {
 }
 
 #[test]
-fn marks_appear_on_the_cardinals_and_never_over_a_real_exit() {
+fn marks_cover_the_whole_rose_and_never_replace_a_real_exit() {
     let m = fixture();
     let text = render_with(true, &m.graph);
     assert!(text.contains('?'), "the overlay marks what is untried");
     // #1 walked north, so its top border carries the connector's arrowhead, not a `?`.
     let arrows = AppState::default().symbols.arrows;
     assert!(text.contains(arrows.north), "the walked N passage keeps its arrowhead");
-    // Box corners must survive: marking all eight compass points erased the outline, which is
-    // why the overlay is cardinals-only.
-    for corner in ['╭', '╮', '╰', '╯'] {
-        assert!(text.contains(corner), "the box outline survives the overlay ({corner} missing)");
-    }
+    // The vertical pair rides beside N and S as lower-case letters, so an unexplored staircase
+    // reads differently from an unexplored compass direction at a glance.
+    assert!(text.contains('u'), "an unexplored way up is marked");
+    assert!(text.contains('d'), "and an unexplored way down");
+    // The diagonals sit ON the corners: the overlay is transient, so trading the outline for a
+    // full rose is the deliberate bargain (the box comes straight back when you toggle it off).
+    assert!(
+        !render_with(true, &m.graph).lines().any(|l| l.contains('╭')),
+        "with the overlay ON the corners carry diagonal marks"
+    );
+    assert!(
+        render_with(false, &m.graph).contains('╭'),
+        "and the outline returns intact the moment it is off"
+    );
 }

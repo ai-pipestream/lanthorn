@@ -63,11 +63,13 @@ The map is a place you can move through, not just a picture.
   is one-way or the way back is some other direction entirely. `peel-layer <direction>`
   names the seam yourself; with neither, it falls back to hunting for a stairway or
   other portal to cut at.
-- **Untried exits** — `toggle-untried-exits` (leader `u`) marks each cardinal direction you have
-  never typed in a room with a `?` on its border, so a half-explored map shows you where to go
-  next at a glance. A direction that bounced off a wall counts as tried — the map stops nagging
-  about it — and one that actually led somewhere keeps its arrow instead. Off by default, and
-  styled by the `map.untried_exit` selector.
+- **Untried exits** — `toggle-untried-exits` (leader `u`) draws a compass rose of everything you
+  have *not* tried from each room: a `?` on all eight compass points — diagonals on the box
+  corners — plus a lower-case `u` or `d` beside the north and south marks for an unexplored way
+  up or down. A half-explored map then shows where to go next at a glance. A direction that
+  bounced off a wall counts as tried, so the map stops nagging about it, and one that actually
+  led somewhere keeps its arrow. It's a transient overlay — off by default, and the box outlines
+  come straight back when you toggle it off — styled by the `map.untried_exit` selector.
 - **Room inspector** — `toggle-inspector` opens an overlay for the selected room:
   its id, name, layer, position, and the per-edge layout constraints, so you can
   see *why* a room landed where it did.
