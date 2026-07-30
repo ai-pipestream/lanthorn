@@ -220,10 +220,24 @@ impl PictSource {
     }
 
     /// Is this Pict declared adaptive by the container's `APal` chunk (§11.3)?
-    /// Only adaptive pictures follow the Current Palette; a base picture carries
-    /// its own and is redrawn by the game itself.
     pub fn is_adaptive(&self, resnum: u32) -> bool {
         self.adaptive.contains(&resnum)
+    }
+
+    /// Decode `resnum` under the CURRENT palette WITHOUT establishing a new one —
+    /// the replay path (SQ-0567).
+    ///
+    /// A v6 screen holds palette indices, so once a picture is on it, it displays
+    /// through whatever palette is loaded now — base pictures included, not just the
+    /// adaptive ones. Replaying a window therefore decodes every picture the same way
+    /// an adaptive draw is decoded: the live PLTE spliced in, its own ignored. Calling
+    /// `image` here instead would let each replayed base picture reload the palette
+    /// and undo the change being replayed for.
+    pub fn image_under_current_palette(&mut self, resnum: u32) -> Option<Arc<DynamicImage>> {
+        if self.adaptive.is_empty() && self.current_plte.is_none() {
+            return self.get(resnum).cloned();
+        }
+        self.adaptive_image(resnum)
     }
 
     /// The Blorb `Reso` standard window `(width, height)` in pixels — the

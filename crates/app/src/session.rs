@@ -513,17 +513,27 @@ pub struct GameSession {
     /// transcript. Cleared for a window on its canvas-clear (number-0 erase).
     /// (SQ-0461 decision 3)
     last_content_pic: std::collections::HashMap<u8, u16>,
-    /// Adaptive pictures (Blorb `APal`, §11.3) currently ON SCREEN, in draw order:
-    /// `(window, resnum, canvas x, canvas y)`.
+    /// Ordered display list per window canvas: every picture drawn and every region
+    /// erased, in the order it happened.
     ///
-    /// An adaptive picture is plotted with the Current Palette rather than its own,
-    /// so when a later base draw establishes a different palette everything already
-    /// plotted from this list is showing stale colours and has to be replotted.
-    /// Arthur is the case that needs it: its whole frame is three adaptive pictures
-    /// drawn ONCE at boot, so without replotting the frame keeps the churchyard's
-    /// palette for the rest of the game — staying blue in the brown-palette church,
-    /// and not inverting when the gravestone scene swaps the blues. (SQ-0567)
-    adaptive_on_screen: Vec<(u8, u16, i32, i32)>,
+    /// This exists to make a palette change behave like real hardware. A v6 screen is
+    /// a framebuffer of palette INDICES, so loading a new palette recolours
+    /// everything already on it, in place, without disturbing what covers what.
+    /// babelmap bakes RGBA at draw time, so the only faithful way to recolour is to
+    /// replay the window from scratch under the new palette — which needs the erases
+    /// as well as the draws, and needs them in order. (SQ-0567)
+    ///
+    /// Arthur is the story that needs it twice over: its frame is three adaptive
+    /// pictures drawn once at boot (so without a replay it keeps the churchyard's
+    /// palette all game), and its map screen draws a full-screen background OVER that
+    /// frame (so a replay that ignores order paints the frame back on top and hides
+    /// the map).
+    display_ops: std::collections::HashMap<u8, Vec<V6Op>>,
+    /// Windows whose display list overflowed [`V6_OPS_CAP`]. Replay is skipped for
+    /// them rather than replayed from a truncated list, which would invent a screen
+    /// that never existed. They keep the pre-SQ-0567 behaviour: stale palette, right
+    /// layering.
+    unreplayable: std::collections::HashSet<u8>,
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
@@ -625,7 +635,8 @@ impl GameSession {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
-            adaptive_on_screen: Vec::new(),
+            display_ops: std::collections::HashMap::new(),
+            unreplayable: std::collections::HashSet::new(),
         })
     }
 
@@ -928,7 +939,7 @@ impl GameSession {
         // has to be replotted (Blorb §11.3, SQ-0567). Checked once per batch: with
         // several palette changes in one turn only the final palette is visible.
         if self.palette_gen() != palette_before {
-            self.replot_adaptive_pictures();
+            self.replay_under_current_palette();
         }
         events
     }
@@ -963,36 +974,13 @@ impl GameSession {
     /// erases windows 2/5/6 — never 7 — so that background has to disappear from
     /// window 7's canvas or it sits under every later screen for the rest of the game.
     ///
-    /// A retained adaptive draw the rect COVERS ENTIRELY is gone from the screen and
-    /// stops being replotted on a palette change (SQ-0567 + SQ-0568 interact here):
-    /// Arthur's map screen erases the side-strip windows, which is what removes the
-    /// picture border's vertical pieces, and then draws a base picture that changes
-    /// the palette. Without this the replot put those strips straight back, so the
-    /// border stayed visible over the map. A partially erased picture is still on
-    /// screen and is left retained.
+    /// The erase is recorded in each affected window's display list too, so a later
+    /// palette replay reproduces it rather than restoring pixels the game removed.
     fn erase_screen_rect(&mut self, rect: (u32, u32, u32, u32), skip: Option<u8>) {
         let (rx, ry, rw, rh) = rect;
         if rw == 0 || rh == 0 {
             return;
         }
-        let retained = std::mem::take(&mut self.adaptive_on_screen);
-        self.adaptive_on_screen = retained
-            .into_iter()
-            .filter(|&(win, number, dx, dy)| {
-                let Some((wx, wy, _, _)) = self.window_screen_rect(win) else { return true };
-                let Some((pw, ph)) = self
-                    .pict_source
-                    .as_mut()
-                    .and_then(|s| s.dims(number as u32))
-                    .map(|(w, h)| (w * V6_ART_SCALE, h * V6_ART_SCALE))
-                else {
-                    return true;
-                };
-                let (px, py) = (wx + dx.max(0) as u32, wy + dy.max(0) as u32);
-                let covered = px >= rx && py >= ry && px + pw <= rx + rw && py + ph <= ry + rh;
-                !covered
-            })
-            .collect();
         let wins: Vec<u8> = self.pictures_canvas.keys().copied().collect();
         for win in wins {
             if Some(win) == skip {
@@ -1012,34 +1000,88 @@ impl GameSession {
             if x1 <= x0 || y1 <= y0 {
                 continue;
             }
+            let (ex, ey, ew, eh) = ((x0 - wx) as i32, (y0 - wy) as i32, x1 - x0, y1 - y0);
             let canvas = self.pictures_canvas.get_mut(&win).expect("checked just above");
             // NOT a z_seq bump: an erase is not a draw, and re-stamping the layer
             // here would reorder the composite for a window nothing was drawn into.
-            canvas.erase_rect((x0 - wx) as i32, (y0 - wy) as i32, x1 - x0, y1 - y0);
+            canvas.erase_rect(ex, ey, ew, eh);
+            self.record_op(win, V6Op::Erase { dx: ex, dy: ey, w: ew, h: eh });
         }
     }
 
-    /// Re-plot every adaptive picture still on screen under the Current Palette,
-    /// in the order it was originally drawn (SQ-0567).
+    /// Append an op to a window's display list, dropping the window out of replay if
+    /// it overflows the cap. A whole-canvas op supersedes everything before it, so the
+    /// list resets there — which is what keeps a screen-swapping story (Arthur) short.
+    fn record_op(&mut self, win: u8, op: V6Op) {
+        let full = self
+            .pictures_canvas
+            .get(&win)
+            .map(|c| (c.img.width(), c.img.height()))
+            .is_some_and(|(cw, ch)| match op {
+                V6Op::Erase { dx, dy, w, h } => dx <= 0 && dy <= 0 && w >= cw && h >= ch,
+                V6Op::Draw { .. } => false,
+            });
+        let ops = self.display_ops.entry(win).or_default();
+        if full {
+            ops.clear();
+            self.unreplayable.remove(&win);
+        }
+        if ops.len() >= V6_OPS_CAP {
+            self.unreplayable.insert(win);
+            return;
+        }
+        ops.push(op);
+    }
+
+    /// Replay every window's display list under the Current Palette (SQ-0567).
     ///
-    /// Decoding goes through the same `image` path as a real draw, so each one is
-    /// re-decoded with the new palette spliced into its PLTE. Re-plotting cannot
-    /// restore layering against BASE pictures drawn between these — an adaptive
-    /// overlay that something was drawn over comes back on top. That is the right
-    /// trade for what adaptive pictures are actually used for: full-screen frames
-    /// and border art that live in their own window, above nothing.
-    fn replot_adaptive_pictures(&mut self) {
-        let draws = self.adaptive_on_screen.clone();
-        for (window, number, dx, dy) in draws {
-            let Some(canvas) = self.pictures_canvas.get(&window) else { continue };
-            let (pw, ph) = (canvas.img.width(), canvas.img.height());
-            let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(number as u32)) else {
+    /// The canvas is cleared and rebuilt op by op, so the result is what the screen
+    /// would look like if the new palette had been loaded all along: every picture
+    /// recoloured, every erase still erased, and — the part a plain replot got wrong —
+    /// everything covering what it covered before. Arthur's map background is drawn
+    /// over its frame, and must stay over it.
+    ///
+    /// Decoding goes through [`PictSource::image_under_current_palette`], which
+    /// splices the live palette into each picture without letting it establish a new
+    /// one: on real hardware the framebuffer holds indices, so a picture already
+    /// drawn shows through whatever palette is loaded now, base or adaptive alike.
+    fn replay_under_current_palette(&mut self) {
+        let mut wins: Vec<u8> = self.display_ops.keys().copied().collect();
+        wins.sort();
+        for win in wins {
+            if self.unreplayable.contains(&win) {
+                continue;
+            }
+            let Some(ops) = self.display_ops.get(&win).cloned() else { continue };
+            let Some((cw, ch)) = self.pictures_canvas.get(&win).map(|c| (c.img.width(), c.img.height()))
+            else {
                 continue;
             };
-            let img = v6_scaled_art(&img);
-            let canvas = self.pictures_canvas.get_mut(&window).expect("checked above");
-            canvas.draw_image_clipped(&img, dx, dy, (pw, ph));
-            canvas.z_seq = crate::graphics::next_draw_seq();
+            if let Some(c) = self.pictures_canvas.get_mut(&win) {
+                c.erase_rect(0, 0, cw, ch);
+            }
+            for op in ops {
+                match op {
+                    V6Op::Erase { dx, dy, w, h } => {
+                        if let Some(c) = self.pictures_canvas.get_mut(&win) {
+                            c.erase_rect(dx, dy, w, h);
+                        }
+                    }
+                    V6Op::Draw { number, dx, dy } => {
+                        let Some(img) = self
+                            .pict_source
+                            .as_mut()
+                            .and_then(|s| s.image_under_current_palette(number as u32))
+                        else {
+                            continue;
+                        };
+                        let img = v6_scaled_art(&img);
+                        if let Some(c) = self.pictures_canvas.get_mut(&win) {
+                            c.draw_image_clipped(&img, dx, dy, (cw, ch));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -1065,8 +1107,9 @@ impl GameSession {
             // The window's canvas was cleared, so a later redraw of a content
             // splash into it is genuinely new — forget the dedupe key. (SQ-0461)
             self.last_content_pic.remove(&ev.window);
-            // Nothing of this window survives to be replotted on a palette change.
-            self.adaptive_on_screen.retain(|(w, ..)| *w != ev.window);
+            // Nothing of this window survives to be replayed.
+            self.display_ops.remove(&ev.window);
+            self.unreplayable.remove(&ev.window);
             // The erased region belongs to the shared SCREEN, so take it out of
             // every other window's canvas too (SQ-0568).
             if let Some(rect) = self.window_screen_rect(ev.window) {
@@ -1166,9 +1209,7 @@ impl GameSession {
             let ew = ew.min(pw.saturating_sub(dx.max(0) as u32));
             let eh = eh.min(ph.saturating_sub(dy.max(0) as u32));
             canvas.erase_rect(dx, dy, ew, eh);
-            // Erased: it is no longer on screen to replot. (SQ-0567)
-            self.adaptive_on_screen
-                .retain(|&(w, n, x, y)| (w, n, x, y) != (ev.window, ev.number, dx, dy));
+            self.record_op(ev.window, V6Op::Erase { dx, dy, w: ew, h: eh });
             // …and the same region of the shared screen (SQ-0568).
             screen_erase = Some((dx.max(0) as u32, dy.max(0) as u32, ew, eh));
         } else if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
@@ -1178,16 +1219,10 @@ impl GameSession {
             let img = v6_scaled_art(&img);
             canvas.draw_image_clipped(&img, dx, dy, (pw, ph));
             canvas.z_seq = crate::graphics::next_draw_seq();
-            // Remember adaptive draws so a later palette change can replot them
-            // (SQ-0567). Keyed by position as well as number: the same overlay is
-            // legally drawn at several places, and a redraw in place must not
-            // accumulate duplicates.
-            if self.pict_source.as_ref().is_some_and(|s| s.is_adaptive(ev.number as u32)) {
-                let key = (ev.window, ev.number, dx, dy);
-                if !self.adaptive_on_screen.contains(&key) {
-                    self.adaptive_on_screen.push(key);
-                }
-            }
+            // Every picture goes in the display list, base or adaptive: under a new
+            // palette they ALL recolour, and their order is what a replay has to
+            // reproduce. (SQ-0567)
+            self.record_op(ev.window, V6Op::Draw { number: ev.number, dx, dy });
             // SQ-0461 decision 3: a large CONTENT-art draw into a graphics window
             // (Shogun's title splash) ALSO anchors a transcript inline band, so
             // the frameless mode — which drops graphics windows — still shows it.
@@ -1979,6 +2014,18 @@ impl GameSession {
         self.is_terminator(z as u16).then_some(z)
     }
 }
+
+/// One entry in a v6 window's display list — a picture drawn, or a region erased,
+/// in window-canvas coordinates (SQ-0567).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum V6Op {
+    Draw { number: u16, dx: i32, dy: i32 },
+    Erase { dx: i32, dy: i32, w: u32, h: u32 },
+}
+
+/// Longest display list kept per window. Comfortably above any real screen (Arthur's
+/// busiest is a handful of ops) while bounding a story that redraws forever.
+const V6_OPS_CAP: usize = 512;
 
 /// Mirror a Z-machine's screen into the neutral [`ScreenModel`].
 ///
@@ -3945,7 +3992,8 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
-            adaptive_on_screen: Vec::new(),
+            display_ops: std::collections::HashMap::new(),
+            unreplayable: std::collections::HashSet::new(),
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -3997,7 +4045,8 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
-            adaptive_on_screen: Vec::new(),
+            display_ops: std::collections::HashMap::new(),
+            unreplayable: std::collections::HashSet::new(),
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -4036,7 +4085,8 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
-            adaptive_on_screen: Vec::new(),
+            display_ops: std::collections::HashMap::new(),
+            unreplayable: std::collections::HashSet::new(),
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -4069,7 +4119,8 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
-            adaptive_on_screen: Vec::new(),
+            display_ops: std::collections::HashMap::new(),
+            unreplayable: std::collections::HashSet::new(),
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -4115,7 +4166,8 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
-            adaptive_on_screen: Vec::new(),
+            display_ops: std::collections::HashMap::new(),
+            unreplayable: std::collections::HashSet::new(),
         };
         // Window 7 has a rendered picture (a canvas sized to its pixel dims).
         sess.pictures_canvas.insert(7, crate::graphics::Canvas::new(64, 48));
@@ -4203,7 +4255,8 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
-            adaptive_on_screen: Vec::new(),
+            display_ops: std::collections::HashMap::new(),
+            unreplayable: std::collections::HashSet::new(),
         };
         let mut canvas = crate::graphics::Canvas::new(64, 48);
         canvas.z_seq = 42;
@@ -4246,7 +4299,8 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
-            adaptive_on_screen: Vec::new(),
+            display_ops: std::collections::HashMap::new(),
+            unreplayable: std::collections::HashSet::new(),
         };
         // The erase path allocates the canvas even without a resolved image.
         // (number != 0: a real erase_picture — number 0 is the erase_window

@@ -25,6 +25,7 @@
 
 use std::path::PathBuf;
 
+use app::engine::{Engine, WinNode};
 use app::graphics::PictSource;
 use app::session::{GameSession, InputKind};
 
@@ -124,4 +125,89 @@ fn arthur_frame_follows_the_scene_palette() {
             "{label}: but a different blue — the gravestone scene swaps the palette"
         );
     }
+}
+
+/// Composite the v6 chrome exactly as the hybrid and raster renderers do, so a test
+/// sees the pixels a player sees.
+fn chrome(session: &mut GameSession) -> image::RgbaImage {
+    use image::Rgba;
+    let model = session.screen();
+    let WinNode::Layered(items) = model.root.clone() else { panic!("v6 stories build a Layered root") };
+    let native = app::render::v6_layout::native_extent(&items);
+    let layout = app::render::v6_layout::classify_windows(&items);
+    app::render::v6_layout::build_chrome_canvas(
+        &layout.chrome,
+        native,
+        Rgba([200, 200, 200, 255]),
+        Rgba([0, 0, 0, 255]),
+        &app::colors::ColorScheme::terminal_default(),
+    )
+}
+
+fn fkey(session: &mut GameSession, code: u8) {
+    if matches!(session.pending_input(), InputKind::Line) {
+        session.submit_line_with_terminator("", code);
+    } else {
+        session.submit_char(code);
+    }
+}
+
+/// Fraction of the graphics band taken by its single most common colour — a cheap
+/// read on whether the band shows the frame's dense ornament or the map's flat
+/// parchment, without pinning individual pixels.
+fn band_flatness(img: &image::RgbaImage) -> f64 {
+    let mut counts: std::collections::HashMap<[u8; 4], u64> = std::collections::HashMap::new();
+    let mut total = 0u64;
+    for y in 0..192u32 {
+        for x in 0..640u32 {
+            *counts.entry(img.get_pixel(x, y).0).or_default() += 1;
+            total += 1;
+        }
+    }
+    counts.values().copied().max().unwrap_or(0) as f64 / total.max(1) as f64
+}
+
+/// SQ-0567: recolouring for a new palette must not disturb what covers what.
+///
+/// Arthur's F2 map screen draws a full-screen parchment background into window 7 —
+/// the same window its frame lives in — and that background is a BASE picture, so it
+/// changes the palette. A replay that simply re-plots the adaptive frame afterwards
+/// puts the frame back on top and hides the map: the screen showed the ornate border
+/// with a flat fill in the middle and no map at all. Replaying the window's draws in
+/// their original order keeps the background over the frame, where the game put it.
+///
+/// Measured on the real story: the picture screen's band is 34% its commonest colour
+/// (dense ornament), the map's is 90% (flat parchment). With the frame replotted on
+/// top the map band looked like the picture screen's again.
+#[test]
+fn a_palette_replay_keeps_a_later_background_above_the_frame() {
+    let Some(mut session) = arthur_at_churchyard(true) else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+    let picture = band_flatness(&chrome(&mut session));
+    assert!(picture < 0.6, "the picture screen's band is dense frame art, got {picture:.3}");
+
+    fkey(&mut session, 134); // the map
+    let map_img = chrome(&mut session);
+    let map = band_flatness(&map_img);
+    assert!(
+        map > 0.8,
+        "the map's parchment background covers the frame — the frame must NOT be \
+         replotted over it. Band flatness {map:.3} (the picture screen reads {picture:.3})"
+    );
+    // ...but not a bare wash: the room marker and compass rose reach the composite.
+    let colours: std::collections::HashSet<[u8; 4]> = (0..192)
+        .flat_map(|y| (0..640).map(move |x| (x, y)))
+        .map(|(x, y)| map_img.get_pixel(x, y).0)
+        .collect();
+    assert!(colours.len() > 3, "the map band carries content, got {} colours", colours.len());
+
+    // Back to the picture screen: the dense frame art returns.
+    fkey(&mut session, 133);
+    let back = band_flatness(&chrome(&mut session));
+    assert!(
+        (back - picture).abs() < 1e-9,
+        "the picture screen is restored exactly ({back:.3} vs {picture:.3})"
+    );
 }
