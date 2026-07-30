@@ -2820,6 +2820,20 @@ impl Model {
         self.win(win).and_then(|w| w.char_req)
     }
 
+    /// Update how many characters are currently in a pending line request's buffer
+    /// (Glk §4.2 `initlen`). The host keeps this in step with the player's
+    /// in-progress edits, so `glk_cancel_line_event` reports what has really been
+    /// typed rather than whatever the buffer last held. `false` if no request.
+    pub fn set_line_initlen(&mut self, win: u32, n: u32) -> bool {
+        match self.win_mut(win).and_then(|w| w.line_req.as_mut()) {
+            Some(r) => {
+                r.initlen = n.min(r.maxlen);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Take (and clear) the pending line request on `win`.
     pub fn take_line_request(&mut self, win: u32) -> Option<LineReq> {
         self.win_mut(win).and_then(|w| w.line_req.take())

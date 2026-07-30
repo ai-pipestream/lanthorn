@@ -295,18 +295,31 @@ pub(crate) fn refresh_engine_input(
 ) -> bool {
     let mut redraw = false;
 
-    // A Glulx game that pre-loaded its line-input buffer (Glk spec §4.2 `initlen`)
-    // wants that text ALREADY IN the input line, editable — advent.blb's toolbar
-    // primes a verb this way, so clicking Examine must leave "Examine " at the
-    // prompt for the player to finish. Take it one-shot per request and replace
-    // the line: the game cancelled any half-typed input before re-requesting, so
-    // its prefill is the authoritative content. (SQ-0562)
+    // Each new Glulx line-input request says what the input line should now hold
+    // (Glk spec §4.2 `initlen`): text the game pre-loaded, editable, or nothing.
+    // advent.blb's toolbar needs both — clicking Examine must leave "Examine " at
+    // the prompt for the player to finish, while clicking a verb over an
+    // already-typed noun runs that command itself and asks again empty, which must
+    // not strand the noun at the prompt. Either way the game has just consumed or
+    // cancelled the previous line, so its answer is authoritative and replaces
+    // whatever the app was showing. (SQ-0562, SQ-0565)
     if let Some(text) = crate::engine_helpers::glulx_session_opt_mut(session)
-        .and_then(|gs| gs.take_line_prefill())
+        .and_then(|gs| gs.take_line_seed())
     {
-        state.input.clear();
-        state.input.insert_str(&text);
-        redraw = true;
+        if state.input.value != text {
+            state.input.clear();
+            state.input.insert_str(&text);
+            redraw = true;
+        }
+    }
+    // ...and keep the game's buffer holding what the player has actually typed.
+    // Glk lends the interpreter that buffer for the whole request so a cancel can
+    // report the partial input; advent.blb's toolbar cancels on every button press
+    // and preserves what it finds there, so a stale buffer made every later button
+    // re-insert the FIRST verb — text the player may have already deleted. Written
+    // after the seed above so a fresh prefill lands in the buffer too. (SQ-0565)
+    if let Some(gs) = crate::engine_helpers::glulx_session_opt_mut(session) {
+        gs.sync_line_input(&state.input.value);
     }
 
     // Update char_mode flag so the renderer hides the prompt during read_char.

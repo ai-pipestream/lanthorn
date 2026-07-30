@@ -90,20 +90,90 @@ fn advent_toolbar_verb_buttons_prefill_the_input_line() {
     ] {
         let mut sess = boot_advent().expect("story present");
         let _ = sess.take_transcript();
-        let _ = sess.take_line_prefill();
+        let _ = sess.take_line_seed();
         let windows = sess.mouse_windows();
         let (win, _, _) = *windows.first().expect("the toolbar watches for clicks");
         sess.deliver_mouse(win, px, 8);
         let mut got = None;
         for _ in 0..8 {
             sess.deliver_timer();
-            if let Some(p) = sess.take_line_prefill() {
+            if let Some(p) = sess.take_line_seed() {
                 got = Some(p);
                 break;
             }
         }
         assert_eq!(got.as_deref(), Some(want), "button at canvas x={px} primes {want:?}");
     }
+}
+
+/// SQ-0565 regression: the toolbar cancels line input on every button press and
+/// PRESERVES whatever partial input it finds in the buffer. The app used to write
+/// that buffer only at submit time, so it still held the previous prefill — and
+/// every later verb button re-inserted the FIRST verb, text the player may have
+/// already deleted. ("Click Examine, delete the word, click Take → Examine comes
+/// back.") Mirroring the input line into the buffer each pass fixes it.
+///
+/// Also covers the flip side the same rule delivers: with a noun already typed, a
+/// verb button runs the whole command itself and asks for a fresh empty line, which
+/// must not leave the noun stranded at the prompt.
+#[test]
+fn toolbar_verbs_follow_the_edited_input_line_not_a_stale_buffer() {
+    let Some(mut sess) = boot_advent() else {
+        eprintln!("SKIP: no advent.blb");
+        return;
+    };
+    let _ = sess.take_transcript();
+    let _ = sess.take_line_seed();
+
+    /// What the app's run loop does each pass: adopt any new request's seed as the
+    /// input line, then mirror the (possibly player-edited) line back. Returns the
+    /// line the player would now see, plus anything the game printed.
+    fn settle(sess: &mut GlulxSession, input: &mut String) -> String {
+        let mut printed = String::new();
+        for _ in 0..8 {
+            printed.push_str(&sess.deliver_timer().transcript);
+            if let Some(seed) = sess.take_line_seed() {
+                *input = seed;
+                sess.sync_line_input(input);
+                break;
+            }
+            sess.sync_line_input(input);
+        }
+        printed
+    }
+
+    fn click(sess: &mut GlulxSession, px: u32) {
+        let windows = sess.mouse_windows();
+        let (win, _, _) = *windows.first().expect("the toolbar watches for clicks");
+        sess.deliver_mouse(win, px, 8);
+    }
+
+    const EXAMINE: u32 = 295;
+    let mut input = String::new();
+
+    // Prime Examine, then erase it exactly as the player did.
+    click(&mut sess, EXAMINE);
+    settle(&mut sess, &mut input);
+    assert_eq!(input, "Examine ", "the button primes its verb");
+    input.clear();
+    sess.sync_line_input(&input);
+
+    // Every other verb button must now prime ITS OWN verb.
+    for (px, want) in [(327u32, "Take "), (359, "Drop "), (391, "Open "), (423, "Close "), (455, "Read ")] {
+        click(&mut sess, px);
+        settle(&mut sess, &mut input);
+        assert_eq!(input, want, "after erasing, the button at x={px} primes {want:?}");
+        input.clear();
+        sess.sync_line_input(&input);
+    }
+
+    // With a noun typed, the verb button runs the command and leaves a clean prompt.
+    input.push_str("lamp");
+    sess.sync_line_input(&input);
+    click(&mut sess, EXAMINE);
+    let printed = settle(&mut sess, &mut input);
+    assert!(printed.contains("Examine lamp"), "the click ran the whole command: {printed:?}");
+    assert_eq!(input, "", "and the noun is not left stranded at the prompt");
 }
 
 /// SQ-0564: the premise behind caching kitty uploads by canvas CONTENT. Pressing a

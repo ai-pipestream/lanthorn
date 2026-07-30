@@ -277,12 +277,18 @@ pub struct Machine {
     /// structural call, so the trace shows WHERE story text is printed (which
     /// window and whether it's a buffer that accumulates or a grid). (SQ-0405)
     text_run: Option<(u32, &'static str, String)>,
-    /// Text the game pre-loaded into the buffer of its latest line-input request
-    /// (Glk spec §4.2: the first `initlen` characters are "already in the input
-    /// line"). One-shot — the host takes it to seed its own editable input line,
-    /// so a toolbar button that primes a verb ("Examine ", advent.blb) shows the
-    /// partial command instead of an empty prompt. `None` when `initlen` was 0.
-    line_prefill: Option<String>,
+    /// What the host's editable input line should hold for the latest line-input
+    /// request: the `initlen` characters the game pre-loaded into the buffer (Glk
+    /// spec §4.2 — "already in the input line"), or an EMPTY string when it
+    /// pre-loaded nothing. One-shot per request.
+    ///
+    /// `Some("")` is meaningful, not a miss: a fresh request with an empty buffer
+    /// means the previous line is gone — consumed or cancelled — so the host must
+    /// clear its own line too. advent.blb's toolbar relies on both halves: a verb
+    /// button primes "Examine ", and clicking a verb while a noun is typed runs the
+    /// whole command itself and re-requests empty, which must not leave the noun
+    /// stranded at the prompt.
+    line_seed: Option<String>,
     /// Set once execution has ended (outer return or quit/fault).
     pub(crate) halted: bool,
     /// Protected RAM range `(addr, len)` preserved across restore/restoreundo;
@@ -760,7 +766,7 @@ impl Machine {
             trace_screen: false,
             screen_trace: Vec::new(),
             text_run: None,
-            line_prefill: None,
+            line_seed: None,
             halted: false,
             protect: (0, 0),
             undo_stack: Vec::new(),
@@ -4655,7 +4661,7 @@ impl Machine {
 
     /// Record a pending line-input request; diagnose a bad window. When the game
     /// pre-loaded the buffer (`initlen` > 0, Glk spec §4.2) the pre-filled text is
-    /// read out for [`Self::take_line_prefill`] so the host can start its input
+    /// read out for [`Self::take_line_seed`] so the host can start its input
     /// line with it — read HERE, while the buffer still holds what the game just
     /// wrote, rather than lazily later.
     fn glk_request_line(&mut self, win: u32, buf: u32, maxlen: u32, initlen: u32, unicode: bool) {
@@ -4664,7 +4670,8 @@ impl Machine {
                 .push(format!("glk_request_line_event: bad window {win}"));
             return;
         }
-        self.line_prefill = self.read_line_prefill(buf, initlen.min(maxlen), unicode);
+        self.line_seed =
+            Some(self.read_line_prefill(buf, initlen.min(maxlen), unicode).unwrap_or_default());
     }
 
     /// Read `n` characters of pre-filled line input from `buf` — Latin-1 bytes, or
@@ -4683,11 +4690,50 @@ impl Machine {
         (!s.is_empty()).then_some(s)
     }
 
-    /// Take the text the game pre-loaded into its latest line-input request (Glk
-    /// spec §4.2). One-shot: the host seeds its editable input line with this
-    /// exactly once per request, so re-polling never re-inserts it.
-    pub fn take_line_prefill(&mut self) -> Option<String> {
-        self.line_prefill.take()
+    /// Take what the host's input line should hold for the newest line-input
+    /// request, if one has appeared since the last call. One-shot per request, so
+    /// re-polling never re-inserts it. `Some("")` means "start empty" — see
+    /// [`Self::line_seed`].
+    pub fn take_line_seed(&mut self) -> Option<String> {
+        self.line_seed.take()
+    }
+
+    /// Mirror the host's in-progress input line into the pending line request's
+    /// buffer, updating the count of characters "already in the buffer".
+    ///
+    /// Glk hands the interpreter that buffer for the whole duration of the request
+    /// (spec §4.2), which is what lets `glk_cancel_line_event` report how much has
+    /// been typed so far. Writing only at submit time left the buffer holding
+    /// whatever was last in it, so a game that cancels mid-edit read stale text:
+    /// advent.blb's toolbar cancels on every button press and PRESERVES the partial
+    /// input it finds, so after clicking Examine and deleting the word, every other
+    /// verb button kept re-inserting "Examine " — the game was faithfully restoring
+    /// text the player had already erased. A no-op when no line request is pending.
+    pub fn set_line_input_text(&mut self, text: &str) {
+        let Some((win, unicode)) = self.glk.first_line_request() else { return };
+        let Some(req) = self.glk.line_request(win) else { return };
+        let n = self.write_line_buffer(req.buf, req.maxlen, unicode, text).len() as u32;
+        self.glk.set_line_initlen(win, n);
+    }
+
+    /// Write `text` into a line-input buffer — Latin-1 bytes, or 32-bit code points
+    /// for a `_uni` request — truncated to `maxlen`, and return the characters
+    /// actually stored. A bad address is diagnosed, not fatal.
+    fn write_line_buffer(&mut self, buf: u32, maxlen: u32, unicode: bool, text: &str) -> Vec<char> {
+        let chars: Vec<char> = text.chars().take(maxlen as usize).collect();
+        for (i, &ch) in chars.iter().enumerate() {
+            let cp = ch as u32;
+            let res = if unicode {
+                self.store_mem_sized(buf + i as u32 * 4, cp, 4)
+            } else {
+                self.store_mem_sized(buf + i as u32, cp & 0xFF, 1)
+            };
+            if let Err(e) = res {
+                self.diagnostics.push(e);
+                break;
+            }
+        }
+        chars
     }
 
     /// `glk_set_terminators_line_event(win, keycodes, count)`: record the special
@@ -5002,20 +5048,8 @@ impl Machine {
             Some(r) => (r.buf, r.maxlen, r.unicode),
             None => (0, 0, pi.unicode), // request vanished; still close the event safely
         };
-        let chars: Vec<char> = text.chars().take(maxlen as usize).collect();
+        let chars = self.write_line_buffer(buf, maxlen, unicode, text);
         let n = chars.len() as u32;
-        for (i, &ch) in chars.iter().enumerate() {
-            let cp = ch as u32;
-            let res = if unicode {
-                self.store_mem_sized(buf + i as u32 * 4, cp, 4)
-            } else {
-                self.store_mem_sized(buf + i as u32, cp & 0xFF, 1)
-            };
-            if let Err(e) = res {
-                self.diagnostics.push(e);
-                break;
-            }
-        }
         // Echo the completed line to the window's echo stream, if any: the input
         // text (as stored, truncated to `maxlen`) followed by a newline, written
         // straight to the echo stream — never to the window's own backend, so
@@ -9292,8 +9326,8 @@ mod tests {
         let mut m = machine_ram(body, 0x200);
         poke(&mut m, 0x180, b"Examine ");
         assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
-        assert_eq!(m.take_line_prefill().as_deref(), Some("Examine "));
-        assert_eq!(m.take_line_prefill(), None, "one-shot: a second poll must not re-seed");
+        assert_eq!(m.take_line_seed().as_deref(), Some("Examine "));
+        assert_eq!(m.take_line_seed(), None, "one-shot: a second poll must not re-seed");
     }
 
     /// The prefill is capped at `maxlen` (the model clamps `initlen` the same way),
@@ -9307,7 +9341,7 @@ mod tests {
         let mut m = machine_ram(body, 0x200);
         poke(&mut m, 0x180, b"Examine ");
         assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
-        assert_eq!(m.take_line_prefill().as_deref(), Some("Exam"));
+        assert_eq!(m.take_line_seed().as_deref(), Some("Exam"));
     }
 
     /// A `_uni` request pre-loads 32-bit code points, not bytes.
@@ -9321,7 +9355,7 @@ mod tests {
         m.mem.write32(0x180, 'é' as u32).unwrap();
         m.mem.write32(0x184, '—' as u32).unwrap();
         assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
-        assert_eq!(m.take_line_prefill().as_deref(), Some("é—"));
+        assert_eq!(m.take_line_seed().as_deref(), Some("é—"));
     }
 
     /// The overwhelmingly common request (`initlen` 0) leaves nothing to seed, so
@@ -9334,7 +9368,12 @@ mod tests {
         let mut m = machine_ram(body, 0x200);
         poke(&mut m, 0x180, b"stale bytes");
         assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
-        assert_eq!(m.take_line_prefill(), None, "initlen 0 → the buffer's stale bytes stay out");
+        assert_eq!(
+            m.take_line_seed().as_deref(),
+            Some(""),
+            "initlen 0 → seed the host EMPTY (the stale bytes stay out, and any line the host \
+             still shows is cleared), not `None`, which would mean no new request at all",
+        );
     }
 
     /// Committing the line writes from index 0, so a host that submits the whole
@@ -9354,6 +9393,63 @@ mod tests {
         let got: String =
             (0..12).map(|i| m.mem.read8(0x180 + i).unwrap() as u8 as char).collect();
         assert_eq!(got, "Examine lamp", "written from index 0 — no doubled verb");
+    }
+
+    /// SQ-0565: Glk lends the interpreter the line-input buffer for the whole
+    /// request, which is what lets `glk_cancel_line_event` report how much has been
+    /// typed. The host mirrors the player's in-progress line into it, so a game that
+    /// cancels mid-edit reads the real partial input instead of whatever the buffer
+    /// last held.
+    #[test]
+    fn mirroring_the_host_line_replaces_what_a_cancel_would_report() {
+        use asm::Op::{C16, C8, Zero};
+        // request_line_event(win=1, buf=0x180, maxlen=20, initlen=8) over "Examine " —
+        // the state advent.blb's toolbar leaves behind after priming a verb.
+        let body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(20), C8(8)], Zero);
+        let mut m = machine_ram(body, 0x200);
+        poke(&mut m, 0x180, b"Examine ");
+        step_to_event(&mut m);
+        assert_eq!(m.take_line_seed().as_deref(), Some("Examine "), "seeded from the game");
+
+        // The player erases it and types something else. `glk_cancel_line_event`
+        // reports the request's `initlen` and leaves the buffer for the game to read
+        // (pinned by `glk_cancel_line_event_reports_partial_and_clears`), so BOTH
+        // must now describe the real line — otherwise the game reads back text the
+        // player deleted, which is how every toolbar verb kept re-inserting the
+        // first one.
+        m.set_line_input_text("go west");
+        assert_eq!(
+            m.glk.line_request(1).map(|r| r.initlen),
+            Some(7),
+            "the count a cancel would report is the player's line, not the prefill's 8"
+        );
+        let got: String = (0..7).map(|i| m.mem.read8(0x180 + i).unwrap() as u8 as char).collect();
+        assert_eq!(got, "go west", "and the buffer holds it, not the stale prefill");
+
+        // Shrinking it must shrink the report too — the tail of the old text stays
+        // in memory but is no longer claimed as input.
+        m.set_line_input_text("go");
+        assert_eq!(m.glk.line_request(1).map(|r| r.initlen), Some(2), "deleting shortens it");
+    }
+
+    /// Mirroring is bounded by the buffer the game offered and is a no-op when the
+    /// game is not awaiting a line at all.
+    #[test]
+    fn mirroring_the_host_line_respects_maxlen_and_needs_a_request() {
+        use asm::Op::{C16, C8, Zero};
+        let mut body = glk_call(0xD0, &[C8(1), C16(0x0180), C8(4), C8(0)], Zero);
+        body.extend(glk_call(0xC0, &[C16(0x0100)], Zero));
+        let mut m = machine_ram(body, 0x200);
+        assert_eq!(step_to_event(&mut m), StepResult::NeedLine { win: 1 });
+        m.set_line_input_text("far too long");
+        let got: String = (0..4).map(|i| m.mem.read8(0x180 + i).unwrap() as u8 as char).collect();
+        assert_eq!(got, "far ", "truncated to maxlen");
+        assert_eq!(m.glk.line_request(1).map(|r| r.initlen), Some(4), "and reported as 4");
+
+        // With no request pending, mirroring writes nothing anywhere.
+        let mut m2 = machine_ram(asm::ins(0x120, &[]), 0x200);
+        m2.set_line_input_text("ignored");
+        assert!(m2.diagnostics.is_empty(), "a no-op, not a diagnosed fault");
     }
 
     #[test]

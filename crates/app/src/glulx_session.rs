@@ -802,12 +802,23 @@ impl GlulxSession {
         self.appglk().char_pixels()
     }
 
-    /// Take the text the game pre-loaded into its latest line-input request (Glk
-    /// spec §4.2 `initlen`), for the app to seed its input line with. One-shot per
-    /// request. advent.blb's toolbar primes a verb this way — clicking Examine
-    /// asks for a line with `"Examine "` already in the buffer.
-    pub fn take_line_prefill(&mut self) -> Option<String> {
-        self.machine.take_line_prefill()
+    /// Take what the app's input line should hold for the newest line-input request,
+    /// if one has appeared since the last call (Glk spec §4.2 `initlen`). One-shot
+    /// per request; `Some("")` means "start empty", which is how the app learns the
+    /// previous line is gone. advent.blb's toolbar drives both cases — a verb button
+    /// primes `"Examine "`, and a verb clicked over an already-typed noun runs the
+    /// whole command itself and asks again empty.
+    pub fn take_line_seed(&mut self) -> Option<String> {
+        self.machine.take_line_seed()
+    }
+
+    /// Keep the pending line request's buffer holding exactly what the player has
+    /// typed so far (Glk §4.2). A game that cancels line input mid-edit reads that
+    /// buffer back as the partial input — advent.blb's toolbar does it on every
+    /// button press — so the app must not let it go stale. A no-op when the game is
+    /// not awaiting a line.
+    pub fn sync_line_input(&mut self, text: &str) {
+        self.machine.set_line_input_text(text);
     }
 
     /// A terminal click landed inside a mouse-watching window: deliver a Glk
