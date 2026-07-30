@@ -99,6 +99,12 @@ fn switching_arthur_screens_leaves_no_residue_from_the_other() {
         let frame_baseline = opaque_inside(&session, 7, WIN2_RECT);
         let picture_baseline = opaque(&session, 2);
         assert!(frame_baseline > 0 && picture_baseline > 0, "{label}: F1 screen is drawn");
+        // The picture BORDER's vertical pieces sit below the map background's band,
+        // in the side-strip windows: (6, 300) and (630, 300).
+        let border = |s: &GameSession, x: u32, y: u32| {
+            s.pictures_canvas.get(&7).is_some_and(|c| c.img.get_pixel(x, y).0[3] != 0)
+        };
+        assert!(border(&session, 6, 300) && border(&session, 630, 300), "{label}: border drawn");
 
         // F2, the map: its background goes into window 7 and covers window 2 whole.
         fkey(&mut session, 134);
@@ -108,6 +114,11 @@ fn switching_arthur_screens_leaves_no_residue_from_the_other() {
             "{label}: the map background fills window 2's rect — drawn into window 7"
         );
         assert_ne!(opaque(&session, 2), picture_baseline, "{label}: the map replaced the picture");
+        // The border's vertical pieces are removed by the erase of the side-strip
+        // windows they sit in. This is where the palette replot (SQ-0567) used to put
+        // them straight back — the map screen then kept the picture border over it.
+        assert!(!border(&session, 6, 300), "{label}: left border cleared on the map");
+        assert!(!border(&session, 630, 300), "{label}: right border cleared on the map");
 
         // Back to F1. The game erases windows 2/5/6 and never 7, so the map
         // background can only go if an erase clears the shared screen region.
@@ -121,6 +132,10 @@ fn switching_arthur_screens_leaves_no_residue_from_the_other() {
             opaque(&session, 2),
             picture_baseline,
             "{label}: and the picture insert is repainted, exactly as it first appeared"
+        );
+        assert!(
+            border(&session, 6, 300) && border(&session, 630, 300),
+            "{label}: the border is drawn again on the picture screen"
         );
 
         // A second round trip must not drift — residue would accumulate per switch.

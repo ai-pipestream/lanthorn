@@ -963,14 +963,36 @@ impl GameSession {
     /// erases windows 2/5/6 — never 7 — so that background has to disappear from
     /// window 7's canvas or it sits under every later screen for the rest of the game.
     ///
-    /// Retained adaptive draws are deliberately left alone: a partially erased
-    /// picture is still on screen, and the ones that matter (frames, border art) live
-    /// in their own window, whose own erase path already drops them.
+    /// A retained adaptive draw the rect COVERS ENTIRELY is gone from the screen and
+    /// stops being replotted on a palette change (SQ-0567 + SQ-0568 interact here):
+    /// Arthur's map screen erases the side-strip windows, which is what removes the
+    /// picture border's vertical pieces, and then draws a base picture that changes
+    /// the palette. Without this the replot put those strips straight back, so the
+    /// border stayed visible over the map. A partially erased picture is still on
+    /// screen and is left retained.
     fn erase_screen_rect(&mut self, rect: (u32, u32, u32, u32), skip: Option<u8>) {
         let (rx, ry, rw, rh) = rect;
         if rw == 0 || rh == 0 {
             return;
         }
+        let retained = std::mem::take(&mut self.adaptive_on_screen);
+        self.adaptive_on_screen = retained
+            .into_iter()
+            .filter(|&(win, number, dx, dy)| {
+                let Some((wx, wy, _, _)) = self.window_screen_rect(win) else { return true };
+                let Some((pw, ph)) = self
+                    .pict_source
+                    .as_mut()
+                    .and_then(|s| s.dims(number as u32))
+                    .map(|(w, h)| (w * V6_ART_SCALE, h * V6_ART_SCALE))
+                else {
+                    return true;
+                };
+                let (px, py) = (wx + dx.max(0) as u32, wy + dy.max(0) as u32);
+                let covered = px >= rx && py >= ry && px + pw <= rx + rw && py + ph <= ry + rh;
+                !covered
+            })
+            .collect();
         let wins: Vec<u8> = self.pictures_canvas.keys().copied().collect();
         for win in wins {
             if Some(win) == skip {
@@ -991,8 +1013,9 @@ impl GameSession {
                 continue;
             }
             let canvas = self.pictures_canvas.get_mut(&win).expect("checked just above");
+            // NOT a z_seq bump: an erase is not a draw, and re-stamping the layer
+            // here would reorder the composite for a window nothing was drawn into.
             canvas.erase_rect((x0 - wx) as i32, (y0 - wy) as i32, x1 - x0, y1 - y0);
-            canvas.z_seq = crate::graphics::next_draw_seq();
         }
     }
 
