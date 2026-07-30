@@ -820,7 +820,11 @@ fn draw_frame(
         // full frame so a toast is never lost. Drawn last so toasts sit topmost
         // over the story pane's own content (and anything else under them).
         // (SQ-0176, SQ-0415)
-        let toast_area = app::render::transcript::notification_anchor_rect(story_area, full);
+        let toast_area = app::render::transcript::notification_anchor_rect(
+            state.transcript_geom.get().map(|g| g.area),
+            story_area,
+            full,
+        );
         app::render::transcript::render_notifications(buf, toast_area, state);
     })?;
 

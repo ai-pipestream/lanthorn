@@ -1409,13 +1409,32 @@ pub fn render_transcript(
     render_middle(state, buf, middle_area, normal_style, game_input)
 }
 
-/// Choose the rect notification toasts anchor to: the story pane's inner
-/// content rect when it has room for at least a 1-row strip, else the full
-/// frame. `draw_frame` calls this with the story pane's content rect (as
-/// drawn this frame) and the full terminal frame, so a toast is never lost
-/// even in `Layout::TranscriptFull`-without-room edge cases or a terminal so
-/// small the story pane collapses to zero content area. (SQ-0415)
-pub fn notification_anchor_rect(story_area: Rect, full: Rect) -> Rect {
+/// Choose the rect notification toasts anchor to: the live transcript
+/// viewport when one is published, else the story pane's inner content rect
+/// when it has room for at least a 1-row strip, else the full frame.
+///
+/// Toasts are terminal cells, and cells lose to image placements: a game whose
+/// story window opens with graphics across its top (a v6 chrome band, a
+/// Scott/Glulx top graphics window) drew OVER a pane-anchored toast, leaving
+/// it unreadable (SQ-0577). The transcript viewport is exactly the region the
+/// renderer laid out as real text this frame — cells always win there — so
+/// prefer it. It is clamped to the story pane (the published geom can be a
+/// frame stale after a resize) and must still fit the minimum toast strip. On
+/// a fully-imaged story pane (the v6 splash / map / rebus takeovers publish no
+/// fresh geom) the anchor degrades to the pane rect as before.
+///
+/// `draw_frame` calls this with the frame's published transcript geometry, the
+/// story pane's content rect (as drawn this frame) and the full terminal
+/// frame, so a toast is never lost even in `Layout::TranscriptFull`-without-
+/// room edge cases or a terminal so small the story pane collapses to zero
+/// content area. (SQ-0415)
+pub fn notification_anchor_rect(transcript: Option<Rect>, story_area: Rect, full: Rect) -> Rect {
+    if let Some(t) = transcript {
+        let t = t.intersection(story_area);
+        if t.width >= 6 && t.height > 0 {
+            return t;
+        }
+    }
     if story_area.width >= 6 && story_area.height > 0 {
         story_area
     } else {
@@ -2314,20 +2333,51 @@ mod tests {
 
         // A real story pane with room: anchors there, not the frame (SQ-0415).
         let roomy_pane = Rect::new(0, 0, 40, 24);
-        assert_eq!(notification_anchor_rect(roomy_pane, full), roomy_pane);
+        assert_eq!(notification_anchor_rect(None, roomy_pane, full), roomy_pane);
 
         // No story pane at all (e.g. a layout/edge case with zero content rect):
         // falls back to the full frame so a toast is never lost.
-        assert_eq!(notification_anchor_rect(Rect::default(), full), full);
+        assert_eq!(notification_anchor_rect(None, Rect::default(), full), full);
 
         // A pane too narrow for even the 1-row/6-col minimum toast strip: also
         // falls back to the full frame.
         let tiny_pane = Rect::new(0, 0, 4, 24);
-        assert_eq!(notification_anchor_rect(tiny_pane, full), full);
+        assert_eq!(notification_anchor_rect(None, tiny_pane, full), full);
 
         // A pane with zero height (borders alone ate all the rows): falls back.
         let zero_height_pane = Rect::new(0, 0, 40, 0);
-        assert_eq!(notification_anchor_rect(zero_height_pane, full), full);
+        assert_eq!(notification_anchor_rect(None, zero_height_pane, full), full);
+    }
+
+    /// SQ-0577: toasts anchor to the transcript viewport when one was published
+    /// this frame — the region where terminal cells always win — instead of the
+    /// pane rect, whose top rows can be covered by image placements (a v6 chrome
+    /// band, a Scott/Glulx top graphics window) that draw over cell toasts.
+    #[test]
+    fn notification_anchor_prefers_the_transcript_viewport() {
+        let full = Rect::new(0, 0, 80, 24);
+        let pane = Rect::new(0, 0, 40, 24);
+
+        // A published viewport inset below top-of-window graphics wins.
+        let viewport = Rect::new(2, 5, 36, 15);
+        assert_eq!(notification_anchor_rect(Some(viewport), pane, full), viewport);
+
+        // A stale viewport from before a layout change is clamped to the pane;
+        // fully outside → ignored, pane anchor as before.
+        let stale = Rect::new(50, 0, 20, 10);
+        assert_eq!(notification_anchor_rect(Some(stale), pane, full), pane);
+
+        // Partially outside → the clamped intersection anchors when it still
+        // fits the minimum toast strip.
+        let overhanging = Rect::new(30, 2, 20, 10);
+        assert_eq!(
+            notification_anchor_rect(Some(overhanging), pane, full),
+            Rect::new(30, 2, 10, 10)
+        );
+
+        // A viewport too small for the minimum strip degrades to the pane.
+        let sliver = Rect::new(0, 0, 4, 24);
+        assert_eq!(notification_anchor_rect(Some(sliver), pane, full), pane);
     }
 
     #[test]
