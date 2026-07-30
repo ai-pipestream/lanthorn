@@ -94,7 +94,7 @@ register machine (no call stack, eval stack, or linear memory).
 
 `/debug` (and `--debug`) light up Glulx stories too — and here the inspector is
 in its element, because Glulx *is* a register machine. The full layout survives:
-a live **Disassembly** column that follows the PC instruction by instruction, a
+a live **Disassembly** column anchored on the PC, a
 real **Call Stack** and **Eval Stack**, the innermost frame's **Locals**, and a
 **Memory** hex view you can jump anywhere in with `:` (raw Glulx addresses,
 absolute — the ROM/RAM boundary is flagged with a `<RAM>` marker so you always
@@ -108,6 +108,18 @@ know which side you're on).
   promoted to certain on the spot. Call, branch, `jumpabs`, `streamstr`, and
   `glk` operands are annotated inline: a call shows its target, a `glk` shows the
   named selector (`glk_window_open`), a string print shows a snippet of the text.
+- **Where the PC parks, and how to get somewhere interesting.** The panel
+  refreshes between turns — and between turns a Glulx story is *always* suspended
+  in the same spot: the `@glk glk_select` inside Inform's Glk veneer, a
+  three-instruction shim (`copy sp, L0` / `glk #0xc0, L0, L4` / `return L4`) that
+  pops the Glk argument count, dispatches, and returns. So the PC anchor reports
+  the same address every single turn (`00049a` in *Coloratura*, `00103c` in
+  *Counterfeit Monkey*), and the instructions around it are dispatch glue rather
+  than story logic. That is the machine's honest state, not a mis-decode: it
+  really is parked there, and the shim really does disassemble that way. To land
+  in the game's own code, click a **Call Stack** `ret=……` address — the frames
+  beneath the veneer carry real return PCs into the story. PC-follow re-anchors
+  on the next refresh, so re-click after each turn.
 - **Three repurposed tabs** trade the Z-machine's object world for Glulx's:
   **Functions** lists every discovered routine with its entry address, `C0`/`C1`
   calling convention, local count, confidence tier, and — for the well-known
