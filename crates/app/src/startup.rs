@@ -210,16 +210,16 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             (f.width as u32, f.height as u32)
         })
         .unwrap_or((8, 16));
-    // Pixel-precise mouse reporting (SQ-0563), probed in the same pre-UI window.
-    // Gated on a REAL cell size: without a Picker `char_px` is the (8, 16) guess
-    // above, and translating pixels through a guessed cell size would misplace
-    // every click in the app. No Picker also means no image protocol, hence no
-    // graphics window whose sub-cell precision we'd be buying.
-    // Probed even when `mouse` is off in config: the mode is inert without mouse
-    // tracking, and probing here is what lets a mid-session mouse toggle benefit.
-    if game_picker.is_some() && app::pixel_mouse::query_pixel_mouse_support() {
-        app::pixel_mouse::activate((char_px.0 as u16, char_px.1 as u16));
-    }
+    // Pixel-precise mouse reporting (SQ-0563) is NOT switched on here. The probe
+    // works — terminals answer "set" — but the cell size to divide the reported
+    // pixels by does not: the Picker's `font_size` above is in logical points,
+    // while SGR-Pixels reports DEVICE pixels, so on a 2× display every click came
+    // out at twice its true column and row. That broke click-drag selection and
+    // made even cell-granular game buttons unhittable. Until the cell size is
+    // derived from the same pixel space the mouse reports in, coordinates stay
+    // cells and `pixel_mouse::normalise` is a no-op. Leaving the mode UNSET also
+    // matters: a terminal left in PixelMode would report pixels that nothing
+    // divides. See `pixel_mouse` for the plumbing, which is otherwise complete.
 
     // Storage (SQ-0284): saves/sidecars live in `<data_base>/<story-key>/`,
     // keyed by the story filename. Compute the per-game dir and read the Glk
