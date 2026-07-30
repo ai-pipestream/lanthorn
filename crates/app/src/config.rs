@@ -223,6 +223,24 @@ pub struct Cli {
     #[arg(long)]
     pub no_images: bool,
 
+    /// Interpreter number to advertise in the story header (0x1E).
+    ///
+    /// Games branch on it: Beyond Zork picks character graphics over colour on
+    /// IBM PC, and several v6 story files were built for one specific machine.
+    /// The values are ZMSD §11.1.3's table:
+    ///
+    ///   1  DECSystem-20      7  Commodore 128
+    ///   2  Apple IIe         8  Commodore 64
+    ///   3  Macintosh         9  Apple IIc
+    ///   4  Amiga            10  Apple IIgs
+    ///   5  Atari ST         11  Tandy Color
+    ///   6  IBM PC
+    ///
+    /// Overrides `interpreter_number` in config.toml. With neither set, babelmap
+    /// auto-selects per Frotz's rule: 6 (IBM PC) for v6, else 1 (DECSystem-20).
+    #[arg(long, value_name = "N", verbatim_doc_comment)]
+    pub interpreter_number: Option<u8>,
+
     /// Debug trace sections to enable from boot: comma list of screen,map,hostio,v6
     /// (or `all`/`none`). Output goes to <user_dir>/trace.log. (trace feature)
     #[arg(long, value_name = "LIST")]
@@ -591,9 +609,16 @@ pub struct Config {
     pub honor_timed_input: bool,
     /// Interpreter number to advertise (header 0x1E). `None` = auto (Frotz's rule:
     /// 1 for v1-5, 6 for v6). Set to override, e.g. 6 for BeyondZork's IBM PC
-    /// character-graphics instead of colour.
+    /// character-graphics instead of colour. The full ZMSD §11.1.3 value table is
+    /// on `Cli::interpreter_number`, which overrides this for one run.
     #[serde(default)]
     pub interpreter_number: Option<u8>,
+    /// True when `interpreter_number` came from `--interpreter-number` rather than
+    /// the config file. A one-run CLI override must not be baked into config.toml by
+    /// a later settings write, so [`write_config`] leaves the file's own value alone
+    /// when this is set. Never persisted itself.
+    #[serde(skip)]
+    pub interpreter_number_from_cli: bool,
     /// When true (default), play audio for `sound_effect` (bleeps + Blorb samples).
     #[serde(default = "default_enable_sound")]
     pub enable_sound: bool,
@@ -657,6 +682,7 @@ impl Default for Config {
             honor_game_colours: default_honor_game_colours(),
             honor_timed_input: default_honor_timed_input(),
             interpreter_number: None,
+            interpreter_number_from_cli: false,
             enable_sound: default_enable_sound(),
             volume: default_volume(),
             acceleration: default_acceleration(),
@@ -765,6 +791,13 @@ pub fn resolve(cli: &Cli) -> Config {
         cfg.enable_sound = false;
     }
 
+    // `--interpreter-number N` beats the file's `interpreter_number`; absent, the
+    // file's value (or the auto rule, when it too is unset) stands.
+    if let Some(n) = cli.interpreter_number {
+        cfg.interpreter_number = Some(n);
+        cfg.interpreter_number_from_cli = true;
+    }
+
     if let Some(list) = &cli.trace {
         let (sections, unknown) = crate::trace::TraceSections::parse(list);
         cfg.trace = sections;
@@ -839,7 +872,10 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
     doc["enable_sound"] = toml_edit::value(cfg.enable_sound);
     doc["volume"] = toml_edit::value(cfg.volume as i64);
     doc["undo_levels"] = toml_edit::value(cfg.undo_levels as i64);
-    if let Some(n) = cfg.interpreter_number {
+    // A `--interpreter-number` override is for THIS run only: writing it here would
+    // silently make it permanent the next time anything saves settings, so leave the
+    // file's own value (or its absence) untouched in that case.
+    if let Some(n) = cfg.interpreter_number.filter(|_| !cfg.interpreter_number_from_cli) {
         doc["interpreter_number"] = toml_edit::value(n as i64);
     }
     // Written only when the user pinned one: an absent key means "follow the
@@ -1034,6 +1070,7 @@ mod tests {
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            interpreter_number: None,
             trace: None,
             debug: false,
         };
@@ -1053,6 +1090,7 @@ mod tests {
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            interpreter_number: None,
             trace: None,
             debug: false,
         };
@@ -1073,6 +1111,7 @@ mod tests {
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            interpreter_number: None,
             trace: None,
             debug: false,
         };
@@ -1237,6 +1276,7 @@ use_defaults = false
             honor_game_colours: true,
             honor_timed_input: true,
             interpreter_number: None,
+            interpreter_number_from_cli: false,
             enable_sound: true,
             volume: 100,
             search: SearchConfig::default(),
@@ -1491,6 +1531,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            interpreter_number: None,
             trace: None,
             debug: false,
         };
@@ -1509,6 +1550,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            interpreter_number: None,
             trace: None,
             debug: false,
         };
@@ -1537,6 +1579,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            interpreter_number: None,
             trace: None,
             debug: false,
         };
@@ -1557,6 +1600,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: false,
+            interpreter_number: None,
             trace: None,
             debug: false,
         };
@@ -1578,6 +1622,7 @@ use_defaults = false
             no_sound: false,
             image_protocol: ImageProtocol::Auto,
             no_images: true,
+            interpreter_number: None,
             trace: None,
             debug: false,
         };
@@ -1613,6 +1658,58 @@ use_defaults = false
         assert_eq!(back.volume, 100, "absent key keeps default 100");
         let set: Config = toml::from_str("volume = 40\n").unwrap();
         assert_eq!(set.volume, 40);
+    }
+
+    /// `--interpreter-number N` overrides the config file for ONE run, and must not
+    /// be written back: a later settings save would otherwise make a throwaway
+    /// experiment permanent (and pin one machine for every story, defeating the
+    /// per-version auto rule). The header values themselves are ZMSD §11.1.3's table
+    /// (1 DECSystem-20 … 6 IBM PC … 11 Tandy Color).
+    #[test]
+    fn interpreter_number_cli_overrides_file_without_persisting() {
+        let dir = std::env::temp_dir().join(format!("bm-interp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "interpreter_number = 4\n").unwrap();
+
+        let base = Cli {
+            story: Some(PathBuf::from("foo.z5")),
+            user_dir: None,
+            data_dir: None,
+            config: Some(cfg_path.clone()),
+            no_accel: false,
+            no_sound: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: false,
+            interpreter_number: None,
+            trace: None,
+            debug: false,
+        };
+        // No flag: the file's Amiga (4) stands, and it is provenance-clean.
+        let from_file = resolve(&base);
+        assert_eq!(from_file.interpreter_number, Some(4), "the file's value loads");
+        assert!(!from_file.interpreter_number_from_cli);
+
+        // Flag present: IBM PC (6) wins for this run, marked as CLI-sourced.
+        let overridden = resolve(&Cli { interpreter_number: Some(6), ..base });
+        assert_eq!(overridden.interpreter_number, Some(6), "the CLI beats the file");
+        assert!(overridden.interpreter_number_from_cli);
+
+        // Writing settings must leave the FILE on 4, not bake in the run's 6.
+        write_config(&dir, &overridden).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        let reread: Config = toml::from_str(&back).unwrap();
+        assert_eq!(
+            reread.interpreter_number,
+            Some(4),
+            "a one-run --interpreter-number must not be persisted; file now: {back}"
+        );
+
+        // A value that came from the file DOES persist (the settings panel path).
+        write_config(&dir, &from_file).unwrap();
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert_eq!(toml::from_str::<Config>(&back).unwrap().interpreter_number, Some(4));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
