@@ -513,6 +513,17 @@ pub struct GameSession {
     /// transcript. Cleared for a window on its canvas-clear (number-0 erase).
     /// (SQ-0461 decision 3)
     last_content_pic: std::collections::HashMap<u8, u16>,
+    /// Adaptive pictures (Blorb `APal`, §11.3) currently ON SCREEN, in draw order:
+    /// `(window, resnum, canvas x, canvas y)`.
+    ///
+    /// An adaptive picture is plotted with the Current Palette rather than its own,
+    /// so when a later base draw establishes a different palette everything already
+    /// plotted from this list is showing stale colours and has to be replotted.
+    /// Arthur is the case that needs it: its whole frame is three adaptive pictures
+    /// drawn ONCE at boot, so without replotting the frame keeps the churchyard's
+    /// palette for the rest of the game — staying blue in the brown-palette church,
+    /// and not inverting when the gravestone scene swaps the blues. (SQ-0567)
+    adaptive_on_screen: Vec<(u8, u16, i32, i32)>,
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
@@ -614,6 +625,7 @@ impl GameSession {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
+            adaptive_on_screen: Vec::new(),
         })
     }
 
@@ -907,10 +919,47 @@ impl GameSession {
     /// which never push a `PictureEvent`.
     fn drain_pictures(&mut self) -> Vec<PictureEvent> {
         let events = std::mem::take(&mut self.machine.pending_pictures);
+        let palette_before = self.palette_gen();
         for ev in &events {
             self.apply_picture_event(ev);
         }
+        // A base draw in this batch established a different Current Palette, so
+        // every adaptive picture already on screen is now showing the old one and
+        // has to be replotted (Blorb §11.3, SQ-0567). Checked once per batch: with
+        // several palette changes in one turn only the final palette is visible.
+        if self.palette_gen() != palette_before {
+            self.replot_adaptive_pictures();
+        }
         events
+    }
+
+    /// The Current Palette's generation, or 0 with no Pict source.
+    fn palette_gen(&self) -> u64 {
+        self.pict_source.as_ref().map_or(0, |s| s.palette_gen())
+    }
+
+    /// Re-plot every adaptive picture still on screen under the Current Palette,
+    /// in the order it was originally drawn (SQ-0567).
+    ///
+    /// Decoding goes through the same `image` path as a real draw, so each one is
+    /// re-decoded with the new palette spliced into its PLTE. Re-plotting cannot
+    /// restore layering against BASE pictures drawn between these — an adaptive
+    /// overlay that something was drawn over comes back on top. That is the right
+    /// trade for what adaptive pictures are actually used for: full-screen frames
+    /// and border art that live in their own window, above nothing.
+    fn replot_adaptive_pictures(&mut self) {
+        let draws = self.adaptive_on_screen.clone();
+        for (window, number, dx, dy) in draws {
+            let Some(canvas) = self.pictures_canvas.get(&window) else { continue };
+            let (pw, ph) = (canvas.img.width(), canvas.img.height());
+            let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(number as u32)) else {
+                continue;
+            };
+            let img = v6_scaled_art(&img);
+            let canvas = self.pictures_canvas.get_mut(&window).expect("checked above");
+            canvas.draw_image_clipped(&img, dx, dy, (pw, ph));
+            canvas.z_seq = crate::graphics::next_draw_seq();
+        }
     }
 
     /// Apply one `PictureEvent` to `pictures_canvas`. The event's `(y, x)` are
@@ -935,6 +984,8 @@ impl GameSession {
             // The window's canvas was cleared, so a later redraw of a content
             // splash into it is genuinely new — forget the dedupe key. (SQ-0461)
             self.last_content_pic.remove(&ev.window);
+            // Nothing of this window survives to be replotted on a palette change.
+            self.adaptive_on_screen.retain(|(w, ..)| *w != ev.window);
             return;
         }
         let Some(v6) = self.machine.screen.v6.as_ref() else { return };
@@ -1025,6 +1076,9 @@ impl GameSession {
             let ew = ew.min(pw.saturating_sub(dx.max(0) as u32));
             let eh = eh.min(ph.saturating_sub(dy.max(0) as u32));
             canvas.erase_rect(dx, dy, ew, eh);
+            // Erased: it is no longer on screen to replot. (SQ-0567)
+            self.adaptive_on_screen
+                .retain(|&(w, n, x, y)| (w, n, x, y) != (ev.window, ev.number, dx, dy));
         } else if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
             // Blit the art at 2× into the unit-space window canvas (SQ-0479): the
             // game placed it at unit coords (dx,dy) expecting the Amiga/DOS
@@ -1032,6 +1086,16 @@ impl GameSession {
             let img = v6_scaled_art(&img);
             canvas.draw_image_clipped(&img, dx, dy, (pw, ph));
             canvas.z_seq = crate::graphics::next_draw_seq();
+            // Remember adaptive draws so a later palette change can replot them
+            // (SQ-0567). Keyed by position as well as number: the same overlay is
+            // legally drawn at several places, and a redraw in place must not
+            // accumulate duplicates.
+            if self.pict_source.as_ref().is_some_and(|s| s.is_adaptive(ev.number as u32)) {
+                let key = (ev.window, ev.number, dx, dy);
+                if !self.adaptive_on_screen.contains(&key) {
+                    self.adaptive_on_screen.push(key);
+                }
+            }
             // SQ-0461 decision 3: a large CONTENT-art draw into a graphics window
             // (Shogun's title splash) ALSO anchors a transcript inline band, so
             // the frameless mode — which drops graphics windows — still shows it.
@@ -3782,6 +3846,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
+            adaptive_on_screen: Vec::new(),
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -3833,6 +3898,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
+            adaptive_on_screen: Vec::new(),
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -3871,6 +3937,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
+            adaptive_on_screen: Vec::new(),
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -3903,6 +3970,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
+            adaptive_on_screen: Vec::new(),
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -3948,6 +4016,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
+            adaptive_on_screen: Vec::new(),
         };
         // Window 7 has a rendered picture (a canvas sized to its pixel dims).
         sess.pictures_canvas.insert(7, crate::graphics::Canvas::new(64, 48));
@@ -4035,6 +4104,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
+            adaptive_on_screen: Vec::new(),
         };
         let mut canvas = crate::graphics::Canvas::new(64, 48);
         canvas.z_seq = 42;
@@ -4077,6 +4147,7 @@ mod tests {
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
+            adaptive_on_screen: Vec::new(),
         };
         // The erase path allocates the canvas even without a resolved image.
         // (number != 0: a real erase_picture — number 0 is the erase_window

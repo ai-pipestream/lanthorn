@@ -211,6 +211,21 @@ impl PictSource {
         }
     }
 
+    /// Generation counter of the Current Palette — bumped whenever a non-adaptive
+    /// draw establishes a DIFFERENT palette (§11.3). A caller that has already
+    /// plotted adaptive pictures watches this: when it moves, everything drawn
+    /// with the old palette is now showing the wrong colours and must be replotted.
+    pub fn palette_gen(&self) -> u64 {
+        self.palette_gen
+    }
+
+    /// Is this Pict declared adaptive by the container's `APal` chunk (§11.3)?
+    /// Only adaptive pictures follow the Current Palette; a base picture carries
+    /// its own and is redrawn by the game itself.
+    pub fn is_adaptive(&self, resnum: u32) -> bool {
+        self.adaptive.contains(&resnum)
+    }
+
     /// The Blorb `Reso` standard window `(width, height)` in pixels — the
     /// resolution the pictures were authored for. A v6 story advertises this
     /// as its screen size so its hardcoded pixel art lines up (SQ-0186).
