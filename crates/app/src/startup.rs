@@ -87,6 +87,13 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     // must not crash startup).
     app::theme::template::auto_seed(&cfg.user_dir);
 
+    // …and the same treatment for config.toml (SQ-0573): a fully commented template
+    // listing EVERY setting at its default, so what babelmap can be told to do is
+    // discoverable from the file rather than only from the source. Same contract as
+    // the style seed — never overwrites, best-effort. Runtime edits still go through
+    // `write_config`, which is format-preserving and keeps these comments.
+    app::config_template::auto_seed(&cfg.user_dir);
+
     // A path may be omitted; fall back to the configured default story dir.
     // With neither, there's nothing to open — tell the user how to fix it.
     let story_path = match cli.story.clone().or_else(|| cfg.default_story_dir.clone()) {

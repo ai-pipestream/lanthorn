@@ -14,6 +14,7 @@ pub mod slash;
 pub mod colors;
 pub mod complete;
 pub mod config;
+pub mod config_template;
 pub mod cover;
 pub mod debug_panel;
 pub mod engine;

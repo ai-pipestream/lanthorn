@@ -240,6 +240,15 @@ re-seed the new template, or hand-write the new shape from
 ## Configuration
 - TOML config at `~/.babelmap/config.toml` plus command-line flags
   (`--user-dir`, `--config`); CLI overrides the file, which overrides defaults.
+- **The config file documents itself.** On first run babelmap seeds
+  `config.toml` the same way it seeds `style.toml`: every setting it reads is
+  listed, grouped and commented, with the value shown being the **default** — so
+  the whole surface is browsable from the file instead of only from the source,
+  and uncommenting a line as-is changes nothing. Where a default can't be written
+  down (an unset path, or a value babelmap picks per story) the line is marked as
+  an example, because uncommenting *that* does change behaviour. An existing
+  config is never overwritten, and later edits from the settings screen preserve
+  your comments.
 - **Default story directory** — `default_story_dir` is opened when babelmap is
   launched with no path argument. The first time you point babelmap at a
   directory on the command line without one set, it offers to remember that

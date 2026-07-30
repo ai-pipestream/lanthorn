@@ -61,9 +61,18 @@ playing.
   v6). This byte is what unlocks colour on several Infocom games: Beyond Zork, for
   instance, only emits colour to a non-IBM interpreter and falls back to
   reverse-video under IBM PC. Override it with the app's `interpreter_number` config
-  key or `zvm-cli -I N` / `--interpreter N` — e.g. `-I 6` selects the IBM PC path,
-  which draws Beyond Zork's map box and cursor arrows as CP437 character graphics
-  instead of Font 3.
+  key, `babelmap --interpreter-number N`, or `zvm-cli -I N` / `--interpreter N` —
+  e.g. `6` selects the IBM PC path, which draws Beyond Zork's map box and cursor
+  arrows as CP437 character graphics instead of Font 3. The `--interpreter-number`
+  flag applies to one run only and is never written back to your config, so probing
+  a game's behaviour can't quietly pin one machine for every story afterwards. The
+  values are ZMSD §11.1.3's:
+
+  | | | | |
+  |---|---|---|---|
+  | 1 DECSystem-20 | 4 Amiga | 7 Commodore 128 | 10 Apple IIgs |
+  | 2 Apple IIe | 5 Atari ST | 8 Commodore 64 | 11 Tandy Color |
+  | 3 Macintosh | 6 IBM PC | 9 Apple IIc | |
 - **v6 graphical stories** — babelmap boots and plays graphical v6 titles,
   verified against *Zork Zero*'s full frame. On an image-capable terminal
   (Kitty / iTerm2 / Sixel) the game's chrome — the decorative frame, status
