@@ -1783,6 +1783,30 @@ impl GameSession {
     /// flows through the normal submit path, and all other keys are never
     /// terminators. Returns the ZSCII terminator code to submit with, or `None`
     /// to leave the key to its normal app behavior.
+    /// Does the story want mouse input? ZMSD §11.1 "Flags 2" bit 5, which a game
+    /// sets when it intends to read clicks (`read_mouse`, the header extension's
+    /// X/Y words). Zork Zero, Arthur, Shogun, Journey and Scopa all set it;
+    /// advent.z6 and Sunburst do not.
+    pub fn wants_mouse(&self) -> bool {
+        self.machine.mem.read_word(0x10) & (1 << 5) != 0
+    }
+
+    /// The ZSCII single-click code (254, ZMSD §3.8) as a LINE terminator, when the
+    /// story both wants a mouse and lists a click among its terminating characters
+    /// (§10.7 — either 254 itself, as Arthur and Scopa do, or the 255 wildcard for
+    /// "any function key", as Zork Zero and Shogun do).
+    ///
+    /// This is what lets a click on Zork Zero's border compass work during ordinary
+    /// play: the game sits at a line prompt, and a listed terminator ends that read
+    /// with the text typed so far plus the terminator code, whereupon the game reads
+    /// the click coordinates. `None` — Journey, whose table is empty and whose menus
+    /// are driven by `read_char` instead — leaves a click to the app's own handling,
+    /// so no story ever has a partial command submitted by a stray click.
+    pub fn mouse_click_terminator(&self) -> Option<u8> {
+        const SINGLE_CLICK: u8 = 254;
+        (self.wants_mouse() && self.is_terminator(SINGLE_CLICK as u16)).then_some(SINGLE_CLICK)
+    }
+
     pub fn line_key_terminator(&self, ki: &KeyInput) -> Option<u8> {
         match ki {
             KeyInput::Up | KeyInput::Down | KeyInput::Left | KeyInput::Right | KeyInput::Func(_) => {}

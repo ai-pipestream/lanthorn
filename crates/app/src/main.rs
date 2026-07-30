@@ -2291,24 +2291,70 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 // letterbox margin, or a click outside the pane all fall through to
                 // the app's own story-pane handling (selection) below. No overlay
                 // may be open (a modal owns the click first).
+                // A LINE read takes the click too, when the game lists a click among
+                // its terminating characters (SQ-0566). This is the ordinary-play
+                // case: Zork Zero sits at its `>` prompt with the border compass
+                // drawn, and a click there must end the read with whatever is typed
+                // plus terminator 254, so the game can read the coordinates and move.
+                // Restricting delivery to `read_char` meant compass clicks did
+                // nothing except while a menu happened to be up.
                 if matches!(m.kind, crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left))
                     && !state.any_overlay_open()
-                    && zvm_session_opt(&*session)
-                        .is_some_and(|z| z.pending_input() == app::session::InputKind::Char)
                 {
-                    let hit = state
-                        .graphics_render
-                        .borrow()
-                        .last_v6_map
-                        .as_ref()
-                        .and_then(|cm| cm.map_click(m.column, m.row));
+                    let pending = zvm_session_opt(&*session).map(|z| z.pending_input());
+                    let line_term =
+                        zvm_session_opt(&*session).and_then(|z| z.mouse_click_terminator());
+                    let deliver = match pending {
+                        Some(app::session::InputKind::Char) => true,
+                        Some(app::session::InputKind::Line) => line_term.is_some(),
+                        _ => false,
+                    };
+                    // Only a click that maps INTO the drawn v6 image reaches the VM;
+                    // the letterbox margin and everything outside the pane fall
+                    // through to the app's own story-pane handling (selection).
+                    let hit = deliver
+                        .then(|| {
+                            state
+                                .graphics_render
+                                .borrow()
+                                .last_v6_map
+                                .as_ref()
+                                .and_then(|cm| cm.map_click(m.column, m.row))
+                        })
+                        .flatten();
                     if let Some((gx, gy)) = hit {
-                        let z = zvm_session_opt_mut(&mut *session)
-                            .expect("z-machine char read is pending");
-                        z.set_mouse(gy, gx); // engine stores (y, x)
-                        let result = z.submit_char(254); // ZSCII single-click (§3.8)
-                        if turn::apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::PlayerInput,
+                        if pending == Some(app::session::InputKind::Char) {
+                            let z = zvm_session_opt_mut(&mut *session)
+                                .expect("z-machine char read is pending");
+                            z.set_mouse(gy, gx); // engine stores (y, x)
+                            let result = z.submit_char(254); // ZSCII single-click (§3.8)
+                            if turn::apply_game_driven_result(
+                                &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::PlayerInput,
+                            ) {
+                                break 'event_loop state.exit_target.into();
+                            }
+                            continue 'event_loop;
+                        }
+                        // Line read: a real player turn, so it goes through the same
+                        // path as a typed command — history, turn count, mapping,
+                        // autosave — carrying whatever was already typed (usually
+                        // nothing) and the click as the terminator.
+                        let term = line_term.expect("gated by `deliver` above");
+                        let cmd = state.take_input();
+                        if !cmd.is_empty() {
+                            state.record_command(&cmd);
+                        }
+                        state.turns += 1;
+                        state.unsaved_progress = true;
+                        let result = {
+                            let z = zvm_session_opt_mut(&mut *session)
+                                .expect("z-machine line read is pending");
+                            z.set_mouse(gy, gx); // engine stores (y, x)
+                            z.submit_line_with_terminator(&cmd, term)
+                        };
+                        if turn::finish_command_turn(
+                            &cmd, result, &mut state, &mut mapper, &mut *session,
+                            &game_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,
                         ) {
                             break 'event_loop state.exit_target.into();
                         }
