@@ -195,18 +195,18 @@ for Legacy Computing arrived in Unicode 13 (2020), and plenty of otherwise
 excellent fonts still don't cover it. If your diagonal *passages* come out blank
 while everything else draws fine, that block is your culprit.
 
-> **Coming in the next release.** A `diagonal_corners` switch to turn the stubs
-> off — routing those connectors orthogonally with plain box-drawing characters
-> instead — is **not yet wired up**. The key is read by the renderer but nothing
-> can currently set it, so adding it to a style file today does nothing. It will
-> be honoured in the next version, in `~/.babelmap/style.toml`:
+> **The fix, if your font is missing them.** Turn the stubs off and those
+> connectors route orthogonally with plain box-drawing characters instead. The
+> line is already in your `~/.babelmap/style.toml`, commented out — uncomment it
+> and set it to `false`:
 >
 > ```toml
-> [symbols]
+> [map]
 > diagonal_corners = false
 > ```
 >
-> Until then, picking a font that covers the block is the reliable fix.
+> `reload-style` picks it up without restarting. Picking a font that covers the
+> block works too, and keeps the nicer diagonals.
 
 Style settings live in `~/.babelmap/style.toml` (create it if absent — every
 setting has a default, so it only needs the lines you change), and `reload-style`

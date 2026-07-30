@@ -6,15 +6,75 @@ All notable changes to babelmap are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.1.0`) versions every crate and every
-binary's `--version` at once.
+version in `Cargo.toml` (currently `0.1.0-beta.2`) versions every crate and every
+binary's `--version` at once, and carries the pre-release suffix so a build
+identifies which beta it is without reading its git hash.
 
 ---
 
-## Unreleased
+## v0.1.0-beta.2 — 2026-07-29
+
+Ninety-odd commits on from the first beta, most of them spent making the graphical v6
+support that shipped in beta.1 actually behave: its screen model is now rebuilt against
+ZMSD §8 rather than approximated, palettes adapt the way the Blorb spec says they
+should, and the games that ask for mouse input get it. Alongside that, the map stopped
+implying passages it has never seen, the Glulx mapper learned to identify rooms the way
+the game itself does, and `config.toml` learned to explain itself.
+
+### Added
+
+- **Switch v6 render modes live** with **`/set-v6-render`** — cycle or name one of
+  `hybrid` (crisp terminal story inside a scaled pixel frame), `raster` (the whole pane
+  as one image) or `frameless` (no frame at all — full-pane text with a status band and
+  inline pictures) without restarting the story. The raster bitfont also gained
+  synthesized bold and italic faces, so emphasis survives the pixel path.
+- **Adaptive palettes (Blorb §11.3).** A scene that swaps the palette now recolours
+  the pictures already on screen, by replaying each window's draws *and* erases in
+  order — which is what makes *Arthur*'s churchyard turn brown when you step into the
+  church, and its blues invert behind the gravestone.
+- **Mouse in v6.** Clicks are delivered during a line read, so *Zork Zero*'s border
+  compass rose works while you're mid-command.
+- **A map that admits what it hasn't tried.** The mapper records which directions
+  you've actually attempted in each room, and an optional `?` overlay marks the ones
+  you haven't — verticals included, as `u`/`d`. The room inspector grew a compass rose
+  of explored directions that signals exploration by colour and draws real portal
+  glyphs.
+- **Keep playing with a room panel open.** The room inspector no longer takes the
+  prompt hostage: you can read a room's details and keep typing.
+- **Ghost-text completion at the story prompt.** Suggestions from the story's own
+  vocabulary appear inline as you type, which also stops the prompt bouncing as hints
+  appear and vanish.
+- **The authentic `[more]` pager**, armed the way the original interpreters armed it —
+  on char-input turns, on clears, and at boot.
+- **IFDB ratings in the story browser** — the average rating, with its vote count
+  beside it, so a 5-star single vote reads as what it is.
+- **`--interpreter-number N`** overrides the story header's `0x1E` byte for one run
+  (never written back), and **`/print-colors`** reports what the terminal answered to
+  the OSC 10/11 colour probe.
 
 ### Changed
 
+- **The v6 screen model, rebuilt to spec.** Seven waves of work replaced the beta.1
+  approximation with ZMSD §8 behaviour: word wrap, the live cursor, stream 2, line
+  counting and `buffer_mode` now do what the spec says. *Zork Zero*, *Arthur*,
+  *Journey* and *Shogun* all lay out visibly better for it, and `scroll_window(0)` is
+  a silent no-op instead of a player-facing warning.
+- **`config.toml` explains itself.** On first run it is seeded like `style.toml`
+  already was: every setting babelmap reads, grouped and commented, with the value
+  shown being the default — so uncommenting a line changes nothing and the whole
+  surface is browsable from the file. Only settings you actually change are written
+  live; section headers stay uncommented; your comments survive later saves.
+- **`diagonal_corners` is wired.** The switch the last release said was coming now
+  works, under `[map]` in `style.toml` — set it `false` if your font lacks Unicode 13's
+  half-diagonals. `[map]` is now the single section driving the map's glyphs, and the
+  story-browser badge glyphs became settable too.
+- **One line per room pair.** Parallel passages between the same two rooms collapse to
+  a single line chosen by priority rather than stacking; staircases keep their own
+  vertical slot instead of being folded into the compass line; and an unrelated
+  crossing breaks the horizontal instead of drawing a junction that isn't there.
+- **Glulx rooms are identified the way the game identifies them** — by its own location
+  global rather than by the room's printed name, so two rooms sharing a name stay
+  distinct and a renamed room stays itself.
 - **One save format, whoever asked for it (SQ-0531).** A story's own `SAVE` now
   writes the same self-contained `.babelmap` archive Ctrl+S writes — map, screen,
   transcript and inline art included — instead of a bare VM-state-only file. So an
@@ -42,6 +102,31 @@ binary's `--version` at once.
   live one. No archive format change: the bytes sealed for an in-game save are
   the same standard Glulx-Quetzal as before, and still unzip straight into
   another interpreter.
+- **Glulx resume lands in the room you saved in**, not the boot room, and the room
+  ids a resume seeds now match the ones a live turn would produce.
+- **Toolbar verbs prime the prompt.** Glk's pre-filled line input (§4.2 `initlen`) is
+  honoured, so *Adventure*'s graphical toolbar verbs put the word at your cursor
+  instead of submitting an empty line — and the player's own edits are mirrored back
+  into the game's buffer, so deleting the verb and pressing another button no longer
+  re-inserts the first one.
+- **The input line and caret stay put** — neither the map taking focus nor a room
+  panel opening blanks them any more, and text-entry fields scroll to keep the caret
+  visible.
+- **v6 layout, a long tail of it.** *Arthur*'s header art no longer moves when the
+  `map` command resizes the story window, and its location bar no longer renders as
+  sliced half-glyphs at particular pane widths (both were the same class of bug:
+  two different roundings of one boundary). *Zork Zero*'s full-screen map is visible
+  in hybrid mode instead of being painted over by the transcript. *Journey*'s command
+  menu inverts clicks by row, and the width-dependent dark bar under its picture
+  column is gone. The v6 status band is found above the story window rather than
+  assumed to be at the top of the screen.
+- **Graphics are quieter and faster.** Kitty uploads are cached by canvas *content*,
+  so a game that repaints an identical frame re-places the image instead of
+  re-transmitting it, and image deletion is deferred a generation so animation frames
+  no longer flash between steps. *Adventure*'s graphical toolbar renders as a real
+  image rather than colour-averaged rule glyphs.
+- **`--user-dir` now moves the config read, not just the writes**, so a run with an
+  overridden home stops silently discarding everything it saves.
 
 ### Save format
 
@@ -52,6 +137,27 @@ binary's `--version` at once.
   rejected by older builds, as the format freeze intends. Bare Quetzal /
   Glulx-Quetzal interchange files are untouched. See
   [`docs/release/save-format-policy.md`](docs/release/save-format-policy.md).
+
+### Known issues
+
+- **Sub-cell buttons in a graphics window can't be clicked.** A game that hit-tests
+  its own canvas in pixels — *Adventure*'s graphical toolbar is the case — can place
+  buttons smaller than a terminal cell. Its compass rose puts **W** and **E** in a band
+  that a cell-centre click can never name, so those two are unreachable however
+  carefully you aim. Pixel-precise reporting (DEC mode 1016) was implemented for this
+  and withdrawn before release: the cell size it divides by is reported in logical
+  points while the protocol reports device pixels, which broke every click on a HiDPI
+  display. It needs a `CSI 14t`-derived divisor to land. *Workaround:* type `west` /
+  `east`; the toolbar's other buttons all work.
+- **A v6 game's own erase can take neighbouring art with it.** Windows share one
+  screen (ZMSD §8), so erasing a region clears whatever *any* window plotted there.
+  *Arthur*'s map screen erases the columns its side borders occupy, and since the game
+  never redraws them they stay gone for the session. This is what a real interpreter
+  shows, and babelmap follows it deliberately rather than second-guessing the game.
+- The three v6 caveats from beta.1 still apply: **Inform-compiled v6 status lines
+  don't paint in `raster` mode**, **rasterized v6 text isn't selectable**, and **sixel
+  encode latency on very large panes**. See their entries below for scope and
+  workarounds — `hybrid` (the default) avoids all three.
 
 ---
 
