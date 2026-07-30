@@ -412,3 +412,70 @@ fn arthur_status_bar_is_terminal_cells_at_every_pane_width() {
     }
     assert!(broken.is_empty(), "the status bar must be crisp cells at every width; failures: {broken:#?}");
 }
+
+/// A hybrid render at 8×17/Kitty that reports the recorded letterbox anchor: the
+/// device-pixel top of the drawn game image inside the pane, rounded to a whole
+/// pixel. This is what "the frame moved" means numerically.
+fn hybrid_anchor(model: &app::engine::ScreenModel, cols: u16, rows: u16) -> i32 {
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    #[allow(deprecated)]
+    let mut picker = ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 17));
+    picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+    state.game_picker = Some(picker);
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let area = Rect::new(0, 0, cols, rows);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(model, false, None, &state, area, &mut buf);
+    let anchor = state.graphics_render.borrow().last_v6_map.as_ref().map(|m| m.img_y.round() as i32);
+    anchor.expect("the hybrid path records a v6 click map")
+}
+
+/// SQ-0571(c): none of Arthur's full-screen takeovers may MOVE the frame when they
+/// open or close.
+///
+/// Each of them resizes win0 so its bottom reaches the native screen bottom (400):
+/// `map` grows it to 584×192, and the F6 text page opens it at 640×384.
+/// `hybrid_bottom_plan` read a story window reaching the bottom as an enclosing
+/// frame and — with no full-height side ART to stretch, since Arthur's borders are
+/// drawn into the full-screen window 7 and erased by these very screens — fell back
+/// to `Letterbox`, whose CENTRED vertical offset pushed the whole screen half the
+/// letterbox slack down the pane (F6: 193 device px, ~11 rows). Dismissing the
+/// screen shrank win0 back below the bottom, flipped the plan to `Extend`, and
+/// everything jumped to the top. Where the frame sits must not depend on the story
+/// window's height, so that arm now top-anchors too.
+///
+/// Asserts the recorded letterbox anchor is unchanged across the transition, and
+/// that it is the pane top — a centred offset is exactly the defect.
+#[test]
+fn arthur_screen_swaps_do_not_move_the_frame() {
+    // `None` → the `map` command; `Some(t)` → a line read terminated by function
+    // key ZSCII `t` (F1 = 133, so F3..F6 are 135..138) — how Arthur's keypad
+    // screens are actually invoked.
+    for (label, term) in [
+        ("map command", None),
+        ("F3", Some(135u8)),
+        ("F4", Some(136)),
+        ("F5", Some(137)),
+        ("F6", Some(138)),
+    ] {
+        let Some(mut session) = arthur_at_status() else { return };
+        match term {
+            None => {
+                let _ = session.submit("map");
+            }
+            Some(t) => {
+                let _ = session.submit_line_with_terminator("", t);
+            }
+        }
+        let shown = hybrid_anchor(&session.screen(), 96, 51);
+        let _ = session.submit("");
+        let dismissed = hybrid_anchor(&session.screen(), 96, 51);
+        assert_eq!(
+            shown, dismissed,
+            "{label}: the frame sits at the same place shown and dismissed \
+             (shown img_y={shown}, dismissed img_y={dismissed})"
+        );
+        assert_eq!(shown, 0, "{label}: the frame is anchored to the pane TOP, not centred (img_y={shown})");
+    }
+}

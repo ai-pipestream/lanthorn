@@ -2282,22 +2282,19 @@ fn hybrid_bottom_plan(
         if left_art && right_art {
             return BottomPlan::Frame;
         }
-        // SQ-0571: no enclosing side art, but a HEADER panel above the story — keep
-        // it top-anchored (`Extend`) rather than centring the whole frame. Arthur's
-        // `map` command grows win0 from 128 to 192 native px so its bottom reaches
-        // 400, which used to flip the plan from Extend to Letterbox mid-game: the
-        // centred offset dropped the header art (and the map drawn into it) half the
-        // slack down the pane, leaving a band of blank rows above it — the graphic
-        // "moving" when `map` was issued, then jumping back when the window shrank
-        // again. The picture's placement must not depend on the story window's
-        // height. With nothing to stretch below, `Extend` simply lets the story fill
-        // to the pane bottom, exactly as it does at the smaller window height.
-        let header_art = (0..(story.y_px as u32).min(gfx.height()))
-            .any(|y| (0..gfx.width()).any(|x| gfx.get_pixel(x, y)[3] >= 128));
-        if header_art {
-            return BottomPlan::Extend;
-        }
-        return BottomPlan::Letterbox;
+        // SQ-0571: with no enclosing side art there is nothing to stretch, so
+        // top-anchor (`Extend`) rather than CENTRE the frame. Centring made the
+        // whole screen's position depend on the story window's height, and Arthur
+        // changes that height mid-game: `map` grows win0 from 128 to 192 native px
+        // (bottom 400), and its F6 text screen opens win0 at 640×384 (bottom 400),
+        // both of which flipped the plan Extend → Letterbox. The centred offset then
+        // dropped everything — header art, the map drawn into it, or a bare text
+        // page — half the letterbox slack down the pane, and dismissing the screen
+        // shrank the window and jumped it all back to the top. `Extend` simply lets
+        // the story fill to the pane bottom, exactly as it does at the smaller
+        // window height, so nothing moves. Zork0/Shogun are unaffected: their
+        // full-height side art takes the `Frame` arm above.
+        return BottomPlan::Extend;
     }
     let sx0 = story.x_px as u32;
     let sx1 = (story.x_px as u32 + story.w_px as u32).min(gfx.width());
