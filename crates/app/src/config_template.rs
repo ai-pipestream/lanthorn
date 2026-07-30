@@ -19,6 +19,10 @@
 //! * [`Line::Example`] — the default cannot be written down (`None`, or a computed
 //!   path), so the value is an illustration. Uncommenting it CHANGES behaviour.
 //!
+//! Section headers (`[search]`, `[animation]`, `[keymap]`) are emitted UNCOMMENTED,
+//! matching style.toml, and the schema `version` stamp is a live key: everything that
+//! is actually a *setting* stays commented.
+//!
 //! [`auto_seed`] writes the template on first run and never overwrites an existing
 //! file, exactly like the style seed. `write_config` still owns runtime edits and
 //! stays format-preserving, so a seeded file keeps its comments as settings change.
@@ -306,12 +310,18 @@ pub fn commented_template() -> String {
     out.push_str("# a line as-is changes nothing. Edit the value to change behaviour.\n");
     out.push_str("#\n");
     out.push_str("# Colours, glyphs and borders are NOT here: they live in style.toml.\n");
-    out.push_str(&format!("#\n# Schema version {CONFIG_SCHEMA_VERSION} (babelmap manages the `version` key itself).\n"));
+    out.push_str("#\n# `version` below is the schema stamp — babelmap manages it; leave it alone.\n");
+    out.push_str("# It is also the anchor that keeps settings babelmap writes for you (from the\n");
+    out.push_str("# settings screen, say) together at the top rather than scattered.\n");
+    out.push_str(&format!("version = {CONFIG_SCHEMA_VERSION}\n"));
 
     for g in GROUPS {
         out.push_str(&format!("\n# ── {} {}\n", g.banner, "─".repeat(72usize.saturating_sub(g.banner.len() + 6))));
         if let Some(t) = g.table {
-            out.push_str(&format!("# [{t}]\n"));
+            // Real, UNCOMMENTED header — exactly as style.toml does it. It also gives
+            // the document structure, so a key `write_config` adds lands in the root
+            // table above the sections instead of scattering.
+            out.push_str(&format!("[{t}]\n"));
         }
         for (i, row) in g.rows.iter().enumerate() {
             if i > 0 {
@@ -371,7 +381,18 @@ mod tests {
     fn template_is_valid_toml_and_a_no_op_as_written() {
         let t = commented_template();
         let parsed: toml::Table = toml::from_str(&t).expect("the template parses as TOML");
-        assert!(parsed.is_empty(), "every line is commented, so it parses to nothing: {parsed:?}");
+        // Only the managed schema stamp and the (empty) section headers are live —
+        // every actual setting is commented out.
+        let mut live: Vec<&str> = parsed.keys().map(String::as_str).collect();
+        live.sort_unstable();
+        assert_eq!(live, ["animation", "keymap", "search", "version"], "live keys: {parsed:?}");
+        for t in ["animation", "keymap", "search"] {
+            assert!(
+                parsed[t].as_table().is_some_and(|x| x.is_empty()),
+                "section [{t}] is a bare header with every setting commented: {:?}",
+                parsed[t]
+            );
+        }
         let cfg: Config = toml::from_str(&t).expect("and deserializes as a Config");
         assert_eq!(
             shape(&cfg),
@@ -448,6 +469,54 @@ mod tests {
             missing.is_empty(),
             "these settings are loaded from config.toml but not documented in the template: {missing:?}"
         );
+    }
+
+    /// The end-to-end shape the reporter hit: seed a fresh config, then let something
+    /// save settings (the story browser's "remember this directory?" prompt is enough)
+    /// and confirm the file is still the annotated template rather than the old flat
+    /// key list. `write_config` used to stamp all ~36 keys unconditionally, and because
+    /// an all-comment file parses as trailing trivia they landed ABOVE the comments —
+    /// so a brand-new config read as the old format at first glance.
+    #[test]
+    fn a_settings_save_keeps_the_seeded_template() {
+        let dir = std::env::temp_dir().join(format!("bm-cfgsave-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        auto_seed(&dir);
+        let path = dir.join("config.toml");
+        let seeded = std::fs::read_to_string(&path).unwrap();
+
+        // Exactly what the story-list prompt does: set default_story_dir and save.
+        // `user_dir` deliberately left at its default: the real flow only sets it when
+        // `--user-dir` was passed, and an unchanged one must not be persisted either.
+        let mut cfg = Config::default();
+        cfg.default_story_dir = Some(std::path::PathBuf::from("/games/if"));
+        crate::config::write_config(&dir, &cfg).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+
+        // The documentation survives intact, comment for comment.
+        let comments = |t: &str| t.lines().filter(|l| l.trim_start().starts_with('#')).count();
+        assert_eq!(comments(&after), comments(&seeded), "every comment line survives the save");
+        assert!(after.contains("# ── Interpreter behaviour"), "the group banners survive");
+        assert!(after.contains("#    6  IBM PC"), "the interpreter table survives");
+
+        // And only the setting that actually changed went live.
+        let parsed: toml::Table = toml::from_str(&after).unwrap();
+        let mut live: Vec<&str> = parsed.keys().map(String::as_str).collect();
+        live.sort_unstable();
+        assert_eq!(
+            live,
+            ["animation", "default_story_dir", "keymap", "search", "version"],
+            "only the changed setting joins the stamp and the section headers: {after}"
+        );
+        for t in ["animation", "keymap", "search"] {
+            assert!(parsed[t].as_table().is_some_and(|x| x.is_empty()), "[{t}] stays a bare header");
+        }
+
+        // Re-reading it gives back the config that was saved.
+        let reread: Config = toml::from_str(&after).unwrap();
+        assert_eq!(reread.default_story_dir, Some(std::path::PathBuf::from("/games/if")));
+        assert!(reread.auto_load, "an absent key still means its default");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The seed never clobbers a real config.

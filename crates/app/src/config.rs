@@ -811,6 +811,34 @@ pub fn resolve(cli: &Cli) -> Config {
 
 // ── Write helpers ─────────────────────────────────────────────────────────────
 
+/// Set `key` only when it is worth persisting (SQ-0573).
+///
+/// A setting at its default belongs in the seeded commented template, not as a live
+/// key: `write_config` used to stamp all ~36 keys unconditionally, so the first
+/// settings save — the story browser's "remember this directory?" prompt is enough —
+/// appended the whole flat key list to a freshly seeded config.toml, pinning every
+/// default and burying the comments (they land BELOW the inserted keys, since an
+/// all-comment file parses as trailing trivia).
+///
+/// So: add a key only when its value differs from the default, but ALWAYS update one
+/// the file already has. That second half matters twice over — it keeps a setting the
+/// user flipped back to its default from silently reverting on the next launch, and
+/// it means nothing is ever removed, so a comment the user wrote above their own key
+/// (which toml_edit attaches to that key as decor) is never dropped.
+fn put(doc: &mut toml_edit::DocumentMut, key: &str, value: toml_edit::Value, is_default: bool) {
+    if !is_default || doc.contains_key(key) {
+        doc[key] = toml_edit::Item::Value(value);
+    }
+}
+
+/// [`put`] for a key inside a table.
+fn put_in(tbl: &mut toml_edit::Item, key: &str, value: toml_edit::Value, is_default: bool) {
+    let present = tbl.get(key).is_some();
+    if !is_default || present {
+        tbl[key] = toml_edit::Item::Value(value);
+    }
+}
+
 /// Write the functional config fields (and the `style` pointer) to `dir/config.toml`
 /// using toml_edit (format-preserving). Creates the file and parent directory if absent.
 /// Does NOT emit `[colors]`/`[symbols]` — those now live in the style file.
@@ -826,52 +854,54 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
 
     let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = existing.parse().unwrap_or_default();
+    // Defaults to compare against, so a setting nobody changed is not written out.
+    let def = Config::default();
 
     // Top-level scalar fields. Always stamp the current schema version — writing
     // the file brings it up to the format this build produces.
     doc["version"] = toml_edit::value(CONFIG_SCHEMA_VERSION as i64);
-    doc["user_dir"] = toml_edit::value(cfg.user_dir.to_string_lossy().as_ref());
+    put(&mut doc, "user_dir", cfg.user_dir.to_string_lossy().as_ref().into(), cfg.user_dir == def.user_dir);
     match &cfg.default_story_dir {
         Some(p) => { doc["default_story_dir"] = toml_edit::value(p.to_string_lossy().as_ref()); }
         None => { doc.remove("default_story_dir"); }
     }
-    doc["auto_load"] = toml_edit::value(cfg.auto_load);
-    doc["auto_save"] = toml_edit::value(cfg.auto_save);
-    doc["mouse_wheel_invert"] = toml_edit::value(cfg.mouse_wheel_invert);
-    doc["mouse"] = toml_edit::value(cfg.mouse);
-    doc["command_bar"] = toml_edit::value(cfg.command_bar);
-    doc["prompt_save_on_quit"] = toml_edit::value(cfg.prompt_save_on_quit);
-    doc["prompt_load_on_launch"] = toml_edit::value(cfg.prompt_load_on_launch);
+    put(&mut doc, "auto_load", cfg.auto_load.into(), cfg.auto_load == def.auto_load);
+    put(&mut doc, "auto_save", cfg.auto_save.into(), cfg.auto_save == def.auto_save);
+    put(&mut doc, "mouse_wheel_invert", cfg.mouse_wheel_invert.into(), cfg.mouse_wheel_invert == def.mouse_wheel_invert);
+    put(&mut doc, "mouse", cfg.mouse.into(), cfg.mouse == def.mouse);
+    put(&mut doc, "command_bar", cfg.command_bar.into(), cfg.command_bar == def.command_bar);
+    put(&mut doc, "prompt_save_on_quit", cfg.prompt_save_on_quit.into(), cfg.prompt_save_on_quit == def.prompt_save_on_quit);
+    put(&mut doc, "prompt_load_on_launch", cfg.prompt_load_on_launch.into(), cfg.prompt_load_on_launch == def.prompt_load_on_launch);
     let bg_str = match cfg.background_tidy {
         BackgroundTidy::Off => "off",
         BackgroundTidy::EveryRoom => "every_room",
         BackgroundTidy::OnOverlap => "on_overlap",
         BackgroundTidy::Debounced => "debounced",
     };
-    doc["background_tidy"] = toml_edit::value(bg_str);
+    put(&mut doc, "background_tidy", bg_str.into(), cfg.background_tidy == def.background_tidy);
     let aux_str = match cfg.aux_storage {
         AuxStorage::Ask => "ask",
         AuxStorage::Archive => "archive",
         AuxStorage::Global => "global",
     };
-    doc["aux_storage"] = toml_edit::value(aux_str);
+    put(&mut doc, "aux_storage", aux_str.into(), cfg.aux_storage == def.aux_storage);
     let v6_str = match cfg.v6_render {
         V6RenderMode::Hybrid => "hybrid",
         V6RenderMode::Raster => "raster",
         V6RenderMode::Frameless => "frameless",
     };
-    doc["v6_render"] = toml_edit::value(v6_str);
-    doc["v6_arrow_keys"] = toml_edit::value(cfg.v6_arrow_keys);
-    doc["show_room_numbers"] = toml_edit::value(cfg.show_room_numbers);
-    doc["show_status_bar"] = toml_edit::value(cfg.show_status_bar);
-    doc["hint_skip_screen_warning"] = toml_edit::value(cfg.hint_skip_screen_warning);
-    doc["watch_style"] = toml_edit::value(cfg.watch_style);
-    doc["record_turn_history"] = toml_edit::value(cfg.record_turn_history);
-    doc["honor_game_colours"] = toml_edit::value(cfg.honor_game_colours);
-    doc["honor_timed_input"] = toml_edit::value(cfg.honor_timed_input);
-    doc["enable_sound"] = toml_edit::value(cfg.enable_sound);
-    doc["volume"] = toml_edit::value(cfg.volume as i64);
-    doc["undo_levels"] = toml_edit::value(cfg.undo_levels as i64);
+    put(&mut doc, "v6_render", v6_str.into(), cfg.v6_render == def.v6_render);
+    put(&mut doc, "v6_arrow_keys", cfg.v6_arrow_keys.into(), cfg.v6_arrow_keys == def.v6_arrow_keys);
+    put(&mut doc, "show_room_numbers", cfg.show_room_numbers.into(), cfg.show_room_numbers == def.show_room_numbers);
+    put(&mut doc, "show_status_bar", cfg.show_status_bar.into(), cfg.show_status_bar == def.show_status_bar);
+    put(&mut doc, "hint_skip_screen_warning", cfg.hint_skip_screen_warning.into(), cfg.hint_skip_screen_warning == def.hint_skip_screen_warning);
+    put(&mut doc, "watch_style", cfg.watch_style.into(), cfg.watch_style == def.watch_style);
+    put(&mut doc, "record_turn_history", cfg.record_turn_history.into(), cfg.record_turn_history == def.record_turn_history);
+    put(&mut doc, "honor_game_colours", cfg.honor_game_colours.into(), cfg.honor_game_colours == def.honor_game_colours);
+    put(&mut doc, "honor_timed_input", cfg.honor_timed_input.into(), cfg.honor_timed_input == def.honor_timed_input);
+    put(&mut doc, "enable_sound", cfg.enable_sound.into(), cfg.enable_sound == def.enable_sound);
+    put(&mut doc, "volume", (cfg.volume as i64).into(), cfg.volume == def.volume);
+    put(&mut doc, "undo_levels", (cfg.undo_levels as i64).into(), cfg.undo_levels == def.undo_levels);
     // A `--interpreter-number` override is for THIS run only: writing it here would
     // silently make it permanent the next time anything saves settings, so leave the
     // file's own value (or its absence) untouched in that case.
@@ -889,11 +919,11 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
         Some(n) => { doc["virtual_screen_rows"] = toml_edit::value(i64::from(n)); }
         None => { doc.remove("virtual_screen_rows"); }
     }
-    doc["split_ratio"] = toml_edit::value(i64::from(cfg.split_ratio));
-    doc["verb_dock_pct"] = toml_edit::value(i64::from(cfg.verb_dock_pct));
-    doc["inv_dock_pct"] = toml_edit::value(i64::from(cfg.inv_dock_pct));
-    doc["text_margin_x"] = toml_edit::value(i64::from(cfg.text_margin_x));
-    doc["text_margin_y"] = toml_edit::value(i64::from(cfg.text_margin_y));
+    put(&mut doc, "split_ratio", i64::from(cfg.split_ratio).into(), cfg.split_ratio == def.split_ratio);
+    put(&mut doc, "verb_dock_pct", i64::from(cfg.verb_dock_pct).into(), cfg.verb_dock_pct == def.verb_dock_pct);
+    put(&mut doc, "inv_dock_pct", i64::from(cfg.inv_dock_pct).into(), cfg.inv_dock_pct == def.inv_dock_pct);
+    put(&mut doc, "text_margin_x", i64::from(cfg.text_margin_x).into(), cfg.text_margin_x == def.text_margin_x);
+    put(&mut doc, "text_margin_y", i64::from(cfg.text_margin_y).into(), cfg.text_margin_y == def.text_margin_y);
 
     // style pointer — the only visual key written to config.toml. The actual
     // colors/symbols live in the style file ([colors]/[symbols] are no longer
@@ -903,20 +933,29 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
         None => { doc.remove("style"); }
     }
 
-    // [search] table.
+    // [search] table — only materialized once something in it is non-default, so a
+    // seeded config keeps the commented block instead of gaining an all-defaults table.
+    if doc.contains_key("search")
+        || cfg.search.start_backward != def.search.start_backward
+        || cfg.search.key_back != def.search.key_back
+        || cfg.search.key_forward != def.search.key_forward
     {
         let tbl = doc["search"].or_insert(toml_edit::table());
-        tbl["start_backward"] = toml_edit::value(cfg.search.start_backward);
-        tbl["key_back"] = toml_edit::value(cfg.search.key_back.to_string());
-        tbl["key_forward"] = toml_edit::value(cfg.search.key_forward.to_string());
+        put_in(tbl, "start_backward", cfg.search.start_backward.into(), cfg.search.start_backward == def.search.start_backward);
+        put_in(tbl, "key_back", cfg.search.key_back.to_string().into(), cfg.search.key_back == def.search.key_back);
+        put_in(tbl, "key_forward", cfg.search.key_forward.to_string().into(), cfg.search.key_forward == def.search.key_forward);
     }
 
-    // [animation] table.
+    // [animation] table — same rule as [search].
+    if doc.contains_key("animation")
+        || cfg.animation.enabled != def.animation.enabled
+        || cfg.animation.easing != def.animation.easing
+        || cfg.animation.scroll_ms != def.animation.scroll_ms
     {
         let tbl = doc["animation"].or_insert(toml_edit::table());
-        tbl["enabled"] = toml_edit::value(cfg.animation.enabled);
-        tbl["easing"] = toml_edit::value(crate::anim::easing_token(cfg.animation.easing));
-        tbl["scroll_ms"] = toml_edit::value(cfg.animation.scroll_ms as i64);
+        put_in(tbl, "enabled", cfg.animation.enabled.into(), cfg.animation.enabled == def.animation.enabled);
+        put_in(tbl, "easing", crate::anim::easing_token(cfg.animation.easing).into(), cfg.animation.easing == def.animation.easing);
+        put_in(tbl, "scroll_ms", (cfg.animation.scroll_ms as i64).into(), cfg.animation.scroll_ms == def.animation.scroll_ms);
     }
 
     std::fs::write(&config_path, doc.to_string())
@@ -1305,7 +1344,12 @@ use_defaults = false
         assert_eq!(doc["split_ratio"].as_integer(), Some(70));
         assert_eq!(doc["verb_dock_pct"].as_integer(), Some(40));
         assert_eq!(doc["inv_dock_pct"].as_integer(), Some(25));
-        assert_eq!(doc["mouse"].as_bool(), Some(true));
+        // SQ-0573: `mouse` is at its DEFAULT and the pre-existing file did not carry
+        // it, so it is deliberately not written — a default belongs in the commented
+        // template, not as a live key. `user_dir` here is the test's temp dir, so it
+        // differs from the default and IS written.
+        assert!(doc.get("mouse").is_none(), "a default absent from the file stays absent");
+        assert_eq!(doc["user_dir"].as_str(), Some(dir.to_string_lossy().as_ref()));
         // Style pointer is written; visual sections are NOT.
         assert_eq!(doc["style"].as_str(), Some("neon"));
         assert!(!content.contains("[colors]"));
@@ -1314,6 +1358,21 @@ use_defaults = false
         assert_eq!(doc["keymap"]["zoom_in"].as_str(), Some("z"));
         // Comment is in the raw text.
         assert!(content.contains("# babelmap config"), "comment must be preserved");
+
+        // SQ-0573, the other half: a key the file ALREADY has is always rewritten, even
+        // when it now holds the default — otherwise flipping a setting back to its
+        // default would leave the old value in the file and silently revert on the next
+        // launch. Nothing is removed, so a comment the user wrote above their own key
+        // (toml_edit attaches it to that key) survives too.
+        let with_key = format!("# mine\nauto_load = false\n{initial}");
+        std::fs::write(dir.join("config.toml"), &with_key).unwrap();
+        let mut back_to_default = cfg.clone();
+        back_to_default.auto_load = true; // the default
+        write_config(&dir, &back_to_default).unwrap();
+        let content = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let doc: toml_edit::DocumentMut = content.parse().unwrap();
+        assert_eq!(doc["auto_load"].as_bool(), Some(true), "a present key is updated to its default");
+        assert!(content.contains("# mine"), "the user's own comment above it survives");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
