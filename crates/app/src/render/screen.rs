@@ -706,6 +706,47 @@ fn render_node(
                                 Some(y) => area.y + ((scale.off_y as f32 + (y + 1) as f32 * scale.s) / ch).ceil() as u16,
                                 None => area.y,
                             };
+                            // SQ-0571: the clip must never guillotine a chrome TEXT row
+                            // that sits between the art and the story — Arthur's status
+                            // bar. The clip rounds the art's native bottom UP through the
+                            // scale; `run_cell` maps a run's native top by ROUNDing. Both
+                            // read the same native boundary (Arthur's art ends at 192, its
+                            // status row starts at 192), so whenever `192·s/cell_h` has a
+                            // fraction >= 0.5 the two agree and the clip lands exactly ON
+                            // the status row, evicting it from the band. With no Text strip
+                            // covering it the run is never cleared from the band canvas
+                            // (`clear_text_rows` below), so the status painted as a squashed
+                            // raster slice of the frame instead of crisp cells — the
+                            // width-dependent "corrupted location bar" (broken at 96..=99
+                            // columns on an 8x17 cell, clean at 95 and 100).
+                            //
+                            // Raise the clip past the LAST pure-text chrome row above the
+                            // story. Deliberately only text rows: a run-less row below the
+                            // art still gets clipped (it would otherwise coalesce into an
+                            // Art strip and redraw a squashed slice of the frame's edge,
+                            // the SQ-0548 defect), and a run OVER art is already ring
+                            // content that the unraised clip places correctly.
+                            let story_top = story.y_px as i32;
+                            let text_above = chrome_runs
+                                .iter()
+                                .filter(|t| {
+                                    let py = t.y.max(1) as i32 - 1;
+                                    !t.text.trim().is_empty()
+                                        && py + 16 <= story_top
+                                        && !v6::region_has_opaque(
+                                            &gfx,
+                                            t.x.max(1) as u32 - 1,
+                                            py.max(0) as u32,
+                                            t.text.chars().count().max(1) as u32 * 8,
+                                            16,
+                                        )
+                                })
+                                .map(|t| run_cell(t, &scale, cell_px, area).1)
+                                .max();
+                            let clip_row = match text_above {
+                                Some(r) if r >= 0 => clip_row.max((r as u16).saturating_add(1)),
+                                _ => clip_row,
+                            };
                             for b in &mut ring_bands {
                                 if b.y >= clip_row {
                                     b.height = 0;
@@ -2240,6 +2281,21 @@ fn hybrid_bottom_plan(
         let right_art = flank_opaque(sx1, gfx.width());
         if left_art && right_art {
             return BottomPlan::Frame;
+        }
+        // SQ-0571: no enclosing side art, but a HEADER panel above the story — keep
+        // it top-anchored (`Extend`) rather than centring the whole frame. Arthur's
+        // `map` command grows win0 from 128 to 192 native px so its bottom reaches
+        // 400, which used to flip the plan from Extend to Letterbox mid-game: the
+        // centred offset dropped the header art (and the map drawn into it) half the
+        // slack down the pane, leaving a band of blank rows above it — the graphic
+        // "moving" when `map` was issued, then jumping back when the window shrank
+        // again. The picture's placement must not depend on the story window's
+        // height. With nothing to stretch below, `Extend` simply lets the story fill
+        // to the pane bottom, exactly as it does at the smaller window height.
+        let header_art = (0..(story.y_px as u32).min(gfx.height()))
+            .any(|y| (0..gfx.width()).any(|x| gfx.get_pixel(x, y)[3] >= 128));
+        if header_art {
+            return BottomPlan::Extend;
         }
         return BottomPlan::Letterbox;
     }

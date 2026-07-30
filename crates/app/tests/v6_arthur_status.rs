@@ -282,3 +282,133 @@ fn arthur_frameless_status_bar_anchors_to_the_top() {
         }
     }
 }
+
+/// Boot Arthur, then issue the in-game `map` command. `after_enter` additionally
+/// dismisses the map with a bare Enter. The two states differ ONLY in the story
+/// window's native height: `map` grows win0 from 584×128 to 584×192 (so its bottom
+/// reaches the native screen bottom, 400), and dismissing it shrinks it back.
+fn arthur_showing_map(after_enter: bool) -> Option<GameSession> {
+    let mut session = arthur_at_status()?;
+    let _ = session.submit("map");
+    if after_enter {
+        let _ = session.submit("");
+    }
+    Some(session)
+}
+
+/// A hybrid-mode render at a real terminal cell size (8×17, the reporter's
+/// Ghostty) with the Kitty protocol — the mode and geometry players actually run.
+fn render_hybrid(model: &app::engine::ScreenModel, cols: u16, rows: u16) -> (Rect, Buffer) {
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    // from_fontsize is deprecated in favour of a live stdio query a headless test
+    // can't do; the fixed cell is the point here — the defect is cell-size driven.
+    #[allow(deprecated)]
+    let mut picker = ratatui_image::picker::Picker::from_fontsize(ratatui_image::FontSize::new(8, 17));
+    picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+    state.game_picker = Some(picker);
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    let area = Rect::new(0, 0, cols, rows);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(model, false, None, &state, area, &mut buf);
+    (area, buf)
+}
+
+/// SQ-0571(a): Arthur's header picture must not MOVE when the in-game `map`
+/// command runs.
+///
+/// `map` grows win0 to 584×192, putting its bottom at the native screen bottom
+/// (400). `hybrid_bottom_plan` read that as "an enclosing frame" and — finding no
+/// full-height side ART to stretch (Arthur's side borders are GRID windows, so the
+/// graphics-only canvas is empty there) — fell back to `Letterbox`, whose CENTRED
+/// vertical offset dropped the header art and the map drawn into it half the
+/// letterbox slack down the pane: a band of blank rows opened above the picture,
+/// and dismissing the map jumped it back to the top. A story window's height must
+/// not decide where the header art lands, so a header panel above the story now
+/// keeps the ring top-anchored (`Extend`) in both states.
+#[test]
+fn arthur_map_does_not_move_the_header_art() {
+    let Some(shown) = arthur_showing_map(false) else { return };
+    let Some(dismissed) = arthur_showing_map(true) else { return };
+
+    for (cols, rows) in [(95u16, 51u16), (96, 51), (99, 51), (100, 51), (138, 51)] {
+        let mut seen = Vec::new();
+        for (label, session) in [("map shown", &shown), ("map dismissed", &dismissed)] {
+            let model = session.screen();
+            let (area, buf) = render_hybrid(&model, cols, rows);
+            let ink = |x: u16, y: u16| -> bool {
+                let c = buf.cell((x, y)).unwrap();
+                c.symbol() != " " || c.bg != ratatui::style::Color::Reset
+            };
+            let first_ink_row = (0..area.height)
+                .find(|&y| (0..area.width).any(|x| ink(x, y)))
+                .unwrap_or_else(|| panic!("{label} at {cols}x{rows} drew nothing at all"));
+            assert_eq!(
+                first_ink_row, 0,
+                "{label} at {cols}x{rows}: the header art starts at the pane TOP, with no blank band above it"
+            );
+            let status_y = (0..area.height)
+                .find(|&y| {
+                    (0..area.width)
+                        .map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' '))
+                        .collect::<String>()
+                        .contains("Anne")
+                })
+                .unwrap_or_else(|| panic!("{label} at {cols}x{rows}: status bar renders as terminal cells"));
+            seen.push((label, status_y));
+        }
+        assert_eq!(
+            seen[0].1, seen[1].1,
+            "the status bar sits on the SAME terminal row whether the map is shown or dismissed \
+             at {cols}x{rows} ({} → row {}, {} → row {})",
+            seen[0].0, seen[0].1, seen[1].0, seen[1].1
+        );
+    }
+}
+
+/// SQ-0571(b): Arthur's status bar must render as crisp terminal CELLS at EVERY
+/// pane width — the width-dependent "corrupted location bar".
+///
+/// Under the `Extend` plan the chrome ring bands are clipped to the header art's
+/// own vertical extent, at `ceil(art_bottom · s / cell_h)`, so the flanks below the
+/// art stay theme backdrop. But `run_cell` maps a chrome run's native top by
+/// ROUNDing, and Arthur's art ends at native y=192 exactly where its status row
+/// begins. Whenever `192·s / cell_h` had a fraction ≥ 0.5 the ceil and the round
+/// agreed, the clip landed exactly ON the status row and evicted it from the band:
+/// no `Text` strip covered it, so `clear_text_rows` never carved it out of the band
+/// canvas and the bar painted as a squashed raster slice of the frame instead of
+/// cells — half-height, sliced glyphs. On an 8×17 cell that broke widths 96..=99
+/// and left 95 and 100 clean, which is exactly how it was reported.
+///
+/// Sweeps every width across two full periods of that fraction and requires the bar
+/// to be real cells, solid edge to edge (SQ-0504), at all of them.
+#[test]
+fn arthur_status_bar_is_terminal_cells_at_every_pane_width() {
+    let Some(session) = arthur_showing_map(true) else { return };
+    let model = session.screen();
+
+    let mut broken = Vec::new();
+    for cols in 88u16..=112 {
+        let (area, buf) = render_hybrid(&model, cols, 51);
+        let row_text = |y: u16| -> String {
+            (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+        };
+        let Some(status_y) = (0..area.height).find(|&y| row_text(y).contains("Anne")) else {
+            broken.push((cols, "status bar never reached the cell layer".to_string()));
+            continue;
+        };
+        let row = row_text(status_y);
+        if !row.contains("Churchyard") {
+            broken.push((cols, format!("location text broken up: {row:?}")));
+            continue;
+        }
+        // SQ-0504: a pure reverse-video row reads solid across the whole pane.
+        let holes: Vec<u16> = (0..area.width)
+            .filter(|&x| !buf.cell((x, status_y)).unwrap().modifier.contains(Modifier::REVERSED))
+            .collect();
+        if !holes.is_empty() {
+            broken.push((cols, format!("unreversed gaps at {holes:?} in {row:?}")));
+        }
+    }
+    assert!(broken.is_empty(), "the status bar must be crisp cells at every width; failures: {broken:#?}");
+}
