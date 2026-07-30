@@ -215,3 +215,70 @@ fn journey_does_not_accept_a_click_as_a_line_terminator() {
         "but with an empty terminating-characters table a click must not end its line read"
     );
 }
+
+/// SQ-0576: a compass click must reach the MAPPER as the direction travelled.
+///
+/// A click types nothing — it terminates the line read with ZSCII 254 — so the
+/// mapper used to see an empty command and mint no directional edge. The game
+/// itself echoes the command it synthesized ("north", alone on the first output
+/// line); `echoed_direction_command` adopts that echo, and `apply_turn` then
+/// maps the move exactly like a typed "north".
+///
+/// End to end on the real game: drive to the Great Hall, click the compass's
+/// north spoke (native 640x400: the rose occupies x 278..368, y 2..80), and
+/// assert the echo parses and the mapper records Great Hall --N--> Entrance
+/// Hall.
+#[test]
+fn zork0_compass_click_maps_a_directional_edge() {
+    use app::session::{apply_turn, echoed_direction_command, InputKind};
+
+    let Some(mut session) = boot_zork0() else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+    // Drive to the Great Hall (same prelude as the hybrid suite).
+    let _ = session.take_transcript();
+    let mut lines = ["get under table", "wait", "wait", "wait", "wait", "wait"].into_iter();
+    for _ in 0..16 {
+        let _ = match session.pending_input() {
+            InputKind::Line => session.submit(lines.next().unwrap_or("wait")),
+            InputKind::Char => session.submit_char(13),
+            InputKind::Event => session.submit(""),
+        };
+    }
+    let mut mapper = mapper::mapper::Mapper::default();
+    let mut seeded = false;
+    for _ in 0..6 {
+        let r = match session.pending_input() {
+            InputKind::Char => session.submit_char(13),
+            _ => session.submit("look"),
+        };
+        if r.transcript.contains("Great Hall") {
+            apply_turn(&mut mapper, "look", &r);
+            seeded = true;
+            break;
+        }
+    }
+    assert!(seeded, "reached the Great Hall");
+    let here = mapper.graph.current().expect("Great Hall observed");
+
+    // Click the compass's north spoke, exactly as main.rs delivers it: the
+    // click terminates the pending LINE read (ZSCII 254) with nothing typed.
+    let term = session.mouse_click_terminator().expect("Zork0 accepts click terminators");
+    session.set_mouse(12, 322); // engine stores (y, x); N spoke at ~(322, 12)
+    let result = session.submit_line_with_terminator("", term);
+
+    let echoed = echoed_direction_command(&result.transcript);
+    assert_eq!(echoed, Some("north"), "the game echoes the synthesized command: {:?}", result.transcript);
+    apply_turn(&mut mapper, echoed.unwrap(), &result);
+
+    let there = mapper.graph.current().expect("moved somewhere");
+    assert_ne!(here, there, "the click moved the player");
+    let conns = mapper.graph.connections();
+    assert_eq!(conns.len(), 1, "the click-driven move minted exactly one edge");
+    assert_eq!(
+        (conns[0].origin, conns[0].dir, conns[0].dest),
+        (here, mapper::direction::Direction::N, there),
+        "Great Hall --N--> Entrance Hall"
+    );
+}

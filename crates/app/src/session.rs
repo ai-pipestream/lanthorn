@@ -1517,6 +1517,32 @@ fn location_to_snapshot(loc: &Location) -> zvm::ObjectSnapshot {
 
 // ── Mapper bridge ─────────────────────────────────────────────────────────────
 
+/// The game's own echoed movement command at the head of a turn's transcript,
+/// or `None`.
+///
+/// A compass click (SQ-0576) reaches the VM as a mouse terminator with no typed
+/// text, but the game echoes the command it synthesized — Zork Zero prints
+/// `north` alone on the first output line before the room text. Adopting that
+/// echo lets a click-driven move map exactly like the typed command it stands
+/// for.
+///
+/// Deliberately strict: the first non-empty line must BE a movement command in
+/// its entirety — one word, or `go <word>` — that [`parse_direction`] accepts.
+/// `parse_direction` matches the first token, so a bare prefix test would read
+/// the room heading "North of House" as a move north; the whole-line rule
+/// rejects it.
+pub fn echoed_direction_command(transcript: &str) -> Option<&str> {
+    let line = transcript.lines().find(|l| !l.trim().is_empty())?.trim();
+    let mut tokens = line.split_whitespace();
+    let first = tokens.next()?;
+    let whole_line_is_command = match (tokens.next(), tokens.next()) {
+        (None, None) => true,
+        (Some(_), None) => first.eq_ignore_ascii_case("go"),
+        _ => false,
+    };
+    (whole_line_is_command && parse_direction(line).is_some()).then_some(line)
+}
+
 /// Pure bridge: observe the new location (if any) into the mapper.
 ///
 /// Calls `mapper.observe(snap.number, &snap.name, parse_direction(command))`.
@@ -3012,6 +3038,27 @@ mod tests {
         assert_eq!(conns[0].origin, 1);
         assert_eq!(conns[0].dir, Direction::N);
         assert_eq!(conns[0].dest, 2);
+    }
+
+    /// SQ-0576: a compass click submits no text, but the game echoes the
+    /// command it synthesized as the first output line — that echo (and only a
+    /// whole-line echo) is adopted as the turn's movement command.
+    #[test]
+    fn echoed_direction_command_accepts_only_whole_line_moves() {
+        use super::echoed_direction_command as echo;
+        // Zork Zero's compass-click shape: the direction alone, then room text.
+        assert_eq!(echo("north\nEntrance Hall\n   This is where..."), Some("north"));
+        assert_eq!(echo("\n  southwest  \nSomewhere."), Some("southwest"));
+        assert_eq!(echo("go north\nSomewhere."), Some("go north"));
+        // A room HEADING beginning with a direction word must NOT read as a
+        // move: `parse_direction` matches the first token, so only the
+        // whole-line rule stands between "North of House" and a false N edge.
+        assert_eq!(echo("North of House\nYou are standing..."), None);
+        assert_eq!(echo("Aft Storage\nA cramped hold."), None);
+        assert_eq!(echo("go north now\n..."), None);
+        assert_eq!(echo("You wake up.\nIt is dark."), None);
+        assert_eq!(echo("look\nGallery"), None);
+        assert_eq!(echo(""), None);
     }
 
     #[test]

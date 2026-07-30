@@ -2349,6 +2349,18 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             z.set_mouse(gy, gx); // engine stores (y, x)
                             z.submit_line_with_terminator(&cmd, term)
                         };
+                        // SQ-0576: a compass click types nothing, but the game
+                        // echoes the command it synthesized ("north") at the head
+                        // of its output — adopt it so the turn maps (directional
+                        // edge, tried-exit) exactly like the typed command it
+                        // stands for.
+                        let cmd = if cmd.is_empty() {
+                            app::session::echoed_direction_command(&result.transcript)
+                                .unwrap_or_default()
+                                .to_string()
+                        } else {
+                            cmd
+                        };
                         if turn::finish_command_turn(
                             &cmd, result, &mut state, &mut mapper, &mut *session,
                             &game_dir, &ifid, &arc_file, last_panes.map, &mut bg_tidy_counter,

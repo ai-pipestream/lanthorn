@@ -275,11 +275,23 @@ babelmap at the prompt, and drive the game everywhere else.
 Enter and every other key are untouched, and v1–v5/Glulx stories keep getting
 arrows regardless of this setting; it only ever withholds them from a v6 prompt.
 
-## Not yet there
+## Click the compass, walk the map
 
-- **Mouse and menu input** — `read_mouse`/`mouse_window` are recognized but
-  not yet wired to real pointer events, so clicking the banner compass
-  doesn't yet issue a move.
+A click inside the game image is mapped back through the letterbox to the game
+pixel it landed on and delivered the way the original interpreters did it: the
+coordinates go into the header extension table and the click terminates the
+pending read (ZSCII 254, §3.8) — at a `>` prompt too, when the story asks for
+click terminators, which is exactly how Zork Zero's banner compass works. Click
+a spoke and you walk.
+
+The automapper comes along for the ride. A click types nothing, so there is no
+command to parse a direction from — but the game echoes the command it
+synthesized (`north`, alone on the first output line), and babelmap adopts that
+echo as the turn's movement command. A compass-clicked move draws the same
+directional edge on the map, and retires the same untried-exit marker, as if
+you had typed it.
+
+## Not yet there
 - **Proportional fonts** — status and chrome text currently use fixed-width
   metrics; the v6 titles' proportional font tables aren't honored yet.
 - **Save State across v6** — the host Save State snapshot captures the
