@@ -24,6 +24,22 @@ fn stories_dir() -> PathBuf {
 }
 
 /// Boot a v6 story with its Blorb pictures, exactly as the app does.
+/// Whether ANY v6 story fixture is present. `stories/` is gitignored (the files are
+/// commercial), so CI and fresh worktrees legitimately have none — there, these smokes
+/// skip like every other real-game test. The `ran > 0` guards below exist to catch a
+/// LOCAL run that silently tested nothing because a filename drifted; they must not
+/// fire where the fixtures simply cannot exist.
+fn any_v6_story_present() -> bool {
+    let dir = stories_dir();
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries.filter_map(Result::ok).any(|e| {
+                e.file_name().to_string_lossy().ends_with(".z6")
+            })
+        })
+        .unwrap_or(false)
+}
+
 /// `colours` is the app's `honor_game_colours` (its config default is **true**).
 fn boot_v6(file: &str, colours: bool, trace: bool) -> Option<GameSession> {
     let path = stories_dir().join(file);
@@ -132,7 +148,10 @@ fn v6_titles_boot_and_play_with_truthful_capability_bits() {
             "{name}: v6 screen model must stay Layered"
         );
     }
-    assert!(ran > 0, "no v6 story files present — this smoke was vacuous");
+    assert!(
+        ran > 0 || !any_v6_story_present(),
+        "v6 story files are present but none booted — this smoke was vacuous"
+    );
 }
 
 /// Journey specifically: its story header is the only one of the four that sets
@@ -285,8 +304,14 @@ fn no_shipping_v6_title_issues_erase_window_minus_two() {
             assert!(v6.windows[0].y_size > 0, "{name}: window 0 has a real height after an unsplit erase");
         }
     }
-    assert!(ran > 0, "no v6 story files present — this smoke was vacuous");
-    assert!(saw_minus_one, "erase_window(-1) was never observed — the trace plumbing is broken, not the games");
+    assert!(
+        ran > 0 || !any_v6_story_present(),
+        "v6 story files are present but none booted — this smoke was vacuous"
+    );
+    assert!(
+        saw_minus_one || !any_v6_story_present(),
+        "erase_window(-1) was never observed — the trace plumbing is broken, not the games"
+    );
 }
 
 // ── R4: v4+ split_window preserves the upper window ──────────────────────────
