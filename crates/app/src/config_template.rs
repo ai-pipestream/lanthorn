@@ -363,16 +363,22 @@ pub fn commented_template() -> String {
     out
 }
 
-/// Write [`commented_template`] to `user_dir/config.toml` when that file does not
-/// exist. NEVER overwrites: an existing config is the user's. Best-effort — a write
-/// failure (read-only home) is swallowed so startup cannot crash on it.
-pub fn auto_seed(user_dir: &std::path::Path) {
-    let path = user_dir.join("config.toml");
-    if path.exists() {
+/// Write [`commented_template`] to `config_file` when it does not exist. NEVER
+/// overwrites: an existing config is the user's. Best-effort — a write failure
+/// (read-only home) is swallowed so startup cannot crash on it.
+///
+/// Takes the config FILE, not a directory: the file's location is whatever
+/// [`crate::config::config_path`] resolved (`--config`, `--user-dir`, or the default
+/// home), and seeding `user_dir/config.toml` instead meant a `--user-dir` run seeded a
+/// file it would never read back (SQ-0574).
+pub fn auto_seed(config_file: &std::path::Path) {
+    if config_file.exists() {
         return;
     }
-    let _ = std::fs::create_dir_all(user_dir);
-    let _ = std::fs::write(&path, commented_template());
+    if let Some(parent) = config_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(config_file, commented_template());
 }
 
 /// A `Config`'s Debug string with the schema stamp normalized. An absent `version`
@@ -500,7 +506,7 @@ mod tests {
     fn a_settings_save_keeps_the_seeded_template() {
         let dir = std::env::temp_dir().join(format!("bm-cfgsave-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        auto_seed(&dir);
+        auto_seed(&dir.join("config.toml"));
         let path = dir.join("config.toml");
         let seeded = std::fs::read_to_string(&path).unwrap();
 
@@ -543,13 +549,13 @@ mod tests {
     fn auto_seed_creates_once_and_never_overwrites() {
         let dir = std::env::temp_dir().join(format!("bm-cfgseed-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        auto_seed(&dir);
+        auto_seed(&dir.join("config.toml"));
         let path = dir.join("config.toml");
         let seeded = std::fs::read_to_string(&path).expect("seeded");
         assert!(seeded.contains("interpreter_number"), "the template documents interpreter_number");
 
         std::fs::write(&path, "volume = 40\n").unwrap();
-        auto_seed(&dir);
+        auto_seed(&dir.join("config.toml"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "volume = 40\n", "an existing config is untouched");
         let _ = std::fs::remove_dir_all(&dir);
     }

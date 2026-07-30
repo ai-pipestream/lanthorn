@@ -1440,16 +1440,14 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         let mode = app::config::AuxStorage::Archive;
                         state.overlays.aux_prompt = false;
                         state.config.aux_storage = mode;
-                        let user_dir = state.config.user_dir.clone();
-                        let _ = app::config::write_config(&user_dir, &state.config);
+                                                let _ = app::config::write_config_file(&state.config);
                         session.clear_aux_dirty();
                     }
                     OverlayAct::AuxGlobal => {
                         let mode = app::config::AuxStorage::Global;
                         state.overlays.aux_prompt = false;
                         state.config.aux_storage = mode;
-                        let user_dir = state.config.user_dir.clone();
-                        let _ = app::config::write_config(&user_dir, &state.config);
+                                                let _ = app::config::write_config_file(&state.config);
                         let _ = app::aux_store::write_global_aux(&game_dir, session.aux_data());
                         session.clear_aux_dirty();
                     }
@@ -2893,8 +2891,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // live look was already re-resolved FROM style.toml in apply_action, so we do
         // NOT touch style.toml here — writing it would clobber the seeded template.
         if let Some(cfg_to_write) = config_to_save {
-            let user_dir = cfg_to_write.user_dir.clone();
-            let _ = app::config::write_config(&user_dir, &state.config);
+                        let _ = app::config::write_config_file(&state.config);
             // Apply a mouse-capture change live so the setting takes effect without a
             // restart (matching how audio/colours apply live on save).
             if cfg_to_write.mouse != mouse_before_save {

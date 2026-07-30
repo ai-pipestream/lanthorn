@@ -22,7 +22,7 @@ use ratatui::Terminal;
 use clap::Parser;
 
 use app::archive::load_archive;
-use app::config::{config_path, resolve, write_config, Cli, Config};
+use app::config::{config_path, resolve, Cli, Config};
 use app::engine::Engine;
 use app::glulx_session::GlulxSession;
 use app::hints;
@@ -90,9 +90,11 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     // …and the same treatment for config.toml (SQ-0573): a fully commented template
     // listing EVERY setting at its default, so what babelmap can be told to do is
     // discoverable from the file rather than only from the source. Same contract as
-    // the style seed — never overwrites, best-effort. Runtime edits still go through
-    // `write_config`, which is format-preserving and keeps these comments.
-    app::config_template::auto_seed(&cfg.user_dir);
+    // the style seed — never overwrites, best-effort. Seeded at the RESOLVED config
+    // path (`--config`/`--user-dir`/default), not `user_dir`, so the file we seed is
+    // the file we read (SQ-0574). Runtime edits still go through `write_config_file`,
+    // which is format-preserving and keeps these comments.
+    app::config_template::auto_seed(&cfg.config_file);
 
     // A path may be omitted; fall back to the configured default story dir.
     // With neither, there's nothing to open — tell the user how to fix it.
@@ -123,7 +125,7 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
         // the supplied path if it somehow doesn't.
         let to_store = std::fs::canonicalize(&story_path).unwrap_or_else(|_| story_path.clone());
         cfg.default_story_dir = Some(to_store.clone());
-        match write_config(&cfg.user_dir, &cfg) {
+        match app::config::write_config_file(&cfg) {
             Ok(()) => eprintln!("babelmap: saved default story directory ({}).", to_store.display()),
             Err(e) => eprintln!("babelmap: could not save config: {e}"),
         }

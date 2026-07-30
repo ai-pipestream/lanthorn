@@ -108,8 +108,7 @@ pub(crate) fn quit_dialog_save(
 /// resize-reset/exit persists regardless of which path handled the key.
 pub(crate) fn flush_pending_config_write(state: &mut AppState) {
     if state.pending_config_write {
-        let user_dir = state.config.user_dir.clone();
-        let _ = app::config::write_config(&user_dir, &state.config);
+                let _ = app::config::write_config_file(&state.config);
         state.pending_config_write = false;
     }
 }

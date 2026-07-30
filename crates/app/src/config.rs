@@ -325,6 +325,12 @@ where
     Ok(s.chars().next().unwrap_or('/'))
 }
 
+/// Fallback for [`Config::config_file`] when a `Config` is built without [`resolve`]
+/// (tests, `Config::default()`): the default home's config.toml.
+fn default_config_file() -> PathBuf {
+    default_user_dir().join("config.toml")
+}
+
 fn default_user_dir() -> PathBuf {
     let base = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(base).join(".babelmap")
@@ -613,6 +619,11 @@ pub struct Config {
     /// on `Cli::interpreter_number`, which overrides this for one run.
     #[serde(default)]
     pub interpreter_number: Option<u8>,
+    /// The config file this `Config` was READ from, so a later save goes back to the
+    /// same file rather than to `user_dir` (SQ-0574). Set by [`resolve`]; never
+    /// persisted, and not part of the file's schema.
+    #[serde(skip, default = "default_config_file")]
+    pub config_file: PathBuf,
     /// True when `interpreter_number` came from `--interpreter-number` rather than
     /// the config file. A one-run CLI override must not be baked into config.toml by
     /// a later settings write, so [`write_config`] leaves the file's own value alone
@@ -681,6 +692,7 @@ impl Default for Config {
             animation: AnimationConfig::default(),
             honor_game_colours: default_honor_game_colours(),
             honor_timed_input: default_honor_timed_input(),
+            config_file: default_config_file(),
             interpreter_number: None,
             interpreter_number_from_cli: false,
             enable_sound: default_enable_sound(),
@@ -693,12 +705,22 @@ impl Default for Config {
     }
 }
 
-/// The config file path `resolve` reads from: the `--config` override, else the
-/// default `user_dir/config.toml`.
+/// The config file path `resolve` reads from, most specific first: the `--config`
+/// override, else `--user-dir`'s `config.toml`, else the default home's.
+///
+/// SQ-0574: `--user-dir` used to be ignored here, so it relocated every WRITE
+/// (`write_config` and the template seed both took `cfg.user_dir`) while reads still
+/// came from the default home — `babelmap --user-dir /tmp/x` seeded and saved
+/// `/tmp/x/config.toml` and then loaded `~/.babelmap/config.toml`, silently
+/// discarding everything it had just written.
+///
+/// Deliberately driven by the CLI alone: the `user_dir` KEY inside the file names the
+/// data root (maps, saves, exports) and cannot also name the file it was read from
+/// without being circular. `--user-dir` moves both; the key moves only the data.
 pub fn config_path(cli: &Cli) -> std::path::PathBuf {
     match &cli.config {
         Some(p) => p.clone(),
-        None => default_user_dir().join("config.toml"),
+        None => cli.user_dir.clone().unwrap_or_else(default_user_dir).join("config.toml"),
     }
 }
 
@@ -724,7 +746,7 @@ pub fn resolve(cli: &Cli) -> Config {
     let config_path = config_path(cli);
 
     // Start from defaults.
-    let mut cfg = Config::default();
+    let mut cfg = Config { config_file: config_path.clone(), ..Config::default() };
 
     // Layer in the config file if it exists.
     if let Ok(text) = std::fs::read_to_string(&config_path) {
@@ -839,6 +861,15 @@ fn put_in(tbl: &mut toml_edit::Item, key: &str, value: toml_edit::Value, is_defa
     }
 }
 
+/// Save `cfg` back to the file it was loaded from ([`Config::config_file`]).
+///
+/// Production code should use this rather than [`write_config`]: writing to
+/// `cfg.user_dir` meant a `--user-dir` (or a `user_dir` key) sent the save somewhere
+/// `resolve` would never read it back from (SQ-0574).
+pub fn write_config_file(cfg: &Config) -> std::io::Result<()> {
+    write_config_at(&cfg.config_file, cfg)
+}
+
 /// Write the functional config fields (and the `style` pointer) to `dir/config.toml`
 /// using toml_edit (format-preserving). Creates the file and parent directory if absent.
 /// Does NOT emit `[colors]`/`[symbols]` — those now live in the style file.
@@ -849,10 +880,18 @@ fn put_in(tbl: &mut toml_edit::Item, key: &str, value: toml_edit::Value, is_defa
 /// reverts on the next launch. See the checklist on `struct Config` (and mirror
 /// any new field in `resolve`).
 pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let config_path = dir.join("config.toml");
+    write_config_at(&dir.join("config.toml"), cfg)
+}
 
-    let existing = std::fs::read_to_string(&config_path).unwrap_or_default();
+/// [`write_config`] to an exact file path — the form [`write_config_file`] uses so a
+/// save lands on the file `resolve` read (SQ-0574). `write_config(dir, …)` remains for
+/// callers that genuinely mean "this directory's config.toml", chiefly tests.
+pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::Result<()> {
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let existing = std::fs::read_to_string(config_path).unwrap_or_default();
     let mut doc: toml_edit::DocumentMut = existing.parse().unwrap_or_default();
     // Defaults to compare against, so a setting nobody changed is not written out.
     let def = Config::default();
@@ -958,7 +997,7 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
         put_in(tbl, "scroll_ms", (cfg.animation.scroll_ms as i64).into(), cfg.animation.scroll_ms == def.animation.scroll_ms);
     }
 
-    std::fs::write(&config_path, doc.to_string())
+    std::fs::write(config_path, doc.to_string())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1314,6 +1353,7 @@ use_defaults = false
             show_status_bar: true,
             honor_game_colours: true,
             honor_timed_input: true,
+            config_file: default_config_file(),
             interpreter_number: None,
             interpreter_number_from_cli: false,
             enable_sound: true,
@@ -1717,6 +1757,86 @@ use_defaults = false
         assert_eq!(back.volume, 100, "absent key keeps default 100");
         let set: Config = toml::from_str("volume = 40\n").unwrap();
         assert_eq!(set.volume, 40);
+    }
+
+    /// SQ-0574: `--user-dir` must move the config READ as well as the writes. It used
+    /// to be ignored by `config_path`, so `babelmap --user-dir /tmp/x` seeded and saved
+    /// `/tmp/x/config.toml` while still loading `~/.babelmap/config.toml` — every
+    /// setting it wrote was silently discarded on the next launch.
+    #[test]
+    fn user_dir_moves_the_config_file_and_a_save_round_trips() {
+        let dir = std::env::temp_dir().join(format!("bm-userdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cli = Cli {
+            story: Some(PathBuf::from("foo.z5")),
+            user_dir: Some(dir.clone()),
+            data_dir: None,
+            config: None,
+            no_accel: false,
+            no_sound: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: false,
+            interpreter_number: None,
+            trace: None,
+            debug: false,
+        };
+        // The read path follows --user-dir, and the resolved config remembers it.
+        assert_eq!(config_path(&cli), dir.join("config.toml"));
+        let mut cfg = resolve(&cli);
+        assert_eq!(cfg.config_file, dir.join("config.toml"));
+
+        // A save lands there — not in the default home — and loads back.
+        cfg.volume = 42;
+        write_config_file(&cfg).unwrap();
+        assert!(dir.join("config.toml").is_file(), "the save went to the --user-dir");
+        assert_eq!(resolve(&cli).volume, 42, "and the next launch reads it back");
+
+        // --config still wins over --user-dir for the file's location.
+        let elsewhere = dir.join("other.toml");
+        std::fs::write(&elsewhere, "volume = 7\n").unwrap();
+        let pinned = Cli { config: Some(elsewhere.clone()), ..cli };
+        assert_eq!(config_path(&pinned), elsewhere);
+        let pinned_cfg = resolve(&pinned);
+        assert_eq!(pinned_cfg.volume, 7);
+        assert_eq!(pinned_cfg.config_file, elsewhere);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `user_dir` KEY inside the file names the data root; it must NOT redirect
+    /// where the file itself is saved, or a save would land somewhere `resolve` never
+    /// reads (the second half of SQ-0574, and the reason `write_config_file` exists).
+    #[test]
+    fn a_user_dir_key_in_the_file_does_not_move_the_file() {
+        let home = std::env::temp_dir().join(format!("bm-udkey-{}", std::process::id()));
+        let data = home.join("data-root");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("config.toml"), format!("user_dir = \"{}\"\n", data.display())).unwrap();
+
+        let cli = Cli {
+            story: Some(PathBuf::from("foo.z5")),
+            user_dir: None,
+            data_dir: None,
+            config: Some(home.join("config.toml")),
+            no_accel: false,
+            no_sound: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: false,
+            interpreter_number: None,
+            trace: None,
+            debug: false,
+        };
+        let mut cfg = resolve(&cli);
+        assert_eq!(cfg.user_dir, data, "the key still names the data root");
+        assert_eq!(cfg.config_file, home.join("config.toml"), "but not the config's own location");
+
+        cfg.volume = 33;
+        write_config_file(&cfg).unwrap();
+        assert!(!data.join("config.toml").exists(), "nothing is written into the data root");
+        assert_eq!(resolve(&cli).volume, 33, "the save is where resolve reads");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// `--interpreter-number N` overrides the config file for ONE run, and must not
