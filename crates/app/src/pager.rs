@@ -173,9 +173,76 @@ pub fn activation_target(before_rows: u16, after_rows: u16, viewport_rows: u16) 
     Some(added - viewport_rows)
 }
 
+/// Post-frame transcript bookkeeping, run once per drawn frame with the story
+/// pane's [`StoryPaneMetrics`](crate::render::screen::StoryPaneMetrics) numbers:
+/// clamp scrollback to what the frame can actually show (so an over-scroll past
+/// the top doesn't accumulate), resolve a pending pager arm now that the frame
+/// knows the after-total and the viewport, and cache this frame's total as the
+/// next turn's baseline.
+///
+/// A frame with NO transcript surface — a v6 full-screen picture (the splash,
+/// Zork Zero's map/rebus takeovers) — is skipped wholesale (SQ-0578): its zeroed
+/// metrics are a property of the picture, not of the transcript. Clamping
+/// against them wiped the reader's scrollback offset, and caching its zero total
+/// made the next keypress measure the ENTIRE backlog as "new output", re-parking
+/// the view at the top with a [more] to drain. A pending arm simply survives
+/// until the next frame that really lays the transcript out.
+pub fn apply_frame(
+    state: &mut crate::state::AppState,
+    max_scroll: u16,
+    viewport_rows: u16,
+    total_rows: u16,
+    transcript_surface: bool,
+) {
+    if !transcript_surface {
+        return;
+    }
+    state.transcript_scroll = state.transcript_scroll.min(max_scroll);
+    if let Some(before) = state.pager.pending_before_rows.take() {
+        match activation_target(before, total_rows, viewport_rows) {
+            Some(target) => {
+                state.scroll_transcript_to(target.min(max_scroll));
+                state.pager.active = true;
+            }
+            None => state.pager.active = false,
+        }
+    }
+    state.last_transcript_total_rows = total_rows;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SQ-0578: a v6 full-screen picture frame (Zork Zero's rebus) reports no
+    /// transcript surface. Its zeroed metrics must not clamp the reader's
+    /// scrollback or replace the pager baseline — pre-guard, the keypress that
+    /// dismissed the picture measured the WHOLE backlog against the picture
+    /// frame's zero total and re-parked the view at the top with a [more].
+    #[test]
+    fn picture_frames_do_not_reset_scroll_or_pager_baseline() {
+        let mut state = crate::state::AppState::default();
+
+        // A settled session: 500-row backlog, reader scrolled 100 rows up.
+        apply_frame(&mut state, 476, 24, 500, true);
+        assert_eq!(state.last_transcript_total_rows, 500);
+        state.transcript_scroll = 100;
+
+        // `look at rebus` arms the pager with the real pre-turn total, then the
+        // picture frame draws: no transcript surface, all metrics zero.
+        state.pager.arm(state.last_transcript_total_rows);
+        apply_frame(&mut state, 0, 40, 0, false);
+        assert_eq!(state.transcript_scroll, 100, "a picture frame must not clamp scrollback away");
+        assert_eq!(state.last_transcript_total_rows, 500, "a picture frame must not become the pager baseline");
+        assert_eq!(state.pager.pending_before_rows, Some(500), "a pending arm survives until a real transcript frame");
+
+        // The dismissing keypress re-arms from the (unpoisoned) baseline; the
+        // normal frame returns with the same 500 rows: nothing new, no pager.
+        state.pager.arm(state.last_transcript_total_rows);
+        apply_frame(&mut state, 476, 24, 500, true);
+        assert!(!state.pager.active, "returning from the picture pages nothing (no rows were added)");
+        assert_eq!(state.transcript_scroll, 100, "the reader's position survives the picture round-trip");
+    }
 
     #[test]
     fn no_pager_when_output_fits_one_screen() {

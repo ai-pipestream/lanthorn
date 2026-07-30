@@ -511,13 +511,36 @@ impl GraphicsRender {
     /// Spawn the background resize+encode for a freshly built native `canvas`
     /// (SQ-0469). Caller must have checked [`v6_wants_build`]; this replaces any
     /// (already-absent) job. The UI thread never blocks on the encode — the
-    /// worker's result is installed by [`poll_v6_job`].
+    /// worker's result is installed by [`poll_v6_job`] — with one exception:
+    /// when there is NO last-ready composite at all (first raster frame after
+    /// boot or after [`invalidate_v6`]), the encode runs synchronously so the
+    /// new screen shows this frame. Redrawing "the previous encode until the
+    /// worker lands" is right during a burst of the same screen, but at a
+    /// transition there is no honest previous frame — the pane would blank, or
+    /// worse flash whatever the raster path last showed (SQ-0578: entering the
+    /// rebus flashed the title splash or the on-screen map for a split second).
     pub fn spawn_v6_encode(&mut self, picker: &Picker, canvas: image::RgbaImage, gen: u64, area: Rect) {
         if area.width == 0 || area.height == 0 || canvas.width() == 0 || canvas.height() == 0 {
             return;
         }
+        if self.v6.is_none() {
+            self.v6 = Self::encode_v6(picker, &canvas, gen, area);
+            return;
+        }
         let picker = picker.clone();
         self.v6_job = Some(std::thread::spawn(move || Self::encode_v6(&picker, &canvas, gen, area)));
+    }
+
+    /// Drop the last-ready v6 raster composite (and detach any in-flight encode,
+    /// discarding its result). Called by the HYBRID band path on every frame it
+    /// renders WITHOUT the raster composite: once the pane has shown chrome-band
+    /// frames, the cached composite is stale content from another screen, and a
+    /// later fall-through to raster (a full-screen picture takeover, SQ-0570)
+    /// must not flash it while the new encode is in flight (SQ-0578). The next
+    /// raster frame re-encodes synchronously (see [`spawn_v6_encode`]).
+    pub fn invalidate_v6(&mut self) {
+        self.v6 = None;
+        self.v6_job = None;
     }
 
     /// Poll the background v6 encode: if it finished, install its protocol as the
@@ -1405,17 +1428,35 @@ mod tests {
         let area = Rect::new(0, 0, 4, 2);
         let canvas = image::RgbaImage::from_pixel(32, 32, image::Rgba([1, 2, 3, 255]));
 
-        // First frame for gen 7: nothing ready, no job → wants a build.
+        // First frame for gen 7: nothing ready, no job → wants a build. With no
+        // last-ready composite the encode is SYNCHRONOUS (SQ-0578: a transition
+        // frame has no honest previous image to show), so it is ready this frame.
         assert!(gr.v6_wants_build(7, area), "cold start wants the first build");
         gr.spawn_v6_encode(&picker, canvas.clone(), 7, area);
-        // While the encode is in flight, no second build is requested — coalesced,
-        // even for a NEWER generation (newest wins: the in-flight one finishes,
-        // then the next frame builds whatever the current generation is).
-        assert!(!gr.v6_wants_build(7, area), "an in-flight encode suppresses a rebuild");
-        assert!(!gr.v6_wants_build(8, area), "an in-flight encode suppresses even a newer generation");
+        assert!(gr.v6_job.is_none(), "a cold-start encode runs synchronously, no worker");
+        assert!(gr.v6.is_some(), "the cold-start encode installed immediately");
+        assert_eq!(gr.v6.as_ref().unwrap().gen, 7);
+
+        // With a composite ready, a NEW generation encodes off-thread. While the
+        // encode is in flight, no second build is requested — coalesced, even
+        // for a newer generation (newest wins: the in-flight one finishes, then
+        // the next frame builds whatever the current generation is).
+        assert!(gr.v6_wants_build(8, area), "a changed generation wants a fresh build");
+        gr.spawn_v6_encode(&picker, canvas.clone(), 8, area);
+        assert!(gr.v6_job.is_some(), "a warm re-encode runs on the worker");
+        assert!(!gr.v6_wants_build(8, area), "an in-flight encode suppresses a rebuild");
+        assert!(!gr.v6_wants_build(9, area), "an in-flight encode suppresses even a newer generation");
         drain_v6_job(&mut gr);
         assert!(gr.v6.is_some(), "the worker installed the encoded protocol");
-        assert_eq!(gr.v6.as_ref().unwrap().gen, 7);
+        assert_eq!(gr.v6.as_ref().unwrap().gen, 8);
+
+        // `invalidate_v6` (the hybrid band path ran): back to cold — the next
+        // raster frame wants a build and will encode synchronously again.
+        gr.invalidate_v6();
+        assert!(gr.v6.is_none() && gr.v6_job.is_none(), "invalidation drops composite and job");
+        assert!(gr.v6_wants_build(8, area), "an invalidated cache wants a rebuild");
+        gr.spawn_v6_encode(&picker, canvas.clone(), 7, area);
+        assert!(gr.v6_job.is_none() && gr.v6.is_some(), "post-invalidation encode is synchronous");
 
         // Same generation → no rebuild (the gate is the win: idle frames skip
         // build + encode entirely).

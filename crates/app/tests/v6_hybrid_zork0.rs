@@ -298,10 +298,10 @@ fn zork0_hybrid_tall_pane_frame_reclaim() {
     }
 }
 
-/// Drive Zork0 to its on-screen MAP: survive Megaboz's curse under the table,
-/// advance into the Great Hall, then `map` and answer its "Are you ready to see the
-/// map (y or n)?" prompt with `y`. Returns `None` when the story is absent.
-fn zork0_showing_map() -> Option<GameSession> {
+/// Drive Zork0 to the Great Hall: survive Megaboz's curse under the table, then
+/// advance through the intro until the room announces itself. Returns `None`
+/// when the story is absent.
+fn zork0_in_great_hall() -> Option<GameSession> {
     use app::session::InputKind;
     let mut session = boot_zork0()?;
     let _ = session.take_transcript();
@@ -322,6 +322,14 @@ fn zork0_showing_map() -> Option<GameSession> {
             break;
         }
     }
+    Some(session)
+}
+
+/// Drive Zork0 to its on-screen MAP: from the Great Hall, `map` and answer its
+/// "Are you ready to see the map (y or n)?" prompt with `y`. Returns `None` when
+/// the story is absent.
+fn zork0_showing_map() -> Option<GameSession> {
+    let mut session = zork0_in_great_hall()?;
     let r = session.submit("map");
     assert!(
         r.transcript.contains("ready to see the map"),
@@ -413,5 +421,184 @@ fn zork0_hybrid_shows_the_full_screen_map() {
     assert!(
         rendered[0] == rendered[1],
         "hybrid must render the map frame exactly as raster does (raster was already correct)"
+    );
+}
+
+/// Drive Zork0 to the Gallery and `look at rebus`: the game grows window 0 to
+/// the full screen and paints the rebus picture across virtually all of it,
+/// then waits for a keypress. Returns `None` when the story is absent.
+fn zork0_looking_at_rebus() -> Option<GameSession> {
+    let mut session = zork0_in_great_hall()?;
+    walk_to_rebus(&mut session);
+    Some(session)
+}
+
+/// From the Great Hall (or anywhere the Balcony stairs are reachable), walk to
+/// the Gallery and `look at rebus`, leaving the game on its keypress wait.
+fn walk_to_rebus(session: &mut GameSession) {
+    let r = session.submit("up");
+    assert!(r.transcript.contains("Balcony"), "up from the Great Hall is the Balcony: {:?}", r.transcript);
+    let r = session.submit("south");
+    assert!(r.transcript.contains("Gallery"), "south from the Balcony is the Gallery: {:?}", r.transcript);
+    let _ = session.submit("look at rebus");
+    assert!(
+        matches!(session.pending_input(), app::session::InputKind::Char),
+        "the rebus screen waits for a keypress"
+    );
+}
+
+/// SQ-0578: a full-screen picture must not squeeze the transcript into a
+/// one-character column.
+///
+/// `look at rebus` grows window 0 over the whole screen (the map's takeover
+/// shape) but its art leaves a degenerate 0x80 sliver unpainted, so
+/// `story_clear_native` returns a rect too small to hold a single 8x16 text
+/// cell. The raster composite pinned that zero width to ONE column
+/// (`cols = (sw/8).max(1)`), re-wrapped the whole transcript a character per
+/// line, and armed the [more] pager with a 4-row page — draining it took
+/// hundreds of keypresses. The reported symptom: picture redraws, a thin
+/// single column of text appears with [more], and a key must be held for a
+/// very long time to progress.
+///
+/// The composite now skips the story stamp when no full cell fits: the picture
+/// ships alone with NO scroll metrics, so the pager treats the screen like the
+/// no-story-window case (nothing to page) and one keypress returns to the
+/// normal frame.
+#[test]
+fn zork0_rebus_picture_shows_without_a_text_column() {
+    let Some(session) = zork0_looking_at_rebus() else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+
+    // Precondition: the takeover shape — window 0 grown to the whole screen.
+    let story = items
+        .iter()
+        .find(|pw| matches!(&pw.node, WinNode::Buffer(_)))
+        .expect("the rebus screen keeps a story window");
+    assert_eq!(
+        (story.x_px, story.y_px, story.w_px, story.h_px),
+        (0, 0, 640, 400),
+        "the rebus grows window 0 to the full screen"
+    );
+
+    // Precondition that separates this from the map: the art leaves a clear
+    // sliver too small for even one 8x16 text cell. (The map paints edge to
+    // edge; the rebus is what exposed the degenerate-sliver stamp.)
+    use app::render::v6_layout as v6;
+    let native = v6::native_extent(items);
+    let layout = v6::classify_windows(items);
+    let state = render_state(app::config::V6RenderMode::Hybrid);
+    let canvas = v6::build_chrome_canvas(
+        &layout.chrome,
+        native,
+        image::Rgba([220, 220, 220, 255]),
+        image::Rgba([0, 0, 0, 255]),
+        &state.colors,
+    );
+    let clear = v6::story_clear_native(layout.story, &canvas).expect("story window present");
+    eprintln!("story_clear_native: {clear:?}");
+    assert!(
+        clear.2 < 8 || clear.3 < 16,
+        "the rebus art occludes the story interior down to a sub-cell sliver: {clear:?}"
+    );
+
+    // The composite must ship the picture alone: no story stamp, no metrics.
+    let (_, rm) = app::render::screen::build_v6_raster_canvas(&layout, native, &state);
+    assert!(
+        rm.is_none(),
+        "a sub-cell story interior must not produce raster scroll metrics (a 1-column \
+         transcript stamp armed a 4-row [more] pager): {rm:?}"
+    );
+
+    // End to end through the pane render, with a real transcript backlog (the
+    // text that used to wrap a character per line): the pager must see the
+    // full-pane fallback viewport, not a sliver, and nothing to page.
+    let mut state = render_state(app::config::V6RenderMode::Hybrid);
+    for i in 0..40 {
+        state.push_transcript(&format!("transcript backlog line {i} with enough words to wrap"));
+    }
+    let area = Rect::new(0, 0, 96, 40);
+    let mut buf = Buffer::empty(area);
+    let metrics = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+    assert_eq!(
+        (metrics.viewport_rows, metrics.total_rows),
+        (area.height, 0),
+        "the rebus screen reports the no-story fallback metrics — nothing for the [more] pager to drain"
+    );
+    assert!(
+        !metrics.transcript_surface,
+        "a picture-takeover frame reports NO transcript surface, so the frame loop skips the \
+         scroll clamp and pager-baseline bookkeeping (a zero baseline re-paged the whole \
+         backlog on return)"
+    );
+    let text: String = (0..area.height)
+        .map(|y| {
+            (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !text.contains("backlog"),
+        "the transcript must not be stamped over the rebus picture\n{text}"
+    );
+}
+
+/// SQ-0578 (flash): entering one full-screen picture must never show a stale
+/// raster composite from an EARLIER screen while the new encode runs.
+///
+/// The raster path encodes off-thread and redraws "the last-ready composite
+/// until the worker lands" — right for a burst of the same screen, but the
+/// hybrid path only falls through to raster for takeovers, so its last-ready
+/// composite could be minutes old: booting showed the title splash for a split
+/// second when the rebus came up, and `map` → gameplay → `look at rebus`
+/// flashed the map. Hybrid band frames now drop the cached composite, and a
+/// raster frame with no composite encodes synchronously — the new picture is
+/// on screen the same frame it is entered.
+///
+/// One shared render state across three frames, exactly like the live pane:
+/// the map (raster), the restored gameplay frame (hybrid bands), the rebus
+/// (raster). The rebus frame must not reproduce the map frame's cells.
+#[test]
+fn zork0_rebus_after_map_never_flashes_the_stale_composite() {
+    let Some(mut session) = zork0_showing_map() else { return };
+    let mut state = render_state(app::config::V6RenderMode::Hybrid);
+    let area = Rect::new(0, 0, 96, 40);
+    let render = |session: &GameSession, state: &app::state::AppState| {
+        let model = session.screen();
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, state, area, &mut buf);
+        buf
+    };
+
+    // Frame 1: the map — raster fall-through; with no prior composite the
+    // encode is synchronous, so the map is really in this buffer.
+    let map_buf = render(&session, &state);
+    let img_cells = |buf: &Buffer| {
+        (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf.cell((x, y)).unwrap().symbol() == "\u{2580}")
+            .count()
+    };
+    assert!(img_cells(&map_buf) > 0, "the map composite really rendered (halfblock cells present)");
+
+    // Frame 2: dismiss the map — an ordinary gameplay frame takes the hybrid
+    // band path (story window back inside the frame), invalidating the cache.
+    let _ = session.submit_char(b' ');
+    {
+        let model = session.screen();
+        let app::engine::WinNode::Layered(items) = &model.root else { panic!("layered") };
+        let story = items.iter().find(|pw| matches!(&pw.node, WinNode::Buffer(_))).expect("story window");
+        assert!(story.w_px < 640, "gameplay restores the framed story window: {}px wide", story.w_px);
+    }
+    state.push_transcript("Great Hall");
+    let _ = render(&session, &state);
+
+    // Frame 3: the rebus. Its composite must be freshly encoded — not the map.
+    walk_to_rebus(&mut session);
+    let rebus_buf = render(&session, &state);
+    assert!(img_cells(&rebus_buf) > 0, "the rebus composite really rendered (halfblock cells present)");
+    assert!(
+        rebus_buf != map_buf,
+        "the rebus frame must not redraw the stale map composite while its own encode runs"
     );
 }

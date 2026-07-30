@@ -33,6 +33,13 @@ pub struct StoryPaneMetrics {
     /// Per-frame map from rendered cell `(col, row)` → Glk hyperlink value, for
     /// hit-testing a mouse click to its link. Empty when nothing is linked.
     pub links: Vec<((u16, u16), u32)>,
+    /// Whether this frame actually laid the transcript out. `false` on frames
+    /// whose story pane carries no text surface at all — a v6 full-screen
+    /// picture (splash, Zork Zero's map/rebus takeovers). Cross-frame transcript
+    /// bookkeeping (the scroll clamp, the [more] pager's row baseline) must skip
+    /// such frames: measuring "rows added" against a picture frame's zero total
+    /// re-paged the ENTIRE backlog when the normal frame returned (SQ-0578).
+    pub transcript_surface: bool,
 }
 
 /// Tally `(grids, buffers, others)` leaf windows in the tree. Used only by tests
@@ -210,7 +217,7 @@ pub fn render_story_pane(
         let tarea = reserve_text_margin(tarea, state, margin_style(model, state), buf);
         let (scrollbar, max_scroll, total_rows, mut tlinks) = render_transcript(&model.status, introspect, state, tarea, buf, gi);
         links.append(&mut tlinks);
-        return StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: tarea.height, total_rows, links };
+        return StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: tarea.height, total_rows, links, transcript_surface: true };
     }
 
     // Generic multi-window path. Grid windows push their hyperlink cells into
@@ -235,7 +242,14 @@ pub fn render_story_pane(
     collect_graphics_ids(&model.root, &mut live);
     state.graphics_render.borrow_mut().retain_live(&live);
 
-    let mut m = metrics.unwrap_or(StoryPaneMetrics { scrollbar: false, max_scroll: 0, viewport_rows: area.height, total_rows: 0, links: Vec::new() });
+    let mut m = metrics.unwrap_or(StoryPaneMetrics {
+        scrollbar: false,
+        max_scroll: 0,
+        viewport_rows: area.height,
+        total_rows: 0,
+        links: Vec::new(),
+        transcript_surface: false,
+    });
     m.links.extend(grid_links);
     m
 }
@@ -451,7 +465,7 @@ fn render_node(
                 let area = reserve_text_margin(area, state, state.colors.theme.get("transcript").style, buf);
                 let (scrollbar, max_scroll, total_rows, links) =
                     render_transcript(status, introspect, state, area, buf, game_input);
-                Some(StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: area.height, total_rows, links })
+                Some(StoryPaneMetrics { scrollbar, max_scroll, viewport_rows: area.height, total_rows, links, transcript_surface: true })
             } else {
                 render_inline_buffer(b, state, area, buf);
                 None
@@ -545,6 +559,11 @@ fn render_node(
                 // through to raster.
                 if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
                     if let Some(story) = layout.story.filter(|s| !picture_takeover(s, &layout.chrome, native)) {
+                        // This frame renders as chrome bands, not the raster
+                        // composite — drop the cached composite so a later
+                        // fall-through to raster (map/rebus takeover) cannot
+                        // flash a stale screen while its encode runs (SQ-0578).
+                        state.graphics_render.borrow_mut().invalidate_v6();
                         // SQ-0532 wave-5: a game that set its own story page presents
                         // on a FULL page — Zork Zero boots `set_colour(fg=2 black,
                         // bg=9 white)` and the DOS original's white runs edge to edge:
@@ -1049,6 +1068,7 @@ fn render_node(
                         viewport_rows: rm.viewport_rows,
                         total_rows: rm.total_rows,
                         links: Vec::new(),
+                        transcript_surface: true,
                     });
                 }
                 return None;
@@ -1639,7 +1659,18 @@ pub fn build_v6_raster_canvas(
     let ink = game_ink.unwrap_or(default_fg);
     let mut canvas = v6::build_chrome_canvas(&layout.chrome, native, default_fg, default_bg, &state.colors);
     let mut raster_metrics: Option<RasterMetrics> = None;
-    if let Some((sx, sy, sw, sh)) = v6::story_clear_native(layout.story, &canvas) {
+    // SQ-0578: only stamp the story when its clear interior can hold at least
+    // one full 8x16 text cell. A full-screen picture (Zork Zero's rebus) grows
+    // window 0 over the whole screen and paints art across virtually all of it;
+    // the inset then leaves a degenerate sliver (the rebus leaves 0x80), and the
+    // `.max(1)` below pinned that to a ONE-COLUMN story box — the whole
+    // transcript re-wrapped a character per line with a [more] prompt that took
+    // hundreds of keypresses to drain. No cell fits → the picture owns the
+    // screen: ship the art alone and report no scroll metrics, exactly like the
+    // no-story-window case.
+    if let Some((sx, sy, sw, sh)) =
+        v6::story_clear_native(layout.story, &canvas).filter(|&(_, _, w, h)| w >= 8 && h >= 16)
+    {
         // Paint the story page opaque (SQ-0510, reopened). Leaving it
         // transparent let whoever composites the image pick the colour
         // instead of us. `story_clear_native` has already inset past any
