@@ -297,3 +297,121 @@ fn zork0_hybrid_tall_pane_frame_reclaim() {
         assert!(rmin >= vp.right(), "right flank does not overlap the story viewport at row {dy} (rmin {rmin}, vp.right {})", vp.right());
     }
 }
+
+/// Drive Zork0 to its on-screen MAP: survive Megaboz's curse under the table,
+/// advance into the Great Hall, then `map` and answer its "Are you ready to see the
+/// map (y or n)?" prompt with `y`. Returns `None` when the story is absent.
+fn zork0_showing_map() -> Option<GameSession> {
+    use app::session::InputKind;
+    let mut session = boot_zork0()?;
+    let _ = session.take_transcript();
+    let mut lines = ["get under table", "wait", "wait", "wait", "wait", "wait"].into_iter();
+    for _ in 0..16 {
+        let _ = match session.pending_input() {
+            InputKind::Line => session.submit(lines.next().unwrap_or("wait")),
+            InputKind::Char => session.submit_char(13),
+            InputKind::Event => session.submit(""),
+        };
+    }
+    for _ in 0..6 {
+        let r = match session.pending_input() {
+            InputKind::Char => session.submit_char(13),
+            _ => session.submit("look"),
+        };
+        if r.transcript.contains("Great Hall") {
+            break;
+        }
+    }
+    let r = session.submit("map");
+    assert!(
+        r.transcript.contains("ready to see the map"),
+        "expected the map's confirmation prompt, got: {:?}",
+        r.transcript
+    );
+    let _ = session.submit_char(b'y');
+    Some(session)
+}
+
+/// SQ-0570: Zork0's on-screen map must actually be VISIBLE in hybrid mode.
+///
+/// The map is the exact inverse of the title splash. The splash calls
+/// `split_window(400)`, which makes window 1 the whole screen and COLLAPSES window
+/// 0, so hybrid carves no story viewport over it (SQ-0497). The map instead GROWS
+/// window 0 to the full screen `(0,0) 640×400` and paints the map into the
+/// full-screen graphics window beneath it. Hybrid therefore made the story viewport
+/// the ENTIRE pane, which leaves `chrome_bands` empty — the map was never uploaded
+/// at all and the transcript painted over the whole screen. The reported symptom was
+/// a sudden drop into frameless mode: no frame, no map, only story text. Raster mode
+/// was unaffected, which is the tell: the composite was right, the hybrid overlay
+/// was covering it.
+///
+/// Such a frame has no ring, so hybrid now falls through to the raster composite for
+/// it. Asserts the model precondition, that the pane is fully imaged with no
+/// transcript stamped over it, and that hybrid agrees with raster — which the
+/// reporter confirmed already renders this screen correctly.
+#[test]
+fn zork0_hybrid_shows_the_full_screen_map() {
+    let Some(session) = zork0_showing_map() else { return };
+    let model = session.screen();
+    let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+
+    // Precondition: window 0 grown to the whole screen, opaque graphics behind it.
+    let story = items
+        .iter()
+        .find(|pw| matches!(&pw.node, WinNode::Buffer(_)))
+        .expect("the map screen keeps a story window (it does NOT collapse it)");
+    assert_eq!(
+        (story.x_px, story.y_px, story.w_px, story.h_px),
+        (0, 0, 640, 400),
+        "the map grows window 0 to the full screen — the inverse of the splash's collapse"
+    );
+    let coverage = items
+        .iter()
+        .filter_map(|pw| match &pw.node {
+            WinNode::Graphics(gw) if pw.x_px == 0 && pw.y_px == 0 && gw.canvas.width() >= 640 && gw.canvas.height() >= 400 => {
+                let total = gw.canvas.pixels().count();
+                let opaque = gw.canvas.pixels().filter(|p| p.0[3] >= 128).count();
+                Some(opaque as f32 / total.max(1) as f32)
+            }
+            _ => None,
+        })
+        .fold(0.0f32, f32::max);
+    eprintln!("full-screen graphics coverage: {coverage:.4}");
+    assert!(coverage > 0.95, "the map is painted across a full-screen graphics window (coverage {coverage:.4})");
+
+    let area = Rect::new(0, 0, 96, 40);
+    let mut rendered = Vec::new();
+    for mode in [app::config::V6RenderMode::Hybrid, app::config::V6RenderMode::Raster] {
+        let mut state = render_state(mode);
+        // Real transcript lines — the text that used to be painted over the map.
+        state.push_transcript("Great Hall");
+        state.push_transcript("You are in the great hall of the castle.");
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+        let text: String = (0..area.height)
+            .map(|y| {
+                (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !text.contains("great hall of the castle"),
+            "{mode:?}: the transcript must not be stamped over the map\n{text}"
+        );
+        let painted = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf.cell((x, y)).unwrap().bg != ratatui::style::Color::Reset)
+            .count();
+        assert_eq!(
+            painted,
+            area.width as usize * area.height as usize,
+            "{mode:?}: the map fills the whole pane"
+        );
+        rendered.push(buf);
+    }
+    assert!(
+        rendered[0] == rendered[1],
+        "hybrid must render the map frame exactly as raster does (raster was already correct)"
+    );
+}

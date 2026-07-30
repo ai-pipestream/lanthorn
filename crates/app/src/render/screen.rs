@@ -540,9 +540,11 @@ fn render_node(
                 // around a terminal story viewport, then render the story window as
                 // real terminal text (crisp, selectable, scrollable) inside it — the
                 // existing primary-Buffer transcript path, with inline images as
-                // bands. Needs a story window; without one, fall through to raster.
+                // bands. Needs a story window; without one — or with a full-screen
+                // picture takeover, which has no ring to draw (SQ-0570) — fall
+                // through to raster.
                 if state.config.v6_render == crate::config::V6RenderMode::Hybrid {
-                    if let Some(story) = layout.story {
+                    if let Some(story) = layout.story.filter(|s| !picture_takeover(s, &layout.chrome, native)) {
                         // SQ-0532 wave-5: a game that set its own story page presents
                         // on a FULL page — Zork Zero boots `set_colour(fg=2 black,
                         // bg=9 white)` and the DOS original's white runs edge to edge:
@@ -2241,6 +2243,65 @@ enum BottomPlan {
     Extend,
     Menu,
     Frame,
+}
+
+/// SQ-0570: is this frame a full-screen PICTURE takeover — a picture painted
+/// across the whole screen with the story window grown over it?
+///
+/// Zork Zero's `map` command is the case. It is the exact inverse of the title
+/// splash: the splash calls `split_window(400)` so window 1 becomes the screen and
+/// window 0 COLLAPSES to zero height, leaving no story viewport to carve (SQ-0497),
+/// whereas the map GROWS window 0 to the full screen `(0,0) 640×400` and paints the
+/// map into the full-screen graphics window beneath it. Hybrid mode then made the
+/// story viewport the entire pane, which leaves `chrome_bands` empty — so the map
+/// was never uploaded at all and the transcript painted over the whole screen. (It
+/// reads as a sudden drop into frameless mode: no frame, no picture, just text.)
+///
+/// Such a frame has no ring to draw, so there is nothing for hybrid to do: the
+/// caller falls through to the RASTER composite, which draws the picture and
+/// rasterizes the story text over it in one canvas, and already renders this screen
+/// correctly. Detection is deliberately narrow — the story window must cover the
+/// whole screen (within one native text row per edge) AND opaque graphics must sit
+/// behind it across that whole area. An ordinary gameplay screen keeps window 0
+/// inset inside its frame, so it can never qualify.
+///
+/// The opacity test samples a coarse grid rather than every pixel: it runs on every
+/// hybrid frame, and a fully painted picture versus a frame-only (or empty) canvas
+/// is not a close call.
+fn picture_takeover(
+    story: &crate::engine::PositionedWindow,
+    chrome: &[&crate::engine::PositionedWindow],
+    native: (u16, u16),
+) -> bool {
+    // One native text row of slack per edge, so a game that leaves a hairline
+    // border still counts as full-screen.
+    let slop = 16u32;
+    let covers_screen = (story.x_px as u32) <= slop
+        && (story.y_px as u32) <= slop
+        && story.x_px as u32 + story.w_px as u32 + slop >= native.0 as u32
+        && story.y_px as u32 + story.h_px as u32 + slop >= native.1 as u32;
+    if !covers_screen {
+        return false;
+    }
+    // Sample an 8×8 grid across the screen; every point must be painted by some
+    // chrome graphics window.
+    const N: u32 = 8;
+    (0..N).all(|iy| {
+        let y = native.1 as u32 * (2 * iy + 1) / (2 * N);
+        (0..N).all(|ix| {
+            let x = native.0 as u32 * (2 * ix + 1) / (2 * N);
+            chrome.iter().any(|pw| {
+                let crate::engine::WinNode::Graphics(gw) = &pw.node else { return false };
+                let (wx, wy) = (pw.x_px as u32, pw.y_px as u32);
+                let img = &gw.canvas;
+                x >= wx
+                    && y >= wy
+                    && x - wx < img.width()
+                    && y - wy < img.height()
+                    && img.get_pixel(x - wx, y - wy)[3] >= 128
+            })
+        })
+    })
 }
 
 /// Classify what sits below the story window natively, to pick the [`BottomPlan`]
