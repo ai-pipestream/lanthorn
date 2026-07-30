@@ -209,6 +209,17 @@ always matches the seeded template.
 it's re-applied every time that story opens. There's no "Save Game" button —
 you write the file directly.
 
+**Per-game settings**: alongside that style file, a game's save directory can hold
+its own `config.toml` — a separate, deliberately tiny sidecar carrying at most
+`honor_game_colours`, `borderless_windows` and `show_map`. It is written for you
+when you toggle one of those for a story (`/game-colours`, `/borderless`, hiding
+the map), and it is a *sparse override layer*, not a copy of your global config:
+bare uncommented lines, only the keys that differ, and the file is deleted once
+nothing is overridden. An absent key means "inherit the global value" — which is
+why babelmap never seeds the annotated template into a game directory, and why you
+shouldn't either: every line you uncommented would become a per-game override
+pinning that value for that story.
+
 **Resolution order**, most specific first: an *explicit* user per-game slot →
 a garglk per-stream override → the game's own live style hints → the
 `glk.*` slot (global theme, defaults, and any shipped `garglk.ini`) → that

@@ -23,6 +23,14 @@
 //! matching style.toml, and the schema `version` stamp is a live key: everything that
 //! is actually a *setting* stays commented.
 //!
+//! Scope: this is the GLOBAL config only (`<user_dir>/config.toml`). A game's own
+//! save directory can hold a second, unrelated `config.toml` — the sparse per-game
+//! override sidecar in [`crate::styles`], carrying at most `honor_game_colours`,
+//! `borderless_windows` and `show_map` as bare uncommented lines, and deleted when
+//! empty. It is deliberately NOT templated: there, an absent key means "inherit the
+//! global value", so seeding defaults into it would turn every one of them into a
+//! per-game override. [`auto_seed`] is only ever called with the user dir.
+//!
 //! [`auto_seed`] writes the template on first run and never overwrites an existing
 //! file, exactly like the style seed. `write_config` still owns runtime edits and
 //! stays format-preserving, so a seeded file keeps its comments as settings change.
@@ -310,6 +318,17 @@ pub fn commented_template() -> String {
     out.push_str("# a line as-is changes nothing. Edit the value to change behaviour.\n");
     out.push_str("#\n");
     out.push_str("# Colours, glyphs and borders are NOT here: they live in style.toml.\n");
+    out.push_str("#\n");
+    out.push_str("# PER-GAME overrides live in a second, separate config.toml inside that game's\n");
+    out.push_str("# own save directory, and hold only these three keys:\n");
+    out.push_str("#\n");
+    out.push_str("#   honor_game_colours   borderless_windows   show_map\n");
+    out.push_str("#\n");
+    out.push_str("# That file is a sparse override layer, not a copy of this one: it carries only\n");
+    out.push_str("# the keys that differ, bare and uncommented, and is deleted once nothing is\n");
+    out.push_str("# overridden. An absent key there means \"inherit whatever this file says\", so\n");
+    out.push_str("# do NOT paste this template into a game directory — every line you uncommented\n");
+    out.push_str("# would become a per-game override pinning that value for that story.\n");
     out.push_str("#\n# `version` below is the schema stamp — babelmap manages it; leave it alone.\n");
     out.push_str("# It is also the anchor that keeps settings babelmap writes for you (from the\n");
     out.push_str("# settings screen, say) together at the top rather than scattered.\n");
