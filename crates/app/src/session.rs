@@ -938,6 +938,64 @@ impl GameSession {
         self.pict_source.as_ref().map_or(0, |s| s.palette_gen())
     }
 
+    /// The screen rect a v6 window occupies — `(x, y, w, h)` in the same 0-based
+    /// unit-pixel space the window canvases use (window coords are 1-based).
+    fn window_screen_rect(&self, win: u8) -> Option<(u32, u32, u32, u32)> {
+        let v6 = self.machine.screen.v6.as_ref()?;
+        let w = v6.windows.get(win as usize)?;
+        Some((
+            w.x_coord.saturating_sub(1) as u32,
+            w.y_coord.saturating_sub(1) as u32,
+            w.x_size as u32,
+            w.y_size as u32,
+        ))
+    }
+
+    /// Erase a SCREEN rect from every window canvas except `skip` (SQ-0568).
+    ///
+    /// v6 windows are clipping regions over ONE shared screen, not independent
+    /// surfaces: plotting is "clipped to the current window, and anything showing
+    /// through is plotted onto the screen", and "subsequent movements of the window
+    /// do not move what was printed" (ZMSD §8). A plotted pixel therefore belongs to
+    /// the screen, so erasing a region has to take out whatever ANY window put
+    /// there. Arthur is the case that needs it: its F2 map screen paints a
+    /// full-screen background into window 7, and returning to the picture screen
+    /// erases windows 2/5/6 — never 7 — so that background has to disappear from
+    /// window 7's canvas or it sits under every later screen for the rest of the game.
+    ///
+    /// Retained adaptive draws are deliberately left alone: a partially erased
+    /// picture is still on screen, and the ones that matter (frames, border art) live
+    /// in their own window, whose own erase path already drops them.
+    fn erase_screen_rect(&mut self, rect: (u32, u32, u32, u32), skip: Option<u8>) {
+        let (rx, ry, rw, rh) = rect;
+        if rw == 0 || rh == 0 {
+            return;
+        }
+        let wins: Vec<u8> = self.pictures_canvas.keys().copied().collect();
+        for win in wins {
+            if Some(win) == skip {
+                continue;
+            }
+            let Some((wx, wy, _, _)) = self.window_screen_rect(win) else { continue };
+            // Intersect against the CANVAS extent (which `grow_to` may have taken
+            // past the window box), then translate into that canvas's own coords.
+            let Some((cw, ch)) = self.pictures_canvas.get(&win).map(|c| (c.img.width(), c.img.height()))
+            else {
+                continue;
+            };
+            let x0 = rx.max(wx);
+            let y0 = ry.max(wy);
+            let x1 = (rx + rw).min(wx + cw);
+            let y1 = (ry + rh).min(wy + ch);
+            if x1 <= x0 || y1 <= y0 {
+                continue;
+            }
+            let canvas = self.pictures_canvas.get_mut(&win).expect("checked just above");
+            canvas.erase_rect((x0 - wx) as i32, (y0 - wy) as i32, x1 - x0, y1 - y0);
+            canvas.z_seq = crate::graphics::next_draw_seq();
+        }
+    }
+
     /// Re-plot every adaptive picture still on screen under the Current Palette,
     /// in the order it was originally drawn (SQ-0567).
     ///
@@ -986,6 +1044,11 @@ impl GameSession {
             self.last_content_pic.remove(&ev.window);
             // Nothing of this window survives to be replotted on a palette change.
             self.adaptive_on_screen.retain(|(w, ..)| *w != ev.window);
+            // The erased region belongs to the shared SCREEN, so take it out of
+            // every other window's canvas too (SQ-0568).
+            if let Some(rect) = self.window_screen_rect(ev.window) {
+                self.erase_screen_rect(rect, Some(ev.window));
+            }
             return;
         }
         let Some(v6) = self.machine.screen.v6.as_ref() else { return };
@@ -1063,6 +1126,10 @@ impl GameSession {
         // preserves content; a shrunken window only tightens the clip below
         // (window_size "does not change the current display", ZMSD §15).
         canvas.grow_to(pw, ph);
+        // An erase_picture footprint to take out of the OTHER windows' canvases too,
+        // applied once the canvas borrow above has ended (SQ-0568). Window-relative;
+        // translated to screen coords at the bottom of this function.
+        let mut screen_erase: Option<(u32, u32, u32, u32)> = None;
         if ev.erase {
             // Picture dims are art-native; the canvas is unit space, so scale the
             // erased footprint by V6_ART_SCALE to match the doubled draw (SQ-0479).
@@ -1079,6 +1146,8 @@ impl GameSession {
             // Erased: it is no longer on screen to replot. (SQ-0567)
             self.adaptive_on_screen
                 .retain(|&(w, n, x, y)| (w, n, x, y) != (ev.window, ev.number, dx, dy));
+            // …and the same region of the shared screen (SQ-0568).
+            screen_erase = Some((dx.max(0) as u32, dy.max(0) as u32, ew, eh));
         } else if let Some(img) = self.pict_source.as_mut().and_then(|s| s.image(ev.number as u32)) {
             // Blit the art at 2× into the unit-space window canvas (SQ-0479): the
             // game placed it at unit coords (dx,dy) expecting the Amiga/DOS
@@ -1116,6 +1185,13 @@ impl GameSession {
                     margin_px: None,
                     source: crate::inline_image::ImageSource::ContentSplash,
                 }));
+            }
+        }
+        // Apply the deferred cross-window erase now the canvas borrow has ended:
+        // translate the window-relative footprint into screen coords (SQ-0568).
+        if let Some((ex, ey, ew, eh)) = screen_erase {
+            if let Some((wx, wy, _, _)) = self.window_screen_rect(ev.window) {
+                self.erase_screen_rect((wx + ex, wy + ey, ew, eh), Some(ev.window));
             }
         }
     }
