@@ -682,6 +682,42 @@ fn render_node(
                                 (top_scale, Rect::new(x, y, vp.width, menu_top.saturating_sub(y)), Some(menu_scale))
                             }
                         };
+                        // SQ-0582: a status bar the game OVERLAYS on its story window
+                        // (advent.z6) leaves no chrome ring to carry it. Reserve its
+                        // rows off the top of the story viewport, so the band below
+                        // decomposes it exactly like a game that reserved the space
+                        // itself — a solid full-width Text strip, with the transcript
+                        // starting under it instead of scrolling through it. Measured
+                        // from the strip's own runs, not its declared height: a 20px
+                        // window is 1.25 cells tall but carries a single text row.
+                        let overlay_strip = overlaid_status_strip(&layout.chrome, story, native.0);
+                        // The overlaid strip's native bottom, so `decompose_chrome_strips`
+                        // counts its runs as band content: they sit INSIDE the story box,
+                        // which its above/below test rejects.
+                        let overlay_bottom =
+                            overlay_strip.map(|s| s.y_px.saturating_add(s.h_px) as i32).unwrap_or(0);
+                        let viewport = match overlay_strip {
+                            Some(strip) => {
+                                let last = match &strip.node {
+                                    WinNode::Grid(g) => g
+                                        .px_texts
+                                        .iter()
+                                        .filter(|t| !t.text.trim().is_empty())
+                                        .map(|t| run_cell(t, &scale, cell_px, area).1)
+                                        .max(),
+                                    _ => None,
+                                };
+                                match last {
+                                    Some(r) if r >= area.y as i32 => {
+                                        let top = (r as u16).saturating_add(1).min(area.bottom());
+                                        let y = viewport.y.max(top);
+                                        Rect::new(viewport.x, y, viewport.width, viewport.bottom().saturating_sub(y))
+                                    }
+                                    _ => viewport,
+                                }
+                            }
+                            None => viewport,
+                        };
                         // SQ-0500: a full-width chrome band (top/bottom) is carved
                         // into horizontal strips — an ART strip (opaque frame
                         // graphics behind it) keeps the scaled pixel RING; a
@@ -768,6 +804,14 @@ fn render_node(
                                 Some(r) if r >= 0 => clip_row.max((r as u16).saturating_add(1)),
                                 _ => clip_row,
                             };
+                            // SQ-0582: never clip above the story viewport. The rule
+                            // above only spares text that sits above the story WINDOW,
+                            // so a bar the game overlays on the story instead (advent.z6)
+                            // matched neither test — with no art either, the clip landed
+                            // at the pane top and dropped the very band the inset above
+                            // just reserved for it. Whatever is above the viewport is
+                            // chrome by construction; it survives.
+                            let clip_row = clip_row.max(viewport.y);
                             for b in &mut ring_bands {
                                 if b.y >= clip_row {
                                     b.height = 0;
@@ -786,9 +830,9 @@ fn render_node(
                             BottomPlan::Menu => story.y_px as u32 + story.h_px as u32,
                             _ => native.1 as u32,
                         };
-                        let strips = decompose_chrome_strips(&ring_bands, area, &scale, cell_px, story, &gfx, &chrome_runs);
+                        let strips = decompose_chrome_strips(&ring_bands, area, &scale, cell_px, story, overlay_bottom, &gfx, &chrome_runs);
                         let menu_strips = match &menu {
-                            Some(ms) => decompose_chrome_strips(&menu_bands, area, ms, cell_px, story, &gfx, &chrome_runs),
+                            Some(ms) => decompose_chrome_strips(&menu_bands, area, ms, cell_px, story, overlay_bottom, &gfx, &chrome_runs),
                             None => Vec::new(),
                         };
                         // SQ-0504: rows drawn as terminal CELLS (pure-text strips)
@@ -2142,17 +2186,60 @@ fn v6_run_style(
     }
 }
 
-/// SQ-0515: which native rows of a painted v6 screen should flood edge-to-edge
-/// with a reverse-video bar (see [`draw_painted_screen`]). A row qualifies only
-/// when EVERY non-blank run at that native row is reverse-video AND each such run's
-/// owning grid window spans at least ~90% of the native screen width — a full-width
-/// title/status bar (Zork0's " InvisiClues (tm)" header sits in a w_px=640/640
-/// window) rather than a narrow selection block (Shogun's boot-menu window is
-/// w_px=169/640, and Zork0's own selected-topic highlight is in the w_px=468/640
-/// topic window — both stay text-width). Returns native_row → flood [`Style`],
-/// with colours resolved first-explicit-wins across the row (this header carries
-/// none) and the reverse bit set, via [`v6_run_style`].
-fn full_width_reverse_flood_rows(
+/// A status STRIP the game paints OVER the top of its own story window, rather than
+/// above it (SQ-0582). advent.z6 leaves window 0 covering the whole 640×380 screen and
+/// hangs window 1 — full width, one row tall, pinned at the top — over its first row.
+/// Every other v6 game here reserves the band by placing the story window BELOW it
+/// (Zork0 y=79, Shogun y=33, Arthur y=209), so the chrome ring picks the band up for
+/// free; with an overlay there is no ring at all, and the bar's runs land inside the
+/// story box to be stamped glyph-by-glyph over the transcript — a ribbon with holes
+/// between the fields, and the transcript scrolling underneath it.
+///
+/// Returns the overlaying window, whose rows the caller reserves at the top of the
+/// story viewport so the ordinary Text-strip path draws it as a solid bar.
+fn overlaid_status_strip<'a>(
+    chrome: &[&'a PositionedWindow],
+    story: &PositionedWindow,
+    native_w: u16,
+) -> Option<&'a PositionedWindow> {
+    let threshold = native_w as u32 * 9 / 10;
+    chrome.iter().copied().find(|pw| {
+        let WinNode::Grid(g) = &pw.node else { return false };
+        g.px_texts.iter().any(|t| !t.text.trim().is_empty())
+            && pw.w_px as u32 >= threshold
+            && pw.h_px > 0
+            && pw.h_px <= V6_STATUS_STRIP_MAX_H_PX
+            && pw.y_px <= story.y_px
+            && pw.y_px.saturating_add(pw.h_px) > story.y_px
+    })
+}
+
+/// Tallest v6 grid window that counts as a status STRIP for [`full_width_flood_rows`]:
+/// two text rows. Matches `zvm::location`'s band rule, which mines the same shape for
+/// the room name — a bar is one or two rows, anything taller is a panel or overlay.
+const V6_STATUS_STRIP_MAX_H_PX: u16 = 32;
+
+/// SQ-0515/SQ-0582: which native rows of a painted v6 screen should flood edge-to-edge
+/// with a bar (see [`draw_painted_screen`]). A row qualifies only when each of its
+/// non-blank runs belongs to a grid window spanning at least ~90% of the native screen
+/// width — a full-width title/status bar (Zork0's " InvisiClues (tm)" header sits in a
+/// w_px=640/640 window) rather than a narrow selection block (Shogun's boot-menu window
+/// is w_px=169/640, and Zork0's own selected-topic highlight is in the w_px=468/640
+/// topic window — both stay text-width) — AND one of:
+///
+///   - every run on it is reverse-video (the game asked for a bar), or
+///   - the owning window is a STRIP at most [`V6_STATUS_STRIP_MAX_H_PX`] tall. Not
+///     every game styles its status line: advent.z6 paints "At End Of Road … Score:
+///     36 … Moves: 1" into a full-width, one-row window with no reverse bit and no
+///     colours (SQ-0582), so the reverse rule never fired and the theme's bar
+///     background reached only the cells under the glyphs — a ribbon with holes
+///     between the fields. A window that shape IS the status bar, whatever style its
+///     text carries.
+///
+/// Returns native_row → flood [`Style`], with colours resolved first-explicit-wins
+/// across the row and the reverse bit set only for the reverse case, via
+/// [`v6_run_style`].
+fn full_width_flood_rows(
     chrome: &[&PositionedWindow],
     native_w: u16,
     base: ratatui::style::Style,
@@ -2161,8 +2248,8 @@ fn full_width_reverse_flood_rows(
 ) -> std::collections::HashMap<u16, ratatui::style::Style> {
     use crate::render::v6_layout::packed_explicit;
     let threshold = native_w as u32 * 9 / 10;
-    // Group every non-blank run by native row, carrying its owning window's w_px.
-    let mut per_row: std::collections::HashMap<u16, Vec<(&crate::engine::PxText, u16)>> = Default::default();
+    // Group every non-blank run by native row, carrying its owning window's size.
+    let mut per_row: std::collections::HashMap<u16, Vec<(&crate::engine::PxText, u16, u16)>> = Default::default();
     for pw in chrome {
         if let WinNode::Grid(g) = &pw.node {
             for t in &g.px_texts {
@@ -2170,19 +2257,26 @@ fn full_width_reverse_flood_rows(
                     continue;
                 }
                 let row = (t.y.max(1) - 1) / 16;
-                per_row.entry(row).or_default().push((t, pw.w_px));
+                per_row.entry(row).or_default().push((t, pw.w_px, pw.h_px));
             }
         }
     }
     let mut out = std::collections::HashMap::new();
     for (row, row_runs) in per_row {
-        let all_reverse = row_runs.iter().all(|(t, _)| t.style & 1 != 0);
-        let all_full_width = row_runs.iter().all(|(_, w)| *w as u32 >= threshold);
-        if all_reverse && all_full_width {
-            let fg = row_runs.iter().map(|(t, _)| t.fg).find(|&p| packed_explicit(p)).unwrap_or(0);
-            let bg = row_runs.iter().map(|(t, _)| t.bg).find(|&p| packed_explicit(p)).unwrap_or(0);
-            out.insert(row, v6_run_style(base, fg, bg, 1, honor, colors));
+        if !row_runs.iter().all(|(_, w, _)| *w as u32 >= threshold) {
+            continue;
         }
+        let all_reverse = row_runs.iter().all(|(t, _, _)| t.style & 1 != 0);
+        let all_strip = row_runs.iter().all(|(_, _, h)| *h > 0 && *h <= V6_STATUS_STRIP_MAX_H_PX);
+        if !all_reverse && !all_strip {
+            continue;
+        }
+        let fg = row_runs.iter().map(|(t, _, _)| t.fg).find(|&p| packed_explicit(p)).unwrap_or(0);
+        let bg = row_runs.iter().map(|(t, _, _)| t.bg).find(|&p| packed_explicit(p)).unwrap_or(0);
+        // Reverse only where the game asked for it: a plain strip floods with the
+        // theme's own bar style, exactly as the anchored band does.
+        let style_bits = u8::from(all_reverse);
+        out.insert(row, v6_run_style(base, fg, bg, style_bits, honor, colors));
     }
     out
 }
@@ -2215,7 +2309,7 @@ fn draw_painted_screen(
     // reverse bar rather than reverse across only its own glyphs. A narrow window's
     // reverse row (Shogun's boot-menu selection) is untouched — it stays a
     // text-width highlight block below.
-    let flood = full_width_reverse_flood_rows(chrome, native_w, base, honor, colors);
+    let flood = full_width_flood_rows(chrome, native_w, base, honor, colors);
     for (&row, &style) in &flood {
         let Some(y) = place(row) else { continue };
         for x in area.x..area.right() {
@@ -2656,6 +2750,7 @@ fn decompose_chrome_strips<'a>(
     scale: &crate::render::v6_layout::Scale,
     cell_px: (u16, u16),
     story: &crate::engine::PositionedWindow,
+    overlay_bottom: i32,
     gfx: &image::RgbaImage,
     runs: &[&'a crate::engine::PxText],
 ) -> Vec<ChromeStrip<'a>> {
@@ -2671,9 +2766,12 @@ fn decompose_chrome_strips<'a>(
     };
     // A run is a text-band candidate when it lies fully above or below the story
     // box (never beside it — those stay in the side bands' ring).
+    // …plus a status strip the game OVERLAYS on the story box (SQ-0582): its runs are
+    // inside the box by native coordinates, but the caller has reserved their rows out
+    // of the story viewport, so they belong to the band like any other bar.
     let below_or_above = |t: &crate::engine::PxText| -> bool {
         let py = t.y.max(1) as i32 - 1;
-        py >= story_bottom || py + 16 <= story_top
+        py >= story_bottom || py + 16 <= story_top || (overlay_bottom > 0 && py + 16 <= overlay_bottom)
     };
     let row_runs_at = |row: u16| -> Vec<&'a crate::engine::PxText> {
         runs.iter()

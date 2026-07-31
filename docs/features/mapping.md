@@ -45,10 +45,13 @@ still there long after the turn that discovered it.
   glyphs are laid back onto their columns first, because Arthur paints its bar one
   letter at a time; the room then goes through exactly the same checks as every
   other Z-machine game (`via player object`, or `via name match` when the game
-  doesn't re-parent you, as Shogun doesn't). A title banner or a right-hand date
-  field is never promoted to a room on a name match alone, and Journey — whose
+  doesn't re-parent you, as Shogun doesn't). Some games never reserve the band at
+  all and simply *overlay* the bar on the top row of a full-screen prose window
+  (advent.z6): a short, full-width strip pinned to the top of the screen counts as
+  the band even though nothing is "above" the prose. A title banner or a right-hand
+  date field is never promoted to a room on a name match alone, and Journey — whose
   story window owns the top of the screen and whose menus sit below it — correctly
-  reports no room at all.
+  reports no room at all (its menu window is the whole screen, not a strip).
 - **Glulx (Inform 7)** games often keep the room out of the status bar entirely,
   so babelmap reads the **Inform room heading** — the bold title line printed as
   you enter a room (`via room heading`). Games like FooFoo and Superluminal

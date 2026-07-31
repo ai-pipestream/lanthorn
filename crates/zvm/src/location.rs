@@ -190,6 +190,15 @@ fn centered_status_line_room_name(upper: &UpperWindow, active_rows: u16) -> Opti
 /// name, below every banner/score.
 const V6_LEFT_ANCHOR_MAX_DX: u16 = 96;
 
+/// Tallest window that can be a status STRIP overlaying the story window: two text
+/// rows. A real v6 status bar is one or two rows pinned to the top of the screen
+/// (advent.z6's is 20px, a single row); anything taller that starts up there is a
+/// panel or a full-screen overlay, not a bar — Journey's menu window is the whole
+/// 640×400 screen, and treating IT as a status band would mine menu labels for room
+/// names. Zork Zero's 78px band and Arthur's 12-rows-down bar are unaffected either
+/// way: they sit genuinely ABOVE their story window and are found by that rule.
+const V6_STATUS_STRIP_MAX_H: u16 = 2 * V6_FONT_HEIGHT;
+
 /// One v6 status-band candidate: the cleaned room text and whether it was
 /// left-anchored. Left-anchored runs are tried for StatusName; centered/other
 /// runs are PlayerParent-only (a centered run is usually a banner, e.g. "SHOGUN").
@@ -285,6 +294,19 @@ fn v6_row_segments(runs: &[(&crate::screen::V6Text, u16)]) -> Vec<V6Segment> {
     out
 }
 
+/// True when window `i` is a status STRIP laid over the top of the story window: a
+/// short, non-story window pinned to the top of the SCREEN whose bottom edge reaches
+/// past the story window's top. "Pinned to the top" is what keeps Shogun's bottom
+/// menu window (y=337, the same y as its story window, 48px tall) from qualifying —
+/// a bar overlaying the story starts at the screen top or not at all.
+fn is_v6_status_strip(i: usize, w: &crate::screen::ZWindow, story_top: u16) -> bool {
+    i != 0
+        && w.y_size > 0
+        && w.y_size <= V6_STATUS_STRIP_MAX_H
+        && w.y_coord <= V6_FONT_HEIGHT
+        && w.y_coord + w.y_size > story_top
+}
+
 /// Ordered v6 status-band room candidates: left-anchored fields first (top rows
 /// first), then centered/other fields. A pure read of the v6 paint model; empty
 /// when the story is not v6 or paints no text above the story window.
@@ -308,10 +330,23 @@ fn v6_status_candidates(machine: &Machine) -> Vec<V6Candidate> {
     // Group band runs by row (absolute y), carrying each run's window left edge
     // so left-anchoring is measured relative to the window, not the screen.
     let mut rows: BTreeMap<u16, Vec<(&crate::screen::V6Text, u16)>> = BTreeMap::new();
-    for w in v6.windows.iter() {
+    for (i, w) in v6.windows.iter().enumerate() {
+        // A status STRIP overlays the story window instead of sitting above it
+        // (SQ-0581): advent.z6 leaves window 0 covering the whole screen and hangs
+        // window 1 — one row tall, pinned at the top — over its first row, painting
+        // "At End Of Road   Score: 36   Moves: 1" there. Nothing is above the story
+        // window, so the rule below finds no band at all. Such a strip IS the band,
+        // and only its own rows are: window 0's prose is never scooped in, because
+        // window 0 can't be a strip.
+        let strip_bottom = is_v6_status_strip(i, w, story_top).then(|| w.y_coord + w.y_size);
         for t in w.texts.iter() {
+            if t.text.is_empty() {
+                continue;
+            }
             // Wholly above the story text: a run straddling the boundary is prose.
-            if t.y + V6_FONT_HEIGHT <= story_top && !t.text.is_empty() {
+            let above_story = t.y + V6_FONT_HEIGHT <= story_top;
+            let in_strip = strip_bottom.is_some_and(|b| t.y + V6_FONT_HEIGHT <= b);
+            if above_story || in_strip {
                 rows.entry(t.y).or_default().push((t, w.x_coord));
             }
         }

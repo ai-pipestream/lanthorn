@@ -77,7 +77,13 @@ session-only switch that never touches your saved config:
   status, painted directly *onto* its banner art, stays in the ring. A pure
   reverse-video row (a status/menu bar) fills **edge to edge across the full pane
   width**, so a bar the game drew as separate runs with bare cells between and
-  around them reads as one solid block. The rows that become cells are carved out
+  around them reads as one solid block. A game that never reserves a band and
+  instead **overlays** its bar on the top row of a full-screen prose window
+  (advent.z6) is given one: a full-width strip of at most two rows, pinned to the
+  top of the screen, has its rows reserved off the story viewport so it decomposes
+  into an ordinary text strip — a solid bar with the transcript starting beneath it,
+  rather than glyphs stamped over scrolling prose. Such a bar need not be
+  reverse-video to fill the row; a window that shape *is* the status bar. The rows that become cells are carved out
   of the pixel bands entirely — their rasterized ink never reaches an uploaded
   band image (no raster bar showing through behind the cells), and because a
   band's image no longer depends on that text, navigating the menu re-encodes only
