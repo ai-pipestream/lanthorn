@@ -1294,7 +1294,28 @@ impl GameSession {
         // it (compass, room illustration). (SQ-0186)
         let mut graphics_entries: Vec<(u64, PositionedWindow)> = Vec::new();
         let mut text_entries = Vec::new();
+        // The window the game actually streams prose through (SQ-0583). Window 0 is
+        // the classic answer and Infocom's own, but Inform 6's v6 library prints into
+        // WINDOW 7 — the engine already diverts its output to the transcript on the
+        // same wrap+scroll test (SQ-0459, `cpu::exec`), so the model has to agree
+        // about WHERE that prose lands or every consumer of the story rect points at
+        // the wrong region. advent.z6 shows the cost: it never touches window 0, so
+        // window 0 keeps its boot-time full-screen rect forever, and after the game
+        // splits the screen (its "style" command opens a text window on top, moves
+        // the status bar to the middle and leaves prose in the bottom 200px) the
+        // story rect still claimed the whole screen — transcript viewport, chrome
+        // ring and mapper band all aimed at it.
+        let prose_idx = {
+            let cur = v6.current as usize;
+            if v6.windows[cur].attributes & 0b11 == 0b11 { cur } else { 0 }
+        };
         for (i, win) in v6.windows.iter().enumerate() {
+            // Window 0 with nothing of its own, while the prose streams elsewhere:
+            // it is a boot-time placeholder covering the screen (see below), and
+            // admitting it would hand `classify_windows` a second, wrong story rect.
+            if i == 0 && prose_idx != 0 && win.texts.is_empty() && !self.pictures_canvas.contains_key(&0) {
+                continue;
+            }
             // A zero-pixel-size window is normally inactive and skipped — UNLESS
             // it still holds painted text runs. v6 text is PAINT: a run persists
             // at its screen-absolute pixel position even after the window is
@@ -1360,7 +1381,7 @@ impl GameSession {
             // (menu screens: Zork Zero's InvisiClues clears bit 0 and paints
             // topics via set_cursor), and its pixel runs render like any grid
             // window's.
-            let node = if i == 0 && win.attributes & 1 != 0 {
+            let node = if i == prose_idx && win.attributes & 1 != 0 {
                 WinNode::Buffer(BufferWindow {
                     primary: true,
                     bg: (win.bg != ZColour::Default).then(|| crate::state::pack_zcolour(win.bg)),

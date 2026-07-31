@@ -1,4 +1,5 @@
-//! advent.z6's OVERLAID status bar — SQ-0581 (mapping) / SQ-0582 (render).
+//! advent.z6's OVERLAID status bar — SQ-0581 (mapping) / SQ-0582 (render) — and the
+//! window its prose actually streams through (SQ-0583).
 //!
 //! Every other v6 story here reserves its status band by placing the story window
 //! BELOW it: Zork Zero opens window 0 at y=79, Shogun at y=33, Arthur at y=209 under
@@ -210,4 +211,57 @@ fn advent_hybrid_bar_is_solid_honoring_game_colours() {
 #[test]
 fn advent_hybrid_bar_is_solid_theme_only() {
     advent_hybrid_bar_is_solid(false);
+}
+
+/// SQ-0583: the story window is whichever window the game STREAMS prose through, not
+/// window 0 by fiat. advent (Inform 6's v6 library) prints into window 7 and never
+/// touches window 0, so window 0 keeps its boot-time full-screen rect for the whole
+/// game. Its own `style` command proves the difference: it splits the screen into a
+/// text window on top, the status bar in the middle (y=181) and prose in the bottom
+/// 200px (y=201) — at which point a story rect that still claims the whole screen
+/// puts the transcript viewport, and with it the input line, nowhere near the game's
+/// own `>` prompt, and leaves the mapper reading a band above a window that starts at
+/// the screen top.
+#[test]
+fn advent_style_command_moves_the_story_window() {
+    use app::engine::WinNode;
+
+    let Some(mut session) = advent_in_play(true) else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+    let _ = session.submit("look");
+    let _ = session.take_transcript();
+
+    // The prose window's rect, whichever window carries it.
+    let story_box = |s: &GameSession| -> (u16, u16) {
+        let model = s.screen();
+        let WinNode::Layered(items) = &model.root else { panic!("v6 Layered root") };
+        let story = items
+            .iter()
+            .find(|pw| matches!(&pw.node, WinNode::Buffer(b) if b.primary))
+            .expect("a primary story window");
+        (story.y_px, story.h_px)
+    };
+
+    let before = story_box(&session);
+    assert_eq!(before, (0, 380), "prose fills the screen before the split");
+
+    let r = session.submit("style");
+    assert!(!r.quit && r.fault.is_none(), "\"style\" faulted/quit: {:?}", r.fault);
+    let _ = session.take_transcript();
+
+    let after = story_box(&session);
+    assert_eq!(
+        after,
+        (200, 200),
+        "the story window follows the game's prose window into the bottom 200px \
+         (window 0 still claims 0..380 — taking it would aim the viewport, and the \
+         input line with it, at the whole screen)"
+    );
+
+    // And the mapper keeps working across the split: the bar moved down beside the
+    // prose, so the band is only found by asking the RIGHT window where prose starts.
+    let loc = session.current_location().expect("the room is still detected after the split");
+    assert!(loc.name.contains("End Of Road"), "expected At End Of Road, got {:?}", loc.name);
 }

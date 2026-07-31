@@ -295,12 +295,12 @@ fn v6_row_segments(runs: &[(&crate::screen::V6Text, u16)]) -> Vec<V6Segment> {
 }
 
 /// True when window `i` is a status STRIP laid over the top of the story window: a
-/// short, non-story window pinned to the top of the SCREEN whose bottom edge reaches
-/// past the story window's top. "Pinned to the top" is what keeps Shogun's bottom
+/// short window that is not the prose window itself, pinned to the top of the SCREEN,
+/// whose bottom edge reaches past the story window's top. "Pinned to the top" is what keeps Shogun's bottom
 /// menu window (y=337, the same y as its story window, 48px tall) from qualifying —
 /// a bar overlaying the story starts at the screen top or not at all.
-fn is_v6_status_strip(i: usize, w: &crate::screen::ZWindow, story_top: u16) -> bool {
-    i != 0
+fn is_v6_status_strip(i: usize, prose_idx: usize, w: &crate::screen::ZWindow, story_top: u16) -> bool {
+    i != prose_idx
         && w.y_size > 0
         && w.y_size <= V6_STATUS_STRIP_MAX_H
         && w.y_coord <= V6_FONT_HEIGHT
@@ -324,7 +324,16 @@ fn v6_status_candidates(machine: &Machine) -> Vec<V6Candidate> {
     let Some(v6) = machine.screen.v6.as_ref() else {
         return Vec::new();
     };
-    let story_top = v6.windows[0].y_coord.max(1);
+    // The window the game streams prose through — window 0 for Infocom, window 7 for
+    // Inform 6's v6 library, decided by the same wrap+scroll test the printer uses
+    // (SQ-0459/SQ-0583). advent.z6 never touches window 0, so window 0 keeps its
+    // boot-time full-screen rect: reading the band above THAT finds nothing once the
+    // game splits the screen and moves its status bar down beside the real prose.
+    let prose_idx = {
+        let cur = v6.current as usize;
+        if v6.windows[cur].attributes & 0b11 == 0b11 { cur } else { 0 }
+    };
+    let story_top = v6.windows[prose_idx].y_coord.max(1);
 
     use std::collections::BTreeMap;
     // Group band runs by row (absolute y), carrying each run's window left edge
@@ -338,7 +347,7 @@ fn v6_status_candidates(machine: &Machine) -> Vec<V6Candidate> {
         // window, so the rule below finds no band at all. Such a strip IS the band,
         // and only its own rows are: window 0's prose is never scooped in, because
         // window 0 can't be a strip.
-        let strip_bottom = is_v6_status_strip(i, w, story_top).then(|| w.y_coord + w.y_size);
+        let strip_bottom = is_v6_status_strip(i, prose_idx, w, story_top).then(|| w.y_coord + w.y_size);
         for t in w.texts.iter() {
             if t.text.is_empty() {
                 continue;
