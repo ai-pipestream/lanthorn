@@ -1813,7 +1813,11 @@ use_defaults = false
         let data = home.join("data-root");
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join("config.toml"), format!("user_dir = \"{}\"\n", data.display())).unwrap();
+        // A TOML *literal* string (single quotes) — no escape processing. A basic
+        // double-quoted string would read the `\U` of a Windows `C:\Users\…` temp
+        // path as TOML's 8-hex-digit unicode escape and fail to parse the file at
+        // all, and `resolve` silently falls back to defaults on a parse error.
+        std::fs::write(home.join("config.toml"), format!("user_dir = '{}'\n", data.display())).unwrap();
 
         let cli = Cli {
             story: Some(PathBuf::from("foo.z5")),
