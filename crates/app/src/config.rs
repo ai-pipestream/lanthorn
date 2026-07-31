@@ -624,6 +624,13 @@ pub struct Config {
     /// persisted, and not part of the file's schema.
     #[serde(skip, default = "default_config_file")]
     pub config_file: PathBuf,
+    /// Set when the config file exists but does not parse: the TOML error, carried so
+    /// startup can say which line broke instead of running on defaults in silence
+    /// (SQ-0580). A single typo costs the user the WHOLE file — TOML is parsed as one
+    /// document, so there is no partial load to fall back to. Never persisted, and not
+    /// part of the file's schema.
+    #[serde(skip)]
+    pub config_error: Option<String>,
     /// True when `interpreter_number` came from `--interpreter-number` rather than
     /// the config file. A one-run CLI override must not be baked into config.toml by
     /// a later settings write, so [`write_config`] leaves the file's own value alone
@@ -693,6 +700,7 @@ impl Default for Config {
             honor_game_colours: default_honor_game_colours(),
             honor_timed_input: default_honor_timed_input(),
             config_file: default_config_file(),
+            config_error: None,
             interpreter_number: None,
             interpreter_number_from_cli: false,
             enable_sound: default_enable_sound(),
@@ -750,7 +758,15 @@ pub fn resolve(cli: &Cli) -> Config {
 
     // Layer in the config file if it exists.
     if let Ok(text) = std::fs::read_to_string(&config_path) {
-        if let Ok(from_file) = toml::from_str::<Config>(&text) {
+        let parsed = toml::from_str::<Config>(&text);
+        // A file that exists but doesn't parse used to be dropped in silence, so one
+        // stray character reverted every setting to its default with nothing said —
+        // and the next settings save then overwrote the user's file (SQ-0580). Keep
+        // the error for startup to show; `write_config_at` refuses to clobber.
+        if let Err(e) = &parsed {
+            cfg.config_error = Some(e.to_string());
+        }
+        if let Ok(from_file) = parsed {
             // NOTE: this is a field-by-field merge — every persisted field must
             // be copied here or the file's value is ignored on load. See the
             // checklist on `struct Config`. (Also mirror it in `write_config`.)
@@ -795,8 +811,8 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.text_margin_y = from_file.text_margin_y;
             cfg.animation = from_file.animation;
         }
-        // If the file exists but is malformed, silently keep defaults.
-        // Production code could warn here; for now, YAGNI.
+        // A malformed file leaves every field at its default — TOML is parsed as one
+        // document, so there is no half-loaded config to salvage.
     }
 
     // CLI overrides beat the file.
@@ -892,7 +908,25 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     }
 
     let existing = std::fs::read_to_string(config_path).unwrap_or_default();
-    let mut doc: toml_edit::DocumentMut = existing.parse().unwrap_or_default();
+    // A file that doesn't parse is NOT a blank slate to build on: `unwrap_or_default`
+    // here meant the first settings save (the story browser's "remember this
+    // directory?" prompt is enough) replaced the user's entire file — every key and
+    // every comment — with a fresh doc, destroying the very text they need to see to
+    // fix the typo. Refuse instead, and say why (SQ-0580). An absent or empty file
+    // parses fine, so this only ever fires on real syntax errors.
+    let mut doc: toml_edit::DocumentMut = match existing.parse() {
+        Ok(doc) => doc,
+        Err(e) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "{} is not valid TOML ({e}) — refusing to overwrite it. Fix the file, \
+                     or move it aside and babelmap will seed a fresh one.",
+                    config_path.display(),
+                ),
+            ));
+        }
+    };
     // Defaults to compare against, so a setting nobody changed is not written out.
     let def = Config::default();
 
@@ -1354,6 +1388,7 @@ use_defaults = false
             honor_game_colours: true,
             honor_timed_input: true,
             config_file: default_config_file(),
+            config_error: None,
             interpreter_number: None,
             interpreter_number_from_cli: false,
             enable_sound: true,
@@ -1841,6 +1876,78 @@ use_defaults = false
         assert!(!data.join("config.toml").exists(), "nothing is written into the data root");
         assert_eq!(resolve(&cli).volume, 33, "the save is where resolve reads");
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// SQ-0580: a config file that doesn't parse costs the user every setting in it —
+    /// TOML is one document, so there is no partial load. That much is unavoidable;
+    /// doing it in silence is not. `resolve` must report the parse error so startup can
+    /// tell the user which line broke instead of quietly running on defaults.
+    #[test]
+    fn a_malformed_config_is_reported_rather_than_swallowed() {
+        let dir = std::env::temp_dir().join(format!("bm-badcfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        // `volume` would take effect if the file parsed; the unterminated string on the
+        // next line means none of it does.
+        std::fs::write(&path, "volume = 42\nstyle = \"neon\n").unwrap();
+
+        let cli = Cli {
+            story: Some(PathBuf::from("foo.z5")),
+            user_dir: None,
+            data_dir: None,
+            config: Some(path.clone()),
+            no_accel: false,
+            no_sound: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: false,
+            interpreter_number: None,
+            trace: None,
+            debug: false,
+        };
+        let cfg = resolve(&cli);
+        assert!(cfg.config_error.is_some(), "the parse failure is reported");
+        assert_eq!(cfg.volume, Config::default().volume, "and nothing from the file loaded");
+
+        // A file that parses leaves the field clear — the error must not be sticky.
+        std::fs::write(&path, "volume = 42\n").unwrap();
+        let good = resolve(&cli);
+        assert_eq!(good.config_error, None, "a valid file reports no error");
+        assert_eq!(good.volume, 42);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0580, the destructive half: `write_config_at` parsed the existing file into a
+    /// toml_edit doc and fell back to an EMPTY doc when that failed, so the first
+    /// settings save after a typo replaced the user's whole config — keys, comments and
+    /// all — with a handful of defaults. Refuse the write and keep the file byte-exact.
+    #[test]
+    fn a_save_refuses_to_clobber_a_malformed_config() {
+        let dir = std::env::temp_dir().join(format!("bm-badsave-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let original = "# my carefully commented config\nvolume = 42\nstyle = \"neon\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut cfg = Config { config_file: path.clone(), ..Config::default() };
+        cfg.volume = 33;
+        let err = write_config_file(&cfg).expect_err("a malformed file is not overwritten");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("not valid TOML"), "and it says why: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "the user's file survives untouched, comments included",
+        );
+
+        // Once the file is well-formed again, saving works normally.
+        std::fs::write(&path, "# my carefully commented config\nvolume = 42\n").unwrap();
+        write_config_file(&cfg).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("# my carefully commented config"), "comments preserved: {after}");
+        assert!(after.contains("volume = 33"), "and the new value landed: {after}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `--interpreter-number N` overrides the config file for ONE run, and must not

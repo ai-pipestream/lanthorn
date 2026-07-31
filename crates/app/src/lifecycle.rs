@@ -108,7 +108,12 @@ pub(crate) fn quit_dialog_save(
 /// resize-reset/exit persists regardless of which path handled the key.
 pub(crate) fn flush_pending_config_write(state: &mut AppState) {
     if state.pending_config_write {
-                let _ = app::config::write_config_file(&state.config);
+        // A save can legitimately fail — a read-only home, or a config.toml the user
+        // has broken, which `write_config_file` refuses to overwrite (SQ-0580). Say so
+        // rather than dropping the setting on the floor.
+        if let Err(e) = app::config::write_config_file(&state.config) {
+            state.push_notice(&format!("[config not saved: {e}]"));
+        }
         state.pending_config_write = false;
     }
 }

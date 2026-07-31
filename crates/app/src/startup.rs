@@ -640,6 +640,19 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
         app::state::apply_transcript_elems(&mut state, &banner_elems);
     }
 
+    // A config.toml that doesn't parse is ignored WHOLESALE — TOML is one document, so
+    // a single stray character costs every setting in the file. Say so, with the error
+    // TOML reported, rather than letting the user wonder why their config has no effect
+    // (SQ-0580). Saving is refused while it's broken, so nothing overwrites it.
+    if let Some(err) = state.config.config_error.clone() {
+        let msg = format!(
+            "{} could not be parsed ({err}) — running on defaults, and settings will \
+             not be saved until it is fixed",
+            state.config.config_file.display(),
+        );
+        state.push_transcript_internal(&msg, app::state::TranscriptKind::Warning);
+    }
+
     // One-time notice: config.toml no longer carries style — those moved to style.toml.
     if let Ok(raw_cfg) = std::fs::read_to_string(app::config::config_path(cli)) {
         if app::config::config_has_style_sections(&raw_cfg) {

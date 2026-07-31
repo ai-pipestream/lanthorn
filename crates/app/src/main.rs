@@ -2902,7 +2902,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // live look was already re-resolved FROM style.toml in apply_action, so we do
         // NOT touch style.toml here — writing it would clobber the seeded template.
         if let Some(cfg_to_write) = config_to_save {
-                        let _ = app::config::write_config_file(&state.config);
+            // Hitting Save on the settings screen and getting nothing is the worst
+            // place to swallow this — surface the reason (SQ-0580).
+            if let Err(e) = app::config::write_config_file(&state.config) {
+                state.push_notice(&format!("[config not saved: {e}]"));
+            }
             // Apply a mouse-capture change live so the setting takes effect without a
             // restart (matching how audio/colours apply live on save).
             if cfg_to_write.mouse != mouse_before_save {

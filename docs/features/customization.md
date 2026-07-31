@@ -260,6 +260,13 @@ re-seed the new template, or hand-write the new shape from
   an example, because uncommenting *that* does change behaviour. An existing
   config is never overwritten, and later edits from the settings screen preserve
   your comments.
+- **A broken config file says so.** TOML is parsed as one document, so a single
+  stray character — an unclosed quote, a stray bracket — costs you every setting
+  in the file, not just the line it's on. babelmap names the file and shows the
+  parse error at startup instead of quietly running on defaults, and it refuses
+  to save settings over a file it couldn't read, so the text you need in order
+  to find the typo is never overwritten. Fix the file (or move it aside and let
+  babelmap seed a fresh one) and saving resumes.
 - **Default story directory** — `default_story_dir` is opened when babelmap is
   launched with no path argument. The first time you point babelmap at a
   directory on the command line without one set, it offers to remember that
