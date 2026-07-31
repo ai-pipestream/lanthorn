@@ -470,6 +470,26 @@ pub struct TurnResult {
     pub transcript_elems: Vec<TranscriptElem>,
 }
 
+/// One `erase_window`'s background fill: the screen rect it painted (0-based pixels,
+/// as the composite uses), the window background it painted with as a packed colour
+/// (0 = the window inherited the page default), and the draw-order stamp it took from
+/// the shared picture sequence so it layers with picture draws (SQ-0584).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowFill {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub bg: u32,
+    pub seq: u64,
+    /// Story chars printed when the erase happened (`PictureEvent::out_chars`). Prose
+    /// is paint too: one character streamed to the story window after this erase means
+    /// the fill is no longer the newest thing on the screen, so it stops covering.
+    /// Zork Zero is the case that needs it — it erases its full-screen decorative
+    /// window 7 to white during BOOT, before a word of the story has printed.
+    pub out_chars: u64,
+}
+
 /// A running Z-machine game session.
 pub struct GameSession {
     pub machine: Machine,
@@ -500,6 +520,17 @@ pub struct GameSession {
     /// `drain_turn` from `Machine::pending_pictures`; read by the Task 4
     /// screen adapter to build the layered composite.
     pub pictures_canvas: std::collections::HashMap<u8, crate::graphics::Canvas>,
+    /// The last `erase_window` on each v6 window: what it filled and when (SQ-0584).
+    ///
+    /// ZMSD §8.8.5.3 — erasing a window fills its rect with that window's background
+    /// colour. On a real interpreter every v6 window is a clipping region over ONE
+    /// screen bitmap, so that fill is opaque paint: it is what makes a menu panel hide
+    /// the story behind it (advent.z6's `help` splits window 1 to 160px, erases it,
+    /// then paints the menu into it). babelmap composites layers instead, and an
+    /// erased window used to become simply transparent — the panel's text floated over
+    /// the story with nothing behind it. Recorded here at drain time, on the same
+    /// ordered queue as picture draws, so the fill composites in sequence with them.
+    pub window_fills: std::collections::HashMap<u8, WindowFill>,
     /// v6 window-0 inline pictures (drop-caps, room icons) awaiting transcript
     /// interleaving: the absolute win0 output-char offset each was drawn at
     /// (`PictureEvent::out_chars`), plus the prepared float image. Drained into
@@ -632,6 +663,7 @@ impl GameSession {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
@@ -1114,6 +1146,36 @@ impl GameSession {
             // every other window's canvas too (SQ-0568).
             if let Some(rect) = self.window_screen_rect(ev.window) {
                 self.erase_screen_rect(rect, Some(ev.window));
+                // …and record what the erase PAINTED there (SQ-0584). ZMSD §8.8.5.3:
+                // the rect is filled with the window's background colour, opaquely —
+                // dropping the canvas above only removes what was under it. A fill of
+                // the region a window no longer covers is dead the moment the window
+                // moves or shrinks, so it is clamped to the live rect when published.
+                let bg = self
+                    .machine
+                    .screen
+                    .v6
+                    .as_ref()
+                    .and_then(|v6| v6.windows.get(ev.window as usize))
+                    .map(|w| crate::state::pack_zcolour(w.bg))
+                    .unwrap_or(0);
+                let (x, y, w, h) = rect;
+                if w > 0 && h > 0 {
+                    self.window_fills.insert(
+                        ev.window,
+                        WindowFill {
+                            x,
+                            y,
+                            w,
+                            h,
+                            bg,
+                            seq: crate::graphics::next_draw_seq(),
+                            out_chars: ev.out_chars,
+                        },
+                    );
+                } else {
+                    self.window_fills.remove(&ev.window);
+                }
             }
             return;
         }
@@ -1417,6 +1479,21 @@ impl GameSession {
                     bg: (win.bg != ZColour::Default).then(|| crate::state::pack_zcolour(win.bg)),
                     fg: (win.fg != ZColour::Default).then(|| crate::state::pack_zcolour(win.fg)),
                     reverse: false,
+                    // An erase fill still on top of everything painted here (SQ-0584):
+                    // newer than the story's last prose, still covering the window's
+                    // live rect (a window that moved or grew since leaves its old fill
+                    // behind rather than dragging a stale blank around), and never the
+                    // prose window itself — erasing THAT means "clear the transcript",
+                    // which rides `erase_lower` instead and would otherwise blank the
+                    // pane on every ordinary turn.
+                    fill: self.window_fills.get(&(i as u8)).and_then(|f| {
+                        let covers = f.x <= x_px as u32
+                            && f.y <= y_px as u32
+                            && f.x + f.w >= x_px as u32 + win.x_size as u32
+                            && f.y + f.h >= y_px as u32 + win.y_size as u32;
+                        (i != prose_idx && covers && f.out_chars == self.machine.v6_win0_out_chars)
+                            .then_some(crate::engine::ErasedFill { bg: f.bg, seq: f.seq })
+                    }),
                     // Exact pixel-positioned runs for the pixel raster (the
                     // cells above stay the cell-mode fallback).
                     px_texts: win
@@ -2085,6 +2162,7 @@ pub fn screen_model_from_machine(machine: &Machine) -> ScreenModel {
     let screen = &machine.screen;
     let src = &screen.upper;
     let grid = GridWindow {
+        fill: None, // v6-only erase fill (SQ-0584)
         cols: src.cols,
         rows: src.rows,
         cells: src
@@ -4057,6 +4135,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
@@ -4110,6 +4189,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
@@ -4150,6 +4230,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
@@ -4184,6 +4265,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
@@ -4231,6 +4313,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
@@ -4320,6 +4403,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),
@@ -4364,6 +4448,7 @@ mod tests {
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
+            window_fills: std::collections::HashMap::new(),
             story_pics: Vec::new(),
             v6_win0_chars_seen: 0,
             last_content_pic: std::collections::HashMap::new(),

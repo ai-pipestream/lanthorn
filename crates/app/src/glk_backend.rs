@@ -662,6 +662,7 @@ impl AppGlk {
             }
         }
         GridWindow {
+            fill: None, // v6-only erase fill (SQ-0584)
             cols,
             rows,
             cells,

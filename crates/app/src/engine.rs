@@ -116,6 +116,16 @@ pub enum BorderPref {
     NoBorder,
 }
 
+/// An `erase_window`'s surviving background fill (SQ-0584): the packed colour it
+/// painted (0 = the page default) and its draw-order stamp, so several fills — and
+/// the picture draws they interleave with — composite in the order the game made
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErasedFill {
+    pub bg: u32,
+    pub seq: u64,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct GridWindow {
     /// Logical grid width in columns.
@@ -144,6 +154,15 @@ pub struct GridWindow {
     /// styles with no explicit colours (Counterfeit Monkey's menu), the empty-cell
     /// fill is drawn reversed too, so the whole window matches. (SQ-0403)
     pub reverse: bool,
+    /// This window was ERASED more recently than the story last printed, so its rect
+    /// is an opaque field of this packed background colour (0 = the page default) —
+    /// v6 only (SQ-0584). ZMSD §8.8.5.3: erasing a window fills its rect with the
+    /// window's background, and on a real interpreter that paint sits on the one
+    /// shared screen bitmap, hiding whatever was under it. That is what makes
+    /// advent.z6's `help` menu a solid panel rather than text floating over the
+    /// story. `None` — the ordinary case — means the story text is the newer paint,
+    /// so nothing is covered.
+    pub fill: Option<ErasedFill>,
     /// Pixel-positioned text runs (v6 only; empty for Glulx/cell grids). Each is
     /// the exact 1-based window-relative pixel start the game printed at, so the
     /// pixel raster draws status text where the game placed it (Zork Zero puts

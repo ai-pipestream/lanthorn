@@ -984,6 +984,19 @@ fn render_node(
                         }
                         // The story window as real terminal text (primary-Buffer path).
                         let metrics = render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors);
+                        if std::env::var("BM_DBG").is_ok() { eprintln!("DBG ring-path viewport={viewport:?}"); }
+                        // SQ-0584: a chrome window the game ERASED more recently than it
+                        // printed prose is an opaque panel over the story — advent.z6's
+                        // `help` splits window 1 to 160px, erases it and paints a menu
+                        // there. Fill its rect over the transcript before the runs below
+                        // stamp their glyphs, so the panel reads as a panel instead of
+                        // text floating over the room description. `fill` is only set
+                        // for a window that is still the newest paint on its own rect,
+                        // so an ordinary turn (whose prose is newer) fills nothing.
+                        draw_erase_fills(
+                            &layout.chrome, viewport, buf, base, state.config.honor_game_colours, &state.colors,
+                            &|pw: &PositionedWindow| px_rect_to_cells(pw, &scale, cell_px, area),
+                        );
                         // Chrome text runs that fall INSIDE the story box paint
                         // ON TOP of the terminal transcript (v6 paint order —
                         // Shogun overlays its boot-menu items and selection
@@ -1046,6 +1059,7 @@ fn render_node(
                         .flatten()
                         .collect();
                     if runs.iter().any(|t| !t.text.trim().is_empty()) {
+                        if std::env::var("BM_DBG").is_ok() { eprintln!("DBG hint-menu path"); }
                         draw_painted_screen(&runs, 0..u16::MAX, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native.0);
                         return None;
                     }
@@ -1256,6 +1270,20 @@ fn render_node(
                     }
                     let story_area = Rect::new(story_x, mid_y, story_right.saturating_sub(story_x), mid_h);
                     let m = render_node(&story.node, status, char_mode, introspect, state, story_area, buf, game_input, links, grid_colors);
+                    // SQ-0584: erase fields go down over the transcript first — this is
+                    // where a painted MENU screen lands (SQ-0484 routes it here out of
+                    // hybrid), so without them the menu's text floats over the story it
+                    // is supposed to be covering. The cell path is 1:1 with native rows
+                    // (8x16 cells), so a window's rect maps by division.
+                    draw_erase_fills(
+                        &layout.chrome, area, buf, status_style, state.config.honor_game_colours, &state.colors,
+                        &|pw: &PositionedWindow| px_rect_to_cells(
+                            pw,
+                            &crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 },
+                            (8, 16),
+                            area,
+                        ),
+                    );
                     // Painted-screen overlay (SQ-0478): stamp the paint runs INSIDE
                     // the story box as absolutely-positioned terminal text on TOP of
                     // the transcript. A no-op in normal gameplay (chrome grids carry
@@ -2281,6 +2309,48 @@ fn full_width_flood_rows(
     out
 }
 
+/// Paint the background fields left by `erase_window` (SQ-0584).
+///
+/// ZMSD §8.8.5.3: erasing a window fills its rect with that window's background, and
+/// on a real interpreter — where every v6 window is a clipping region over ONE screen
+/// bitmap — that fill is opaque paint covering whatever was under it. A window carries
+/// `fill` only while it is still the newest paint on its own rect (see
+/// `GridWindow::fill`), so an ordinary turn, whose prose is newer, paints nothing here.
+///
+/// Drawn in the order the game erased them, over the whole pane rather than any one
+/// draw call's row window: advent.z6's `help` erases the full screen and then its
+/// 160px menu window, and the real screen that leaves is a menu panel on blank
+/// background — not a panel with the transcript resuming under it.
+fn draw_erase_fills(
+    chrome: &[&PositionedWindow],
+    area: Rect,
+    buf: &mut Buffer,
+    base: ratatui::style::Style,
+    honor: bool,
+    colors: &ColorScheme,
+    to_cells: &dyn Fn(&PositionedWindow) -> Rect,
+) {
+    let mut fills: Vec<(&PositionedWindow, crate::engine::ErasedFill)> = chrome
+        .iter()
+        .filter_map(|pw| match &pw.node {
+            WinNode::Grid(g) => g.fill.map(|f| (*pw, f)),
+            _ => None,
+        })
+        .collect();
+    fills.sort_by_key(|(_, f)| f.seq);
+    for (pw, f) in fills {
+        let style = v6_run_style(base, 0, f.bg, 0, honor, colors);
+        let r = to_cells(pw);
+        for y in r.y.max(area.y)..r.bottom().min(area.bottom()) {
+            for x in r.x.max(area.x)..r.right().min(area.right()) {
+                if let Some(cell) = buf.cell_mut((x, y)) {
+                    cell.set_symbol(" ").set_style(style);
+                }
+            }
+        }
+    }
+}
+
 fn draw_painted_screen(
     runs: &[&crate::engine::PxText],
     rows: std::ops::Range<u16>,
@@ -2726,6 +2796,27 @@ fn flank_divider_extension(
 /// cell (col, row) through the letterbox `scale` — the same mapping the pixel
 /// ring and the inside-story overlay use, so a text strip lines up exactly with
 /// the art strips beside it.
+/// A v6 window's native pixel rect as terminal CELLS, both corners mapped exactly as
+/// [`run_cell`] maps a run's origin: through the scale, then ROUNDED. Rounding (not
+/// ceil) on the far edge is what keeps a 20px status strip — 1.25 cells — from
+/// claiming a second row and eating the first line of story under it. (SQ-0584)
+fn px_rect_to_cells(
+    pw: &PositionedWindow,
+    scale: &crate::render::v6_layout::Scale,
+    cell_px: (u16, u16),
+    pane: Rect,
+) -> Rect {
+    let cw = cell_px.0.max(1) as f32;
+    let ch = cell_px.1.max(1) as f32;
+    let to_col = |px: f32| pane.x as f32 + (scale.off_x as f32 + px * scale.s) / cw;
+    let to_row = |py: f32| pane.y as f32 + (scale.off_y as f32 + py * scale.s) / ch;
+    let x0 = to_col(pw.x_px as f32).round().max(pane.x as f32) as u16;
+    let y0 = to_row(pw.y_px as f32).round().max(pane.y as f32) as u16;
+    let x1 = to_col(pw.x_px.saturating_add(pw.w_px) as f32).round().max(x0 as f32).min(pane.right() as f32) as u16;
+    let y1 = to_row(pw.y_px.saturating_add(pw.h_px) as f32).round().max(y0 as f32).min(pane.bottom() as f32) as u16;
+    Rect::new(x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+}
+
 fn run_cell(t: &crate::engine::PxText, scale: &crate::render::v6_layout::Scale, cell_px: (u16, u16), pane: Rect) -> (i32, i32) {
     let cw = cell_px.0.max(1) as f32;
     let ch = cell_px.1.max(1) as f32;
@@ -5046,6 +5137,7 @@ mod tests {
             x: 0, y: 6, w: 40, h: 1, x_px: 0, y_px: 96, w_px: 320, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
+                fill: None,
                 cols: 40, rows: 1, cells: vec![], active_rows: 1, cursor: (1, 1),
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
                 bg: None, fg: None, reverse: false,
@@ -5138,6 +5230,7 @@ mod tests {
             x: 12, y: 8, w: 1, h: 3, x_px: 100, y_px: 129, w_px: 1, h_px: 48,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
+                fill: None,
                 cols: 1, rows: 3, cells: vec![], active_rows: 3, cursor: (1, 1),
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
                 bg: None, fg: None, reverse: false,
@@ -5177,6 +5270,7 @@ mod tests {
             x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
+                fill: None,
                 cols: 1, rows: 1, cells: vec![], active_rows: 1, cursor: (1, 1),
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
                 bg: None, fg: None, reverse: false, px_texts: runs,
@@ -5353,6 +5447,7 @@ mod tests {
             x: 0, y: 0, w: 40, h: 1, x_px: 0, y_px: 0, w_px: 320, h_px: 16,
             left_margin: 0, right_margin: 0,
             node: WinNode::Grid(crate::engine::GridWindow {
+                fill: None,
                 cols: 40, rows: 1, cells: vec![], active_rows: 1, cursor: (1, 1),
                 cursor_active: false, border: crate::engine::BorderPref::Unspecified,
                 bg: None, fg: None, reverse: false,

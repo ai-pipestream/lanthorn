@@ -265,3 +265,87 @@ fn advent_style_command_moves_the_story_window() {
     let loc = session.current_location().expect("the room is still detected after the split");
     assert!(loc.name.contains("End Of Road"), "expected At End Of Road, got {:?}", loc.name);
 }
+
+/// SQ-0584: `help` opens a hint-style menu — window 1 split to 160px, ERASED, then
+/// painted with the subject list. On a real interpreter every v6 window is a clipping
+/// region over ONE screen bitmap, so that erase is opaque paint and the menu hides the
+/// story behind it. babelmap composites layers instead, and an erased window used to
+/// be simply transparent: the menu's text floated over the room description with
+/// nothing behind it. The panel must read solid, and the story must come back
+/// untouched when the menu closes (advent erases and reprints on the way out).
+fn advent_help_panel_is_opaque(honor: bool) {
+    let Some(mut session) = advent_in_play(honor) else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+    let _ = session.submit("look");
+    let _ = session.take_transcript();
+
+    let area = Rect::new(0, 0, 80, 25);
+    let render = |session: &GameSession| -> Buffer {
+        let model = session.screen();
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+        state.config.v6_render = app::config::V6RenderMode::Hybrid;
+        state.config.honor_game_colours = honor;
+        // Story text in the transcript, so anything showing THROUGH the panel is
+        // unmistakable — this is exactly what the panel used to fail to cover.
+        for i in 0..20 {
+            state.push_transcript(&format!("story line {i} ------------------------------"));
+        }
+        let mut buf = Buffer::empty(area);
+        let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+        buf
+    };
+    let row_of = |buf: &Buffer, y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+
+    let _ = session.submit("help");
+    let _ = session.take_transcript();
+    let buf = render(&session);
+
+    // The menu is there…
+    let menu_y = (0..area.height)
+        .find(|&y| row_of(&buf, y).contains("Instructions for playing"))
+        .unwrap_or_else(|| panic!("the help menu renders (honor={honor})"));
+    // …and NOT one line of the story shows through anywhere on the panel.
+    let leaks: Vec<u16> = (0..area.height).filter(|&y| row_of(&buf, y).contains("story line")).collect();
+    assert!(
+        leaks.is_empty(),
+        "the erased menu panel hides the story behind it (honor={honor}); story visible on rows {leaks:?}\n{}",
+        leaks.iter().map(|&y| row_of(&buf, y)).collect::<Vec<_>>().join("\n"),
+    );
+    // The panel is a filled field, not bare backdrop between the items: the blank row
+    // under the menu item carries the same background as the item's own row.
+    let item_bg = buf.cell((4, menu_y)).unwrap().bg;
+    let gap_bg = buf.cell((4, menu_y.saturating_sub(1))).unwrap().bg;
+    assert_eq!(item_bg, gap_bg, "the rows between menu items are part of the panel (honor={honor})");
+
+    // Q resumes: the fill is gone and the story is visible again, with the one-row
+    // status bar back on top.
+    let _ = session.submit_char(b'Q');
+    let _ = session.take_transcript();
+    let buf = render(&session);
+    assert!(
+        (0..area.height).any(|y| row_of(&buf, y).contains("story line")),
+        "closing the menu brings the story back (honor={honor}):\n{}",
+        (0..area.height).map(|y| row_of(&buf, y)).collect::<Vec<_>>().join("\n"),
+    );
+    assert!(
+        row_of(&buf, 0).contains("End Of Road"),
+        "and the status bar is back on the top row (honor={honor}): {:?}",
+        row_of(&buf, 0),
+    );
+}
+
+#[test]
+fn advent_help_panel_is_opaque_honoring_game_colours() {
+    advent_help_panel_is_opaque(true);
+}
+
+#[test]
+fn advent_help_panel_is_opaque_theme_only() {
+    advent_help_panel_is_opaque(false);
+}

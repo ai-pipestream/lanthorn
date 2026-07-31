@@ -944,6 +944,7 @@ mod tests {
         PositionedWindow {
             x: 0, y: 0, w: 1, h: 1, x_px, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                fill: None,
                 cols: 1, rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
                 px_texts: Vec::new(),
@@ -1283,6 +1284,7 @@ mod tests {
         let win = PositionedWindow {
             x: 0, y: 0, w: 3, h: 2, x_px: 10, y_px: 4, w_px: 24, h_px: 32, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                fill: None,
                 cols: 3, rows: 2, cells, active_rows: 2, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
                 px_texts: Vec::new(),
@@ -1313,6 +1315,7 @@ mod tests {
         PositionedWindow {
             x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 8, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                fill: None,
                 cols: 1, rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
                 px_texts: vec![PxText { y: 1, x: 1, text: text.into(), style, fg, bg }],
@@ -1380,6 +1383,7 @@ mod tests {
             let win = PositionedWindow {
                 x: 0, y: 0, w: 1, h: 1, x_px: 0, y_px: 0, w_px: 8, h_px: 16, left_margin: 0, right_margin: 0,
                 node: WinNode::Grid(GridWindow {
+                    fill: None,
                     cols: 1, rows: 1, cells: cells(style), active_rows: 1, cursor: (0, 0), cursor_active: false,
                     border: BorderPref::Unspecified, bg: None, fg: None, reverse: false,
                     px_texts: Vec::new(),
@@ -1573,6 +1577,7 @@ mod tests {
         PositionedWindow {
             x: 0, y: 0, w: (w_px / 8).max(1), h: 1, x_px: 0, y_px: 0, w_px, h_px: 16, left_margin: 0, right_margin: 0,
             node: WinNode::Grid(GridWindow {
+                fill: None,
                 cols: (w_px / 8).max(1), rows: 1, cells: vec![], active_rows: 1, cursor: (0, 0), cursor_active: false,
                 border: BorderPref::Unspecified, bg: None, fg: None, reverse: false, px_texts: runs,
             }),

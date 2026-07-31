@@ -83,7 +83,18 @@ session-only switch that never touches your saved config:
   top of the screen, has its rows reserved off the story viewport so it decomposes
   into an ordinary text strip — a solid bar with the transcript starting beneath it,
   rather than glyphs stamped over scrolling prose. Such a bar need not be
-  reverse-video to fill the row; a window that shape *is* the status bar. The rows that become cells are carved out
+  reverse-video to fill the row; a window that shape *is* the status bar.
+- **Erased windows are opaque.** On a real interpreter every v6 window is a
+  clipping region over one shared screen bitmap, so erasing a window paints its
+  rect with that window's background — which is what makes a hint menu hide the
+  story behind it. babelmap composites layers instead, so it tracks the erase:
+  a window stays an opaque field until the story prints another character, at
+  which point the prose is the newer paint and the fill stops covering. That one
+  rule keeps both cases right — advent.z6's `help` (erase the screen, split a
+  160px window, erase it, paint the menu, and print no prose) reads as a solid
+  panel on blank background, while Zork Zero's full-screen decorative window,
+  erased to white during boot *before* a word of story has printed, never
+  blankets the transcript. The rows that become cells are carved out
   of the pixel bands entirely — their rasterized ink never reaches an uploaded
   band image (no raster bar showing through behind the cells), and because a
   band's image no longer depends on that text, navigating the menu re-encodes only
