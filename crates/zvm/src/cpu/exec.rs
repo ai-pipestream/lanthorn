@@ -3525,36 +3525,50 @@ impl Machine {
             // playing in another below it. Both are wrap+scroll, so both reach this
             // stream, and splicing them into one transcript scrolls the top window's
             // text away (the game itself warns that a correct interpreter must not).
-            // The window the player TYPES into is the transcript's window; text bound
-            // for any other prose window is that window's own live screen state, so
-            // it goes to its `prose` buffer and stops here.
-            if let Some(v6) = self.screen.v6.as_mut() {
+            //
+            // Which one carries the narrative is not a guess: ZMSD §8.8.3.1 gives every
+            // v6 window an attribute 2, "text copied to output stream 2 (the transcript,
+            // if selected)", and a game that splits its display sets it on the window
+            // whose text is the transcript. advent does exactly that — window 7, where
+            // the player types, has it; the window 3 it opens across the top does not.
+            // So the game's own declaration decides, corroborated by the window it asks
+            // for input through. Text bound for any other prose window is that window's
+            // live screen state and goes to its own buffer.
+            //
+            // Only the DESTINATION changes here. Everything the game can observe —
+            // the window cursor (props 4/5) and the §8.8.3.2.2 newline interrupt below
+            // — happens either way, exactly as it would if the text had streamed.
+            let divert = self.screen.v6.as_ref().and_then(|v6| {
                 let cur = v6.current as usize;
-                if v6.current != self.v6_input_window && v6.windows[cur].prose_window() {
+                let w = &v6.windows[cur];
+                (w.prose_window() && !w.copy_to_transcript() && v6.current != self.v6_input_window)
+                    .then_some(cur)
+            });
+            if let Some(cur) = divert {
+                if let Some(v6) = self.screen.v6.as_mut() {
                     v6.windows[cur].push_prose(s);
-                    self.v6_advance_prose_cursor(s);
-                    return;
                 }
-            }
-            // v6: this is window 0's (the main scrolling window's) output.
-            // Count its chars so window-0 inline pictures can anchor to their
-            // exact position in the text stream (PictureEvent::out_chars).
-            if self.screen.v6.is_some() {
-                self.v6_win0_out_chars += s.chars().count() as u64;
-            }
-            let attrs = crate::io::TextAttrs {
-                style: self.screen.text_style,
-                fg: self.screen.current_fg,
-                bg: self.screen.current_bg,
-            };
-            if font3 {
-                let translated: String = s.chars().map(|ch| {
-                    let code = ch as u32;
-                    if (32..=126).contains(&code) { font3_translate(ch) } else { ch }
-                }).collect();
-                self.out.print_attr(&translated, attrs);
             } else {
-                self.out.print_attr(s, attrs);
+                // v6: this is window 0's (the main scrolling window's) output.
+                // Count its chars so window-0 inline pictures can anchor to their
+                // exact position in the text stream (PictureEvent::out_chars).
+                if self.screen.v6.is_some() {
+                    self.v6_win0_out_chars += s.chars().count() as u64;
+                }
+                let attrs = crate::io::TextAttrs {
+                    style: self.screen.text_style,
+                    fg: self.screen.current_fg,
+                    bg: self.screen.current_bg,
+                };
+                if font3 {
+                    let translated: String = s.chars().map(|ch| {
+                        let code = ch as u32;
+                        if (32..=126).contains(&code) { font3_translate(ch) } else { ch }
+                    }).collect();
+                    self.out.print_attr(&translated, attrs);
+                } else {
+                    self.out.print_attr(s, attrs);
+                }
             }
             // The prose regime moves the window cursor too (SQ-0536). Before
             // this, v6 window 0 / win7 printed whole paragraphs without prop
@@ -6359,6 +6373,65 @@ pub(crate) mod tests {
             "one new-line → one decrement",
         );
         assert_eq!(m.global(0), 0, "routine must not run while the count is above zero");
+    }
+
+    // Test (SQ-0585): text DIVERTED to a secondary prose window's own buffer must
+    // still have every side effect the game can observe. Routing decides only where
+    // the text is displayed — ZMSD §8.8.3.2.2's new-line countdown (prop 9, the
+    // [MORE]/interrupt mechanism) and the window cursor (props 4/5) belong to the
+    // window that was printed to, whichever surface the host shows it on.
+    #[test]
+    fn diverted_prose_still_ticks_the_newline_interrupt_and_cursor() {
+        let mut m = Machine::new(
+            Memory::new(crate::header::tests_support::sample_story(6)).unwrap(),
+        );
+        // Window 3: wrapping+scrolling (a prose window) with attribute 2 CLEAR —
+        // ZMSD §8.8.3.1's "text copied to output stream 2" — which is how a game
+        // says this window's text is not the transcript's (advent.z6's `style`).
+        {
+            let v6 = m.screen.v6.as_mut().unwrap();
+            v6.current = 3;
+            let w = &mut v6.windows[3];
+            w.attributes = 0b1011; // wrap + scroll + buffered, NOT copy-to-transcript
+            w.y_size = 200;
+            w.x_size = 640;
+            w.y_cursor = 1;
+            w.x_cursor = 1;
+            w.interrupt_countdown = 3;
+            w.interrupt_routine = 0xA0;
+        }
+        m.v6_input_window = 7; // the player types elsewhere
+        m.print_text("hello\n");
+
+        let w = &m.screen.v6.as_ref().unwrap().windows[3];
+        assert_eq!(w.prose, vec!["hello".to_string(), String::new()], "the text went to the window");
+        assert_eq!(w.interrupt_countdown, 2, "the new-line still counted down (ZMSD 8.8.3.2.2)");
+        assert!(w.y_cursor > 1, "the window cursor still advanced (props 4/5), got {}", w.y_cursor);
+        assert_eq!(m.global(0), 0, "no routine fires above zero");
+    }
+
+    // Test (SQ-0585): the same window WITH attribute 2 set streams to the transcript
+    // as before — the game marks the narrative window, and nothing is diverted from
+    // it even when the player is typing elsewhere.
+    #[test]
+    fn a_copy_to_transcript_window_is_never_diverted() {
+        let mut m = Machine::new(
+            Memory::new(crate::header::tests_support::sample_story(6)).unwrap(),
+        );
+        {
+            let v6 = m.screen.v6.as_mut().unwrap();
+            v6.current = 7;
+            let w = &mut v6.windows[7];
+            w.attributes = 0b1111; // wrap + scroll + copy-to-transcript + buffered
+            w.y_size = 200;
+            w.x_size = 640;
+        }
+        m.v6_input_window = 0; // e.g. before the first read, at boot
+        m.print_text("banner\n");
+        assert!(
+            m.screen.v6.as_ref().unwrap().windows[7].prose.is_empty(),
+            "a transcript-marked window streams, so nothing lands in its buffer"
+        );
     }
 
     // Test: when the countdown hits zero the prop-8 routine fires exactly once,

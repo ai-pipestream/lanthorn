@@ -311,6 +311,13 @@ impl ZWindow {
     pub fn prose_window(&self) -> bool {
         self.attributes & 0b0011 == 0b0011
     }
+    /// ZMSD §8.8.3.1 attribute 2: "text copied to output stream 2 (the transcript,
+    /// if selected)". A game that runs more than one prose window marks the one
+    /// carrying the narrative with it — advent.z6 sets it on the window the player
+    /// types into and clears it on the display window it opens above (SQ-0585).
+    pub fn copy_to_transcript(&self) -> bool {
+        self.attributes & 0b0100 != 0
+    }
     /// Append streamed prose to this window's live line buffer (SQ-0585), starting
     /// a new logical line at each `\n` and dropping the oldest lines past
     /// [`PROSE_MAX_LINES`]. Wrapping is the host's job — it knows the font and the

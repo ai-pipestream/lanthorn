@@ -88,9 +88,12 @@ session-only switch that never touches your saved config:
   windows at once — advent.z6's `style` opens one across the top of the screen and
   keeps playing in another below it. Both are wrap+scroll, so both stream through
   the same text path, and splicing them into one transcript scrolled the top
-  window's text away with the story (the game warns about exactly that). babelmap
-  keeps the transcript for the window the player types into and gives every other
-  prose window its own buffer, drawn in its own rect. A secondary window is **live
+  window's text away with the story (the game warns about exactly that). Which
+  window carries the narrative is the game's own declaration: ZMSD §8.8.3.1's
+  attribute 2, "text copied to output stream 2", is set on the transcript's window
+  and cleared on a display window. babelmap follows that — corroborated by the
+  window the game reads input through — and gives every other prose window its own
+  buffer, drawn in its own rect. A secondary window is **live
   screen state**: what it currently shows, with no scrollback, cleared when the game
   erases it — but persisted with the rest of the screen, because a game that splits
   the display does not necessarily repaint it after a restore (advent doesn't).

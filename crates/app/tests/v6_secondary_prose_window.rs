@@ -64,8 +64,41 @@ fn split_open() -> Option<GameSession> {
     Some(session)
 }
 
+/// The BOOT banner still reaches the transcript. advent prints it into window 7
+/// before it ever asks for input, so a rule that leaned only on "the window the
+/// player types into" diverted the whole banner into a window buffer and the
+/// transcript opened empty. ZMSD §8.8.3.1 attribute 2 — "text copied to output
+/// stream 2" — is set on window 7 and settles it independently of input.
+#[test]
+fn the_boot_banner_still_reaches_the_transcript() {
+    let Some(mut session) = boot() else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+    // `boot` drains the banner on the way to the first prompt, so re-boot raw.
+    let story_path = stories_dir().join("advent.z6");
+    let bytes = std::fs::read(&story_path).expect("story present");
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let dims = picts.all_pict_dims();
+    let mut fresh =
+        GameSession::new_with_trace(bytes, true, false, None, false, dims, picts.std_window(), None)
+            .expect("boot");
+    fresh.set_pict_source(Some(picts));
+    fresh.flush_boot_pictures();
+    let banner = fresh.take_transcript();
+    assert!(
+        banner.contains("Version 6"),
+        "the opening banner belongs to the transcript, got {} chars: {banner:?}",
+        banner.len()
+    );
+    for (i, w) in fresh.machine.screen.v6.as_ref().unwrap().windows.iter().enumerate() {
+        assert!(w.prose.is_empty(), "no window buffer swallowed the banner (window {i}: {:?})", w.prose);
+    }
+    let _ = session.take_transcript();
+}
+
 /// The engine keeps the second window's text in the WINDOW, not in the transcript
-/// stream, and the split is decided by which window the game reads input through.
+/// stream, and the split is decided by the game's own copy-to-transcript attribute.
 #[test]
 fn second_prose_window_keeps_its_own_text() {
     let Some(mut session) = split_open() else {
