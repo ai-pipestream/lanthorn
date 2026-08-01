@@ -1450,6 +1450,23 @@ impl GameSession {
                     fg: (win.fg != ZColour::Default).then(|| crate::state::pack_zcolour(win.fg)),
                     ..Default::default()
                 })
+            } else if !win.prose.is_empty() {
+                // A SECOND flowing-prose window (SQ-0585): the engine kept its text
+                // out of the transcript stream and in the window, so publish it as a
+                // non-primary Buffer — the same node Glulx uses for its secondary
+                // text buffers. Live screen state: no scrollback, and the lines go
+                // when the game erases the window.
+                WinNode::Buffer(BufferWindow {
+                    primary: false,
+                    lines: win.prose.clone(),
+                    runs: vec![Vec::new(); win.prose.len()],
+                    para: vec![crate::state::ParaFmt::default(); win.prose.len()],
+                    images: vec![None; win.prose.len()],
+                    scroll: 0,
+                    bg: (win.bg != ZColour::Default).then(|| crate::state::pack_zcolour(win.bg)),
+                    fg: (win.fg != ZColour::Default).then(|| crate::state::pack_zcolour(win.fg)),
+                    panel: false,
+                })
             } else {
                 WinNode::Grid(GridWindow {
                     cols,

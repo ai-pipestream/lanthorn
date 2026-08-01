@@ -327,6 +327,13 @@ struct ZWindowDto {
     fg: ZColourDto,
     bg: ZColourDto,
     texts: Vec<V6TextDto>,
+    /// A secondary prose window's live lines (SQ-0585). Persisted for the same
+    /// reason as `texts` and the picture canvases: a restore has to reproduce what
+    /// was on screen. Measured on advent.z6 — after a restore into its split layout
+    /// the game repaints neither window, so an unpersisted panel would come back
+    /// blank and stay blank. `#[serde(default)]` keeps older archives loading.
+    #[serde(default)]
+    prose: Vec<String>,
 }
 
 impl ZWindowDto {
@@ -348,6 +355,7 @@ impl ZWindowDto {
                 y: t.y, x: t.x, text: t.text.clone(), style: t.style,
                 fg: ZColourDto::from_z(t.fg), bg: ZColourDto::from_z(t.bg),
             }).collect(),
+            prose: w.prose.clone(),
         }
     }
     fn to_window(&self) -> zvm::screen::ZWindow {
@@ -367,6 +375,7 @@ impl ZWindowDto {
         w.texts = self.texts.iter().map(|t| zvm::screen::V6Text {
             y: t.y, x: t.x, text: t.text.clone(), style: t.style, fg: t.fg.to_z(), bg: t.bg.to_z(),
         }).collect();
+        w.prose = self.prose.clone();
         w
     }
 }

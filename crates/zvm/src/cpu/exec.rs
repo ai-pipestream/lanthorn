@@ -192,6 +192,15 @@ pub struct Machine {
     /// window) — stamps `PictureEvent::out_chars` so window-0 inline pictures
     /// anchor to their position in the text stream. Monotonic, never reset.
     pub v6_win0_out_chars: u64,
+    /// The v6 window the game last asked for INPUT through, when that window was a
+    /// flowing-prose one (SQ-0585). It is the game's main text window by definition
+    /// — the one the player types into — so its output is what the host mirrors as
+    /// the transcript. Any OTHER prose window is a display panel, and its text goes
+    /// to that window's own `prose` buffer instead of being spliced into the same
+    /// stream. `0` until the first input request, which is right for boot: window 0
+    /// is the classic main window, and text printed before any read (the banner)
+    /// belongs to the transcript.
+    pub v6_input_window: u8,
     /// Host-facing diagnostic lines (e.g. unimplemented opcodes, sampled sounds)
     /// recorded since the host last drained them. The engine never prints.
     pub diagnostics: Vec<String>,
@@ -380,6 +389,7 @@ impl Machine {
             picture_dims: Vec::new(),
             pending_pictures: Vec::new(),
             v6_win0_out_chars: 0,
+            v6_input_window: 0,
             diagnostics: Vec::new(),
             aux_data: std::collections::BTreeMap::new(),
             aux_dirty: false,
@@ -472,6 +482,7 @@ impl Machine {
         self.pending_pictures.clear();
         self.buffer_screen_mode = 0;
         self.v6_win0_out_chars = 0;
+        self.v6_input_window = 0; // a reboot is back to the classic main window (SQ-0585)
         self.newline_interrupt_active = false;
 
         // Re-stamp the interpreter capability bits over the pristine header, then
@@ -647,6 +658,22 @@ impl Machine {
                 self.diagnostics.push(
                     "transcript file output isn't supported — the game's script command will have no effect (the app keeps its own scrollback)".to_string(),
                 );
+            }
+        }
+    }
+
+    /// Remember which v6 window the game is reading input through (SQ-0585), at
+    /// every `read`/`read_char`.
+    ///
+    /// Only a flowing-prose window counts: a game that reads a keypress while a
+    /// PAINT window is current is running a menu (Shogun's boot menu reads through
+    /// its 1px caret window), and that must not redesignate the main text window —
+    /// doing so would divert the whole transcript into a window buffer.
+    fn note_v6_input_window(&mut self) {
+        if let Some(v6) = self.screen.v6.as_ref() {
+            let cur = v6.current as usize;
+            if v6.windows[cur].prose_window() {
+                self.v6_input_window = v6.current;
             }
         }
     }
@@ -1495,6 +1522,7 @@ impl Machine {
             // Operands: text_buf, parse_buf, + optional time/routine (v4+).
             0x04 => {
                 self.check_transcript_bit();
+                self.note_v6_input_window();
                 let text_buf = ops.first().copied().unwrap_or(0) as u32;
                 let parse_buf = ops.get(1).copied().unwrap_or(0) as u32;
                 let interrupt_time = ops.get(2).copied().unwrap_or(0);
@@ -1509,6 +1537,7 @@ impl Machine {
             // Has a store var for the ZSCII code. Operands: device, + optional time/routine.
             0x16 => {
                 self.check_transcript_bit();
+                self.note_v6_input_window();
                 let interrupt_time = ops.get(1).copied().unwrap_or(0);
                 let interrupt_routine = ops.get(2).copied().unwrap_or(0);
                 self.pending_input = Some(PendingInput {
@@ -1679,6 +1708,7 @@ impl Machine {
                             for (i, w) in v6.windows.iter_mut().enumerate() {
                                 w.grid.clear();
                                 w.texts.clear();
+                                w.prose.clear(); // live screen state, erased with the pixels (SQ-0585)
                                 w.y_cursor = 1;
                                 w.x_cursor = 1;
                                 clear_canvas.push(i as u8);
@@ -1715,6 +1745,7 @@ impl Machine {
                             for (i, w) in v6.windows.iter_mut().enumerate() {
                                 w.grid.clear();
                                 w.texts.clear();
+                                w.prose.clear(); // live screen state, erased with the pixels (SQ-0585)
                                 clear_canvas.push(i as u8);
                             }
                         }
@@ -1738,6 +1769,7 @@ impl Machine {
                             // erased window does not become an opaque layer over
                             // the pictures (see the -1 arm).
                             w.grid.clear();
+                            w.prose.clear(); // live screen state, erased with the pixels (SQ-0585)
                             w.y_cursor = 1;
                             w.x_cursor = 1;
                             clear_canvas.push(n as u8);
@@ -3488,6 +3520,22 @@ impl Machine {
         }
         // Stream 3 is inactive; streams 1/2/4 apply.
         if self.streams.stream1 {
+            // SQ-0585: a v6 game may run SEVERAL flowing-prose windows at once —
+            // advent.z6's `style` opens one across the top of the screen and keeps
+            // playing in another below it. Both are wrap+scroll, so both reach this
+            // stream, and splicing them into one transcript scrolls the top window's
+            // text away (the game itself warns that a correct interpreter must not).
+            // The window the player TYPES into is the transcript's window; text bound
+            // for any other prose window is that window's own live screen state, so
+            // it goes to its `prose` buffer and stops here.
+            if let Some(v6) = self.screen.v6.as_mut() {
+                let cur = v6.current as usize;
+                if v6.current != self.v6_input_window && v6.windows[cur].prose_window() {
+                    v6.windows[cur].push_prose(s);
+                    self.v6_advance_prose_cursor(s);
+                    return;
+                }
+            }
             // v6: this is window 0's (the main scrolling window's) output.
             // Count its chars so window-0 inline pictures can anchor to their
             // exact position in the text stream (PictureEvent::out_chars).

@@ -257,6 +257,17 @@ pub struct ZWindow {
     /// rows 6/14, ON the banner ribbons) instead of snapping to the char grid.
     /// The char grid above remains the cell-mode fallback.
     pub texts: Vec<V6Text>,
+    /// Flowing PROSE currently displayed in this window, as logical lines
+    /// (SQ-0585). Only a wrap+scroll window that is not the one the game reads
+    /// input through fills this: a v6 game may run several scrolling text windows
+    /// at once — advent.z6's `style` opens one across the top and keeps playing in
+    /// another below — and their streams must not be spliced into one transcript.
+    ///
+    /// This is LIVE SCREEN STATE, not history: no scrollback, bounded to
+    /// [`PROSE_MAX_LINES`], and cleared by `erase_window` exactly as `texts` is.
+    /// The window the game reads input through streams to the host transcript as
+    /// before and leaves this empty.
+    pub prose: Vec<String>,
 }
 
 /// One pixel-positioned text run in a v6 grid window: `(y, x)` are the 1-based
@@ -293,6 +304,31 @@ impl ZWindow {
     /// ZMSD §8.8.3.1 attribute 0 ("wrapping").
     pub fn wrapping(&self) -> bool {
         self.attributes & 0b0001 != 0
+    }
+    /// A flowing-PROSE window: wrapping AND scrolling, the pair that sends a v6
+    /// window's output down the stream-1 text path rather than painting it at
+    /// pixel coordinates (see `cpu::exec`'s print routing).
+    pub fn prose_window(&self) -> bool {
+        self.attributes & 0b0011 == 0b0011
+    }
+    /// Append streamed prose to this window's live line buffer (SQ-0585), starting
+    /// a new logical line at each `\n` and dropping the oldest lines past
+    /// [`PROSE_MAX_LINES`]. Wrapping is the host's job — it knows the font and the
+    /// pane — so lines are stored logically, exactly as the host transcript keeps
+    /// them.
+    pub fn push_prose(&mut self, s: &str) {
+        for (i, part) in s.split('\n').enumerate() {
+            if i > 0 || self.prose.is_empty() {
+                self.prose.push(String::new());
+            }
+            if let Some(last) = self.prose.last_mut() {
+                last.push_str(part);
+            }
+        }
+        if self.prose.len() > PROSE_MAX_LINES {
+            let drop = self.prose.len() - PROSE_MAX_LINES;
+            self.prose.drain(..drop);
+        }
     }
     /// ZMSD §8.8.3.1 attribute 1 ("scrolling").
     pub fn scrolling(&self) -> bool {
@@ -1112,6 +1148,13 @@ pub const DEFAULT_SCREEN_COLS: u8 = 80;
 /// dividing X by WIDTH and Y by HEIGHT.
 pub const V6_FONT_WIDTH: u16 = 8;
 pub const V6_FONT_HEIGHT: u16 = 16;
+
+/// Cap on [`ZWindow::prose`] (SQ-0585). A secondary prose window shows what is on
+/// screen and nothing more — the tallest v6 screen is 400px, 25 text rows, and a
+/// game that prints past its window's bottom without erasing has scrolled the
+/// earlier lines off. Twice the tallest screen leaves room for that overshoot while
+/// keeping a runaway printer from growing the buffer without bound.
+pub const PROSE_MAX_LINES: usize = 50;
 
 /// Write the screen-dimension header fields for the loaded story's version.
 ///

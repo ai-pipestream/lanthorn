@@ -527,7 +527,10 @@ fn render_node(
             // on menus.
             let hybrid = state.config.v6_render == crate::config::V6RenderMode::Hybrid;
             let story_rows = items.iter().find_map(|pw| {
-                matches!(&pw.node, WinNode::Buffer(_)).then(|| {
+                // The PRIMARY buffer only: a v6 game can publish a second, non-primary
+                // prose window (SQ-0585), and taking its rows as the story box made an
+                // ordinary split look like a menu takeover.
+                matches!(&pw.node, WinNode::Buffer(b) if b.primary).then(|| {
                     let top = pw.y_px / 16;
                     (top, top + pw.h_px.max(1).div_ceil(16))
                 })
@@ -984,7 +987,6 @@ fn render_node(
                         }
                         // The story window as real terminal text (primary-Buffer path).
                         let metrics = render_node(&story.node, status, char_mode, introspect, state, viewport, buf, game_input, links, grid_colors);
-                        if std::env::var("BM_DBG").is_ok() { eprintln!("DBG ring-path viewport={viewport:?}"); }
                         // SQ-0584: a chrome window the game ERASED more recently than it
                         // printed prose is an opaque panel over the story — advent.z6's
                         // `help` splits window 1 to 160px, erases it and paints a menu
@@ -997,6 +999,9 @@ fn render_node(
                             &layout.chrome, viewport, buf, base, state.config.honor_game_colours, &state.colors,
                             &|pw: &PositionedWindow| px_rect_to_cells(pw, &scale, cell_px, area),
                         );
+                        draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {
+                            px_rect_to_cells(pw, &scale, cell_px, area)
+                        });
                         // Chrome text runs that fall INSIDE the story box paint
                         // ON TOP of the terminal transcript (v6 paint order —
                         // Shogun overlays its boot-menu items and selection
@@ -1059,7 +1064,6 @@ fn render_node(
                         .flatten()
                         .collect();
                     if runs.iter().any(|t| !t.text.trim().is_empty()) {
-                        if std::env::var("BM_DBG").is_ok() { eprintln!("DBG hint-menu path"); }
                         draw_painted_screen(&runs, 0..u16::MAX, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native.0);
                         return None;
                     }
@@ -1284,6 +1288,9 @@ fn render_node(
                             area,
                         ),
                     );
+                    draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {
+                        px_rect_to_cells(pw, &crate::render::v6_layout::Scale { s: 1.0, off_x: 0, off_y: 0 }, (8, 16), area)
+                    });
                     // Painted-screen overlay (SQ-0478): stamp the paint runs INSIDE
                     // the story box as absolutely-positioned terminal text on TOP of
                     // the transcript. A no-op in normal gameplay (chrome grids carry
@@ -2321,6 +2328,41 @@ fn full_width_flood_rows(
 /// draw call's row window: advent.z6's `help` erases the full screen and then its
 /// 160px menu window, and the real screen that leaves is a menu panel on blank
 /// background — not a panel with the transcript resuming under it.
+/// Draw the v6 SECONDARY prose windows: flowing-text windows that are not the one
+/// the player types into (SQ-0585). A v6 game may run several at once — advent.z6's
+/// `style` opens one across the top of the screen and keeps playing in another below
+/// — and the engine keeps each one's text in its own window rather than splicing them
+/// into the transcript, so each draws in its own rect here.
+///
+/// Live screen state: what the window currently holds, no scrollback. Drawn after the
+/// erase fills (a window is erased, then printed into) and before the chrome runs, so
+/// a status bar painted over the same rows still lands on top.
+fn draw_secondary_buffers(
+    chrome: &[&PositionedWindow],
+    area: Rect,
+    buf: &mut Buffer,
+    state: &AppState,
+    to_cells: &dyn Fn(&PositionedWindow) -> Rect,
+) {
+    for pw in chrome {
+        let WinNode::Buffer(b) = &pw.node else { continue };
+        if b.primary || b.lines.is_empty() {
+            continue;
+        }
+        let r = to_cells(pw);
+        let clipped = Rect::new(
+            r.x.max(area.x),
+            r.y.max(area.y),
+            r.width.min(area.right().saturating_sub(r.x.max(area.x))),
+            r.height.min(area.bottom().saturating_sub(r.y.max(area.y))),
+        );
+        if clipped.width == 0 || clipped.height == 0 {
+            continue;
+        }
+        render_inline_buffer(b, state, clipped, buf);
+    }
+}
+
 fn draw_erase_fills(
     chrome: &[&PositionedWindow],
     area: Rect,

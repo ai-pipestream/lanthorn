@@ -84,6 +84,16 @@ session-only switch that never touches your saved config:
   into an ordinary text strip — a solid bar with the transcript starting beneath it,
   rather than glyphs stamped over scrolling prose. Such a bar need not be
   reverse-video to fill the row; a window that shape *is* the status bar.
+- **More than one scrolling text window.** A v6 game may run several flowing-prose
+  windows at once — advent.z6's `style` opens one across the top of the screen and
+  keeps playing in another below it. Both are wrap+scroll, so both stream through
+  the same text path, and splicing them into one transcript scrolled the top
+  window's text away with the story (the game warns about exactly that). babelmap
+  keeps the transcript for the window the player types into and gives every other
+  prose window its own buffer, drawn in its own rect. A secondary window is **live
+  screen state**: what it currently shows, with no scrollback, cleared when the game
+  erases it — but persisted with the rest of the screen, because a game that splits
+  the display does not necessarily repaint it after a restore (advent doesn't).
 - **Erased windows are opaque.** On a real interpreter every v6 window is a
   clipping region over one shared screen bitmap, so erasing a window paints its
   rect with that window's background — which is what makes a hint menu hide the
