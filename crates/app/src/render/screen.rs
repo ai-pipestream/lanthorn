@@ -1000,8 +1000,21 @@ fn render_node(
                         // text floating over the room description. `fill` is only set
                         // for a window that is still the newest paint on its own rect,
                         // so an ordinary turn (whose prose is newer) fills nothing.
+                        // Only windows that START inside the story viewport fill here.
+                        // Everything above it belongs to the chrome ring, which draws
+                        // its own background — a status strip is flooded by its Text
+                        // strip. Letting such a window fill too painted it twice, and
+                        // the second rect is the PIXEL-scaled one: advent's 20px bar is
+                        // 1.6 terminal rows at a tall pane, so its fill spilled a second
+                        // row into the story and the bar read two rows deep (SQ-0582).
+                        let fill_chrome: Vec<&PositionedWindow> = layout
+                            .chrome
+                            .iter()
+                            .copied()
+                            .filter(|pw| px_rect_to_cells(pw, &scale, cell_px, area).y >= viewport.y)
+                            .collect();
                         draw_erase_fills(
-                            &layout.chrome, viewport, buf, base, state.config.honor_game_colours, &state.colors,
+                            &fill_chrome, viewport, buf, base, state.config.honor_game_colours, &state.colors,
                             &|pw: &PositionedWindow| px_rect_to_cells(pw, &scale, cell_px, area),
                         );
                         draw_secondary_buffers(&layout.chrome, area, buf, state, &|pw: &PositionedWindow| {

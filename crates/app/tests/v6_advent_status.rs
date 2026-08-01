@@ -419,3 +419,52 @@ fn the_boot_popup_does_not_blank_the_rows_behind_it() {
         all[popup_row as usize]
     );
 }
+
+/// SQ-0582 follow-up: the bar stays ONE row at a pane whose scale is not 1:1.
+///
+/// advent's bar window is 20px — 1.25 native text rows — and hybrid scales art by
+/// PIXEL while text is one terminal row per native row (the standing v6 hazard). At a
+/// tall pane the bar's pixel rect rounds to two terminal rows, so its erase fill
+/// spilled a second row into the story below and the bar read two rows deep. Chrome
+/// above the viewport is the ring's to paint; only windows starting inside the
+/// viewport fill there.
+#[test]
+fn the_status_bar_is_one_row_at_any_pane_scale() {
+    let Some(mut session) = advent_in_play(true) else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+    let _ = session.submit("look");
+    let _ = session.take_transcript();
+    let model = session.screen();
+
+    // Cell sizes spanning the real terminals this is drawn on; each gives the
+    // hybrid ring a different scale, and the 20px bar lands on a different fraction
+    // of a row in every one.
+    for cell in [(8u16, 16u16), (9, 18), (10, 20), (8, 17)] {
+        for (w, h) in [(80u16, 25u16), (97, 52), (120, 60)] {
+            let mut state = app::state::AppState::default();
+            state.colors = app::colors::ColorScheme::terminal_default();
+            state.game_picker = Some(ratatui_image::picker::Picker::from_fontsize(cell.into()));
+            state.config.v6_render = app::config::V6RenderMode::Hybrid;
+            let area = Rect::new(0, 0, w, h);
+            let mut buf = Buffer::empty(area);
+            let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+            let row = |y: u16| -> String {
+                (0..w).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+            };
+            let bar_y = (0..h)
+                .find(|&y| row(y).contains("End Of Road"))
+                .unwrap_or_else(|| panic!("bar renders at {w}x{h} cell {cell:?}"));
+            let bar_bg = buf.cell((1, bar_y)).unwrap().bg;
+            let barred: Vec<u16> =
+                (0..h).filter(|&y| (0..w).all(|x| buf.cell((x, y)).unwrap().bg == bar_bg)).collect();
+            assert_eq!(
+                barred,
+                vec![bar_y],
+                "the bar is one row at {w}x{h} with a {cell:?} cell; full-bar rows: {barred:?}"
+            );
+        }
+    }
+}
