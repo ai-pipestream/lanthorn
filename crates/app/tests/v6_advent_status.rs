@@ -428,6 +428,11 @@ fn the_boot_popup_does_not_blank_the_rows_behind_it() {
 /// spilled a second row into the story below and the bar read two rows deep. Chrome
 /// above the viewport is the ring's to paint; only windows starting inside the
 /// viewport fill there.
+// `Picker::from_fontsize` is deprecated in favour of querying the real terminal —
+// which a headless test cannot do, and the whole point here is to pin SPECIFIC cell
+// sizes. `halfblocks()` hard-codes 10x20, the one size where the old rounding
+// happened to be right.
+#[allow(deprecated)]
 #[test]
 fn the_status_bar_is_one_row_at_any_pane_scale() {
     let Some(mut session) = advent_in_play(true) else {
