@@ -349,3 +349,73 @@ fn advent_help_panel_is_opaque_honoring_game_colours() {
 fn advent_help_panel_is_opaque_theme_only() {
     advent_help_panel_is_opaque(false);
 }
+
+/// SQ-0582 follow-up: advent's BOOT POPUP must not blank the rows behind it.
+///
+/// After the first keypress the game shrinks window 1 to 640x1 — one pixel tall —
+/// and paints a message box ("Use the command 'style'…") 50px further down. v6 text
+/// is paint and outlives its window's geometry (ZMSD §8.8.4: resizing "does not
+/// change the current display"), so the runs stay put. The full-width-strip flood
+/// judged that window a status bar by its declared HEIGHT alone, so every row the
+/// popup touched was flooded edge to edge and the banner behind it disappeared into
+/// dark bands. A bar has to paint inside its own rect.
+#[test]
+fn the_boot_popup_does_not_blank_the_rows_behind_it() {
+    let story_path = stories_dir().join("advent.z6");
+    let Ok(bytes) = std::fs::read(&story_path) else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+    let dims = picts.all_pict_dims();
+    let mut session =
+        GameSession::new_with_trace(bytes, true, true, None, false, dims, picts.std_window(), None)
+            .expect("boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let banner = session.take_transcript();
+    // One keypress: the game paints its popup over the banner.
+    session.submit_char(13);
+
+    let model = session.screen();
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    for line in banner.lines() {
+        state.push_transcript(line);
+    }
+    let area = Rect::new(0, 0, 100, 30);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    // The popup is on screen…
+    assert!(
+        (0..area.height).any(|y| row(y).contains("Use the command")),
+        "the popup renders:\n{}",
+        (0..area.height).map(row).collect::<Vec<_>>().join("\n")
+    );
+    // …and the banner behind it survives, both to its left and to its right. These
+    // are the rows that came back as solid dark bands.
+    let all: Vec<String> = (0..area.height).map(row).collect();
+    for needle in ["Note:  This file was comp", "there being no graphics f", "Please report any Version"] {
+        assert!(
+            all.iter().any(|r| r.contains(needle)),
+            "banner text {needle:?} must survive behind the popup:\n{}",
+            all.join("\n")
+        );
+    }
+    // Nothing is flooded edge to edge: no row is a single solid background from the
+    // pane's left edge to its right.
+    let popup_row = (0..area.height).find(|&y| all[y as usize].contains("Use the command")).unwrap();
+    let bg_of = |x: u16, y: u16| buf.cell((x, y)).unwrap().bg;
+    assert_ne!(
+        bg_of(0, popup_row),
+        bg_of(40, popup_row),
+        "the popup fills its own box, not the whole row: {:?}",
+        all[popup_row as usize]
+    );
+}

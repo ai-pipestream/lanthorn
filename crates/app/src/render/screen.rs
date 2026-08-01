@@ -702,12 +702,17 @@ fn render_node(
                         let viewport = match overlay_strip {
                             Some(strip) => {
                                 let last = match &strip.node {
-                                    WinNode::Grid(g) => g
-                                        .px_texts
-                                        .iter()
-                                        .filter(|t| !t.text.trim().is_empty())
-                                        .map(|t| run_cell(t, &scale, cell_px, area).1)
-                                        .max(),
+                                    WinNode::Grid(g) => {
+                                        let bound = strip_rows(strip, g);
+                                        g.px_texts
+                                            .iter()
+                                            .filter(|t| !t.text.trim().is_empty())
+                                            .filter(|t| {
+                                                bound.is_some_and(|b| (t.y.max(1) - 1) / 16 <= b)
+                                            })
+                                            .map(|t| run_cell(t, &scale, cell_px, area).1)
+                                            .max()
+                                    }
                                     _ => None,
                                 };
                                 match last {
@@ -2240,13 +2245,31 @@ fn overlaid_status_strip<'a>(
     let threshold = native_w as u32 * 9 / 10;
     chrome.iter().copied().find(|pw| {
         let WinNode::Grid(g) = &pw.node else { return false };
-        g.px_texts.iter().any(|t| !t.text.trim().is_empty())
+        // Text INSIDE the window's own rect. v6 text is paint and outlives the
+        // window's geometry (ZMSD §8.8.4), so a window shrunk to a sliver while its
+        // message box sits 50px lower — advent's own boot popup — is not a bar, and
+        // reserving rows for it would inset the story out from under the popup.
+        strip_rows(pw, g).is_some()
             && pw.w_px as u32 >= threshold
             && pw.h_px > 0
             && pw.h_px <= V6_STATUS_STRIP_MAX_H_PX
             && pw.y_px <= story.y_px
             && pw.y_px.saturating_add(pw.h_px) > story.y_px
     })
+}
+
+/// The native rows a status strip's own text occupies: the last row carrying a
+/// non-blank run that lies within the window's rect, or `None` when it paints none
+/// there. (SQ-0582/SQ-0584)
+fn strip_rows(pw: &PositionedWindow, g: &crate::engine::GridWindow) -> Option<u16> {
+    let first = pw.y_px / 16;
+    let last = pw.y_px.saturating_add(pw.h_px).div_ceil(16).max(first + 1);
+    g.px_texts
+        .iter()
+        .filter(|t| !t.text.trim().is_empty())
+        .map(|t| (t.y.max(1) - 1) / 16)
+        .filter(|row| *row >= first && *row < last)
+        .max()
 }
 
 /// Tallest v6 grid window that counts as a status STRIP for [`full_width_flood_rows`]:
@@ -2263,13 +2286,20 @@ const V6_STATUS_STRIP_MAX_H_PX: u16 = 32;
 /// topic window — both stay text-width) — AND one of:
 ///
 ///   - every run on it is reverse-video (the game asked for a bar), or
-///   - the owning window is a STRIP at most [`V6_STATUS_STRIP_MAX_H_PX`] tall. Not
-///     every game styles its status line: advent.z6 paints "At End Of Road … Score:
-///     36 … Moves: 1" into a full-width, one-row window with no reverse bit and no
-///     colours (SQ-0582), so the reverse rule never fired and the theme's bar
-///     background reached only the cells under the glyphs — a ribbon with holes
-///     between the fields. A window that shape IS the status bar, whatever style its
-///     text carries.
+///   - the owning window is a STRIP at most [`V6_STATUS_STRIP_MAX_H_PX`] tall AND the
+///     run lies INSIDE that window's own rect. Not every game styles its status line:
+///     advent.z6 paints "At End Of Road … Score: 36 … Moves: 1" into a full-width,
+///     one-row window with no reverse bit and no colours (SQ-0582), so the reverse
+///     rule never fired and the theme's bar background reached only the cells under
+///     the glyphs — a ribbon with holes between the fields. A window that shape IS the
+///     status bar, whatever style its text carries.
+///
+///     The containment half is not pedantry: v6 text is PAINT, and a run stays where
+///     it was put even when its window is later resized to nothing (ZMSD §8.8.4 — a
+///     window's size "does not change the current display"). advent's own boot popup
+///     is exactly that — window 1 shrunk to 640x1 while it paints a message box 50px
+///     down the screen — so height alone called every popup row a status bar and
+///     flooded the story text behind it edge to edge.
 ///
 /// Returns native_row → flood [`Style`], with colours resolved first-explicit-wins
 /// across the row and the reverse bit set only for the reverse case, via
@@ -2284,7 +2314,7 @@ fn full_width_flood_rows(
     use crate::render::v6_layout::packed_explicit;
     let threshold = native_w as u32 * 9 / 10;
     // Group every non-blank run by native row, carrying its owning window's size.
-    let mut per_row: std::collections::HashMap<u16, Vec<(&crate::engine::PxText, u16, u16)>> = Default::default();
+    let mut per_row: std::collections::HashMap<u16, Vec<(&crate::engine::PxText, u16, u16, bool)>> = Default::default();
     for pw in chrome {
         if let WinNode::Grid(g) = &pw.node {
             for t in &g.px_texts {
@@ -2292,22 +2322,27 @@ fn full_width_flood_rows(
                     continue;
                 }
                 let row = (t.y.max(1) - 1) / 16;
-                per_row.entry(row).or_default().push((t, pw.w_px, pw.h_px));
+                // Does this run sit within the rows its own window covers?
+                let win_first = pw.y_px / 16;
+                let win_last = pw.y_px.saturating_add(pw.h_px).div_ceil(16).max(win_first + 1);
+                let inside = row >= win_first && row < win_last;
+                per_row.entry(row).or_default().push((t, pw.w_px, pw.h_px, inside));
             }
         }
     }
     let mut out = std::collections::HashMap::new();
     for (row, row_runs) in per_row {
-        if !row_runs.iter().all(|(_, w, _)| *w as u32 >= threshold) {
+        if !row_runs.iter().all(|(_, w, _, _)| *w as u32 >= threshold) {
             continue;
         }
-        let all_reverse = row_runs.iter().all(|(t, _, _)| t.style & 1 != 0);
-        let all_strip = row_runs.iter().all(|(_, _, h)| *h > 0 && *h <= V6_STATUS_STRIP_MAX_H_PX);
+        let all_reverse = row_runs.iter().all(|(t, _, _, _)| t.style & 1 != 0);
+        let all_strip =
+            row_runs.iter().all(|(_, _, h, inside)| *inside && *h > 0 && *h <= V6_STATUS_STRIP_MAX_H_PX);
         if !all_reverse && !all_strip {
             continue;
         }
-        let fg = row_runs.iter().map(|(t, _, _)| t.fg).find(|&p| packed_explicit(p)).unwrap_or(0);
-        let bg = row_runs.iter().map(|(t, _, _)| t.bg).find(|&p| packed_explicit(p)).unwrap_or(0);
+        let fg = row_runs.iter().map(|(t, _, _, _)| t.fg).find(|&p| packed_explicit(p)).unwrap_or(0);
+        let bg = row_runs.iter().map(|(t, _, _, _)| t.bg).find(|&p| packed_explicit(p)).unwrap_or(0);
         // Reverse only where the game asked for it: a plain strip floods with the
         // theme's own bar style, exactly as the anchored band does.
         let style_bits = u8::from(all_reverse);
