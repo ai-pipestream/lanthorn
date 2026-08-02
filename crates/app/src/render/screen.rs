@@ -1030,53 +1030,42 @@ fn render_node(
                         // for a window that is still the newest paint on its own rect,
                         // so an ordinary turn (whose prose is newer) fills nothing.
                         // Record what this frame mapped each window onto, in cells, for
-                        // `/dump-windows` (the engine only knows the game's pixel rects).
+                        // `/dump-windows`. Each entry carries the NATIVE rect it came
+                        // from, so the engine can report a window's game-side state and
+                        // its terminal placement as one block instead of leaving them to
+                        // be correlated by eye (SQ-0585).
                         {
+                            use crate::state::V6CellRect;
+                            let rec = |label: &str, native: (u16, u16, u16, u16), r: Rect| V6CellRect {
+                                label: label.to_string(),
+                                native,
+                                cells: (r.x, r.y, r.width, r.height),
+                            };
                             let mut map = state.v6_cell_map.borrow_mut();
                             map.clear();
-                            map.push(("pane".into(), area.x, area.y, area.width, area.height));
-                            map.push((
-                                "story viewport".into(),
-                                viewport.x, viewport.y, viewport.width, viewport.height,
-                            ));
-                            map.push(("scale".into(), (scale.s * 100.0) as u16, scale.off_x as u16, cell_px.0, cell_px.1));
-                            for (i, pw) in layout.chrome.iter().enumerate() {
+                            map.push(rec("pane", (0, 0, 0, 0), area));
+                            map.push(rec("viewport", (story.x_px, story.y_px, story.w_px, story.h_px), viewport));
+                            map.push(V6CellRect {
+                                label: "scale".into(),
+                                native: ((scale.s * 100.0) as u16, scale.off_x as u16, cell_px.0, cell_px.1),
+                                cells: (0, 0, 0, 0),
+                            });
+                            for pw in &layout.chrome {
                                 let r = px_rect_to_cells(pw, &scale, cell_px, area);
                                 let kind = match &pw.node {
-                                    WinNode::Buffer(b) if b.primary => "chrome story?",
+                                    WinNode::Buffer(b) if b.primary => "story",
                                     WinNode::Buffer(_) => "panel",
                                     WinNode::Grid(_) => "grid",
                                     WinNode::Graphics(_) => "art",
                                     _ => "?",
                                 };
-                                map.push((format!("chrome[{i}] {kind}"), r.x, r.y, r.width, r.height));
+                                map.push(rec(kind, (pw.x_px, pw.y_px, pw.w_px, pw.h_px), r));
                             }
-                            // An ART strip with no actual art behind it draws a
-                            // rasterized slice of the chrome canvas — which carries
-                            // TEXT too, so on a text-only v6 story (advent) that is
-                            // pure noise painted over the pane. Under a graphics
-                            // protocol the image composites ABOVE the cells, so it
-                            // cannot even be overdrawn. Skip those. (SQ-0585)
-                            let strip_has_art = |r: &Rect| -> bool {
-                                let ch = cell_px.1.max(1) as f32;
-                                let top = ((r.y.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
-                                    / scale.s.max(0.001);
-                                let bot = ((r.bottom().saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
-                                    / scale.s.max(0.001);
-                                let y0 = top.max(0.0) as u32;
-                                let h = (bot.max(0.0) as u32).saturating_sub(y0).max(1);
-                                crate::render::v6_layout::region_has_opaque(&gfx, 0, y0, gfx.width(), h)
-                            };
                             for strip in &strips {
-                                if let ChromeStrip::Art(r) = strip {
-                                    if !strip_has_art(r) {
-                                        continue;
-                                    }
-                                }
                                 match strip {
-                                    ChromeStrip::Art(r) => map.push(("strip art".into(), r.x, r.y, r.width, r.height)),
+                                    ChromeStrip::Art(r) => map.push(rec("strip:art", (0, 0, 0, 0), *r)),
                                     ChromeStrip::Text(r, runs) => {
-                                        map.push((format!("strip text ({} runs)", runs.len()), r.x, r.y, r.width, r.height))
+                                        map.push(rec(&format!("strip:text({})", runs.len()), (0, 0, 0, 0), *r))
                                     }
                                 }
                             }

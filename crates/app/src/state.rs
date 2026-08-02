@@ -1311,9 +1311,17 @@ pub struct OverlayState {
     pub dialog_focus: usize,
 }
 
-/// One v6 window as the last frame mapped it onto the terminal: `(label, x, y, w, h)`
-/// in cells, for `/dump-windows`. (SQ-0585)
-pub type V6CellRect = (String, u16, u16, u16, u16);
+/// Where the last v6 frame put one thing on the terminal, for `/dump-windows`
+/// (SQ-0585). `native` is the game-pixel rect it came from — zeroed for entries that
+/// are not a game window (the pane, the viewport, a carved strip) — so the engine can
+/// match each record back to the window it belongs to and report both halves
+/// together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V6CellRect {
+    pub label: String,
+    pub native: (u16, u16, u16, u16),
+    pub cells: (u16, u16, u16, u16),
+}
 
 #[derive(Debug)]
 pub struct AppState {

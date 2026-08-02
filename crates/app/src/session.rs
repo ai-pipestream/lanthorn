@@ -1340,6 +1340,112 @@ impl GameSession {
     /// the same rect. z-order (list order): graphics entries first (background),
     /// then text windows by ascending window number — `render_node`'s `Layered`
     /// arm (Task 3) paints text over graphics, cell-text-wins.
+    /// `/dump-windows` for a v6 story: ONE BLOCK PER WINDOW.
+    ///
+    /// Three things have to agree for a v6 layout to be right — the game's window
+    /// table, what the model made of each window, and where the renderer put it on
+    /// the terminal — and a defect is nearly always a disagreement between two of
+    /// them. Reporting them as three parallel lists left the reader correlating by
+    /// eye; this reports each window once, with all three.
+    ///
+    /// `cells` is the last frame's mapping (`AppState::v6_cell_map`), matched back to
+    /// windows by native rect. Empty when the caller has none — the engine-only view
+    /// still shows the game and model halves.
+    pub fn v6_window_dump(&self, cells: &[crate::state::V6CellRect]) -> Vec<String> {
+        let Some(v6) = self.machine.screen.v6.as_ref() else {
+            return Vec::new();
+        };
+        let model = self.screen();
+        let items: &[PositionedWindow] = match &model.root {
+            WinNode::Layered(items) => items,
+            _ => &[],
+        };
+        let find = |label: &str| cells.iter().find(|c| c.label == label);
+        let fmt_cells = |c: (u16, u16, u16, u16)| format!("{}x{} at ({},{})", c.2, c.3, c.0, c.1);
+
+        let mut out = Vec::new();
+        let mut head = format!("v6 layout — current window {}, input window {}", v6.current, self.machine.v6_input_window);
+        if let Some(scale) = find("scale") {
+            let (s100, off_x, cw, ch) = scale.native;
+            head.push_str(&format!(", scale {:.2}, cell {cw}x{ch}px, x-offset {off_x}", s100 as f32 / 100.0));
+        }
+        out.push(head);
+        if let Some(pane) = find("pane") {
+            let vp = find("viewport").map(|v| fmt_cells(v.cells)).unwrap_or_else(|| "—".into());
+            out.push(format!("  pane {} · story viewport {vp}", fmt_cells(pane.cells)));
+        }
+
+        for (i, w) in v6.windows.iter().enumerate() {
+            if w.x_size == 0 && w.y_size == 0 && w.texts.is_empty() && w.prose.is_empty() {
+                continue;
+            }
+            let native = (w.x_coord.saturating_sub(1), w.y_coord.saturating_sub(1), w.x_size, w.y_size);
+            let mut flags = Vec::new();
+            if w.wrapping() { flags.push("wrap"); }
+            if w.scrolling() { flags.push("scroll"); }
+            if w.copy_to_transcript() { flags.push("transcript"); }
+            if w.attributes & 0b1000 != 0 { flags.push("buffered"); }
+            let mut marks = Vec::new();
+            if v6.current as usize == i { marks.push("current"); }
+            if self.machine.v6_input_window as usize == i { marks.push("input"); }
+            // The flag names spell the attribute bits out, so the raw value rides the
+            // detail line below — this one has to stay short enough not to wrap.
+            out.push(format!(
+                "  win{i}  {}x{} at ({},{})  [{}]{}",
+                w.x_size,
+                w.y_size,
+                w.x_coord,
+                w.y_coord,
+                flags.join(" "),
+                if marks.is_empty() { String::new() } else { format!("  <- {}", marks.join("+")) },
+            ));
+            out.push(format!(
+                "          game: attrs={:04b}, {} paint run(s), {} prose line(s)",
+                w.attributes,
+                w.texts.len(),
+                w.prose.len()
+            ));
+            // What the model made of this window, matched by its native rect.
+            let node = items.iter().find(|pw| (pw.x_px, pw.y_px, pw.w_px, pw.h_px) == native);
+            out.push(match node.map(|pw| &pw.node) {
+                Some(WinNode::Buffer(b)) if b.primary => "          model: Buffer — the story window".to_string(),
+                Some(WinNode::Buffer(b)) => format!("          model: Buffer — panel, {} line(s)", b.lines.len()),
+                Some(WinNode::Grid(g)) => format!(
+                    "          model: Grid — {} run(s){}",
+                    g.px_texts.len(),
+                    if g.fill.is_some() { ", erase fill live" } else { "" }
+                ),
+                Some(WinNode::Graphics(_)) => "          model: Graphics".to_string(),
+                Some(_) => "          model: ?".to_string(),
+                None => "          model: not published (empty placeholder)".to_string(),
+            });
+            // …and where the last frame put it.
+            let placed: Vec<&crate::state::V6CellRect> =
+                cells.iter().filter(|c| c.native == native && c.label != "scale").collect();
+            if placed.is_empty() {
+                out.push(if cells.is_empty() {
+                    "          cells: (no frame recorded — render one first)".to_string()
+                } else {
+                    "          cells: NOT DRAWN this frame".to_string()
+                });
+            } else {
+                for p in placed {
+                    out.push(format!("          cells: {} as {}", fmt_cells(p.cells), p.label));
+                }
+            }
+        }
+
+        let strips: Vec<&crate::state::V6CellRect> =
+            cells.iter().filter(|c| c.label.starts_with("strip:")).collect();
+        if !strips.is_empty() {
+            out.push("  chrome ring strips:".to_string());
+            for s in strips {
+                out.push(format!("    {} {}", s.label, fmt_cells(s.cells)));
+            }
+        }
+        out
+    }
+
     fn v6_screen_model(&self) -> ScreenModel {
         use zvm::screen::{V6_FONT_HEIGHT, V6_FONT_WIDTH};
         let screen = &self.machine.screen;
@@ -2355,70 +2461,20 @@ impl Engine for GameSession {
 
     /// `/dump-windows` for the Z-machine. The trait's default describes the v1–5
     /// shape — one grid over one buffer — which tells you nothing about a v6 story:
-    /// its model is a LAYERED composite of up to eight windows, so the default
-    /// printed "Grid 0x0 over Buffer" no matter what was on screen. Dump the real
-    /// v6 window table beside what the model made of each window, since a defect is
-    /// usually a disagreement between those two.
+    /// its model is a LAYERED composite of up to eight windows.
+    ///
+    /// See [`GameSession::v6_window_dump`] for the v6 form; this is the fallback for
+    /// v1–5 and for a caller with no render mapping to hand.
     fn window_dump(&self) -> Vec<String> {
-        let Some(v6) = self.machine.screen.v6.as_ref() else {
-            let model = self.screen();
-            let (gc, gr) = model.grid().map(|g| (g.cols, g.active_rows)).unwrap_or((0, 0));
-            return vec![format!(
-                "Window layout: Grid {gc}x{gr} over Buffer (Z-machine v{})",
-                self.machine.mem.version()
-            )];
-        };
+        if self.machine.screen.v6.is_some() {
+            return self.v6_window_dump(&[]);
+        }
         let model = self.screen();
-        let nodes: Vec<(u16, u16, u16, u16, String)> = match &model.root {
-            WinNode::Layered(items) => items
-                .iter()
-                .map(|pw| {
-                    let kind = match &pw.node {
-                        WinNode::Buffer(b) if b.primary => "Buffer(story)".to_string(),
-                        WinNode::Buffer(b) => format!("Buffer(panel, {} lines)", b.lines.len()),
-                        WinNode::Grid(g) => format!(
-                            "Grid({} runs{})",
-                            g.px_texts.len(),
-                            if g.fill.is_some() { ", erased" } else { "" }
-                        ),
-                        WinNode::Graphics(_) => "Graphics".to_string(),
-                        _ => "?".to_string(),
-                    };
-                    (pw.x_px, pw.y_px, pw.w_px, pw.h_px, kind)
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
-        let mut out = vec![format!(
-            "v6 window layout: current={}, input window={}, {} in the model",
-            v6.current,
-            self.machine.v6_input_window,
-            nodes.len(),
-        )];
-        for (i, w) in v6.windows.iter().enumerate() {
-            if w.x_size == 0 && w.y_size == 0 && w.texts.is_empty() && w.prose.is_empty() {
-                continue;
-            }
-            out.push(format!(
-                "  win{i}: {}x{} at ({},{})  attrs={:04b} [{}{}{}{}]  runs={} prose={}{}",
-                w.x_size,
-                w.y_size,
-                w.x_coord,
-                w.y_coord,
-                w.attributes,
-                if w.wrapping() { "wrap " } else { "" },
-                if w.scrolling() { "scroll " } else { "" },
-                if w.copy_to_transcript() { "transcript " } else { "" },
-                if w.attributes & 0b1000 != 0 { "buffered" } else { "" },
-                w.texts.len(),
-                w.prose.len(),
-                if v6.current as usize == i { "  <- current" } else { "" },
-            ));
-        }
-        for (x, y, w, h, kind) in nodes {
-            out.push(format!("  model: {w}x{h} at ({x},{y})  {kind}"));
-        }
-        out
+        let (gc, gr) = model.grid().map(|g| (g.cols, g.active_rows)).unwrap_or((0, 0));
+        vec![format!(
+            "Window layout: Grid {gc}x{gr} over Buffer (Z-machine v{})",
+            self.machine.mem.version()
+        )]
     }
 
     fn save_state(&self) -> EngineSave {

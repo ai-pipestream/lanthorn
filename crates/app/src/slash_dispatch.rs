@@ -89,21 +89,16 @@ pub(crate) fn dispatch_slash_outcome(
             );
         }
         SlashOutcome::DumpWindows => {
-            for line in session.window_dump() {
-                state.push_transcript_internal(&line, TranscriptKind::Meta);
-            }
-            // …and where the LAST FRAME actually put each of them, in terminal cells.
-            // The engine reports the game's own pixel geometry; this is the renderer's
-            // half, and a v6 layout defect is nearly always a disagreement between the
-            // two (art scales by pixel, text lands on cells).
+            // A v6 story reports one block per window, merging the game's window
+            // table, the model, and where the last frame put each on the terminal —
+            // the three things that have to agree (SQ-0585). The engine owns the
+            // first two; the render mapping lives here, so hand it over.
             let cells = state.v6_cell_map.borrow().clone();
-            for (label, x, y, w, h) in cells {
-                let line = if label == "scale" {
-                    // packed by the render: (s*100, off_x, cell_w, cell_h)
-                    format!("  cells: scale={:.2} off_x={y} cell={w}x{h}px", x as f32 / 100.0)
-                } else {
-                    format!("  cells: {label}: {w}x{h} at ({x},{y})")
-                };
+            let lines = match session.as_any().downcast_ref::<app::session::GameSession>() {
+                Some(gs) if !gs.v6_window_dump(&cells).is_empty() => gs.v6_window_dump(&cells),
+                _ => session.window_dump(),
+            };
+            for line in lines {
                 state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
         }
