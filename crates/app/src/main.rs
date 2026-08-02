@@ -950,6 +950,26 @@ fn loading_line(name: &str, bytes: usize, frame: char) -> String {
     format!("babelmap: loading {name} ({:.1} MB) {frame}", bytes as f64 / 1_048_576.0)
 }
 
+/// Clear the terminal, and tell the graphics cache that it just lost every image
+/// placement (SQ-0587).
+///
+/// A clear wipes the screen — under a graphics protocol that takes the placements
+/// with it. The chrome-band cache exists to skip re-uploading a band whose pixels
+/// have not changed, so after a clear every band is a HIT and nothing is sent: the
+/// art is gone from the screen while the cache believes it is still there. It comes
+/// back only when something happens to change a band's cache key, which is why
+/// toggling the map (a width change) restored it while a vertical-only resize — same
+/// rects, same keys — did not.
+fn clear_terminal<B: ratatui::backend::Backend>(
+    terminal: &mut ratatui::Terminal<B>,
+    state: &app::state::AppState,
+) {
+    let _ = terminal.clear();
+    let mut gr = state.graphics_render.borrow_mut();
+    gr.invalidate_chrome_bands();
+    gr.invalidate_v6();
+}
+
 fn main() {
     // ── ONE-TIME setup ────────────────────────────────────────────────────────
     // Register termination-signal handlers before any raw-mode entry (the picker
@@ -1426,7 +1446,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // to run here where session / mapper / paths are in scope. Swallows the
         // events its overlay does not handle, then `continue`s.
         if let Some(ov) = overlays::topmost_common_dialog(&state.overlays) {
-            if let Event::Resize(_, _) = &event { let _ = terminal.clear(); continue; }
+            if let Event::Resize(_, _) = &event { clear_terminal(&mut terminal, &state); continue; }
             let outcome = match &event {
                 Event::Key(k) if k.kind == KeyEventKind::Press => ov.key(&mut state, k),
                 Event::Mouse(m) => ov.mouse(&mut state, m, &last_panes),
@@ -1663,7 +1683,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         }
                     }
                 }
-                Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
+                Event::Resize(_, _) => { clear_terminal(&mut terminal, &state); continue; }
                 _ => {}
             }
             continue;
@@ -2374,7 +2394,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             }
             // Resize: continue so the next draw uses the updated terminal size.
             // Resize: force a full repaint so no stale cells survive the size change.
-            Event::Resize(_, _) => { let _ = terminal.clear(); continue; }
+            Event::Resize(_, _) => { clear_terminal(&mut terminal, &state); continue; }
             _ => continue,
         };
 
