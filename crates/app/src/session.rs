@@ -1366,8 +1366,8 @@ impl GameSession {
         let mut out = Vec::new();
         let mut head = format!("v6 layout — current window {}, input window {}", v6.current, self.machine.v6_input_window);
         if let Some(scale) = find("scale") {
-            let (s100, off_x, cw, ch) = scale.native;
-            head.push_str(&format!(", scale {:.2}, cell {cw}x{ch}px, x-offset {off_x}", s100 as f32 / 100.0));
+            let (s100, off_y, cw, ch) = scale.native;
+            head.push_str(&format!(", scale {:.2}, cell {cw}x{ch}px, y-offset {off_y}", s100 as f32 / 100.0));
         }
         out.push(head);
         if let Some(pane) = find("pane") {

@@ -1047,7 +1047,7 @@ fn render_node(
                             map.push(rec("viewport", (story.x_px, story.y_px, story.w_px, story.h_px), viewport));
                             map.push(V6CellRect {
                                 label: "scale".into(),
-                                native: ((scale.s * 100.0) as u16, scale.off_x as u16, cell_px.0, cell_px.1),
+                                native: ((scale.s * 100.0) as u16, scale.off_y as u16, cell_px.0, cell_px.1),
                                 cells: (0, 0, 0, 0),
                             });
                             for pw in &layout.chrome {

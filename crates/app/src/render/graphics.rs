@@ -667,7 +667,20 @@ impl GraphicsRender {
     /// once per hybrid frame so a resize/layout change can't leave stale band
     /// uploads accumulating.
     pub fn retain_chrome_bands(&mut self, live: &std::collections::HashSet<(u16, u16, u16, u16)>) {
+        let before = self.chrome_bands.len();
         self.chrome_bands.retain(|k, _| live.contains(k));
+        // SQ-0587: dropping a cached band drops its image PROTOCOL, and a graphics
+        // protocol releases its placement when it goes (kitty deletes the image).
+        // A band that merely survived is a cache HIT, so it would not re-upload and
+        // its placement can go with the deleted ones — Arthur loses its header art
+        // for a frame whenever the ring's band set changes shape, which is what a
+        // restore and its first move do. Cheap and certain: when anything was
+        // evicted, evict the rest too, so every surviving band re-encodes and
+        // re-places on this frame. Costs one re-encode on the rare frames where the
+        // ring's shape changes, and nothing at all on the common path.
+        if self.chrome_bands.len() != before {
+            self.chrome_bands.clear();
+        }
     }
 
     /// Snapshot the current chrome-band freshness hashes, keyed by band cell rect
