@@ -759,10 +759,24 @@ impl GameSession {
             };
             if self.unreplayable.contains(&win) {
                 fallback.push(win);
-                diags.push(format!(
-                    "v6 window {win}: display list cannot rebuild it (overflowed {V6_OPS_CAP} ops, \
-                     or was itself restored from pixels) — storing its canvas as a PNG instead"
-                ));
+                // The two ways a window becomes unreplayable have the same
+                // consequence and completely different fixes, and they are already
+                // distinguishable: an overflow leaves a FULL list behind, while a
+                // window restored from pixels has none at all.
+                let n = self.display_ops.get(&win).map_or(0, Vec::len);
+                diags.push(if n >= V6_OPS_CAP {
+                    format!(
+                        "v6 window {win}: display list hit the {V6_OPS_CAP}-op cap, so it cannot be \
+                         replayed — storing its canvas as a PNG. Its colours will not follow a later \
+                         palette change. If a real game reaches this, the cap is too low."
+                    )
+                } else {
+                    format!(
+                        "v6 window {win}: restored from pixels, so it has no draw history to replay \
+                         ({n} op(s) recorded) — storing its canvas as a PNG. Expected for a save \
+                         made before the display list was persisted."
+                    )
+                });
                 continue;
             }
             let ops = self.display_ops.get(&win).cloned().unwrap_or_default();
@@ -780,6 +794,21 @@ impl GameSession {
             }
         }
         (crate::archive::DisplayListDto { palette, windows }, fallback, diags)
+    }
+
+    /// The longest display list any v6 window is currently holding, and how many
+    /// windows have hit [`V6_OPS_CAP`].
+    ///
+    /// Exists to answer "is the cap big enough?" with a measurement instead of a
+    /// guess. The number that matters is not the peak but whether it GROWS with play:
+    /// a story that resets its list on whole-canvas ops (Arthur swapping screens)
+    /// plateaus and is safe at any session length, while one that only ever appends
+    /// would overflow eventually and the cap would just be a bigger number before the
+    /// same failure.
+    pub fn display_ops_extent(&self) -> (usize, usize) {
+        let longest = self.display_ops.values().map(Vec::len).max().unwrap_or(0);
+        let at_cap = self.display_ops.values().filter(|v| v.len() >= V6_OPS_CAP).count();
+        (longest, at_cap)
     }
 
     /// PNG blobs for just `wins` (the fallback set from [`display_list`](Self::display_list)),
@@ -1197,6 +1226,32 @@ impl GameSession {
         if full {
             ops.clear();
             self.unreplayable.remove(&win);
+        } else if let V6Op::Erase { dx, dy, w, h } = op {
+            // SQ-0592: an erase paints the window background over its rect, so every
+            // EARLIER erase lying entirely inside it contributes nothing to the final
+            // canvas and can go. This is the `full` reset above generalized from "covers
+            // the whole canvas" to "covers that op's rect" — and it is what keeps the
+            // list proportional to what is ON the screen rather than to how long the
+            // session has run.
+            //
+            // Shogun is the case that needs it: it re-erases the same two regions every
+            // turn, reaching 266 ops by turn 200 while holding only 7 distinct ones, and
+            // would cross V6_OPS_CAP around turn 390 — at which point the window drops
+            // out of palette replay for the rest of the session.
+            //
+            // Only earlier ERASES are pruned. An earlier draw under this rect is dead
+            // too, but proving it needs the picture's scaled footprint, and keeping it
+            // is harmless: replay order is preserved, so the erase still covers it.
+            ops.retain(|prev| match *prev {
+                V6Op::Erase { dx: pdx, dy: pdy, w: pw, h: ph } => {
+                    let inside = pdx >= dx
+                        && pdy >= dy
+                        && pdx.saturating_add(pw as i32) <= dx.saturating_add(w as i32)
+                        && pdy.saturating_add(ph as i32) <= dy.saturating_add(h as i32);
+                    !inside
+                }
+                V6Op::Draw { .. } => true,
+            });
         }
         if ops.len() >= V6_OPS_CAP {
             self.unreplayable.insert(win);
@@ -2459,7 +2514,7 @@ pub enum V6Op {
 
 /// Longest display list kept per window. Comfortably above any real screen (Arthur's
 /// busiest is a handful of ops) while bounding a story that redraws forever.
-const V6_OPS_CAP: usize = 512;
+pub const V6_OPS_CAP: usize = 512;
 
 /// Mirror a Z-machine's screen into the neutral [`ScreenModel`].
 ///
