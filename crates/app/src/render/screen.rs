@@ -847,6 +847,22 @@ fn render_node(
                             .map(|pw| px_rect_to_cells(pw, &scale, cell_px, area))
                             .collect();
                         let strips = decompose_chrome_strips(&ring_bands, area, &scale, cell_px, story, overlay_bottom, &panel_rects, &gfx, &chrome_runs);
+                        // An ART strip with no actual art behind it draws a rasterized
+                        // slice of the chrome canvas — which carries TEXT too, so on a
+                        // text-only v6 story (advent) that is pure noise painted over the
+                        // pane. Under a graphics protocol the image composites ABOVE the
+                        // cells, so it cannot even be overdrawn. Skip those, and let
+                        // `/dump-windows` say which ones were skipped. (SQ-0585)
+                        let strip_has_art = |r: &Rect| -> bool {
+                            let ch = cell_px.1.max(1) as f32;
+                            let top = ((r.y.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
+                                / scale.s.max(0.001);
+                            let bot = ((r.bottom().saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
+                                / scale.s.max(0.001);
+                            let y0 = top.max(0.0) as u32;
+                            let h = (bot.max(0.0) as u32).saturating_sub(y0).max(1);
+                            crate::render::v6_layout::region_has_opaque(&gfx, 0, y0, gfx.width(), h)
+                        };
                         let menu_strips = match &menu {
                             Some(ms) => decompose_chrome_strips(&menu_bands, area, ms, cell_px, story, overlay_bottom, &panel_rects, &gfx, &chrome_runs),
                             None => Vec::new(),
@@ -904,22 +920,6 @@ fn render_node(
                                 .chain(divider_exts.iter().map(|(r, _)| (r.x, r.y, r.width, r.height)))
                                 .collect();
                             gr.retain_chrome_bands(&live);
-                            // An ART strip with no actual art behind it draws a
-                            // rasterized slice of the chrome canvas — which carries
-                            // TEXT too, so on a text-only v6 story (advent) that is
-                            // pure noise painted over the pane. Under a graphics
-                            // protocol the image composites ABOVE the cells, so it
-                            // cannot even be overdrawn. Skip those. (SQ-0585)
-                            let strip_has_art = |r: &Rect| -> bool {
-                                let ch = cell_px.1.max(1) as f32;
-                                let top = ((r.y.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
-                                    / scale.s.max(0.001);
-                                let bot = ((r.bottom().saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
-                                    / scale.s.max(0.001);
-                                let y0 = top.max(0.0) as u32;
-                                let h = (bot.max(0.0) as u32).saturating_sub(y0).max(1);
-                                crate::render::v6_layout::region_has_opaque(&gfx, 0, y0, gfx.width(), h)
-                            };
                             for strip in &strips {
                                 if let ChromeStrip::Art(r) = strip {
                                     if !strip_has_art(r) {
@@ -1063,9 +1063,16 @@ fn render_node(
                             }
                             for strip in &strips {
                                 match strip {
-                                    ChromeStrip::Art(r) => map.push(rec("strip:art", (0, 0, 0, 0), *r)),
+                                    ChromeStrip::Art(r) => {
+                                        let label = if strip_has_art(r) {
+                                            "strip:art".to_string()
+                                        } else {
+                                            "strip:art (skipped — no art behind it)".to_string()
+                                        };
+                                        map.push(rec(&label, (0, 0, 0, 0), *r))
+                                    }
                                     ChromeStrip::Text(r, runs) => {
-                                        map.push(rec(&format!("strip:text({})", runs.len()), (0, 0, 0, 0), *r))
+                                        map.push(rec(&format!("strip:text({} runs)", runs.len()), (0, 0, 0, 0), *r))
                                     }
                                 }
                             }
