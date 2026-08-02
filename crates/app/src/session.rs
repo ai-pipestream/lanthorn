@@ -742,6 +742,24 @@ impl GameSession {
             canvas.z_seq = crate::graphics::next_draw_seq();
             self.pictures_canvas.insert(*win, canvas);
         }
+        // Restored pixels arrive with NO draw history: they were persisted as an
+        // image, not as the ops that built them. Mark every one UNREPLAYABLE, which
+        // is exactly what that set means (SQ-0567 uses it for a window whose op list
+        // can no longer reproduce its canvas).
+        //
+        // Without this, the first palette change after a restore ERASES the restored
+        // art. `replay_under_current_palette` clears each window's canvas and rebuilds
+        // it from the display list — and a restored window's list is empty, or worse
+        // holds only the Erase ops that `erase_screen_rect` records when a LATER
+        // window is erased over it. Arthur shows the cost: one move after a restore
+        // recolours the palette, its full-screen border window replays a list of pure
+        // erases, and the surrounding art vanishes while the room picture — redrawn by
+        // the game that same turn — stays. (SQ-0587)
+        self.display_ops.clear();
+        self.unreplayable.clear();
+        for (win, _) in blobs {
+            self.unreplayable.insert(*win);
+        }
     }
 
     /// Drain the transcript accumulated since the last drain (intro or last turn).

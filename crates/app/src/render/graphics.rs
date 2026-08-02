@@ -284,6 +284,17 @@ pub struct GraphicsRender {
     /// (SQ-0514). Pruned each frame to the live band set by
     /// [`GraphicsRender::retain_chrome_bands`].
     chrome_bands: std::collections::HashMap<(u16, u16, u16, u16), (u64, Protocol)>,
+    /// What happened to each chrome band on the last v6 frame, for `/dump-windows`
+    /// (SQ-0587). Whether a band was a cache hit, whether it encoded, and what size
+    /// the protocol reported — the questions that decide whether a missing image is a
+    /// stale placement, a failed upload, or a band that was never drawn at all. The
+    /// answers cannot be inferred from the geometry, which is why this exists.
+    pub band_log: Vec<String>,
+    /// How many chrome bands have been ENCODED (uploaded) since launch (SQ-0587).
+    /// The band log only shows the latest frame; this shows whether an upload ever
+    /// happened across an event like a restore. Dump it either side: if the number
+    /// has not moved, every band was a cache hit and the terminal was sent nothing.
+    pub band_encodes: u64,
     /// The whole native chrome canvas scaled to device pixels, shared across all
     /// bands of a frame so the expensive Nearest resize runs at most ONCE per
     /// changed frame instead of once per band (SQ-0514). Keyed on the canvas
@@ -673,6 +684,11 @@ impl GraphicsRender {
     /// v6 pixel path stood down while it was up, and on the way back every band is a
     /// cache HIT and nothing is sent. The image is gone from the screen and the cache
     /// believes it is still there.
+    /// Start a fresh band log for this frame.
+    pub fn begin_band_log(&mut self) {
+        self.band_log.clear();
+    }
+
     pub fn invalidate_chrome_bands(&mut self) {
         self.chrome_bands.clear();
     }
@@ -817,7 +833,10 @@ impl GraphicsRender {
             };
             let img = image::DynamicImage::ImageRgba8(band_img);
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
-                Ok(p) => { self.chrome_bands.insert(key, (hash, p)); }
+                Ok(p) => {
+                    self.band_encodes += 1;
+                    self.chrome_bands.insert(key, (hash, p));
+                }
                 Err(_) => return,
             }
         }
@@ -828,7 +847,19 @@ impl GraphicsRender {
             // The band image is exactly band-sized, so it places at the band's
             // top-left (no centering — the crop is already positioned).
             let dest = Rect::new(band.x, band.y, w, ht);
+            let note = format!(
+                "band {}x{}@({},{}): {} · proto {}x{} · placed {}x{}",
+                band.width, band.height, band.x, band.y,
+                if fresh { "cache HIT" } else { "encoded" },
+                sz.width, sz.height, dest.width, dest.height,
+            );
+            self.band_log.push(note);
             Image::new(proto).render(dest, buf);
+        } else {
+            self.band_log.push(format!(
+                "band {}x{}@({},{}): NO PROTOCOL (encode failed)",
+                band.width, band.height, band.x, band.y
+            ));
         }
     }
 
@@ -910,7 +941,10 @@ impl GraphicsRender {
             let stretched = image::imageops::resize(&src, bw, bh, image::imageops::FilterType::Nearest);
             let img = image::DynamicImage::ImageRgba8(stretched);
             match picker.new_protocol(img, Size::new(band.width, band.height), Resize::Fit(None)) {
-                Ok(p) => { self.chrome_bands.insert(key, (hash, p)); }
+                Ok(p) => {
+                    self.band_encodes += 1;
+                    self.chrome_bands.insert(key, (hash, p));
+                }
                 Err(_) => return,
             }
         }

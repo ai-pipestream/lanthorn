@@ -120,6 +120,15 @@ pub(crate) fn dispatch_slash_outcome(
                 None => format!("plan {}, ring not clipped", state.v6_ring_plan.get()),
             };
             state.push_transcript_internal(&format!("  ring: {clip}"), TranscriptKind::Meta);
+            let encodes = state.graphics_render.borrow().band_encodes;
+            state.push_transcript_internal(
+                &format!("  band uploads since launch: {encodes}"),
+                TranscriptKind::Meta,
+            );
+            let bands = state.graphics_render.borrow().band_log.clone();
+            for b in bands {
+                state.push_transcript_internal(&format!("  {b}"), TranscriptKind::Meta);
+            }
             if !history.is_empty() {
                 state.push_transcript_internal(
                     &format!("  recent render paths (oldest first): {}", history.join(" · ")),

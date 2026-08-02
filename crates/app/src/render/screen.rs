@@ -948,6 +948,7 @@ fn render_node(
                         };
                         {
                             let mut gr = state.graphics_render.borrow_mut();
+                            gr.begin_band_log();
                             let live: std::collections::HashSet<_> = strips
                                 .iter()
                                 .chain(menu_strips.iter())
