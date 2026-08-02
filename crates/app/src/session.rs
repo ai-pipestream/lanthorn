@@ -1369,6 +1369,9 @@ impl GameSession {
             let (s100, off_y, cw, ch) = scale.native;
             head.push_str(&format!(", scale {:.2}, cell {cw}x{ch}px, y-offset {off_y}", s100 as f32 / 100.0));
         }
+        if let Some(path) = cells.iter().find(|c| c.label.starts_with("path:")) {
+            head.push_str(&format!("\n  render path: {}", path.label.trim_start_matches("path:")));
+        }
         out.push(head);
         if let Some(pane) = find("pane") {
             let vp = find("viewport").map(|v| fmt_cells(v.cells)).unwrap_or_else(|| "—".into());

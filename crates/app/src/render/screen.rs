@@ -544,7 +544,16 @@ fn render_node(
                             && story_rows.is_some_and(|(top, bot)| row >= top && row < bot)
                     }))
             });
-            if !state.any_overlay_open() && !frameless && !(has_menu && hybrid) {
+            // MODAL overlays only (SQ-0587). The fall-through exists because image
+            // placements draw above terminal cells in classic protocols, so a
+            // menu/dialog over the story pane would be invisible under the v6 image.
+            // The room panel and the tidy animation are not that: both live in the MAP
+            // pane and never cover the story, and the code already draws exactly this
+            // distinction for the input line. Including them here meant an ordinary
+            // move — which re-tidies the map and starts its animation — dropped the
+            // whole v6 pixel path for the duration, and Arthur's header art vanished
+            // with it.
+            if !state.any_modal_overlay_open() && !frameless && !(has_menu && hybrid) {
             if let Some(picker) = state.game_picker.as_ref() {
                 let (default_fg, default_bg) = v6_host_pair(state);
                 use crate::render::v6_layout as v6;
@@ -1043,6 +1052,7 @@ fn render_node(
                             };
                             let mut map = state.v6_cell_map.borrow_mut();
                             map.clear();
+                            map.push(rec("path:hybrid-ring", (0, 0, 0, 0), area));
                             map.push(rec("pane", (0, 0, 0, 0), area));
                             map.push(rec("viewport", (story.x_px, story.y_px, story.w_px, story.h_px), viewport));
                             map.push(V6CellRect {
@@ -1368,6 +1378,19 @@ fn render_node(
                         render_node(&pw.node, status, char_mode, introspect, state, rect, buf, game_input, links, grid_colors);
                     }
                     let story_area = Rect::new(story_x, mid_y, story_right.saturating_sub(story_x), mid_h);
+                    {
+                        // Which path drew this frame (SQ-0587): the ring records a full
+                        // mapping, so without this a cell-path frame would leave the
+                        // last ring frame's numbers in `/dump-windows` and read as if
+                        // the ring had run.
+                        let mut map = state.v6_cell_map.borrow_mut();
+                        map.clear();
+                        map.push(crate::state::V6CellRect {
+                            label: "path:cell (no pixel ring this frame)".into(),
+                            native: (0, 0, 0, 0),
+                            cells: (story_area.x, story_area.y, story_area.width, story_area.height),
+                        });
+                    }
                     let m = render_node(&story.node, status, char_mode, introspect, state, story_area, buf, game_input, links, grid_colors);
                     // SQ-0584: erase fields go down over the transcript first — this is
                     // where a painted MENU screen lands (SQ-0484 routes it here out of
