@@ -307,6 +307,84 @@ pub struct GraphicsRender {
     kitty_wins: std::collections::HashMap<u32, KittyWindowImage>,
     /// Monotonic id source for `kitty_wins` (offset into a private id range).
     next_kitty_id: u32,
+    /// Machine-readable record of the protocol traffic this frame produced
+    /// (SQ-0590) — see [`GraphicsOp`]. `band_log` above is the human dump for
+    /// `/dump-windows`; this is the same events in a form a test can assert on,
+    /// which is what lets the pixel path be exercised headlessly at all.
+    ops: Vec<GraphicsOp>,
+}
+
+/// One unit of graphics-protocol traffic (SQ-0590).
+///
+/// The pixel path's failure modes are all about WHICH of these happened: an image
+/// that vanished is a stale [`Place`](GraphicsOp::Place) with no re-[`Upload`](GraphicsOp::Upload),
+/// a slow frame is an `Upload` that should have been a [`Reuse`](GraphicsOp::Reuse),
+/// and a leak is an `Upload` with no matching [`Drop`](GraphicsOp::Drop). None of
+/// that is visible in the rendered `Buffer` — under the kitty protocol the cells
+/// carry only placeholder glyphs — so it has to be recorded as it happens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GraphicsOp {
+    /// Pixels were encoded and handed to the terminal.
+    Upload { target: GraphicsTarget, id: Option<u32>, cells: (u16, u16) },
+    /// The terminal already had these exact pixels; an existing upload was re-placed
+    /// instead of re-sent (the kitty per-window cache, or a fresh band).
+    Reuse { target: GraphicsTarget, id: Option<u32> },
+    /// An image was placed on screen at a cell rect `(x, y, w, h)`.
+    Place { target: GraphicsTarget, at: (u16, u16, u16, u16) },
+    /// An upload was released — a kitty `a=d` delete, or a cached band dropped.
+    /// The terminal frees the image AND its placements, so anything dropped must
+    /// be re-uploaded before it can be seen again (SQ-0587).
+    Drop { target: GraphicsTarget },
+}
+
+/// What a [`GraphicsOp`] acted on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum GraphicsTarget {
+    /// A v6 graphics window, by window number.
+    Window(u32),
+    /// One chrome-ring band, by its cell rect `(x, y, w, h)`.
+    Band(u16, u16, u16, u16),
+}
+
+impl GraphicsOp {
+    pub fn target(&self) -> GraphicsTarget {
+        match *self {
+            GraphicsOp::Upload { target, .. }
+            | GraphicsOp::Reuse { target, .. }
+            | GraphicsOp::Place { target, .. }
+            | GraphicsOp::Drop { target } => target,
+        }
+    }
+    pub fn is_upload(&self) -> bool {
+        matches!(self, GraphicsOp::Upload { .. })
+    }
+    pub fn is_place(&self) -> bool {
+        matches!(self, GraphicsOp::Place { .. })
+    }
+}
+
+/// Cap on the retained op log. A v6 frame records a few dozen ops and clears at
+/// the top of the next one ([`GraphicsRender::begin_band_log`]); this only bounds
+/// the non-v6 paths, which have no frame boundary to clear on.
+const OPS_MAX: usize = 512;
+
+/// Build a [`Picker`] that speaks the kitty graphics protocol at a fixed cell
+/// size, without querying a terminal (SQ-0590).
+///
+/// Test harnesses otherwise use `Picker::halfblocks()`, which reports 10×20 and
+/// draws cells — so every band cache, upload, eviction and placement in this file
+/// was unreachable from the suite, and the whole class of v6 graphics regressions
+/// could only be found by playing. Pass the cell size the case needs (14×28 is a
+/// typical kitty terminal); the pixel path is sensitive to it, since art scales by
+/// pixel while text places by cell.
+///
+/// `from_fontsize` is deprecated upstream in favour of `from_query_stdio`, which
+/// needs a real terminal — exactly what a headless test does not have.
+pub fn kitty_picker(cell_w: u16, cell_h: u16) -> Picker {
+    #[allow(deprecated)]
+    let mut picker = Picker::from_fontsize(ratatui_image::FontSize::new(cell_w, cell_h));
+    picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+    picker
 }
 
 /// How many distinct canvases one graphics window keeps uploaded in the terminal
@@ -440,6 +518,10 @@ impl GraphicsRender {
                     let sent = entry.sent.remove(pos);
                     entry.id = sent.1;
                     entry.sent.push(sent);
+                    self.note_op(GraphicsOp::Reuse {
+                        target: GraphicsTarget::Window(gw.win),
+                        id: Some(entry.id),
+                    });
                 }
                 None => {
                     // Private id range, disjoint from ratatui-image's random ids
@@ -455,16 +537,26 @@ impl GraphicsRender {
                     while entry.sent.len() >= KITTY_CACHE {
                         let (_, dead) = entry.sent.remove(0);
                         write!(transmit, "\x1b_Gq=2,a=d,d=I,i={dead}\x1b\\").unwrap();
+                        self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Window(gw.win) });
                     }
                     transmit.push_str(&kitty_transmit_virtual(&gw.canvas, id, area.height, area.width));
                     entry.pending_transmit = Some(transmit);
                     entry.id = id;
                     entry.sent.push((hash, id));
+                    self.note_op(GraphicsOp::Upload {
+                        target: GraphicsTarget::Window(gw.win),
+                        id: Some(id),
+                        cells: (area.width, area.height),
+                    });
                 }
             }
         }
         let transmit = entry.pending_transmit.take();
         kitty_place_rows(entry.id, transmit.as_deref(), area, buf);
+        self.note_op(GraphicsOp::Place {
+            target: GraphicsTarget::Window(gw.win),
+            at: (area.x, area.y, area.width, area.height),
+        });
         self.kitty_wins.insert(gw.win, entry);
     }
 
@@ -684,17 +776,49 @@ impl GraphicsRender {
     /// v6 pixel path stood down while it was up, and on the way back every band is a
     /// cache HIT and nothing is sent. The image is gone from the screen and the cache
     /// believes it is still there.
-    /// Start a fresh band log for this frame.
+    /// Start a fresh band log — and op log (SQ-0590) — for this frame.
     pub fn begin_band_log(&mut self) {
         self.band_log.clear();
+        self.ops.clear();
+    }
+
+    /// Record one unit of protocol traffic (SQ-0590), bounded by [`OPS_MAX`] so a
+    /// path with no frame boundary cannot grow it without limit.
+    fn note_op(&mut self, op: GraphicsOp) {
+        if self.ops.len() >= OPS_MAX {
+            self.ops.remove(0);
+        }
+        self.ops.push(op);
+    }
+
+    /// The protocol traffic recorded since the last [`begin_band_log`] (SQ-0590).
+    pub fn ops(&self) -> &[GraphicsOp] {
+        &self.ops
+    }
+
+    /// Every target that was UPLOADED (not merely re-placed) since the last frame
+    /// boundary — the question "was the terminal actually sent these pixels?".
+    pub fn uploaded_targets(&self) -> std::collections::BTreeSet<GraphicsTarget> {
+        self.ops.iter().filter(|o| o.is_upload()).map(|o| o.target()).collect()
+    }
+
+    /// Every target PLACED on screen since the last frame boundary — the question
+    /// "what should be visible right now?", which a stale cache can answer wrongly
+    /// only by omission (SQ-0587).
+    pub fn placed_targets(&self) -> std::collections::BTreeSet<GraphicsTarget> {
+        self.ops.iter().filter(|o| o.is_place()).map(|o| o.target()).collect()
     }
 
     pub fn invalidate_chrome_bands(&mut self) {
+        let dropped: Vec<_> = self.chrome_bands.keys().copied().collect();
         self.chrome_bands.clear();
+        for (x, y, w, h) in dropped {
+            self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Band(x, y, w, h) });
+        }
     }
 
     pub fn retain_chrome_bands(&mut self, live: &std::collections::HashSet<(u16, u16, u16, u16)>) {
-        let before = self.chrome_bands.len();
+        let before: Vec<_> = self.chrome_bands.keys().copied().collect();
         self.chrome_bands.retain(|k, _| live.contains(k));
         // SQ-0587: dropping a cached band drops its image PROTOCOL, and a graphics
         // protocol releases its placement when it goes (kitty deletes the image).
@@ -705,8 +829,14 @@ impl GraphicsRender {
         // evicted, evict the rest too, so every surviving band re-encodes and
         // re-places on this frame. Costs one re-encode on the rare frames where the
         // ring's shape changes, and nothing at all on the common path.
-        if self.chrome_bands.len() != before {
+        if self.chrome_bands.len() != before.len() {
             self.chrome_bands.clear();
+            // Everything that was cached is gone — the ones `retain` evicted and
+            // the survivors cleared with them — so every one of them must
+            // re-upload before it can be seen again.
+            for (x, y, w, h) in before {
+                self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Band(x, y, w, h) });
+            }
         }
     }
 
@@ -836,9 +966,19 @@ impl GraphicsRender {
                 Ok(p) => {
                     self.band_encodes += 1;
                     self.chrome_bands.insert(key, (hash, p));
+                    self.note_op(GraphicsOp::Upload {
+                        target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                        id: None,
+                        cells: (band.width, band.height),
+                    });
                 }
                 Err(_) => return,
             }
+        } else {
+            self.note_op(GraphicsOp::Reuse {
+                target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                id: None,
+            });
         }
         if let Some((_, proto)) = self.chrome_bands.get(&key) {
             let sz = proto.size();
@@ -855,6 +995,10 @@ impl GraphicsRender {
             );
             self.band_log.push(note);
             Image::new(proto).render(dest, buf);
+            self.note_op(GraphicsOp::Place {
+                target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                at: (dest.x, dest.y, dest.width, dest.height),
+            });
         } else {
             self.band_log.push(format!(
                 "band {}x{}@({},{}): NO PROTOCOL (encode failed)",
@@ -944,9 +1088,19 @@ impl GraphicsRender {
                 Ok(p) => {
                     self.band_encodes += 1;
                     self.chrome_bands.insert(key, (hash, p));
+                    self.note_op(GraphicsOp::Upload {
+                        target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                        id: None,
+                        cells: (band.width, band.height),
+                    });
                 }
                 Err(_) => return,
             }
+        } else {
+            self.note_op(GraphicsOp::Reuse {
+                target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                id: None,
+            });
         }
         if let Some((_, proto)) = self.chrome_bands.get(&key) {
             let sz = proto.size();
@@ -954,6 +1108,10 @@ impl GraphicsRender {
             let ht = sz.height.min(band.height);
             let dest = Rect::new(band.x, band.y, w, ht);
             Image::new(proto).render(dest, buf);
+            self.note_op(GraphicsOp::Place {
+                target: GraphicsTarget::Band(key.0, key.1, key.2, key.3),
+                at: (dest.x, dest.y, dest.width, dest.height),
+            });
         }
     }
 }
