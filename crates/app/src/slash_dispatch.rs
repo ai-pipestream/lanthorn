@@ -128,6 +128,32 @@ pub(crate) fn dispatch_slash_outcome(
             for msg in &save_diags {
                 state.push_transcript_internal(&format!("  save: {msg}"), TranscriptKind::Meta);
             }
+            // SQ-0593: the character-cell pixel size we hand the game. EVERYTHING a
+            // Glulx game sizes in pixels is derived from it — advent.blb's toolbar
+            // among them — so a wrong value here makes the game's own artwork come out
+            // the wrong size, with nothing downstream to blame. Two ways it can be
+            // wrong, and this line tells them apart: with no image protocol we fall
+            // back to a hardcoded 8x16 regardless of the real font, and where there IS
+            // one the Picker reports LOGICAL points, which on a 2x HiDPI display are
+            // half the device pixels the terminal actually paints (the same mismatch
+            // that keeps pixel-precise mouse reporting switched off, see startup.rs).
+            // Compare `implies` against the real window size to tell which.
+            let (cw, ch, src) = match state.game_picker.as_ref() {
+                Some(p) => {
+                    let f = p.font_size();
+                    (f.width as u32, f.height as u32, "terminal-reported (logical points)")
+                }
+                None => (8, 16, "FALLBACK — no image protocol, real font size unknown"),
+            };
+            state.push_transcript_internal(
+                &format!(
+                    "  cell size reported to the game: {cw}x{ch} px — {src}; pane {}x{} cells \
+                     implies {}x{} px",
+                    story_rect.width, story_rect.height,
+                    cw * story_rect.width as u32, ch * story_rect.height as u32
+                ),
+                TranscriptKind::Meta,
+            );
             let encodes = state.graphics_render.borrow().band_encodes;
             state.push_transcript_internal(
                 &format!("  band uploads since launch: {encodes}"),
