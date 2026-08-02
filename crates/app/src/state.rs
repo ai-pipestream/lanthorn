@@ -1537,6 +1537,14 @@ pub struct AppState {
     /// away from the pixel path — so the last frame before the command runs is always
     /// a palette frame. This history shows what the frames BEFORE it did.
     pub v6_path_log: std::cell::RefCell<Vec<(String, u32)>>,
+    /// The hybrid ring's bottom PLAN for the last frame, and the clip it applied
+    /// (SQ-0587): `(lowest opaque native art row, the terminal row the ring was cut
+    /// at)`, or `None` when that plan does not clip. The side-border flank bands are
+    /// what this drops, so when a game's surrounding art goes missing while its
+    /// centre picture stays, these two numbers say whether the ring was cut and how
+    /// far up — i.e. whether the graphics canvas still has art down there at all.
+    pub v6_ring_plan: std::cell::Cell<&'static str>,
+    pub v6_ring_clip: std::cell::Cell<Option<(u16, u16)>>,
     /// Last v6 raster story metrics (SQ-0469), cached so a frame that skips the
     /// canvas rebuild (unchanged generation) can still republish the scroll/pager
     /// geometry the render arm returns. Valid across skipped frames because every
@@ -1884,6 +1892,8 @@ impl Default for AppState {
             v6_image_scale: std::cell::Cell::new(1.0),
             v6_cell_map: std::cell::RefCell::new(Vec::new()),
             v6_path_log: std::cell::RefCell::new(Vec::new()),
+            v6_ring_plan: std::cell::Cell::new("—"),
+            v6_ring_clip: std::cell::Cell::new(None),
             v6_raster_metrics: std::cell::Cell::new(None),
             text_margin_applied: std::cell::Cell::new(0),
             selection_text: std::cell::RefCell::new(None),

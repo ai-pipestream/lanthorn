@@ -666,6 +666,17 @@ impl GraphicsRender {
     /// Drop cached chrome-band protocols whose band rect is not in `live` — called
     /// once per hybrid frame so a resize/layout change can't leave stale band
     /// uploads accumulating.
+    /// Drop every cached chrome band, so the next draw re-encodes and re-PLACES all
+    /// of them (SQ-0587). The cache's job is to skip re-uploading a band whose pixels
+    /// have not changed — which is exactly wrong when the terminal has lost the
+    /// placement rather than the band having changed: an overlay covered the pane, the
+    /// v6 pixel path stood down while it was up, and on the way back every band is a
+    /// cache HIT and nothing is sent. The image is gone from the screen and the cache
+    /// believes it is still there.
+    pub fn invalidate_chrome_bands(&mut self) {
+        self.chrome_bands.clear();
+    }
+
     pub fn retain_chrome_bands(&mut self, live: &std::collections::HashSet<(u16, u16, u16, u16)>) {
         let before = self.chrome_bands.len();
         self.chrome_bands.retain(|k, _| live.contains(k));

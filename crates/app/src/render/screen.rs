@@ -576,6 +576,19 @@ fn render_node(
                         // fall-through to raster (map/rebus takeover) cannot
                         // flash a stale screen while its encode runs (SQ-0578).
                         state.graphics_render.borrow_mut().invalidate_v6();
+                        // Resuming the pixel path after ANY frame that did not use it
+                        // (an overlay was up, a menu takeover, a raster frame): the
+                        // terminal no longer holds our placements, but every band is a
+                        // cache hit and would send nothing. Force them all to re-upload
+                        // on this frame (SQ-0587).
+                        if state
+                            .v6_path_log
+                            .borrow()
+                            .last()
+                            .is_none_or(|(label, _)| label != "hybrid-ring")
+                        {
+                            state.graphics_render.borrow_mut().invalidate_chrome_bands();
+                        }
                         // SQ-0532 wave-5: a game that set its own story page presents
                         // on a FULL page — Zork Zero boots `set_colour(fg=2 black,
                         // bg=9 white)` and the DOS original's white runs edge to edge:
@@ -772,6 +785,13 @@ fn render_node(
                         // art stay the theme backdrop — no art stretching or tiling there.
                         // Letterbox is untouched (its bands lie within the scaled canvas).
                         let stretch_flanks = matches!(plan, BottomPlan::Frame | BottomPlan::Menu);
+                        state.v6_ring_plan.set(match plan {
+                            BottomPlan::Letterbox => "letterbox",
+                            BottomPlan::Extend => "extend",
+                            BottomPlan::Frame => "frame",
+                            BottomPlan::Menu => "menu",
+                        });
+                        state.v6_ring_clip.set(None);
                         if reclaim && !stretch_flanks {
                             let ch = cell_px.1.max(1) as f32;
                             let art_bottom_px =
@@ -829,6 +849,15 @@ fn render_node(
                             // just reserved for it. Whatever is above the viewport is
                             // chrome by construction; it survives.
                             let clip_row = clip_row.max(viewport.y);
+                            // Record what clipped the ring (SQ-0587). Arthur's side
+                            // borders live in the flank bands, and this clip is what
+                            // drops them: it trims the ring to the graphics canvas's
+                            // lowest opaque row, so a canvas that lost its lower art
+                            // takes the side borders with it.
+                            state.v6_ring_clip.set(Some((
+                                art_bottom_px.map(|y| y as u16).unwrap_or(u16::MAX),
+                                clip_row,
+                            )));
                             for b in &mut ring_bands {
                                 if b.y >= clip_row {
                                     b.height = 0;

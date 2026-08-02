@@ -109,6 +109,17 @@ pub(crate) fn dispatch_slash_outcome(
             for line in lines {
                 state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
+            let clip = match state.v6_ring_clip.get() {
+                Some((art, row)) if art == u16::MAX => {
+                    format!("plan {}, ring clipped at row {row} — NO opaque art found in the canvas", state.v6_ring_plan.get())
+                }
+                Some((art, row)) => format!(
+                    "plan {}, ring clipped at row {row} (art opaque down to native y={art})",
+                    state.v6_ring_plan.get()
+                ),
+                None => format!("plan {}, ring not clipped", state.v6_ring_plan.get()),
+            };
+            state.push_transcript_internal(&format!("  ring: {clip}"), TranscriptKind::Meta);
             if !history.is_empty() {
                 state.push_transcript_internal(
                     &format!("  recent render paths (oldest first): {}", history.join(" · ")),
