@@ -126,6 +126,7 @@ dependencies = [
  "hyperrat",
  "image",
  "jiff",
+ "libc",
  "mapper",
  "notify",
  "ratatui",

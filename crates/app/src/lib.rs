@@ -53,6 +53,7 @@ pub mod scott_debug;
 pub mod scott_session;
 pub mod session;
 pub mod state;
+pub mod stderr_redirect;
 pub mod storage;
 pub mod style;
 pub mod story_info;

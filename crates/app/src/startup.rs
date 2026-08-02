@@ -787,6 +787,17 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // one between enable_raw_mode and EnterAlternateScreen) restores the terminal.
     install_panic_hook(state.config.user_dir.clone());
 
+    // SQ-0586: from here until teardown, fd 2 goes to <user_dir>/stderr.log instead
+    // of the terminal. C libraries (libasound through rodio/cpal) write there
+    // directly — no Rust hook can catch them — and an ALSA underrun repeated during
+    // power-save lands mid-frame and corrupts the render. Installed AFTER the panic
+    // hook, whose `restore_terminal` puts fd 2 back before it prints, and after the
+    // CLI/picker phases so ordinary terminal output is unaffected. A failure here is
+    // not worth refusing to start over: the game runs, the chatter just stays visible.
+    if let Err(e) = app::stderr_redirect::install(&state.config.user_dir.join("stderr.log")) {
+        eprintln!("babelmap: could not redirect OS error output ({e}); it may corrupt the display");
+    }
+
     if let Err(e) = enable_raw_mode() {
         eprintln!("babelmap: cannot enable raw mode (not a TTY?): {}", e);
         std::process::exit(1);

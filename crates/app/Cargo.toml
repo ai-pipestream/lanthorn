@@ -42,3 +42,8 @@ roxmltree = "0.21"
 ureq = "3.3"
 hyperrat = "0.1.3"
 font8x8 = "0.3"
+
+# SQ-0586: fd-level stderr redirect. C libraries (libasound via rodio/cpal) write
+# to fd 2 directly, so nothing in Rust can intercept them — only dup2 can.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

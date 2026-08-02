@@ -125,6 +125,10 @@ fn withhold_arrow_from_v6(
 /// Called both on clean exit and from the panic hook.
 /// DisableMouseCapture MUST be issued here so both paths release the mouse.
 fn restore_terminal() {
+    // SQ-0586: FIRST, so anything printed after this — a panic message, a CLI error,
+    // the captured-output notice below — reaches the terminal rather than the log we
+    // pointed fd 2 at. Idempotent and safe when nothing was installed.
+    app::stderr_redirect::restore();
     let _ = disable_raw_mode();
     // Mode 1016 (pixel mouse reporting) is terminal state that outlives us, and
     // DisableMouseCapture does not clear it — a shell left in PixelMode would hand
@@ -135,6 +139,27 @@ fn restore_terminal() {
         DisableMouseCapture,
         LeaveAlternateScreen
     );
+}
+
+/// Print what the fd-2 redirect swallowed while the TUI was up (SQ-0586), once the
+/// terminal is back. Silent when nothing was captured, which is the normal case.
+///
+/// Without this the redirect would trade a corrupted screen for a silent one: the
+/// ALSA repeats that used to wreck the display would simply vanish. A short tail
+/// after the alternate screen closes keeps them diagnosable — and names the log, so a
+/// user chasing an audio problem has somewhere to look.
+fn report_captured_stderr() {
+    let lines = app::stderr_redirect::captured_tail(10);
+    if lines.is_empty() {
+        return;
+    }
+    if let Some(path) = app::stderr_redirect::log_path() {
+        eprintln!("babelmap: the system wrote {} line(s) of error output while the game was running", lines.len());
+        for l in &lines {
+            eprintln!("  {l}");
+        }
+        eprintln!("  (full output: {})", path.display());
+    }
 }
 
 /// Set by an external termination signal; the main loops poll
@@ -225,6 +250,7 @@ fn term_exit_code() -> i32 {
 fn exit_if_terminated() {
     if termination_requested() {
         restore_terminal();
+        report_captured_stderr();
         std::process::exit(term_exit_code());
     }
 }
@@ -249,6 +275,7 @@ fn exit_if_terminated_saving(
 ) {
     if termination_requested() {
         restore_terminal();
+        report_captured_stderr();
         lifecycle::exit_auto_save(&mut *session, mapper, state, ifid, arc_file);
         std::process::exit(term_exit_code());
     }
@@ -2952,6 +2979,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
     // picker. The exit auto-save keeps progress on either path. (SQ-0435)
 
     restore_terminal();
+    report_captured_stderr();
 
     lifecycle::exit_auto_save(&mut *session, &mapper, &state, &ifid, &arc_file);
 
