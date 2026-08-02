@@ -94,12 +94,26 @@ pub(crate) fn dispatch_slash_outcome(
             // the three things that have to agree (SQ-0585). The engine owns the
             // first two; the render mapping lives here, so hand it over.
             let cells = state.v6_cell_map.borrow().clone();
+            // Typing `/` opened the palette, so the frame this dump reads is a palette
+            // frame by construction. The history says what the frames before it did.
+            let history: Vec<String> = state
+                .v6_path_log
+                .borrow()
+                .iter()
+                .map(|(label, n)| if *n > 1 { format!("{label} x{n}") } else { label.clone() })
+                .collect();
             let lines = match session.as_any().downcast_ref::<app::session::GameSession>() {
                 Some(gs) if !gs.v6_window_dump(&cells).is_empty() => gs.v6_window_dump(&cells),
                 _ => session.window_dump(),
             };
             for line in lines {
                 state.push_transcript_internal(&line, TranscriptKind::Meta);
+            }
+            if !history.is_empty() {
+                state.push_transcript_internal(
+                    &format!("  recent render paths (oldest first): {}", history.join(" · ")),
+                    TranscriptKind::Meta,
+                );
             }
         }
         SlashOutcome::ToggleDebug => toggle_debug(state, session),

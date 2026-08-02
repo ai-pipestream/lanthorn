@@ -1531,6 +1531,12 @@ pub struct AppState {
     /// that mapping — art scales by pixel, text by cell, and the two disagree.
     /// Rebuilt every frame by the v6 render paths.
     pub v6_cell_map: std::cell::RefCell<Vec<V6CellRect>>,
+    /// Recent v6 render paths, newest last, consecutive repeats collapsed to a count
+    /// (SQ-0587). `/dump-windows` cannot observe the steady state on its own: typing
+    /// `/` opens the command palette, a modal overlay, which itself routes the frame
+    /// away from the pixel path — so the last frame before the command runs is always
+    /// a palette frame. This history shows what the frames BEFORE it did.
+    pub v6_path_log: std::cell::RefCell<Vec<(String, u32)>>,
     /// Last v6 raster story metrics (SQ-0469), cached so a frame that skips the
     /// canvas rebuild (unchanged generation) can still republish the scroll/pager
     /// geometry the render arm returns. Valid across skipped frames because every
@@ -1877,6 +1883,7 @@ impl Default for AppState {
             transcript_geom: std::cell::Cell::new(None),
             v6_image_scale: std::cell::Cell::new(1.0),
             v6_cell_map: std::cell::RefCell::new(Vec::new()),
+            v6_path_log: std::cell::RefCell::new(Vec::new()),
             v6_raster_metrics: std::cell::Cell::new(None),
             text_margin_applied: std::cell::Cell::new(0),
             selection_text: std::cell::RefCell::new(None),
@@ -2239,6 +2246,21 @@ impl AppState {
             || self.overlays.hints.is_some()
             || self.overlays.replay.is_some()
             || self.resize_mode
+    }
+
+    /// Note one v6 render path for the `/dump-windows` history (SQ-0587). Consecutive
+    /// repeats collapse into a count, and only the last few distinct runs are kept.
+    pub fn note_v6_path(&self, label: &str) {
+        let mut log = self.v6_path_log.borrow_mut();
+        match log.last_mut() {
+            Some((last, n)) if last == label => *n += 1,
+            _ => {
+                log.push((label.to_string(), 1));
+                if log.len() > 6 {
+                    log.remove(0);
+                }
+            }
+        }
     }
 
     /// The modal overlays currently open, by name (SQ-0587). A v6 story drops its

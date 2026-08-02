@@ -1053,6 +1053,7 @@ fn render_node(
                             let mut map = state.v6_cell_map.borrow_mut();
                             map.clear();
                             map.push(rec("path:hybrid-ring", (0, 0, 0, 0), area));
+                            state.note_v6_path("hybrid-ring");
                             map.push(rec("pane", (0, 0, 0, 0), area));
                             map.push(rec("viewport", (story.x_px, story.y_px, story.w_px, story.h_px), viewport));
                             map.push(V6CellRect {
@@ -1180,6 +1181,7 @@ fn render_node(
                     // the wrong one.
                     let mut map = state.v6_cell_map.borrow_mut();
                     map.clear();
+                    state.note_v6_path("raster");
                     map.push(crate::state::V6CellRect {
                         label: "path:raster (full-frame composite)".into(),
                         native: (0, 0, 0, 0),
@@ -1412,6 +1414,7 @@ fn render_node(
                                 "no story window, or a full-screen picture takeover".to_string()
                             }
                         };
+                        state.note_v6_path(&format!("cell — {why}"));
                         map.push(crate::state::V6CellRect {
                             label: format!("path:cell — {why}"),
                             native: (0, 0, 0, 0),
