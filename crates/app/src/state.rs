@@ -2241,6 +2241,32 @@ impl AppState {
             || self.resize_mode
     }
 
+    /// The modal overlays currently open, by name (SQ-0587). A v6 story drops its
+    /// pixel path while one is up, so `/dump-windows` can say WHICH — "the ring did
+    /// not run" is only half an answer.
+    pub fn open_modal_overlays(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.overlays.saves.is_some() { v.push("saves"); }
+        if self.overlays.file_browser.is_some() { v.push("file_browser"); }
+        if self.overlays.file_picker.is_some() { v.push("file_picker"); }
+        if self.overlays.config_screen.is_some() { v.push("config_screen"); }
+        if self.overlays.verb_menu.is_some() { v.push("verb_menu"); }
+        if self.overlays.palette.is_some() { v.push("palette"); }
+        if self.overlays.hotkey_dialog { v.push("hotkey_dialog"); }
+        if self.overlays.text_entry.is_some() { v.push("text_entry"); }
+        if self.overlays.confirm_delete_save.is_some() { v.push("confirm_delete_save"); }
+        if self.overlays.reset_dialog { v.push("reset_dialog"); }
+        if self.overlays.game_over { v.push("game_over"); }
+        if self.overlays.save_name_dialog.is_some() { v.push("save_name_dialog"); }
+        if self.overlays.aux_prompt { v.push("aux_prompt"); }
+        if self.overlays.quit_dialog { v.push("quit_dialog"); }
+        if self.overlays.launch_dialog { v.push("launch_dialog"); }
+        if self.overlays.hints.is_some() { v.push("hints"); }
+        if self.overlays.replay.is_some() { v.push("replay"); }
+        if self.resize_mode { v.push("resize_mode"); }
+        v
+    }
+
     /// Set the explicit layer override. `None` means follow the current room's layer.
     pub fn set_viewed_layer(&mut self, layer: Option<LayerId>) {
         self.viewed_layer = layer;

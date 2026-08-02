@@ -1174,6 +1174,18 @@ fn render_node(
                     }
                 }
 
+                {
+                    // Stamp this path too (SQ-0587): otherwise a raster frame leaves
+                    // the previous path's record standing and `/dump-windows` reports
+                    // the wrong one.
+                    let mut map = state.v6_cell_map.borrow_mut();
+                    map.clear();
+                    map.push(crate::state::V6CellRect {
+                        label: "path:raster (full-frame composite)".into(),
+                        native: (0, 0, 0, 0),
+                        cells: (area.x, area.y, area.width, area.height),
+                    });
+                }
                 // Raster mode (or Hybrid with no story window): rasterize the story
                 // text into the clear interior of the native canvas, then draw the
                 // whole thing scaled.
@@ -1385,8 +1397,23 @@ fn render_node(
                         // the ring had run.
                         let mut map = state.v6_cell_map.borrow_mut();
                         map.clear();
+                        // Say WHY the ring did not run — "it did not" is half an answer.
+                        let why = {
+                            let modals = state.open_modal_overlays();
+                            if !modals.is_empty() {
+                                format!("modal overlay open: {}", modals.join(", "))
+                            } else if frameless {
+                                "v6_render = frameless".to_string()
+                            } else if state.game_picker.is_none() {
+                                "no image protocol".to_string()
+                            } else if has_menu && hybrid {
+                                "painted menu takeover routed here".to_string()
+                            } else {
+                                "no story window, or a full-screen picture takeover".to_string()
+                            }
+                        };
                         map.push(crate::state::V6CellRect {
-                            label: "path:cell (no pixel ring this frame)".into(),
+                            label: format!("path:cell — {why}"),
                             native: (0, 0, 0, 0),
                             cells: (story_area.x, story_area.y, story_area.width, story_area.height),
                         });
