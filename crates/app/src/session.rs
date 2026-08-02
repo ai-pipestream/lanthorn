@@ -1978,6 +1978,46 @@ pub fn restore_screen(machine: &mut Machine, screen: zvm::screen::ScreenState) {
         machine.screen.current_fg = fg;
         machine.screen.current_bg = bg;
     }
+    reconcile_restored_screen_size(machine);
+}
+
+/// Make a restored screen follow the terminal it is being restored ON, not the
+/// one it was saved from (SQ-0589).
+///
+/// Every restore path runs the VM restore first — `Machine::restore_file` (host
+/// Save State) or `complete_restore_success` (in-game `@restore` of a
+/// `.babelmap`) — and both capture the host's dimensions BEFORE the restore
+/// overwrites dynamic memory, then re-stamp them through `post_restore_fixups`.
+/// So by the time we get here bytes $20/$21 hold THIS host's pane size.
+///
+/// `restore_screen` then replaces the whole `ScreenState` with the saved
+/// session's — which carries the SAVED terminal's grid geometry — and that
+/// silently undoes the refit. Restoring an 80-column save into a 120-column
+/// pane left an 80-column upper window under a header claiming 120, so a status
+/// line or quote box stayed short until the game happened to re-split (games
+/// that split once at boot — Sherlock, Trinity — never do). Restoring into a
+/// *narrower* pane was the worse direction: an over-wide grid.
+///
+/// Re-applying the host dims routes the restored screen through exactly the
+/// path a live resize takes ([`Machine::refit_upper_window_width`]): content
+/// preserved left-aligned, grown columns blanked, shrunk ones truncated, cursor
+/// clamped. A restore into a different size IS a resize the game never saw.
+///
+/// **v6 is exempt**, for the same reason `Engine::set_screen_dims` exempts it: a
+/// v6 story lays out on its own fixed native pixel screen (the `Reso`-seeded
+/// 640×400 frame) and the app SCALES that into whatever pane it has, so $20/$21
+/// are native-derived rather than terminal-derived and there is no terminal
+/// geometry to reconcile. Feeding a pane size in would resize the game's
+/// coordinate system underneath its own hardcoded art placement — and would
+/// clobber the window-0/1 sizes just restored from the archive.
+fn reconcile_restored_screen_size(machine: &mut Machine) {
+    if machine.mem.version() == 6 {
+        return;
+    }
+    let (rows, cols) = (machine.mem.read_byte(0x20), machine.mem.read_byte(0x21));
+    if rows > 0 && cols > 0 {
+        machine.set_screen_dims(rows, cols);
+    }
 }
 
 // ── Adventure-title helpers ───────────────────────────────────────────────────
@@ -3773,6 +3813,89 @@ mod tests {
             s.machine.mem.read_word(0x24),
         );
         assert_eq!(before, after, "a v6 story keeps its native screen dimensions");
+    }
+
+    /// Build a minimal v5 story. In v5 header 0x06/0x07 is the initial PC as a
+    /// BYTE address (ZMSD §5.5 — packed only for the v6 `main` routine), so it
+    /// points straight at an instruction: `quit` (0OP:0x0A, opcode byte 0xBA).
+    fn v5_stub_story() -> Vec<u8> {
+        let mut buf = vec![0u8; 0x0800];
+        buf[0x00] = 5; // version
+        buf[0x04] = 0x04; buf[0x05] = 0x00; // high_mem_base = 0x0400
+        buf[0x06] = 0x01; buf[0x07] = 0x00; // initial PC = 0x0100
+        // dictionary = 0x0080 (empty: word-sep=0, entry-size=4, entry-count=0)
+        buf[0x08] = 0x00; buf[0x09] = 0x80;
+        buf[0x0080] = 0; buf[0x0081] = 4; buf[0x0082] = 0; buf[0x0083] = 0;
+        buf[0x0A] = 0x01; buf[0x0B] = 0x00; // object_table = 0x0100 (unused by this stub)
+        buf[0x0C] = 0x03; buf[0x0D] = 0x00; // global_vars = 0x0300
+        buf[0x0E] = 0x04; buf[0x0F] = 0x00; // static_mem_base = 0x0400
+        buf[0x18] = 0x00; buf[0x19] = 0x60; // abbrev_table = 0x0060
+        buf[0x0100] = 0xBA; // quit
+        buf
+    }
+
+    fn upper_row_text(m: &Machine, row: u16) -> String {
+        (1..=m.screen.upper.cols).map(|c| m.screen.upper.cell(row, c).ch).collect()
+    }
+
+    /// A screen saved on one terminal, restored on another (SQ-0589).
+    ///
+    /// `restore_screen` installs the saved `ScreenState` wholesale, so without
+    /// reconciliation the upper window keeps the SAVED terminal's width while
+    /// the header (already re-stamped by `post_restore_fixups`) reports this
+    /// one — the mismatch that leaves a short status bar in a wide pane.
+    #[test]
+    fn a_restore_refits_the_upper_window_to_the_host_pane_not_the_saved_one() {
+        for (host_cols, label) in [(120u8, "wider host"), (60u8, "narrower host")] {
+            let mut s = GameSession::new_with_trace(v5_stub_story(), false, false, None, false, Vec::new(), None, None)
+                .expect("v5 session");
+            // The pane we are restoring INTO, as `post_restore_fixups` leaves it.
+            s.machine.set_screen_dims(40, host_cols);
+
+            // A screen saved on an 80-column terminal with a one-row status line.
+            let mut saved = s.machine.screen.clone();
+            saved.upper_window_rows = 1;
+            saved.upper.resize(1, 80);
+            for (i, ch) in "West of House".chars().enumerate() {
+                saved.upper.put(1, i as u16 + 1, ch, 0, ZColour::Default, ZColour::Default);
+            }
+
+            restore_screen(&mut s.machine, saved);
+
+            assert_eq!(
+                s.machine.screen.upper.cols, host_cols as u16,
+                "{label}: the restored grid follows THIS terminal, not the saved one"
+            );
+            assert_eq!(
+                s.machine.screen.upper_window_rows, 1,
+                "{label}: the game's split height is the game's — untouched"
+            );
+            let row = upper_row_text(&s.machine, 1);
+            assert_eq!(row.chars().count(), host_cols as usize, "{label}: the row spans the pane");
+            assert!(row.starts_with("West of House"), "{label}: content preserved: {row:?}");
+        }
+    }
+
+    /// The v6 counterpart of the exemption in `reconcile_restored_screen_size`:
+    /// a v6 story lays out on its own native pixel screen, so a restore must
+    /// hand back the archived window geometry untouched rather than re-deriving
+    /// window 0/1 from a terminal cell count.
+    #[test]
+    fn a_v6_restore_keeps_the_archived_window_geometry() {
+        let mut s = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, Vec::new(), None, None)
+            .expect("v6 session");
+        let mut saved = s.machine.screen.clone();
+        let v6 = saved.v6.as_mut().expect("v6 window table");
+        v6.windows[0].x_size = 640;
+        v6.windows[0].y_size = 400;
+        v6.windows[2].x_coord = 41;
+        v6.windows[2].y_size = 96;
+
+        restore_screen(&mut s.machine, saved);
+
+        let v6 = s.machine.screen.v6.as_ref().expect("v6 window table");
+        assert_eq!((v6.windows[0].x_size, v6.windows[0].y_size), (640, 400), "window 0 as archived");
+        assert_eq!((v6.windows[2].x_coord, v6.windows[2].y_size), (41, 96), "a game window as archived");
     }
 
     /// SQ-0532/A-F2. ZMSD §8.3.3: the interpreter "should ... write its default
