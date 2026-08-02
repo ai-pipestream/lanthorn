@@ -268,3 +268,57 @@ fn a_restore_brings_the_second_window_back() {
         "the second window's live text survives the archive round trip"
     );
 }
+
+/// SQ-0585: the chrome RING must not claim a secondary window's rows.
+///
+/// The ring is the area around the story viewport, carved into art and text strips.
+/// A panel is neither — it is a text window the renderer draws itself — but with no
+/// paint runs of its own its rows classified as ART, so the ring rasterized a slice
+/// of the chrome canvas (which carries TEXT) straight over the panel. Under a
+/// graphics protocol that image composites ABOVE the terminal cells, so the panel's
+/// text vanished behind stray rasterized banner — invisible with a half-blocks
+/// picker, which draws the same band as overwritable cells.
+///
+/// Assert on the strips through what reaches the buffer: the panel's own text, and
+/// nothing from the transcript, on the panel's rows.
+#[test]
+fn the_ring_leaves_the_panels_rows_alone() {
+    let Some(session) = split_open() else {
+        eprintln!("SKIP: gitignored story missing");
+        return;
+    };
+    let model = session.screen();
+    // The panel's cell rows, from the model's pixel rect at this scale.
+    let mut state = app::state::AppState::default();
+    state.colors = app::colors::ColorScheme::terminal_default();
+    state.game_picker = Some(ratatui_image::picker::Picker::halfblocks());
+    state.config.v6_render = app::config::V6RenderMode::Hybrid;
+    // Distinctive transcript text: if the ring rasterizes the chrome canvas over the
+    // panel, banner-ish content lands on those rows.
+    for i in 0..30 {
+        state.push_transcript(&format!("TRANSCRIPTLINE{i} ----------------------------"));
+    }
+    let area = Rect::new(0, 0, 95, 49);
+    let mut buf = Buffer::empty(area);
+    let _ = app::render::screen::render_story_pane(&model, false, None, &state, area, &mut buf);
+
+    let row = |y: u16| -> String {
+        (0..area.width).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+    };
+    let panel_row = (0..area.height)
+        .find(|&y| row(y).contains("You are standing at the end of a road"))
+        .expect("the panel's text renders");
+    // The panel sits above the status bar and the story.
+    let bar_row = (0..area.height).find(|&y| row(y).contains("Score:")).expect("the bar renders");
+    assert!(panel_row < bar_row, "panel above the bar: panel={panel_row} bar={bar_row}");
+
+    // No transcript line appears on the panel's rows — the ring is not drawing there
+    // and the story text is not bleeding up into it either.
+    for y in 0..bar_row {
+        let r = row(y);
+        assert!(
+            !r.contains("TRANSCRIPTLINE"),
+            "row {y} is the panel's, but carries transcript text: {r:?}"
+        );
+    }
+}

@@ -1311,6 +1311,10 @@ pub struct OverlayState {
     pub dialog_focus: usize,
 }
 
+/// One v6 window as the last frame mapped it onto the terminal: `(label, x, y, w, h)`
+/// in cells, for `/dump-windows`. (SQ-0585)
+pub type V6CellRect = (String, u16, u16, u16, u16);
+
 #[derive(Debug)]
 pub struct AppState {
     pub focus: Focus,
@@ -1513,6 +1517,12 @@ pub struct AppState {
     /// arm so inline story pictures scale to match the chrome frame (see
     /// `render_transcript`). 0.0 (the Default) and 1.0 both mean "no scaling".
     pub v6_image_scale: std::cell::Cell<f32>,
+    /// Where the last v6 frame actually PUT each window, in terminal cells, for
+    /// `/dump-windows`. The engine can report the game's pixel rects but has no idea
+    /// what the renderer did with them, and a v6 layout defect is nearly always in
+    /// that mapping — art scales by pixel, text by cell, and the two disagree.
+    /// Rebuilt every frame by the v6 render paths.
+    pub v6_cell_map: std::cell::RefCell<Vec<V6CellRect>>,
     /// Last v6 raster story metrics (SQ-0469), cached so a frame that skips the
     /// canvas rebuild (unchanged generation) can still republish the scroll/pager
     /// geometry the render arm returns. Valid across skipped frames because every
@@ -1858,6 +1868,7 @@ impl Default for AppState {
             selection_edge: 0,
             transcript_geom: std::cell::Cell::new(None),
             v6_image_scale: std::cell::Cell::new(1.0),
+            v6_cell_map: std::cell::RefCell::new(Vec::new()),
             v6_raster_metrics: std::cell::Cell::new(None),
             text_margin_applied: std::cell::Cell::new(0),
             selection_text: std::cell::RefCell::new(None),

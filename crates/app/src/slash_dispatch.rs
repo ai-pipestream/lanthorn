@@ -92,6 +92,20 @@ pub(crate) fn dispatch_slash_outcome(
             for line in session.window_dump() {
                 state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
+            // …and where the LAST FRAME actually put each of them, in terminal cells.
+            // The engine reports the game's own pixel geometry; this is the renderer's
+            // half, and a v6 layout defect is nearly always a disagreement between the
+            // two (art scales by pixel, text lands on cells).
+            let cells = state.v6_cell_map.borrow().clone();
+            for (label, x, y, w, h) in cells {
+                let line = if label == "scale" {
+                    // packed by the render: (s*100, off_x, cell_w, cell_h)
+                    format!("  cells: scale={:.2} off_x={y} cell={w}x{h}px", x as f32 / 100.0)
+                } else {
+                    format!("  cells: {label}: {w}x{h} at ({x},{y})")
+                };
+                state.push_transcript_internal(&line, TranscriptKind::Meta);
+            }
         }
         SlashOutcome::ToggleDebug => toggle_debug(state, session),
         SlashOutcome::DumpNotifications => {

@@ -838,9 +838,17 @@ fn render_node(
                             BottomPlan::Menu => story.y_px as u32 + story.h_px as u32,
                             _ => native.1 as u32,
                         };
-                        let strips = decompose_chrome_strips(&ring_bands, area, &scale, cell_px, story, overlay_bottom, &gfx, &chrome_runs);
+                        // Cell rects of the secondary prose windows: the ring leaves
+                        // those rows to them (SQ-0585).
+                        let panel_rects: Vec<Rect> = layout
+                            .chrome
+                            .iter()
+                            .filter(|pw| matches!(&pw.node, WinNode::Buffer(b) if !b.primary && !b.lines.is_empty()))
+                            .map(|pw| px_rect_to_cells(pw, &scale, cell_px, area))
+                            .collect();
+                        let strips = decompose_chrome_strips(&ring_bands, area, &scale, cell_px, story, overlay_bottom, &panel_rects, &gfx, &chrome_runs);
                         let menu_strips = match &menu {
-                            Some(ms) => decompose_chrome_strips(&menu_bands, area, ms, cell_px, story, overlay_bottom, &gfx, &chrome_runs),
+                            Some(ms) => decompose_chrome_strips(&menu_bands, area, ms, cell_px, story, overlay_bottom, &panel_rects, &gfx, &chrome_runs),
                             None => Vec::new(),
                         };
                         // SQ-0504: rows drawn as terminal CELLS (pure-text strips)
@@ -896,7 +904,28 @@ fn render_node(
                                 .chain(divider_exts.iter().map(|(r, _)| (r.x, r.y, r.width, r.height)))
                                 .collect();
                             gr.retain_chrome_bands(&live);
+                            // An ART strip with no actual art behind it draws a
+                            // rasterized slice of the chrome canvas — which carries
+                            // TEXT too, so on a text-only v6 story (advent) that is
+                            // pure noise painted over the pane. Under a graphics
+                            // protocol the image composites ABOVE the cells, so it
+                            // cannot even be overdrawn. Skip those. (SQ-0585)
+                            let strip_has_art = |r: &Rect| -> bool {
+                                let ch = cell_px.1.max(1) as f32;
+                                let top = ((r.y.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
+                                    / scale.s.max(0.001);
+                                let bot = ((r.bottom().saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
+                                    / scale.s.max(0.001);
+                                let y0 = top.max(0.0) as u32;
+                                let h = (bot.max(0.0) as u32).saturating_sub(y0).max(1);
+                                crate::render::v6_layout::region_has_opaque(&gfx, 0, y0, gfx.width(), h)
+                            };
                             for strip in &strips {
+                                if let ChromeStrip::Art(r) = strip {
+                                    if !strip_has_art(r) {
+                                        continue;
+                                    }
+                                }
                                 match strip {
                                     // SQ-0511: a SIDE flank band (narrower than the pane)
                                     // under the FRAME stretch plan is drawn vertically
@@ -1000,6 +1029,58 @@ fn render_node(
                         // text floating over the room description. `fill` is only set
                         // for a window that is still the newest paint on its own rect,
                         // so an ordinary turn (whose prose is newer) fills nothing.
+                        // Record what this frame mapped each window onto, in cells, for
+                        // `/dump-windows` (the engine only knows the game's pixel rects).
+                        {
+                            let mut map = state.v6_cell_map.borrow_mut();
+                            map.clear();
+                            map.push(("pane".into(), area.x, area.y, area.width, area.height));
+                            map.push((
+                                "story viewport".into(),
+                                viewport.x, viewport.y, viewport.width, viewport.height,
+                            ));
+                            map.push(("scale".into(), (scale.s * 100.0) as u16, scale.off_x as u16, cell_px.0, cell_px.1));
+                            for (i, pw) in layout.chrome.iter().enumerate() {
+                                let r = px_rect_to_cells(pw, &scale, cell_px, area);
+                                let kind = match &pw.node {
+                                    WinNode::Buffer(b) if b.primary => "chrome story?",
+                                    WinNode::Buffer(_) => "panel",
+                                    WinNode::Grid(_) => "grid",
+                                    WinNode::Graphics(_) => "art",
+                                    _ => "?",
+                                };
+                                map.push((format!("chrome[{i}] {kind}"), r.x, r.y, r.width, r.height));
+                            }
+                            // An ART strip with no actual art behind it draws a
+                            // rasterized slice of the chrome canvas — which carries
+                            // TEXT too, so on a text-only v6 story (advent) that is
+                            // pure noise painted over the pane. Under a graphics
+                            // protocol the image composites ABOVE the cells, so it
+                            // cannot even be overdrawn. Skip those. (SQ-0585)
+                            let strip_has_art = |r: &Rect| -> bool {
+                                let ch = cell_px.1.max(1) as f32;
+                                let top = ((r.y.saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
+                                    / scale.s.max(0.001);
+                                let bot = ((r.bottom().saturating_sub(area.y)) as f32 * ch - scale.off_y as f32)
+                                    / scale.s.max(0.001);
+                                let y0 = top.max(0.0) as u32;
+                                let h = (bot.max(0.0) as u32).saturating_sub(y0).max(1);
+                                crate::render::v6_layout::region_has_opaque(&gfx, 0, y0, gfx.width(), h)
+                            };
+                            for strip in &strips {
+                                if let ChromeStrip::Art(r) = strip {
+                                    if !strip_has_art(r) {
+                                        continue;
+                                    }
+                                }
+                                match strip {
+                                    ChromeStrip::Art(r) => map.push(("strip art".into(), r.x, r.y, r.width, r.height)),
+                                    ChromeStrip::Text(r, runs) => {
+                                        map.push((format!("strip text ({} runs)", runs.len()), r.x, r.y, r.width, r.height))
+                                    }
+                                }
+                            }
+                        }
                         // Only windows that START inside the story viewport fill here.
                         // Everything above it belongs to the chrome ring, which draws
                         // its own background — a status strip is flooded by its Text
@@ -2925,6 +3006,13 @@ fn run_cell(t: &crate::engine::PxText, scale: &crate::render::v6_layout::Scale, 
 /// other row is ART. Consecutive rows of one class merge into a strip. `story` is
 /// the story window (its native pixel box splits above/below); `gfx` is the
 /// graphics-only chrome canvas (the art test, via [`region_has_opaque`]).
+///
+/// `panels` are the cell rects of SECONDARY PROSE windows (SQ-0585) — a v6 game's
+/// second scrolling text window, which the renderer draws as terminal text of its
+/// own. Those rows belong to that window, so no strip is emitted for them at all:
+/// classing them ART made the ring rasterize a slice of the chrome canvas straight
+/// over the panel, and under a graphics protocol like kitty the image composites
+/// ABOVE the cells, so the panel's text vanished behind stray rasterized banner.
 fn decompose_chrome_strips<'a>(
     bands: &[Rect],
     pane: Rect,
@@ -2932,6 +3020,7 @@ fn decompose_chrome_strips<'a>(
     cell_px: (u16, u16),
     story: &crate::engine::PositionedWindow,
     overlay_bottom: i32,
+    panels: &[Rect],
     gfx: &image::RgbaImage,
     runs: &[&'a crate::engine::PxText],
 ) -> Vec<ChromeStrip<'a>> {
@@ -2966,7 +3055,10 @@ fn decompose_chrome_strips<'a>(
         Art,
         /// No runs and no opaque frame art behind — bare background.
         Empty,
+        /// A secondary prose window owns this row; the ring must not draw here.
+        Panel,
     }
+    let in_panel = |row: u16| panels.iter().any(|p| row >= p.y && row < p.bottom());
     let mut out = Vec::new();
     for band in bands {
         // Side bands (narrower than the pane) are never text — one Art strip.
@@ -2977,6 +3069,10 @@ fn decompose_chrome_strips<'a>(
         // Classify each terminal row of this full-width band.
         let mut classes: Vec<RowClass> = Vec::new();
         for row in band.y..band.bottom() {
+            if in_panel(row) {
+                classes.push(RowClass::Panel);
+                continue;
+            }
             let rr = row_runs_at(row);
             classes.push(if rr.is_empty() {
                 RowClass::Empty
@@ -3002,6 +3098,7 @@ fn decompose_chrome_strips<'a>(
             if !matches!(classes[i], RowClass::Empty) {
                 continue;
             }
+            let _ = &classes[i];
             let above = (0..i).rev().find(|&j| !matches!(classes[j], RowClass::Empty));
             let below = (i + 1..n).find(|&j| !matches!(classes[j], RowClass::Empty));
             if above.is_some_and(|j| is_text(&classes[j])) && below.is_some_and(|j| is_text(&classes[j])) {
@@ -3011,10 +3108,18 @@ fn decompose_chrome_strips<'a>(
         // Coalesce consecutive same-class (Text|bridged vs. not) rows into strips.
         let mut i = 0usize;
         while i < n {
+            // A panel's rows produce no strip: that window draws itself.
+            if matches!(classes[i], RowClass::Panel) {
+                i += 1;
+                continue;
+            }
             let text = matches!(classes[i], RowClass::Text(_)) || bridge[i];
             let mut j = i;
             let mut text_runs: Vec<&crate::engine::PxText> = Vec::new();
-            while j < n && (matches!(classes[j], RowClass::Text(_)) || bridge[j]) == text {
+            while j < n
+                && !matches!(classes[j], RowClass::Panel)
+                && (matches!(classes[j], RowClass::Text(_)) || bridge[j]) == text
+            {
                 if let RowClass::Text(rr) = &classes[j] {
                     text_runs.extend(rr.iter().copied());
                 }
