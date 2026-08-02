@@ -256,6 +256,7 @@ fn a_restore_brings_the_second_window_back() {
         },
         &[], &[], &[], &[], &[], &[], &[],
         &session.pictures_png(),
+        None,
     )
     .expect("save_archive_meta_pics");
     let ac = app::archive::load_archive(&path).expect("load_archive");

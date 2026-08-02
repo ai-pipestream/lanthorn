@@ -550,8 +550,9 @@ pub fn save_archive_meta(
     history: &[crate::history::TurnRecord],
     command_history: &[String],
 ) -> io::Result<()> {
+    // No pictures and no display list: this is the non-v6 entry point.
     save_archive_meta_pics(path, mapper, save, screen, aux, meta, transcript,
-        transcript_kinds, transcript_runs, transcript_para, &[], history, command_history, &[])
+        transcript_kinds, transcript_runs, transcript_para, &[], history, command_history, &[], None)
 }
 
 /// Write a `.babelmap` archive including per-window v6 graphics-canvas PNG
@@ -566,29 +567,6 @@ pub fn save_archive_meta(
 /// is PNG-encoded into a sibling `transcript-img/NNNN.png` blob and its draw
 /// metadata into `transcript.json` so a restored transcript renders its embedded
 /// art, not just its text (SQ-0518). Pass an empty slice when there is none.
-#[allow(clippy::too_many_arguments)]
-pub fn save_archive_meta_pics(
-    path: &Path,
-    mapper: &Mapper,
-    save: &EngineSave,
-    screen: Option<&zvm::screen::ScreenState>,
-    aux: &BTreeMap<String, Vec<u8>>,
-    meta: Meta,
-    transcript: &[String],
-    transcript_kinds: &[crate::state::TranscriptKind],
-    transcript_runs: &[Vec<crate::state::StyleRun>],
-    transcript_para: &[crate::state::ParaFmt],
-    transcript_images: &[Option<crate::inline_image::InlineImage>],
-    history: &[crate::history::TurnRecord],
-    command_history: &[String],
-    pictures: &[(u8, Vec<u8>)],
-) -> io::Result<()> {
-    save_archive_with_display(
-        path, mapper, save, screen, aux, meta, transcript, transcript_kinds, transcript_runs,
-        transcript_para, transcript_images, history, command_history, pictures, None,
-    )
-}
-
 /// As [`save_archive_meta_pics`], plus the v6 DISPLAY LIST and Current Palette
 /// (SQ-0588) — what the story *did*, rather than what the screen *looked like*.
 ///
@@ -605,7 +583,7 @@ pub fn save_archive_meta_pics(
 /// worth of stale colours and names itself in a diagnostic, instead of silently
 /// restoring a screen we cannot rebuild.
 #[allow(clippy::too_many_arguments)]
-pub fn save_archive_with_display(
+pub fn save_archive_meta_pics(
     path: &Path,
     mapper: &Mapper,
     save: &EngineSave,
@@ -1238,6 +1216,7 @@ mod tests {
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
             &transcript, &kinds, &[], &[], &images, &[], &[], &[],
+            None,
         )
         .expect("save with inline image");
         let ac = load_archive(&path).expect("load");
@@ -1269,6 +1248,7 @@ mod tests {
             &path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen), &machine.aux_data,
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
             &transcript, &kinds, &[], &[], &[], &[], &[], &[],
+            None,
         )
         .expect("save without inline images");
         let ac = load_archive(&path).expect("load");
@@ -2031,6 +2011,7 @@ mod tests {
             Meta { format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns: 0, saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState },
             &[], &[], &[], &[], &[], &[], &[],
             &[(7, png_a.clone()), (1, png_b.clone())],
+            None,
         ).expect("save with pictures");
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);

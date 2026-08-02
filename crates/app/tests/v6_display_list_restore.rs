@@ -73,7 +73,7 @@ fn round_trip(session: &mut GameSession, tag: &str, with_display: bool) -> app::
     } else {
         (session.pictures_png(), None)
     };
-    app::archive::save_archive_with_display(
+    app::archive::save_archive_meta_pics(
         &path,
         &mapper,
         &es,

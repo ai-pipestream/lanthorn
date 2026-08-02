@@ -77,7 +77,12 @@ pub(crate) fn handle_save_as(
     let trigger = if ingame { SaveTrigger::Ingame } else { SaveTrigger::HostState };
     let save = app::persist_files::game_save_bytes(&*session, trigger);
     let (location, score) = crate::engine_helpers::save_summary(&*session, state);
-    let result = save_named(dir, ifid, &buf, trigger, mapper, &save, zvm_session_opt(&*session).map(|z| &z.machine.screen), &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images);
+    // SQ-0588: the display list travels with every host save, not just the
+    // auto-save paths — an archive written without it restores art that can never
+    // be recoloured.
+    let (v6_pics, v6_display, v6_diags) = crate::engine_helpers::v6_save_payload(&mut *session);
+    for d in &v6_diags { state.note_v6_save(d); }
+    let result = save_named(dir, ifid, &buf, trigger, mapper, &save, zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images);
     match result {
         Ok(()) => {
             state.push_notice(&format!("[Saved as: {}]", buf));

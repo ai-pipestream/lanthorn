@@ -2545,7 +2545,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 let (v6_pics, v6_display, v6_diags) =
                     crate::engine_helpers::v6_save_payload(&mut *session);
                 for d in &v6_diags { state.note_v6_save(d); }
-                match app::archive::save_archive_with_display(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref()) {
+                match app::archive::save_archive_meta_pics(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref()) {
                     Ok(()) => {
                         state.push_notice(&format!(
                             "[Game saved to {}]",

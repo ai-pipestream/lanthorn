@@ -185,11 +185,15 @@ pub(crate) fn dispatch_slash_outcome(
             }
         }
         SlashOutcome::Save(name_opt) => {
-            // Named save or default archive save.
+            // Named save or default archive save. SQ-0588: the display list travels
+            // with BOTH — this is the interactive Save State path, and an archive
+            // written without it restores art that can never be recoloured.
+            let (v6_pics, v6_display, v6_diags) = crate::engine_helpers::v6_save_payload(&mut *session);
+            for d in &v6_diags { state.note_v6_save(d); }
             let result = match name_opt {
                 Some(ref name) => {
                     let (location, score) = crate::engine_helpers::save_summary(&*session, state);
-                    save_named(game_dir, ifid, name, app::archive::SaveTrigger::HostState, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images)
+                    save_named(game_dir, ifid, name, app::archive::SaveTrigger::HostState, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images)
                         .map(|()| format!("saved as \"{}\"", name))
                         .map_err(|e| format!("save failed: {}", e))
                 }
@@ -210,7 +214,7 @@ pub(crate) fn dispatch_slash_outcome(
                         score,
                         trigger: app::archive::SaveTrigger::HostState,
                     };
-                    save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default())
+                    save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref())
                         .map(|()| "saved".to_string())
                         .map_err(|e| format!("save failed: {}", e))
                 }
