@@ -153,7 +153,7 @@ pub(crate) fn finish_command_turn(
 
     // ── Post-turn bookkeeping (history / inventory / auto-save) ──
     post_turn_bookkeeping(
-        state, mapper, &*session, &result, cmd,
+        state, mapper, &mut *session, &result, cmd,
         rooms_before, conns_before, ifid, arc_file,
     );
     persist_aux_after_turn(session, state, game_dir);
@@ -271,7 +271,7 @@ fn intercept_scott_game_over(should_exit: bool, is_scott: bool, state: &mut AppS
 fn post_turn_bookkeeping(
     state: &mut AppState,
     mapper: &Mapper,
-    session: &dyn Engine,
+    session: &mut dyn Engine,
     result: &TurnResult,
     cmd: &str,
     rooms_before: usize,
@@ -363,8 +363,9 @@ fn post_turn_bookkeeping(
         };
         // v6 graphics canvases ride along so a resumed v6 story's pictures redraw
         // (SQ-0516); empty for non-v6 sessions, leaving the archive layout unchanged.
-        let v6_pics = zvm_session_opt(session).map(|z| z.pictures_png()).unwrap_or_default();
-        if let Err(e) = app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics) {
+        let (v6_pics, v6_display, v6_diags) = crate::engine_helpers::v6_save_payload(session);
+        for d in &v6_diags { state.note_v6_save(d); }
+        if let Err(e) = app::archive::save_archive_with_display(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref()) {
             state.push_notice(&format!("[Auto-save failed: {}]", e));
         }
     }
@@ -447,7 +448,7 @@ pub(crate) fn finish_resumed_turn(
     result: TurnResult,
     mapper: &mut Mapper,
     state: &mut AppState,
-    session: &dyn Engine,
+    session: &mut dyn Engine,
     game_dir: &std::path::Path,
     ifid: &str,
     map_area: Rect,
@@ -486,7 +487,7 @@ pub(crate) fn finish_resumed_turn(
         open_filename_modal(req, session, state);
     } else {
         let arc_file = default_state_path(game_dir);
-        post_turn_bookkeeping(state, mapper, session, &result, "", rooms_before, conns_before, ifid, &arc_file);
+        post_turn_bookkeeping(state, mapper, &mut *session, &result, "", rooms_before, conns_before, ifid, &arc_file);
     }
     should_exit
 }
@@ -514,17 +515,16 @@ pub(crate) fn apply_launch_resume(
             let mut resumed_images: Vec<Option<app::inline_image::InlineImage>> = Vec::new();
             // The resumed game's map is part of its archive state — load it alongside.
             if let Ok(ac) = load_archive(arc_file) {
+                // The v6 screen: rebuilt from the archived display list under the
+                // archived palette when there is one (SQ-0588), else from canvas
+                // PNGs. Ahead of the map move below, which consumes `ac` in part.
+                // No-op for non-v6 archives and for Glulx (SQ-0516).
+                crate::engine_helpers::apply_v6_pictures(&mut *session, &ac);
                 *mapper = ac.mapper;
                 // Restore the turn counter from the same archive the map came from.
                 // The launch-resume stash omits it, so without this the count would
                 // reset to 0 on resume (SQ-0260) — mirrors the interactive restore.
                 state.turns = ac.meta.turns;
-                // v6 graphics canvases from the same archive: mirror the startup
-                // auto-load / interactive restore so a resumed v6 story's pictures
-                // redraw in every mode (SQ-0516). No-op for non-v6 (ac.pictures empty).
-                if let Some(z) = zvm_session_opt_mut(&mut *session) {
-                    z.load_pictures_png(&ac.pictures);
-                }
                 // Hand Glulx back the room it was saved in (SQ-0523); no-op for zvm.
                 crate::engine_helpers::seed_resumed_location(&mut *session, &ac.meta);
                 resumed_images = ac.transcript_images;

@@ -42,6 +42,46 @@ pub(crate) fn zvm_session_opt_mut(engine: &mut dyn Engine) -> Option<&mut GameSe
     engine.as_any_mut().downcast_mut::<GameSession>()
 }
 
+/// What [`v6_save_payload`] hands a save site: the fallback canvas PNGs
+/// `(window, png_bytes)`, the display list + palette, and the self-check's
+/// diagnostics.
+pub(crate) type V6SavePayload =
+    (Vec<(u8, Vec<u8>)>, Option<app::archive::DisplayListDto>, Vec<String>);
+
+/// Everything a host Save State needs to reproduce a v6 screen (SQ-0588): the
+/// display list + Current Palette, the fallback canvas PNGs, and any diagnostics
+/// the save-time self-check raised.
+///
+/// The list is authoritative and the PNGs are the exception — `display_list`
+/// replays each window and only asks for a PNG where the replay does not reproduce
+/// the live canvas. Empty/`None` for non-v6 stories and non-Z-machine engines, so
+/// the archive layout is unchanged for them.
+///
+/// `&mut` because the self-check replays, and replaying decodes pictures.
+pub(crate) fn v6_save_payload(session: &mut dyn Engine) -> V6SavePayload {
+    let Some(z) = zvm_session_opt_mut(session) else {
+        return (Vec::new(), None, Vec::new());
+    };
+    if z.machine.screen.v6.is_none() {
+        return (Vec::new(), None, Vec::new());
+    }
+    let (dto, fallback, diags) = z.display_list();
+    let pics = z.pictures_png_for(&fallback);
+    (pics, Some(dto), diags)
+}
+
+/// Reinstate a restored v6 screen: rebuild from the display list when the archive
+/// has one (SQ-0588), else from the canvas PNGs alone (pre-SQ-0588 archives, and
+/// non-v6 stories, where both are empty). Shared by every restore site so the two
+/// paths cannot drift.
+pub(crate) fn apply_v6_pictures(session: &mut dyn Engine, ac: &app::archive::ArchiveContents) {
+    let Some(z) = zvm_session_opt_mut(session) else { return };
+    match &ac.display {
+        Some(d) => z.load_display_list(d, &ac.pictures),
+        None => z.load_pictures_png(&ac.pictures),
+    }
+}
+
 /// The `(location, score)` save summary captured into a save's `Meta` at save time
 /// (SQ-0411), shared by every Meta-building save site (auto-save, exit/quit-dialog
 /// snapshots, named saves).
@@ -181,11 +221,10 @@ pub(crate) fn apply_archive_state(
             app::session::restore_screen(&mut z.machine, scr);
         }
     }
-    // v6 graphics canvases, in their persisted paint order; a no-op for
-    // non-v6 archives (`ac.pictures` empty) and for Glulx (SQ-0516).
-    if let Some(z) = zvm_session_opt_mut(session) {
-        z.load_pictures_png(&ac.pictures);
-    }
+    // The v6 screen: rebuilt from the archived display list under the archived
+    // palette when there is one (SQ-0588), else from canvas PNGs alone. A no-op for
+    // non-v6 archives and for Glulx (SQ-0516).
+    apply_v6_pictures(session, &ac);
     // Hand Glulx back the room it was saved in (SQ-0523); no-op for zvm.
     seed_resumed_location(session, &ac.meta);
     if state.config.aux_storage != app::config::AuxStorage::Global {

@@ -724,6 +724,128 @@ impl GameSession {
         out
     }
 
+    /// The v6 display list + Current Palette for a host Save State (SQ-0588),
+    /// together with the windows whose PNG must still be stored as a fallback.
+    ///
+    /// Returns `(dto, fallback_windows, diagnostics)`. Every window is REPLAYED
+    /// into a scratch canvas here and compared against the live one:
+    ///
+    /// - identical → the ops go in the archive and the PNG is dropped;
+    /// - different (or the window is already `unreplayable`) → the window is left
+    ///   out of the list, its PNG is kept, and a diagnostic names it.
+    ///
+    /// That check is the whole point of storing ops rather than pixels. A pixel
+    /// snapshot restores correctly even when our op recording is incomplete, so a
+    /// gap only ever surfaces later and indirectly — as it did in SQ-0587, where a
+    /// restored window's art vanished a move later. Comparing at save time turns
+    /// the same gap into a named window in a diagnostic, before the archive is
+    /// written, while still producing an archive that restores correctly.
+    ///
+    /// Windows are emitted in paint order (ascending `z_seq`), matching
+    /// [`pictures_png`](Self::pictures_png) so relative z-order survives either path.
+    pub fn display_list(&mut self) -> (crate::archive::DisplayListDto, Vec<u8>, Vec<String>) {
+        let mut keys: Vec<u8> = self.pictures_canvas.keys().copied().collect();
+        keys.sort_by_key(|k| (self.pictures_canvas[k].z_seq, *k));
+
+        let palette = self.pict_source.as_ref().and_then(|s| s.current_palette().map(<[u8]>::to_vec));
+        let mut windows = Vec::new();
+        let mut fallback = Vec::new();
+        let mut diags = Vec::new();
+
+        for win in keys {
+            let (cw, ch) = {
+                let c = &self.pictures_canvas[&win];
+                (c.img.width(), c.img.height())
+            };
+            if self.unreplayable.contains(&win) {
+                fallback.push(win);
+                diags.push(format!(
+                    "v6 window {win}: display list cannot rebuild it (overflowed {V6_OPS_CAP} ops, \
+                     or was itself restored from pixels) — storing its canvas as a PNG instead"
+                ));
+                continue;
+            }
+            let ops = self.display_ops.get(&win).cloned().unwrap_or_default();
+            let rebuilt = self.replay_into_scratch(&ops, cw, ch);
+            if *rebuilt.img == *self.pictures_canvas[&win].img {
+                windows.push(crate::archive::V6WindowOpsDto { win, w: cw, h: ch, ops });
+            } else {
+                fallback.push(win);
+                diags.push(format!(
+                    "v6 window {win}: replaying its {} recorded op(s) does not reproduce the live \
+                     canvas — storing a PNG for it, and its colours will not follow a later palette \
+                     change. A draw path that is not being recorded.",
+                    ops.len()
+                ));
+            }
+        }
+        (crate::archive::DisplayListDto { palette, windows }, fallback, diags)
+    }
+
+    /// PNG blobs for just `wins` (the fallback set from [`display_list`](Self::display_list)),
+    /// in the same paint order [`pictures_png`](Self::pictures_png) uses.
+    pub fn pictures_png_for(&self, wins: &[u8]) -> Vec<(u8, Vec<u8>)> {
+        self.pictures_png().into_iter().filter(|(w, _)| wins.contains(w)).collect()
+    }
+
+    /// Replay `ops` into a fresh `w × h` canvas under the CURRENT palette, without
+    /// touching any live canvas — the save-time self-check's scratch surface, and
+    /// the restore path's canvas builder. Mirrors
+    /// [`replay_under_current_palette`](Self::replay_under_current_palette) op for op;
+    /// any divergence between the two would make the self-check meaningless.
+    fn replay_into_scratch(&mut self, ops: &[V6Op], w: u32, h: u32) -> crate::graphics::Canvas {
+        let mut canvas = crate::graphics::Canvas::new(w, h);
+        canvas.erase_rect(0, 0, w, h);
+        for op in ops {
+            match *op {
+                V6Op::Erase { dx, dy, w: ew, h: eh } => canvas.erase_rect(dx, dy, ew, eh),
+                V6Op::Draw { number, dx, dy } => {
+                    let Some(img) = self
+                        .pict_source
+                        .as_mut()
+                        .and_then(|s| s.image_under_current_palette(number as u32))
+                    else {
+                        continue;
+                    };
+                    let img = v6_scaled_art(&img);
+                    canvas.draw_image_clipped(&img, dx, dy, (w, h));
+                }
+            }
+        }
+        canvas
+    }
+
+    /// Rebuild the v6 screen from a restored display list (SQ-0588) — the counterpart
+    /// of [`display_list`](Self::display_list), and the reason a restored window can be
+    /// recoloured at all.
+    ///
+    /// The Current Palette is reinstated FIRST (Blorb §11.3: an adaptive picture has no
+    /// palette of its own and decodes through whichever one is live), then each window's
+    /// canvas is rebuilt by replaying its ops. Those windows keep their display lists, so
+    /// the next palette change replays them again — which is exactly what a window
+    /// restored from a PNG cannot do.
+    ///
+    /// `pngs` covers the windows the list does not: the save-time self-check's fallbacks,
+    /// and every window of a pre-SQ-0588 archive. They load as pixels and are marked
+    /// `unreplayable`, i.e. today's behaviour, unchanged.
+    pub fn load_display_list(&mut self, dto: &crate::archive::DisplayListDto, pngs: &[(u8, Vec<u8>)]) {
+        // Pixels first, so a window present in BOTH (which should not happen, but an
+        // archive is an external input) ends up rebuilt from ops rather than pixels.
+        self.load_pictures_png(pngs);
+        if let Some(src) = self.pict_source.as_mut() {
+            src.set_current_palette(dto.palette.clone());
+        }
+        for w in &dto.windows {
+            let ops = w.ops.clone();
+            let mut canvas = self.replay_into_scratch(&ops, w.w, w.h);
+            canvas.version = canvas.version.wrapping_add(1);
+            canvas.z_seq = crate::graphics::next_draw_seq();
+            self.pictures_canvas.insert(w.win, canvas);
+            self.display_ops.insert(w.win, ops);
+            self.unreplayable.remove(&w.win);
+        }
+    }
+
     /// Rebuild `pictures_canvas` from persisted per-window PNG blobs
     /// (`archive::ArchiveContents::pictures`) after a host Save State restore, so
     /// a v6 story's graphics windows redraw identically without replaying draw
@@ -2325,8 +2447,12 @@ impl GameSession {
 
 /// One entry in a v6 window's display list — a picture drawn, or a region erased,
 /// in window-canvas coordinates (SQ-0567).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum V6Op {
+///
+/// Serializable because a host Save State persists the display list itself rather
+/// than a picture of the result (SQ-0588): these ops ARE the archived form of a v6
+/// screen, replayed under the restored palette to rebuild it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum V6Op {
     Draw { number: u16, dx: i32, dy: i32 },
     Erase { dx: i32, dy: i32, w: u32, h: u32 },
 }

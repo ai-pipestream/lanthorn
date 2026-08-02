@@ -224,6 +224,27 @@ impl PictSource {
         self.adaptive.contains(&resnum)
     }
 
+    /// The Current Palette's raw `PLTE` bytes, for host Save State (SQ-0588).
+    ///
+    /// Blorb §11.3 makes this live interpreter state, not game state: it is
+    /// established by whichever non-adaptive picture was drawn last, and every
+    /// adaptive picture drawn after it decodes through it. A save that carries the
+    /// display list but not the palette replays those pictures under whatever
+    /// palette the restoring session happens to hold — the wrong colours, or none.
+    pub fn current_palette(&self) -> Option<&[u8]> {
+        self.current_plte.as_deref()
+    }
+
+    /// Reinstate a saved Current Palette (SQ-0588). Bumps `palette_gen` on a real
+    /// change, exactly as a non-adaptive draw does, so any adaptive decode cached
+    /// against the old generation is recomputed rather than reused.
+    pub fn set_current_palette(&mut self, plte: Option<Vec<u8>>) {
+        if self.current_plte != plte {
+            self.current_plte = plte;
+            self.palette_gen += 1;
+        }
+    }
+
     /// Decode `resnum` under the CURRENT palette WITHOUT establishing a new one —
     /// the replay path (SQ-0567).
     ///

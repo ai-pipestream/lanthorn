@@ -1537,6 +1537,10 @@ pub struct AppState {
     /// away from the pixel path — so the last frame before the command runs is always
     /// a palette frame. This history shows what the frames BEFORE it did.
     pub v6_path_log: std::cell::RefCell<Vec<(String, u32)>>,
+    /// Save-time display-list diagnostics (SQ-0588), newest last, shown by
+    /// `/dump-windows`. Written by `note_v6_save` when a window's recorded ops do
+    /// not reproduce its live canvas.
+    pub v6_save_log: std::cell::RefCell<Vec<String>>,
     /// The hybrid ring's bottom PLAN for the last frame, and the clip it applied
     /// (SQ-0587): `(lowest opaque native art row, the terminal row the ring was cut
     /// at)`, or `None` when that plan does not clip. The side-border flank bands are
@@ -1892,6 +1896,7 @@ impl Default for AppState {
             v6_image_scale: std::cell::Cell::new(1.0),
             v6_cell_map: std::cell::RefCell::new(Vec::new()),
             v6_path_log: std::cell::RefCell::new(Vec::new()),
+            v6_save_log: std::cell::RefCell::new(Vec::new()),
             v6_ring_plan: std::cell::Cell::new("—"),
             v6_ring_clip: std::cell::Cell::new(None),
             v6_raster_metrics: std::cell::Cell::new(None),
@@ -2256,6 +2261,25 @@ impl AppState {
             || self.overlays.hints.is_some()
             || self.overlays.replay.is_some()
             || self.resize_mode
+    }
+
+    /// Note a v6 save-time display-list diagnostic for `/dump-windows` (SQ-0588).
+    ///
+    /// The save-time self-check replays each window's ops and compares against the
+    /// live canvas; a window that fails names itself here. That is the whole reason
+    /// the archive stores ops rather than pixels — a pixel snapshot would restore
+    /// correctly and leave the recording gap invisible until it surfaced later as
+    /// missing or mis-coloured art. `&self` because the auto-save paths hold an
+    /// immutable `AppState` (same reason as `note_v6_path`).
+    pub fn note_v6_save(&self, msg: &str) {
+        let mut log = self.v6_save_log.borrow_mut();
+        if log.iter().any(|m| m == msg) {
+            return; // one line per distinct problem, not one per save
+        }
+        log.push(msg.to_string());
+        if log.len() > 8 {
+            log.remove(0);
+        }
     }
 
     /// Note one v6 render path for the `/dump-windows` history (SQ-0587). Consecutive

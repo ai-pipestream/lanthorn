@@ -120,6 +120,14 @@ pub(crate) fn dispatch_slash_outcome(
                 None => format!("plan {}, ring not clipped", state.v6_ring_plan.get()),
             };
             state.push_transcript_internal(&format!("  ring: {clip}"), TranscriptKind::Meta);
+            // SQ-0588: windows whose recorded ops did not reproduce their canvas at
+            // save time. Each is a draw path we are not recording — the archive fell
+            // back to a PNG for it, so it restores correctly but cannot be recoloured
+            // by a later palette change.
+            let save_diags: Vec<String> = state.v6_save_log.borrow().clone();
+            for msg in &save_diags {
+                state.push_transcript_internal(&format!("  save: {msg}"), TranscriptKind::Meta);
+            }
             let encodes = state.graphics_render.borrow().band_encodes;
             state.push_transcript_internal(
                 &format!("  band uploads since launch: {encodes}"),

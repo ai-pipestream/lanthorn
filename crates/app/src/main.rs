@@ -241,7 +241,7 @@ fn exit_if_terminated() {
 /// signal handler runs (and sets the flag) before that `poll` returns, so a
 /// pre-`read()` check reliably catches it. (SQ-0502)
 fn exit_if_terminated_saving(
-    session: &dyn Engine,
+    session: &mut dyn Engine,
     mapper: &Mapper,
     state: &app::state::AppState,
     ifid: &str,
@@ -249,7 +249,7 @@ fn exit_if_terminated_saving(
 ) {
     if termination_requested() {
         restore_terminal();
-        lifecycle::exit_auto_save(session, mapper, state, ifid, arc_file);
+        lifecycle::exit_auto_save(&mut *session, mapper, state, ifid, arc_file);
         std::process::exit(term_exit_code());
     }
 }
@@ -1098,7 +1098,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // Restore the terminal + auto-save + exit if an external termination signal
         // arrived (SIGTERM/SIGHUP/out-of-band SIGINT); the poll below wakes at least
         // every ~50ms, so this is checked promptly.
-        exit_if_terminated_saving(&*session, &mapper, &state, &ifid, &arc_file);
+        exit_if_terminated_saving(&mut *session, &mapper, &state, &ifid, &arc_file);
 
         // ── Pre-input pollers (SQ-0306) ───────────────────────────────────────
         // The per-iteration housekeeping that runs BEFORE the draw/poll: each
@@ -1217,7 +1217,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 // (e.g. on Linux). If a termination signal is what killed the tty,
                 // take the auto-save + conventional signal exit rather than the
                 // bare error exit below. (SQ-0502)
-                exit_if_terminated_saving(&*session, &mapper, &state, &ifid, &arc_file);
+                exit_if_terminated_saving(&mut *session, &mapper, &state, &ifid, &arc_file);
                 restore_terminal();
                 eprintln!("babelmap: poll error: {}", e);
                 std::process::exit(1);
@@ -1402,7 +1402,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // that fd, never returning to the loop top where termination is checked. The
         // signal handler has already set the flag by now, so catch it here first.
         // (SQ-0502)
-        exit_if_terminated_saving(&*session, &mapper, &state, &ifid, &arc_file);
+        exit_if_terminated_saving(&mut *session, &mapper, &state, &ifid, &arc_file);
 
         let event = match read() {
             Ok(e) => e,
@@ -1560,7 +1560,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         // library; the target (Exit vs Library) was set when the
                         // dialog opened. (SQ-0435)
                         state.overlays.quit_dialog = false;
-                        lifecycle::quit_dialog_save(&*session, &mapper, &state, &ifid, &arc_file);
+                        lifecycle::quit_dialog_save(&mut *session, &mapper, &state, &ifid, &arc_file);
                         break 'event_loop state.exit_target.into();
                     }
                     OverlayAct::QuitQuit => {
@@ -2542,8 +2542,10 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 };
                 // v6 graphics canvases ride along (Lane P): empty for non-v6
                 // sessions, so the archive layout is unchanged for them.
-                let v6_pics = zvm_session_opt(&*session).map(|z| z.pictures_png()).unwrap_or_default();
-                match app::archive::save_archive_meta_pics(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics) {
+                let (v6_pics, v6_display, v6_diags) =
+                    crate::engine_helpers::v6_save_payload(&mut *session);
+                for d in &v6_diags { state.note_v6_save(d); }
+                match app::archive::save_archive_with_display(&arc_file, &mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref()) {
                     Ok(()) => {
                         state.push_notice(&format!(
                             "[Game saved to {}]",
@@ -2568,9 +2570,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                     if let Some(z) = zvm_session_opt_mut(&mut *session) { app::session::restore_screen(&mut z.machine, scr); }
                                 }
                                 // v6 graphics canvases (Lane P): no-op for non-v6 archives.
-                                if let Some(z) = zvm_session_opt_mut(&mut *session) {
-                                    z.load_pictures_png(&ac.pictures);
-                                }
+                                crate::engine_helpers::apply_v6_pictures(&mut *session, &ac);
                                 // Hand Glulx back the room it was saved in (SQ-0523); no-op for zvm.
                                 engine_helpers::seed_resumed_location(&mut *session, &ac.meta);
                                 if state.config.aux_storage != app::config::AuxStorage::Global {
@@ -2720,7 +2720,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             session.resume_restore(None)
                         }
                     };
-                    let quit = turn::finish_resumed_turn(result, &mut mapper, &mut state, &*session, &game_dir, &ifid, last_panes.map);
+                    let quit = turn::finish_resumed_turn(result, &mut mapper, &mut state, &mut *session, &game_dir, &ifid, last_panes.map);
                     turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
                     turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
                     if let Some(io) = state.ingame_io {
@@ -2764,7 +2764,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                 state.overlays.saves = None;
                                 state.ingame_io = None;
                                 let result = session.resume_restore(None);
-                                let quit = turn::finish_resumed_turn(result, &mut mapper, &mut state, &*session, &game_dir, &ifid, last_panes.map);
+                                let quit = turn::finish_resumed_turn(result, &mut mapper, &mut state, &mut *session, &game_dir, &ifid, last_panes.map);
                                 turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
                                 turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
                                 if let Some(io) = state.ingame_io {
@@ -2953,7 +2953,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
 
     restore_terminal();
 
-    lifecycle::exit_auto_save(&*session, &mapper, &state, &ifid, &arc_file);
+    lifecycle::exit_auto_save(&mut *session, &mapper, &state, &ifid, &arc_file);
 
     // `--debug` (SQ-0449): persist the cumulative executed-PC coverage to the
     // per-story sidecar so a later `--debug`/`/debug` run resumes the blue lines.

@@ -26,7 +26,7 @@ use crate::format_rfc3339;
 /// restore (SQ-0283 carry-forward fix). The in-game save the player was
 /// already making is the relevant persistence in that case.
 pub(crate) fn exit_auto_save(
-    session: &dyn Engine,
+    session: &mut dyn Engine,
     mapper: &Mapper,
     state: &app::state::AppState,
     ifid: &str,
@@ -51,8 +51,9 @@ pub(crate) fn exit_auto_save(
         score,
         trigger: app::archive::SaveTrigger::HostState,
     };
-    let v6_pics = zvm_session_opt(session).map(|z| z.pictures_png()).unwrap_or_default();
-    match app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics) {
+    let (v6_pics, v6_display, v6_diags) = crate::engine_helpers::v6_save_payload(session);
+    for d in &v6_diags { state.note_v6_save(d); }
+    match app::archive::save_archive_with_display(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), exit_meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref()) {
         Ok(()) => {
             eprintln!("babelmap: map saved to {}", arc_file.display());
         }
@@ -71,7 +72,7 @@ pub(crate) fn exit_auto_save(
 /// making is the relevant persistence in that case; the dialog still proceeds
 /// to quit either way.
 pub(crate) fn quit_dialog_save(
-    session: &dyn Engine,
+    session: &mut dyn Engine,
     mapper: &Mapper,
     state: &app::state::AppState,
     ifid: &str,
@@ -96,8 +97,9 @@ pub(crate) fn quit_dialog_save(
         score,
         trigger: app::archive::SaveTrigger::HostState,
     };
-    let v6_pics = zvm_session_opt(session).map(|z| z.pictures_png()).unwrap_or_default();
-    let _ = app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics);
+    let (v6_pics, v6_display, v6_diags) = crate::engine_helpers::v6_save_payload(session);
+    for d in &v6_diags { state.note_v6_save(d); }
+    let _ = app::archive::save_archive_with_display(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref());
 }
 
 // ── Pending config-write flush ────────────────────────────────────────────────
@@ -161,7 +163,7 @@ mod tests {
         // stub; restore_state never pops it, corrupting the stack on a later Save
         // State restore. exit_auto_save must skip entirely (not call save_state)
         // when Engine::is_saveload_pending() is true, even with auto_save on.
-        let engine = SaveloadPendingEngine;
+        let mut engine = SaveloadPendingEngine;
         let mut state = app::state::AppState::default();
         state.config.auto_save = true;
         let mapper = mapper::mapper::Mapper::default();
@@ -170,7 +172,7 @@ mod tests {
 
         // Must not panic (save_state()/aux_data() are unreachable!()) and must not
         // write the archive file.
-        super::exit_auto_save(&engine, &mapper, &state, "ZCODE-1", &arc_file);
+        super::exit_auto_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file);
 
         assert!(!arc_file.exists(), "exit auto-save must not write while a save/restore is pending");
         let _ = std::fs::remove_file(&arc_file);
@@ -183,7 +185,7 @@ mod tests {
         // suspended (Ctrl+Q wins even over an open SaveAs prompt). Mirrors
         // exit_auto_save_skips_snapshot_while_a_save_is_pending above but for the
         // extracted quit_dialog_save helper, which has no auto_save gate.
-        let engine = SaveloadPendingEngine;
+        let mut engine = SaveloadPendingEngine;
         let state = app::state::AppState::default();
         let mapper = mapper::mapper::Mapper::default();
         let arc_file = std::env::temp_dir().join(format!("bm-t6-quit-pending-{}.babelmap", std::process::id()));
@@ -191,7 +193,7 @@ mod tests {
 
         // Must not panic (save_state()/aux_data() are unreachable!()) and must not
         // write the archive file.
-        super::quit_dialog_save(&engine, &mapper, &state, "ZCODE-1", &arc_file);
+        super::quit_dialog_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file);
 
         assert!(!arc_file.exists(), "quit-dialog save must not write while a save/restore is pending");
         let _ = std::fs::remove_file(&arc_file);

@@ -37,6 +37,41 @@ const ENTRY_META: &str = "meta.json";
 const ENTRY_TRANSCRIPT: &str = "transcript.json";
 const ENTRY_COMMAND_HISTORY: &str = "command_history.json";
 const ENTRY_SCREEN: &str = "screen.json";
+const ENTRY_DISPLAY: &str = "display.json";
+
+/// The archived v6 screen as a RECIPE rather than a picture (SQ-0588): every
+/// window's display list, plus the Current Palette they were drawn under.
+///
+/// Blorb §11.3 makes the palette part of the recipe. An adaptive picture carries
+/// no palette of its own — it decodes through whichever one the last non-adaptive
+/// draw established — so a display list replayed without the palette that was live
+/// when it was recorded produces the right shapes in the wrong colours.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DisplayListDto {
+    /// Raw `PLTE` bytes of the Current Palette at save time; `None` when no
+    /// palette was ever established (a game with no indexed pictures).
+    #[serde(default)]
+    pub palette: Option<Vec<u8>>,
+    /// One entry per REPLAYABLE window, in paint order (ascending `z_seq`) — the
+    /// same order `pictures_png` emits, so relative z-order survives without
+    /// storing the raw stamps. A window missing from here is one whose replay did
+    /// not reproduce its canvas at save time; it is carried as a PNG instead.
+    pub windows: Vec<V6WindowOpsDto>,
+}
+
+/// One v6 window's display list, with the canvas size to replay it into.
+///
+/// The size is stored rather than re-derived from the restored window table: the
+/// canvas is created at the window's pixel box when the FIRST op lands, and a game
+/// that resizes the window afterwards would otherwise replay into a canvas of the
+/// wrong shape, silently clipping or padding the art.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct V6WindowOpsDto {
+    pub win: u8,
+    pub w: u32,
+    pub h: u32,
+    pub ops: Vec<crate::session::V6Op>,
+}
 const ENTRY_AUX: &str = "aux.dat";
 /// Engine tag (the `EngineSave` engine string) the save was written by.
 const ENTRY_ENGINE: &str = "engine.txt";
@@ -80,7 +115,13 @@ const ENTRY_PICTURES_PREFIX: &str = "pictures/win-";
 /// its art, not just its text (SQ-0518). Sibling metadata is `TranscriptData.images`.
 const ENTRY_TRANSCRIPT_IMG_PREFIX: &str = "transcript-img/";
 
-pub const CURRENT_FORMAT_VERSION: u32 = 5;
+/// Bumped to 6 for SQ-0588: a v6 archive now carries its display list, and omits
+/// the canvas PNG for every window whose replay reproduced the live canvas at save
+/// time. Older archives (≤5) still load — they take the PNG path, which is what
+/// this build falls back to anyway — but an older BUILD reading a version-6 archive
+/// would find neither a PNG nor a list it understands and restore those windows
+/// blank, so the version check must reject it (see `load_archive`).
+pub const CURRENT_FORMAT_VERSION: u32 = 6;
 
 /// What asked for this archive to be written (SQ-0531). Both triggers produce the
 /// SAME `.babelmap` container — map, transcript, screen, aux and all — so an
@@ -432,6 +473,13 @@ pub struct ArchiveContents {
     /// Applied on the host-mediated restore paths so the upper window is restored.
     /// For v6 stories this also carries the full 8-window table (`screen.v6`).
     pub screen: Option<zvm::screen::ScreenState>,
+    /// The v6 display list + Current Palette (`display.json`), `None` for non-v6
+    /// stories and for archives written before SQ-0588. When present it is the
+    /// AUTHORITATIVE form of the v6 screen — feed it to
+    /// `GameSession::load_display_list`, which rebuilds each window's canvas by
+    /// replaying the ops under the restored palette and falls back to `pictures`
+    /// for any window the list does not cover.
+    pub display: Option<DisplayListDto>,
     /// Per-window v6 graphics-canvas PNG blobs `(window_number, png_bytes)`,
     /// sorted by window number (empty for non-v6 / archives without graphics).
     /// Feed to `GameSession::load_pictures_png` so a restored v6 story redraws
@@ -534,6 +582,45 @@ pub fn save_archive_meta_pics(
     history: &[crate::history::TurnRecord],
     command_history: &[String],
     pictures: &[(u8, Vec<u8>)],
+) -> io::Result<()> {
+    save_archive_with_display(
+        path, mapper, save, screen, aux, meta, transcript, transcript_kinds, transcript_runs,
+        transcript_para, transcript_images, history, command_history, pictures, None,
+    )
+}
+
+/// As [`save_archive_meta_pics`], plus the v6 DISPLAY LIST and Current Palette
+/// (SQ-0588) — what the story *did*, rather than what the screen *looked like*.
+///
+/// A canvas PNG restores pixels with no draw history, so a restored window cannot
+/// be replayed and therefore cannot be recoloured when the game next changes
+/// palette (Blorb §11.3); its art keeps the colours it was saved with for the rest
+/// of the session. Replaying the ops rebuilds the same screen in a form that still
+/// responds to the palette.
+///
+/// `pictures` stays the per-window FALLBACK, not the default: the caller
+/// ([`crate::session::GameSession::display_list`]) replays each window into a
+/// scratch canvas at save time and only emits a PNG for the windows whose replay
+/// does not reproduce the live canvas. A recording gap then costs one window's
+/// worth of stale colours and names itself in a diagnostic, instead of silently
+/// restoring a screen we cannot rebuild.
+#[allow(clippy::too_many_arguments)]
+pub fn save_archive_with_display(
+    path: &Path,
+    mapper: &Mapper,
+    save: &EngineSave,
+    screen: Option<&zvm::screen::ScreenState>,
+    aux: &BTreeMap<String, Vec<u8>>,
+    meta: Meta,
+    transcript: &[String],
+    transcript_kinds: &[crate::state::TranscriptKind],
+    transcript_runs: &[Vec<crate::state::StyleRun>],
+    transcript_para: &[crate::state::ParaFmt],
+    transcript_images: &[Option<crate::inline_image::InlineImage>],
+    history: &[crate::history::TurnRecord],
+    command_history: &[String],
+    pictures: &[(u8, Vec<u8>)],
+    display: Option<&DisplayListDto>,
 ) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -638,6 +725,15 @@ pub fn save_archive_meta_pics(
             .expect("ScreenDto is always serializable");
         zip.start_file(ENTRY_SCREEN, options)?;
         zip.write_all(screen_json.as_bytes())?;
+    }
+
+    // display.json — the v6 display list + Current Palette (SQ-0588). Absent for
+    // non-v6 stories, and for archives written before the list was persisted.
+    if let Some(d) = display {
+        let display_json =
+            serde_json::to_string(d).expect("DisplayListDto is always serializable");
+        zip.start_file(ENTRY_DISPLAY, options)?;
+        zip.write_all(display_json.as_bytes())?;
     }
 
     // aux.dat — engine aux data (only when non-empty).
@@ -913,6 +1009,17 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         Err(_) => std::collections::BTreeMap::new(),
     };
 
+    // display.json — the v6 display list + Current Palette (SQ-0588). Absent for
+    // non-v6 stories and for archives written before it existed; those restore
+    // from `pictures` below, exactly as they always did.
+    let display: Option<DisplayListDto> = match zip.by_name(ENTRY_DISPLAY) {
+        Ok(mut entry) => {
+            let mut s = String::new();
+            entry.read_to_string(&mut s).ok().and_then(|_| serde_json::from_str(&s).ok())
+        }
+        Err(_) => None,
+    };
+
     // pictures/win-N.png — v6 per-window graphics canvases (absent for non-v6).
     // Collect the matching names first (releases each borrow before the reads).
     // ZIP central-directory (by_index) order == write order, which is the paint
@@ -935,7 +1042,7 @@ pub fn load_archive(path: &Path) -> io::Result<ArchiveContents> {
         }
     }
 
-    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, transcript_para, transcript_images, history, screen, aux, command_history, engine, pictures })
+    Ok(ArchiveContents { mapper, save, meta, transcript, transcript_kinds, transcript_runs, transcript_para, transcript_images, history, screen, aux, command_history, engine, display, pictures })
 }
 
 /// Read ONLY the `meta.json` entry from a save archive — avoids `load_archive`
@@ -1661,7 +1768,7 @@ mod tests {
     // bump (update this pin + a migration/release note), never accidental drift.
     #[test]
     fn format_version_constant_is_frozen() {
-        assert_eq!(CURRENT_FORMAT_VERSION, 5, "archive format_version changed — see docs/release/save-format-policy.md");
+        assert_eq!(CURRENT_FORMAT_VERSION, 6, "archive format_version changed — see docs/release/save-format-policy.md");
     }
 
     // SQ-0531: `trigger` is persisted metadata, so its wire spelling is pinned —

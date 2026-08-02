@@ -46,7 +46,7 @@ Pre-beta there is still **no obligation to read old files** (see the standing
 | Glulx-Quetzal (`@save`) | `game.glksave` inside `<slug>.babelmap` (app); bare `<slug>.qzl` (`gvm-cli`) | `gvm/src/exec.rs` `save_quetzal` | none — spec-defined `FORM IFZS` | Public spec (Glulx §1.8) | `exec::tests::save_quetzal_is_a_wellformed_ifzs_container`, `…omits_greg_and_glk_chunks` |
 | Host Save State — Z-machine | inside `.babelmap` `game.qzl` | `zvm/src/quetzal.rs` (+ archive) | via archive `format_version` | Frozen (0.x) | archive round-trip tests |
 | Host Save State — Glulx | inside `.babelmap` `game.glksave` | `gvm/src/exec.rs` `save_state` (adds `GReg` + `Glk `) | `Glk ` chunk: `GLK_SNAPSHOT_VERSION = 6` | Frozen (0.x) | `glk::tests::snapshot_version_constant_is_frozen`, `…serialize_stamps_current_snapshot_version`, `…deserialize_rejects_future_snapshot_version`, `exec::tests::save_state_is_the_same_container_plus_our_own_chunks` |
-| `.babelmap` archive (map + save + transcript + screen + history + pictures) | `<ifid>.babelmap` (ZIP) | `app/src/archive.rs` | `Meta.format_version = 5` | Frozen (0.x) | `archive::tests::format_version_constant_is_frozen`, `…unknown_format_version_returns_err`, `…save_trigger_wire_names_are_pinned_and_round_trip`, archive round-trip tests |
+| `.babelmap` archive (map + save + transcript + screen + history + pictures) | `<ifid>.babelmap` (ZIP) | `app/src/archive.rs` | `Meta.format_version = 6` | Frozen (0.x) | `archive::tests::format_version_constant_is_frozen`, `…unknown_format_version_returns_err`, `…save_trigger_wire_names_are_pinned_and_round_trip`, archive round-trip tests |
 | Z-machine aux data (v5 `@save`/`@restore` table) | `default.aux` | `app/src/aux_store.rs` + `zvm-cli/src/auxiliary.rs` | `ZAUX` magic + `VERSION = 1` | Frozen (0.x), cross-host | `aux_store::tests::version_constant_is_frozen`, `…decode_rejects_bumped_version`, `…encodes_canonical_zaux_bytes` |
 | Glk file VFS sidecar | `default.glkvfs` | `gvm/src/glk.rs` `encode_files`/`decode_files` (path: `app/src/vfs_store.rs`) | `GVFS` magic + `u32` version `1` | Frozen (0.x) | `glk::tests::encode_files_roundtrips_and_skips_temp`, `…decode_files_rejects_bumped_gvfs_version` |
 | Debug-coverage PC set | `default.pcs` | `app/src/pcset_store.rs` | `ZPCS` magic + `VERSION = 1` | Frozen (0.x) | `pcset_store::tests::version_constant_is_frozen`, `…decode_rejects_bumped_version`, `…codec_round_trips` |
@@ -66,6 +66,22 @@ Pre-beta there is still **no obligation to read old files** (see the standing
   to `"hoststate"`, which is what every archive written before the bump actually
   was), but a v5 archive is rejected by older builds, as the freeze machinery
   intends. Bare `.qzl`/`.glksave` interchange files are untouched.
+
+- **`.babelmap` archive 5 → 6 (SQ-0588).** A v6 (graphical Z-machine) archive now
+  carries `display.json` — each graphics window's DISPLAY LIST plus the Blorb §11.3
+  Current Palette it was drawn under — and **omits** `pictures/win-N.png` for every
+  window whose replay reproduced the live canvas at save time. Storing what the story
+  drew, rather than a picture of the result, is what lets restored art follow a later
+  palette change: a canvas restored as pixels cannot be recoloured, only a replay of
+  its ops under the new palette can.
+  *Accepted break, no migration:* a pre-6 archive still loads and restores exactly as
+  before (no `display.json` → the canvas PNGs are used, and those windows are not
+  replayable, so their colours stay as saved — there are no ops to migrate). A v6
+  archive is rejected by older builds, which matters more here than usual: an older
+  build would find neither a PNG nor a list it understands for the omitted windows and
+  would restore them **blank**. `pictures/win-N.png` remains as the per-window
+  fallback, written whenever the save-time self-check finds that a window's recorded
+  ops do not rebuild it.
 
 ## Notes on identity vs. version
 

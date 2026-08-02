@@ -476,10 +476,9 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                                     app::session::restore_screen(&mut zs.machine, scr);
                                 }
                             }
-                            // v6 graphics canvases (Lane P): no-op for non-v6 archives.
-                            if let Some(zs) = zvm_session_opt_mut(&mut *session) {
-                                zs.load_pictures_png(&ac.pictures);
-                            }
+                            // The v6 screen: display list where the archive has one
+                            // (SQ-0588), else canvas PNGs. No-op for non-v6 archives.
+                            crate::engine_helpers::apply_v6_pictures(&mut *session, &ac);
                             // Hand Glulx back the room it was saved in (SQ-0523);
                             // no-op for zvm.
                             crate::engine_helpers::seed_resumed_location(&mut *session, &ac.meta);
