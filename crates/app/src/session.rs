@@ -2353,6 +2353,74 @@ impl Engine for GameSession {
         }
     }
 
+    /// `/dump-windows` for the Z-machine. The trait's default describes the v1–5
+    /// shape — one grid over one buffer — which tells you nothing about a v6 story:
+    /// its model is a LAYERED composite of up to eight windows, so the default
+    /// printed "Grid 0x0 over Buffer" no matter what was on screen. Dump the real
+    /// v6 window table beside what the model made of each window, since a defect is
+    /// usually a disagreement between those two.
+    fn window_dump(&self) -> Vec<String> {
+        let Some(v6) = self.machine.screen.v6.as_ref() else {
+            let model = self.screen();
+            let (gc, gr) = model.grid().map(|g| (g.cols, g.active_rows)).unwrap_or((0, 0));
+            return vec![format!(
+                "Window layout: Grid {gc}x{gr} over Buffer (Z-machine v{})",
+                self.machine.mem.version()
+            )];
+        };
+        let model = self.screen();
+        let nodes: Vec<(u16, u16, u16, u16, String)> = match &model.root {
+            WinNode::Layered(items) => items
+                .iter()
+                .map(|pw| {
+                    let kind = match &pw.node {
+                        WinNode::Buffer(b) if b.primary => "Buffer(story)".to_string(),
+                        WinNode::Buffer(b) => format!("Buffer(panel, {} lines)", b.lines.len()),
+                        WinNode::Grid(g) => format!(
+                            "Grid({} runs{})",
+                            g.px_texts.len(),
+                            if g.fill.is_some() { ", erased" } else { "" }
+                        ),
+                        WinNode::Graphics(_) => "Graphics".to_string(),
+                        _ => "?".to_string(),
+                    };
+                    (pw.x_px, pw.y_px, pw.w_px, pw.h_px, kind)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        let mut out = vec![format!(
+            "v6 window layout: current={}, input window={}, {} in the model",
+            v6.current,
+            self.machine.v6_input_window,
+            nodes.len(),
+        )];
+        for (i, w) in v6.windows.iter().enumerate() {
+            if w.x_size == 0 && w.y_size == 0 && w.texts.is_empty() && w.prose.is_empty() {
+                continue;
+            }
+            out.push(format!(
+                "  win{i}: {}x{} at ({},{})  attrs={:04b} [{}{}{}{}]  runs={} prose={}{}",
+                w.x_size,
+                w.y_size,
+                w.x_coord,
+                w.y_coord,
+                w.attributes,
+                if w.wrapping() { "wrap " } else { "" },
+                if w.scrolling() { "scroll " } else { "" },
+                if w.copy_to_transcript() { "transcript " } else { "" },
+                if w.attributes & 0b1000 != 0 { "buffered" } else { "" },
+                w.texts.len(),
+                w.prose.len(),
+                if v6.current as usize == i { "  <- current" } else { "" },
+            ));
+        }
+        for (x, y, w, h, kind) in nodes {
+            out.push(format!("  model: {w}x{h} at ({x},{y})  {kind}"));
+        }
+        out
+    }
+
     fn save_state(&self) -> EngineSave {
         EngineSave::new(ZMACHINE_ENGINE, ZMACHINE_SAVE_FORMAT, self.machine.save_quetzal())
     }
