@@ -138,17 +138,22 @@ pub(crate) fn dispatch_slash_outcome(
             // half the device pixels the terminal actually paints (the same mismatch
             // that keeps pixel-precise mouse reporting switched off, see startup.rs).
             // Compare `implies` against the real window size to tell which.
-            let (cw, ch, src) = match state.game_picker.as_ref() {
+            let (raw_w, raw_h, src) = match state.game_picker.as_ref() {
                 Some(p) => {
                     let f = p.font_size();
-                    (f.width as u32, f.height as u32, "terminal-reported (logical points)")
+                    (f.width as u32, f.height as u32, "terminal-reported")
                 }
                 None => (8, 16, "FALLBACK — no image protocol, real font size unknown"),
             };
+            // What the game actually sees, after SQ-0593 scaling. Reporting the raw
+            // terminal value alone was misleading the moment the divisor existed.
+            let scale = state.config.glk_pixel_scale.resolve(raw_h);
+            let (cw, ch) = ((raw_w / scale).max(1), (raw_h / scale).max(1));
             state.push_transcript_internal(
                 &format!(
-                    "  cell size reported to the game: {cw}x{ch} px — {src}; pane {}x{} cells \
-                     implies {}x{} px",
+                    "  cell size: terminal says {raw_w}x{raw_h} px ({src}), glk_pixel_scale \
+                     divides by {scale} → game sees {cw}x{ch}; pane {}x{} cells implies {}x{} px \
+                     to the game",
                     story_rect.width, story_rect.height,
                     cw * story_rect.width as u32, ch * story_rect.height as u32
                 ),

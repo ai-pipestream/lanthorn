@@ -203,6 +203,22 @@ const INTERPRETER: &[Row] = &[
         ],
     ),
     d(
+        "glk_pixel_scale",
+        "\"auto\"",
+        &[
+            "How the pixel sizes a Glulx game asks for are scaled to your terminal.",
+            "A Glk game sizes its graphics windows in pixels chosen against a normal",
+            "screen (advent.blb wants a ~36px toolbar). On a HiDPI display, or with a",
+            "large font, a character cell is twice as tall, so that request buys half",
+            "the rows and the game's artwork shrinks against the text beside it.",
+            "  \"auto\" — divide by cell height / 14, so artwork keeps its proportions",
+            "  1      — report the cell size unchanged (pre-0.1 behaviour)",
+            "  2, 3…  — pin the divisor yourself",
+            "Only affects Glulx: v6 Z-machine and Scott Adams lay out on their own",
+            "fixed canvas, which babelmap scales into the pane already.",
+        ],
+    ),
+    d(
         "v6_render",
         "\"hybrid\"",
         &[

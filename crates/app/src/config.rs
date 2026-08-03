@@ -377,6 +377,80 @@ pub enum AuxStorage {
     Global,
 }
 
+/// How many device pixels the host reports per "pixel" a Glulx game asks for
+/// (SQ-0593).
+///
+/// TOML: `glk_pixel_scale = "auto"` (default) or an integer like `1` or `2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GlkPixelScale {
+    /// Derive it from the terminal's cell height (see [`GlkPixelScale::resolve`]).
+    #[default]
+    Auto,
+    /// Report the cell size divided by exactly this, whatever the terminal says.
+    Fixed(u32),
+}
+
+/// Accepts `"auto"` or a bare integer. A derived `untagged` impl cannot do this — an
+/// untagged unit variant matches null, not the string `"auto"` — so the two shapes are
+/// spelled out.
+impl<'de> serde::Deserialize<'de> for GlkPixelScale {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Num(u32),
+            Str(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::Num(n) => Ok(GlkPixelScale::Fixed(n)),
+            Raw::Str(s) if s.eq_ignore_ascii_case("auto") => Ok(GlkPixelScale::Auto),
+            // A quoted number is a natural thing to write and costs nothing to accept.
+            Raw::Str(s) => s.trim().parse::<u32>().map(GlkPixelScale::Fixed).map_err(|_| {
+                serde::de::Error::custom(format!(
+                    "glk_pixel_scale must be \"auto\" or a positive integer, got {s:?}"
+                ))
+            }),
+        }
+    }
+}
+
+/// A conventional terminal cell height in device pixels, and the yardstick `Auto`
+/// measures against. It is what an unscaled 1x display reports for a normal font, so
+/// `Auto` resolves to 1 there and changes nothing.
+pub const REFERENCE_CELL_PX: u32 = 14;
+
+impl GlkPixelScale {
+    /// The divisor to apply to the terminal's reported cell size before handing it to
+    /// a Glulx game.
+    ///
+    /// A Glk game sizes its graphics windows in PIXELS, and those requests are
+    /// constants its author picked against a conventional screen — advent.blb asks for
+    /// a ~36px toolbar. The terminal reports its cell size in DEVICE pixels, so on a 2x
+    /// display a cell is 28px rather than 14 and that same request buys two text rows
+    /// instead of three: the game's artwork drops to two thirds its intended height
+    /// while the text beside it is unchanged.
+    ///
+    /// Dividing by cell height over [`REFERENCE_CELL_PX`] restores the proportion.
+    /// Deliberately NOT the display's DPI scale: a large font on an unscaled display
+    /// produces exactly the same complaint while reporting no unusual DPI, and reading
+    /// the real scale would need a separate platform path for each Linux compositor,
+    /// macOS and Windows. The cell size is what actually determines the mismatch, and
+    /// every terminal reports it.
+    ///
+    /// Never below 1 — a cell SMALLER than the reference must not magnify a game's
+    /// pixel space, which would push its windows off the screen.
+    pub fn resolve(self, cell_px_h: u32) -> u32 {
+        match self {
+            GlkPixelScale::Fixed(n) => n.max(1),
+            // Nearest, so a 20px cell (1.43x) resolves to 1: only a cell at least 1.5x
+            // the reference counts as scaled.
+            GlkPixelScale::Auto => {
+                ((cell_px_h as f32 / REFERENCE_CELL_PX as f32).round() as u32).max(1)
+            }
+        }
+    }
+}
+
 /// How the v6 graphical story pane is rendered.
 ///
 /// TOML: `v6_render = "hybrid"` (default), `"raster"`, or `"frameless"`.
@@ -527,6 +601,11 @@ pub struct Config {
     /// How the v6 graphical story pane is rendered. Default: Hybrid.
     #[serde(default)]
     pub v6_render: V6RenderMode,
+    /// Divisor applied to the terminal's reported cell size before a Glulx game
+    /// sees it, so a game's fixed pixel sizes keep their proportions on a scaled
+    /// display or with a large font (SQ-0593). Default: Auto.
+    #[serde(default)]
+    pub glk_pixel_scale: GlkPixelScale,
     /// When true (default), forward arrow keypresses to a v6 story as ZSCII
     /// cursor codes (129-132). Some v6 games bind arrows to movement; set false
     /// (or `--no-v6-arrows`) to withhold them so arrows drive app-side
@@ -679,6 +758,7 @@ impl Default for Config {
             background_tidy: BackgroundTidy::EveryRoom,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
+            glk_pixel_scale: GlkPixelScale::Auto,
             v6_arrow_keys: true,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
@@ -787,6 +867,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.background_tidy = from_file.background_tidy;
             cfg.aux_storage = from_file.aux_storage;
             cfg.v6_render = from_file.v6_render;
+            cfg.glk_pixel_scale = from_file.glk_pixel_scale;
             cfg.v6_arrow_keys = from_file.v6_arrow_keys;
             cfg.keymap = from_file.keymap;
             cfg.hotkeys = from_file.hotkeys;
@@ -964,6 +1045,11 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
         V6RenderMode::Frameless => "frameless",
     };
     put(&mut doc, "v6_render", v6_str.into(), cfg.v6_render == def.v6_render);
+    let scale_val: toml_edit::Value = match cfg.glk_pixel_scale {
+        GlkPixelScale::Auto => "auto".into(),
+        GlkPixelScale::Fixed(n) => (n as i64).into(),
+    };
+    put(&mut doc, "glk_pixel_scale", scale_val, cfg.glk_pixel_scale == def.glk_pixel_scale);
     put(&mut doc, "v6_arrow_keys", cfg.v6_arrow_keys.into(), cfg.v6_arrow_keys == def.v6_arrow_keys);
     put(&mut doc, "show_room_numbers", cfg.show_room_numbers.into(), cfg.show_room_numbers == def.show_room_numbers);
     put(&mut doc, "show_status_bar", cfg.show_status_bar.into(), cfg.show_status_bar == def.show_status_bar);
@@ -1316,6 +1402,40 @@ use_defaults = false
         assert_eq!(c.aux_storage, AuxStorage::Global);
     }
 
+    /// The rule advent.blb's toolbar needs (SQ-0593): a cell at the reference height
+    /// changes nothing, a 2x-scaled cell halves the game's pixel space back to it.
+    #[test]
+    fn glk_pixel_scale_auto_tracks_the_cell_height() {
+        use GlkPixelScale::*;
+        assert_eq!(Auto.resolve(14), 1, "the reference cell is unscaled");
+        assert_eq!(Auto.resolve(28), 2, "a 2x display halves the reported pixel space");
+        assert_eq!(Auto.resolve(42), 3, "and 3x thirds it");
+        // Nearest, not ceil: a merely largish cell is not a scaled display, and
+        // dividing there would shrink artwork on an ordinary 1x terminal.
+        assert_eq!(Auto.resolve(17), 1, "17px is a normal cell, not a scaled one");
+        assert_eq!(Auto.resolve(20), 1, "20px (1.43x) still resolves to 1");
+        assert_eq!(Auto.resolve(21), 2, "1.5x is where scaling begins");
+        // A cell SMALLER than the reference must never magnify the game's pixel
+        // space — that would push its windows off the screen.
+        assert_eq!(Auto.resolve(7), 1, "a small cell never magnifies");
+        assert_eq!(Auto.resolve(1), 1);
+        assert_eq!(Auto.resolve(0), 1, "a nonsense cell size is still safe");
+        // Fixed overrides the derivation, but never to 0 (a division by it follows).
+        assert_eq!(Fixed(3).resolve(14), 3);
+        assert_eq!(Fixed(0).resolve(28), 1, "0 would divide by zero downstream");
+    }
+
+    #[test]
+    fn glk_pixel_scale_defaults_to_auto_and_round_trips() {
+        assert_eq!(Config::default().glk_pixel_scale, GlkPixelScale::Auto);
+        let c: Config = toml::from_str("glk_pixel_scale = 2").unwrap();
+        assert_eq!(c.glk_pixel_scale, GlkPixelScale::Fixed(2));
+        let c: Config = toml::from_str("glk_pixel_scale = \"auto\"").unwrap();
+        assert_eq!(c.glk_pixel_scale, GlkPixelScale::Auto);
+        let c: Config = toml::from_str("").unwrap();
+        assert_eq!(c.glk_pixel_scale, GlkPixelScale::Auto, "absent is auto");
+    }
+
     #[test]
     fn v6_render_defaults_to_hybrid() {
         assert_eq!(Config::default().v6_render, V6RenderMode::Hybrid);
@@ -1376,6 +1496,7 @@ use_defaults = false
             background_tidy: BackgroundTidy::OnOverlap,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
+            glk_pixel_scale: GlkPixelScale::Auto,
             v6_arrow_keys: true,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),

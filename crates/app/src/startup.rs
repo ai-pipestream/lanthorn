@@ -219,6 +219,14 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             (f.width as u32, f.height as u32)
         })
         .unwrap_or((8, 16));
+    // SQ-0593: divide out the terminal's scale before the game sees it. A Glk game's
+    // graphics-window sizes are pixel constants its author picked against a
+    // conventional screen; a cell twice the reference height turns the same request
+    // into half the rows, shrinking the game's artwork against unchanged text. See
+    // `GlkPixelScale::resolve` for why this keys off the cell size rather than the
+    // display's DPI. No-op at `auto` on an unscaled display with a normal font.
+    let glk_scale = cfg.glk_pixel_scale.resolve(char_px.1);
+    let char_px = ((char_px.0 / glk_scale).max(1), (char_px.1 / glk_scale).max(1));
     // Pixel-precise mouse reporting (SQ-0563) is NOT switched on here. The probe
     // works — terminals answer "set" — but the cell size to divide the reported
     // pixels by does not: the Picker's `font_size` above is in logical points,
