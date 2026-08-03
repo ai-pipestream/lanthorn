@@ -244,7 +244,11 @@ impl GridWin {
 /// character, which matters here because a full-width panel row is now always
 /// emitted at full width rather than trimmed.
 fn append_grid(out: &mut String, g: &GridWin, _term_cols: u32, honor: bool, tty: bool) {
-    for (r, row) in g.cells.iter().enumerate() {
+    // `rect.height`, not `cells.len()`: the buffer only ever grows, so a grid
+    // that shrank — Counterfeit Monkey's status line doubles as its menu, going
+    // from one row to four and back — would otherwise keep repainting the rows
+    // it no longer owns, leaving the menu's legend stranded over the story text.
+    for (r, row) in g.cells.iter().take(g.rect.height as usize).enumerate() {
         let screen_row = g.rect.top + r as u32 + 1;
         let screen_col = g.rect.left + 1;
         out.push_str(&format!("\x1b[{screen_row};{screen_col}H"));
@@ -939,12 +943,21 @@ impl GlkBackend for TerminalBackend {
         }
         // Register every TextGrid at its rect (growing its cell buffer), and drop
         // grids that have closed. Rendering happens in redraw_chrome / grid_put.
+        // Rows any grid occupied before this layout. A grid that shrinks hands
+        // them to the scrolling buffer, which only ever appends at its cursor
+        // and so never repaints them — they must be erased here or the old
+        // content stays on screen (SQ-0603 follow-up).
+        let vacated: Vec<(u32, u32)> =
+            self.grids.iter().map(|g| (g.rect.top, g.rect.top + g.rect.height)).collect();
+
         let mut live: Vec<u32> = Vec::new();
         let mut live_bufs: Vec<u32> = Vec::new();
         for &(id, ty, rect, _) in wins {
             if ty == WinType::TextGrid {
                 let idx = self.grid_index(id);
                 self.grids[idx].rect = rect;
+                // Drop cells past the new height so they cannot be redrawn.
+                self.grids[idx].cells.truncate(rect.height as usize);
                 self.grids[idx].ensure(rect.height, rect.width);
                 live.push(id);
             } else if ty == WinType::TextBuffer {
@@ -964,6 +977,24 @@ impl GlkBackend for TerminalBackend {
 
         if !self.is_tty {
             return; // piped: no geometry chrome, output stays byte-identical
+        }
+
+        // Erase rows a grid has given up.
+        let still_grid = |row: u32, grids: &[GridWin]| {
+            grids.iter().any(|g| row >= g.rect.top && row < g.rect.top + g.rect.height)
+        };
+        let mut erase = String::new();
+        for (top, bottom) in vacated {
+            for row in top..bottom {
+                if !still_grid(row, &self.grids) {
+                    erase.push_str(&format!("\x1b[{};1H\x1b[2K", row + 1));
+                }
+            }
+        }
+        if !erase.is_empty() {
+            erase.insert_str(0, "\x1b7");
+            erase.push_str("\x1b8");
+            let _ = self.out.write_all(erase.as_bytes());
         }
 
         // Clear the screen once, on the first layout that establishes any chrome.
@@ -1030,7 +1061,31 @@ impl GlkBackend for TerminalBackend {
             self.buffers[idx].lines = vec![Vec::new()];
             self.buffers[idx].pending.clear();
             self.redraw_chrome();
+            return;
         }
+        // Streaming mode used to ignore this entirely, so a game that redraws a
+        // screen in place — Counterfeit Monkey's hint menu clears its window and
+        // reprints on every arrow key — appended each new copy below the last
+        // and scrolled the console instead of updating (SQ-0603 follow-up).
+        //
+        // Piped output is left alone: it has no cursor to move, and its
+        // byte-for-byte transcript is what the test harnesses read.
+        if !self.is_tty {
+            return;
+        }
+        self.flush_pending_word();
+        // The buffer's band is the scroll region when one is set, else the whole
+        // screen. `2K` erases with the active background, which the OSC 11 page
+        // colour has already made the game's own.
+        let (top, bottom) =
+            if self.region_set { self.region_bounds } else { (1, self.rows.max(1)) };
+        let mut out = String::new();
+        for r in top..=bottom {
+            out.push_str(&format!("\x1b[{r};1H\x1b[2K"));
+        }
+        out.push_str(&format!("\x1b[{top};1H"));
+        let _ = self.out.write_all(out.as_bytes());
+        self.current_col = 0;
     }
 
     fn window_tree(&mut self, tree: Option<WinTree>) {
@@ -1884,6 +1939,65 @@ mod tests {
         let out = out_string(&buf);
         let bg = "\x1b[48;2;16;32;48m";
         assert!(out.contains(&format!("{bg} \x1b[0m")), "the space is styled too: {out:?}");
+    }
+
+    /// SQ-0603 follow-up: streaming mode ignored `window_clear`, so a game that
+    /// redraws a screen in place — Counterfeit Monkey's hint menu clears its
+    /// window and reprints on every arrow key — appended each copy below the
+    /// last and scrolled the console instead of updating.
+    #[test]
+    fn clearing_a_streamed_window_erases_its_band() {
+        let (mut b, buf) = backend(true);
+        let grid = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 1 }, Some(true));
+        let story = (1u32, WinType::TextBuffer, Rect { left: 0, top: 1, width: 80, height: 23 }, Some(true));
+        b.window_layout(&[story, grid]);
+        b.put_text(1, GlkStyle::Normal, "old menu");
+        b.window_clear(1);
+        let out = out_string(&buf);
+        // The buffer's band is rows 2..=24; each is addressed and erased, and the
+        // cursor returns to the band's top so the redraw lands in place.
+        assert!(out.contains("\x1b[2;1H\x1b[2K"), "band top erased: {out:?}");
+        assert!(out.contains("\x1b[24;1H\x1b[2K"), "band bottom erased: {out:?}");
+        assert!(out.ends_with("\x1b[2;1H"), "cursor homes to the band top: {out:?}");
+    }
+
+    /// Piped output has no cursor to move and its byte-for-byte transcript is
+    /// what the harnesses read, so a clear must not inject escapes there.
+    #[test]
+    fn clearing_a_window_emits_nothing_when_piped() {
+        let (mut b, buf) = backend(false);
+        let story = (1u32, WinType::TextBuffer, Rect { left: 0, top: 0, width: 80, height: 24 }, Some(true));
+        b.window_layout(&[story]);
+        b.put_text(1, GlkStyle::Normal, "text");
+        b.window_clear(1);
+        let out = out_string(&buf);
+        assert_eq!(out, "text", "piped output stays byte-identical: {out:?}");
+    }
+
+    /// SQ-0603 follow-up: a grid that shrinks must stop painting the rows it gave
+    /// up, and those rows must be erased once. Counterfeit Monkey's status line
+    /// doubles as its menu — one row normally, four while the menu is open — so
+    /// on exit the menu's legend stayed stranded over the story text.
+    #[test]
+    fn a_shrinking_grid_stops_painting_and_erases_the_rows_it_gave_up() {
+        let (mut b, buf) = backend(true);
+        let tall = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 4 }, Some(true));
+        let story = (1u32, WinType::TextBuffer, Rect { left: 0, top: 5, width: 80, height: 19 }, Some(true));
+        b.window_layout(&[story, tall]);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "MENU");
+        b.grid_put(2, 0, 2, GlkStyle::Normal, "LEGEND");
+
+        // The menu closes: the same grid shrinks back to a single row.
+        let short = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 1 }, Some(true));
+        let grown = (1u32, WinType::TextBuffer, Rect { left: 0, top: 2, width: 80, height: 22 }, Some(true));
+        let before = out_string(&buf).len();
+        b.window_layout(&[grown, short]);
+        b.window_tree(None); // force a chrome redraw
+        let after = &out_string(&buf)[before..];
+
+        assert!(after.contains("\x1b[2;1H\x1b[2K"), "vacated row 2 is erased: {after:?}");
+        assert!(after.contains("\x1b[4;1H\x1b[2K"), "vacated row 4 is erased: {after:?}");
+        assert!(!after.contains("LEGEND"), "the shrunken grid stops painting its old rows: {after:?}");
     }
 
     #[test]
