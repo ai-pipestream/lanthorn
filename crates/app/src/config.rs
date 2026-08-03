@@ -383,8 +383,13 @@ pub enum AuxStorage {
 /// TOML: `glk_pixel_scale = "auto"` (default) or an integer like `1` or `2`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GlkPixelScale {
-    /// Derive it from the terminal's cell height (see [`GlkPixelScale::resolve`]).
+    /// Report the terminal's own cell size, unchanged. **The default**, because a
+    /// game's pixel constants can be too small OR too large for the screen it ends up
+    /// on, and only leaving them alone is safe for both (see [`GlkPixelScale::apply`]).
     #[default]
+    Native,
+    /// Normalise to a [`REFERENCE_CELL_PX`]-tall cell, so a game's artwork scales with
+    /// the text rather than holding a fixed pixel size.
     Auto,
     /// Report the cell size divided by exactly this, whatever the terminal says.
     Fixed(u32),
@@ -403,11 +408,12 @@ impl<'de> serde::Deserialize<'de> for GlkPixelScale {
         }
         match Raw::deserialize(d)? {
             Raw::Num(n) => Ok(GlkPixelScale::Fixed(n)),
+            Raw::Str(s) if s.eq_ignore_ascii_case("native") => Ok(GlkPixelScale::Native),
             Raw::Str(s) if s.eq_ignore_ascii_case("auto") => Ok(GlkPixelScale::Auto),
             // A quoted number is a natural thing to write and costs nothing to accept.
             Raw::Str(s) => s.trim().parse::<u32>().map(GlkPixelScale::Fixed).map_err(|_| {
                 serde::de::Error::custom(format!(
-                    "glk_pixel_scale must be \"auto\" or a positive integer, got {s:?}"
+                    "glk_pixel_scale must be \"native\", \"auto\" or a positive integer, got {s:?}"
                 ))
             }),
         }
@@ -444,11 +450,21 @@ impl GlkPixelScale {
     /// scaled 14px cell, i.e. a common Windows and GNOME default, so that cliff sat in
     /// the middle of real configurations.
     ///
-    /// `Fixed(n)` divides by `n` instead, an escape hatch for a game that dislikes the
-    /// normalisation; `Fixed(1)` reports the terminal's cell unchanged, the behaviour
-    /// before any of this existed. Never returns 0 on either axis.
+    /// **`Native` is the default, and normalisation is opt-in**, because the two
+    /// directions cannot both be satisfied. A game's pixel constants are chosen against
+    /// the screen its author had, and they land on both sides of ours: advent.blb wants
+    /// a 36px toolbar (too SMALL on a modern screen — normalising helps), while an
+    /// Inform 7 map sidebar asks for a fixed 722px (too LARGE — normalising to a 693px
+    /// screen makes it not fit, and Counterfeit Monkey's map stops being half the
+    /// screen). Whichever reference is chosen, one of those two breaks; leaving the
+    /// terminal's own cell alone is the only setting that is never actively wrong, so
+    /// it is what an unconfigured babelmap does.
+    ///
+    /// `Fixed(n)` divides by `n`, for pinning the trade-off manually. Never returns 0
+    /// on either axis.
     pub fn apply(self, cell: (u32, u32)) -> (u32, u32) {
         match self {
+            GlkPixelScale::Native => cell,
             GlkPixelScale::Fixed(n) => {
                 let n = n.max(1);
                 ((cell.0 / n).max(1), (cell.1 / n).max(1))
@@ -769,7 +785,7 @@ impl Default for Config {
             background_tidy: BackgroundTidy::EveryRoom,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
-            glk_pixel_scale: GlkPixelScale::Auto,
+            glk_pixel_scale: GlkPixelScale::Native,
             v6_arrow_keys: true,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
@@ -1057,6 +1073,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     };
     put(&mut doc, "v6_render", v6_str.into(), cfg.v6_render == def.v6_render);
     let scale_val: toml_edit::Value = match cfg.glk_pixel_scale {
+        GlkPixelScale::Native => "native".into(),
         GlkPixelScale::Auto => "auto".into(),
         GlkPixelScale::Fixed(n) => (n as i64).into(),
     };
@@ -1441,6 +1458,10 @@ use_defaults = false
 
         // Fixed is a plain divisor, and 1 restores the terminal's own cell.
         assert_eq!(Fixed(1).apply((14, 28)), (14, 28), "the author's literal pixels");
+        // Native is what an unconfigured babelmap does: hand the game exactly what the
+        // terminal reports, so no game's pixel constants are moved under it.
+        assert_eq!(Native.apply((14, 28)), (14, 28));
+        assert_eq!(Native.apply((7, 14)), (7, 14));
         assert_eq!(Fixed(2).apply((14, 28)), (7, 14));
         assert_eq!(Fixed(0).apply((14, 28)), (14, 28), "0 must not divide by zero");
         assert_eq!(Fixed(99).apply((14, 28)), (1, 1), "never reports a zero-size cell");
@@ -1461,14 +1482,21 @@ use_defaults = false
     }
 
     #[test]
-    fn glk_pixel_scale_defaults_to_auto_and_round_trips() {
-        assert_eq!(Config::default().glk_pixel_scale, GlkPixelScale::Auto);
+    fn glk_pixel_scale_defaults_to_native_and_round_trips() {
+        assert_eq!(
+            Config::default().glk_pixel_scale,
+            GlkPixelScale::Native,
+            "normalisation is OPT-IN: it fixes a game with too-small pixel constants \
+             and breaks one with too-large (SQ-0593)"
+        );
         let c: Config = toml::from_str("glk_pixel_scale = 2").unwrap();
         assert_eq!(c.glk_pixel_scale, GlkPixelScale::Fixed(2));
         let c: Config = toml::from_str("glk_pixel_scale = \"auto\"").unwrap();
         assert_eq!(c.glk_pixel_scale, GlkPixelScale::Auto);
+        let c: Config = toml::from_str("glk_pixel_scale = \"native\"").unwrap();
+        assert_eq!(c.glk_pixel_scale, GlkPixelScale::Native);
         let c: Config = toml::from_str("").unwrap();
-        assert_eq!(c.glk_pixel_scale, GlkPixelScale::Auto, "absent is auto");
+        assert_eq!(c.glk_pixel_scale, GlkPixelScale::Native, "absent is native");
     }
 
     #[test]
@@ -1531,7 +1559,7 @@ use_defaults = false
             background_tidy: BackgroundTidy::OnOverlap,
             aux_storage: AuxStorage::Ask,
             v6_render: V6RenderMode::Hybrid,
-            glk_pixel_scale: GlkPixelScale::Auto,
+            glk_pixel_scale: GlkPixelScale::Native,
             v6_arrow_keys: true,
             keymap: KeymapConfig::default(),
             hotkeys: HotkeysConfig::default(),
