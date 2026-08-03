@@ -2515,17 +2515,22 @@ impl AppState {
     /// Cycle keyboard focus one step forward (`forward = true`, Tab) or back
     /// (Shift-Tab). The stops are **per window**, not per sub-tab: the story
     /// pane, then — when the debug inspector is open — each of its windows in
-    /// turn (story → debug 0 → 1 → 2 → story). Without the inspector it toggles
-    /// story ↔ map when the map is visible, and stays on the story when the map
-    /// is hidden so Tab can't land on a hidden pane (SQ-0333).
+    /// turn (story → debug 0 → 1 → 2 → story). With the inspector closed there
+    /// is nowhere else to go and Tab does nothing.
+    ///
+    /// The map pane is deliberately NOT a stop (SQ-0599). It used to be, and
+    /// that made the same keystroke mean two different things depending on a
+    /// focus state with no obvious on-screen cue — press an arrow and you were
+    /// either editing the command line or panning the map, with nothing to say
+    /// which. The map is now driven entirely modelessly: Shift+Arrow pans and
+    /// the mouse does the rest, from wherever you are.
     pub fn cycle_focus(&mut self, forward: bool) {
-        // Focus stops after the story pane (position 0).
+        // Focus stops after the story pane (position 0) — the inspector's
+        // windows, and nothing else.
         let extra = if self.debug.is_some() {
             crate::debug_panel::WINDOW_TABS.len() // one stop per debug window
-        } else if self.layout == Layout::Split {
-            1 // the map pane
         } else {
-            0 // map hidden, no debug → story only
+            0
         };
         let total = extra + 1;
         let cur = match self.focus {
@@ -2543,17 +2548,16 @@ impl AppState {
         }
     }
 
-    /// Toggle the map panel on (`Split`) / off (`TranscriptFull`). Hiding the
-    /// map pulls focus back to the game so Tab can't land on a hidden pane
-    /// (SQ-0333).
+    /// Toggle the map panel on (`Split`) / off (`TranscriptFull`).
+    ///
+    /// No longer touches focus: since SQ-0599 the map is not a focus stop at
+    /// all, so hiding it cannot strand the keyboard on a hidden pane (the
+    /// SQ-0333 hazard this used to guard against).
     pub fn toggle_map(&mut self) {
         self.layout = match self.layout {
             Layout::Split => Layout::TranscriptFull,
             Layout::TranscriptFull => Layout::Split,
         };
-        if self.layout == Layout::TranscriptFull {
-            self.focus = Focus::Game;
-        }
     }
 
     /// Which panes are currently visible and eligible for resize mode, in
@@ -4358,19 +4362,37 @@ mod tests {
     }
 
     #[test]
-    fn toggle_map_flips_panel_and_pulls_focus_off_hidden_map() {
+    fn toggle_map_flips_the_panel_and_never_moves_focus() {
         let mut s = AppState::default();
         assert!(matches!(s.layout, Layout::Split));
-        // Focus the map, then hide it: focus must snap back to the game.
+        // SQ-0599: Tab does not reach the map, so focus is on the game before
+        // and after — there is no hidden-pane hazard left to guard against.
         s.toggle_focus();
-        assert!(matches!(s.focus, Focus::Map));
+        assert!(matches!(s.focus, Focus::Game), "Tab has nowhere to go without the inspector");
         s.toggle_map();
         assert!(matches!(s.layout, Layout::TranscriptFull));
-        assert!(matches!(s.focus, Focus::Game), "hiding the map pulls focus to the game");
-        // Toggle again: map returns; focus stays on the game (not auto-moved).
+        assert!(matches!(s.focus, Focus::Game));
         s.toggle_map();
         assert!(matches!(s.layout, Layout::Split));
         assert!(matches!(s.focus, Focus::Game));
+    }
+
+    /// The whole point of SQ-0599: with the inspector closed, Tab is inert and
+    /// every keystroke keeps going to the story. It used to hand the keyboard
+    /// to the map, silently changing what the next arrow key did.
+    #[test]
+    fn tab_does_not_hand_the_keyboard_to_the_map() {
+        let mut s = AppState::default();
+        assert!(matches!(s.layout, Layout::Split), "map is visible");
+        for _ in 0..4 {
+            s.toggle_focus();
+            assert!(matches!(s.focus, Focus::Game), "Tab must never land on the map pane");
+        }
+        // Shift-Tab likewise.
+        for _ in 0..4 {
+            s.cycle_focus(false);
+            assert!(matches!(s.focus, Focus::Game));
+        }
     }
 
     #[test]
@@ -4427,7 +4449,7 @@ mod tests {
         let mut s = AppState::default();
         assert!(matches!(s.focus, Focus::Game));
         s.toggle_focus();
-        assert!(matches!(s.focus, Focus::Map));
+        assert!(matches!(s.focus, Focus::Game), "no map focus stop (SQ-0599)");
         s.toggle_map();
         assert!(matches!(s.layout, Layout::TranscriptFull));
         s.toggle_map();

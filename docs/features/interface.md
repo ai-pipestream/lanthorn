@@ -24,12 +24,15 @@ inspecting the machine, and firing commands — without ever leaving the story.
   story pane's columns, so a drag never scoops up the map beside the text.
 - **Room inspector overlay** — id, name, layer, position, and the per-edge
   dropped-constraint flags, so you can see *why* the layout engine placed a room
-  where it did. **Tab** hands the keyboard to the map when you do want to step or
-  nudge rooms, and the panel stays open while you do.
-- **Pane focus** is always visibly highlighted. **Tab** / **Shift-Tab** step
-  keyboard focus through the panes — story pane ↔ map, and, when the debug
-  inspector is open, each of its windows in turn. Show or hide the map entirely
-  with `/toggle-map`.
+  where it did. `F6`–`F9` nudge rooms while it is open, and the panel stays open
+  while you do.
+- **The map never takes the keyboard.** Every keystroke goes to the story, so a
+  key always means the same thing — you never have to look at which pane is
+  "active" before pressing an arrow. The map is driven alongside your typing
+  instead: `Shift+Arrow` pans, the mouse pans/zooms/selects, and zoom and
+  centring live on the `Ctrl+P` leader panel's **Map** group. **Tab** / **Shift-Tab** are only
+  live when the debug inspector is open, where they step through its windows.
+  Show or hide the map entirely with `/toggle-map`.
 
 ## Debug inspector (Z-machine)
 
@@ -175,10 +178,11 @@ know which side you're on).
   forward to the end, and `Ctrl+W` deletes the word behind the caret — the same
   shortcuts your shell uses. Only live while you're actually typing a command
   (not mid-`read_char` prompt), so they never steal a keystroke the game expects.
-- **Keyboard map navigation** — arrow keys and `hjkl` pan the map (and `+`/`-`/`0`
-  zoom, `c` center) when it holds focus. **Shift+Arrow pans the map from either
-  focus** — story or map — and keeps panning *during the tidy animation*, where
-  the plain arrows step through the layout stages instead. During that animation
+- **Keyboard map navigation** — **Shift+Arrow pans the map** without leaving the
+  command line, and keeps panning *during the tidy animation*, where
+  the plain arrows step through the layout stages instead. Zoom (`+`/`-`/`0`)
+  and centring (`0`) are on the `Ctrl+P` leader panel's **Map** group; `F6`–`F9`
+  nudge the selected room. During that animation
   `Ctrl+←`/`Ctrl+→` jump a whole stage at a time. `Ctrl+Q` (or `Ctrl+C`) quits
   from anywhere, even mid-prompt.
 - **Inventory strip** — a toggleable strip of your carried items along the

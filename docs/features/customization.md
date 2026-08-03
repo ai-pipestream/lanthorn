@@ -143,20 +143,26 @@ switches that make babelmap feel like yours without opening the whole registry.
   a **reference panel** of frequent map-editing verbs, each on a **mnemonic
   single letter** — `t`idy, `a`nimate, `p`eel, `m`erge, `c`ycle-layer, `r`ename
   room, `n`otes, `d`elete connection, `e`dge relabel, `i`nventory, portal
-  `l`abels, `v`erb menu, `s`ettings, `h`istory, reset `g`ame — grouped as
-  Layout / Layers / Edit / View / Session. Pressing a letter runs the command and
+  `l`abels, `v`erb menu, `+`/`-` zoom, `0` centre map, `s`ettings, `h`istory,
+  reset `g`ame — grouped as
+  Layout / Layers / Edit / View / Map / Session. Pressing a letter runs the command and
   returns to normal — one keypress, then the panel closes (any unbound key or
   `q`/`Esc` just closes it; `q` is deliberately left unassigned so it closes).
   The long tail (exports, pane resizing, `rename-layer`, `toggle-map`,
   `toggle-inspector`, `toggle-alignment`, …) lives in the `/` command palette
   below rather than the panel. A small always-active set stays live outside the
-  panel and is advertised in the bottom hint bar: Tab (focus), `Ctrl+S`/`Ctrl+R`
-  (save/restore state), quit, and — in map focus — pan/zoom/select-room/center
-  navigation. Leader letters are set per group under `[[hotkeys.group]]` in
+  panel and is advertised in the bottom hint bar: `Ctrl+S`/`Ctrl+R`
+  (save/restore state), quit, `Shift+Arrow` to pan the map and `F6`–`F9` to nudge
+  a room — all of which work while you type, since the map never takes the
+  keyboard. Tab appears there only while the debug inspector is open, which is
+  the one thing it still steps through.
+  Leader letters are set per group under `[[hotkeys.group]]` in
   `config.toml` (`commands = ["t tidy-map", …]`; a bare `"tidy-map"` auto-assigns
   the first free letter), and the letter's color is themeable via the
   `hotkey_key` style selector. Direct key bindings
-  still live in `[keymap.global]`, `[keymap.map]`, and `[keymap.anim]` as
+  still live in `[keymap.global]`, `[keymap.map]` (reached only while the debug
+  inspector holds the right-hand pane; it ships no defaults of its own), and
+  `[keymap.anim]` as
   `"key" = "command args"` (each value a slash-command string the key runs); set
   `use_defaults = false` under `[keymap]` to clear the built-ins and define your
   own from scratch.

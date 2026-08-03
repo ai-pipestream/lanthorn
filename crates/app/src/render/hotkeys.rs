@@ -31,8 +31,11 @@ pub fn draw_hotkey_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
 
     // Target: at most 60 wide; tall enough for rows + chrome overhead.
     let panel_w = area.width.min(60);
-    // +2: border top/bottom; button row adds 1 more (draw_dialog subtracts it from content).
-    let panel_h = ((rows.len() as u16).saturating_add(2)).min(area.height);
+    // +3: border top/bottom, plus the button row `draw_dialog` carves out of the
+    // content area. Asking for only +2 left the content one row short of `rows`,
+    // so the panel silently dropped its last entry at EVERY terminal size — the
+    // final group's last command simply could not be seen.
+    let panel_h = ((rows.len() as u16).saturating_add(3)).min(area.height);
     if panel_w < 20 || panel_h < 4 {
         return None;
     }
@@ -84,7 +87,13 @@ pub fn draw_hotkey_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
             put_str(buf, content.x as i32, y as i32, key_part, key_style, content);
             let label_x = content.x + kw + 2;
             if label_x < content.right() {
-                draw_str_clipped(buf, label_x, y, label_part, label_style, content);
+                // Ellipsize rather than let a long label run into the border.
+                // The authored defaults are written to fit; a user-configured
+                // entry falls back to a registry description, which is a full
+                // sentence and routinely does not.
+                let avail = content.right().saturating_sub(label_x) as usize;
+                let shown = ellipsize(label_part, avail);
+                draw_str_clipped(buf, label_x, y, &shown, label_style, content);
             }
         } else {
             draw_str_clipped(buf, content.x, y, row, label_style, content);
@@ -94,22 +103,58 @@ pub fn draw_hotkey_dialog(state: &AppState, area: Rect, buf: &mut Buffer) -> Opt
     Some(rects)
 }
 
+/// Shorten `s` to at most `width` cells, ending in `…` when it had to be cut.
+fn ellipsize(s: &str, width: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= width {
+        return s.to_string();
+    }
+    match width {
+        0 => String::new(),
+        1 => "…".to_string(),
+        _ => chars[..width - 1].iter().collect::<String>() + "…",
+    }
+}
+
 /// Build text rows for the dialog panel.
 /// Section headings are prefixed with "##"; separators are "---".
+///
+/// No blank separator rows: one used to trail every group, costing a panel row
+/// each, and the panel silently drops any row past its bottom edge — so those
+/// blanks came straight out of the last group's visibility on a short terminal.
+/// Reclaiming them is what paid for the "Map" group (SQ-0599) without making
+/// the panel taller than it already was; the styled group headings separate the
+/// sections on their own.
 fn build_rows(state: &AppState) -> Vec<String> {
     let mut rows: Vec<String> = Vec::new();
 
-    for (title, cmds) in &state.hotkeys.groups {
+    for (title, cmds) in state.hotkeys.groups.iter() {
         rows.push(format!("## {title}"));
-        for (letter, cmd_str) in cmds {
+        for (letter, cmd_str, authored) in cmds {
             let key_label = letter.to_string();
-            let first = cmd_str.split_whitespace().next().unwrap_or(cmd_str.as_str());
-            let label = crate::slash::find_command(first)
+            let (first, args) = match cmd_str.split_once(char::is_whitespace) {
+                Some((c, a)) => (c, a.trim()),
+                None => (cmd_str.as_str(), ""),
+            };
+            let desc = crate::slash::find_command(first)
                 .map(|c| c.description)
                 .unwrap_or(cmd_str.as_str());
+            // An authored label wins: a registry description documents every
+            // argument form the *slash* command takes ("zoom the map in/out,
+            // reset, or step by signed n"), and a panel entry runs one fixed
+            // command with no way to pass an argument at all — so that text is
+            // both identical across sibling entries and untrue of each.
+            //
+            // Without one, an entry that carries arguments leads with them, so
+            // siblings at least differ; rows are clipped to the panel width, so
+            // the distinguishing word has to come first to survive the clip.
+            let label = match authored {
+                Some(l) => l.clone(),
+                None if args.is_empty() => desc.to_string(),
+                None => format!("{args} — {desc}"),
+            };
             rows.push(format!("{:<3} {}", key_label, label));
         }
-        rows.push("---".into());
     }
 
     rows
@@ -164,11 +209,9 @@ mod tests {
         let content = rects.content;
 
         // The tidy-map row is authored with leader letter 't'; find its row by
-        // locating the row whose content-area text contains tidy-map's unique
-        // registry description, then check the row's key column is 't'.
-        let tidy_desc = crate::slash::find_command("tidy-map")
-            .expect("tidy-map command should be registered")
-            .description;
+        // locating the row whose content-area text carries tidy-map's authored
+        // panel label, then check the row's key column is 't'.
+        let tidy_desc = "tidy the layout";
         let mut found_tidy_row = false;
         for y in content.y..content.bottom() {
             let mut line = String::new();
@@ -183,19 +226,74 @@ mod tests {
                 assert_eq!(key_cell.symbol(), "t", "expected authored letter 't' in the key column of the tidy row");
             }
         }
-        assert!(found_tidy_row, "expected a row containing tidy-map's description in the dialog content");
+        assert!(found_tidy_row, "expected a row containing tidy-map's panel label in the dialog content");
 
         // The old global-keymap chord label must not appear anywhere.
         let text = buf_text(&buf);
         assert!(!text.contains("^T"), "old chord label '^T' should not appear in the dialog");
 
-        // The Layers group's cycle-layer entry should show its real registry
-        // description, not the raw "cycle-layer next" command string.
-        let cycle_layer_desc = crate::slash::find_command("cycle-layer")
-            .expect("cycle-layer command should be registered")
-            .description;
-        assert!(text.contains(cycle_layer_desc), "expected cycle-layer's registry description in dialog");
+        // The Layers group's cycle-layer entry shows its authored panel label,
+        // not the raw "cycle-layer next" command string.
+        assert!(text.contains("next map layer"), "expected cycle-layer's panel label in dialog");
         assert!(!text.contains("cycle-layer next"), "raw command string should not be shown");
+    }
+
+    /// SQ-0599: every default entry's label has to fit the panel. They used to
+    /// be full registry sentences, which ran past the border and were cut
+    /// mid-word — and nothing showed that text had been lost.
+    #[test]
+    fn every_default_panel_label_fits_without_ellipsis() {
+        let mut state = AppState::default();
+        state.overlays.hotkey_dialog = true;
+        let area = Rect::new(0, 0, 100, 44);
+        let mut buf = Buffer::empty(area);
+        let rects = draw_hotkey_dialog(&state, area, &mut buf).expect("dialog draws");
+        let content = rects.content;
+
+        let mut rows = 0;
+        for y in content.y..content.bottom() {
+            let line: String = (content.x..content.right())
+                .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                .collect();
+            if line.trim().is_empty() {
+                continue;
+            }
+            rows += 1;
+            assert!(!line.contains('…'), "label clipped at the panel edge: {line:?}");
+        }
+        assert!(rows > 10, "the panel actually rendered its groups ({rows} rows)");
+
+        // Every group survives — nothing is pushed off the bottom at this size.
+        let text = buf_text(&buf);
+        for (title, _) in &state.hotkeys.groups {
+            assert!(text.contains(title.as_str()), "group {title:?} missing from the panel");
+        }
+    }
+
+    /// The panel sized itself for its rows plus the two borders but not the
+    /// button row `draw_dialog` carves out, so the very last entry was cut at
+    /// every terminal size — `reset-game` could not be seen at all.
+    #[test]
+    fn the_last_entry_of_the_last_group_is_visible() {
+        let mut state = AppState::default();
+        state.overlays.hotkey_dialog = true;
+        let (title, cmds) = state.hotkeys.groups.last().expect("a last group").clone();
+        let (key, _, label) = cmds.last().expect("a last entry").clone();
+        let label = label.expect("the default layout authors every label");
+
+        let area = Rect::new(0, 0, 100, 44);
+        let mut buf = Buffer::empty(area);
+        draw_hotkey_dialog(&state, area, &mut buf).expect("dialog draws");
+        let text = buf_text(&buf);
+        assert!(text.contains(&label), "last entry of {title:?} ('{key}' → {label:?}) was cut off");
+    }
+
+    #[test]
+    fn a_label_too_long_for_the_panel_is_ellipsized() {
+        assert_eq!(super::ellipsize("short", 20), "short");
+        assert_eq!(super::ellipsize("abcdefghij", 5), "abcd…");
+        assert_eq!(super::ellipsize("abc", 1), "…");
+        assert_eq!(super::ellipsize("abc", 0), "");
     }
 
     #[test]

@@ -39,7 +39,7 @@ use app::engine::Engine;
 use app::session::{apply_turn, TurnResult};
 use app::hints;
 use app::keymap::Context;
-use app::render::hintbar::{hint_bar, ANIM_HINTS, GAME_HINTS, MAP_HINTS};
+use app::render::hintbar::{hint_bar, ANIM_HINTS, GAME_HINTS};
 use app::slash;
 use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, RoomPanelMode, SavesState};
 
@@ -793,7 +793,17 @@ fn draw_frame(
             // row doesn't overflow help_row.width (mirrors the tidy_anim branch).
             let w = (pane_layout.help_row.width as usize).saturating_sub(leader_hint.chars().count() + 3);
             let rest = match state.focus {
-                Focus::Game => hint_bar(&state.keymap, &state.hotkeys, Context::Global, GAME_HINTS, w),
+                Focus::Game => {
+                    // Tab only leads somewhere while the inspector is open
+                    // (SQ-0599) — otherwise it is inert and must not be
+                    // advertised as a focus toggle.
+                    let hints: &[&str] = if state.debug.is_some() {
+                        GAME_HINTS
+                    } else {
+                        app::render::hintbar::GAME_HINTS_NO_INSPECTOR
+                    };
+                    hint_bar(&state.keymap, &state.hotkeys, Context::Global, hints, w)
+                }
                 Focus::Map if state.debug.is_some() => {
                     // Show the live disassembly mode in the `r:` hint entry.
                     let mode = state.debug.as_ref().map(|p| p.disasm_mode_label()).unwrap_or("full");
@@ -801,7 +811,10 @@ fn draw_frame(
                         .map(|&(k, v)| if k == "r" { ("r", mode) } else { (k, v) }).collect();
                     app::render::hintbar::literal_hint_bar(&hints, w)
                 }
-                Focus::Map => hint_bar(&state.keymap, &state.hotkeys, Context::Map, MAP_HINTS, w),
+                // Unreachable in practice: `Focus::Map` is only ever set while
+                // the inspector owns the right-hand pane (SQ-0599), which the
+                // arm above already handles.
+                Focus::Map => String::new(),
             };
             if rest.is_empty() {
                 leader_hint

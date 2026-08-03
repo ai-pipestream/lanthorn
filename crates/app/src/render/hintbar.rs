@@ -8,18 +8,20 @@ use crate::keymap::{Context, HotkeyLayout, KeyMap};
 /// Priority-ordered command-string lists for the bottom hint bar.
 /// Commands are included only when directly available in the current context.
 /// `tidy-map` is intentionally excluded from all lists.
+/// Story-pane hints while the debug inspector is open, so Tab has somewhere to
+/// go.
 pub const GAME_HINTS: &[&str] = &[
     "toggle-focus",
     "save-state",
     "restore-state",
 ];
 
-pub const MAP_HINTS: &[&str] = &[
-    "toggle-focus",
-    "pan-map -1 0",
-    "zoom-map in",
-    "select-room next",
-    "center-map",
+/// The ordinary story-pane hints. `toggle-focus` is deliberately absent: with
+/// the inspector closed the map is not a focus stop (SQ-0599), so Tab does
+/// nothing and advertising it would promise a mode that no longer exists.
+pub const GAME_HINTS_NO_INSPECTOR: &[&str] = &[
+    "save-state",
+    "restore-state",
 ];
 
 pub const ANIM_HINTS: &[&str] = &[
@@ -129,7 +131,7 @@ pub fn hint_bar(
 
 #[cfg(test)]
 mod tests {
-    use super::{hint_bar, literal_hint_bar, ANIM_HINTS, DEBUG_HINTS, GAME_HINTS, MAP_HINTS};
+    use super::{hint_bar, literal_hint_bar, ANIM_HINTS, DEBUG_HINTS, GAME_HINTS};
     use crate::keymap::{Context, HotkeyLayout, KeyMap};
 
     #[test]
@@ -146,28 +148,41 @@ mod tests {
     }
 
     #[test]
-    fn hint_line_map_contains_zoom_with_plus_key() {
+    fn hint_line_anim_contains_zoom_with_plus_key() {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
-        let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
+        let line = hint_bar(&km, &layout, Context::Anim, ANIM_HINTS, 200);
         // With default keymap: zoom-map in primary key is '+'; short label is "zoom map in".
         assert!(line.contains("+: zoom"), "expected '+: zoom' in '{line}'");
     }
 
     #[test]
-    fn map_hint_bar_excludes_dialog_only_commands() {
-        // Regression (#11): gallery/inspector/layout moved to the Ctrl+K dialog
+    fn hint_bar_excludes_dialog_only_commands() {
+        // Regression (#11): gallery/inspector/layout moved to the leader dialog
         // after the leader-key change; the hint bar must NOT advertise their dead
         // direct keys. The is_direct filter excludes them (they are dialog-only).
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
-        let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
+        let line = hint_bar(&km, &layout, Context::Anim, ANIM_HINTS, 200);
         assert!(!line.contains("gallery"), "must not advertise gallery (dialog-only): {line}");
         assert!(!line.contains("inspector"), "must not advertise inspector (dialog-only): {line}");
         assert!(!line.contains("hide the map"), "must not advertise toggle-map (dialog-only): {line}");
         // The working direct keys ARE present.
-        assert!(line.contains("Tab: toggle focus"), "focus toggle present: {line}");
         assert!(line.contains("+: zoom"), "zoom present: {line}");
+    }
+
+    /// SQ-0599: the story hint bar only offers Tab when the inspector gives it
+    /// somewhere to go. Advertising a focus toggle that does nothing is exactly
+    /// the invisible-mode confusion this change removed.
+    #[test]
+    fn the_story_hint_bar_offers_tab_only_with_the_inspector_open() {
+        let km = KeyMap::default();
+        let layout = HotkeyLayout::default();
+        let plain = hint_bar(&km, &layout, Context::Global, super::GAME_HINTS_NO_INSPECTOR, 200);
+        assert!(!plain.contains("toggle focus"), "no focus toggle without the inspector: {plain}");
+        assert!(plain.contains("save state"), "the real global keys are still shown: {plain}");
+        let with_inspector = hint_bar(&km, &layout, Context::Global, GAME_HINTS, 200);
+        assert!(with_inspector.contains("Tab: toggle focus"), "{with_inspector}");
     }
 
     #[test]
@@ -198,11 +213,11 @@ mod tests {
     fn hint_bar_never_contains_tidy() {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
-        let map_line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
+        let anim_line = hint_bar(&km, &layout, Context::Anim, ANIM_HINTS, 200);
         let game_line = hint_bar(&km, &layout, Context::Global, GAME_HINTS, 200);
         assert!(
-            !map_line.to_lowercase().contains("tidy") && !map_line.to_lowercase().contains("retidy"),
-            "map hint bar must not contain tidy/retidy; got: '{map_line}'"
+            !anim_line.to_lowercase().contains("tidy") && !anim_line.to_lowercase().contains("retidy"),
+            "anim hint bar must not contain tidy/retidy; got: '{anim_line}'"
         );
         assert!(
             !game_line.to_lowercase().contains("tidy") && !game_line.to_lowercase().contains("retidy"),
@@ -216,8 +231,8 @@ mod tests {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
         for (ctx, hints) in [
-            (Context::Map, MAP_HINTS),
             (Context::Global, GAME_HINTS),
+            (Context::Global, super::GAME_HINTS_NO_INSPECTOR),
             (Context::Anim, ANIM_HINTS),
         ] {
             for &cmd in hints {
@@ -247,8 +262,7 @@ mod tests {
         // Build a layout where zoom-map in is NOT direct (dialog-only), but toggle-focus IS.
         let mut direct: HashSet<String> = HashSet::new();
         direct.insert("toggle-focus".into());
-        direct.insert("center-map".into());
-        direct.insert("select-room next".into());
+        direct.insert("anim-play".into());
         // zoom-map in intentionally NOT in direct set.
         let layout = HotkeyLayout {
             prefix: "ctrl+k".parse().unwrap(),
@@ -256,15 +270,15 @@ mod tests {
             groups: vec![],
         };
         let km = KeyMap::default();
-        let bar = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
+        let bar = hint_bar(&km, &layout, Context::Anim, ANIM_HINTS, 200);
         assert!(
             !bar.contains("zoom"),
             "zoom-map in should be absent when not direct; got: '{bar}'"
         );
-        // toggle-focus IS direct, so it should appear.
+        // anim-play IS direct, so it should appear.
         assert!(
-            bar.contains("focus"),
-            "toggle-focus should still appear when direct; got: '{bar}'"
+            bar.contains("anim play"),
+            "anim-play should still appear when direct; got: '{bar}'"
         );
     }
 
@@ -273,7 +287,7 @@ mod tests {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
         // Use a very narrow width (10 chars) — the full bar is much longer.
-        let bar = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 10);
+        let bar = hint_bar(&km, &layout, Context::Anim, ANIM_HINTS, 10);
         let char_count = bar.chars().count();
         assert!(
             char_count <= 10,
@@ -290,7 +304,7 @@ mod tests {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
         // Use a very generous width — no truncation expected.
-        let bar = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 1000);
+        let bar = hint_bar(&km, &layout, Context::Anim, ANIM_HINTS, 1000);
         assert!(
             !bar.ends_with('…'),
             "bar should not be truncated at width=1000; got: '{bar}'"
@@ -301,10 +315,10 @@ mod tests {
     fn hint_bar_shows_short_registry_labels() {
         let km = KeyMap::default();
         let layout = HotkeyLayout::default();
-        let line = hint_bar(&km, &layout, Context::Map, MAP_HINTS, 200);
-        // center-map is direct and bound to 'c' in Map; its short label is "center map".
-        assert!(line.contains("center map"), "hint bar should show the short label 'center map', got: {line}");
+        let line = hint_bar(&km, &layout, Context::Anim, ANIM_HINTS, 200);
+        // zoom-map in is direct and bound to '+' in Anim; its short label is "zoom map in".
+        assert!(line.contains("zoom map in"), "hint bar should show the short label 'zoom map in', got: {line}");
         // The full description sentence must NOT appear.
-        assert!(!line.contains("re-center the map"), "hint bar must not show the long description");
+        assert!(!line.contains("zoom the map in/out"), "hint bar must not show the long description");
     }
 }

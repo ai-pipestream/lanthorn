@@ -219,37 +219,18 @@ impl Default for KeyMap {
         bind!(plain(F(9)), "nudge-room 0 1", Context::Global);
 
         // ── Map ───────────────────────────────────────────────────────────────
-        // Pan: plain arrows + hjkl + shift-arrows (three sets). Shift+Arrow pans
-        // in Map focus (SQ-0416): it mirrors the Game-focus shift-arrow pan so the
-        // same keystroke works whichever pane holds focus.
-        bind!(plain(Left), "pan-map -1 0", Context::Map);
-        bind!(plain(Right), "pan-map 1 0", Context::Map);
-        bind!(plain(Up), "pan-map 0 -1", Context::Map);
-        bind!(plain(Down), "pan-map 0 1", Context::Map);
-
-        bind!(g(Left, false, true), "pan-map -1 0", Context::Map);
-        bind!(g(Right, false, true), "pan-map 1 0", Context::Map);
-        bind!(g(Up, false, true), "pan-map 0 -1", Context::Map);
-        bind!(g(Down, false, true), "pan-map 0 1", Context::Map);
-
-        bind!(plain(Char('h')), "pan-map -1 0", Context::Map);
-        bind!(plain(Char('l')), "pan-map 1 0", Context::Map);
-        bind!(plain(Char('k')), "pan-map 0 -1", Context::Map);
-        bind!(plain(Char('j')), "pan-map 0 1", Context::Map);
-
-        // Zoom: + / = (shift(+) alias removed; plain alternatives cover it).
-        bind!(plain(Char('+')), "zoom-map in", Context::Map);
-        bind!(plain(Char('=')), "zoom-map in", Context::Map);
-        bind!(plain(Char('-')), "zoom-map out", Context::Map);
-        // '0' (zero) resets zoom to default (Boxes) and clears char-pan offset.
-        bind!(plain(Char('0')), "zoom-map reset", Context::Map);
-
-        // Map commands
-        bind!(plain(Char('c')), "center-map", Context::Map);
-        bind!(plain(Char('n')), "select-room next", Context::Map);
-        bind!(plain(Char('p')), "select-room prev", Context::Map);
-        // Esc → toggle-focus (in map context)
-        bind!(plain(Esc), "toggle-focus", Context::Map);
+        // Deliberately EMPTY of defaults since SQ-0599. `Context::Map` used to
+        // carry the map pane's own key set — plain arrows/hjkl to pan, +/-/0 to
+        // zoom, c/n/p to centre and select — reachable only while the map held
+        // the keyboard. That focus mode is gone: the same keystroke meaning two
+        // different things with no on-screen cue was the whole complaint.
+        //
+        // The context itself stays, because `[keymap.map]` is a documented
+        // config surface and a user may still bind to it; it is now reached
+        // only while the debug inspector holds the right-hand pane. Everything
+        // the map needs is modeless instead — Shift+Arrow pans from anywhere
+        // (see `game_key_to_action`), the mouse pans/zooms/selects, and zoom
+        // and centring live in the leader panel's "Map" group below.
 
         // ── Anim ──────────────────────────────────────────────────────────────
         // Pan in anim: hjkl + shift-arrows. Plain arrows step the animation stage,
@@ -380,13 +361,44 @@ const DEFAULT_DIRECT_COMMANDS: &[&str] = &[
 /// unassigned so a bare `q` closes the dialog (universal quit/close convention).
 /// The long tail (exports, rename-layer, toggle-map, toggle-inspector,
 /// toggle-alignment, pane sizing, …) is reachable through the `/` command palette.
-const DEFAULT_GROUPS: &[(&str, &[(char, &str)])] = &[
-    ("Layout", &[('t', "tidy-map"), ('a', "animate-tidy")]),
-    ("Layers", &[('p', "peel-layer"), ('m', "merge-layer"), ('c', "cycle-layer next")]),
-    ("Edit", &[('r', "rename-room"), ('n', "edit-notes"), ('d', "delete-connection"), ('e', "relabel-edge")]),
-    ("View", &[('i', "toggle-inventory"), ('l', "toggle-portal-labels"), ('v', "open-verb-menu"), ('u', "toggle-untried-exits")]),
-    ("Session", &[('s', "open-config"), ('h', "open-history"), ('g', "reset-game")]),
+/// Entries are `(leader letter, command-string, panel label)`. An empty label
+/// falls back to the slash command's own description.
+///
+/// Every default entry carries a label, for two reasons. A registry description
+/// documents every argument form the *slash* command accepts ("zoom the map
+/// in/out, reset, or step by signed n") — identical across sibling entries and
+/// untrue of each, since a panel entry runs one fixed command and cannot take
+/// an argument. And descriptions are written as full sentences that run well
+/// past the panel's width, so they were being cut off mid-word at the border.
+/// These are sized to fit: keep them short enough to survive the panel's
+/// 60-column cap (see `render::hotkeys`).
+/// One authored default entry: `(leader letter, command-string, panel label)`.
+type DefaultEntry = (char, &'static str, &'static str);
+/// One authored default group: title plus its entries.
+type DefaultGroup = (&'static str, &'static [DefaultEntry]);
+
+const DEFAULT_GROUPS: &[DefaultGroup] = &[
+    ("Layout", &[('t', "tidy-map", "tidy the layout"), ('a', "animate-tidy", "animate a tidy pass")]),
+    ("Layers", &[('p', "peel-layer", "peel region into a new layer"), ('m', "merge-layer", "merge layer down"), ('c', "cycle-layer next", "next map layer")]),
+    ("Edit", &[('r', "rename-room", "rename room"), ('n', "edit-notes", "edit room notes"), ('d', "delete-connection", "delete connection"), ('e', "relabel-edge", "relabel edge")]),
+    ("View", &[('i', "toggle-inventory", "inventory strip"), ('l', "toggle-portal-labels", "portal labels"), ('v', "open-verb-menu", "verb/item palette"), ('u', "toggle-untried-exits", "mark untried exits")]),
+    // SQ-0599: zoom and centring used to be plain +/- and c while the map held
+    // the keyboard. With that focus mode gone they would otherwise be
+    // mouse-only, so they live here — on the keys they always used, which keeps
+    // the muscle memory intact now that a leader press precedes them.
+    ("Map", &[('+', "zoom-map in", "zoom in"), ('-', "zoom-map out", "zoom out"), ('0', "center-map", "centre on selection")]),
+    ("Session", &[('s', "open-config", "settings"), ('h', "open-history", "rewind/replay history"), ('g', "reset-game", "restart game")]),
 ];
+
+/// One leader-panel entry: `(leader letter, command-string, optional label)`.
+///
+/// The label overrides the command's registry description when the panel draws
+/// the row; `None` falls back to that description. See [`DEFAULT_GROUPS`] for
+/// why an override is needed at all.
+pub type HotkeyEntry = (char, String, Option<String>);
+
+/// One leader-panel group: its title plus its entries.
+pub type HotkeyGroup = (String, Vec<HotkeyEntry>);
 
 /// Runtime layout for the hotkey dialog.
 ///
@@ -400,7 +412,8 @@ pub struct HotkeyLayout {
     /// Full command-strings that are always available without opening the dialog.
     pub direct: std::collections::HashSet<String>,
     /// Groups of commands shown in the dialog: (group title, [(leader letter, command-string)]).
-    pub groups: Vec<(String, Vec<(char, String)>)>,
+    /// The panel's groups. See [`HotkeyEntry`] and [`DEFAULT_GROUPS`].
+    pub groups: Vec<HotkeyGroup>,
 }
 
 impl Default for HotkeyLayout {
@@ -413,7 +426,14 @@ impl Default for HotkeyLayout {
         let groups = DEFAULT_GROUPS
             .iter()
             .map(|(title, entries)| {
-                (title.to_string(), entries.iter().map(|(letter, cmd)| (*letter, cmd.to_string())).collect())
+                let entries = entries
+                    .iter()
+                    .map(|(letter, cmd, label)| {
+                        let label = (!label.is_empty()).then(|| label.to_string());
+                        (*letter, cmd.to_string(), label)
+                    })
+                    .collect();
+                (title.to_string(), entries)
             })
             .collect();
 
@@ -454,11 +474,13 @@ impl HotkeyLayout {
 
         // Override groups if any are specified.
         if !cfg.group.is_empty() {
-            let mut groups: Vec<(String, Vec<(char, String)>)> = Vec::new();
+            let mut groups: Vec<HotkeyGroup> = Vec::new();
             let mut used_letters: std::collections::HashSet<char> = std::collections::HashSet::new();
 
             for g in &cfg.group {
-                let mut cmds: Vec<(char, String)> = Vec::new();
+                // User-authored entries carry no label — the panel falls back
+                // to each command's registry description for them.
+                let mut cmds: Vec<HotkeyEntry> = Vec::new();
                 for entry in &g.commands {
                     let tokens: Vec<&str> = entry.split_whitespace().collect();
                     if tokens.is_empty() {
@@ -496,7 +518,7 @@ impl HotkeyLayout {
                         continue;
                     }
                     used_letters.insert(letter);
-                    cmds.push((letter, cmd));
+                    cmds.push((letter, cmd, None));
                 }
                 groups.push((g.title.clone(), cmds));
             }
@@ -510,8 +532,8 @@ impl HotkeyLayout {
     pub fn leader_command(&self, key: char) -> Option<&str> {
         self.groups.iter()
             .flat_map(|(_, cmds)| cmds.iter())
-            .find(|(letter, _)| *letter == key)
-            .map(|(_, cmd)| cmd.as_str())
+            .find(|(letter, _, _)| *letter == key)
+            .map(|(_, cmd, _)| cmd.as_str())
     }
 
     /// Check whether a full keymap command-string resolves to a direct command.
@@ -552,14 +574,39 @@ mod tests {
         let g = |code, ctrl, shift| KeySpec { code, ctrl, shift, alt: false };
         use KeyCode::*;
         assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Global), Some("save-state"));
-        assert_eq!(km.lookup(&g(Char('n'), false, false), Context::Map), Some("select-room next"));
-        assert_eq!(km.lookup(&g(Char('h'), false, false), Context::Map), Some("pan-map -1 0"));
         // Map falls through to Global:
         assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Map), Some("save-state"));
-        // plain arrow pans:
-        assert_eq!(km.lookup(&g(Left, false, false), Context::Map), Some("pan-map -1 0"));
-        // shift-arrow also pans in Map context (SQ-0416):
-        assert_eq!(km.lookup(&g(Left, false, true), Context::Map), Some("pan-map -1 0"));
+    }
+
+    /// SQ-0599: the map pane no longer takes the keyboard, so the key set that
+    /// only worked while it held focus is gone. These keys are ordinary typing
+    /// now — a bare `h` belongs in the command line, not panning the map.
+    #[test]
+    fn the_map_context_ships_no_default_bindings() {
+        let km = KeyMap::default();
+        let g = |code, ctrl, shift| KeySpec { code, ctrl, shift, alt: false };
+        use KeyCode::*;
+        for spec in [
+            g(Char('h'), false, false),
+            g(Char('j'), false, false),
+            g(Char('n'), false, false),
+            g(Char('p'), false, false),
+            g(Char('c'), false, false),
+            g(Char('+'), false, false),
+            g(Char('-'), false, false),
+            g(Char('0'), false, false),
+            g(Left, false, false),
+            g(Esc, false, false),
+        ] {
+            assert_eq!(
+                km.lookup(&spec, Context::Map),
+                None,
+                "{spec:?} must not be a map-context default any more"
+            );
+        }
+        // Global bindings still reach through the map context's fallthrough.
+        assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Map), Some("save-state"));
+        assert_eq!(km.lookup(&g(F(6), false, false), Context::Map), Some("nudge-room -1 0"));
     }
 
     // ── HotkeyLayout tests ────────────────────────────────────────────────────
@@ -575,7 +622,7 @@ mod tests {
         assert!(!layout.is_direct_name("tidy-map"), "tidy-map should NOT be direct");
         assert!(!layout.is_direct_name("open-config"), "open-config should NOT be direct");
         // Groups
-        assert_eq!(layout.groups.len(), 5, "default layout should have 5 groups");
+        assert_eq!(layout.groups.len(), 6, "default layout should have 6 groups");
         assert_eq!(layout.groups[0].0, "Layout", "first group title should be Layout");
     }
 
@@ -735,14 +782,23 @@ mod tests {
 
     // ── Item 2: ZoomReset command wiring ─────────────────────────────────────
 
+    /// Zoom and centring kept their keys but moved behind the leader (SQ-0599):
+    /// the map pane no longer takes focus, so a bare `0` is typing, and these
+    /// commands would otherwise be mouse-only.
     #[test]
-    fn zoom_reset_bound_to_zero_key() {
+    fn zoom_and_centre_are_reachable_through_the_leader_panel() {
+        let layout = HotkeyLayout::default();
+        assert_eq!(layout.leader_command('+'), Some("zoom-map in"));
+        assert_eq!(layout.leader_command('-'), Some("zoom-map out"));
+        assert_eq!(layout.leader_command('0'), Some("center-map"));
+        assert_eq!(layout.leader_command('f'), None, "centring moved onto '0'");
+
         let km = KeyMap::default();
         let zero = KeySpec { code: KeyCode::Char('0'), ctrl: false, shift: false, alt: false };
         assert_eq!(
             km.lookup(&zero, Context::Map),
-            Some("zoom-map reset"),
-            "'0' key must be bound to zoom-map reset in Map context"
+            None,
+            "'0' is no longer a map-focus binding — there is no map focus"
         );
     }
 
@@ -832,7 +888,7 @@ mod tests {
         }
         // DEFAULT_GROUPS hold (letter, full command-string) pairs; validate the first token.
         for (_title, entries) in DEFAULT_GROUPS {
-            for (_letter, cmd) in *entries {
+            for (_letter, cmd, _label) in *entries {
                 let name = cmd.split_whitespace().next().unwrap_or("");
                 assert!(crate::slash::find_command(name).is_some(), "group command not in registry: {cmd}");
             }
@@ -843,10 +899,19 @@ mod tests {
     fn keymap_default_and_resolve_command_strings() {
         use crate::config::KeymapConfig;
         let km = KeyMap::default();
-        let plus: KeySpec = "+".parse().unwrap();
-        assert_eq!(km.lookup(&plus, Context::Map), Some("zoom-map in"));
-        let left: KeySpec = "left".parse().unwrap();
-        assert_eq!(km.lookup(&left, Context::Map), Some("pan-map -1 0"));
+        let f6: KeySpec = "f6".parse().unwrap();
+        assert_eq!(km.lookup(&f6, Context::Global), Some("nudge-room -1 0"));
+        // Reached through the map context's fallthrough to Global.
+        assert_eq!(km.lookup(&f6, Context::Map), Some("nudge-room -1 0"));
+
+        // A user CAN still bind into the map context even though it ships no
+        // defaults — `[keymap.map]` remains a documented config surface.
+        let mut cfg0 = KeymapConfig::default();
+        cfg0.map.insert("ctrl+g".into(), "center-map".into());
+        let (km0, warns0) = KeyMap::resolve(&cfg0);
+        let cg: KeySpec = "ctrl+g".parse().unwrap();
+        assert_eq!(km0.lookup(&cg, Context::Map), Some("center-map"));
+        assert!(warns0.is_empty());
 
         // use_defaults=false → empty base; only the user binding exists.
         let mut cfg = KeymapConfig { use_defaults: false, ..Default::default() };
@@ -854,7 +919,7 @@ mod tests {
         let (km2, warns) = KeyMap::resolve(&cfg);
         let cs: KeySpec = "ctrl+s".parse().unwrap();
         assert_eq!(km2.lookup(&cs, Context::Global), Some("save-state"));
-        assert!(km2.lookup(&plus, Context::Map).is_none(), "no defaults loaded");
+        assert!(km2.lookup(&f6, Context::Global).is_none(), "no defaults loaded");
         assert!(warns.is_empty());
 
         // Unknown command name → skip + warn.
@@ -870,11 +935,16 @@ mod tests {
     fn default_leader_letters_are_unique() {
         let layout = HotkeyLayout::default();
         let letters: Vec<char> = layout.groups.iter()
-            .flat_map(|(_, cmds)| cmds.iter().map(|(letter, _)| *letter))
+            .flat_map(|(_, cmds)| cmds.iter().map(|(letter, _, _)| *letter))
             .collect();
         let unique: std::collections::HashSet<char> = letters.iter().copied().collect();
         assert_eq!(letters.len(), unique.len(), "leader letters must be unique");
-        assert_eq!(letters.len(), 16, "expected 16 authored leader letters (SQ-0446 Proposal B, plus SQ-0391's toggle-untried-exits)");
+        assert_eq!(
+            letters.len(),
+            19,
+            "expected 19 authored leader letters (SQ-0446 Proposal B, plus SQ-0391's \
+             toggle-untried-exits and SQ-0599's Map group: +/- zoom and 0 centre)"
+        );
     }
 
     #[test]
@@ -911,7 +981,7 @@ mod tests {
         };
         let (layout, _warnings) = HotkeyLayout::resolve(&cfg);
         assert_eq!(layout.groups.len(), 1);
-        assert!(layout.groups[0].1.iter().any(|(letter, cmd)| *letter == 't' && cmd == "tidy-map"));
+        assert!(layout.groups[0].1.iter().any(|(letter, cmd, _)| *letter == 't' && cmd == "tidy-map"));
     }
 
     #[test]

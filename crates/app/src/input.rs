@@ -1019,8 +1019,12 @@ pub fn mouse_to_action(
                 // Room hit: show its info panel. Focus deliberately stays on the
                 // story pane so you can keep typing (see `ShowRoomInfo`).
                 Some(id) => Action::ShowRoomInfo(id),
-                // Empty map gutter: activate map focus and close any open panel.
-                None => Action::ActivatePane(crate::state::Focus::Map),
+                // Empty map gutter: just dismiss any open panel. This used to
+                // hand the keyboard to the map, which is exactly the invisible
+                // mode SQ-0599 removed — a stray click in the gutter would
+                // silently redirect every subsequent keystroke away from the
+                // story.
+                None => Action::CloseRoomPanel,
             }
         }
         // ── Right-click in map ────────────────────────────────────────────────
@@ -3186,12 +3190,17 @@ mod tests {
     }
 
     #[test]
-    fn map_focus_pan_and_zoom() {
-        let mut s = AppState::default();
-        s.toggle_focus(); // Map
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('-'))), Action::ZoomOut));
+    fn map_letter_keys_are_ordinary_typing() {
+        // SQ-0599: h/j/-/c/n/p used to drive the map while it held focus. The
+        // map cannot hold focus any more, so they are just characters — typing
+        // "hunt" must not pan the map twice on the way.
+        let s = AppState::default();
+        for c in ['h', 'j', 'k', 'l', 'c', 'n', 'p', '+', '-', '0'] {
+            assert!(
+                matches!(key_to_action(&s, key(KeyCode::Char(c))), Action::InputChar(x) if x == c),
+                "'{c}' must reach the command line, not the map"
+            );
+        }
     }
 
     #[test]
@@ -3209,23 +3218,25 @@ mod tests {
     // ── Additional tests ──────────────────────────────────────────────────────
 
     #[test]
-    fn map_focus_arrow_pan() {
-        let mut s = AppState::default();
-        s.toggle_focus();
-        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(-1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::Pan(1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::Pan(0, -1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::Pan(0, 1)));
+    fn arrows_always_mean_the_same_thing() {
+        // The heart of SQ-0599: an arrow key had two meanings depending on a
+        // focus state with no on-screen cue. Now plain arrows are always the
+        // command line's, and Shift+Arrow is always the map's.
+        let s = AppState::default();
+        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::CursorLeft));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::CursorRight));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::HistoryPrev));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::HistoryNext));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Up)), Action::Pan(0, -1)));
+        assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
     }
 
     #[test]
-    fn plain_arrows_pan_and_fn_keys_nudge_in_map_focus() {
-        let mut s = AppState::default();
-        s.toggle_focus(); // map focus
-        // Plain arrows pan in map focus.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(-1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::Pan(0, 1)));
-        // Shift+Arrows also pan in map context (SQ-0416).
+    fn shift_arrows_pan_and_fn_keys_nudge_from_the_story() {
+        let s = AppState::default();
+        // Shift+Arrows pan without leaving the command line (SQ-0416).
         assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
         // Nudge via plain F6-F9 (direct, via Map->Global fallthrough).
@@ -3236,14 +3247,6 @@ mod tests {
         // Ctrl+Arrows no longer nudge (not in keymap).
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::None));
-    }
-
-    #[test]
-    fn map_focus_select_next_prev() {
-        let mut s = AppState::default();
-        s.toggle_focus();
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::SelectNext));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::SelectPrev));
     }
 
     #[test]
@@ -3262,15 +3265,14 @@ mod tests {
     }
 
     #[test]
-    fn global_shortcuts_work_in_map_focus() {
+    fn global_shortcuts_work_with_the_dialog_closed() {
         let mut s = AppState::default();
-        s.toggle_focus();
         // Direct commands fire without the dialog.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('q'))), Action::Quit));
         assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-state"));
         assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('r'))), KeyResolve::Command(c, _) if c == "restore-state"));
-        // Non-direct commands return None when dialog is closed.
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::None));
+        // Non-direct commands return None when dialog is closed. (Ctrl+E is the
+        // readline move-to-end at the story prompt, so it is not one of them.)
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('g'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('d'))), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('l'))), Action::None));
@@ -3333,13 +3335,12 @@ mod tests {
 
     #[test]
     fn key_resolves_to_command_string() {
-        // '+' in Map focus resolves to the zoom-map command string (not an Action).
-        let mut s = AppState::default();
-        s.focus = Focus::Map;
-        match key_to_command(&s, key(KeyCode::Char('+'))) {
+        // Ctrl+S resolves to a command string (not an Action).
+        let s = AppState::default();
+        match key_to_command(&s, ctrl(KeyCode::Char('s'))) {
             KeyResolve::Command(c, ctx) => {
-                assert_eq!(c, "zoom-map in");
-                assert_eq!(ctx, crate::keymap::Context::Map);
+                assert_eq!(c, "save-state");
+                assert_eq!(ctx, crate::keymap::Context::Global);
             }
             other => panic!("expected Command, got {other:?}"),
         }
@@ -3351,13 +3352,6 @@ mod tests {
     fn tab_toggles_focus() {
         let s = AppState::default();
         assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
-    }
-
-    #[test]
-    fn esc_toggles_focus_in_map() {
-        let mut s = AppState::default();
-        s.toggle_focus(); // → Map
-        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::ToggleFocus));
     }
 
     #[test]
@@ -3421,8 +3415,10 @@ mod tests {
     fn apply_action_toggle_focus() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
+        // SQ-0599: with no inspector open there is nowhere for Tab to go, so
+        // ToggleFocus is inert and the story keeps the keyboard.
         apply_action(Action::ToggleFocus, &mut s, &mut m);
-        assert_eq!(s.focus, crate::state::Focus::Map);
+        assert_eq!(s.focus, crate::state::Focus::Game);
         apply_action(Action::ToggleFocus, &mut s, &mut m);
         assert_eq!(s.focus, crate::state::Focus::Game);
     }
@@ -3447,12 +3443,11 @@ mod tests {
     }
 
     #[test]
-    fn shift_r_in_map_focus_is_retidy() {
+    fn tidy_and_rename_fire_only_through_the_leader_dialog() {
         let mut s = AppState::default();
-        s.toggle_focus(); // → Map
-        // Retidy and RenameRoom are dialog-only: return None when dialog is closed.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::None));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::None));
+        // With the dialog closed these are ordinary typing (SQ-0599).
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::InputChar('t')));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::InputChar('r')));
         // Return actions when dialog is open, via their authored leader letters
         // ('t' for tidy-map/Retidy, 'r' for rename-room); Shift+R is no longer
         // an authored leader letter.
@@ -3654,9 +3649,8 @@ mod tests {
     fn anim_submode_routes_transport_keys_and_exits() {
         use crate::state::{TidyAnim, TidyFrame};
         let mut s = AppState::default();
-        s.focus = crate::state::Focus::Map;
-        // No animation: arrows pan as usual (not stepping).
-        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(..)));
+        // No animation: arrows are the command line's (SQ-0599), not stepping.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::CursorLeft));
         // Animation active: arrows step, Space toggles, Esc exits.
         let frame = |l: &str| TidyFrame { label: l.into(), graph: mapper::graph::MapGraph::new(), description: String::new(), stats: mapper::layout::TidyStats::default(), stage_start: false, manifest: None };
         s.tidy_anim = Some(TidyAnim::new(vec![frame("a"), frame("b")], mapper::layer::MAIN_LAYER));
@@ -3700,11 +3694,10 @@ mod tests {
         mapper.observe(1, "Dark Room", None);
 
         let mut state = AppState::default();
-        state.toggle_focus(); // Map
         state.select_room(Some(1));
 
-        // RenameRoom is dialog-only: 'r' returns None when dialog is closed.
-        assert!(matches!(key_to_action(&state, key(KeyCode::Char('r'))), Action::None));
+        // 'r' with the dialog closed is ordinary typing (SQ-0599).
+        assert!(matches!(key_to_action(&state, key(KeyCode::Char('r'))), Action::InputChar('r')));
 
         // With dialog open, 'r' → RenameRoom action → the text-entry dialog opens.
         state.overlays.hotkey_dialog = true;
@@ -4198,24 +4191,6 @@ mod tests {
         assert!(!s.show_inspector, "show_inspector should be false after closing");
     }
 
-    #[test]
-    fn n_p_select_still_work_after_inspector_added() {
-        let mut s = AppState::default();
-        s.focus = Focus::Map;
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::SelectNext));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::SelectPrev));
-    }
-
-    #[test]
-    fn pan_keys_still_work_after_inspector_added() {
-        let mut s = AppState::default();
-        s.focus = Focus::Map;
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('k'))), Action::Pan(0, -1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::Pan(1, 0)));
-    }
-
     // ── Equivalence guard for the KeyMap refactor ──────────────────────────────
 
     /// This test encodes the CURRENT (pre-refactor) behavior of key_to_action for
@@ -4258,57 +4233,28 @@ mod tests {
         // Text entry
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::InputChar('n')));
 
-        // ── Map focus (dialog closed) ──────────────────────────────────────────
+        // ── Story focus: the old map-focus key set is typing now (SQ-0599) ────
         let mut s = AppState::default();
-        s.toggle_focus(); // Map
-        // Plain arrows pan (direct)
-        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::Pan(-1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::Pan(1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::Pan(0, -1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::Pan(0, 1)));
-        // Shift+Arrows also pan in Map focus (SQ-0416).
+        // Every key that used to drive the focused map reaches the command line.
+        for c in ['h', 'j', 'k', 'l', 'c', 'n', 'p', '+', '=', '-', '0'] {
+            assert!(
+                matches!(key_to_action(&s, key(KeyCode::Char(c))), Action::InputChar(x) if x == c),
+                "'{c}' must be typing, not a map command"
+            );
+        }
+        // Plain arrows edit the line; Shift+Arrows pan the map from right here.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Left)), Action::CursorLeft));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Right)), Action::CursorRight));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Up)), Action::Pan(0, -1)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
-        // hjkl pan (direct)
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('j'))), Action::Pan(0, 1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('k'))), Action::Pan(0, -1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::Pan(1, 0)));
-        // Zoom (direct); shift(+) alias removed, plain alternatives remain.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('+'))), Action::ZoomIn));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('='))), Action::ZoomIn));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('+'))), Action::None));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('-'))), Action::ZoomOut));
-        // Direct map commands
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('c'))), Action::Recenter));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::SelectNext));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::SelectPrev));
-        // Dialog-only map commands: return None when dialog is closed
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('N'))), Action::None));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('P'))), Action::None));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('M'))), Action::None));
-        assert!(matches!(key_to_action(&s, shift(KeyCode::Char('R'))), Action::None));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char(']'))), Action::None));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('['))), Action::None));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('r'))), Action::None));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('o'))), Action::None));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('d'))), Action::None));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('e'))), Action::None));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::None));
-        // Esc → ToggleFocus (direct, always works)
-        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::ToggleFocus));
-        // Direct ctrl globals work in map focus (save/restore kept with ctrl).
+        // Direct ctrl globals and the F6-F9 nudges are unaffected.
         assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-state"));
-        // Ctrl+Left no longer nudges (nudge moved to F6-F9).
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
-        // F6-F9 nudge work in map focus via Global fallthrough.
         assert!(matches!(key_to_action(&s, key(KeyCode::F(6))), Action::NudgeSelected(-1, 0)));
-        // Tab → ToggleFocus in map focus
-        assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
 
-        // ── Map focus (dialog open) ───────────────────────────────────────────
+        // ── Leader dialog open ────────────────────────────────────────────────
         s.overlays.hotkey_dialog = true;
         // Dialog-only commands now fire via their authored leader letters (SQ-0446).
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::EditNotes));
@@ -4628,15 +4574,11 @@ mod tests {
 
     #[test]
     fn dialog_closed_direct_cmd_still_works() {
-        // In map focus with dialog closed, direct commands still work.
-        let mut s = AppState::default();
-        s.focus = Focus::Map;
-        // SelectNext ('n') is in the direct set.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::SelectNext));
-        // PanLeft ('h') is in the direct set.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('h'))), Action::Pan(-1, 0)));
-        // Recenter ('c') is in the direct set.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('c'))), Action::Recenter));
+        // With the dialog closed, direct commands still fire on their own keys.
+        let s = AppState::default();
+        assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-state"));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('q'))), Action::Quit));
+        assert!(matches!(key_to_action(&s, key(KeyCode::F(6))), Action::NudgeSelected(-1, 0)));
     }
 
     #[test]
@@ -5086,7 +5028,7 @@ mod tests {
     }
 
     #[test]
-    fn left_down_on_gutter_produces_activate_map_pane() {
+    fn left_down_on_gutter_closes_the_panel_without_taking_focus() {
         use crossterm::event::MouseEventKind;
         use crate::state::Zoom;
 
@@ -5100,8 +5042,8 @@ mod tests {
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 0, KeyModifiers::NONE);
         let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None);
         assert!(
-            matches!(action, Action::ActivatePane(Focus::Map)),
-            "left-down on map gutter should produce ActivatePane(Map), got {:?}", action
+            matches!(action, Action::CloseRoomPanel),
+            "left-down on the map gutter must not hand the keyboard to the map (SQ-0599), got {:?}", action
         );
     }
 
