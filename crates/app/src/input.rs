@@ -170,8 +170,6 @@ pub enum Action {
     /// Begin a relabel-edge prompt for the first outgoing connection of the
     /// selected room.
     RelabelSelectedEdge,
-    /// Nudge the selected room by (dx, dy) grid cells (Manual mode only).
-    NudgeSelected(i32, i32),
     /// Caller: save the game.
     SaveGame,
     /// Caller: restore a saved game.
@@ -1613,10 +1611,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // but `animate: false` so the run loop applies the tidied graph instantly
             // (no animation playback). Guard against a double-spawn while a build is in
             // flight or an animation is showing. (SQ-0261)
-            if mapper.mode == mapper::layout::LayoutMode::Auto
-                && state.anim_build_job.is_none()
-                && state.tidy_anim.is_none()
-            {
+            if state.anim_build_job.is_none() && state.tidy_anim.is_none() {
                 let layer = state.active_layer(&mapper.graph);
                 let mut g = mapper.graph.clone();
                 let gen = state.graph_gen;
@@ -1665,10 +1660,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // during the (potentially long) build. The run loop polls the job, applies the
             // tidied graph, and installs the animation when it finishes. Guard against a
             // double-spawn while one build is in flight or an animation is already showing.
-            if mapper.mode == mapper::layout::LayoutMode::Auto
-                && state.anim_build_job.is_none()
-                && state.tidy_anim.is_none()
-            {
+            if state.anim_build_job.is_none() && state.tidy_anim.is_none() {
                 let layer = state.active_layer(&mapper.graph);
                 let mut g = mapper.graph.clone();
                 let gen = state.graph_gen;
@@ -1848,18 +1840,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 }
             }
         }
-        Action::NudgeSelected(dx, dy) => {
-            if let Some(id) = state.selected_room {
-                if let Some(room) = mapper.graph.room(id) {
-                    if let Some(pos) = room.pos {
-                        let target = (pos.0 + dx, pos.1 + dy);
-                        mapper.nudge(id, target);
-                        state.bump_graph_gen(); // room moved → invalidate map memo + hit-testing (SQ-0305)
-                    }
-                }
-            }
-        }
-
         Action::OpenHotkeyDialog => {
             state.overlays.hotkey_dialog = true;
             // Close other overlays if open.
@@ -3234,17 +3214,17 @@ mod tests {
     }
 
     #[test]
-    fn shift_arrows_pan_and_fn_keys_nudge_from_the_story() {
+    fn shift_arrows_pan_from_the_story() {
         let s = AppState::default();
         // Shift+Arrows pan without leaving the command line (SQ-0416).
         assert!(matches!(key_to_action(&s, shift(KeyCode::Left)), Action::Pan(-1, 0)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
-        // Nudge via plain F6-F9 (direct, via Map->Global fallthrough).
-        assert!(matches!(key_to_action(&s, key(KeyCode::F(6))), Action::NudgeSelected(-1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::F(7))), Action::NudgeSelected(1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::F(8))), Action::NudgeSelected(0, -1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::F(9))), Action::NudgeSelected(0, 1)));
-        // Ctrl+Arrows no longer nudge (not in keymap).
+        // F6-F9 were the room-nudge keys until SQ-0600 removed nudging; they are
+        // unbound now, not silently doing nothing.
+        for f in [6u8, 7, 8, 9] {
+            assert!(matches!(key_to_action(&s, key(KeyCode::F(f))), Action::None), "F{f} is unbound");
+        }
+        // Ctrl+Arrows are unbound too.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::None));
     }
@@ -3510,20 +3490,6 @@ mod tests {
     }
 
     #[test]
-    fn nudge_selected_bumps_graph_gen() {
-        let mut s = AppState::default();
-        let mut m = Mapper::default();
-        m.observe(1, "A", None);
-        m.set_mode(mapper::layout::LayoutMode::Manual); // nudge is Manual-mode only
-        m.graph.set_pos(1, (0, 0));
-        s.select_room(Some(1));
-        let before = s.graph_gen;
-        apply_action(Action::NudgeSelected(1, 0), &mut s, &mut m);
-        assert_eq!(m.graph.room(1).unwrap().pos, Some((1, 0)), "room actually moved");
-        assert_ne!(s.graph_gen, before, "moving a room must invalidate the map memo + hit-testing");
-    }
-
-    #[test]
     fn delete_connection_bumps_graph_gen() {
         let mut s = AppState::default();
         let mut m = Mapper::default();
@@ -3536,21 +3502,6 @@ mod tests {
         apply_action(Action::DeleteSelectedConnection, &mut s, &mut m);
         assert!(!m.graph.connections().iter().any(|c| c.origin == 1), "edge actually deleted");
         assert_ne!(s.graph_gen, before, "deleting a connection must invalidate the map memo");
-    }
-
-    #[test]
-    fn retidy_is_noop_in_manual() {
-        use mapper::layout::LayoutMode;
-        let mut s = AppState::default();
-        let mut m = Mapper::default();
-        m.observe(1, "A", None);
-        m.observe(2, "B", Some(mapper::direction::Direction::E));
-        m.set_mode(LayoutMode::Manual);
-        m.graph.set_pos(1, (5, 5));
-        m.graph.set_pos(2, (0, 0)); // deliberately contradicts the hint
-        apply_action(Action::Retidy, &mut s, &mut m);
-        assert_eq!(m.graph.room(1).unwrap().pos, Some((5, 5)), "Manual: retidy must not move rooms");
-        assert_eq!(m.graph.room(2).unwrap().pos, Some((0, 0)));
     }
 
     #[test]
@@ -3595,18 +3546,6 @@ mod tests {
             assert_eq!(frames.last().unwrap().graph.room(id).unwrap().pos, inst);
             assert_eq!(tidied.room(id).unwrap().pos, inst);
         }
-    }
-
-    #[test]
-    fn animate_tidy_is_noop_in_manual() {
-        use mapper::layout::LayoutMode;
-        let mut s = AppState::default();
-        let mut m = Mapper::default();
-        m.observe(1, "A", None);
-        m.set_mode(LayoutMode::Manual);
-        apply_action(Action::AnimateTidy, &mut s, &mut m);
-        assert!(s.tidy_anim.is_none(), "Manual: no animation started");
-        assert!(s.anim_build_job.is_none(), "Manual: no build job spawned");
     }
 
     #[test]
@@ -4218,16 +4157,14 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::CursorHome));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::CursorEnd));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('p'))), Action::OpenHotkeyDialog));
-        // Ctrl+Arrows no longer nudge (nudge moved to plain F6-F9).
+        // Ctrl+Arrows and F6-F9 are unbound (room nudging removed, SQ-0600).
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Up)), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Down)), Action::None));
-        // F6-F9 nudge via Global fallthrough from game focus.
-        assert!(matches!(key_to_action(&s, key(KeyCode::F(6))), Action::NudgeSelected(-1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::F(7))), Action::NudgeSelected(1, 0)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::F(8))), Action::NudgeSelected(0, -1)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::F(9))), Action::NudgeSelected(0, 1)));
+        for f in [6u8, 7, 8, 9] {
+            assert!(matches!(key_to_action(&s, key(KeyCode::F(f))), Action::None));
+        }
         // Tab → ToggleFocus (no input, no suggestions)
         assert!(matches!(key_to_action(&s, key(KeyCode::Tab)), Action::ToggleFocus));
         // Text entry
@@ -4249,10 +4186,9 @@ mod tests {
         assert!(matches!(key_to_action(&s, shift(KeyCode::Right)), Action::Pan(1, 0)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Up)), Action::Pan(0, -1)));
         assert!(matches!(key_to_action(&s, shift(KeyCode::Down)), Action::Pan(0, 1)));
-        // Direct ctrl globals and the F6-F9 nudges are unaffected.
+        // Direct ctrl globals are unaffected.
         assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-state"));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
-        assert!(matches!(key_to_action(&s, key(KeyCode::F(6))), Action::NudgeSelected(-1, 0)));
 
         // ── Leader dialog open ────────────────────────────────────────────────
         s.overlays.hotkey_dialog = true;
@@ -4578,7 +4514,6 @@ mod tests {
         let s = AppState::default();
         assert!(matches!(key_to_command(&s, ctrl(KeyCode::Char('s'))), KeyResolve::Command(c, _) if c == "save-state"));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('q'))), Action::Quit));
-        assert!(matches!(key_to_action(&s, key(KeyCode::F(6))), Action::NudgeSelected(-1, 0)));
     }
 
     #[test]
@@ -6975,7 +6910,7 @@ mod tests {
         // word you could actually recall found nothing at all.
         let names = crate::slash::slash_names();
         let s = slash_suggestions("room", &names, 10);
-        for want in ["toggle-room-numbers", "select-room", "nudge-room", "rename-room"] {
+        for want in ["toggle-room-numbers", "select-room", "rename-room"] {
             assert!(s.contains(&want.to_string()), "'room' must offer {want}: {s:?}");
         }
         // And it must not turn into a free-for-all: a name without the token stays out.

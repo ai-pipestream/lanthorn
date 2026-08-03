@@ -45,15 +45,6 @@ const ITERS: usize = 60;
 /// Above this room count, skip the O(ITERS·n²) solve and use the longest-path sort.
 const MAX_NODES: usize = 400;
 
-// ── LayoutMode ────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum LayoutMode {
-    #[default]
-    Auto,
-    Manual,
-}
-
 // ── Public helpers ────────────────────────────────────────────────────────────
 
 /// Returns the set of all grid cells currently occupied by a placed room.
@@ -834,11 +825,6 @@ mod tests {
     use super::*;
     use crate::direction::Direction;
     use crate::mapper::Mapper;
-
-    #[test]
-    fn layout_mode_default_is_auto() {
-        assert_eq!(LayoutMode::default(), LayoutMode::Auto);
-    }
 
     #[test]
     fn unknown_edges_are_non_spatial_for_components() {

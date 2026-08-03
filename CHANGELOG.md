@@ -214,7 +214,7 @@ is not a promise that every game in a format works.
 - **Awkward cases understood** — vertical up/down connections (dotted, never
   "distorted"), nautical fore/aft/port/starboard, and redundant multi-direction
   paths collapsed into one shared connector.
-- **Hand edits & export** — select / nudge / rename rooms and layers, edit notes,
+- **Hand edits & export** — select / rename rooms and layers, edit notes,
   delete connections, relabel edges; export the map as **SVG**, **Graphviz DOT**,
   or an annotatable text dump; `animate-tidy` steps through the whole layout
   assembly stage by stage.

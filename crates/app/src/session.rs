@@ -3761,29 +3761,6 @@ mod tests {
         assert_eq!(illegal, 0, "background cleanup must leave zero illegal overlaps");
     }
 
-    #[test]
-    fn manual_mode_does_not_move_previously_placed_rooms() {
-        use mapper::layout::LayoutMode;
-
-        let mut m = Mapper::default();
-        // Place two rooms in Auto mode so they get positions.
-        apply_turn(&mut m, "look",  &turn(1, "Hall"));
-        apply_turn(&mut m, "north", &turn(2, "Attic"));
-
-        // Record positions before switching to Manual.
-        let pos1_before = m.graph.room(1).unwrap().pos;
-        let pos2_before = m.graph.room(2).unwrap().pos;
-
-        // Switch to Manual: cleanup must NOT run on subsequent apply_turn calls.
-        m.set_mode(LayoutMode::Manual);
-
-        // Observe a new room; this must not move the already-placed rooms.
-        apply_turn(&mut m, "east", &turn(3, "East Room"));
-
-        assert_eq!(m.graph.room(1).unwrap().pos, pos1_before, "room 1 must not move in Manual mode");
-        assert_eq!(m.graph.room(2).unwrap().pos, pos2_before, "room 2 must not move in Manual mode");
-    }
-
     // ── Task 7: InputKind / submit_char tests ─────────────────────────────────
 
     /// Build a minimal v5 story whose program is: read_char (store→G0), quit.

@@ -278,16 +278,6 @@ pub static COMMANDS: &[CommandSpec] = &[
                 _ => err("select-room requires an argument: next|prev"),
             }
         } },
-    CommandSpec { name: "nudge-room", category: Category::Map, context: Context::Map,
-        usage: "nudge-room <dx> <dy>", description: "nudge the selected room by dx, dy cells",
-        dispatch: |a| {
-            let dx = a.first().and_then(|s| s.parse::<i32>().ok());
-            let dy = a.get(1).and_then(|s| s.parse::<i32>().ok());
-            match (dx, dy) {
-                (Some(x), Some(y)) => SlashOutcome::Action(crate::input::Action::NudgeSelected(x, y)),
-                _ => err("nudge-room requires two integers (e.g. nudge-room -1 0)"),
-            }
-        } },
     CommandSpec { name: "rename-room", category: Category::Map, context: Context::Map,
         usage: "rename-room", description: "rename the selected room",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::RenameRoom) },
@@ -606,7 +596,6 @@ mod tests {
         // 0 still means "reset", and a non-integer is still an error.
         assert!(matches!(parse("zoom-map 0", '/'), SlashOutcome::Action(Action::ZoomReset)));
         assert!(matches!(parse("zoom-map wat", '/'), SlashOutcome::Error(_)));
-        assert!(matches!(parse("nudge-room -1 0", '/'), SlashOutcome::Action(Action::NudgeSelected(-1, 0))));
         assert!(matches!(parse("cycle-layer next", '/'), SlashOutcome::Action(Action::CycleLayer(1))));
         assert!(matches!(parse("save-state foo", '/'), SlashOutcome::Save(Some(_))));
         assert!(matches!(parse("save-state", '/'), SlashOutcome::Save(None)));
@@ -767,7 +756,8 @@ mod tests {
         // gallery/style-editor UIs are gone; `reload-style` remains.
         // `quit-to-library` (SQ-0435) exits to the story picker.
         // `set-v6-render` switches/cycles the v6 render mode live.
-        assert_eq!(COMMANDS.len(), 60, "registry must match the spec's Full command table");
+        // `nudge-room` was removed with Manual layout mode (SQ-0600).
+        assert_eq!(COMMANDS.len(), 59, "registry must match the spec's Full command table");
     }
 
     #[test]

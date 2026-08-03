@@ -99,10 +99,11 @@ The map is a place you can move through, not just a picture.
    w  +  E   ⊙ ⊗
   sw  s  se   ↓
   ```
-- **Hand edits** — select rooms with `select-room next|prev`, `nudge-room` a stray
-  box into place, `rename-room` / `rename-layer`, jot `edit-notes`, or clean up the
-  graph with `delete-connection` and `relabel-edge`. Room-number labels toggle with
-  `toggle-room-numbers`.
+- **Hand edits** — select rooms with `select-room next|prev`, `rename-room` /
+  `rename-layer`, jot `edit-notes`, or clean up the graph with
+  `delete-connection` and `relabel-edge`. Room-number labels toggle with
+  `toggle-room-numbers`. Room *positions* are the layout engine's — re-run
+  `tidy-map` rather than placing boxes by hand.
 - **Export** — take the map with you: `export-svg` writes a scalable vector image,
   `export-dot` emits Graphviz DOT (render it with `dot -Tsvg …`), and `export-map`
   writes the raw structure. Omit the filename for a default path in the game's data

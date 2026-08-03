@@ -152,9 +152,8 @@ switches that make babelmap feel like yours without opening the whole registry.
   `toggle-inspector`, `toggle-alignment`, …) lives in the `/` command palette
   below rather than the panel. A small always-active set stays live outside the
   panel and is advertised in the bottom hint bar: `Ctrl+S`/`Ctrl+R`
-  (save/restore state), quit, `Shift+Arrow` to pan the map and `F6`–`F9` to nudge
-  a room — all of which work while you type, since the map never takes the
-  keyboard. Tab appears there only while the debug inspector is open, which is
+  (save/restore state), quit, and `Shift+Arrow` to pan the map — all of which
+  work while you type, since the map never takes the keyboard. Tab appears there only while the debug inspector is open, which is
   the one thing it still steps through.
   Leader letters are set per group under `[[hotkeys.group]]` in
   `config.toml` (`commands = ["t tidy-map", …]`; a bare `"tidy-map"` auto-assigns

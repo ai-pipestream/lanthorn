@@ -211,13 +211,6 @@ impl Default for KeyMap {
         bind!(ctrl(Char('s')), "save-state", Context::Global);
         bind!(ctrl(Char('r')), "restore-state", Context::Global);
 
-        // F6-F9 → Nudge (plain function keys; ctrl+arrow removed so all direct
-        // bindings remain modifier-free).
-        bind!(plain(F(6)), "nudge-room -1 0", Context::Global);
-        bind!(plain(F(7)), "nudge-room 1 0", Context::Global);
-        bind!(plain(F(8)), "nudge-room 0 -1", Context::Global);
-        bind!(plain(F(9)), "nudge-room 0 1", Context::Global);
-
         // ── Map ───────────────────────────────────────────────────────────────
         // Deliberately EMPTY of defaults since SQ-0599. `Context::Map` used to
         // carry the map pane's own key set — plain arrows/hjkl to pan, +/-/0 to
@@ -348,10 +341,6 @@ const DEFAULT_DIRECT_COMMANDS: &[&str] = &[
     "select-room prev",
     "center-map",
     "toggle-focus",
-    "nudge-room -1 0",
-    "nudge-room 1 0",
-    "nudge-room 0 -1",
-    "nudge-room 0 1",
 ];
 
 /// Default groups for the hotkey dialog (title, authored leader-key + full command-string).
@@ -606,7 +595,7 @@ mod tests {
         }
         // Global bindings still reach through the map context's fallthrough.
         assert_eq!(km.lookup(&g(Char('s'), true, false), Context::Map), Some("save-state"));
-        assert_eq!(km.lookup(&g(F(6), false, false), Context::Map), Some("nudge-room -1 0"));
+        assert_eq!(km.lookup(&g(Char('r'), true, false), Context::Map), Some("restore-state"));
     }
 
     // ── HotkeyLayout tests ────────────────────────────────────────────────────
@@ -899,10 +888,10 @@ mod tests {
     fn keymap_default_and_resolve_command_strings() {
         use crate::config::KeymapConfig;
         let km = KeyMap::default();
-        let f6: KeySpec = "f6".parse().unwrap();
-        assert_eq!(km.lookup(&f6, Context::Global), Some("nudge-room -1 0"));
+        let cs: KeySpec = "ctrl+s".parse().unwrap();
+        assert_eq!(km.lookup(&cs, Context::Global), Some("save-state"));
         // Reached through the map context's fallthrough to Global.
-        assert_eq!(km.lookup(&f6, Context::Map), Some("nudge-room -1 0"));
+        assert_eq!(km.lookup(&cs, Context::Map), Some("save-state"));
 
         // A user CAN still bind into the map context even though it ships no
         // defaults — `[keymap.map]` remains a documented config surface.
@@ -919,7 +908,7 @@ mod tests {
         let (km2, warns) = KeyMap::resolve(&cfg);
         let cs: KeySpec = "ctrl+s".parse().unwrap();
         assert_eq!(km2.lookup(&cs, Context::Global), Some("save-state"));
-        assert!(km2.lookup(&f6, Context::Global).is_none(), "no defaults loaded");
+        assert!(km2.lookup(&"f6".parse().unwrap(), Context::Global).is_none(), "no defaults loaded");
         assert!(warns.is_empty());
 
         // Unknown command name → skip + warn.

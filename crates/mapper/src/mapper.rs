@@ -1,13 +1,12 @@
 use std::collections::BTreeSet;
 use crate::direction::{Direction, parse_direction};
 use crate::graph::{MapGraph, RoomId};
-use crate::layout::{nearest_free_cell, occupied_cells, place_incremental, LayoutMode};
+use crate::layout::{nearest_free_cell, occupied_cells, place_incremental};
 use crate::layout::mark_distorted;
 
 #[derive(Debug, Default)]
 pub struct Mapper {
     pub graph: MapGraph,
-    pub mode: LayoutMode,
     /// The passage the player last WALKED to reach the current room: the room they
     /// left and the direction they took (SQ-0552). `None` when the current room was
     /// not arrived at by a walked passage — the first room of a game, an involuntary
@@ -50,17 +49,13 @@ impl Mapper {
                     // directional move just followed, or a directional edge already existed and
                     // this move was Unknown. Edge hygiene is independent of layout mode. (SQ-0220)
                     self.graph.collapse_unknown_edges();
-                    if self.mode == LayoutMode::Auto {
-                        place_incremental(&mut self.graph, prev_id, location, edge_dir);
-                    }
+                    place_incremental(&mut self.graph, prev_id, location, edge_dir);
                 }
             }
         }
         self.graph.set_current(location);
-        if self.mode == LayoutMode::Auto {
-            // Re-evaluate distortion over the whole graph (cheap); no relayout.
-            mark_distorted(&mut self.graph, &BTreeSet::new());
-        }
+        // Re-evaluate distortion over the whole graph (cheap); no relayout.
+        mark_distorted(&mut self.graph, &BTreeSet::new());
     }
 
     /// The passage the player last walked to reach the current room — `(room left,
@@ -102,41 +97,7 @@ impl Mapper {
             }
         }
         self.graph.set_current(location);
-        if self.mode == LayoutMode::Auto {
-            mark_distorted(&mut self.graph, &BTreeSet::new());
-        }
-    }
-
-    /// Switch layout mode.
-    /// Setting the same mode is a no-op.
-    pub fn set_mode(&mut self, mode: LayoutMode) {
-        if self.mode == mode {
-            return;
-        }
-        self.mode = mode;
-    }
-
-    /// Move room `id` to cell `to` (Manual mode only).
-    /// Returns false (no-op) in Auto mode.
-    /// Returns true if the room moved or was already at `to`.
-    /// Only moves if `to` is free (not occupied by another room).
-    pub fn nudge(&mut self, id: RoomId, to: (i32, i32)) -> bool {
-        if self.mode != LayoutMode::Manual {
-            return false;
-        }
-        // Build occupied set excluding the room's own current cell so nudging to
-        // its own cell is treated as free (no-op that returns true), and to allow
-        // a true move to a currently self-occupied cell.
-        let own_pos = self.graph.room(id).and_then(|r| r.pos);
-        let mut occupied = occupied_cells(&self.graph);
-        if let Some(p) = own_pos {
-            occupied.remove(&p);
-        }
-        if occupied.contains(&to) {
-            return false;
-        }
-        self.graph.set_pos(id, to);
-        true
+        mark_distorted(&mut self.graph, &BTreeSet::new());
     }
 
     /// Set or clear the label_override for a room.
@@ -305,23 +266,6 @@ mod tests {
         m.observe(1, "Hall", None);
         m.observe(1, "Hall", Some(Direction::N)); // look/again — same room
         assert_eq!(m.graph.connections().len(), 0);
-    }
-
-    #[test]
-    fn manual_mode_freezes_and_allows_nudge() {
-        use crate::layout::LayoutMode;
-        let mut m = Mapper::default();
-        m.observe(1, "A", None);
-        m.observe(2, "B", Some(crate::direction::Direction::N));
-        m.set_mode(LayoutMode::Manual);
-        let before = m.graph.room(2).unwrap().pos.unwrap();
-        // a new observation in Manual mode must NOT move existing rooms
-        m.observe(3, "C", Some(crate::direction::Direction::E));
-        assert_eq!(m.graph.room(2).unwrap().pos.unwrap(), before);
-        // nudge room 2 to a known free cell
-        let free = (before.0 + 5, before.1 + 5);
-        assert!(m.nudge(2, free));
-        assert_eq!(m.graph.room(2).unwrap().pos, Some(free));
     }
 
     #[test]

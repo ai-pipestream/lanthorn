@@ -176,44 +176,42 @@ pub(crate) fn finish_command_turn(
     // the newest job is tracked/joined; concurrent stragglers are bounded by the
     // input rate. (This job is spawned once per command; the per-frame render worker
     // still coalesces — see `spawn_render_job` — to avoid a per-frame thread storm.)
-    if mapper.mode == mapper::layout::LayoutMode::Auto {
-        let new_room = mapper.graph.rooms().count() > rooms_before;
-        let new_conn = mapper.graph.connections().len() > conns_before;
-        let changed = new_room || new_conn;
-        if changed {
-            let active_layer = state.active_layer(&mapper.graph);
-            // Overlap/distortion signal → decides FULL relayout vs. cleanup-only.
-            let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
-            let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
-            let has_overlap = cells.len() < total_rooms;
-            let has_distorted = mapper.graph.connections().iter().any(|c| {
-                c.distorted
-                    && mapper.graph.layer_of(c.origin) == active_layer
-                    && mapper.graph.layer_of(c.dest) == active_layer
-            });
-            let overlap = has_overlap || has_distorted;
-            let full = should_bg_tidy(
-                state.config.background_tidy, new_room, overlap, changed, bg_tidy_counter,
-            );
-            let kind = if full { TidyKind::Full } else { TidyKind::Cleanup };
-            let graph_clone = mapper.graph.clone();
-            let gen = state.graph_gen;
-            let handle = std::thread::spawn(move || {
-                let mut g = graph_clone;
-                match kind {
-                    TidyKind::Full => tidy_layer_silent(&mut g, active_layer),
-                    TidyKind::Cleanup => cleanup_overlaps_layer_silent(&mut g, active_layer),
-                }
-                g
-            });
-            state.tidy_job = Some(TidyJob {
-                handle,
-                layer: active_layer,
-                gen,
-                started: std::time::Instant::now(),
-                kind,
-            });
-        }
+    let new_room = mapper.graph.rooms().count() > rooms_before;
+    let new_conn = mapper.graph.connections().len() > conns_before;
+    let changed = new_room || new_conn;
+    if changed {
+        let active_layer = state.active_layer(&mapper.graph);
+        // Overlap/distortion signal → decides FULL relayout vs. cleanup-only.
+        let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
+        let total_rooms = mapper.graph.rooms_in_layer(active_layer).len();
+        let has_overlap = cells.len() < total_rooms;
+        let has_distorted = mapper.graph.connections().iter().any(|c| {
+            c.distorted
+                && mapper.graph.layer_of(c.origin) == active_layer
+                && mapper.graph.layer_of(c.dest) == active_layer
+        });
+        let overlap = has_overlap || has_distorted;
+        let full = should_bg_tidy(
+            state.config.background_tidy, new_room, overlap, changed, bg_tidy_counter,
+        );
+        let kind = if full { TidyKind::Full } else { TidyKind::Cleanup };
+        let graph_clone = mapper.graph.clone();
+        let gen = state.graph_gen;
+        let handle = std::thread::spawn(move || {
+            let mut g = graph_clone;
+            match kind {
+                TidyKind::Full => tidy_layer_silent(&mut g, active_layer),
+                TidyKind::Cleanup => cleanup_overlaps_layer_silent(&mut g, active_layer),
+            }
+            g
+        });
+        state.tidy_job = Some(TidyJob {
+            handle,
+            layer: active_layer,
+            gen,
+            started: std::time::Instant::now(),
+            kind,
+        });
     }
 
     // Clear any manual layer browse override so the view follows the player.

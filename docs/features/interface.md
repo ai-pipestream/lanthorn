@@ -24,8 +24,7 @@ inspecting the machine, and firing commands — without ever leaving the story.
   story pane's columns, so a drag never scoops up the map beside the text.
 - **Room inspector overlay** — id, name, layer, position, and the per-edge
   dropped-constraint flags, so you can see *why* the layout engine placed a room
-  where it did. `F6`–`F9` nudge rooms while it is open, and the panel stays open
-  while you do.
+  where it did. The panel stays open while you keep playing.
 - **The map never takes the keyboard.** Every keystroke goes to the story, so a
   key always means the same thing — you never have to look at which pane is
   "active" before pressing an arrow. The map is driven alongside your typing
@@ -180,9 +179,8 @@ know which side you're on).
   (not mid-`read_char` prompt), so they never steal a keystroke the game expects.
 - **Keyboard map navigation** — **Shift+Arrow pans the map** without leaving the
   command line, and keeps panning *during the tidy animation*, where
-  the plain arrows step through the layout stages instead. Zoom (`+`/`-`/`0`)
-  and centring (`0`) are on the `Ctrl+P` leader panel's **Map** group; `F6`–`F9`
-  nudge the selected room. During that animation
+  the plain arrows step through the layout stages instead. Zoom (`+`/`-`)
+  and centring (`0`) are on the `Ctrl+P` leader panel's **Map** group. During that animation
   `Ctrl+←`/`Ctrl+→` jump a whole stage at a time. `Ctrl+Q` (or `Ctrl+C`) quits
   from anywhere, even mid-prompt.
 - **Inventory strip** — a toggleable strip of your carried items along the
