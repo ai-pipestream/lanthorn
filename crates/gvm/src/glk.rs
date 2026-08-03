@@ -2478,6 +2478,22 @@ impl Model {
         self.file_streams.get(&id).map(|fs| (fs.name.clone(), fs.by_prompt))
     }
 
+    /// The bytes a `@restore` can read from `id` WITHOUT host help — the stream's
+    /// contents from its cursor to the end. `None` when the stream's data lives
+    /// outside the VM (a saved-game or file stream, which the host services by
+    /// name via [`stream_saveload_info`](Self::stream_saveload_info)).
+    ///
+    /// Exists because Glulx `@restore L1 S1` restores from the STREAM it is handed
+    /// (spec §1.8.2), and a resource stream has no fileref name for the host to
+    /// open. Games ship a pre-computed save as a Blorb `Data` chunk and restore it
+    /// at boot to skip an expensive initialisation — Counterfeit Monkey's is 39 KB
+    /// as resource 9998 — so without this the game silently falls back to
+    /// recomputing, every launch (SQ-0595).
+    pub fn stream_restore_bytes(&self, id: u32) -> Option<Vec<u8>> {
+        let rs = self.resource_streams.get(&id)?;
+        Some(rs.data[rs.pos.min(rs.data.len())..].to_vec())
+    }
+
     /// Close a stream, returning its `(read_count, write_count)`. The current
     /// stream is cleared if it was this one.
     pub fn stream_close(&mut self, id: u32) -> Option<(u32, u32)> {

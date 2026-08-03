@@ -1227,6 +1227,47 @@ impl Machine {
                 // stub (which stores -1, the "just restored" sentinel); on
                 // failure complete_restore_failure() stores 1 here.
                 let (l, s) = self.read_operands(1, 1)?;
+                // A stream whose bytes are already inside the VM — a Blorb resource
+                // stream — restores IN PROCESS. The spec restores from the stream it
+                // is handed (§1.8.2); only a saved-game/file stream needs the host,
+                // because only that stream's bytes live outside us.
+                //
+                // Games ship a pre-computed save as a Data chunk and restore it at
+                // boot to skip an expensive initialisation. Routing that through the
+                // host's by-name path silently fails — a resource stream has no
+                // fileref name, so the lookup below yields "" and finds nothing — and
+                // the game recomputes on every launch instead (Counterfeit Monkey:
+                // 5.4s rather than 0.7s, SQ-0595).
+                if let Some(blob) = self.glk.stream_restore_bytes(l[0]) {
+                    // `complete_restore_*` write the result through `pending_saveload`,
+                    // so stage it exactly as the suspend path would.
+                    self.pending_saveload = Some(PendingSaveLoad {
+                        dest: s[0],
+                        restore: true,
+                        name: String::new(),
+                        by_prompt: false,
+                        save_stream: 0,
+                        save_bytes: 0,
+                        fresh: false,
+                    });
+                    // `restore_quetzal`, NOT `restore_state`: a blob a game carries in
+                    // its own Blorb is a spec-standard Glulx-Quetzal (§1.8.4), with
+                    // none of the `GReg`/`Glk ` chunks our host snapshots add — and
+                    // `restore_state` rejects it outright for the missing `GReg`.
+                    // It also pops the original @save's call stub storing -1, the
+                    // "just restored" sentinel (§2.9).
+                    match self.restore_quetzal(&blob) {
+                        Ok(()) => {
+                            self.pending_saveload = None;
+                            self.undo_stack.clear();
+                        }
+                        Err(e) => {
+                            self.diagnostics.push(format!("@restore from stream failed: {e:?}"));
+                            self.complete_restore_failure();
+                        }
+                    }
+                    return Ok(());
+                }
                 // L1 is the restore stream; carry its fileref name + prompt-ness so
                 // the host reads the game's fixed file silently (failing cleanly if
                 // absent) or surfaces the player's RESTORE-verb picker.
@@ -7831,6 +7872,65 @@ mod tests {
 
     /// The key §1.8.5 property: `restore_quetzal` reverts VM memory/stack/heap
     /// to the save point and resumes with `-1` in `@save`'s S1, but leaves the
+    /// `@restore L1 S1` restores from the STREAM it is handed (Glulx §1.8.2). A
+    /// **resource stream** has no fileref name, so routing it through the host's
+    /// by-name path silently found nothing and the restore failed — invisibly,
+    /// because a game that ships a pre-computed save as a Blorb `Data` chunk and
+    /// restores it at boot just falls back to recomputing (SQ-0595).
+    ///
+    /// The blob must go through `restore_quetzal`, not `restore_state`: a save a
+    /// game carries in its own Blorb is spec-standard, with none of the
+    /// `GReg`/`Glk ` chunks our host snapshots add, and `restore_state` rejects it
+    /// for the missing `GReg`.
+    #[test]
+    fn restore_reads_the_blob_from_a_resource_stream_with_no_fileref_name() {
+        use asm::Op::{C8, Mem32, Zero};
+        // @save 0 -> mem[0x180]; copy 0x7F -> mem[0x184]; quit.
+        let mut body = asm::ins(0x0123, &[Zero, Mem32(0x180)]);
+        body.extend(asm::ins(0x40, &[C8(0x7F), Mem32(0x184)]));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let blob = m.save_quetzal();
+        m.complete_save(true);
+        while m.step() == StepResult::Continue {}
+        assert_eq!(m.mem.read32(0x184).unwrap(), 0x7F, "the post-save sentinel ran");
+
+        // Replay the same story, restoring from a RESOURCE stream — the shape a
+        // game's embedded startup save takes. No fileref, no host involvement.
+        let mut body2 = asm::ins(0x0123, &[Zero, Mem32(0x180)]);
+        body2.extend(asm::ins(0x40, &[C8(0x7F), Mem32(0x184)]));
+        body2.extend(asm::ins(0x120, &[]));
+        let mut m2 = machine_with_body(&[], body2);
+        let sid = m2.glk.stream_open_resource(blob.clone(), false, false, 0);
+        assert!(sid != 0, "resource stream opens");
+        assert_eq!(
+            m2.glk.stream_saveload_info(sid),
+            None,
+            "a resource stream has no fileref name — the case the host path cannot serve"
+        );
+        assert_eq!(
+            m2.glk.stream_restore_bytes(sid).map(|b| b.len()),
+            Some(blob.len()),
+            "its bytes are readable in-process"
+        );
+
+        // @restore sid -> mem[0x188]
+        let restore = asm::ins(0x0124, &[asm::Op::C8(sid as i8), Mem32(0x188)]);
+        let mut m3 = machine_with_body(&[], restore);
+        let sid3 = m3.glk.stream_open_resource(blob, false, false, 0);
+        assert_eq!(sid3, sid, "same stream id in the fresh machine");
+        // Executing @restore must NOT suspend for the host: it completes inline.
+        let step = m3.step();
+        assert_ne!(step, StepResult::RestoreRequest, "a resource stream never suspends for the host");
+        assert_eq!(
+            m3.mem.read32(0x184).unwrap(),
+            0,
+            "restored to the SAVE point, before the sentinel was written"
+        );
+    }
+
     /// live Glk model (windows/streams/VFS) and `iosys_mode`/`iosys_rock`
     /// completely untouched — including further mutations made to them AFTER
     /// the save. This is what distinguishes it from `restore_state`, which
