@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 buildinfo = { path = "../buildinfo" }
+cli-host = { path = "../cli-host" }
 zvm = { path = "../zvm" }
 blorb = { path = "../blorb" }
 audio = { path = "../audio" }

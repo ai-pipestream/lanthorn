@@ -9,9 +9,10 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, IsTerminal};
+use std::io::{self};
 use std::process;
 
+use cli_host::{HostMode, TerminalGuard};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 
@@ -105,33 +106,14 @@ fn build_machine(bytes: Vec<u8>, backend: Box<dyn GlkBackend>) -> Result<Machine
 
 // ── input helpers ─────────────────────────────────────────────────────────────
 
-/// Read one line, or `None` at true EOF.
-///
-/// A 0-byte `read_line` is EOF; a blank line still yields one byte (`"\n"`) and
-/// is a legitimate empty command. Mirrors `zvm-cli`'s `read_byte_or_eof`.
-fn read_line_or_eof<R: BufRead>(r: &mut R) -> Option<String> {
-    let mut line = String::new();
-    match r.read_line(&mut line) {
-        Ok(0) => None,
-        Ok(_) => Some(line),
-        // A read error is not recoverable input either.
-        Err(_) => None,
-    }
-}
-
 /// Stop cleanly at end of piped input.
 ///
 /// The read helpers below have no access to the machine or the display, so the
-/// terminal is put back by hand: raw mode off, styling cleared, the page
-/// background released, and the cursor shape restored. Without this the shell
-/// inherited the game's background and a block cursor.
+/// terminal restore is the shared one (raw mode off, styling cleared, page
+/// background released, cursor shape restored) with no renderer prefix. Without
+/// it the shell inherited the game's background and a block cursor.
 fn exit_on_eof() -> ! {
-    let _ = terminal::disable_raw_mode();
-    if io::stdout().is_terminal() {
-        print!("\x1b[0m{}{}", glk_term::osc_reset_bg(), glk_term::cursor_reset());
-    }
-    let _ = io::Write::flush(&mut io::stdout());
-    std::process::exit(0);
+    cli_host::input::exit_at_eof("")
 }
 
 /// Read a cooked line of input from stdin (the terminal echoes it). The second
@@ -143,7 +125,7 @@ fn exit_on_eof() -> ! {
 /// piping `/dev/null` to Kerkerkruip repeated its "no destination yet" reply
 /// until the process was killed.
 fn read_line_stdin() -> (String, u32) {
-    match read_line_or_eof(&mut io::stdin().lock()) {
+    match cli_host::read_line_stdin() {
         Some(line) => (line, 0),
         None => exit_on_eof(),
     }
@@ -196,15 +178,11 @@ fn read_line_raw(is_tty: bool, echo: LineEcho) -> (String, u32) {
                     if modifiers.contains(KeyModifiers::CONTROL) =>
                 {
                     if !sgr.is_empty() { print!("\x1b[0m"); }
-                    print!("\r\n");
+                    print!("\r\n"); // close the echoed line before the terminal goes back
                     let _ = io::Write::flush(&mut io::stdout());
-                    let _ = terminal::disable_raw_mode();
-                    // Unconditional: this path can't see `honor`/`last_page_bg`;
-                    // resetting when nothing was set is harmless.
-                    print!("{}", glk_term::osc_reset_bg());
-                    print!("{}", glk_term::cursor_reset());
-                    let _ = io::Write::flush(&mut io::stdout());
-                    std::process::exit(0);
+                    // No renderer prefix: this path can't reach the backend to
+                    // drop its scroll region, and never could.
+                    cli_host::restore_and_exit("", 0);
                 }
                 KeyCode::Char(c) => {
                     buf.push(c);
@@ -248,7 +226,7 @@ fn read_char_input(stdin_is_tty: bool) -> u32 {
     if !stdin_is_tty {
         // Same EOF rule as the line path: a char request at end of input has
         // nothing left to answer with (SQ-0604).
-        let Some(line) = read_line_or_eof(&mut io::stdin().lock()) else { exit_on_eof() };
+        let Some(line) = cli_host::read_line_stdin() else { exit_on_eof() };
         let byte = line.bytes().next().unwrap_or(b'\n');
         return match byte {
             b'\n' | b'\r' => keycode::RETURN,
@@ -288,12 +266,12 @@ fn emit_page_bg(machine: &mut Machine, honor: bool, stdout_is_tty: bool, last: &
             machine
                 .style_colour(gvm::WinType::TextBuffer, gvm::glk::GlkStyle::Normal)
                 .bg
-                .map(glk_term::rgb24)
+                .map(cli_host::rgb24)
         })
     } else {
         None
     };
-    if let Some(esc) = glk_term::page_bg_escape(cur, *last) {
+    if let Some(esc) = cli_host::page_bg_escape(cur, *last) {
         print!("{esc}");
         let _ = io::Write::flush(&mut io::stdout());
         *last = cur;
@@ -556,12 +534,7 @@ Options:
 
 fn main() {
     let argv: Vec<String> = env::args().collect();
-    if argv.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{HELP}");
-        return;
-    }
-    if argv.iter().any(|a| a == "--version" || a == "-V") {
-        println!("{} {}", env!("CARGO_PKG_NAME"), buildinfo::LONG);
+    if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_PKG_NAME"), buildinfo::LONG) {
         return;
     }
     // Honour the game's stylehint colours by default; --no-game-colours opts out
@@ -620,13 +593,24 @@ fn main() {
     let mut machine = Machine::with_glk(mem, Box::new(backend));
     machine.set_acceleration(accel);
 
-    let stdin_is_tty = io::stdin().is_terminal();
-    let stdout_is_tty = io::stdout().is_terminal();
-    let both_tty = stdin_is_tty && stdout_is_tty;
+    // One decision about what this terminal can take, published process-wide so
+    // the exit paths buried in the read helpers can reach it (SQ-0605). The
+    // locals keep their old names and, today, their old values: `rich` is
+    // "stdout is a TTY" and `raw_input` is "stdin is a TTY" until `--plain`
+    // exists (SQ-0606).
+    let mode = HostMode::detect().install();
+    let stdin_is_tty = mode.raw_input();
+    let stdout_is_tty = mode.rich();
+    let both_tty = mode.both_tty();
+
+    // Restores the terminal on every way out of `main`, including a panic. The
+    // explicit `restore` below runs after the backend drops its own display
+    // state; this just guarantees it happens at all.
+    let mut guard = TerminalGuard::new();
 
     // Force a steady block cursor (SQ-0281); reset to the terminal default on exit.
     if stdout_is_tty {
-        print!("{}", glk_term::cursor_steady_block());
+        print!("{}", cli_host::cursor_steady_block());
         let _ = io::Write::flush(&mut io::stdout());
     }
 
@@ -703,27 +687,22 @@ fn main() {
     );
 
     machine.flush();
-    // Ensure raw mode is not left active on exit (harmless if already off).
-    let _ = terminal::disable_raw_mode();
+    // Leave raw mode BEFORE the backend's teardown: `leave_display` ends with a
+    // newline to park the cursor, and in raw mode that would be a bare LF with
+    // no carriage return.
+    cli_host::end_raw_mode();
     // Drop the scroll region, clear styling, and put the cursor below the last
     // painted row so the shell prompt returns under the display rather than
     // inside it.
     if let Some(t) = machine.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>() {
         t.leave_display();
     }
-    // Restore the terminal's own background (OSC 111): covers normal quit and
-    // the fault/exit(70) path below (single teardown point; drive() never
-    // resets itself, to avoid a double-reset).
-    if honor && stdout_is_tty {
-        print!("{}", glk_term::osc_reset_bg());
-        let _ = io::Write::flush(&mut io::stdout());
-    }
-    // Restore the terminal's default cursor shape (SQ-0281). Not honor-gated —
-    // the cursor is a UI preference, not a game colour.
-    if stdout_is_tty {
-        print!("{}", glk_term::cursor_reset());
-        let _ = io::Write::flush(&mut io::stdout());
-    }
+    // The single teardown point — it covers normal quit and the fault/exit(70)
+    // path below, and `drive()` never resets itself so there is no double-reset.
+    // The page-background release is no longer honor-gated: OSC 111 restores the
+    // terminal's own default, so sending it when no colour was honoured is a
+    // no-op, and the Ctrl-C path had already reached that conclusion.
+    guard.restore("");
 
     if let Some(trace) = machine.take_fault_trace() {
         for line in trace.to_lines() {
@@ -743,7 +722,11 @@ fn main() {
 
 #[cfg(test)]
 mod stdin_eof_tests {
-    use super::*;
+    // The implementation moved to `cli_host::input` (SQ-0605), but gvm-cli keeps
+    // its own regression test: this is the crate the bug actually shipped in,
+    // and a test here fails if the dependency is ever swapped for something that
+    // reads EOF the old way.
+    use cli_host::read_line_or_eof;
 
     /// SQ-0604: gvm-cli ignored `read_line`'s result, so a closed stdin handed
     /// the game an empty command over and over and the process never stopped —

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 buildinfo = { path = "../buildinfo" }
+cli-host = { path = "../cli-host" }
 gvm = { path = "../gvm" }
 blorb = { path = "../blorb" }
 crossterm = "0.29"

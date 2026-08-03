@@ -13,9 +13,10 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, Write};
 use std::process;
 
+use cli_host::{HostMode, TerminalGuard};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal;
 
@@ -44,10 +45,7 @@ fn separator(block: &str) -> String {
 /// is a play/smoke harness, not a full readline.
 fn read_command(interactive: bool, out: &mut impl Write) -> Option<String> {
     if !interactive {
-        let mut line = String::new();
-        if io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
-            return None;
-        }
+        let line = cli_host::read_line_stdin()?;
         let line = line.trim_end_matches(['\n', '\r']).to_string();
         let _ = writeln!(out, "{line}"); // echo for a readable piped transcript
         return Some(line);
@@ -55,10 +53,7 @@ fn read_command(interactive: bool, out: &mut impl Write) -> Option<String> {
     // Raw mode disables canonical line editing and echo; on failure, fall back to a
     // cooked read (arrow keys may still echo, but input still works).
     if terminal::enable_raw_mode().is_err() {
-        let mut line = String::new();
-        if io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
-            return None;
-        }
+        let line = cli_host::read_line_stdin()?;
         return Some(line.trim_end_matches(['\n', '\r']).to_string());
     }
     let mut buf = String::new();
@@ -145,12 +140,8 @@ Options:
 ";
 
 fn main() {
-    if env::args().any(|a| a == "--help" || a == "-h") {
-        print!("{HELP}");
-        return;
-    }
-    if env::args().any(|a| a == "--version" || a == "-V") {
-        println!("{} {}", env!("CARGO_PKG_NAME"), buildinfo::LONG);
+    let argv: Vec<String> = env::args().collect();
+    if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_PKG_NAME"), buildinfo::LONG) {
         return;
     }
     let args = match parse_args() {
@@ -183,7 +174,14 @@ fn main() {
         vm.seed_rng(seed);
     }
 
-    let interactive = io::stdin().is_terminal();
+    // scott-cli emits no escape sequences at all, so `rich` never comes up here
+    // — the only terminal state it touches is raw mode, and until SQ-0605 it had
+    // no teardown of any kind: a panic mid-game left the shell in raw mode.
+    // `raw_only` fixes that without putting escapes into a transcript that has
+    // never had any.
+    let mode = HostMode::detect().install();
+    let interactive = mode.raw_input();
+    let _guard = TerminalGuard::raw_only();
     let mut out = io::stdout();
 
     // Any pending output before the first prompt (empty today — the room is shown

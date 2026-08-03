@@ -15,11 +15,13 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, Write};
 use std::path::Path;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
+
+use cli_host::{HostMode, TerminalGuard};
 
 use zvm::cpu::exec::{Machine, StepResult};
 use zvm::io::Output;
@@ -557,17 +559,24 @@ fn aux_flush(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
 fn prompt_and_read_line(prompt: &str) -> String {
     print!("{}", prompt);
     let _ = io::stdout().flush();
-    let stdin = io::stdin();
-    let mut line = String::new();
-    let _ = stdin.lock().read_line(&mut line);
-    line
+    // EOF here yields an empty filename, which the caller already treats as
+    // "cancel" — unlike a *game's* input request, an unanswered save prompt is
+    // recoverable, so this one does not exit.
+    cli_host::read_line_stdin().unwrap_or_default()
 }
 
+/// One line of piped input, or a clean exit at true EOF.
+///
+/// This path had the SQ-0604 bug all along, one path over from where it was
+/// fixed: a 0-byte read left `line` empty and the game was handed a blank
+/// command forever. Measured before the fix, `zvm-cli gostak.z5 < /dev/null`
+/// printed 90 KB of `>Louk?` and had to be killed. The char path next door
+/// (`read_byte_stdin`) had checked for EOF for months.
 fn read_line_stdin() -> String {
-    let stdin = io::stdin();
-    let mut line = String::new();
-    let _ = stdin.lock().read_line(&mut line);
-    line
+    match cli_host::read_line_stdin() {
+        Some(line) => line,
+        None => cli_host::input::exit_at_eof(&crate::screen::leave_region()),
+    }
 }
 
 /// Read a line of input in RAW mode, echoing as the user types. Unlike cooked
@@ -637,17 +646,12 @@ fn read_line_raw(
                     if modifiers.contains(KeyModifiers::CONTROL) =>
                 {
                     if !sgr.is_empty() { print!("\x1b[0m"); }
-                    print!("\r\n");
+                    print!("\r\n"); // close the echoed line before the terminal goes back
                     let _ = io::stdout().flush();
-                    let _ = terminal::disable_raw_mode();
-                    print!("{}", crate::screen::leave_region());
-                    let _ = io::stdout().flush();
-                    // Unconditional: this path can't see honor/last_page_bg, and an
-                    // OSC 111 when nothing was set is harmless.
-                    print!("{}", crate::screen::osc_reset_bg());
-                    print!("{}", crate::screen::cursor_reset());
-                    let _ = io::stdout().flush();
-                    std::process::exit(0);
+                    // The scroll region is this renderer's own teardown, so it
+                    // rides along as the prefix; everything after it is the
+                    // shared restore.
+                    cli_host::restore_and_exit(&crate::screen::leave_region(), 0);
                 }
                 KeyCode::Char(c) => {
                     buf.push(c);
@@ -691,25 +695,18 @@ fn read_line_raw(
     (buf, terminator, last_resize, aborted)
 }
 
-/// Read one line from `r` and return its first byte, or `None` at true EOF.
-/// A 0-byte `read_line` result is EOF; a blank line still yields 1 byte
-/// (`\n`), which must NOT be confused with EOF (that confusion previously
-/// caused piped/closed stdin to busy-spin forever on a synthesized `\n`).
-fn read_byte_or_eof<R: BufRead>(r: &mut R) -> Option<u8> {
-    let mut line = String::new();
-    match r.read_line(&mut line) {
-        Ok(0) => None,
-        _ => Some(line.bytes().next().unwrap_or(b'\n')),
-    }
-}
-
+/// One byte of piped input, or a clean exit at true EOF.
+///
+/// The EOF rule (a 0-byte read is the end; a blank line is still a real `\n`)
+/// lives in `cli_host::input` — see SQ-0604/0605 for why it is worth having in
+/// exactly one place. What this path used to get wrong was the *exit*: it called
+/// `process::exit(0)` directly, leaving the terminal wearing the game's page
+/// background and a block cursor whenever stdin was a pipe but stdout was not
+/// (`echo commands | zvm-cli story.z5`). `exit_at_eof` restores first.
 fn read_byte_stdin() -> u8 {
-    let stdin = io::stdin();
-    match read_byte_or_eof(&mut stdin.lock()) {
+    match cli_host::read_byte_stdin() {
         Some(b) => b,
-        // True EOF on piped stdin: there is no more input to synthesize, so
-        // exit cleanly instead of looping on a fabricated newline forever.
-        None => std::process::exit(0),
+        None => cli_host::input::exit_at_eof(&crate::screen::leave_region()),
     }
 }
 
@@ -792,12 +789,7 @@ Options:
 
 fn main() {
     let argv: Vec<String> = env::args().collect();
-    if argv.iter().any(|a| a == "--help" || a == "-h") {
-        print!("{HELP}");
-        return;
-    }
-    if argv.iter().any(|a| a == "--version" || a == "-V") {
-        println!("{} {}", env!("CARGO_PKG_NAME"), buildinfo::LONG);
+    if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_PKG_NAME"), buildinfo::LONG) {
         return;
     }
     let args = parse_args(&argv);
@@ -838,13 +830,24 @@ fn main() {
     let game_dir = base.join(format!("{}.save", story_key(&story_path)));
     let aux_file = auxiliary::aux_path(&game_dir);
 
-    let stdout_is_tty = io::stdout().is_terminal();
-    let stdin_is_tty = io::stdin().is_terminal();
-    let both_tty = stdout_is_tty && stdin_is_tty;
+    // One decision about what this terminal can take, published process-wide so
+    // the exit paths buried in the read helpers can reach it (SQ-0605). The
+    // locals below keep their old names and, today, their old values: `rich` is
+    // "stdout is a TTY" and `raw_input` is "stdin is a TTY" until `--plain`
+    // exists (SQ-0606).
+    let mode = HostMode::detect().install();
+    let stdout_is_tty = mode.rich();
+    let stdin_is_tty = mode.raw_input();
+    let both_tty = mode.both_tty();
+
+    // Restores the terminal on every way out of `main`, including a panic. The
+    // explicit `restore` calls below hand it the scroll-region teardown; this
+    // just guarantees it happens at all.
+    let mut guard = TerminalGuard::new();
 
     // Force a steady block cursor (SQ-0281); reset to the terminal default on exit.
     if stdout_is_tty {
-        print!("{}", screen::cursor_steady_block());
+        print!("{}", cli_host::cursor_steady_block());
         let _ = io::stdout().flush();
     }
 
@@ -952,37 +955,18 @@ fn main() {
             StepResult::Continue => {}
 
             StepResult::Quit => {
-                print!("{}", view.leave());
-                let _ = io::stdout().flush();
-                // Ensure raw mode is not left active on exit.
-                let _ = terminal::disable_raw_mode();
-                if stdout_is_tty && machine.honor_game_colours {
-                    print!("{}", screen::osc_reset_bg());
-                    let _ = io::stdout().flush();
-                }
-                if stdout_is_tty {
-                    print!("{}", screen::cursor_reset());
-                    let _ = io::stdout().flush();
-                }
+                // `view.leave()` is the renderer's own teardown (drop the scroll
+                // region, park the cursor below it); the guard does the rest.
+                guard.restore(&view.leave());
                 break;
             }
 
             StepResult::Fault => {
-                print!("{}", view.leave());
-                let _ = io::stdout().flush();
-                let _ = terminal::disable_raw_mode();
+                guard.restore(&view.leave());
                 if let Some(trace) = machine.take_fault_trace() {
                     for line in trace.to_lines() {
                         eprintln!("{line}");
                     }
-                }
-                if stdout_is_tty && machine.honor_game_colours {
-                    print!("{}", screen::osc_reset_bg());
-                    let _ = io::stdout().flush();
-                }
-                if stdout_is_tty {
-                    print!("{}", screen::cursor_reset());
-                    let _ = io::stdout().flush();
                 }
                 std::process::exit(70); // EX_SOFTWARE: internal software error
             }
@@ -1020,7 +1004,7 @@ fn main() {
                 } else {
                     None
                 };
-                if let Some(esc) = screen::page_bg_escape(cur_bg, last_page_bg) {
+                if let Some(esc) = cli_host::page_bg_escape(cur_bg, last_page_bg) {
                     print!("{esc}");
                     let _ = io::stdout().flush();
                     last_page_bg = cur_bg;
@@ -1064,7 +1048,7 @@ fn main() {
                 } else {
                     None
                 };
-                if let Some(esc) = screen::page_bg_escape(cur_bg, last_page_bg) {
+                if let Some(esc) = cli_host::page_bg_escape(cur_bg, last_page_bg) {
                     print!("{esc}");
                     let _ = io::stdout().flush();
                     last_page_bg = cur_bg;
@@ -1321,7 +1305,12 @@ mod arg_tests {
 
 #[cfg(test)]
 mod stdin_eof_tests {
-    use super::*;
+    // The implementation moved to `cli_host::input` (SQ-0605); zvm-cli keeps its
+    // own regression test, because this is one of the two crates the bug shipped
+    // in — and it shipped here twice, the char path fixed months before the line
+    // path (`zvm-cli gostak.z5 < /dev/null` printed 90 KB of prompts until it
+    // was killed).
+    use cli_host::read_byte_or_eof;
 
     #[test]
     fn true_eof_returns_none_instead_of_looping() {

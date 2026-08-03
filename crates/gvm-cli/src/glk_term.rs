@@ -106,46 +106,9 @@ fn sgr_set(style: GlkStyle, attrs: StyleAttrs) -> String {
     s
 }
 
-/// Split a 24-bit `0xRRGGBB` colour into `(r, g, b)`.
-pub(crate) fn rgb24(v: u32) -> (u8, u8, u8) {
-    (((v >> 16) & 0xFF) as u8, ((v >> 8) & 0xFF) as u8, (v & 0xFF) as u8)
-}
-
-// ── page-background OSC helpers ─────────────────────────────────────────────
-
-/// OSC 11: set the terminal's default background to `#rrggbb`.
-pub fn osc_set_bg((r, g, b): (u8, u8, u8)) -> String {
-    format!("\x1b]11;#{r:02x}{g:02x}{b:02x}\x07")
-}
-
-/// OSC 111: reset the terminal's default background to the user's default.
-pub fn osc_reset_bg() -> &'static str {
-    "\x1b]111\x07"
-}
-
-/// DECSCUSR: force a steady block cursor (SQ-0281 — a box rather than the
-/// terminal's default underline).
-pub fn cursor_steady_block() -> &'static str {
-    "\x1b[2 q"
-}
-
-/// DECSCUSR: restore the terminal's default cursor shape.
-pub fn cursor_reset() -> &'static str {
-    "\x1b[0 q"
-}
-
-/// The escape to emit for a page-bg transition from `prev` to `cur` (both are
-/// already honor-resolved: `None` = no game bg / default). `None` return = no
-/// change.
-pub fn page_bg_escape(cur: Option<(u8, u8, u8)>, prev: Option<(u8, u8, u8)>) -> Option<String> {
-    if cur == prev {
-        return None;
-    }
-    Some(match cur {
-        Some(rgb) => osc_set_bg(rgb),
-        None => osc_reset_bg().to_string(),
-    })
-}
+// The colour-splitting and page-background/cursor escapes live in
+// `cli_host::term` — they were byte-identical here and in zvm-cli (SQ-0605).
+use cli_host::rgb24;
 
 /// Opening SGR for a style + resolved colour and attribute hints. Style
 /// attributes always apply; the game's fg/bg/reverse colour is added only when
@@ -1611,22 +1574,8 @@ mod tests {
         );
     }
 
-    // ── page-background OSC helpers ───────────────────────────────────────────
-
-    #[test]
-    fn osc_set_bg_formats_hex() {
-        assert_eq!(super::osc_set_bg((0x12, 0x34, 0x56)), "\x1b]11;#123456\x07");
-        assert_eq!(super::osc_set_bg((0, 0, 0)), "\x1b]11;#000000\x07");
-    }
-
-    #[test]
-    fn page_bg_escape_emits_only_on_change() {
-        assert_eq!(super::page_bg_escape(None, None), None);
-        assert_eq!(super::page_bg_escape(Some((1, 2, 3)), None), Some("\x1b]11;#010203\x07".into()));
-        assert_eq!(super::page_bg_escape(Some((1, 2, 3)), Some((1, 2, 3))), None);
-        assert_eq!(super::page_bg_escape(Some((9, 9, 9)), Some((1, 2, 3))), Some("\x1b]11;#090909\x07".into()));
-        assert_eq!(super::page_bg_escape(None, Some((1, 2, 3))), Some("\x1b]111\x07".into()));
-    }
+    // The page-background OSC helpers moved to `cli_host::term`, and their
+    // tests with them (SQ-0605).
 
     // ── deferred input echo (SQ-0282) ─────────────────────────────────────────
 
