@@ -105,13 +105,48 @@ fn build_machine(bytes: Vec<u8>, backend: Box<dyn GlkBackend>) -> Result<Machine
 
 // ── input helpers ─────────────────────────────────────────────────────────────
 
+/// Read one line, or `None` at true EOF.
+///
+/// A 0-byte `read_line` is EOF; a blank line still yields one byte (`"\n"`) and
+/// is a legitimate empty command. Mirrors `zvm-cli`'s `read_byte_or_eof`.
+fn read_line_or_eof<R: BufRead>(r: &mut R) -> Option<String> {
+    let mut line = String::new();
+    match r.read_line(&mut line) {
+        Ok(0) => None,
+        Ok(_) => Some(line),
+        // A read error is not recoverable input either.
+        Err(_) => None,
+    }
+}
+
+/// Stop cleanly at end of piped input.
+///
+/// The read helpers below have no access to the machine or the display, so the
+/// terminal is put back by hand: raw mode off, styling cleared, the page
+/// background released, and the cursor shape restored. Without this the shell
+/// inherited the game's background and a block cursor.
+fn exit_on_eof() -> ! {
+    let _ = terminal::disable_raw_mode();
+    if io::stdout().is_terminal() {
+        print!("\x1b[0m{}{}", glk_term::osc_reset_bg(), glk_term::cursor_reset());
+    }
+    let _ = io::Write::flush(&mut io::stdout());
+    std::process::exit(0);
+}
+
 /// Read a cooked line of input from stdin (the terminal echoes it). The second
 /// value is the Glk line terminator keycode; cooked stdin only ever completes a
 /// line with Enter, so it is always 0 (normal termination).
+///
+/// At true EOF this exits rather than returning an empty line: the game would
+/// otherwise be handed a blank command forever and never stop (SQ-0604) —
+/// piping `/dev/null` to Kerkerkruip repeated its "no destination yet" reply
+/// until the process was killed.
 fn read_line_stdin() -> (String, u32) {
-    let mut line = String::new();
-    let _ = io::stdin().lock().read_line(&mut line);
-    (line, 0)
+    match read_line_or_eof(&mut io::stdin().lock()) {
+        Some(line) => (line, 0),
+        None => exit_on_eof(),
+    }
 }
 
 /// How [`read_line_raw`] should echo the typed line.
@@ -211,8 +246,9 @@ fn read_line_raw(is_tty: bool, echo: LineEcho) -> (String, u32) {
 /// stdin: return the first byte of the next line.
 fn read_char_input(stdin_is_tty: bool) -> u32 {
     if !stdin_is_tty {
-        let mut line = String::new();
-        let _ = io::stdin().lock().read_line(&mut line);
+        // Same EOF rule as the line path: a char request at end of input has
+        // nothing left to answer with (SQ-0604).
+        let Some(line) = read_line_or_eof(&mut io::stdin().lock()) else { exit_on_eof() };
         let byte = line.bytes().next().unwrap_or(b'\n');
         return match byte {
             b'\n' | b'\r' => keycode::RETURN,
@@ -702,6 +738,44 @@ fn main() {
 
     for d in &machine.diagnostics {
         eprintln!("gvm: {d}");
+    }
+}
+
+#[cfg(test)]
+mod stdin_eof_tests {
+    use super::*;
+
+    /// SQ-0604: gvm-cli ignored `read_line`'s result, so a closed stdin handed
+    /// the game an empty command over and over and the process never stopped —
+    /// piping /dev/null to Kerkerkruip repeated its "no destination yet" reply
+    /// until it was killed. A 0-byte read is EOF and must be reported as such.
+    #[test]
+    fn true_eof_is_reported_rather_than_read_as_a_blank_command() {
+        let mut empty: &[u8] = b"";
+        assert_eq!(read_line_or_eof(&mut empty), None);
+    }
+
+    /// The distinction that makes it safe: a blank line is a real, empty
+    /// command and still yields a byte.
+    #[test]
+    fn a_blank_line_is_not_eof() {
+        let mut input: &[u8] = b"\n";
+        assert_eq!(read_line_or_eof(&mut input).as_deref(), Some("\n"));
+    }
+
+    #[test]
+    fn a_line_is_returned_whole_and_then_input_ends() {
+        let mut input: &[u8] = b"look\n";
+        assert_eq!(read_line_or_eof(&mut input).as_deref(), Some("look\n"));
+        assert_eq!(read_line_or_eof(&mut input), None, "the stream is exhausted");
+    }
+
+    /// A final line with no trailing newline is still a command, not EOF.
+    #[test]
+    fn an_unterminated_last_line_is_still_input() {
+        let mut input: &[u8] = b"quit";
+        assert_eq!(read_line_or_eof(&mut input).as_deref(), Some("quit"));
+        assert_eq!(read_line_or_eof(&mut input), None);
     }
 }
 
