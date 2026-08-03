@@ -209,6 +209,13 @@ struct GridWin {
     id: u32,
     rect: Rect,
     cells: Vec<Vec<GridCell>>,
+    /// The window's own Normal-style colours, from its `WinTree::Leaf`. A grid
+    /// is a *panel*: its background belongs to the whole rect, not just to the
+    /// cells the game happened to write. Without this the untouched cells — the
+    /// gaps between fields and everything past the last one — showed the
+    /// terminal's default background, so a coloured panel rendered as coloured
+    /// words floating on bare terminal (SQ-0602).
+    fill: StyleColour,
 }
 
 impl GridWin {
@@ -225,28 +232,67 @@ impl GridWin {
     }
 }
 
-/// Append one grid's cells to `out`, addressed absolutely at its rect. A grid
-/// that spans the full terminal width keeps the historical clear-line rendering
-/// (`\x1b[2K` then the trimmed row), so the common status-line-on-top case is
-/// byte-identical; a narrower grid (a Left/Right column) writes its cells at its
-/// own width only, so it never clears into a neighbouring window.
-fn append_grid(out: &mut String, g: &GridWin, term_cols: u32, honor: bool, tty: bool) {
-    let full_width = g.rect.left == 0 && g.rect.width == term_cols;
+/// Append one grid's cells to `out`, addressed absolutely at its rect.
+///
+/// Every cell in the rect is written, including the blanks: a grid is a panel
+/// whose background covers its whole area. A cell the game never wrote inherits
+/// the window's own Normal-style colour (`g.fill`) rather than rendering bare,
+/// so the gaps between fields and the run past the last field carry the panel's
+/// background like every other cell (SQ-0602).
+///
+/// Runs of identical styling share one SGR pair instead of wrapping every
+/// character, which matters here because a full-width panel row is now always
+/// emitted at full width rather than trimmed.
+fn append_grid(out: &mut String, g: &GridWin, _term_cols: u32, honor: bool, tty: bool) {
     for (r, row) in g.cells.iter().enumerate() {
         let screen_row = g.rect.top + r as u32 + 1;
         let screen_col = g.rect.left + 1;
         out.push_str(&format!("\x1b[{screen_row};{screen_col}H"));
-        let mut line = String::new();
+
+        // Coalesce neighbouring cells that render identically.
+        let mut run = String::new();
+        let mut run_key: Option<(GlkStyle, StyleColour, StyleAttrs)> = None;
         for c in 0..g.rect.width as usize {
             let (ch, st, col, at) = row.get(c).copied().unwrap_or(BLANK_CELL);
-            line.push_str(&style_wrap(&ch.to_string(), st, col, at, honor, tty));
+            // An unset cell colour falls back to the window's own fill, so a
+            // blank inside a coloured panel is still part of the panel.
+            let col = StyleColour {
+                fg: col.fg.or(g.fill.fg),
+                bg: col.bg.or(g.fill.bg),
+                reverse: col.reverse || g.fill.reverse,
+            };
+            let key = (st, col, at);
+            match &run_key {
+                Some(k) if *k == key => run.push(ch),
+                Some(k) => {
+                    let (s0, c0, a0) = *k;
+                    out.push_str(&style_wrap(&run, s0, c0, a0, honor, tty));
+                    run.clear();
+                    run.push(ch);
+                    run_key = Some(key);
+                }
+                None => {
+                    run.push(ch);
+                    run_key = Some(key);
+                }
+            }
         }
-        if full_width {
-            out.push_str("\x1b[2K"); // clear the whole line, then the trimmed row
-            out.push_str(line.trim_end());
-        } else {
-            out.push_str(&line); // fixed-width column: no line clear
+        if let Some((s0, c0, a0)) = run_key {
+            out.push_str(&style_wrap(&run, s0, c0, a0, honor, tty));
         }
+    }
+}
+
+/// The Normal-style colours of the leaf with `id`, if the tree has one.
+fn leaf_fill(tree: &WinTree, id: u32) -> Option<StyleColour> {
+    match tree {
+        WinTree::Leaf { id: lid, bg, fg, reverse, .. } if *lid == id => {
+            Some(StyleColour { fg: *fg, bg: *bg, reverse: *reverse })
+        }
+        WinTree::Pair { first, second, .. } => {
+            leaf_fill(first, id).or_else(|| leaf_fill(second, id))
+        }
+        _ => None,
     }
 }
 
@@ -445,7 +491,12 @@ impl TerminalBackend {
         if let Some(i) = self.grids.iter().position(|g| g.id == id) {
             i
         } else {
-            self.grids.push(GridWin { id, rect: Rect::default(), cells: Vec::new() });
+            self.grids.push(GridWin {
+                id,
+                rect: Rect::default(),
+                cells: Vec::new(),
+                fill: StyleColour::default(),
+            });
             self.grids.len() - 1
         }
     }
@@ -658,6 +709,16 @@ impl GlkBackend for TerminalBackend {
 
     fn window_tree(&mut self, tree: Option<WinTree>) {
         self.tree = tree;
+        // Refresh each grid's panel fill and the buffer's column from the tree:
+        // the leaves carry the per-window Normal-style colours and true rects
+        // that `window_layout` does not (SQ-0602).
+        if let Some(t) = &self.tree {
+            for g in &mut self.grids {
+                if let Some(fill) = leaf_fill(t, g.id) {
+                    g.fill = fill;
+                }
+            }
+        }
         // The tree carries the borders + true rects; redraw the static chrome so
         // separators and any repositioned grids appear (TTY only).
         self.redraw_chrome();
@@ -1304,8 +1365,57 @@ mod tests {
         b.grid_put(2, 0, 0, GlkStyle::Normal, "TOP");
         b.grid_put(3, 0, 0, GlkStyle::Normal, "BOTTOM");
         let out = out_string(&buf);
-        assert!(out.contains("\x1b[1;1H\x1b[2KTOP"), "top grid at row 1: {out:?}");
-        assert!(out.contains("\x1b[24;1H\x1b[2KBOTTOM"), "bottom grid at row 24: {out:?}");
+        // Each grid is addressed at its own row and painted across its full
+        // width — no `2K` line clear now that every cell is written (SQ-0602).
+        assert!(out.contains(&format!("\x1b[1;1HTOP{}", " ".repeat(77))), "top grid at row 1: {out:?}");
+        assert!(out.contains(&format!("\x1b[24;1HBOTTOM{}", " ".repeat(74))), "bottom grid at row 24: {out:?}");
+    }
+
+    /// SQ-0602: a grid is a panel, so its window background covers the whole
+    /// rect. Cells the game never wrote used to render bare and a full-width row
+    /// was trimmed at its last character, so a coloured status bar appeared as
+    /// coloured words floating on the terminal's own background — Kerkerkruip's
+    /// bar painted its background under roughly a third of the row.
+    #[test]
+    fn a_grid_paints_its_window_background_across_the_whole_row() {
+        let (mut b, buf) = backend(true);
+        let grid = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 20, height: 1 }, Some(true));
+        let buffer = (1u32, WinType::TextBuffer, Rect { left: 0, top: 1, width: 20, height: 22 }, Some(true));
+        b.window_layout(&[buffer, grid]);
+        // The window's own Normal-style background, as the tree reports it.
+        b.window_tree(Some(WinTree::Pair {
+            vertical: true,
+            border: false,
+            split: 1,
+            rect: Rect { left: 0, top: 0, width: 20, height: 23 },
+            key_bg: None,
+            key_fg: None,
+            first: Box::new(WinTree::Leaf {
+                id: 2,
+                wintype: WinType::TextGrid,
+                rect: Rect { left: 0, top: 0, width: 20, height: 1 },
+                bg: Some(0x00204060),
+                fg: None,
+                reverse: false,
+            }),
+            second: Box::new(WinTree::Leaf {
+                id: 1,
+                wintype: WinType::TextBuffer,
+                rect: Rect { left: 0, top: 1, width: 20, height: 22 },
+                bg: None,
+                fg: None,
+                reverse: false,
+            }),
+        }));
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "HP");
+        let out = out_string(&buf);
+
+        let bg = "\x1b[48;2;32;64;96m";
+        assert!(out.contains(bg), "the window background is emitted at all: {out:?}");
+        // The row is 20 cells: "HP" plus 18 blanks, and the blanks carry the
+        // background too — the whole panel is filled, not just the text.
+        let filled = format!("{bg}HP{}\x1b[0m", " ".repeat(18));
+        assert!(out.contains(&filled), "background must cover the full 20-cell row: {out:?}");
     }
 
     #[test]
