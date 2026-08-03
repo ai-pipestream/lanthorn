@@ -125,7 +125,9 @@ enum LineEcho {
     /// blind, then ERASE exactly what we echoed on Enter — so the game's own echo
     /// is the only copy that survives on a scrolling terminal (SQ-0282). Mirrors a
     /// redrawable Glk library, which removes echo-off input once the line ends.
-    EraseOnEnter,
+    /// Carries the SGR to echo with, so live typing matches the colour the
+    /// window will repaint it in (SQ-0603 follow-up).
+    EraseOnEnter(String),
 }
 
 /// Read a line of input in RAW mode, echoing typed characters manually so the
@@ -140,7 +142,7 @@ fn read_line_raw(is_tty: bool, echo: LineEcho) -> (String, u32) {
     }
     let (sgr, erase_after): (&str, bool) = match &echo {
         LineEcho::Shown(s) => (s.as_str(), false),
-        LineEcho::EraseOnEnter => ("", true),
+        LineEcho::EraseOnEnter(s) => (s.as_str(), true),
     };
     let _ = terminal::enable_raw_mode();
     let mut buf = String::new();
@@ -237,12 +239,21 @@ fn read_char_input(stdin_is_tty: bool) -> u32 {
 /// Emit an OSC 11 page-background update if the game's Normal-style background
 /// changed since `last` (honor-gated, TTY-only). Called just before blocking for
 /// input, so the per-instruction step loop never pays for the lookup.
-fn emit_page_bg(machine: &Machine, honor: bool, stdout_is_tty: bool, last: &mut Option<(u8, u8, u8)>) {
+fn emit_page_bg(machine: &mut Machine, honor: bool, stdout_is_tty: bool, last: &mut Option<(u8, u8, u8)>) {
     let cur = if honor && stdout_is_tty {
-        machine
-            .style_colour(gvm::WinType::TextBuffer, gvm::glk::GlkStyle::Normal)
-            .bg
-            .map(glk_term::rgb24)
+        // Prefer the live window colours; fall back to the by-wintype style
+        // lookup for a game that sets its hints globally.
+        let from_window = machine
+            .backend_mut()
+            .as_any_mut()
+            .downcast_mut::<TerminalBackend>()
+            .and_then(|t| t.page_bg());
+        from_window.or_else(|| {
+            machine
+                .style_colour(gvm::WinType::TextBuffer, gvm::glk::GlkStyle::Normal)
+                .bg
+                .map(glk_term::rgb24)
+        })
     } else {
         None
     };
@@ -324,7 +335,13 @@ fn drive(
                 // the backend echoes it so it isn't lost (e.g. sensory, which relies
                 // on library echo gvm does not implement). See
                 // TerminalBackend::arm_input_echo (SQ-0275 + SQ-0282).
-                let (line, terminator) = read_line(LineEcho::EraseOnEnter);
+                let echo_sgr = machine
+                    .backend_mut()
+                    .as_any_mut()
+                    .downcast_mut::<TerminalBackend>()
+                    .map(|t| t.input_echo_sgr())
+                    .unwrap_or_default();
+                let (line, terminator) = read_line(LineEcho::EraseOnEnter(echo_sgr));
                 let cmd = line.trim_end_matches(['\n', '\r']);
                 if let Some(t) =
                     machine.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>()
@@ -652,6 +669,12 @@ fn main() {
     machine.flush();
     // Ensure raw mode is not left active on exit (harmless if already off).
     let _ = terminal::disable_raw_mode();
+    // Drop the scroll region, clear styling, and put the cursor below the last
+    // painted row so the shell prompt returns under the display rather than
+    // inside it.
+    if let Some(t) = machine.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>() {
+        t.leave_display();
+    }
     // Restore the terminal's own background (OSC 111): covers normal quit and
     // the fault/exit(70) path below (single teardown point; drive() never
     // resets itself, to avoid a double-reset).

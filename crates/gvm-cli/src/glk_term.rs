@@ -835,6 +835,65 @@ impl TerminalBackend {
         }
     }
 
+    /// The page background to push to the terminal (OSC 11): the largest buffer
+    /// window's own Normal-style background.
+    ///
+    /// Taken from the window tree rather than a by-wintype style lookup, because
+    /// a game that sets its colours per window — Kerkerkruip does — has no
+    /// global TextBuffer Normal background to find, and the page then stayed the
+    /// terminal's own colour with the game's background showing only behind the
+    /// glyphs it had actually drawn.
+    pub fn page_bg(&self) -> Option<(u8, u8, u8)> {
+        if !self.honor {
+            return None;
+        }
+        self.buffers
+            .iter()
+            .max_by_key(|b| b.rect.width * b.rect.height)
+            .and_then(|b| b.fill.bg)
+            .map(rgb24)
+    }
+
+    /// The SGR the CLI should open its live input echo with, so a half-typed
+    /// command looks like the finished one.
+    ///
+    /// Raw-mode echo is written by `main` at the terminal cursor, outside the
+    /// window model, so it carried no styling at all: text changed colour the
+    /// moment you pressed Enter and the window repainted it. Styling it as
+    /// `Input` over the active window's own background closes that gap.
+    pub fn input_echo_sgr(&self) -> String {
+        let fill = self
+            .active_buffer
+            .and_then(|id| self.buffers.iter().find(|b| b.id == id))
+            .map(|b| b.fill)
+            .unwrap_or_default();
+        sgr_open(GlkStyle::Input, fill, StyleAttrs::default(), self.honor)
+    }
+
+    /// Tear down the windowed display: drop any scroll region, clear styling,
+    /// and leave the cursor on the last screen row.
+    ///
+    /// Windowed mode parks the cursor inside a window, so without this the shell
+    /// prompt returned in the middle of the panels and then scrolled through
+    /// them. The screen is deliberately left painted — the final frame is worth
+    /// keeping — but the prompt belongs underneath it.
+    pub fn leave_display(&mut self) {
+        if !self.is_tty {
+            return;
+        }
+        let mut out = String::new();
+        if self.region_set {
+            out.push_str(&leave_region());
+            self.region_set = false;
+        }
+        out.push_str("\x1b[0m");
+        if self.windowed() {
+            out.push_str(&format!("\x1b[{};1H\n", self.rows.max(1)));
+        }
+        let _ = self.out.write_all(out.as_bytes());
+        let _ = self.out.flush();
+    }
+
     /// Update the terminal size. Returns `true` if the size actually changed.
     /// The caller should call [`gvm::exec::Machine::notify_resize`] afterward
     /// to push an `evtype_Arrange` event and re-layout windows.
@@ -1058,7 +1117,10 @@ impl GlkBackend for TerminalBackend {
                     // Drop a trailing space that would push past the right margin
                     // (same normalisation as the previous soft_wrap helper).
                     if self.current_col < self.cols {
-                        let _ = self.out.write_all(b" ");
+                        // Styled, not a bare byte: an unstyled space punched a
+                        // hole in the background between every pair of words.
+                        let sp = style_wrap(" ", style, colour, attrs, self.honor, self.is_tty);
+                        let _ = self.out.write_all(sp.as_bytes());
                         self.current_col += 1;
                     }
                 }
@@ -1777,6 +1839,51 @@ mod tests {
         // Streamed at the cursor, with no absolute addressing of the buffer.
         assert!(out.contains("hello"), "text is streamed: {out:?}");
         assert!(!out.contains("\x1b[2;1Hhello"), "no windowed addressing: {out:?}");
+    }
+
+    /// Live raw-mode echo is written by `main` outside the window model, so it
+    /// carried no styling: text changed colour the moment you pressed Enter and
+    /// the window repainted it.
+    #[test]
+    fn the_input_echo_carries_the_active_window_styling() {
+        let (mut b, _buf) = backend(true);
+        let story = (1u32, WinType::TextBuffer, Rect { left: 0, top: 0, width: 20, height: 4 }, Some(true));
+        let panel = (2u32, WinType::TextBuffer, Rect { left: 21, top: 0, width: 10, height: 4 }, Some(true));
+        b.window_layout(&[story, panel]);
+        b.buffers[0].fill = StyleColour { fg: None, bg: Some(0x00102030), reverse: false };
+        b.put_text(1, GlkStyle::Normal, "> ");
+        let sgr = b.input_echo_sgr();
+        assert!(sgr.contains("\x1b[48;2;16;32;48m"), "echo uses the window's background: {sgr:?}");
+        assert!(sgr.contains("\x1b[1m"), "and the Input style's bold: {sgr:?}");
+    }
+
+    /// Windowed mode parks the cursor inside a window, so on exit the shell
+    /// prompt came back in the middle of the panels.
+    #[test]
+    fn leaving_the_display_parks_the_cursor_below_it() {
+        let (mut b, buf) = backend(true);
+        let story = (1u32, WinType::TextBuffer, Rect { left: 0, top: 0, width: 20, height: 4 }, Some(true));
+        let panel = (2u32, WinType::TextBuffer, Rect { left: 21, top: 0, width: 10, height: 4 }, Some(true));
+        b.window_layout(&[story, panel]);
+        b.leave_display();
+        let out = out_string(&buf);
+        assert!(out.contains("\x1b[0m"), "styling is cleared: {out:?}");
+        assert!(out.contains("\x1b[24;1H"), "cursor parks on the last row: {out:?}");
+    }
+
+    /// A bare space between words punched a hole in the background, so a
+    /// coloured screen showed the game's colour only behind the glyphs.
+    #[test]
+    fn a_streamed_space_carries_the_run_styling() {
+        let (mut b, buf) = backend(true);
+        let story = (1u32, WinType::TextBuffer, Rect { left: 0, top: 1, width: 80, height: 23 }, Some(true));
+        b.window_layout(&[story]);
+        let col = StyleColour { fg: None, bg: Some(0x00102030), reverse: false };
+        b.put_text_attr(1, GlkStyle::Normal, col, StyleAttrs::default(), 0, "aa bb");
+        b.flush_out();
+        let out = out_string(&buf);
+        let bg = "\x1b[48;2;16;32;48m";
+        assert!(out.contains(&format!("{bg} \x1b[0m")), "the space is styled too: {out:?}");
     }
 
     #[test]
