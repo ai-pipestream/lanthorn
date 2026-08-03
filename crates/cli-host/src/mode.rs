@@ -9,17 +9,14 @@
 //! - **raw input** — may we take over line editing in raw mode, echoing
 //!   characters ourselves? Today this is exactly "stdin is a TTY".
 //!
-//! They are separate because a plain-text mode (SQ-0606) turns *both* off while
-//! leaving the underlying TTY facts unchanged: a screen reader wants a real
-//! terminal with no escapes in it and the kernel's own cooked line editing.
-//! [`HostMode::detect_with`] takes that `force_plain` decision as a parameter so
-//! the flag can be added without touching this type; until then every caller
-//! passes `false` and the answers are byte-for-byte what the CLIs computed
-//! inline before.
+//! They are separate because plain-text mode turns *both* off while leaving the
+//! underlying TTY facts unchanged: a screen reader wants a real terminal with no
+//! escapes in it and the kernel's own cooked line editing (so the reader can
+//! hook the terminal's echo to announce typed characters, and the user keeps
+//! their familiar line editing).
 //!
-//! `both_tty` stays a plain TTY fact — it gates terminal-size polling and
-//! `[MORE]` paging, which are questions about the device, not about how much
-//! decoration the reader wants.
+//! `both_tty` stays a plain TTY fact — it gates terminal-size polling, which is
+//! a question about the device, not about how much decoration the reader wants.
 
 use std::io::{self, IsTerminal};
 use std::sync::OnceLock;
@@ -110,6 +107,41 @@ impl HostMode {
     }
 }
 
+/// The flags that ask for plain-text output. `--screen-reader` is the same
+/// switch under the name the people who need it will look for.
+pub const PLAIN_FLAGS: [&str; 2] = ["--plain", "--screen-reader"];
+
+/// Was plain-text output asked for — by flag, or by `TERM=dumb`?
+pub fn plain_requested(argv: &[String]) -> bool {
+    plain_from(argv, std::env::var("TERM").ok().as_deref())
+}
+
+/// The decision behind [`plain_requested`], with the environment passed in.
+///
+/// `TERM=dumb` counts because it is the terminal saying it has no capabilities —
+/// emitting cursor addressing at it would be nonsense whatever the user asked
+/// for. `NO_COLOR` deliberately does **not** count here; see [`no_color`].
+pub fn plain_from(argv: &[String], term: Option<&str>) -> bool {
+    argv.iter().any(|a| PLAIN_FLAGS.contains(&a.as_str())) || term == Some("dumb")
+}
+
+/// Is `NO_COLOR` set to a non-empty value?
+///
+/// This suppresses **colour**, not layout. The convention (no-color.org) is
+/// specifically that software "prevents the addition of ANSI color" — it says
+/// nothing about cursor addressing, and someone who sets `NO_COLOR` has not
+/// asked to lose their pinned status line. So it maps onto the CLIs' existing
+/// `--no-game-colours`, not onto plain mode. `TERM=dumb` is the variable that
+/// means the whole vocabulary is unavailable.
+pub fn no_color() -> bool {
+    no_color_from(std::env::var("NO_COLOR").ok().as_deref())
+}
+
+/// The decision behind [`no_color`], with the environment passed in.
+pub fn no_color_from(no_color: Option<&str>) -> bool {
+    no_color.is_some_and(|v| !v.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +159,39 @@ mod tests {
 
         // Piped stdout: no escapes, whatever stdin is.
         assert!(!HostMode::new(true, false, false).rich());
+    }
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn plain_comes_from_either_flag_or_a_dumb_terminal() {
+        assert!(plain_from(&argv(&["prog", "--plain"]), Some("xterm-256color")));
+        assert!(plain_from(&argv(&["prog", "--screen-reader"]), Some("xterm-256color")));
+        assert!(plain_from(&argv(&["prog", "story.z5"]), Some("dumb")));
+        assert!(!plain_from(&argv(&["prog", "story.z5"]), Some("xterm-256color")));
+        assert!(!plain_from(&argv(&["prog", "story.z5"]), None));
+        // Not a prefix match — a story file named like the flag is not the flag.
+        assert!(!plain_from(&argv(&["prog", "--plaintext"]), None));
+    }
+
+    #[test]
+    fn no_color_is_presence_and_non_empty_not_truthiness() {
+        // no-color.org: set and non-empty, "regardless of its value".
+        assert!(no_color_from(Some("1")));
+        assert!(no_color_from(Some("0")), "even \"0\" means set");
+        assert!(no_color_from(Some("anything")));
+        assert!(!no_color_from(Some("")), "empty means not set");
+        assert!(!no_color_from(None));
+    }
+
+    #[test]
+    fn no_color_does_not_imply_plain() {
+        // NO_COLOR suppresses colour, not cursor addressing: someone who sets it
+        // has not asked to lose their pinned status line. Only TERM=dumb says
+        // the terminal has no vocabulary at all.
+        assert!(!plain_from(&argv(&["prog"]), Some("xterm-256color")));
     }
 
     #[test]

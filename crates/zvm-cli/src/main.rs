@@ -389,6 +389,8 @@ fn resolve_save_input(input: &str, game_dir: &std::path::Path) -> std::path::Pat
 }
 
 /// Returns `true` (honour game colours) unless `--no-game-colours` is present.
+/// `NO_COLOR` is folded in at the call site, so this stays a pure function of
+/// the command line and its test stays independent of the environment.
 fn parse_game_colours(args: &[String]) -> bool {
     !args.iter().any(|a| a == "--no-game-colours")
 }
@@ -774,11 +776,16 @@ Arguments:
                         with babelmap.
 
 Options:
+      --plain           Plain text only: no escape sequences, no [MORE] pager,
+                        and the terminal's own line editing and echo. Intended
+                        for screen readers (alias: --screen-reader). Also
+                        selected by TERM=dumb.
       --no-status       Suppress the pinned status/upper-window line (alias: --lower-only)
       --no-aux          Don't read or write v5 auxiliary (VFS) sidecar files
       --no-more         Disable [MORE] paging on long output (alias: --no-page)
       --no-timed-input  Ignore timed-input interrupts
       --no-game-colours Ignore the game's set_colour / true-colour output
+                        (also honoured: NO_COLOR)
       --no-sound        Disable sound (bleeps + sampled audio)
       --volume <0-100>  Set the master volume
   -I, --interpreter <n> Set the Z-machine interpreter number
@@ -831,11 +838,10 @@ fn main() {
     let aux_file = auxiliary::aux_path(&game_dir);
 
     // One decision about what this terminal can take, published process-wide so
-    // the exit paths buried in the read helpers can reach it (SQ-0605). The
-    // locals below keep their old names and, today, their old values: `rich` is
-    // "stdout is a TTY" and `raw_input` is "stdin is a TTY" until `--plain`
-    // exists (SQ-0606).
-    let mode = HostMode::detect().install();
+    // the exit paths buried in the read helpers can reach it (SQ-0605).
+    // `--plain`/`--screen-reader`, or TERM=dumb, turns off both escape output
+    // and raw-mode line editing (SQ-0606).
+    let mode = HostMode::detect_with(cli_host::plain_requested(&argv)).install();
     let stdout_is_tty = mode.rich();
     let stdin_is_tty = mode.raw_input();
     let both_tty = mode.both_tty();
@@ -854,15 +860,22 @@ fn main() {
     // Paging is only safe when BOTH ends are TTYs (else it would block the
     // headless harness); --no-more disables it.
     let (mut term_rows, mut term_cols) = detect_term_size();
-    let paging = both_tty && !args.no_more;
+    // Plain mode also drops the pager: a [MORE] prompt is a blocking modal that
+    // hides the rest of the output behind a keypress, which is exactly the shape
+    // a screen reader cannot cope with (SQ-0606).
+    let paging = both_tty && !args.no_more && !mode.plain();
     let mut page_height = term_rows.saturating_sub(2).max(2);
     // Timed reads (read/read_char time+routine) are honored unless disabled.
     let timed = !args.no_timed_input;
     let sound_enabled = !args.no_sound;
     let volume = parse_volume(&argv).unwrap_or(100);
 
-    let honor = parse_game_colours(&argv);
+    // `NO_COLOR` (no-color.org) means colour, not layout: it drops the game's
+    // colours exactly as `--no-game-colours` does, and leaves the pinned status
+    // line alone. Plain mode emits no escapes at all, so colour is moot there.
+    let honor = parse_game_colours(&argv) && !cli_host::no_color();
     let interpreter = parse_interpreter(&argv);
+
     let mut machine = match build_machine(
         story_bytes,
         stdout_is_tty,
@@ -922,7 +935,10 @@ fn main() {
             let events: Vec<zvm::cpu::exec::SoundEvent> = machine.pending_sounds.drain(..).collect();
             let beeps = events.iter().filter(|e| e.number == 1 || e.number == 2).count();
             if beeps > 0 {
-                print!("{}", screen::bleep_bytes(beeps, stdout_is_tty));
+                // The device fact, not `rich`: a bell is not an escape sequence
+                // and a game ringing it is saying something, so plain mode keeps
+                // it. Identical to `rich` in every other case.
+                print!("{}", screen::bleep_bytes(beeps, mode.stdout_tty()));
                 let _ = io::stdout().flush();
             }
             if let Some(cs) = sound.as_mut() {

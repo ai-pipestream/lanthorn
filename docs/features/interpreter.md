@@ -150,7 +150,33 @@ upper-window grid. **Glulx/Glk** games get the same treatment —
 It all sits under one switch, `honor_game_colours` (default **on**): flip it in the
 F2 settings screen to let your theme own every colour instead. `zvm-cli` and
 `gvm-cli` render the same colours as ANSI SGR and both accept `--no-game-colours`
-to opt out.
+to opt out, as does setting `NO_COLOR` to a non-empty value.
+
+## Plain text, for screen readers
+
+All three CLIs accept **`--plain`** (alias `--screen-reader`), and select it
+automatically under `TERM=dumb`. It emits no escape sequences at all: no colour,
+no cursor addressing, no scroll region, no pinned status line, no alternate
+screen — just linear, append-only text a screen reader can follow and scrollback
+can review. `[MORE]` paging goes too, since a blocking prompt that hides the rest
+of the output behind a keypress is the shape a reader copes with worst. Line
+editing and echo go back to the terminal, so the reader announces typed
+characters and the user's familiar editing keys work.
+
+What would otherwise be spatial arrives in reading order instead: the Z-machine
+status line and upper window come through as ordinary lines, and Glk TextGrid
+windows stream inline, deduped so an unchanged status bar doesn't repeat every
+turn.
+
+This is the same output path piped/redirected use has always taken — kept honest
+by the test harnesses that read it — so `--plain` mostly makes it *selectable*
+without giving up an interactive terminal. `NO_COLOR` deliberately does **not**
+imply plain mode: [the convention](https://no-color.org/) is about colour, and
+someone who sets it has not asked to lose their status line.
+
+> **Not yet validated with a real screen reader.** The escape output, input
+> paths, and TTY gating are measured; NVDA/Orca/VoiceOver behaviour is not. If
+> you use one, we would like to hear how this goes.
 
 ## Robustness
 

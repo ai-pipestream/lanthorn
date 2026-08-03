@@ -525,7 +525,11 @@ Arguments:
   <story>               Glulx story (.ulx) or Blorb (.gblorb)
 
 Options:
+      --plain           Plain text only: no escape sequences, and the terminal's
+                        own line editing and echo. Intended for screen readers
+                        (alias: --screen-reader). Also selected by TERM=dumb.
       --no-game-colours Ignore the game's Glk stylehint colours
+                        (also honoured: NO_COLOR)
       --no-accel        Disable Glulx accelerated-function interception
       --data-dir <path> Base dir for saves/sidecars (default: beside the story)
   -V, --version         Print version and exit
@@ -537,9 +541,14 @@ fn main() {
     if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_PKG_NAME"), buildinfo::LONG) {
         return;
     }
+    // Resolve the terminal mode FIRST: `TerminalBackend::new` below reads the
+    // installed mode to decide whether it may emit escapes, so `--plain` has to
+    // be known before the backend exists (SQ-0606).
+    let mode = HostMode::detect_with(cli_host::plain_requested(&argv)).install();
     // Honour the game's stylehint colours by default; --no-game-colours opts out
-    // (mirrors zvm-cli). The story path is the first non-flag argument.
-    let honor = !argv.iter().any(|a| a == "--no-game-colours");
+    // (mirrors zvm-cli), as does NO_COLOR — which is about colour only, not
+    // layout. The story path is the first non-flag argument.
+    let honor = !argv.iter().any(|a| a == "--no-game-colours") && !cli_host::no_color();
     // Acceleration (Glulx accelfunc interception) is on by default; --no-accel opts out.
     let accel = !argv.iter().any(|a| a == "--no-accel");
     // --data-dir takes a value, so it (and its value) must be consumed before
@@ -593,12 +602,7 @@ fn main() {
     let mut machine = Machine::with_glk(mem, Box::new(backend));
     machine.set_acceleration(accel);
 
-    // One decision about what this terminal can take, published process-wide so
-    // the exit paths buried in the read helpers can reach it (SQ-0605). The
-    // locals keep their old names and, today, their old values: `rich` is
-    // "stdout is a TTY" and `raw_input` is "stdin is a TTY" until `--plain`
-    // exists (SQ-0606).
-    let mode = HostMode::detect().install();
+    // Resolved above, before the backend was built.
     let stdin_is_tty = mode.raw_input();
     let stdout_is_tty = mode.rich();
     let both_tty = mode.both_tty();

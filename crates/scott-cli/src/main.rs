@@ -112,6 +112,9 @@ fn parse_args() -> Result<Args, String> {
                 let v = argv.next().ok_or("--max-turns needs a value")?;
                 max_turns = Some(v.parse().map_err(|_| format!("bad --max-turns value: {v}"))?);
             }
+            // Resolved by cli_host straight from argv, but they must be accepted
+            // here or the strict unknown-option check below rejects them.
+            other if cli_host::PLAIN_FLAGS.contains(&other) => {}
             other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
             other => {
                 if path.replace(other.to_string()).is_some() {
@@ -133,6 +136,9 @@ Arguments:
   <adv.dat>           Scott Adams ScottFree .dat adventure
 
 Options:
+      --plain         Use the terminal's own line editing and echo rather than
+                      the built-in editor. Intended for screen readers
+                      (alias: --screen-reader). Also selected by TERM=dumb.
       --seed <n>      Seed the RNG for reproducible play
       --max-turns <n> Stop after n turns (headless/testing)
   -V, --version       Print version and exit
@@ -179,7 +185,11 @@ fn main() {
     // no teardown of any kind: a panic mid-game left the shell in raw mode.
     // `raw_only` fixes that without putting escapes into a transcript that has
     // never had any.
-    let mode = HostMode::detect().install();
+    //
+    // That also makes plain mode nearly free here: the one thing `--plain` has
+    // to change is handing line editing back to the terminal, which is exactly
+    // what `raw_input` decides (SQ-0606).
+    let mode = HostMode::detect_with(cli_host::plain_requested(&argv)).install();
     let interactive = mode.raw_input();
     let _guard = TerminalGuard::raw_only();
     let mut out = io::stdout();

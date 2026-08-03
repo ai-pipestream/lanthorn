@@ -17,7 +17,7 @@
 // top) is overwritten as the buffer scrolls. This is documented rather than hacked
 // around with a broken sub-column scroll region.
 
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, Write};
 
 use gvm::glk::{GlkBackend, GlkStyle, Rect, StyleAttrs, StyleColour, WinTree, WinType};
 
@@ -562,9 +562,14 @@ pub struct TerminalBackend {
 }
 
 impl TerminalBackend {
-    /// Build a backend writing to stdout, detecting TTY + terminal size.
+    /// Build a backend writing to stdout, taking its terminal size from the
+    /// device and its "may I emit escapes?" answer from the installed
+    /// [`HostMode`] — so `--plain` reaches the renderer, and everything
+    /// downstream takes the same path piped output already does (SQ-0606).
+    ///
+    /// `main` must install the mode before constructing this.
     pub fn new() -> Self {
-        let is_tty = io::stdout().is_terminal();
+        let is_tty = cli_host::HostMode::current().rich();
         let (cols, rows) = detect_size();
         let debug = std::env::var_os("BABELMAP_DEBUG_TERM").is_some();
         if debug {

@@ -25,7 +25,7 @@ pub mod term;
 
 pub use flags::handled_common_flags;
 pub use input::{read_byte_or_eof, read_byte_stdin, read_line_or_eof, read_line_stdin};
-pub use mode::HostMode;
+pub use mode::{HostMode, PLAIN_FLAGS, no_color, plain_requested};
 pub use term::{
     TerminalGuard, cursor_reset, cursor_steady_block, end_raw_mode, osc_reset_bg, osc_set_bg,
     page_bg_escape, restore_and_exit, restore_terminal, rgb24,
