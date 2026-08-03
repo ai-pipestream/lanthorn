@@ -248,38 +248,165 @@ fn append_grid(out: &mut String, g: &GridWin, _term_cols: u32, honor: bool, tty:
         let screen_row = g.rect.top + r as u32 + 1;
         let screen_col = g.rect.left + 1;
         out.push_str(&format!("\x1b[{screen_row};{screen_col}H"));
+        out.push_str(&render_row(row, g.rect.width, g.fill, honor, tty));
+    }
+}
 
-        // Coalesce neighbouring cells that render identically.
-        let mut run = String::new();
-        let mut run_key: Option<(GlkStyle, StyleColour, StyleAttrs)> = None;
-        for c in 0..g.rect.width as usize {
-            let (ch, st, col, at) = row.get(c).copied().unwrap_or(BLANK_CELL);
-            // An unset cell colour falls back to the window's own fill, so a
-            // blank inside a coloured panel is still part of the panel.
-            let col = StyleColour {
-                fg: col.fg.or(g.fill.fg),
-                bg: col.bg.or(g.fill.bg),
-                reverse: col.reverse || g.fill.reverse,
-            };
-            let key = (st, col, at);
-            match &run_key {
-                Some(k) if *k == key => run.push(ch),
-                Some(k) => {
-                    let (s0, c0, a0) = *k;
-                    out.push_str(&style_wrap(&run, s0, c0, a0, honor, tty));
-                    run.clear();
-                    run.push(ch);
-                    run_key = Some(key);
+/// Render `cells` as one screen row exactly `width` cells wide, padding with
+/// blanks, and give every cell the window's `fill` wherever its own colour is
+/// unset. Runs of identical styling share one SGR pair.
+///
+/// Padding and filling are the point: a window's background covers its whole
+/// rect, so the blanks past the last character are as much a part of the panel
+/// as the text is (SQ-0602).
+fn render_row(cells: &[GridCell], width: u32, fill: StyleColour, honor: bool, tty: bool) -> String {
+    let mut out = String::new();
+    let mut run = String::new();
+    let mut run_key: Option<(GlkStyle, StyleColour, StyleAttrs)> = None;
+    for c in 0..width as usize {
+        let (ch, st, col, at) = cells.get(c).copied().unwrap_or(BLANK_CELL);
+        let col = StyleColour {
+            fg: col.fg.or(fill.fg),
+            bg: col.bg.or(fill.bg),
+            reverse: col.reverse || fill.reverse,
+        };
+        let key = (st, col, at);
+        match &run_key {
+            Some(k) if *k == key => run.push(ch),
+            Some(k) => {
+                let (s0, c0, a0) = *k;
+                out.push_str(&style_wrap(&run, s0, c0, a0, honor, tty));
+                run.clear();
+                run.push(ch);
+                run_key = Some(key);
+            }
+            None => {
+                run.push(ch);
+                run_key = Some(key);
+            }
+        }
+    }
+    if let Some((s0, c0, a0)) = run_key {
+        out.push_str(&style_wrap(&run, s0, c0, a0, honor, tty));
+    }
+    out
+}
+
+/// A tracked TextBuffer window: its rect, panel fill, and the wrapped lines it
+/// has accumulated.
+///
+/// gvm-cli used to render every buffer window into one shared scrolling stream,
+/// because `put_text_attr` ignored its `win` argument. A game with a single
+/// story window never noticed; one that lays its UI out in several buffer
+/// windows — Kerkerkruip puts its status panels in six of them — had every
+/// panel's text dumped into the story flow (SQ-0603).
+struct BufWin {
+    id: u32,
+    rect: Rect,
+    fill: StyleColour,
+    /// Wrapped lines, oldest first. Bounded by [`MAX_SCROLLBACK`]; only the last
+    /// `rect.height` are ever drawn.
+    lines: Vec<Vec<GridCell>>,
+    /// Word being accumulated, so breaks land at spaces even when the game
+    /// sends one character per call (as Glulx games do via `glk_put_char`).
+    pending: String,
+    pending_style: GlkStyle,
+    pending_colour: StyleColour,
+    pending_attrs: StyleAttrs,
+}
+
+/// Lines retained per buffer window. Only `rect.height` are drawn; the rest is
+/// headroom so a window that grows on resize still has something to show.
+const MAX_SCROLLBACK: usize = 400;
+
+impl BufWin {
+    fn width(&self) -> u32 {
+        self.rect.width.max(1)
+    }
+
+    fn cur_len(&self) -> u32 {
+        self.lines.last().map(|l| l.len() as u32).unwrap_or(0)
+    }
+
+    fn new_line(&mut self) {
+        self.lines.push(Vec::new());
+        if self.lines.len() > MAX_SCROLLBACK {
+            self.lines.remove(0);
+        }
+    }
+
+    fn push_cell(&mut self, cell: GridCell) {
+        if self.lines.is_empty() {
+            self.lines.push(Vec::new());
+        }
+        self.lines.last_mut().expect("just ensured").push(cell);
+    }
+
+    /// Place the accumulated word, wrapping to the next line first if it no
+    /// longer fits on this one.
+    fn flush_word(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let word: Vec<char> = std::mem::take(&mut self.pending).chars().collect();
+        let wlen = word.len() as u32;
+        if self.cur_len() > 0 && self.cur_len() + wlen > self.width() {
+            self.new_line();
+        }
+        let (st, col, at) = (self.pending_style, self.pending_colour, self.pending_attrs);
+        for ch in word {
+            // A word longer than the window hard-breaks at the margin.
+            if self.cur_len() >= self.width() {
+                self.new_line();
+            }
+            self.push_cell((ch, st, col, at));
+        }
+    }
+
+    fn put(&mut self, style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, s: &str) {
+        for ch in s.chars() {
+            match ch {
+                '\n' => {
+                    self.flush_word();
+                    self.new_line();
                 }
-                None => {
-                    run.push(ch);
-                    run_key = Some(key);
+                ' ' => {
+                    self.flush_word();
+                    // A space that would push past the margin is dropped, so a
+                    // line never ends in trailing whitespace.
+                    if self.cur_len() < self.width() {
+                        self.push_cell((' ', style, colour, attrs));
+                    }
+                }
+                _ => {
+                    if (self.pending_style != style
+                        || self.pending_colour != colour
+                        || self.pending_attrs != attrs)
+                        && !self.pending.is_empty()
+                    {
+                        self.flush_word();
+                    }
+                    self.pending_style = style;
+                    self.pending_colour = colour;
+                    self.pending_attrs = attrs;
+                    self.pending.push(ch);
+                    if self.pending.chars().count() as u32 >= self.width() {
+                        self.flush_word();
+                    }
                 }
             }
         }
-        if let Some((s0, c0, a0)) = run_key {
-            out.push_str(&style_wrap(&run, s0, c0, a0, honor, tty));
-        }
+    }
+
+    /// The lines actually on screen, and the row index within the rect where the
+    /// last one sits. Text is bottom-aligned once it overflows, so the newest
+    /// output is always visible.
+    fn visible(&self) -> (&[Vec<GridCell>], u32) {
+        let h = self.rect.height.max(1) as usize;
+        let start = self.lines.len().saturating_sub(h);
+        let shown = &self.lines[start..];
+        let last_row = shown.len().saturating_sub(1) as u32;
+        (shown, last_row)
     }
 }
 
@@ -392,6 +519,18 @@ pub struct TerminalBackend {
     grids: Vec<GridWin>,
     /// Graphics windows as `(id, rect)`, drawn as bordered placeholder boxes.
     graphics: Vec<(u32, Rect)>,
+    /// Every tracked TextBuffer window. Only consulted in *windowed* mode — see
+    /// [`TerminalBackend::windowed`].
+    buffers: Vec<BufWin>,
+    /// The buffer window that last received output; the input cursor parks at
+    /// its end so a prompt appears where the game wrote it.
+    active_buffer: Option<u32>,
+    /// Signature of the last window layout drawn in windowed mode. When it
+    /// changes the screen is cleared before the redraw: windowed mode paints
+    /// only inside window rects, so anything the previous layout left outside
+    /// the new one — the streamed output from before a game enabled its panels,
+    /// say — would otherwise sit there forever (SQ-0603).
+    layout_sig: Vec<(u32, Rect)>,
     /// The live window tree (from `window_tree`), used to draw inter-window
     /// separators in the gutters gvm reserves. `None` until the first tree, or
     /// when no root window exists.
@@ -437,6 +576,9 @@ impl TerminalBackend {
             honor: true,
             grids: Vec::new(),
             graphics: Vec::new(),
+            buffers: Vec::new(),
+            active_buffer: None,
+            layout_sig: Vec::new(),
             tree: None,
             region_set: false,
             region_bounds: (0, 0),
@@ -476,6 +618,9 @@ impl TerminalBackend {
             honor: true,
             grids: Vec::new(),
             graphics: Vec::new(),
+            buffers: Vec::new(),
+            active_buffer: None,
+            layout_sig: Vec::new(),
             tree: None,
             region_set: false,
             region_bounds: (0, 0),
@@ -549,6 +694,23 @@ impl TerminalBackend {
     /// Flush buffered output to the display **without** tearing down the scroll
     /// region (used before reading input, so the prompt is visible mid-run).
     pub fn flush_out(&mut self) {
+        // Windowed mode accumulates into each window's line store; the screen is
+        // painted here, right before the game blocks on input (SQ-0603).
+        if self.windowed() {
+            if let Some(cmd) = self.pending_echo.take() {
+                if let Some(win) = self.active_buffer {
+                    let idx = self.buffer_index(win);
+                    self.buffers[idx].put(GlkStyle::Input, StyleColour::default(), StyleAttrs::default(), &cmd);
+                    self.buffers[idx].put(GlkStyle::Input, StyleColour::default(), StyleAttrs::default(), "\n");
+                }
+            }
+            for b in &mut self.buffers {
+                b.flush_word();
+            }
+            self.redraw_chrome();
+            let _ = self.out.flush();
+            return;
+        }
         // A line input that produced no reprinting buffer output before the next
         // prompt still needs its command echoed, or it would vanish (SQ-0282).
         if let Some(cmd) = self.pending_echo.take() {
@@ -588,9 +750,17 @@ impl TerminalBackend {
             return;
         }
         let mut out = String::new();
-        out.push_str("\x1b7"); // DECSC save cursor
+        let windowed = self.windowed();
+        if !windowed {
+            out.push_str("\x1b7"); // DECSC save cursor
+        }
         for g in &self.grids {
             append_grid(&mut out, g, self.cols, self.honor, true);
+        }
+        // Windowed mode positions the cursor itself (at the active buffer's
+        // prompt), so it must not be saved/restored around the redraw.
+        if windowed {
+            self.append_buffers(&mut out);
         }
         for &(_, rect) in &self.graphics {
             append_graphics(&mut out, rect);
@@ -598,8 +768,71 @@ impl TerminalBackend {
         if let Some(tree) = &self.tree {
             append_borders(&mut out, tree);
         }
-        out.push_str("\x1b8"); // DECRC restore cursor
+        if windowed {
+            // Re-park at the prompt: the border pass moved the cursor.
+            let mut tail = String::new();
+            self.append_buffers(&mut tail);
+            if let Some(i) = tail.rfind("\x1b[") {
+                out.push_str(&tail[i..]);
+            }
+        } else {
+            out.push_str("\x1b8"); // DECRC restore cursor
+        }
         let _ = self.out.write_all(out.as_bytes());
+    }
+
+    /// Whether to render buffer windows individually at their rects rather than
+    /// as one scrolling stream.
+    ///
+    /// Only when a game actually uses more than one buffer window. A single
+    /// story window — every ordinary game — keeps the streaming path, so its
+    /// output stays byte-identical and the terminal's own scrollback still
+    /// holds the transcript. Windowed mode necessarily gives that up: it paints
+    /// fixed rects, so scrollback is [`MAX_SCROLLBACK`] lines of our own.
+    fn windowed(&self) -> bool {
+        self.is_tty && self.buffers.len() > 1
+    }
+
+    fn buffer_index(&mut self, id: u32) -> usize {
+        if let Some(i) = self.buffers.iter().position(|b| b.id == id) {
+            return i;
+        }
+        self.buffers.push(BufWin {
+            id,
+            rect: Rect::default(),
+            fill: StyleColour::default(),
+            lines: vec![Vec::new()],
+            pending: String::new(),
+            pending_style: GlkStyle::Normal,
+            pending_colour: StyleColour::default(),
+            pending_attrs: StyleAttrs::default(),
+        });
+        self.buffers.len() - 1
+    }
+
+    /// Draw every buffer window at its rect and park the cursor at the end of
+    /// the active one's last line, so the game's prompt sits where it wrote it.
+    fn append_buffers(&self, out: &mut String) {
+        for b in &self.buffers {
+            if b.rect.width == 0 || b.rect.height == 0 {
+                continue;
+            }
+            let (shown, _) = b.visible();
+            for r in 0..b.rect.height {
+                let row = b.rect.top + r + 1;
+                let col = b.rect.left + 1;
+                out.push_str(&format!("\x1b[{row};{col}H"));
+                let empty: Vec<GridCell> = Vec::new();
+                let cells = shown.get(r as usize).unwrap_or(&empty);
+                out.push_str(&render_row(cells, b.rect.width, b.fill, self.honor, true));
+            }
+        }
+        if let Some(active) = self.active_buffer.and_then(|id| self.buffers.iter().find(|b| b.id == id)) {
+            let (_, last_row) = active.visible();
+            let row = active.rect.top + last_row + 1;
+            let col = active.rect.left + active.cur_len().min(active.width().saturating_sub(1)) + 1;
+            out.push_str(&format!("\x1b[{row};{col}H"));
+        }
     }
 
     /// Update the terminal size. Returns `true` if the size actually changed.
@@ -648,15 +881,21 @@ impl GlkBackend for TerminalBackend {
         // Register every TextGrid at its rect (growing its cell buffer), and drop
         // grids that have closed. Rendering happens in redraw_chrome / grid_put.
         let mut live: Vec<u32> = Vec::new();
+        let mut live_bufs: Vec<u32> = Vec::new();
         for &(id, ty, rect, _) in wins {
             if ty == WinType::TextGrid {
                 let idx = self.grid_index(id);
                 self.grids[idx].rect = rect;
                 self.grids[idx].ensure(rect.height, rect.width);
                 live.push(id);
+            } else if ty == WinType::TextBuffer {
+                let idx = self.buffer_index(id);
+                self.buffers[idx].rect = rect;
+                live_bufs.push(id);
             }
         }
         self.grids.retain(|g| live.contains(&g.id));
+        self.buffers.retain(|b| live_bufs.contains(&b.id));
         // Register graphics windows for their placeholder boxes.
         self.graphics = wins
             .iter()
@@ -680,6 +919,23 @@ impl GlkBackend for TerminalBackend {
         // geometry exactly, but a LEFT/RIGHT split falls back to the buffer's full
         // width (the documented limitation — a terminal cannot scroll a sub-column
         // independently). The largest buffer is treated as the primary one.
+        // DECSTBM is a *streaming* device: it scrolls full-width bands. Windowed
+        // mode paints each buffer at an absolute rect instead, so the region
+        // would only smear panels sideways — drop it (SQ-0603).
+        if self.windowed() {
+            if self.region_set {
+                let _ = self.out.write_all(leave_region().as_bytes());
+                self.region_set = false;
+                self.region_bounds = (0, 0);
+            }
+            let sig: Vec<(u32, Rect)> = wins.iter().map(|&(id, _, r, _)| (id, r)).collect();
+            if sig != self.layout_sig {
+                self.layout_sig = sig;
+                let _ = self.out.write_all(b"\x1b[2J");
+                self.redraw_chrome();
+            }
+            return;
+        }
         let buffer = wins
             .iter()
             .filter(|(_, ty, _, _)| *ty == WinType::TextBuffer)
@@ -707,6 +963,17 @@ impl GlkBackend for TerminalBackend {
         }
     }
 
+    fn window_clear(&mut self, win: u32) {
+        // Panels rewrite themselves every turn; without this their text would
+        // pile up instead of being replaced.
+        if self.windowed() {
+            let idx = self.buffer_index(win);
+            self.buffers[idx].lines = vec![Vec::new()];
+            self.buffers[idx].pending.clear();
+            self.redraw_chrome();
+        }
+    }
+
     fn window_tree(&mut self, tree: Option<WinTree>) {
         self.tree = tree;
         // Refresh each grid's panel fill and the buffer's column from the tree:
@@ -716,6 +983,11 @@ impl GlkBackend for TerminalBackend {
             for g in &mut self.grids {
                 if let Some(fill) = leaf_fill(t, g.id) {
                     g.fill = fill;
+                }
+            }
+            for b in &mut self.buffers {
+                if let Some(fill) = leaf_fill(t, b.id) {
+                    b.fill = fill;
                 }
             }
         }
@@ -728,7 +1000,23 @@ impl GlkBackend for TerminalBackend {
         self.put_text_attr(win, style, StyleColour::default(), StyleAttrs::default(), 0, s);
     }
 
-    fn put_text_attr(&mut self, _win: u32, style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, _link: u32, s: &str) {
+    fn put_text_attr(&mut self, win: u32, style: GlkStyle, colour: StyleColour, attrs: StyleAttrs, _link: u32, s: &str) {
+        // Windowed mode: each buffer keeps its own wrapped lines and is drawn at
+        // its own rect, so a game whose UI is several buffer windows renders as
+        // panels rather than one interleaved stream (SQ-0603).
+        if self.windowed() {
+            if let Some(cmd) = self.pending_echo.take() {
+                if style != GlkStyle::Input {
+                    let idx = self.buffer_index(win);
+                    self.buffers[idx].put(GlkStyle::Input, StyleColour::default(), StyleAttrs::default(), &cmd);
+                    self.buffers[idx].put(GlkStyle::Input, StyleColour::default(), StyleAttrs::default(), "\n");
+                }
+            }
+            let idx = self.buffer_index(win);
+            self.buffers[idx].put(style, colour, attrs, s);
+            self.active_buffer = Some(win);
+            return;
+        }
         // When piped (not a TTY), pass through byte-identical — no buffering, no
         // wrap. `cols == 0` is the non-TTY sentinel for the soft_wrap helper and
         // is logged below but never used in the new char-by-char path.
@@ -1416,6 +1704,79 @@ mod tests {
         // background too — the whole panel is filled, not just the text.
         let filled = format!("{bg}HP{}\x1b[0m", " ".repeat(18));
         assert!(out.contains(&filled), "background must cover the full 20-cell row: {out:?}");
+    }
+
+    /// SQ-0603: a game whose UI is several buffer windows must have each one
+    /// rendered at its own rect. `put_text_attr` ignored its `win` argument, so
+    /// Kerkerkruip's six panel windows all wrote into the story stream and their
+    /// contents appeared inline in the prose.
+    #[test]
+    fn each_buffer_window_renders_in_its_own_column() {
+        let (mut b, buf) = backend(true);
+        let story = (1u32, WinType::TextBuffer, Rect { left: 0, top: 0, width: 20, height: 4 }, Some(true));
+        let panel = (2u32, WinType::TextBuffer, Rect { left: 21, top: 0, width: 10, height: 4 }, Some(true));
+        b.window_layout(&[story, panel]);
+        b.put_text(1, GlkStyle::Normal, "STORY");
+        b.put_text(2, GlkStyle::Normal, "PANEL");
+        b.flush_out();
+        let out = out_string(&buf);
+
+        // Each window is addressed at its own left column, and its text is there.
+        assert!(out.contains("\x1b[1;1HSTORY"), "story at its own rect: {out:?}");
+        assert!(out.contains("\x1b[1;22HPANEL"), "panel at its own rect: {out:?}");
+        // The panel's text never reaches the story column.
+        assert!(!out.contains("STORYPANEL"), "windows must not share a stream: {out:?}");
+    }
+
+    /// Text wraps to the window's own width, not the terminal's.
+    #[test]
+    fn a_narrow_buffer_window_wraps_at_its_own_width() {
+        let (mut b, buf) = backend(true);
+        let story = (1u32, WinType::TextBuffer, Rect { left: 0, top: 0, width: 10, height: 4 }, Some(true));
+        let panel = (2u32, WinType::TextBuffer, Rect { left: 11, top: 0, width: 10, height: 4 }, Some(true));
+        b.window_layout(&[story, panel]);
+        b.put_text(1, GlkStyle::Normal, "alpha beta gamma");
+        b.flush_out();
+        let out = out_string(&buf);
+        // "alpha beta" is 10 cells, so "gamma" wraps onto the window's next row —
+        // which is row 2 at the window's own left column.
+        assert!(out.contains("\x1b[1;1Halpha beta"), "first line fills the width: {out:?}");
+        assert!(out.contains("\x1b[2;1Hgamma"), "wrap lands in the same column: {out:?}");
+    }
+
+    /// A panel rewrites itself each turn; without honouring `window_clear` its
+    /// text would pile up instead of being replaced.
+    #[test]
+    fn clearing_a_buffer_window_drops_its_text() {
+        let (mut b, buf) = backend(true);
+        let story = (1u32, WinType::TextBuffer, Rect { left: 0, top: 0, width: 20, height: 4 }, Some(true));
+        let panel = (2u32, WinType::TextBuffer, Rect { left: 21, top: 0, width: 10, height: 4 }, Some(true));
+        b.window_layout(&[story, panel]);
+        b.put_text(2, GlkStyle::Normal, "OLD");
+        b.flush_out();
+        b.window_clear(2);
+        b.put_text(2, GlkStyle::Normal, "NEW");
+        b.flush_out();
+        let out = out_string(&buf);
+        let last = &out[out.rfind("\x1b[1;22H").expect("panel redrawn")..];
+        assert!(last.contains("NEW"), "the new text is shown: {last:?}");
+        assert!(!last.contains("OLD"), "the cleared text is gone: {last:?}");
+    }
+
+    /// A single-buffer game — every ordinary one — keeps the streaming path, so
+    /// its output and the terminal's own scrollback are unchanged.
+    #[test]
+    fn one_buffer_window_still_streams() {
+        let (mut b, buf) = backend(true);
+        let story = (1u32, WinType::TextBuffer, Rect { left: 0, top: 1, width: 80, height: 23 }, Some(true));
+        let grid = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 80, height: 1 }, Some(true));
+        b.window_layout(&[story, grid]);
+        b.put_text(1, GlkStyle::Normal, "hello ");
+        b.flush_out();
+        let out = out_string(&buf);
+        // Streamed at the cursor, with no absolute addressing of the buffer.
+        assert!(out.contains("hello"), "text is streamed: {out:?}");
+        assert!(!out.contains("\x1b[2;1Hhello"), "no windowed addressing: {out:?}");
     }
 
     #[test]
