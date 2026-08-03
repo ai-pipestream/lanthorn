@@ -219,6 +219,37 @@ fn append_grid(out: &mut String, g: &GridWin, _term_cols: u32, honor: bool, tty:
     }
 }
 
+/// The grid's content as plain text: one line per row it currently owns,
+/// trailing blanks trimmed, trailing blank rows dropped. Empty when the grid
+/// holds nothing worth saying.
+///
+/// This is what a grid degrades to when there is no screen to place it on. A
+/// TextGrid is spatial by nature — a status bar, a compass rose, a menu — and
+/// off a TTY there are no rects, so the only faithful thing left is its reading
+/// order. The same `take(rect.height)` rule as [`append_grid`] applies: the cell
+/// buffer only grows, so a grid that shrank (Counterfeit Monkey's status line
+/// doubles as its menu, going one row to four and back) must not report rows it
+/// no longer owns.
+fn grid_plain_text(g: &GridWin) -> String {
+    let mut rows: Vec<String> = g
+        .cells
+        .iter()
+        .take(g.rect.height as usize)
+        .map(|row| {
+            let text: String = row
+                .iter()
+                .take(g.rect.width as usize)
+                .map(|&(ch, ..)| ch)
+                .collect();
+            text.trim_end().to_string()
+        })
+        .collect();
+    while rows.last().is_some_and(|r| r.is_empty()) {
+        rows.pop();
+    }
+    rows.join("\n")
+}
+
 /// Render `cells` as one screen row exactly `width` cells wide, padding with
 /// blanks, and give every cell the window's `fill` wherever its own colour is
 /// unset. Runs of identical styling share one SGR pair.
@@ -484,6 +515,15 @@ pub struct TerminalBackend {
     /// Every tracked TextGrid window with its resolved rect + cell buffer. Each
     /// is drawn at its own rect (grids no longer collapse to one status line).
     grids: Vec<GridWin>,
+    /// Whether the off-TTY output stream is at the start of a line. Tracked
+    /// separately from `current_col`, which is a TTY-only wrap counter, so the
+    /// inline grid stream can tell whether it needs to break the line first.
+    plain_at_line_start: bool,
+    /// The last plain-text block emitted for each grid, keyed by window id.
+    /// Off-TTY only — grids have no rect to be painted at, so they are streamed
+    /// inline instead, and a status line that says the same thing this turn as
+    /// last turn is not worth repeating (SQ-0607).
+    last_grid_plain: Vec<(u32, String)>,
     /// Graphics windows as `(id, rect)`, drawn as bordered placeholder boxes.
     graphics: Vec<(u32, Rect)>,
     /// Every tracked TextBuffer window. Only consulted in *windowed* mode — see
@@ -542,6 +582,8 @@ impl TerminalBackend {
             pending_word_attrs: StyleAttrs::default(),
             honor: true,
             grids: Vec::new(),
+            plain_at_line_start: true,
+            last_grid_plain: Vec::new(),
             graphics: Vec::new(),
             buffers: Vec::new(),
             active_buffer: None,
@@ -584,6 +626,8 @@ impl TerminalBackend {
             pending_word_attrs: StyleAttrs::default(),
             honor: true,
             grids: Vec::new(),
+            plain_at_line_start: true,
+            last_grid_plain: Vec::new(),
             graphics: Vec::new(),
             buffers: Vec::new(),
             active_buffer: None,
@@ -688,7 +732,50 @@ impl TerminalBackend {
         if !self.pending_word.is_empty() {
             self.flush_pending_word();
         }
+        self.emit_grids_plain();
         let _ = self.out.flush();
+    }
+
+    /// Stream each grid's text inline (off-TTY only), deduped against the last
+    /// block emitted for that window.
+    ///
+    /// `redraw_chrome` returns early when there is no TTY, because it paints at
+    /// screen coordinates and there are none. But `grid_put_attr` keeps filling
+    /// the cell buffer regardless, so before SQ-0607 the content was tracked and
+    /// then silently dropped: piping Counterfeit Monkey lost "Back Alley, noon /
+    /// Goals: 1 / Score: 0" entirely. zvm-cli had the right answer all along —
+    /// its piped output carries the status line as ordinary text — so this is
+    /// gvm-cli catching up rather than a new convention.
+    ///
+    /// Called from `flush_out`, i.e. just before the game blocks for input,
+    /// which is the moment it has finished writing the turn. Deduping matters
+    /// there: a status line is rewritten every turn and usually says the same
+    /// thing, and repeating it would bury the prose.
+    fn emit_grids_plain(&mut self) {
+        if self.is_tty {
+            return;
+        }
+        for i in 0..self.grids.len() {
+            let id = self.grids[i].id;
+            let text = grid_plain_text(&self.grids[i]);
+            if text.is_empty() {
+                continue;
+            }
+            match self.last_grid_plain.iter_mut().find(|(gid, _)| *gid == id) {
+                Some((_, last)) if *last == text => continue,
+                Some((_, last)) => *last = text.clone(),
+                None => self.last_grid_plain.push((id, text.clone())),
+            }
+            // Start on a fresh line. The game has just written its prompt, so
+            // the stream is mid-line more often than not, and a status bar
+            // welded to the end of `>` is worse than a bare prompt above it.
+            if !self.plain_at_line_start {
+                let _ = self.out.write_all(b"\n");
+            }
+            let _ = self.out.write_all(text.as_bytes());
+            let _ = self.out.write_all(b"\n");
+            self.plain_at_line_start = true;
+        }
     }
 
     /// Arm a deferred echo of `cmd` (a just-read line-input command) to be resolved
@@ -1106,6 +1193,12 @@ impl GlkBackend for TerminalBackend {
         }
         if !self.is_tty {
             let _ = self.out.write_all(s.as_bytes());
+            // `current_col` is a TTY word-wrap counter and is not maintained
+            // here, but the inline grid stream still needs to know whether it
+            // would be interrupting a line (SQ-0607).
+            if let Some(last) = s.chars().last() {
+                self.plain_at_line_start = last == '\n';
+            }
             return;
         }
 
@@ -1440,6 +1533,141 @@ mod tests {
         assert!(out.contains("Score: 10"), "grid text rendered: {out:?}");
         assert!(out.contains("You are in a room."), "buffer text rendered");
         assert!(out.contains("\x1b[r"), "region reset on flush");
+    }
+
+    // ── grids off a TTY (SQ-0607) ─────────────────────────────────────────────
+
+    /// Lay out the usual status-grid-over-story-buffer pair.
+    fn status_layout(b: &mut TerminalBackend, grid_rows: u32) {
+        let grid = (2u32, WinType::TextGrid, Rect { left: 0, top: 0, width: 40, height: grid_rows });
+        let buffer = (1u32, WinType::TextBuffer, Rect { left: 0, top: grid_rows, width: 40, height: 24 - grid_rows });
+        b.window_layout(&[
+            (buffer.0, buffer.1, buffer.2, Some(true)),
+            (grid.0, grid.1, grid.2, Some(true)),
+        ]);
+    }
+
+    #[test]
+    fn piped_grid_is_streamed_inline_rather_than_dropped() {
+        // The bug: redraw_chrome returns early off-TTY, so the cell buffer was
+        // filled and then silently discarded — piping Counterfeit Monkey lost
+        // its "Back Alley, noon / Goals: 1 / Score: 0" entirely.
+        let (mut b, buf) = backend(false);
+        status_layout(&mut b, 1);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Back Alley  Score: 0");
+        b.put_text(1, GlkStyle::Normal, "You are in an alley.\n>");
+        b.flush_out();
+        let out = out_string(&buf);
+        assert!(out.contains("Back Alley  Score: 0"), "grid text reaches piped output: {out:?}");
+        assert!(out.contains("You are in an alley."), "story text still there: {out:?}");
+    }
+
+    #[test]
+    fn piped_grid_starts_on_its_own_line() {
+        // The game writes its prompt last, so the stream is mid-line when the
+        // grid goes out; a status bar welded to the end of `>` is unreadable.
+        let (mut b, buf) = backend(false);
+        status_layout(&mut b, 1);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Hall");
+        b.put_text(1, GlkStyle::Normal, "Text.\n>");
+        b.flush_out();
+        let out = out_string(&buf);
+        assert!(out.contains(">\nHall\n"), "grid breaks the prompt line: {out:?}");
+        assert!(!out.contains(">Hall"), "never welded to the prompt: {out:?}");
+    }
+
+    #[test]
+    fn piped_grid_repeats_only_when_it_changes() {
+        // A status line is rewritten every turn and usually says the same thing;
+        // repeating it each time would bury the prose.
+        let (mut b, buf) = backend(false);
+        status_layout(&mut b, 1);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Hall");
+        b.flush_out();
+        b.flush_out();
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Hall"); // rewritten, same content
+        b.flush_out();
+        assert_eq!(out_string(&buf).matches("Hall").count(), 1, "unchanged status is not repeated");
+
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Cave");
+        b.flush_out();
+        let out = out_string(&buf);
+        assert_eq!(out.matches("Cave").count(), 1, "a changed status IS emitted: {out:?}");
+    }
+
+    #[test]
+    fn piped_grid_reports_only_the_rows_it_owns() {
+        // `grid_put` grows the cell buffer to whatever row the game addresses,
+        // rect or no rect, and the buffer never shrinks on its own — so the row
+        // count has to come from the rect. Same rule append_grid follows on a
+        // TTY, where the symptom was a menu's legend stranded over the story
+        // text after the menu closed.
+        //
+        // (A rect that shrinks via `window_layout` is handled separately, by the
+        // `truncate` there; this is the path that reaches `grid_plain_text`.)
+        let (mut b, buf) = backend(false);
+        status_layout(&mut b, 1);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Hall");
+        b.grid_put(2, 0, 2, GlkStyle::Normal, "STALE"); // row 2 of a 1-row grid
+        b.flush_out();
+        let out = out_string(&buf);
+        assert!(out.contains("Hall"), "the row it owns is emitted: {out:?}");
+        assert!(!out.contains("STALE"), "a row past the rect is not: {out:?}");
+    }
+
+    #[test]
+    fn piped_grid_follows_a_rect_that_shrinks() {
+        // Counterfeit Monkey's status line doubles as its menu, going one row to
+        // four and back.
+        let (mut b, buf) = backend(false);
+        status_layout(&mut b, 4);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "MENU");
+        b.grid_put(2, 0, 2, GlkStyle::Normal, "LEGEND");
+        b.flush_out();
+        assert!(out_string(&buf).contains("LEGEND"), "the 4-row menu reports all of it");
+
+        status_layout(&mut b, 1); // menu closes, back to a status line
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Hall");
+        b.flush_out();
+        let after = out_string(&buf);
+        assert_eq!(after.matches("LEGEND").count(), 1, "the stale row is not re-emitted: {after:?}");
+    }
+
+    #[test]
+    fn a_tty_still_paints_grids_at_their_rects_instead() {
+        // The inline stream is strictly the off-TTY fallback; on a TTY the grid
+        // must still be positioned, not appended to the story text.
+        let (mut b, buf) = backend(true);
+        status_layout(&mut b, 1);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Hall");
+        b.flush_out();
+        let out = out_string(&buf);
+        assert!(out.contains("\x1b[1;1H"), "grid is cursor-addressed on a TTY: {out:?}");
+    }
+
+    #[test]
+    fn grid_plain_text_trims_trailing_blanks_and_rows() {
+        let mut g = GridWin {
+            id: 2,
+            rect: Rect { left: 0, top: 0, width: 10, height: 3 },
+            cells: Vec::new(),
+            fill: StyleColour::default(),
+        };
+        g.ensure(3, 10);
+        for (i, ch) in "Hi".chars().enumerate() {
+            g.cells[0][i] = (ch, GlkStyle::Normal, StyleColour::default(), StyleAttrs::default());
+        }
+        // Row 1 written then blanked, row 2 never touched: neither should show.
+        assert_eq!(grid_plain_text(&g), "Hi", "trailing blank rows and padding dropped");
+
+        // An entirely blank grid says nothing at all.
+        let blank = GridWin {
+            id: 3,
+            rect: Rect { left: 0, top: 0, width: 10, height: 2 },
+            cells: vec![vec![BLANK_CELL; 10]; 2],
+            fill: StyleColour::default(),
+        };
+        assert_eq!(grid_plain_text(&blank), "");
     }
 
     #[test]
