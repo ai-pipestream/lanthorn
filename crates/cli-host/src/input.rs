@@ -66,6 +66,25 @@ pub fn exit_at_eof(prefix: &str) -> ! {
     restore_and_exit(prefix, 0)
 }
 
+/// The line that asks the host — not the game — to repeat the status.
+pub const STATUS_COMMAND: &str = "/status";
+
+/// Is this input line a status request rather than a game command?
+///
+/// Status information reaches a plain-mode reader only when the game chooses to
+/// write it, and then it scrolls away. A sighted player re-reads a pinned status
+/// line for free; a listener would have to scroll back through the transcript to
+/// answer "where am I, what is my score?" (SQ-0610).
+///
+/// The leading slash is what makes interception safe. Any bare word — `status`,
+/// `score`, `look` — risks shadowing a verb the game itself defines, and a host
+/// that silently eats a real command is worse than no feature. No interactive
+/// fiction parser assigns meaning to a leading `/`, and babelmap's own TUI
+/// already spells its host commands that way, so the vocabulary is not new.
+pub fn is_status_request(line: &str) -> bool {
+    line.trim().eq_ignore_ascii_case(STATUS_COMMAND)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,6 +118,18 @@ mod tests {
 
         let mut r = io::Cursor::new(b"yes\n".to_vec());
         assert_eq!(read_byte_or_eof(&mut r), Some(b'y'));
+    }
+
+    #[test]
+    fn status_request_is_recognised_leniently_but_never_greedily() {
+        assert!(is_status_request("/status"));
+        assert!(is_status_request("  /status  \n"), "trimmed");
+        assert!(is_status_request("/STATUS"), "case-insensitive");
+        // Anything that could be a real game command must pass straight through:
+        // eating a verb the game defines is worse than not having the feature.
+        for line in ["status", "score", "look", "/status now", "x /status", "/", ""] {
+            assert!(!is_status_request(line), "{line:?} must reach the game");
+        }
     }
 
     #[test]

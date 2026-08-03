@@ -741,6 +741,21 @@ impl TerminalBackend {
         let _ = self.out.flush();
     }
 
+    /// Every grid's current text, unconditionally — no dedupe, no TTY gate.
+    ///
+    /// [`emit_grids_plain`](Self::emit_grids_plain) answers "what changed", which
+    /// is right for streaming and wrong for `/status`: the player asked *because*
+    /// nothing changed and it has scrolled away (SQ-0610). Empty when the game
+    /// has no grid windows.
+    pub fn grids_plain_now(&self) -> String {
+        self.grids
+            .iter()
+            .map(grid_plain_text)
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     /// Stream each grid's text inline (off-TTY only), deduped against the last
     /// block emitted for that window.
     ///
@@ -1648,6 +1663,52 @@ mod tests {
         b.flush_out();
         let out = out_string(&buf);
         assert!(out.contains("\x1b[1;1H"), "grid is cursor-addressed on a TTY: {out:?}");
+    }
+
+    #[test]
+    fn piped_menu_grid_is_re_emitted_when_the_selection_moves() {
+        // SQ-0609: Counterfeit Monkey's status line doubles as its hint menu,
+        // resized from one row to four and reprinted on every keypress. Off a
+        // TTY the whole block comes through as text and repeats whenever it
+        // changes, so a listener hears where the marker went.
+        let (mut b, buf) = backend(false);
+        status_layout(&mut b, 4);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "> Introduction");
+        b.grid_put(2, 0, 1, GlkStyle::Normal, "  Instructions");
+        b.grid_put(2, 0, 3, GlkStyle::Normal, "N = Next   Q = Quit Menu");
+        b.flush_out();
+        let first = out_string(&buf);
+        assert!(first.contains("> Introduction"), "menu as text: {first:?}");
+        assert!(first.contains("Q = Quit Menu"), "and its key legend: {first:?}");
+
+        // The marker moves: the block repeats with the new selection.
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "  Introduction");
+        b.grid_put(2, 0, 1, GlkStyle::Normal, "> Instructions");
+        b.flush_out();
+        let after = out_string(&buf);
+        assert_eq!(after.matches("> Instructions").count(), 1, "new selection announced: {after:?}");
+        assert_eq!(after.matches("> Introduction").count(), 1, "old marker not repeated: {after:?}");
+    }
+
+    #[test]
+    fn grids_plain_now_answers_even_when_nothing_changed() {
+        // `/status` (SQ-0610) is asked precisely because nothing changed and the
+        // status has scrolled away, so it must bypass the streaming dedupe.
+        let (mut b, buf) = backend(false);
+        status_layout(&mut b, 1);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Hall  Score: 3");
+        b.flush_out();
+        b.flush_out(); // deduped: emits nothing
+        assert_eq!(out_string(&buf).matches("Hall  Score: 3").count(), 1);
+        // ...but asking directly always answers.
+        assert_eq!(b.grids_plain_now(), "Hall  Score: 3");
+        assert_eq!(b.grids_plain_now(), "Hall  Score: 3", "and answers again");
+    }
+
+    #[test]
+    fn grids_plain_now_is_empty_without_grids() {
+        let (b, _buf) = backend(false);
+        assert_eq!(b.grids_plain_now(), "", "a game with no grid has no status");
     }
 
     #[test]

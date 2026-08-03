@@ -775,6 +775,9 @@ Arguments:
                         Graphical v6 stories are not supported — play those
                         with babelmap.
 
+Host commands (typed at any line prompt, never passed to the game):
+  /status               Repeat the current status line / upper window
+
 Options:
       --plain           Plain text only: no escape sequences, no [MORE] pager,
                         and the terminal's own line editing and echo. Intended
@@ -1037,8 +1040,19 @@ fn main() {
                     zvm::io::TextAttrs::default()
                 };
                 let timeout = if timed { machine.pending_timeout() } else { None };
-                let (line, terminator, resize, aborted) =
-                    read_line_raw(stdin_is_tty, echo, &mut machine, &mut view, timeout, &mut sound);
+                // `/status` is answered by the host and the game never sees it,
+                // so loop until a real command arrives (SQ-0610). A timed read
+                // that expired is NOT re-read here: the interrupt has already
+                // run and the game is owed its answer.
+                let (line, terminator, resize, aborted) = loop {
+                    let r = read_line_raw(stdin_is_tty, echo, &mut machine, &mut view, timeout, &mut sound);
+                    if r.3 || !cli_host::input::is_status_request(&r.0) {
+                        break r;
+                    }
+                    let status = screen::ScreenView::status_now(&machine);
+                    println!("{}", if status.is_empty() { "[no status]" } else { &status });
+                    let _ = io::stdout().flush();
+                };
                 if let Some((new_cols, new_rows)) = resize {
                     apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,
                                  &mut page_height, &mut machine, &mut view);

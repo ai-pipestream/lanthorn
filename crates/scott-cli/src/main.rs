@@ -29,9 +29,19 @@ const PROMPT: &str = "\nTell me what to do ? ";
 
 /// The authentic Scott divider drawn between the room "window" and the command
 /// area: `<` and `>` bracketing a run of em-dashes, sized to the room block.
-fn separator(block: &str) -> String {
+///
+/// `None` in plain mode. The rule is pure decoration — it stands in for the
+/// boundary a real Scott terminal drew between its two windows — and a screen
+/// reader has no way to take it as one: it is thirty-odd em-dashes, announced
+/// one at a time or swallowed entirely depending on the reader's punctuation
+/// settings, and either way it says nothing. The blank line before the room
+/// block already separates the two for a listener (SQ-0608).
+fn separator(block: &str, plain: bool) -> Option<String> {
+    if plain {
+        return None;
+    }
     let width = block.lines().map(|l| l.chars().count()).max().unwrap_or(0).max(20);
-    format!("<{}>", "\u{2014}".repeat(width.saturating_sub(2)))
+    Some(format!("<{}>", "\u{2014}".repeat(width.saturating_sub(2))))
 }
 
 /// Read one command line. Returns `None` at end of input (EOF, or Ctrl-C/Ctrl-D
@@ -135,6 +145,9 @@ Usage: scott-cli [OPTIONS] <adv.dat>
 Arguments:
   <adv.dat>           Scott Adams ScottFree .dat adventure
 
+Host commands (typed at any prompt, never passed to the game):
+  /status         Repeat the room block (location, exits, what is here)
+
 Options:
       --plain         Use the terminal's own line editing and echo rather than
                       the built-in editor. Intended for screen readers
@@ -215,18 +228,36 @@ fn main() {
         let block = vm.room_block();
         if block != last_block {
             let _ = writeln!(out, "\n{block}");
-            let _ = writeln!(out, "{}", separator(&block));
+            if let Some(rule) = separator(&block, mode.plain()) {
+                let _ = writeln!(out, "{rule}");
+            }
             last_block = block;
         }
         let _ = write!(out, "{PROMPT}");
         let _ = out.flush();
 
-        let line = match read_command(interactive, &mut out) {
-            Some(l) => l,
-            None => {
-                let _ = writeln!(out); // tidy trailing newline on EOF / quit
-                break;
+        // `/status` is answered by the host and the game never sees it, so loop
+        // until a real command arrives. Scott's "status" is the room block —
+        // where you are, the exits, what is here — which the loop above prints
+        // only when it *changes*, so after a few turns of conversation it has
+        // scrolled away (SQ-0610).
+        let read = loop {
+            match read_command(interactive, &mut out) {
+                Some(l) if cli_host::input::is_status_request(&l) => {
+                    let _ = writeln!(out, "{}", vm.room_block());
+                    let _ = write!(out, "{PROMPT}");
+                    let _ = out.flush();
+                }
+                // Both a real command and end-of-input leave the loop; only the
+                // status request goes round again. Keeping EOF as `None` here
+                // matters — turning it into an empty command is the bug that hung
+                // the other two CLIs (SQ-0604/0605).
+                other => break other,
             }
+        };
+        let Some(line) = read else {
+            let _ = writeln!(out); // tidy trailing newline on EOF / quit
+            break;
         };
 
         vm.supply_line(&line);
@@ -244,9 +275,36 @@ fn main() {
             let block = vm.room_block();
             if block != last_block {
                 let _ = writeln!(out, "\n{block}");
-                let _ = writeln!(out, "{}", separator(&block));
+                if let Some(rule) = separator(&block, mode.plain()) {
+                let _ = writeln!(out, "{rule}");
+            }
             }
         }
     }
     let _ = out.flush();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn separator_rule_is_sized_to_the_room_block() {
+        // `<` + em-dashes + `>`, as wide as the widest line (floor of 20).
+        let rule = separator("I'm in a forest", false).expect("a rule outside plain mode");
+        assert_eq!(rule.chars().count(), 20, "short block gets the minimum width");
+        assert!(rule.starts_with('<') && rule.ends_with('>'), "bracketed: {rule:?}");
+
+        let wide = separator(&"x".repeat(40), false).unwrap();
+        assert_eq!(wide.chars().count(), 40, "grows to the block");
+    }
+
+    #[test]
+    fn separator_is_absent_in_plain_mode() {
+        // Thirty-odd em-dashes are pure decoration: a screen reader either
+        // announces each one or drops the line entirely, and neither conveys the
+        // window boundary it stands for (SQ-0608).
+        assert_eq!(separator("I'm in a forest", true), None);
+        assert_eq!(separator(&"x".repeat(60), true), None);
+    }
 }

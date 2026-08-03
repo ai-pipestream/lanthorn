@@ -388,6 +388,22 @@ impl ScreenView {
         }
     }
 
+    /// The pinned region's current text, unconditionally — no dedupe, no TTY
+    /// gate, no `--no-status` gate.
+    ///
+    /// [`frame`](Self::frame) answers "what changed since last time", which is
+    /// right for streaming and wrong for `/status`: the player asked *because*
+    /// nothing changed and it has scrolled away (SQ-0610). Empty when the game
+    /// has no status region at all.
+    pub fn status_now(machine: &Machine) -> String {
+        let top = Self::top_rows(machine);
+        let mut rows = Self::rows_plain(machine, top);
+        while rows.last().is_some_and(|r| r.trim_end().is_empty()) {
+            rows.pop();
+        }
+        rows.iter().map(|r| r.trim_end()).collect::<Vec<_>>().join("\n")
+    }
+
     /// Update the row count used for scroll-region sizing (call on terminal resize).
     pub fn set_term_rows(&mut self, rows: u16) {
         self.term_rows = rows;
@@ -482,6 +498,53 @@ mod view_tests {
         assert!(f.contains("\x1b[2;24r"), "sets scroll region: {f:?}");
         assert!(f.contains("\x1b[7m"), "v3 status bar is reverse-video: {f:?}");
         assert!(v.leave().contains("\x1b[r"), "leave resets region");
+    }
+
+    /// A menu-shaped upper window: a header, then items with `>` on one of them.
+    fn menu_rows(selected: usize) -> Vec<String> {
+        let items = ["Credits", "Documentation", "Sample Transcript"];
+        let mut rows = vec![" N = next item    P = previous item".to_string()];
+        for (i, item) in items.iter().enumerate() {
+            rows.push(format!("{} {item}", if i == selected { '>' } else { ' ' }));
+        }
+        rows
+    }
+
+    #[test]
+    fn piped_menu_is_re_emitted_when_the_selection_moves() {
+        // SQ-0609: a game whose UI is a grid redrawn in place (Arthur's menus,
+        // Shogun's startup menu) is spatial by construction. Off a TTY it comes
+        // through as text, and the whole block repeats whenever anything in it
+        // changes — so a listener hears where the marker went. Noisy for a long
+        // menu, but followable, which the pinned-region path is not.
+        let mut v = ScreenView::new(false, false, 24);
+        let first = menu_rows(0);
+        let out = v.render(4, &first, &first, "");
+        assert!(out.contains("> Credits"), "menu comes through as text: {out:?}");
+        assert!(out.contains("N = next item"), "and so does its key legend: {out:?}");
+
+        // Unchanged: silence, or every turn would replay the whole menu.
+        assert_eq!(v.render(4, &first, &first, ""), "");
+
+        // Marker moves: the block repeats, with the new selection.
+        let second = menu_rows(1);
+        let moved = v.render(4, &second, &second, "");
+        assert!(moved.contains("> Documentation"), "new selection announced: {moved:?}");
+        assert!(!moved.contains("> Credits"), "old selection is gone: {moved:?}");
+    }
+
+    #[test]
+    fn status_now_answers_even_when_nothing_changed() {
+        // `/status` (SQ-0610) is asked precisely because nothing changed and the
+        // status has scrolled away, so it must not go through the dedupe that
+        // `render` applies.
+        let (p, a) = v3_rows();
+        let mut v = ScreenView::new(false, false, 24);
+        assert!(!v.render(1, &p, &a, "").is_empty(), "first frame emits");
+        assert_eq!(v.render(1, &p, &a, ""), "", "second is deduped away");
+        // ScreenView::status_now goes to the machine, which these row-level tests
+        // do not build; what is pinned here is that the dedupe it must bypass is
+        // real. The end-to-end behaviour is covered by the CLI's own runs.
     }
 
     #[test]

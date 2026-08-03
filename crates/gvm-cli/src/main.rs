@@ -355,7 +355,22 @@ fn drive(
                     .downcast_mut::<TerminalBackend>()
                     .map(|t| t.input_echo_sgr())
                     .unwrap_or_default();
-                let (line, terminator) = read_line(LineEcho::EraseOnEnter(echo_sgr));
+                // `/status` is answered by the host and the game never sees it,
+                // so loop until a real command arrives (SQ-0610).
+                let (line, terminator) = loop {
+                    let r = read_line(LineEcho::EraseOnEnter(echo_sgr.clone()));
+                    if !cli_host::input::is_status_request(&r.0) {
+                        break r;
+                    }
+                    let status = machine
+                        .backend_mut()
+                        .as_any_mut()
+                        .downcast_mut::<TerminalBackend>()
+                        .map(|t| t.grids_plain_now())
+                        .unwrap_or_default();
+                    println!("{}", if status.is_empty() { "[no status]" } else { &status });
+                    let _ = io::Write::flush(&mut io::stdout());
+                };
                 let cmd = line.trim_end_matches(['\n', '\r']);
                 if let Some(t) =
                     machine.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>()
@@ -523,6 +538,9 @@ Usage: gvm-cli [OPTIONS] <story>
 
 Arguments:
   <story>               Glulx story (.ulx) or Blorb (.gblorb)
+
+Host commands (typed at any line prompt, never passed to the game):
+  /status           Repeat the current Glk grid windows (status line)
 
 Options:
       --plain           Plain text only: no escape sequences, and the terminal's

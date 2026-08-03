@@ -166,7 +166,29 @@ characters and the user's familiar editing keys work.
 What would otherwise be spatial arrives in reading order instead: the Z-machine
 status line and upper window come through as ordinary lines, and Glk TextGrid
 windows stream inline, deduped so an unchanged status bar doesn't repeat every
-turn.
+turn. That covers **menus** too — Arthur's, and Counterfeit Monkey's hint menu,
+whose status line doubles as the menu — since a block that changes is re-sent in
+full, so a listener hears where the selection went. It is noisy for a long menu;
+a numbered-list convention would be quieter, but that changes the interaction
+model and is the kind of thing worth designing *with* someone who uses a reader
+rather than guessing at.
+
+`scott-cli` drops its em-dash divider rule in plain mode. It stands in for the
+boundary a real Scott terminal drew between its two windows, and a reader either
+announces thirty-odd em-dashes one at a time or swallows the line — neither of
+which conveys a boundary.
+
+### `/status`
+
+Status text reaches a listener only when the game chooses to write it, and then
+it scrolls away; a sighted player re-reads a pinned line for free. All three CLIs
+answer **`/status`** at any line prompt with the current status — the Z-machine
+status line or upper window, the Glk grid windows, or a Scott room block — and
+the game never sees the command. The leading slash is what makes intercepting it
+safe: no interactive-fiction parser gives `/` a meaning, so no game verb is
+shadowed, and babelmap's own TUI already spells host commands that way. (A `char`
+prompt — "press any key" — takes the keypress as itself; `/status` is a line
+command.)
 
 This is the same output path piped/redirected use has always taken — kept honest
 by the test harnesses that read it — so `--plain` mostly makes it *selectable*
