@@ -177,6 +177,39 @@ pub struct DownloadOption {
     pub url: String,
     /// IFDB's declared format (e.g. "zcode", "glulx"), for display.
     pub format: Option<String>,
+    /// The link's `<title>`, flattened to one line. Usually just the filename
+    /// again, but occasionally the only thing that identifies the file
+    /// ("Russian translation in Z8"). See [`Self::subtitle`].
+    pub title: Option<String>,
+    /// The link's `<desc>`, flattened to one line — "Release 16: latest version
+    /// of the game.", "Competition version". This is what tells two downloads
+    /// apart, and for some games it is the *only* thing that does: IFDB lists
+    /// two different Photopia builds both named `photopia.z5`.
+    pub desc: Option<String>,
+}
+
+impl DownloadOption {
+    /// The one-line description shown under the filename in the chooser, or
+    /// `None` when IFDB told us nothing the filename doesn't already say.
+    ///
+    /// `<title>` is dropped when it merely repeats the filename — which is the
+    /// common case (27 of the 39 playable links across a 20-game sample), so
+    /// showing it unconditionally would be noise on most rows. When it does
+    /// differ it is kept *and* joined to the description, because the two carry
+    /// different halves of the answer ("Russian translation in Z8" +
+    /// "translated by Vyacheslav Dobranov").
+    pub fn subtitle(&self) -> Option<String> {
+        let title = self
+            .title
+            .as_deref()
+            .filter(|t| !t.eq_ignore_ascii_case(self.filename.as_str()));
+        match (title, self.desc.as_deref()) {
+            (Some(t), Some(d)) => Some(format!("{t} — {d}")),
+            (Some(t), None) => Some(t.to_string()),
+            (None, Some(d)) => Some(d.to_string()),
+            (None, None) => None,
+        }
+    }
 }
 
 /// A resolved game: its playable download options plus (SQ-0474) the
@@ -420,9 +453,34 @@ pub fn parse_download_options(xml: &[u8]) -> Vec<DownloadOption> {
                 return None;
             }
             let filename = basename_from_url(&url).and_then(|n| sanitize_filename(&n))?;
-            Some(DownloadOption { filename, url, format: child_text(link, "format") })
+            Some(DownloadOption {
+                filename,
+                url,
+                format: child_text(link, "format"),
+                title: child_text(link, "title").and_then(|t| one_line(&t)),
+                desc: child_text(link, "desc").and_then(|d| one_line(&d)),
+            })
         })
         .collect()
+}
+
+/// Flatten an IFDB per-file `<title>`/`<desc>` to a single display line, or
+/// `None` if nothing is left.
+///
+/// Two passes matter here. The text is double-encoded the same way a game's
+/// `<description>` is (see `ifiction`), so literal HTML survives roxmltree's one
+/// XML decode and has to be flattened. That flattening yields *newlines* — and
+/// these strings really do carry them (IFDB's Invisiclues entry ends in a blank
+/// line) — which a one-row list cell cannot show, so every whitespace run then
+/// collapses to a single space.
+fn one_line(s: &str) -> Option<String> {
+    let flat = crate::ifiction::html_to_text(s);
+    let joined = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    if joined.is_empty() {
+        None
+    } else {
+        Some(joined)
+    }
 }
 
 /// A download link is offered iff it is uncompressed AND its URL basename has
@@ -796,6 +854,68 @@ mod tests {
         assert_eq!(o.url, "https://eblong.com/infocom/gamefiles/zork1-invclues-r52-s871125.z5");
         assert_eq!(o.filename, "zork1-invclues-r52-s871125.z5");
         assert_eq!(o.format.as_deref(), Some("zcode"));
+        // SQ-0597: the per-file title/desc IFDB really sends for this link.
+        assert_eq!(o.title.as_deref(), Some("Zork 1"));
+        assert_eq!(o.desc.as_deref(), Some("Solid Gold Revision 52"));
+    }
+
+    /// SQ-0597: which of `<title>`/`<desc>` actually reaches the chooser row.
+    #[test]
+    fn subtitle_drops_a_title_that_only_repeats_the_filename() {
+        let base = DownloadOption {
+            filename: "curses.z5".into(),
+            url: "https://x/curses.z5".into(),
+            format: Some("zcode".into()),
+            title: None,
+            desc: None,
+        };
+
+        // The common shape: IFDB's <title> IS the filename, so only the
+        // description says anything (Curses ships 7 files that differ this way).
+        let o = DownloadOption {
+            title: Some("curses.z5".into()),
+            desc: Some("Release 16: latest version of the game.".into()),
+            ..base.clone()
+        };
+        assert_eq!(o.subtitle().as_deref(), Some("Release 16: latest version of the game."));
+
+        // A title that says something the filename doesn't is kept AND joined —
+        // Photopia's Russian build splits the answer across both fields.
+        let o = DownloadOption {
+            filename: "PhotopiaR.z8".into(),
+            title: Some("Russian translation in Z8".into()),
+            desc: Some("translated by Vyacheslav Dobranov".into()),
+            ..base.clone()
+        };
+        assert_eq!(
+            o.subtitle().as_deref(),
+            Some("Russian translation in Z8 — translated by Vyacheslav Dobranov")
+        );
+
+        // Either alone.
+        let o = DownloadOption { title: Some("Competition version".into()), ..base.clone() };
+        assert_eq!(o.subtitle().as_deref(), Some("Competition version"));
+        let o = DownloadOption { desc: Some("Photopia v1.30".into()), ..base.clone() };
+        assert_eq!(o.subtitle().as_deref(), Some("Photopia v1.30"));
+
+        // Nothing worth a second row.
+        assert_eq!(base.subtitle(), None);
+        let o = DownloadOption { title: Some("CURSES.Z5".into()), ..base };
+        assert_eq!(o.subtitle(), None, "a case-different filename echo is still an echo");
+    }
+
+    /// The text is double-encoded HTML inside XML and really does carry
+    /// newlines (IFDB's Invisiclues entry ends in a blank line), but a list row
+    /// is one line high.
+    #[test]
+    fn one_line_flattens_markup_and_newlines_to_a_single_row() {
+        assert_eq!(one_line("Release 7").as_deref(), Some("Release 7"));
+        assert_eq!(
+            one_line("Hints for &quot;Zork I&quot;,<br>adapted\n\nwith permission.\n\n").as_deref(),
+            Some("Hints for \"Zork I\", adapted with permission."),
+        );
+        assert_eq!(one_line("   ").as_deref(), None, "whitespace-only is nothing to show");
+        assert_eq!(one_line("<br/>").as_deref(), None, "markup-only is nothing to show");
     }
 
     #[test]
@@ -988,6 +1108,8 @@ mod tests {
             filename: "test.z5".into(),
             url: "https://x/test.z5".into(),
             format: Some("zcode".into()),
+            title: None,
+            desc: None,
         };
         let source = Fake { hits: vec![hit.clone()], options: vec![opt], record: None, fail: false };
         let data_base = std::env::temp_dir().join(format!("bm_ifdb_worker_data_{}", std::process::id()));

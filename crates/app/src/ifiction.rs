@@ -48,7 +48,10 @@ pub enum IFictionError {
 /// block tags become newlines, other tags are dropped, and HTML entities are
 /// decoded. Deliberately small — it handles the tags and entities IFDB actually
 /// emits, not a general HTML parser, so it stays dependency-free.
-fn html_to_text(s: &str) -> String {
+///
+/// Shared with `ifdb_search`, whose per-file `<title>`/`<desc>` text is
+/// double-encoded exactly the same way (see the `description` call below).
+pub(crate) fn html_to_text(s: &str) -> String {
     // 1. Tags → newline for line/paragraph breaks, empty for the rest.
     let mut no_tags = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();

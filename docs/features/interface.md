@@ -306,7 +306,13 @@ cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
   rating, and year. `↑`/`↓` (or `j`/`k`) move, and `Enter` on a game fetches
   its download links: if there's a single directly-playable story file it
   downloads at once, and if there are several a small chooser lets you pick
-  one. The file lands in the current library directory, the list refreshes,
+  one. Each file in the chooser carries IFDB's own description of it on the
+  line below — "Release 16: latest version of the game.", "Competition
+  version" — which is often the only way to tell the candidates apart, since a
+  game may well list several files under the *same* filename. A file the
+  library directory already holds is marked `✓ … · already downloaded` (you can
+  still download it again; it lands beside the original under a new name). The
+  file lands in the current library directory, the list refreshes,
   and the cursor jumps to your new story with a "Downloaded …" note. Only
   files babelmap can actually open are offered (`.z3`–`.z8`, `.ulx`,
   `.gblorb`/`.zblorb`/`.blorb`/`.blb`, `.dat`); zips and executables are
@@ -321,7 +327,11 @@ cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
   list is one extra request per modal open, not a poll). The modal reuses the
   themeable `dialog.*` chrome plus the
   `ifdb_result`/`ifdb_result:selected`/`ifdb_result_meta`/`ifdb_download_marker`/
-  `ifdb_attribution` style selectors.
+  `ifdb_download_present`/`ifdb_attribution` style selectors (the two download
+  selectors carry the row's `⭳`/`✓` glyph, so a theme can change it).
+  Both lists scroll the way the story list does — the cursor moves inside the
+  visible window and only scrolls it once it reaches an edge — and `Home`/`End`
+  and `PageUp`/`PageDown` work throughout.
 - **Metadata fetch (IFDB).** Press `f` to fetch author/year/genre/description/
   cover art for the highlighted story from IFDB, or `r` to sweep the whole
   library (skipping any story already at the current fetch version); `Esc`

@@ -724,7 +724,7 @@ pub(crate) fn run_story_picker(
 
             // IFDB search modal (SQ-0413): also drawn last (never with the
             // preview open — the two entry points are mutually exclusive).
-            if let Some(sm) = &search_modal {
+            if let Some(sm) = &mut search_modal {
                 let rects = app::ifdb_search_modal::draw_search_modal(sm, area, &cs, buf);
                 search_area = rects.area;
                 search_close_rect = rects.close;
@@ -916,10 +916,18 @@ pub(crate) fn run_story_picker(
         let gallery_busy = matches!(view, PickerView::Gallery) && !requested.is_empty();
         let cover_busy = panel_busy || gallery_busy;
         let search_busy = search_modal.as_ref().is_some_and(|m| m.busy()) || search_worker.busy();
-        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy() || hint_dl.busy() || search_busy)
+        // The modal's own lists ease exactly as `list` does (SQ-0598), so they
+        // need the same tick — without it a scroll would freeze mid-tween until
+        // the next keypress.
+        let search_scrolling =
+            search_modal.as_ref().is_some_and(|m| m.has_active_animation());
+        if (list.has_active_animation() || slide.active() || cover_busy || fetcher.busy() || hint_dl.busy() || search_busy || search_scrolling)
             && !crossterm::event::poll(Duration::from_millis(16)).unwrap_or(false)
         {
             list.finalize_if_done();
+            if let Some(m) = &mut search_modal {
+                m.finalize_if_done();
+            }
             continue;
         }
 
@@ -951,7 +959,7 @@ pub(crate) fn run_story_picker(
                 // its state machine decides what each does (Esc backs out a
                 // level, Enter activates, ↑/↓/j/k navigate).
                 if search_modal.is_some() {
-                    let action = search_modal.as_mut().unwrap().on_key(k.code);
+                    let action = search_modal.as_mut().unwrap().on_key(k.code, anim);
                     dispatch_search_action(action, &search_worker, dir, &mut search_modal);
                 // The resource-preview modal (SQ-0347) captures all keys while
                 // open: `+`/`=`/`-`/`0` step the zoom (SQ-0486, intercepted
@@ -1180,6 +1188,10 @@ pub(crate) fn run_story_picker(
                         // fetched non-blocking through the same worker.
                         Char('/') => {
                             let mut sm = app::ifdb_search_modal::SearchModal::new();
+                            // So the chooser can mark files this directory
+                            // already holds (SQ-0597) — the same `dir` every
+                            // download lands in, below.
+                            sm.set_download_dir(dir);
                             let seed_action = sm.open();
                             search_modal = Some(sm);
                             dispatch_search_action(seed_action, &search_worker, dir, &mut search_modal);

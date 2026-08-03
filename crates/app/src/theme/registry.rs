@@ -333,7 +333,10 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("ifdb_result", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("ifdb_result_selected", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, true)),
     row("ifdb_result_meta", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
-    row("ifdb_download_marker", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("ifdb_download_marker", Section::Elements, Kind::Style, Some("accent"), glyph("⭳")),
+    // A file the download directory already holds (SQ-0597): its own glyph and a
+    // muted tint, so "I have this one" reads without displacing the filename.
+    row("ifdb_download_present", Section::Elements, Kind::Style, Some("muted"), glyph("✓")),
     row("ifdb_attribution", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
     // ── saves manager (SQ-0531) — the Type cell's portability tint. A "Game"
     // save carries standard save-instruction-PC bytes any interpreter reads and
@@ -490,6 +493,7 @@ mod tests {
         "ifdb_result_selected",
         "ifdb_result_meta",
         "ifdb_download_marker",
+        "ifdb_download_present",
         "saves_portable",
         "saves_host_only",
         "ifdb_attribution",

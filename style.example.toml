@@ -90,7 +90,8 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # ifdb_result = { parent = "text" }
 # ifdb_result_selected = { parent = "accent", bold = true, reversed = true }
 # ifdb_result_meta = { parent = "muted" }
-# ifdb_download_marker = { parent = "accent" }
+# ifdb_download_marker = { parent = "accent", glyph = "⭳" }
+# ifdb_download_present = { parent = "muted", glyph = "✓" }
 # ifdb_attribution = { parent = "muted", italic = true }
 # saves_portable = { parent = "accent", glyph = "↗" }
 # saves_host_only = { parent = "muted" }

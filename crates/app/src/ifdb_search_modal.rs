@@ -27,8 +27,10 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
 use crate::colors::ColorScheme;
+use crate::config::AnimationConfig;
 use crate::ifdb_search::{DownloadOption, SearchEvent, SearchHit};
 use crate::ifiction::IFiction;
+use crate::list_scroll::ListScroll;
 use crate::render::dialog::{
     draw_dialog, DialogField, DialogRects, DialogSpec, DialogStyle, Placement,
 };
@@ -83,7 +85,13 @@ pub struct SearchModal {
     view: View,
     inflight: Option<Inflight>,
     hits: Vec<SearchHit>,
-    hit_sel: usize,
+    /// Selection + scroll offset for `hits`, shared with the story picker
+    /// (SQ-0598). A stateless "recompute the window from the index each frame"
+    /// rule can only ever pin the selection to one edge of the viewport — going
+    /// back up, the cursor froze on the bottom row and the list scrolled under
+    /// it until the top. `ListScroll` keeps the offset and moves it only when
+    /// the selection would actually leave the viewport.
+    hit_scroll: ListScroll,
     /// The "Popular on IFDB" seed list (SQ-0473), cached for this modal
     /// instance's lifetime once it arrives — reused when Esc backs out of a
     /// typed search rather than re-fetching. NOT persisted across separate
@@ -94,7 +102,23 @@ pub struct SearchModal {
     /// results — governs the Esc ladder and the "Popular on IFDB" hint label.
     showing_seed: bool,
     options: Vec<DownloadOption>,
-    opt_sel: usize,
+    /// Selection + scroll offset for `options`, in *items* rather than rows —
+    /// a download row is two rows tall when any of them has a description.
+    opt_scroll: ListScroll,
+    /// Parallel to `options`: whether the download directory already holds a
+    /// file of that name (SQ-0597). Computed once, when the options land,
+    /// rather than per frame — the renderer runs on every keystroke and this
+    /// is a filesystem probe.
+    opt_present: Vec<bool>,
+    /// Where a download would land, so `opt_present` can be filled in. `None`
+    /// until the picker supplies it (and in the unit tests), which simply means
+    /// nothing is reported as already downloaded.
+    download_dir: Option<std::path::PathBuf>,
+    /// Items (not rows) the list viewport last fitted, recorded by the renderer
+    /// because only it knows the dialog's height and the current row stride.
+    /// Key handling needs it to decide when a move scrolls; 1 until the first
+    /// frame, which keeps a key pressed before any draw well-defined.
+    list_rows: usize,
     /// The iFiction record resolved alongside `options` (SQ-0474), if any —
     /// carried from the last `SearchEvent::Options` through to whichever
     /// `Download` action follows (immediately, for the one-option
@@ -115,11 +139,14 @@ impl SearchModal {
             view: View::Input,
             inflight: None,
             hits: Vec::new(),
-            hit_sel: 0,
+            hit_scroll: ListScroll::new(),
             seed_hits: Vec::new(),
             showing_seed: false,
             options: Vec::new(),
-            opt_sel: 0,
+            opt_scroll: ListScroll::new(),
+            opt_present: Vec::new(),
+            download_dir: None,
+            list_rows: 1,
             pending_record: None,
             status: None,
         }
@@ -144,7 +171,52 @@ impl SearchModal {
     /// The title of the currently-selected hit, for the "Downloaded X" toast /
     /// progress line the picker shows on success.
     pub fn selected_hit_title(&self) -> Option<&str> {
-        self.hits.get(self.hit_sel).map(|h| h.title.as_str())
+        self.hits.get(self.hit_scroll.selected).map(|h| h.title.as_str())
+    }
+
+    /// True while either list's scroll offset is still easing, so the picker's
+    /// run loop keeps ticking and the motion is actually drawn (same contract as
+    /// its own `list`).
+    pub fn has_active_animation(&self) -> bool {
+        self.hit_scroll.has_active_animation() || self.opt_scroll.has_active_animation()
+    }
+
+    /// Drop a finished scroll tween so the settled frame paints once. Mirrors
+    /// `ListScroll::finalize_if_done`; returns whether anything was cleared.
+    pub fn finalize_if_done(&mut self) -> bool {
+        // Both, not short-circuited — either may be mid-tween.
+        let h = self.hit_scroll.finalize_if_done();
+        let o = self.opt_scroll.finalize_if_done();
+        h || o
+    }
+
+    /// Tell the modal where a download would land, so the chooser can mark the
+    /// files that directory already holds. The picker calls this right after
+    /// construction; without it nothing is marked.
+    pub fn set_download_dir(&mut self, dir: &std::path::Path) {
+        self.download_dir = Some(dir.to_path_buf());
+    }
+
+    /// Which of `options` the download directory already has, by the exact
+    /// filename the download would be saved under.
+    ///
+    /// Names only — not contents. Two IFDB entries can share a filename while
+    /// being different builds (both of Photopia's `photopia.z5` links), so a
+    /// match means "a file of this name is already here", which is precisely
+    /// what decides whether downloading again produces a `foo (2).z5`
+    /// duplicate. It is a hint on the row, never a block on the download.
+    fn probe_present(&self, options: &[DownloadOption]) -> Vec<bool> {
+        let Some(dir) = &self.download_dir else { return vec![false; options.len()] };
+        options.iter().map(|o| dir.join(&o.filename).exists()).collect()
+    }
+
+    /// Point the hit list back at its first row after `hits` is replaced. A
+    /// fresh `ListScroll` rather than `selected = 0`, so the scroll *offset*
+    /// resets too — otherwise a new, shorter result set would render from a
+    /// window scrolled past its end.
+    fn reset_hit_scroll(&mut self) {
+        self.hit_scroll = ListScroll::new();
+        self.hit_scroll.len(self.hits.len());
     }
 
     /// Consume the iFiction record resolved for the game currently being
@@ -157,8 +229,10 @@ impl SearchModal {
 
     // ── Key handling ──────────────────────────────────────────────────────
 
-    /// Feed a keypress; returns what the picker should do.
-    pub fn on_key(&mut self, code: KeyCode) -> ModalAction {
+    /// Feed a keypress; returns what the picker should do. `anim` is the
+    /// picker's animation config, so list scrolling eases exactly as the story
+    /// list's does.
+    pub fn on_key(&mut self, code: KeyCode, anim: &AnimationConfig) -> ModalAction {
         // While busy, only Esc responds — it abandons the pending result.
         if self.inflight.is_some() {
             if code == KeyCode::Esc {
@@ -171,9 +245,36 @@ impl SearchModal {
         self.status = None;
         match self.view {
             View::Input => self.input_key(code),
-            View::Results => self.results_key(code),
-            View::Choosing => self.choosing_key(code),
+            View::Results => self.results_key(code, anim),
+            View::Choosing => self.choosing_key(code, anim),
         }
+    }
+
+    /// Apply a list-navigation key to `scroll`, or report that it wasn't one.
+    /// Shared by both list views so they navigate identically — and identically
+    /// to the story picker, which drives the same [`ListScroll`] methods.
+    ///
+    /// Re-records `total` on every keystroke: the lists are replaced wholesale
+    /// when a reply lands, and a scroll still clamping against the previous
+    /// list's length would let the selection run off the end of the new one.
+    fn nav_key(
+        scroll: &mut ListScroll,
+        code: KeyCode,
+        total: usize,
+        rows: usize,
+        anim: &AnimationConfig,
+    ) -> bool {
+        scroll.len(total);
+        match code {
+            KeyCode::Up | KeyCode::Char('k') => scroll.move_by(-1, rows, anim),
+            KeyCode::Down | KeyCode::Char('j') => scroll.move_by(1, rows, anim),
+            KeyCode::PageUp => scroll.page(-1, rows, anim),
+            KeyCode::PageDown => scroll.page(1, rows, anim),
+            KeyCode::Home => scroll.home(rows, anim),
+            KeyCode::End => scroll.end(total, rows, anim),
+            _ => return false,
+        }
+        true
     }
 
     fn input_key(&mut self, code: KeyCode) -> ModalAction {
@@ -219,7 +320,12 @@ impl SearchModal {
         }
     }
 
-    fn results_key(&mut self, code: KeyCode) -> ModalAction {
+    fn results_key(&mut self, code: KeyCode, anim: &AnimationConfig) -> ModalAction {
+        // Nav first: Home/End/PageUp/PageDown are not `Char`s, so they can't
+        // collide with the type-to-search fallback at the bottom of this match.
+        if Self::nav_key(&mut self.hit_scroll, code, self.hits.len(), self.list_rows, anim) {
+            return ModalAction::None;
+        }
         match code {
             // SQ-0473 Esc ladder: from the seed list, close outright (nothing
             // useful behind it); from a typed search's results, return to the
@@ -231,24 +337,14 @@ impl SearchModal {
                 }
                 if !self.seed_hits.is_empty() {
                     self.hits = self.seed_hits.clone();
-                    self.hit_sel = 0;
+                    self.reset_hit_scroll();
                     self.showing_seed = true;
                 } else {
                     self.view = View::Input;
                 }
                 ModalAction::None
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.hit_sel = self.hit_sel.saturating_sub(1);
-                ModalAction::None
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.hit_sel + 1 < self.hits.len() {
-                    self.hit_sel += 1;
-                }
-                ModalAction::None
-            }
-            KeyCode::Enter => match self.hits.get(self.hit_sel) {
+            KeyCode::Enter => match self.hits.get(self.hit_scroll.selected) {
                 Some(hit) => {
                     self.inflight = Some(Inflight::Resolve);
                     ModalAction::Resolve(hit.tuid.clone())
@@ -256,10 +352,12 @@ impl SearchModal {
                 None => ModalAction::None,
             },
             // Fallback: open the game's IFDB page in a browser.
-            KeyCode::Char('o') => match self.hits.get(self.hit_sel).and_then(|h| h.link.clone()) {
-                Some(link) => ModalAction::OpenInBrowser(link),
-                None => ModalAction::None,
-            },
+            KeyCode::Char('o') => {
+                match self.hits.get(self.hit_scroll.selected).and_then(|h| h.link.clone()) {
+                    Some(link) => ModalAction::OpenInBrowser(link),
+                    None => ModalAction::None,
+                }
+            }
             // SQ-0473: typing over the list (seed or typed-search results)
             // starts a fresh query edit — the list stays visible underneath
             // (see render_body's View::Input arm) until Enter runs the real
@@ -276,26 +374,20 @@ impl SearchModal {
         }
     }
 
-    fn choosing_key(&mut self, code: KeyCode) -> ModalAction {
+    fn choosing_key(&mut self, code: KeyCode, anim: &AnimationConfig) -> ModalAction {
+        if Self::nav_key(&mut self.opt_scroll, code, self.options.len(), self.list_rows, anim) {
+            return ModalAction::None;
+        }
         match code {
             // Back to the results list.
             KeyCode::Esc => {
                 self.view = View::Results;
                 self.options.clear();
-                self.opt_sel = 0;
+                self.opt_present.clear();
+                self.opt_scroll = ListScroll::new();
                 ModalAction::None
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.opt_sel = self.opt_sel.saturating_sub(1);
-                ModalAction::None
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if self.opt_sel + 1 < self.options.len() {
-                    self.opt_sel += 1;
-                }
-                ModalAction::None
-            }
-            KeyCode::Enter => match self.options.get(self.opt_sel) {
+            KeyCode::Enter => match self.options.get(self.opt_scroll.selected) {
                 Some(opt) => {
                     self.inflight = Some(Inflight::Download);
                     ModalAction::Download(opt.url.clone())
@@ -318,7 +410,7 @@ impl SearchModal {
                 Some(Inflight::Search) => {
                     self.inflight = None;
                     self.hits = hits.clone();
-                    self.hit_sel = 0;
+                    self.reset_hit_scroll();
                     self.showing_seed = false;
                     if hits.is_empty() {
                         self.status = Some("No games found".to_string());
@@ -337,7 +429,7 @@ impl SearchModal {
                     self.seed_hits = hits.clone();
                     if !hits.is_empty() {
                         self.hits = hits.clone();
-                        self.hit_sel = 0;
+                        self.reset_hit_scroll();
                         self.showing_seed = true;
                         self.view = View::Results;
                     }
@@ -369,8 +461,10 @@ impl SearchModal {
                         ModalAction::Download(resolved.options[0].url.clone())
                     }
                     _ => {
+                        self.opt_present = self.probe_present(&resolved.options);
                         self.options = resolved.options.clone();
-                        self.opt_sel = 0;
+                        self.opt_scroll = ListScroll::new();
+                        self.opt_scroll.len(self.options.len());
                         self.view = View::Choosing;
                         ModalAction::None
                     }
@@ -404,7 +498,12 @@ const MODAL_H: u16 = 20;
 /// query field is always drawn in the top content row; the list (hits or
 /// download options) fills the rows below, and the final row carries the
 /// "Results from IFDB" attribution.
-pub fn draw_search_modal(modal: &SearchModal, area: Rect, cs: &ColorScheme, buf: &mut Buffer) -> DialogRects {
+pub fn draw_search_modal(
+    modal: &mut SearchModal,
+    area: Rect,
+    cs: &ColorScheme,
+    buf: &mut Buffer,
+) -> DialogRects {
     let st = DialogStyle::from_colors(cs);
     let text = cs.theme.get("story_info_value").style;
     let dim = cs.theme.get("story_info_label").style;
@@ -450,11 +549,14 @@ pub fn draw_search_modal(modal: &SearchModal, area: Rect, cs: &ColorScheme, buf:
     rects
 }
 
-fn render_body(modal: &SearchModal, area: Rect, cs: &ColorScheme, buf: &mut Buffer) {
+fn render_body(modal: &mut SearchModal, area: Rect, cs: &ColorScheme, buf: &mut Buffer) {
     let sel_style = cs.theme.get("ifdb_result_selected").style;
     let row_style = cs.theme.get("ifdb_result").style;
     let meta_style = cs.theme.get("ifdb_result_meta").style;
     let marker_style = cs.theme.get("ifdb_download_marker").style;
+    let present_style = cs.theme.get("ifdb_download_present").style;
+    let marker_glyph = row_glyph(cs, "ifdb_download_marker", "⭳");
+    let present_glyph = row_glyph(cs, "ifdb_download_present", "✓");
     let attrib_style = cs.theme.get("ifdb_attribution").style;
     let alert = cs.theme.get("alert").style;
 
@@ -499,25 +601,39 @@ fn render_body(modal: &SearchModal, area: Rect, cs: &ColorScheme, buf: &mut Buff
         // whatever list — seed or a prior search — was showing).
         View::Input | View::Results => {
             let rows = list_bottom.saturating_sub(y) as usize;
-            let start = scroll_start(modal.hit_sel, modal.hits.len(), rows);
+            modal.list_rows = rows.max(1);
+            let start = window_start(modal.hit_scroll.display_offset(), modal.hits.len(), rows);
+            let sel = modal.hit_scroll.selected;
             for (i, hit) in modal.hits.iter().enumerate().skip(start).take(rows) {
-                let selected = i == modal.hit_sel;
-                render_hit_row(buf, area, y, hit, selected, row_style, sel_style, meta_style);
+                render_hit_row(buf, area, y, hit, i == sel, row_style, sel_style, meta_style);
                 y += 1;
             }
         }
         View::Choosing => {
+            // SQ-0597: a file's description is what tells two downloads apart,
+            // and it is far too long for the tail of a 70-column row (median 43
+            // chars, and IFDB runs to 122), so it gets a row of its own. The
+            // stride is uniform across the list — mixed row heights would make
+            // the offset `ListScroll` maintains in *items* stop matching rows —
+            // and drops back to 1 when no file in the list has anything to say.
+            let stride = if modal.options.iter().any(|o| o.subtitle().is_some()) { 2 } else { 1 };
             let rows = list_bottom.saturating_sub(y) as usize;
-            let start = scroll_start(modal.opt_sel, modal.options.len(), rows);
-            for (i, opt) in modal.options.iter().enumerate().skip(start).take(rows) {
-                let selected = i == modal.opt_sel;
-                let base = if selected { sel_style } else { row_style };
-                // The download glyph in its own (accent) style, then the file.
-                put_str(buf, area.x, y, 2, "⭳ ", if selected { base } else { marker_style });
-                let fmt = opt.format.as_deref().unwrap_or("story file");
-                let line = format!("{}  ({})", opt.filename, fmt);
-                put_str(buf, area.x + 2, y, area.width.saturating_sub(2), &line, base);
-                y += 1;
+            let items = (rows / stride).max(1);
+            modal.list_rows = items;
+            let start = window_start(modal.opt_scroll.display_offset(), modal.options.len(), items);
+            let sel = modal.opt_scroll.selected;
+            for (i, opt) in modal.options.iter().enumerate().skip(start).take(items) {
+                let present = modal.opt_present.get(i).copied().unwrap_or(false);
+                let (glyph, glyph_style) = if present {
+                    (present_glyph.as_str(), present_style)
+                } else {
+                    (marker_glyph.as_str(), marker_style)
+                };
+                render_option_row(
+                    buf, area, y, stride as u16, opt, i == sel, present, glyph, glyph_style,
+                    row_style, sel_style, meta_style,
+                );
+                y += stride as u16;
             }
         }
     }
@@ -584,6 +700,77 @@ fn render_hit_row(
     }
 }
 
+/// A row's themeable marker glyph, falling back to `default` when a theme
+/// blanks it out. Same contract as the saves manager's portability glyph.
+fn row_glyph(cs: &ColorScheme, selector: &str, default: &str) -> String {
+    cs.theme
+        .get(selector)
+        .glyph
+        .as_ref()
+        .and_then(|g| g.single.as_deref())
+        .unwrap_or(default)
+        .to_string()
+}
+
+/// One download-chooser row: the file on the first line, and — when `stride` is
+/// 2 — its IFDB description indented on the second (SQ-0597).
+///
+/// A selected row fills both of its lines edge to edge, the same idiom as
+/// [`render_hit_row`], so the highlight reads as one block rather than as two
+/// adjacent rows; that also means the description has to be drawn in the
+/// selection style there, since a dim meta style is unreadable against it.
+#[allow(clippy::too_many_arguments)]
+fn render_option_row(
+    buf: &mut Buffer,
+    area: Rect,
+    y: u16,
+    stride: u16,
+    opt: &DownloadOption,
+    selected: bool,
+    present: bool,
+    glyph: &str,
+    glyph_style: Style,
+    row_style: Style,
+    sel_style: Style,
+    meta_style: Style,
+) {
+    let base = if selected { sel_style } else { row_style };
+    if selected {
+        for row in y..y + stride {
+            for x in area.x..area.right() {
+                if let Some(cell) = buf.cell_mut((x, row)) {
+                    cell.set_symbol(" ").set_style(base);
+                }
+            }
+        }
+    }
+
+    let content_w = area.right().saturating_sub(ROW_MARGIN).saturating_sub(area.x);
+
+    // The marker glyph in its own style, then the file. A file the download
+    // directory already holds says so outright rather than relying on the glyph
+    // alone — downloading it again is allowed, it just lands as a "foo (2).z5".
+    put_str(buf, area.x, y, 2, &format!("{glyph} "), if selected { base } else { glyph_style });
+    let fmt = opt.format.as_deref().unwrap_or("story file");
+    let mut line = format!("{}  ({})", opt.filename, fmt);
+    if present {
+        line.push_str(" · already downloaded");
+    }
+    let file_w = content_w.saturating_sub(2);
+    put_str(buf, area.x + 2, y, file_w, &clip_with_ellipsis(&line, file_w), base);
+
+    if stride < 2 {
+        return;
+    }
+    // Indented past the glyph so it reads as belonging to the row above.
+    const SUB_INDENT: u16 = 4;
+    if let Some(sub) = opt.subtitle() {
+        let sub_w = content_w.saturating_sub(SUB_INDENT);
+        let style = if selected { base } else { meta_style };
+        put_str(buf, area.x + SUB_INDENT, y + 1, sub_w, &clip_with_ellipsis(&sub, sub_w), style);
+    }
+}
+
 /// Clip `s` to at most `width` characters, appending an ellipsis if it had to
 /// be shortened (the ellipsis itself counts against `width`).
 fn clip_with_ellipsis(s: &str, width: u16) -> String {
@@ -621,16 +808,13 @@ fn hit_rating(hit: &SearchHit) -> Option<String> {
     }
 }
 
-/// First index to show so `sel` stays visible in a window of `rows`.
-fn scroll_start(sel: usize, len: usize, rows: usize) -> usize {
-    if rows == 0 || len <= rows {
-        return 0;
-    }
-    if sel < rows {
-        0
-    } else {
-        (sel + 1 - rows).min(len - rows)
-    }
+/// Clamp a [`ListScroll`] offset to a window that a `len`-item list can
+/// actually fill. `ListScroll` only guarantees the offset is within the list;
+/// after the list shrinks (a new search replaces a long result set with a short
+/// one) an un-clamped offset would render a window hanging off the end, with
+/// blank rows below a handful of items.
+fn window_start(offset: usize, len: usize, rows: usize) -> usize {
+    offset.min(len.saturating_sub(rows))
 }
 
 /// Write `s` (truncated to `width` cells) at `(x, y)` in `style`.
@@ -667,7 +851,20 @@ mod tests {
             filename: name.into(),
             url: format!("https://x/{name}"),
             format: Some("zcode".into()),
+            title: None,
+            desc: None,
         }
+    }
+
+    /// The same, carrying IFDB's per-file description (SQ-0597).
+    fn opt_desc(name: &str, desc: &str) -> DownloadOption {
+        DownloadOption { desc: Some(desc.into()), ..opt(name) }
+    }
+
+    /// Scroll animation off: these tests assert on settled offsets, and an
+    /// eased `display_offset()` would be mid-tween when they look.
+    fn anim() -> AnimationConfig {
+        AnimationConfig { enabled: false, easing: crate::anim::Easing::EaseOut, scroll_ms: 0 }
     }
 
     /// A resolved game with no iFiction record — the shape most existing
@@ -681,58 +878,58 @@ mod tests {
     fn typing_then_enter_dispatches_a_search() {
         let mut m = SearchModal::new();
         for c in "zork".chars() {
-            assert_eq!(m.on_key(KeyCode::Char(c)), ModalAction::None);
+            assert_eq!(m.on_key(KeyCode::Char(c), &anim()), ModalAction::None);
         }
-        assert_eq!(m.on_key(KeyCode::Enter), ModalAction::Search("zork".into()));
+        assert_eq!(m.on_key(KeyCode::Enter, &anim()), ModalAction::Search("zork".into()));
         assert!(m.busy(), "a dispatched search marks the modal busy");
     }
 
     #[test]
     fn empty_query_enter_does_nothing() {
         let mut m = SearchModal::new();
-        assert_eq!(m.on_key(KeyCode::Enter), ModalAction::None);
+        assert_eq!(m.on_key(KeyCode::Enter, &anim()), ModalAction::None);
         assert!(!m.busy());
     }
 
     #[test]
     fn esc_from_input_closes() {
         let mut m = SearchModal::new();
-        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::Close);
+        assert_eq!(m.on_key(KeyCode::Esc, &anim()), ModalAction::Close);
     }
 
     #[test]
     fn results_arrive_then_enter_resolves_selected() {
         let mut m = SearchModal::new();
-        m.on_key(KeyCode::Char('z'));
-        m.on_key(KeyCode::Enter); // Search, busy
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim()); // Search, busy
         let hits = vec![hit("aaa", "Alpha"), hit("bbb", "Beta")];
         assert_eq!(m.on_event(&SearchEvent::Results(hits)), ModalAction::None);
         assert!(!m.busy());
         assert_eq!(m.selected_hit_title(), Some("Alpha"));
-        m.on_key(KeyCode::Down);
+        m.on_key(KeyCode::Down, &anim());
         assert_eq!(m.selected_hit_title(), Some("Beta"));
-        assert_eq!(m.on_key(KeyCode::Enter), ModalAction::Resolve("bbb".into()));
+        assert_eq!(m.on_key(KeyCode::Enter, &anim()), ModalAction::Resolve("bbb".into()));
         assert!(m.busy());
     }
 
     #[test]
     fn empty_results_returns_to_input_with_a_status() {
         let mut m = SearchModal::new();
-        m.on_key(KeyCode::Char('x'));
-        m.on_key(KeyCode::Enter);
+        m.on_key(KeyCode::Char('x'), &anim());
+        m.on_key(KeyCode::Enter, &anim());
         m.on_event(&SearchEvent::Results(vec![]));
         assert!(!m.busy());
         // Back to input; a new keystroke edits the query again.
-        assert_eq!(m.on_key(KeyCode::Char('y')), ModalAction::None);
+        assert_eq!(m.on_key(KeyCode::Char('y'), &anim()), ModalAction::None);
     }
 
     #[test]
     fn one_download_option_auto_downloads() {
         let mut m = SearchModal::new();
-        m.on_key(KeyCode::Char('z'));
-        m.on_key(KeyCode::Enter);
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim());
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
-        m.on_key(KeyCode::Enter); // Resolve
+        m.on_key(KeyCode::Enter, &anim()); // Resolve
         let action = m.on_event(&SearchEvent::Options(resolved(vec![opt("a.z5")])));
         assert_eq!(action, ModalAction::Download("https://x/a.z5".into()));
         assert!(m.busy());
@@ -744,10 +941,10 @@ mod tests {
     #[test]
     fn resolved_record_is_cached_until_taken_once() {
         let mut m = SearchModal::new();
-        m.on_key(KeyCode::Char('z'));
-        m.on_key(KeyCode::Enter);
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim());
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
-        m.on_key(KeyCode::Enter); // Resolve
+        m.on_key(KeyCode::Enter, &anim()); // Resolve
         assert!(m.take_pending_record().is_none(), "nothing resolved yet");
 
         let record = Box::new(IFiction { title: Some("Alpha".into()), ..Default::default() });
@@ -763,29 +960,29 @@ mod tests {
     #[test]
     fn several_options_open_the_chooser() {
         let mut m = SearchModal::new();
-        m.on_key(KeyCode::Char('z'));
-        m.on_key(KeyCode::Enter);
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim());
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
-        m.on_key(KeyCode::Enter);
+        m.on_key(KeyCode::Enter, &anim());
         let action = m.on_event(&SearchEvent::Options(resolved(vec![opt("a.z5"), opt("a.z8")])));
         assert_eq!(action, ModalAction::None);
         assert!(!m.busy());
         // Choosing view: Enter downloads the selected option.
-        m.on_key(KeyCode::Down);
-        assert_eq!(m.on_key(KeyCode::Enter), ModalAction::Download("https://x/a.z8".into()));
+        m.on_key(KeyCode::Down, &anim());
+        assert_eq!(m.on_key(KeyCode::Enter, &anim()), ModalAction::Download("https://x/a.z8".into()));
     }
 
     #[test]
     fn no_playable_option_offers_the_browser_fallback() {
         let mut m = SearchModal::new();
-        m.on_key(KeyCode::Char('z'));
-        m.on_key(KeyCode::Enter);
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim());
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
-        m.on_key(KeyCode::Enter);
+        m.on_key(KeyCode::Enter, &anim());
         assert_eq!(m.on_event(&SearchEvent::Options(resolved(vec![]))), ModalAction::None);
         // 'o' opens the IFDB page.
         assert_eq!(
-            m.on_key(KeyCode::Char('o')),
+            m.on_key(KeyCode::Char('o'), &anim()),
             ModalAction::OpenInBrowser("https://ifdb.org/viewgame?id=aaa".into())
         );
     }
@@ -793,31 +990,31 @@ mod tests {
     #[test]
     fn esc_in_results_returns_to_query_editing() {
         let mut m = SearchModal::new();
-        m.on_key(KeyCode::Char('z'));
-        m.on_key(KeyCode::Enter);
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim());
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
-        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::None);
+        assert_eq!(m.on_key(KeyCode::Esc, &anim()), ModalAction::None);
         // Now in input view: Esc closes.
-        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::Close);
+        assert_eq!(m.on_key(KeyCode::Esc, &anim()), ModalAction::Close);
     }
 
     #[test]
     fn a_failed_event_shows_a_status_and_is_not_busy() {
         let mut m = SearchModal::new();
-        m.on_key(KeyCode::Char('z'));
-        m.on_key(KeyCode::Enter);
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim());
         m.on_event(&SearchEvent::Failed("IFDB unreachable".into()));
         assert!(!m.busy());
         // A new keystroke edits the query.
-        assert_eq!(m.on_key(KeyCode::Char('x')), ModalAction::None);
+        assert_eq!(m.on_key(KeyCode::Char('x'), &anim()), ModalAction::None);
     }
 
     #[test]
     fn stale_results_after_cancel_are_ignored() {
         let mut m = SearchModal::new();
-        m.on_key(KeyCode::Char('z'));
-        m.on_key(KeyCode::Enter); // busy, inflight=Search
-        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::None); // cancel
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim()); // busy, inflight=Search
+        assert_eq!(m.on_key(KeyCode::Esc, &anim()), ModalAction::None); // cancel
         assert!(!m.busy());
         // A late result must not jump to the results view.
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
@@ -827,23 +1024,103 @@ mod tests {
     #[test]
     fn busy_ignores_typing_but_esc_cancels() {
         let mut m = SearchModal::new();
-        m.on_key(KeyCode::Char('z'));
-        m.on_key(KeyCode::Enter);
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim());
         assert!(m.busy());
         // Typing while busy is ignored.
-        assert_eq!(m.on_key(KeyCode::Char('q')), ModalAction::None);
+        assert_eq!(m.on_key(KeyCode::Char('q'), &anim()), ModalAction::None);
         assert!(m.busy());
-        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::None);
+        assert_eq!(m.on_key(KeyCode::Esc, &anim()), ModalAction::None);
         assert!(!m.busy(), "Esc abandons the in-flight request");
     }
 
     #[test]
-    fn scroll_start_keeps_selection_visible() {
-        assert_eq!(scroll_start(0, 10, 5), 0);
-        assert_eq!(scroll_start(4, 10, 5), 0);
-        assert_eq!(scroll_start(5, 10, 5), 1);
-        assert_eq!(scroll_start(9, 10, 5), 5);
-        assert_eq!(scroll_start(3, 3, 5), 0, "list shorter than window starts at 0");
+    fn window_start_never_hangs_the_viewport_off_the_end_of_the_list() {
+        assert_eq!(window_start(0, 10, 5), 0);
+        assert_eq!(window_start(3, 10, 5), 3);
+        assert_eq!(window_start(5, 10, 5), 5, "the last full window is allowed");
+        assert_eq!(window_start(9, 10, 5), 5, "clamped back to the last full window");
+        assert_eq!(window_start(4, 3, 5), 0, "a list shorter than the window starts at 0");
+    }
+
+    /// SQ-0598: the reported bug. Walking down past the viewport and back up
+    /// again must move the *cursor* through the window, not drag the window
+    /// under a cursor frozen on the bottom row. The old stateless window
+    /// recompute pinned `selected` to the last row for every step of the way
+    /// back up, which is what felt wrong.
+    #[test]
+    fn walking_back_up_a_long_list_moves_the_cursor_before_it_scrolls() {
+        let mut m = SearchModal::new();
+        m.open();
+        let hits: Vec<_> = (0..20).map(|i| hit(&format!("t{i}"), &format!("Game {i}"))).collect();
+        m.on_event(&SearchEvent::Results(hits));
+        m.list_rows = 5;
+
+        for _ in 0..9 {
+            m.on_key(KeyCode::Down, &anim());
+        }
+        assert_eq!(m.hit_scroll.selected, 9);
+        assert_eq!(m.hit_scroll.target_offset(), 5, "selection sits on the window's last row");
+
+        // One step back up: the window must NOT move yet — the cursor has four
+        // rows of headroom inside it.
+        m.on_key(KeyCode::Up, &anim());
+        assert_eq!(m.hit_scroll.selected, 8);
+        assert_eq!(
+            m.hit_scroll.target_offset(),
+            5,
+            "the list scrolled instead of moving the cursor — the SQ-0598 symptom"
+        );
+
+        // Only once the cursor reaches the window's TOP row does it scroll.
+        for _ in 0..3 {
+            m.on_key(KeyCode::Up, &anim());
+        }
+        assert_eq!((m.hit_scroll.selected, m.hit_scroll.target_offset()), (5, 5));
+        m.on_key(KeyCode::Up, &anim());
+        assert_eq!(
+            (m.hit_scroll.selected, m.hit_scroll.target_offset()),
+            (4, 4),
+            "at the top row, one more Up scrolls the window by one"
+        );
+    }
+
+    /// Home/End/PageUp/PageDown come free with `ListScroll` — the same keys the
+    /// story picker binds, which is the point of sharing it.
+    #[test]
+    fn the_hit_list_pages_and_jumps_like_the_story_picker() {
+        let mut m = SearchModal::new();
+        m.open();
+        let hits: Vec<_> = (0..30).map(|i| hit(&format!("t{i}"), &format!("Game {i}"))).collect();
+        m.on_event(&SearchEvent::Results(hits));
+        m.list_rows = 5;
+
+        m.on_key(KeyCode::End, &anim());
+        assert_eq!(m.hit_scroll.selected, 29, "End jumps to the last hit");
+        m.on_key(KeyCode::Home, &anim());
+        assert_eq!(m.hit_scroll.selected, 0, "Home jumps back to the first");
+        m.on_key(KeyCode::PageDown, &anim());
+        assert_eq!(m.hit_scroll.selected, 4, "PageDown advances ~a viewport (1-row overlap)");
+        m.on_key(KeyCode::PageUp, &anim());
+        assert_eq!(m.hit_scroll.selected, 0);
+    }
+
+    /// A shorter result set must not leave the viewport scrolled past its end.
+    #[test]
+    fn a_new_shorter_search_resets_the_scroll_offset() {
+        let mut m = SearchModal::new();
+        m.open();
+        let many: Vec<_> = (0..20).map(|i| hit(&format!("t{i}"), &format!("Game {i}"))).collect();
+        m.on_event(&SearchEvent::Results(many));
+        m.list_rows = 5;
+        m.on_key(KeyCode::End, &anim());
+        assert!(m.hit_scroll.target_offset() > 0, "scrolled away from the top");
+
+        m.on_key(KeyCode::Char('z'), &anim()); // start a new query
+        m.on_key(KeyCode::Enter, &anim());
+        m.on_event(&SearchEvent::Results(vec![hit("only", "Only Hit")]));
+        assert_eq!(m.hit_scroll.selected, 0);
+        assert_eq!(m.hit_scroll.target_offset(), 0, "a fresh list starts at the top");
     }
 
     // ── SQ-0473: seed list on open ──────────────────────────────────────────
@@ -868,7 +1145,7 @@ mod tests {
         assert!(m.showing_seed, "results view starts on the seed list");
         assert_eq!(m.selected_hit_title(), Some("Popular One"));
         // Download/resolve/open-in-browser work the same as any other hit row.
-        assert_eq!(m.on_key(KeyCode::Enter), ModalAction::Resolve("pop1".into()));
+        assert_eq!(m.on_key(KeyCode::Enter, &anim()), ModalAction::Resolve("pop1".into()));
     }
 
     #[test]
@@ -897,7 +1174,7 @@ mod tests {
         m.open();
         m.on_event(&SearchEvent::Results(vec![hit("pop1", "Popular One")]));
         assert!(m.showing_seed);
-        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::Close, "one level shorter than before");
+        assert_eq!(m.on_key(KeyCode::Esc, &anim()), ModalAction::Close, "one level shorter than before");
     }
 
     #[test]
@@ -909,13 +1186,13 @@ mod tests {
 
         // The first typed character starts editing the query, but the seed
         // rows stay put underneath (still readable off `hits`/`hit_sel`).
-        assert_eq!(m.on_key(KeyCode::Char('z')), ModalAction::None);
+        assert_eq!(m.on_key(KeyCode::Char('z'), &anim()), ModalAction::None);
         assert_eq!(m.view, View::Input);
         assert_eq!(m.hits.len(), 1, "seed rows are not cleared by typing");
         assert_eq!(m.query.as_str(), "z");
 
         // Enter still runs a real search, same as ever.
-        assert_eq!(m.on_key(KeyCode::Enter), ModalAction::Search("z".into()));
+        assert_eq!(m.on_key(KeyCode::Enter, &anim()), ModalAction::Search("z".into()));
         assert!(m.busy());
     }
 
@@ -925,8 +1202,8 @@ mod tests {
         m.open();
         let seed = vec![hit("pop1", "Popular One")];
         m.on_event(&SearchEvent::Results(seed.clone()));
-        m.on_key(KeyCode::Char('z'));
-        m.on_key(KeyCode::Enter); // busy, inflight = Search
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim()); // busy, inflight = Search
 
         let searched = vec![hit("zzz", "Zork I"), hit("yyy", "Zork II")];
         assert_eq!(m.on_event(&SearchEvent::Results(searched.clone())), ModalAction::None);
@@ -934,13 +1211,13 @@ mod tests {
         assert_eq!(m.selected_hit_title(), Some("Zork I"));
 
         // Esc from typed results goes back to the seed list, not an empty box.
-        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::None);
+        assert_eq!(m.on_key(KeyCode::Esc, &anim()), ModalAction::None);
         assert!(m.showing_seed);
         assert_eq!(m.view, View::Results);
         assert_eq!(m.selected_hit_title(), Some("Popular One"));
 
         // A second Esc, now back on the seed list, closes.
-        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::Close);
+        assert_eq!(m.on_key(KeyCode::Esc, &anim()), ModalAction::Close);
     }
 
     #[test]
@@ -949,14 +1226,14 @@ mod tests {
         // results has nothing to return to, so it falls back to the old
         // pre-SQ-0473 behaviour instead of a phantom "seed" screen.
         let mut m = SearchModal::new();
-        m.on_key(KeyCode::Char('z'));
-        m.on_key(KeyCode::Enter);
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim());
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
         assert!(!m.showing_seed);
         assert!(m.seed_hits.is_empty());
-        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::None);
+        assert_eq!(m.on_key(KeyCode::Esc, &anim()), ModalAction::None);
         assert_eq!(m.view, View::Input);
-        assert_eq!(m.on_key(KeyCode::Esc), ModalAction::Close);
+        assert_eq!(m.on_key(KeyCode::Esc, &anim()), ModalAction::Close);
     }
 
     // ── Render: caret, selected-row meta, long-title layout ─────────────────
@@ -965,14 +1242,14 @@ mod tests {
     fn query_caret_renders_reversed_mid_string_and_at_end() {
         let mut m = SearchModal::new();
         for c in "zork".chars() {
-            m.on_key(KeyCode::Char(c));
+            m.on_key(KeyCode::Char(c), &anim());
         }
-        m.on_key(KeyCode::Left); // cursor now mid-string, before the final 'k'
+        m.on_key(KeyCode::Left, &anim()); // cursor now mid-string, before the final 'k'
 
         let cs = ColorScheme::terminal_default();
         let area = Rect::new(0, 0, MODAL_W, MODAL_H);
         let mut buf = Buffer::empty(area);
-        let rects = draw_search_modal(&m, area, &cs, &mut buf);
+        let rects = draw_search_modal(&mut m, area, &cs, &mut buf);
         let fr = rects.field.expect("field rect recorded");
 
         let label_len = "Search: ".chars().count() as u16;
@@ -982,9 +1259,9 @@ mod tests {
             "mid-string caret cell should be reversed"
         );
 
-        m.on_key(KeyCode::Right); // back to end-of-text
+        m.on_key(KeyCode::Right, &anim()); // back to end-of-text
         let mut buf2 = Buffer::empty(area);
-        draw_search_modal(&m, area, &cs, &mut buf2);
+        draw_search_modal(&mut m, area, &cs, &mut buf2);
         let end_x = fr.x + label_len + 4;
         assert!(
             buf2.cell((end_x, fr.y)).unwrap().style().add_modifier.contains(Modifier::REVERSED),
@@ -997,13 +1274,13 @@ mod tests {
         let mut m = SearchModal::new();
         m.open();
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha"), hit("bbb", "Beta")]));
-        assert_eq!(m.hit_sel, 0);
+        assert_eq!(m.hit_scroll.selected, 0);
 
         let cs = ColorScheme::terminal_default();
         let sel_style = cs.theme.get("ifdb_result_selected").style;
         let area = Rect::new(0, 0, MODAL_W, MODAL_H);
         let mut buf = Buffer::empty(area);
-        let rects = draw_search_modal(&m, area, &cs, &mut buf);
+        let rects = draw_search_modal(&mut m, area, &cs, &mut buf);
 
         // Row 0 (selected: "Alpha") is on the first body row under the field +
         // hint line, i.e. content.y + 2 in buffer coordinates. Find it by
@@ -1033,6 +1310,174 @@ mod tests {
         assert!(
             fill_style.add_modifier.contains(Modifier::REVERSED),
             "row fill uses the selected style's reversed video"
+        );
+    }
+
+    /// SQ-0598 at the level the user actually sees it: after stepping down past
+    /// the viewport, one step back up must move the *highlight* and leave the
+    /// visible window where it is. The old stateless window recompute did the
+    /// opposite — it scrolled the list and left the highlight pinned to the
+    /// bottom row — and this test discriminates the two without depending on
+    /// any internal offset field.
+    #[test]
+    fn stepping_back_up_moves_the_highlight_not_the_window() {
+        /// The rendered rows plus the y of the highlighted one.
+        fn draw(m: &mut SearchModal) -> (Vec<String>, u16) {
+            let cs = ColorScheme::terminal_default();
+            let area = Rect::new(0, 0, MODAL_W, MODAL_H);
+            let mut buf = Buffer::empty(area);
+            draw_search_modal(m, area, &cs, &mut buf);
+            let sel_y = (0..area.height)
+                .find(|&y| {
+                    (0..area.width).any(|x| {
+                        buf.cell((x, y)).is_some_and(|c| {
+                            c.style().add_modifier.contains(Modifier::REVERSED)
+                                && c.symbol() != " "
+                        })
+                    })
+                })
+                .expect("a highlighted row is on screen");
+            (rows_of(&buf, area), sel_y)
+        }
+
+        let mut m = SearchModal::new();
+        m.open();
+        let hits: Vec<_> =
+            (0..30).map(|i| hit(&format!("t{i}"), &format!("Game{i:02}"))).collect();
+        m.on_event(&SearchEvent::Results(hits));
+        draw(&mut m); // establishes the real viewport height
+
+        // Walk down well past the bottom of the window.
+        for _ in 0..20 {
+            m.on_key(KeyCode::Down, &anim());
+        }
+        let (before, sel_before) = draw(&mut m);
+        let visible_before: Vec<&String> =
+            before.iter().filter(|r| r.contains("Game")).collect();
+
+        m.on_key(KeyCode::Up, &anim());
+        let (after, sel_after) = draw(&mut m);
+        let visible_after: Vec<&String> = after.iter().filter(|r| r.contains("Game")).collect();
+
+        assert_eq!(
+            visible_after, visible_before,
+            "one step up from the bottom scrolled the list; the cursor should have moved \
+             inside the window instead (SQ-0598)"
+        );
+        assert_eq!(
+            sel_after + 1,
+            sel_before,
+            "the highlight stayed put while the list moved under it (SQ-0598)"
+        );
+    }
+
+    /// Whole-buffer text, one string per row — enough for the chooser layout
+    /// assertions, which are about *which row* a piece of text lands on.
+    fn rows_of(buf: &Buffer, area: Rect) -> Vec<String> {
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Drive the modal to `View::Choosing` with `options` and render it.
+    fn draw_chooser(m: &mut SearchModal, options: Vec<DownloadOption>) -> Vec<String> {
+        m.open();
+        m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
+        m.on_key(KeyCode::Enter, &anim()); // Resolve
+        m.on_event(&SearchEvent::Options(resolved(options)));
+        assert_eq!(m.view, View::Choosing, ">1 option opens the chooser");
+
+        let cs = ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, MODAL_W, MODAL_H);
+        let mut buf = Buffer::empty(area);
+        draw_search_modal(m, area, &cs, &mut buf);
+        rows_of(&buf, area)
+    }
+
+    /// SQ-0597: the reported problem. Two files whose *filenames are identical*
+    /// — IFDB really lists Photopia's v1.30 and competition builds both as
+    /// `photopia.z5` — must still be told apart on screen, which is only
+    /// possible from the description.
+    #[test]
+    fn the_chooser_shows_each_files_description_on_its_own_row() {
+        let mut m = SearchModal::new();
+        let rows = draw_chooser(
+            &mut m,
+            vec![
+                opt_desc("photopia.z5", "Photopia v1.30"),
+                opt_desc("photopia.z5", "Competition version"),
+            ],
+        );
+        let text = rows.join("\n");
+        assert!(text.contains("Photopia v1.30"), "first file's description is shown: {text}");
+        assert!(text.contains("Competition version"), "second file's description too: {text}");
+
+        // Each description sits on the row directly under its own filename,
+        // rather than being crammed into the filename row's tail.
+        let file_rows: Vec<usize> =
+            (0..rows.len()).filter(|&i| rows[i].contains("photopia.z5")).collect();
+        assert_eq!(file_rows.len(), 2, "both files listed: {rows:#?}");
+        assert!(
+            rows[file_rows[0] + 1].contains("Photopia v1.30"),
+            "description belongs to the row above it: {rows:#?}"
+        );
+        assert!(
+            rows[file_rows[1] + 1].contains("Competition version"),
+            "description belongs to the row above it: {rows:#?}"
+        );
+        assert_eq!(file_rows[1] - file_rows[0], 2, "one file per two rows");
+    }
+
+    /// With nothing to say about any file, the list stays one row per file
+    /// rather than paying for a blank second row each.
+    #[test]
+    fn the_chooser_stays_single_row_when_no_file_has_a_description() {
+        let mut m = SearchModal::new();
+        let rows = draw_chooser(&mut m, vec![opt("a.z5"), opt("b.z8")]);
+        let a = rows.iter().position(|r| r.contains("a.z5")).expect("a.z5 listed");
+        let b = rows.iter().position(|r| r.contains("b.z8")).expect("b.z8 listed");
+        assert_eq!(b - a, 1, "no descriptions → adjacent rows: {rows:#?}");
+    }
+
+    /// A file the download directory already holds is marked, so a user can see
+    /// they'd be making a duplicate before pressing Enter.
+    #[test]
+    fn a_file_already_in_the_download_directory_is_marked() {
+        let dir = std::env::temp_dir().join(format!("bm_ifdb_present_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("have.z5"), b"x").expect("seed an existing download");
+
+        let mut m = SearchModal::new();
+        m.set_download_dir(&dir);
+        let rows = draw_chooser(&mut m, vec![opt("have.z5"), opt("missing.z5")]);
+        let have = rows.iter().find(|r| r.contains("have.z5")).expect("have.z5 listed").clone();
+        let missing =
+            rows.iter().find(|r| r.contains("missing.z5")).expect("missing.z5 listed").clone();
+
+        assert!(have.contains("already downloaded"), "the present file says so: {have:?}");
+        assert!(have.contains('✓'), "and carries the present marker: {have:?}");
+        assert!(
+            !missing.contains("already downloaded"),
+            "a file we don't have is not marked: {missing:?}"
+        );
+        assert!(missing.contains('⭳'), "it keeps the ordinary download glyph: {missing:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without a download directory (the modal's default) nothing is claimed to
+    /// be present — the probe must not guess.
+    #[test]
+    fn nothing_is_marked_present_without_a_download_directory() {
+        let mut m = SearchModal::new();
+        let rows = draw_chooser(&mut m, vec![opt("a.z5"), opt("b.z8")]);
+        assert!(
+            !rows.join("\n").contains("already downloaded"),
+            "no directory set → no claims: {rows:#?}"
         );
     }
 
