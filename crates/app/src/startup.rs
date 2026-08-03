@@ -225,8 +225,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     // into half the rows, shrinking the game's artwork against unchanged text. See
     // `GlkPixelScale::resolve` for why this keys off the cell size rather than the
     // display's DPI. No-op at `auto` on an unscaled display with a normal font.
-    let glk_scale = cfg.glk_pixel_scale.resolve(char_px.1);
-    let char_px = ((char_px.0 / glk_scale).max(1), (char_px.1 / glk_scale).max(1));
+    let char_px = cfg.glk_pixel_scale.apply(char_px);
     // Pixel-precise mouse reporting (SQ-0563) is NOT switched on here. The probe
     // works — terminals answer "set" — but the cell size to divide the reported
     // pixels by does not: the Picker's `font_size` above is in logical points,

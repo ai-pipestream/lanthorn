@@ -420,32 +420,43 @@ impl<'de> serde::Deserialize<'de> for GlkPixelScale {
 pub const REFERENCE_CELL_PX: u32 = 14;
 
 impl GlkPixelScale {
-    /// The divisor to apply to the terminal's reported cell size before handing it to
-    /// a Glulx game.
+    /// The cell size to hand a Glulx game, given what the terminal reports.
     ///
     /// A Glk game sizes its graphics windows in PIXELS, and those requests are
     /// constants its author picked against a conventional screen — advent.blb asks for
-    /// a ~36px toolbar. The terminal reports its cell size in DEVICE pixels, so on a 2x
-    /// display a cell is 28px rather than 14 and that same request buys two text rows
-    /// instead of three: the game's artwork drops to two thirds its intended height
-    /// while the text beside it is unchanged.
+    /// a 36px toolbar. The row count that buys is `ceil(36 / cell_height)`, so the
+    /// terminal's cell size decides how much of the screen the game's artwork occupies:
+    /// a fixed strip at 40px whatever the font, which on a scaled display or with a
+    /// large font is a shrinking fraction of a growing screen.
     ///
-    /// Dividing by cell height over [`REFERENCE_CELL_PX`] restores the proportion.
-    /// Deliberately NOT the display's DPI scale: a large font on an unscaled display
-    /// produces exactly the same complaint while reporting no unusual DPI, and reading
-    /// the real scale would need a separate platform path for each Linux compositor,
-    /// macOS and Windows. The cell size is what actually determines the mismatch, and
-    /// every terminal reports it.
+    /// `Auto` normalises that away by reporting a cell of exactly
+    /// [`REFERENCE_CELL_PX`] tall, with the width scaled to preserve the terminal's own
+    /// aspect ratio. Every terminal then presents the same pixel space, so a game's
+    /// layout is identical everywhere and its artwork scales WITH the text rather than
+    /// against it — 3 rows at any font size, `3 × cell_height` on screen.
     ///
-    /// Never below 1 — a cell SMALLER than the reference must not magnify a game's
-    /// pixel space, which would push its windows off the screen.
-    pub fn resolve(self, cell_px_h: u32) -> u32 {
+    /// Deliberately not keyed off the display's DPI: a large font on an unscaled
+    /// display produces the identical complaint while reporting no unusual DPI, and
+    /// reading the real scale would need a separate platform path for each Linux
+    /// compositor, macOS and Windows. It is also deliberately not an integer divisor,
+    /// which was the first attempt — `round(cell / 14)` puts a cliff at 21px, where a
+    /// one-pixel font change doubled the toolbar (40px → 84px). 21px is exactly a 1.5x
+    /// scaled 14px cell, i.e. a common Windows and GNOME default, so that cliff sat in
+    /// the middle of real configurations.
+    ///
+    /// `Fixed(n)` divides by `n` instead, an escape hatch for a game that dislikes the
+    /// normalisation; `Fixed(1)` reports the terminal's cell unchanged, the behaviour
+    /// before any of this existed. Never returns 0 on either axis.
+    pub fn apply(self, cell: (u32, u32)) -> (u32, u32) {
         match self {
-            GlkPixelScale::Fixed(n) => n.max(1),
-            // Nearest, so a 20px cell (1.43x) resolves to 1: only a cell at least 1.5x
-            // the reference counts as scaled.
+            GlkPixelScale::Fixed(n) => {
+                let n = n.max(1);
+                ((cell.0 / n).max(1), (cell.1 / n).max(1))
+            }
             GlkPixelScale::Auto => {
-                ((cell_px_h as f32 / REFERENCE_CELL_PX as f32).round() as u32).max(1)
+                let h = cell.1.max(1);
+                let w = ((cell.0 as f32 * REFERENCE_CELL_PX as f32 / h as f32).round() as u32).max(1);
+                (w, REFERENCE_CELL_PX)
             }
         }
     }
@@ -1402,27 +1413,51 @@ use_defaults = false
         assert_eq!(c.aux_storage, AuxStorage::Global);
     }
 
-    /// The rule advent.blb's toolbar needs (SQ-0593): a cell at the reference height
-    /// changes nothing, a 2x-scaled cell halves the game's pixel space back to it.
+    /// What advent.blb's toolbar needs (SQ-0593). `Auto` reports a cell of exactly
+    /// the reference height at every font size, so the game's fixed 36px request always
+    /// buys the same 3 rows and its artwork scales WITH the text.
     #[test]
-    fn glk_pixel_scale_auto_tracks_the_cell_height() {
+    fn glk_pixel_scale_auto_normalises_every_cell_to_the_reference() {
         use GlkPixelScale::*;
-        assert_eq!(Auto.resolve(14), 1, "the reference cell is unscaled");
-        assert_eq!(Auto.resolve(28), 2, "a 2x display halves the reported pixel space");
-        assert_eq!(Auto.resolve(42), 3, "and 3x thirds it");
-        // Nearest, not ceil: a merely largish cell is not a scaled display, and
-        // dividing there would shrink artwork on an ordinary 1x terminal.
-        assert_eq!(Auto.resolve(17), 1, "17px is a normal cell, not a scaled one");
-        assert_eq!(Auto.resolve(20), 1, "20px (1.43x) still resolves to 1");
-        assert_eq!(Auto.resolve(21), 2, "1.5x is where scaling begins");
-        // A cell SMALLER than the reference must never magnify the game's pixel
-        // space — that would push its windows off the screen.
-        assert_eq!(Auto.resolve(7), 1, "a small cell never magnifies");
-        assert_eq!(Auto.resolve(1), 1);
-        assert_eq!(Auto.resolve(0), 1, "a nonsense cell size is still safe");
-        // Fixed overrides the derivation, but never to 0 (a division by it follows).
-        assert_eq!(Fixed(3).resolve(14), 3);
-        assert_eq!(Fixed(0).resolve(28), 1, "0 would divide by zero downstream");
+        // A conventional 1x cell is reported unchanged — auto is a no-op there.
+        assert_eq!(Auto.apply((7, 14)), (7, 14));
+        // A 2x-scaled cell reports the same pixel space as the 1x one.
+        assert_eq!(Auto.apply((14, 28)), (7, 14), "a 2x display sees what 1x sees");
+        // ...and so does every other scale, including fractional ones. This is the
+        // whole point of dropping the integer divisor: `round(cell/14)` sent 21px
+        // (a 1.5x-scaled 14px cell, the Windows/GNOME default) to a divisor of 2,
+        // which doubled the toolbar against its 20px neighbour.
+        assert_eq!(Auto.apply((10, 21)), (7, 14), "1.5x — the cliff the divisor rule had");
+        assert_eq!(Auto.apply((11, 20)), (8, 14), "and its neighbour lands beside it");
+        assert_eq!(Auto.apply((21, 42)), (7, 14), "3x");
+        // A SMALL cell is normalised up rather than left alone, which is the change
+        // in behaviour: artwork stays proportional to the text instead of holding a
+        // fixed pixel size on a tiny font.
+        assert_eq!(Auto.apply((4, 8)), (7, 14));
+        // Aspect ratio is preserved, not assumed 1:2.
+        assert_eq!(Auto.apply((10, 20)), (7, 14));
+        assert_eq!(Auto.apply((20, 20)), (14, 14), "a square cell stays square");
+        assert_eq!(Auto.apply((0, 0)), (1, 14), "nonsense input still yields usable pixels");
+
+        // Fixed is a plain divisor, and 1 restores the terminal's own cell.
+        assert_eq!(Fixed(1).apply((14, 28)), (14, 28), "the author's literal pixels");
+        assert_eq!(Fixed(2).apply((14, 28)), (7, 14));
+        assert_eq!(Fixed(0).apply((14, 28)), (14, 28), "0 must not divide by zero");
+        assert_eq!(Fixed(99).apply((14, 28)), (1, 1), "never reports a zero-size cell");
+    }
+
+    /// The toolbar row count that falls out of it: advent asks for 36px, and the point
+    /// of normalising is that the answer stops depending on the font.
+    #[test]
+    fn glk_pixel_scale_auto_gives_the_same_row_count_at_every_font_size() {
+        for cell_h in [8u32, 10, 12, 14, 17, 20, 21, 24, 28, 34, 42] {
+            let (_, seen) = GlkPixelScale::Auto.apply((cell_h / 2, cell_h));
+            let rows = 36u32.div_ceil(seen);
+            assert_eq!(
+                rows, 3,
+                "a {cell_h}px cell must still give advent's 36px toolbar 3 rows (saw {seen}px)"
+            );
+        }
     }
 
     #[test]

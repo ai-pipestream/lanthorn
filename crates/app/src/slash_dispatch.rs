@@ -147,13 +147,11 @@ pub(crate) fn dispatch_slash_outcome(
             };
             // What the game actually sees, after SQ-0593 scaling. Reporting the raw
             // terminal value alone was misleading the moment the divisor existed.
-            let scale = state.config.glk_pixel_scale.resolve(raw_h);
-            let (cw, ch) = ((raw_w / scale).max(1), (raw_h / scale).max(1));
+            let (cw, ch) = state.config.glk_pixel_scale.apply((raw_w, raw_h));
             state.push_transcript_internal(
                 &format!(
-                    "  cell size: terminal says {raw_w}x{raw_h} px ({src}), glk_pixel_scale \
-                     divides by {scale} → game sees {cw}x{ch}; pane {}x{} cells implies {}x{} px \
-                     to the game",
+                    "  cell size: terminal says {raw_w}x{raw_h} px ({src}); glk_pixel_scale \
+                     → game sees {cw}x{ch}; pane {}x{} cells implies {}x{} px to the game",
                     story_rect.width, story_rect.height,
                     cw * story_rect.width as u32, ch * story_rect.height as u32
                 ),
