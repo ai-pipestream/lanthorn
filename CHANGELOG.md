@@ -6,9 +6,137 @@ All notable changes to babelmap are recorded here.
 [`.github/workflows/release.yml`](.github/workflows/release.yml)). A tag whose
 name contains a hyphen — `v0.1.0-beta.1`, `v0.2.0-rc.1` — is published as a
 **pre-release**; a bare `vMAJOR.MINOR.PATCH` is a full release. The workspace
-version in `Cargo.toml` (currently `0.1.0-beta.2`) versions every crate and every
+version in `Cargo.toml` (currently `0.1.0-beta.3`) versions every crate and every
 binary's `--version` at once, and carries the pre-release suffix so a build
 identifies which beta it is without reading its git hash.
+
+---
+
+## v0.1.0-beta.3 — 2026-08-03
+
+Fifty commits, and most of them are about honesty: a saved game that restores into a
+different terminal, a different graphics backend or a recoloured scene now shows what
+it should rather than something that merely looked right when it was written. The
+command-line players got the same treatment — `gvm-cli` learned to render a game's Glk
+windows as the panels they are, and `zvm-cli` learned to say no to the v6 stories it
+was never going to be able to drive. Along the way the map pane stopped stealing your
+keyboard.
+
+### Added
+
+- **The IFDB download chooser tells its candidates apart.** Each file now carries
+  IFDB's own description — "Release 16: latest version of the game.", "Competition
+  version" — which is frequently the only thing that distinguishes two entries: IFDB
+  lists two different *Photopia* builds under the identical filename `photopia.z5`. A
+  file the library already holds is marked `✓ … · already downloaded`, and the chooser
+  now opens even when a game offers a single file, so that mark is always visible
+  before you fetch a duplicate.
+- **`glk_pixel_scale`** — a Glulx game asks how big a character cell is in pixels and
+  sizes its drawings from the answer. Reporting the terminal's true cell made
+  *Adventure*'s toolbar render a third of its intended size on a HiDPI display.
+  `native` (the default) keeps the honest answer; `auto` normalises the cell to a
+  reference height so a game's pixel space scales with the font; `fixed = n` pins the
+  divisor by hand.
+- **`gvm-cli` renders each Glk buffer window at its own rect.** Games that lay their
+  UI out in several windows — *Kerkerkruip* puts its inventory and status panels in
+  six of them — used to have every panel's text dumped into the story stream, so
+  "Health: 18 of 18" appeared inline in the prose. Windowed rendering engages only
+  when a game actually uses more than one buffer window; every other game keeps the
+  streaming path, and the terminal's own scrollback with it.
+- **A second v6 prose window gets its own buffer**, so a game that streams narration
+  through a window other than the main one keeps both readable.
+- **`/dump-windows` describes a v6 story's real layout**, one block per window, and
+  the render path is logged and stamped — including *why* the pixel path was skipped
+  on a given frame, which is the question that actually comes up.
+- **Compass clicks map the direction travelled**, so clicking a room's rose records
+  the passage you took rather than the one you aimed at.
+
+### Changed
+
+- **The map pane no longer takes the keyboard.** `Tab` used to hand focus to the map,
+  and with the map focused an arrow key panned instead of moving the command-line
+  caret — with nothing on screen to say which mode you were in. Every keystroke goes
+  to the story now. `Shift+Arrow` pans (as it always did), the mouse pans, zooms and
+  selects, and zoom and centring moved onto the `Ctrl+P` leader panel's new **Map**
+  group (`+`/`-` zoom, `0` centre). `Tab` still steps the debug inspector's windows,
+  and is only advertised when the inspector is open.
+- **Manual layout mode and room nudging are gone.** Both were permanent no-ops:
+  nothing outside the test suite ever set manual mode, so `nudge-room` and its
+  `F6`–`F9` keys could not move a room in any real session, and the refusal was
+  silent. `F6`–`F9` now reach a story like any other function key. Room positions
+  belong to the layout engine — re-run `tidy-map`.
+- **`zvm-cli` declines graphical v6 stories** instead of accepting ones it cannot
+  drive. Measured across every v6 story available, each one runs away at its first
+  input prompt whatever key it is given: *Zork Zero* and *Arthur* flood the terminal,
+  *Shogun* spins silently with nothing to interrupt. `zvm` itself supports v6 fully —
+  play those in babelmap.
+- **OS and C-library noise stays off the screen.** ALSA and friends write straight to
+  file descriptor 2, which no Rust-side hook can intercept, so their messages landed
+  mid-frame and corrupted the display. While the alternate screen is up, fd 2 goes to
+  `<user_dir>/stderr.log` instead.
+
+### Fixed
+
+- **A restored game now shows what it should.** Quetzal saves no screen state by
+  design — the standard assumes the *story* repaints — but a host Save State swaps
+  memory under a game that never learns it happened, so everything the screen needs is
+  ours to carry. A v6 archive now stores each graphics window's **display list and
+  palette** rather than a snapshot of the pixels, so restored art follows a later
+  recolour instead of freezing at the colours it happened to have; it is carried on
+  every save path, not just auto-save. A restore **refits the saved screen to the
+  terminal you restore into**, which a restore into a different size always was. And
+  the archive is backend- and terminal-neutral, so a save moves between kitty,
+  half-blocks and sixel.
+- **Counterfeit Monkey starts in under a second** (5.4s → 0.76s from the second
+  launch). Two faults: `@restore` read a fileref *name* instead of the stream it was
+  handed, making a restore from a resource stream impossible for any game; and the
+  blorb's own embedded save, whose identity chunk disagrees with the executable beside
+  it, was being offered and then rejected. A save belonging to another story is no
+  longer advertised, so the game takes its working file-cache path.
+- **Graphical v6 rendering**, throughout: a status bar paints inside its own window
+  and stays one row deep at any pane scale; prose follows the window the game actually
+  streams through rather than window 0; `erase_window`'s background fill is tracked so
+  menu panels are opaque; the chrome ring keeps off a secondary prose window's rows and
+  re-uploads correctly when a band set changes, a terminal clears, or the pixel path
+  resumes; and a full-screen picture takeover no longer mangles the transcript, the
+  pager or the composite cache.
+- **`gvm-cli` display correctness**: a text grid paints its window background across
+  its whole rect rather than only behind the glyphs it drew; `window_clear` redraws a
+  screen in place, so a menu updates instead of appending a fresh copy per keypress; a
+  grid that shrinks stops repainting the rows it gave up; live input echo carries the
+  window's own styling; and the page background is taken from the window tree, which
+  is where a game that sets its colours per window actually records them.
+- **Neither CLI hangs or panics on input it cannot use.** `zvm-cli`'s line counter was
+  a `u16` incremented without check — any story printing 65,536 newlines without a
+  pause panicked, which is how *Zork Zero* died in under twenty seconds. `gvm-cli`
+  threw away `read_line`'s result, so end-of-input was indistinguishable from a blank
+  line and a piped session looped forever.
+- **A malformed `config.toml` no longer silently erases itself**, and notification
+  toasts anchor to the transcript viewport rather than the story pane rect.
+
+### Save format
+
+- **`.babelmap` archive `format_version` 5 → 6.** A v6 archive now carries
+  `display.json` — each graphics window's display list plus the Blorb §11.3 palette —
+  and omits the canvas PNG for any window whose replay reproduced the live canvas at
+  save time. Archives written before the bump still load and take the PNG path, which
+  is this build's fallback anyway; a version-6 archive is rejected by older builds, as
+  the format freeze intends. Bare Quetzal / Glulx-Quetzal interchange files are
+  untouched. See
+  [`docs/release/save-format-policy.md`](docs/release/save-format-policy.md).
+
+### Known issues
+
+- **`zvm-cli` cannot play graphical v6 stories at all** — it now says so at load
+  rather than hanging. Play them in babelmap, which renders v6 graphics and menus.
+- **Room selection lost its keyboard shortcuts.** `select-room next|prev` was bound to
+  `n`/`p` only while the map held focus, and with that focus mode removed the command
+  is reachable by clicking a room, `/select-room`, or the command palette.
+- All beta.2 known issues still stand: **sub-cell buttons in a graphics window can't
+  be clicked**, **a v6 game's own erase can take neighbouring art with it**, and the
+  three v6 caveats from beta.1 (**Inform-compiled v6 status lines don't paint in
+  `raster` mode**, **rasterized v6 text isn't selectable**, **sixel encode latency on
+  very large panes**). `hybrid`, the default, avoids the beta.1 three.
 
 ---
 

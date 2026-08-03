@@ -8,7 +8,7 @@ resolver = "2"
 # Shared package metadata inherited by each crate via `<field>.workspace = true`.
 # Bump `version` here to version every crate (and the binaries' --version) at once.
 [workspace.package]
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 license = "BSD-3-Clause"
 
 # Line-tables-only debug info: keeps panic backtraces with file/line, but drops

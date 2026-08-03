@@ -144,11 +144,70 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      # The release body is assembled here rather than inlined below so it can
+      # carry the CHANGELOG section for this tag. Without it the published notes
+      # were download instructions plus an auto-generated commit list — the
+      # summary of what actually changed lived only in the annotated tag, where
+      # nobody reading the release ever saw it.
+      - name: Assemble the release notes
+        run: |
+          set -euo pipefail
+          # The section runs from this tag's heading to the next one. Missing is
+          # not fatal: a tag cut without a CHANGELOG entry still gets a release,
+          # just without the summary.
+          awk -v tag="$GITHUB_REF_NAME" '
+            $0 ~ "^## " tag "( |$)" { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > changelog-section.md
+          if [ ! -s changelog-section.md ]; then
+            echo "::warning::no CHANGELOG.md section found for $GITHUB_REF_NAME"
+          fi
+          # Drop the trailing blank lines and the rule that separates entries in
+          # the file — they are file structure, not release content.
+          while [ -s changelog-section.md ] && {
+                  last=$(tail -n 1 changelog-section.md)
+                  [ -z "$last" ] || [ "$last" = "---" ]
+                }; do
+            sed -i '$d' changelog-section.md
+          done
+          {
+            printf '## babelmap %s\n\n' "$GITHUB_REF_NAME"
+            printf 'Download the archive for your platform, extract it, and run `babelmap`\n'
+            printf '(or one of the no-map CLI players `zvm-cli` / `gvm-cli` / `scott-cli`).\n\n'
+            printf '> **Beta** — on-disk save formats are version-pinned and any change\n'
+            printf '> is a deliberate, release-noted bump (see\n'
+            printf '> `docs/release/save-format-policy.md`); across 0.x versions the\n'
+            printf '> frozen-tier formats may still break, never silently. The\n'
+            printf '> `config.toml` / `style.toml` schemas remain tolerant.\n\n'
+            sed 's/^## .*//' changelog-section.md
+            printf '\n### Platform notes\n'
+            printf -- '- **Linux** (`x86_64`, glibc, built on Ubuntu 22.04) requires\n'
+            printf '  **`libasound2`** at runtime for audio —\n'
+            printf '  `sudo apt-get install libasound2` (Debian/Ubuntu) or your distro'"'"'s\n'
+            printf '  equivalent.\n'
+            printf -- '- **macOS** is a universal binary (Apple Silicon + Intel), ad-hoc\n'
+            printf '  signed but **not notarized** with an Apple Developer ID. If you\n'
+            printf '  download it with a **browser**, Gatekeeper quarantines it — clear\n'
+            printf '  the flag with `xattr -dr com.apple.quarantine <extracted-folder>`\n'
+            printf '  (or approve it once in System Settings → Privacy & Security).\n'
+            printf '  Downloading and extracting from the **Terminal** avoids quarantine\n'
+            printf '  entirely: `curl -L <url> -o babelmap.tar.gz && tar xzf babelmap.tar.gz`.\n'
+            printf -- '- **Windows** is `x86_64`. It is unsigned, so SmartScreen may warn on\n'
+            printf '  first launch (More info → Run anyway).\n\n'
+            printf 'Verify a download against its `.sha256` sidecar.\n'
+          } > release-notes.md
+          echo "--- assembled notes ---"
+          cat release-notes.md
 
       - name: Create draft GitHub Release
         uses: softprops/action-gh-release@v2
@@ -162,31 +221,4 @@ jobs:
             dist/*.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
-          body: |
-            ## babelmap ${{ github.ref_name }}
-
-            Download the archive for your platform, extract it, and run `babelmap`
-            (or one of the no-map CLI players `zvm-cli` / `gvm-cli` / `scott-cli`).
-
-            > **Beta** — on-disk save formats are version-pinned and any change
-            > is a deliberate, release-noted bump (see
-            > `docs/release/save-format-policy.md`); across 0.x versions the
-            > frozen-tier formats may still break, never silently. The
-            > `config.toml` / `style.toml` schemas remain tolerant.
-
-            ### Platform notes
-            - **Linux** (`x86_64`, glibc, built on Ubuntu 22.04) requires
-              **`libasound2`** at runtime for audio —
-              `sudo apt-get install libasound2` (Debian/Ubuntu) or your distro's
-              equivalent.
-            - **macOS** is a universal binary (Apple Silicon + Intel), ad-hoc
-              signed but **not notarized** with an Apple Developer ID. If you
-              download it with a **browser**, Gatekeeper quarantines it — clear
-              the flag with `xattr -dr com.apple.quarantine <extracted-folder>`
-              (or approve it once in System Settings → Privacy & Security).
-              Downloading and extracting from the **Terminal** avoids quarantine
-              entirely: `curl -L <url> -o babelmap.tar.gz && tar xzf babelmap.tar.gz`.
-            - **Windows** is `x86_64`. It is unsigned, so SmartScreen may warn on
-              first launch (More info → Run anyway).
-
-            Verify a download against its `.sha256` sidecar.
+          body_path: release-notes.md
