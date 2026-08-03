@@ -865,7 +865,7 @@ pub(crate) fn run_story_picker(
         // `dir`, so rescan the directory, honour the active sort, and land the
         // cursor on the new story; other events (search results, download
         // options, errors) update the modal's own state machine, which may hand
-        // back a follow-up action (e.g. auto-download the sole playable file).
+        // back a follow-up action.
         let mut search_arrived = false;
         for ev in search_worker.drain() {
             search_arrived = true;

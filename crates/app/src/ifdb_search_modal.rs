@@ -1,6 +1,6 @@
 //! The story-picker's IFDB search modal (SQ-0413): a three-view state machine
-//! (type a query → browse results → optionally pick among a game's download
-//! files) plus its renderer. All network work is delegated to
+//! (type a query → browse results → pick among a game's download files) plus
+//! its renderer. All network work is delegated to
 //! [`crate::ifdb_search::SearchWorker`]; this module is the pure UI half — the
 //! picker drives it by feeding keys/events in and dispatching the [`ModalAction`]s
 //! it hands back. Every state transition is unit-tested without a network.
@@ -120,10 +120,9 @@ pub struct SearchModal {
     /// frame, which keeps a key pressed before any draw well-defined.
     list_rows: usize,
     /// The iFiction record resolved alongside `options` (SQ-0474), if any —
-    /// carried from the last `SearchEvent::Options` through to whichever
-    /// `Download` action follows (immediately, for the one-option
-    /// auto-download; later, for a user's pick in `View::Choosing`), so the
-    /// picker can populate the download's sidecar + cover with zero extra
+    /// carried from the last `SearchEvent::Options` through to the `Download`
+    /// action the user's pick in `View::Choosing` produces, so the picker can
+    /// populate the download's sidecar + cover with zero extra
     /// requests. Taken (not cloned) by [`Self::take_pending_record`] once
     /// the picker dispatches that download. Boxed to match
     /// [`crate::ifdb_search::ResolvedGame::record`].
@@ -400,8 +399,8 @@ impl SearchModal {
 
     // ── Worker events ─────────────────────────────────────────────────────
 
-    /// Feed a worker event. Returns a follow-up action (e.g. auto-download when
-    /// a game has exactly one playable file). A [`SearchEvent::Downloaded`] is
+    /// Feed a worker event. Returns a follow-up action. A
+    /// [`SearchEvent::Downloaded`] is
     /// NOT handled here — the picker consumes that directly (it owns the path
     /// and the list refresh) and then closes the modal.
     pub fn on_event(&mut self, ev: &SearchEvent) -> ModalAction {
@@ -442,33 +441,29 @@ impl SearchModal {
                     return ModalAction::None; // stale
                 }
                 self.inflight = None;
-                // Cached regardless of how many options came back — a
-                // `Download` action, whether auto-fired below or from a
-                // later `View::Choosing` pick, always wants this game's
+                // Cached for whichever `Download` action the user's pick in
+                // `View::Choosing` produces — it always wants this game's
                 // record (SQ-0474).
                 self.pending_record = resolved.record.clone();
-                match resolved.options.len() {
-                    0 => {
-                        self.status =
-                            Some("No directly-playable file — press o to open its IFDB page"
-                                .to_string());
-                        self.view = View::Results;
-                        ModalAction::None
-                    }
-                    1 => {
-                        // Exactly one: download it straight away.
-                        self.inflight = Some(Inflight::Download);
-                        ModalAction::Download(resolved.options[0].url.clone())
-                    }
-                    _ => {
-                        self.opt_present = self.probe_present(&resolved.options);
-                        self.options = resolved.options.clone();
-                        self.opt_scroll = ListScroll::new();
-                        self.opt_scroll.len(self.options.len());
-                        self.view = View::Choosing;
-                        ModalAction::None
-                    }
+                if resolved.options.is_empty() {
+                    self.status = Some(
+                        "No directly-playable file — press o to open its IFDB page".to_string(),
+                    );
+                    self.view = View::Results;
+                    return ModalAction::None;
                 }
+                // Every game with a playable file goes through the chooser,
+                // including one with exactly a single file. That case used to
+                // download straight away, which meant the one screen carrying a
+                // file's description and its "already downloaded" mark was the
+                // one screen you never saw — and a game you already had would
+                // silently fetch a duplicate with nothing on screen to warn you.
+                self.opt_present = self.probe_present(&resolved.options);
+                self.options = resolved.options.clone();
+                self.opt_scroll = ListScroll::new();
+                self.opt_scroll.len(self.options.len());
+                self.view = View::Choosing;
+                ModalAction::None
             }
             SearchEvent::Failed(msg) => {
                 self.inflight = None;
@@ -923,16 +918,46 @@ mod tests {
         assert_eq!(m.on_key(KeyCode::Char('y'), &anim()), ModalAction::None);
     }
 
+    /// A lone playable file still goes through the chooser rather than
+    /// downloading on the spot. It used to auto-download, which skipped the one
+    /// screen that shows the file's description and whether the library already
+    /// has it — so the commonest case was the one you could never inspect, and
+    /// re-downloading a game you already had happened silently.
     #[test]
-    fn one_download_option_auto_downloads() {
+    fn one_download_option_still_opens_the_chooser() {
         let mut m = SearchModal::new();
         m.on_key(KeyCode::Char('z'), &anim());
         m.on_key(KeyCode::Enter, &anim());
         m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha")]));
         m.on_key(KeyCode::Enter, &anim()); // Resolve
         let action = m.on_event(&SearchEvent::Options(resolved(vec![opt("a.z5")])));
-        assert_eq!(action, ModalAction::Download("https://x/a.z5".into()));
+        assert_eq!(action, ModalAction::None, "no download fires on its own");
+        assert!(!m.busy(), "nothing is in flight — the user has not chosen yet");
+        assert_eq!(m.view, View::Choosing);
+
+        // And Enter on that single row downloads it, as it would with several.
+        assert_eq!(
+            m.on_key(KeyCode::Enter, &anim()),
+            ModalAction::Download("https://x/a.z5".into())
+        );
         assert!(m.busy());
+    }
+
+    /// The lone file is marked when the library already holds it — the whole
+    /// reason this case stopped auto-downloading.
+    #[test]
+    fn a_lone_option_already_downloaded_says_so() {
+        let dir = std::env::temp_dir().join(format!("bm_ifdb_lone_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        std::fs::write(dir.join("a.z5"), b"x").expect("seed an existing download");
+
+        let mut m = SearchModal::new();
+        m.set_download_dir(&dir);
+        let rows = draw_chooser(&mut m, vec![opt("a.z5")]);
+        let row = rows.iter().find(|r| r.contains("a.z5")).expect("the lone file is listed");
+        assert!(row.contains("already downloaded"), "and is marked as present: {row:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// SQ-0474: the iFiction record resolved alongside the options is cached
@@ -949,7 +974,7 @@ mod tests {
 
         let record = Box::new(IFiction { title: Some("Alpha".into()), ..Default::default() });
         let action = m.on_event(&SearchEvent::Options(ResolvedGame {
-            options: vec![opt("a.z5"), opt("a.z8")], // >1: no auto-download, record still cached
+            options: vec![opt("a.z5"), opt("a.z8")],
             record: Some(record.clone()),
         }));
         assert_eq!(action, ModalAction::None);

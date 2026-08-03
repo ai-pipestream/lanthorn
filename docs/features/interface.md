@@ -304,9 +304,9 @@ cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
   returns. babelmap queries IFDB's public search API (in the background — the
   picker never freezes) and lists the matching games with their author,
   rating, and year. `↑`/`↓` (or `j`/`k`) move, and `Enter` on a game fetches
-  its download links: if there's a single directly-playable story file it
-  downloads at once, and if there are several a small chooser lets you pick
-  one. Each file in the chooser carries IFDB's own description of it on the
+  its download links and opens a small chooser to pick one — including when
+  there is only a single playable file, so you always get to see what you are
+  about to fetch. Each file in the chooser carries IFDB's own description of it on the
   line below — "Release 16: latest version of the game.", "Competition
   version" — which is often the only way to tell the candidates apart, since a
   game may well list several files under the *same* filename. A file the
