@@ -2299,6 +2299,42 @@ impl Machine {
         Ok(())
     }
 
+    /// Is `data` a Glulx-Quetzal save whose `IFhd` names a DIFFERENT story than the
+    /// one running? False for anything that is not a save at all, and false for a
+    /// save that matches — only a foreign one is true.
+    ///
+    /// A game probes `glk_stream_open_resource` to ask "is there an embedded save I
+    /// can restore?", then hands the stream straight to `@restore`. When that save
+    /// is for another build, the honest answer to the probe is NO: we would reject
+    /// the restore on the §1.8.4 identity check anyway, so opening it only invites a
+    /// guaranteed failure. Counterfeit Monkey r11 ships exactly that — a startup
+    /// save whose RAMSTART/EXTSTART disagree with the story chunk beside it in the
+    /// same blorb — and answering YES cost every launch a full re-initialisation
+    /// (5.4s against 0.77s) because the game does not fall back to its own on-disk
+    /// cache once it believes an embedded one exists. Bypassing the identity check
+    /// instead is not an option: the restored state faults on the first command.
+    ///
+    /// The test MUST agree with [`Machine::restore_quetzal`]'s: hide exactly the
+    /// saves we would refuse, never a restorable one.
+    /// `quetzal_resource_hidden_iff_restore_would_reject_it` pins that.
+    fn quetzal_for_another_story(&self, data: &[u8]) -> bool {
+        if data.len() < 12 || &data[0..4] != b"FORM" || &data[8..12] != b"IFZS" {
+            return false; // not a save: an ordinary data resource, always offered
+        }
+        let mut i = 12usize;
+        while i + 8 <= data.len() {
+            let len =
+                u32::from_be_bytes([data[i + 4], data[i + 5], data[i + 6], data[i + 7]]) as usize;
+            if &data[i..i + 4] == b"IFhd" {
+                let Some(ifhd) = data.get(i + 8..i + 8 + len) else { return false };
+                return ifhd.len() != 128
+                    || (0..128).any(|a| ifhd[a] != self.mem.read8(a as u32).unwrap_or(0) as u8);
+            }
+            i = i + 8 + len + (len & 1);
+        }
+        false // a save with no IFhd names no story; leave it to `@restore` to refuse
+    }
+
     /// Restore VM state from a [`Machine::save_quetzal`] blob (a standard,
     /// spec-conformant Glulx-Quetzal save — Glulx spec §1.8). Restores
     /// RAM/stack/heap exactly like [`Machine::restore_state`], then **pops the
@@ -3722,17 +3758,22 @@ impl Machine {
             0x0049 => {
                 // glk_stream_open_resource(filenum, rock) — read-only Blorb Data
                 // chunk; the host resolves the bytes + text/binary flag. Missing
-                // resource → open fails (0).
+                // resource → open fails (0), and so does a save for another story
+                // (see `quetzal_for_another_story`).
                 match self.backend.data_resource(a(0)) {
-                    Some((data, is_text)) => self.glk.stream_open_resource(data, false, is_text, a(1)),
-                    None => 0,
+                    Some((data, is_text)) if !self.quetzal_for_another_story(&data) => {
+                        self.glk.stream_open_resource(data, false, is_text, a(1))
+                    }
+                    _ => 0,
                 }
             }
             0x013A => {
                 // glk_stream_open_resource_uni(filenum, rock)
                 match self.backend.data_resource(a(0)) {
-                    Some((data, is_text)) => self.glk.stream_open_resource(data, true, is_text, a(1)),
-                    None => 0,
+                    Some((data, is_text)) if !self.quetzal_for_another_story(&data) => {
+                        self.glk.stream_open_resource(data, true, is_text, a(1))
+                    }
+                    _ => 0,
                 }
             }
             0x0044 => {
@@ -7872,6 +7913,47 @@ mod tests {
 
     /// The key §1.8.5 property: `restore_quetzal` reverts VM memory/stack/heap
     /// to the save point and resumes with `-1` in `@save`'s S1, but leaves the
+    /// The rule behind hiding a foreign embedded save must match the rule
+    /// `@restore` refuses one by, or we would either hide a save the game could
+    /// have used or offer one it cannot (SQ-0595).
+    #[test]
+    fn quetzal_resource_hidden_iff_restore_would_reject_it() {
+        use asm::Op::{Mem32, Zero};
+        let body = asm::ins(0x0123, &[Zero, Mem32(0x180)]);
+        let mut m = machine_with_body(&[], body);
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let blob = m.save_quetzal();
+        m.complete_save(true);
+
+        // Our own save: offered, and restorable.
+        assert!(!m.quetzal_for_another_story(&blob), "a matching save stays visible");
+
+        // A save for another story: hidden, AND refused by restore. Flip a byte of
+        // the IFhd's RAMSTART — a field no running game can change, which is what
+        // made Counterfeit Monkey's embedded save provably foreign.
+        let mut foreign = blob.clone();
+        let mut i = 12usize;
+        let ifhd_at = loop {
+            let len = u32::from_be_bytes([foreign[i + 4], foreign[i + 5], foreign[i + 6], foreign[i + 7]]) as usize;
+            if &foreign[i..i + 4] == b"IFhd" {
+                break i + 8;
+            }
+            i += 8 + len + (len & 1);
+        };
+        foreign[ifhd_at + 9] ^= 0xFF; // inside RAMSTART
+        assert!(m.quetzal_for_another_story(&foreign), "a foreign save is hidden");
+        assert!(
+            m.restore_quetzal(&foreign).is_err(),
+            "...and is exactly what restore would refuse — the two rules must agree"
+        );
+
+        // Anything that is not a save is always offered: an ordinary data resource
+        // must not be second-guessed.
+        assert!(!m.quetzal_for_another_story(b"\x89PNG\r\n\x1a\n and then some pixels"));
+        assert!(!m.quetzal_for_another_story(b""));
+        assert!(!m.quetzal_for_another_story(b"FORM\0\0\0\x04IFRS"), "a Blorb is not a save");
+    }
+
     /// `@restore L1 S1` restores from the STREAM it is handed (Glulx §1.8.2). A
     /// **resource stream** has no fileref name, so routing it through the host's
     /// by-name path silently found nothing and the restore failed — invisibly,
