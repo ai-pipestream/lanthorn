@@ -343,7 +343,6 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                 Err(e) => {
                     use zvm::error::ZError;
                     let msg = match e {
-                        ZError::GraphicalV6 => "this is a version 6 (graphical) story; v6 graphical games are not supported".to_string(),
                         ZError::UnsupportedVersion(v) => format!("unsupported Z-machine version {v}"),
                         ZError::NotAStoryFile => "file is not a valid Z-machine story file".to_string(),
                         ZError::Truncated => "story file is truncated".to_string(),

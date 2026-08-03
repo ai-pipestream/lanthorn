@@ -193,7 +193,14 @@ impl StdoutOutput {
         for ch in wrapped.chars() {
             print!("{}", ch);
             if ch == '\n' {
-                self.lines += 1;
+                // Saturating: `lines` is only ever reset by `check_paging`, an
+                // `erase_window`, or an input request, so a story that prints
+                // without pausing — piped output, `--no-more`, or a game in a
+                // print loop — climbs forever and used to panic on overflow at
+                // exactly 65_536 newlines (SQ-0601). Nothing reads the count
+                // once it is past `page_height`, so pinning it at the ceiling
+                // is behaviour-neutral.
+                self.lines = self.lines.saturating_add(1);
                 self.check_paging();
             }
         }
@@ -277,12 +284,29 @@ fn build_machine(
 ) -> Result<Machine, String> {
     use zvm::error::ZError;
     let mem = Memory::new(story).map_err(|e| match e {
-        ZError::GraphicalV6 => "Error: Z-machine v6 graphical games are not supported.".to_string(),
         ZError::UnsupportedVersion(v) => format!("Error: Z-machine version {v} is not supported."),
         ZError::NotAStoryFile => "Error: file is not a valid Z-machine story file.".to_string(),
         ZError::Truncated => "Error: story file is truncated.".to_string(),
         _ => format!("Error loading story: {e:?}"),
     })?;
+    // v6 is a graphical, mouse-and-menu format: its games drive a windowed
+    // display this front-end has no way to present, and none of them can be
+    // driven through a plain character stream. Measured (SQ-0601): every v6
+    // story we have — Zork Zero, Shogun, Arthur, Journey, advent.z6 — runs away
+    // the moment its opening screen asks for input, whatever key it is given.
+    // Zork Zero and Arthur flood the terminal with newlines; Shogun spins
+    // silently with no output at all and no prompt to interrupt.
+    //
+    // So refuse here rather than hang. The refusal is the FRONT-END's, not the
+    // library's: `zvm` supports v6 fully and babelmap plays these games — run
+    // them there.
+    if mem.version() == 6 {
+        return Err(
+            "Error: Z-machine v6 graphical games are not supported by zvm-cli.\n\
+             Run it with babelmap, which renders v6 graphics and menus."
+                .to_string(),
+        );
+    }
     let mut machine = Machine::with_output(mem, Box::new(StdoutOutput::new(
         stdout_is_tty,
         paging,
@@ -749,6 +773,8 @@ Usage: zvm-cli [OPTIONS] <story-file>
 
 Arguments:
   <story-file>          Z-code story (.z3/.z5/.z8 …, or a .zblorb container)
+                        Graphical v6 stories are not supported — play those
+                        with babelmap.
 
 Options:
       --no-status       Suppress the pinned status/upper-window line (alias: --lower-only)
@@ -1100,6 +1126,86 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod v6_tests {
+    use super::*;
+
+    /// A story file with just enough header to load: `version` in byte 0 and a
+    /// plausible layout. Not runnable — `build_machine` only has to get as far
+    /// as reading the version.
+    fn story_of_version(v: u8) -> Vec<u8> {
+        let mut buf = vec![0u8; 0x0800];
+        buf[0x00] = v;
+        buf[0x04] = 0x04; // high_mem_base = 0x0400
+        buf[0x05] = 0x00;
+        buf[0x06] = 0x00; // initial_pc = 0x0040
+        buf[0x07] = 0x40;
+        buf[0x0C] = 0x01; // object table
+        buf[0x0D] = 0x00;
+        buf[0x0E] = 0x02; // globals
+        buf[0x0F] = 0x00;
+        buf[0x18] = 0x00; // abbrev table
+        buf[0x19] = 0x60;
+        buf
+    }
+
+    fn build(story: Vec<u8>) -> Result<Machine, String> {
+        build_machine(story, false, false, 24, 24, 80, true, None)
+    }
+
+    /// SQ-0601: v6 is a graphical, mouse-and-menu format this front-end cannot
+    /// present, and every v6 story we have runs away the moment its opening
+    /// screen asks for input — whatever key it is given. Zork Zero and Arthur
+    /// flood the terminal; Shogun spins silently with nothing to interrupt.
+    /// Refusing at load is the only outcome that neither crashes nor hangs.
+    #[test]
+    fn a_v6_story_is_refused_rather_than_run() {
+        let err = match build(story_of_version(6)) {
+            Err(e) => e,
+            Ok(_) => panic!("v6 must be refused, not loaded"),
+        };
+        assert!(err.contains("not supported by zvm-cli"), "{err}");
+        assert!(err.contains("babelmap"), "the message points at the front-end that can: {err}");
+    }
+
+    /// The refusal is zvm-cli's alone — the library still supports v6, which is
+    /// what babelmap plays. A version check that lived in `Memory::new` would
+    /// take the TUI's v6 support down with it.
+    #[test]
+    fn the_library_still_loads_a_v6_story() {
+        let mem = Memory::new(story_of_version(6)).expect("zvm itself accepts v6");
+        assert_eq!(mem.version(), 6);
+    }
+
+    #[test]
+    fn the_ordinary_versions_still_load() {
+        for v in [3u8, 5, 8] {
+            assert!(build(story_of_version(v)).is_ok(), "v{v} must still load");
+        }
+    }
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::*;
+
+    /// SQ-0601: `lines` only resets on a page break, an `erase_window`, or an
+    /// input request, so a story printing without pause climbs without bound —
+    /// piped output and `--no-more` never page at all. It used to be a `u16`
+    /// incremented with `+=`, which panicked with "attempt to add with
+    /// overflow" at exactly 65_536 newlines. Zork Zero reached that in under
+    /// twenty seconds.
+    #[test]
+    fn the_line_counter_saturates_instead_of_overflowing() {
+        let mut o = StdoutOutput::new(false, false, 24, 80, true);
+        o.lines = u16::MAX - 2;
+        for _ in 0..10 {
+            o.write_counted("\n");
+        }
+        assert_eq!(o.lines, u16::MAX, "the counter pins at its ceiling and never wraps");
     }
 }
 
