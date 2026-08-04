@@ -18,13 +18,15 @@
 //! Deliberately NOT here: anything that draws. See the module docs for the
 //! boundary each piece sits on.
 
+pub mod args;
 pub mod flags;
 pub mod input;
 pub mod line;
 pub mod mode;
 pub mod term;
 
-pub use flags::handled_common_flags;
+pub use args::{Matches, Opt, scan};
+pub use flags::{EXIT_USAGE, handled_common_flags, looks_like_flag, usage_error};
 pub use line::LineHold;
 pub use input::{read_byte_or_eof, read_byte_stdin, read_line_or_eof, read_line_stdin};
 pub use mode::{HostMode, PLAIN_FLAGS, no_color, plain_requested};

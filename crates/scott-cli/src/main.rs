@@ -107,34 +107,34 @@ struct Args {
     max_turns: Option<u64>,
 }
 
-fn parse_args() -> Result<Args, String> {
-    let mut path = None;
-    let mut seed = None;
-    let mut max_turns = None;
-    let mut argv = env::args().skip(1);
-    while let Some(arg) = argv.next() {
-        match arg.as_str() {
-            "--seed" => {
-                let v = argv.next().ok_or("--seed needs a value")?;
-                seed = Some(v.parse().map_err(|_| format!("bad --seed value: {v}"))?);
-            }
-            "--max-turns" => {
-                let v = argv.next().ok_or("--max-turns needs a value")?;
-                max_turns = Some(v.parse().map_err(|_| format!("bad --max-turns value: {v}"))?);
-            }
-            // Resolved by cli_host straight from argv, but they must be accepted
-            // here or the strict unknown-option check below rejects them.
-            other if cli_host::PLAIN_FLAGS.contains(&other) => {}
-            other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
-            other => {
-                if path.replace(other.to_string()).is_some() {
-                    return Err("expected exactly one story file".to_string());
-                }
-            }
-        }
+/// Every option `scott-cli` accepts; `cli_host::args` applies the rules.
+const OPTS: &[cli_host::Opt] = &[
+    cli_host::Opt::flag(&["--plain", "--screen-reader"]),
+    cli_host::Opt::flag(&["--help", "-h"]),
+    cli_host::Opt::flag(&["--version", "-V"]),
+    cli_host::Opt::valued(&["--seed"]),
+    cli_host::Opt::valued(&["--max-turns"]),
+];
+
+fn parse_args(argv: &[String]) -> Result<Args, String> {
+    let m = cli_host::scan(argv, OPTS)?;
+    if m.positional.len() > 1 {
+        return Err(format!("unexpected extra argument: {}", m.positional[1]));
     }
-    let path = path.ok_or("usage: scott-cli <adv.dat> [--seed <n>] [--max-turns <n>]")?;
-    Ok(Args { path, seed, max_turns })
+    // Strict, unlike zvm-cli's lenient interpreter number: a seed or turn cap
+    // that does not parse is a typo in a reproducibility knob, and silently
+    // ignoring it would make a run that looks reproducible but is not.
+    let num = |flag: &str| -> Result<Option<u64>, String> {
+        match m.value(flag) {
+            None => Ok(None),
+            Some(v) => v.parse().map(Some).map_err(|_| format!("bad {flag} value: {v}")),
+        }
+    };
+    Ok(Args {
+        path: m.first_positional().ok_or("no story file given")?.to_string(),
+        seed: num("--seed")?.map(|v| v as u32),
+        max_turns: num("--max-turns")?,
+    })
 }
 
 const HELP: &str = "\
@@ -167,12 +167,11 @@ fn main() {
     if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_PKG_NAME"), buildinfo::LONG) {
         return;
     }
-    let args = match parse_args() {
+    let args = match parse_args(&argv) {
+        // Already the only CLI that rejected unknown flags; now it shows the
+        // help alongside the message, like the other two (SQ-0614).
+        Err(e) => cli_host::usage_error(env!("CARGO_PKG_NAME"), &e, HELP),
         Ok(a) => a,
-        Err(e) => {
-            eprintln!("scott-cli: {e}");
-            process::exit(2);
-        }
     };
 
     let bytes = fs::read(&args.path).unwrap_or_else(|e| {

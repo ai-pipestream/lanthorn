@@ -399,6 +399,7 @@ fn build_machine(
 
 // ── argument parsing ──────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 struct Args {
     story: Option<String>,
     story_only: bool,
@@ -408,41 +409,62 @@ struct Args {
     no_timed_input: bool,
     no_sound: bool,
     data_dir: Option<String>,
+    honor_colours: bool,
+    interpreter: Option<u8>,
+    volume: Option<u8>,
 }
 
-fn parse_args(argv: &[String]) -> Args {
-    let mut a = Args { story: None, story_only: false, show_status: false, no_aux: false, no_more: false, no_timed_input: false, no_sound: false, data_dir: None };
-    let mut i = 1;
-    while i < argv.len() {
-        match argv[i].as_str() {
-            "--story-only" | "--lower-only" => a.story_only = true,
-            // Renamed in SQ-0613: `--no-status` read as the same thing plain
-            // mode does to the status line, and it is stronger than that. Say
-            // so rather than ignoring it, which would look like it worked.
-            "--no-status" => {
-                eprintln!(
-                    "{}: --no-status has been renamed --story-only (it suppresses the whole \
-                     upper window, menus included); honouring it this time.",
-                    env!("CARGO_PKG_NAME")
-                );
-                a.story_only = true;
-            }
-            "--show-status" => a.show_status = true,
-            "--no-aux" => a.no_aux = true,
-            "--no-more" | "--no-page" => a.no_more = true,
-            "--no-timed-input" => a.no_timed_input = true,
-            "--no-sound" => a.no_sound = true,
-            "--volume" => i += 1, // also skip the following value token
-            // NB: --no-game-colours is handled separately by parse_game_colours;
-            // it falls through here (a `--flag` is never taken as the story arg).
-            "-I" | "--interpreter" => i += 1, // also skip the following value token
-            "--data-dir" => { i += 1; if i < argv.len() { a.data_dir = Some(argv[i].clone()); } }
-            s if !s.starts_with("--") && a.story.is_none() => a.story = Some(s.to_string()),
-            _ => {}
-        }
-        i += 1;
+/// Every option `zvm-cli` accepts. The scanner in `cli_host::args` applies the
+/// rules; this table is the only thing that differs between the three CLIs.
+///
+/// Options whose value is read further down (`--volume`, `-I`) still belong
+/// here, because this is what tells an unrecognised flag from a story path.
+const OPTS: &[cli_host::Opt] = &[
+    cli_host::Opt::flag(&["--story-only", "--lower-only", "--no-status"]),
+    cli_host::Opt::flag(&["--show-status"]),
+    cli_host::Opt::flag(&["--no-aux"]),
+    cli_host::Opt::flag(&["--no-more", "--no-page"]),
+    cli_host::Opt::flag(&["--no-timed-input"]),
+    cli_host::Opt::flag(&["--no-sound"]),
+    cli_host::Opt::flag(&["--no-game-colours"]),
+    cli_host::Opt::flag(&["--plain", "--screen-reader"]),
+    cli_host::Opt::flag(&["--help", "-h"]),
+    cli_host::Opt::flag(&["--version", "-V"]),
+    cli_host::Opt::valued(&["--volume"]),
+    cli_host::Opt::valued(&["--interpreter", "-I"]),
+    cli_host::Opt::valued(&["--data-dir"]),
+];
+
+fn parse_args(argv: &[String]) -> Result<Args, String> {
+    let m = cli_host::scan(argv, OPTS)?;
+    if m.positional.len() > 1 {
+        return Err(format!("unexpected extra argument: {}", m.positional[1]));
     }
-    a
+    // Renamed in SQ-0613: `--no-status` read as the same thing plain mode does
+    // to the status line, and it is stronger than that. Say so rather than
+    // ignoring it, which would look like it worked.
+    if argv.iter().any(|a| a == "--no-status") {
+        eprintln!(
+            "{}: --no-status has been renamed --story-only (it suppresses the whole \
+             upper window, menus included); honouring it this time.",
+            env!("CARGO_PKG_NAME")
+        );
+    }
+    Ok(Args {
+        story: m.first_positional().map(str::to_string),
+        story_only: m.has("--story-only"),
+        show_status: m.has("--show-status"),
+        no_aux: m.has("--no-aux"),
+        no_more: m.has("--no-more"),
+        no_timed_input: m.has("--no-timed-input"),
+        no_sound: m.has("--no-sound"),
+        data_dir: m.value("--data-dir").map(str::to_string),
+        honor_colours: !m.has("--no-game-colours"),
+        // Lenient, as before: a bad value falls back to the engine default
+        // rather than refusing to start.
+        interpreter: m.value("--interpreter").and_then(|v| v.parse::<u8>().ok()),
+        volume: m.value("--volume").and_then(|v| v.parse::<u8>().ok()).map(|v| v.min(100)),
+    })
 }
 
 /// Per-game directory name: the story file's basename (incl. extension),
@@ -466,37 +488,6 @@ fn resolve_save_input(input: &str, game_dir: &std::path::Path) -> std::path::Pat
         let name = if t.ends_with(".qzl") { t.to_string() } else { format!("{t}.qzl") };
         game_dir.join(name)
     }
-}
-
-/// Returns `true` (honour game colours) unless `--no-game-colours` is present.
-/// `NO_COLOR` is folded in at the call site, so this stays a pure function of
-/// the command line and its test stays independent of the environment.
-fn parse_game_colours(args: &[String]) -> bool {
-    !args.iter().any(|a| a == "--no-game-colours")
-}
-
-/// Read the interpreter-number override from `-I N` / `--interpreter N`.
-/// Returns None when absent or when N is not a valid u8 (lenient — falls back
-/// to the engine's Frotz default).
-fn parse_interpreter(args: &[String]) -> Option<u8> {
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "-I" || a == "--interpreter" {
-            return it.next().and_then(|v| v.parse::<u8>().ok());
-        }
-    }
-    None
-}
-
-/// Read the master volume from `--volume N` (0..=100). None when absent/invalid.
-fn parse_volume(args: &[String]) -> Option<u8> {
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "--volume" {
-            return it.next().and_then(|v| v.parse::<u8>().ok()).map(|v| v.min(100));
-        }
-    }
-    None
 }
 
 // ── terminal size ─────────────────────────────────────────────────────────────
@@ -895,10 +886,12 @@ fn main() {
     if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_PKG_NAME"), buildinfo::LONG) {
         return;
     }
-    let args = parse_args(&argv);
+    let args = match parse_args(&argv) {
+        Ok(a) => a,
+        Err(e) => cli_host::usage_error(env!("CARGO_PKG_NAME"), &e, HELP),
+    };
     let Some(story_arg) = args.story.clone() else {
-        eprintln!("{}: no story file given. Run `zvm-cli --help` for usage.", env!("CARGO_PKG_NAME"));
-        std::process::exit(1);
+        cli_host::usage_error(env!("CARGO_PKG_NAME"), "no story file given", HELP);
     };
     let story_path = std::path::PathBuf::from(&story_arg);
 
@@ -964,13 +957,13 @@ fn main() {
     // Timed reads (read/read_char time+routine) are honored unless disabled.
     let timed = !args.no_timed_input;
     let sound_enabled = !args.no_sound;
-    let volume = parse_volume(&argv).unwrap_or(100);
+    let volume = args.volume.unwrap_or(100);
 
     // `NO_COLOR` (no-color.org) means colour, not layout: it drops the game's
     // colours exactly as `--no-game-colours` does, and leaves the pinned status
     // line alone. Plain mode emits no escapes at all, so colour is moot there.
-    let honor = parse_game_colours(&argv) && !cli_host::no_color();
-    let interpreter = parse_interpreter(&argv);
+    let honor = args.honor_colours && !cli_host::no_color();
+    let interpreter = args.interpreter;
 
     let mut machine = match build_machine(
         story_bytes,
@@ -1357,15 +1350,55 @@ mod arg_tests {
 
     #[test]
     fn parses_flags_and_story() {
-        let a = parse_args(&["zvm-cli".into(), "--story-only".into(), "game.z5".into()]);
+        let a = parse_args(&["zvm-cli".into(), "--story-only".into(), "game.z5".into()]).expect("valid args");
         assert_eq!(a.story.as_deref(), Some("game.z5"));
         assert!(a.story_only && !a.no_aux);
 
-        let b = parse_args(&["zvm-cli".into(), "--no-aux".into(), "g".into()]);
+        let b = parse_args(&["zvm-cli".into(), "--no-aux".into(), "g".into()]).expect("valid args");
         assert!(b.no_aux && !b.story_only);
 
-        let c = parse_args(&["zvm-cli".into(), "g".into()]);
+        let c = parse_args(&["zvm-cli".into(), "g".into()]).expect("valid args");
         assert!(!c.story_only && !c.no_aux);
+    }
+
+    /// SQ-0614. Every flag the binary accepts has to be listed in `parse_args`,
+    /// even the ones whose value is read elsewhere, or a valid invocation would
+    /// be rejected as unknown. This is the test that catches a flag added to
+    /// `HELP` and to its reader but not to the parser.
+    #[test]
+    fn every_documented_flag_parses() {
+        for flag in [
+            "--story-only", "--lower-only", "--no-status", "--show-status", "--no-aux",
+            "--no-more", "--no-page", "--no-timed-input", "--no-sound", "--no-game-colours",
+            "--plain", "--screen-reader",
+        ] {
+            let a = parse_args(&["zvm-cli".into(), flag.into(), "g".into()]).expect("valid args");
+            assert_eq!(a.story.as_deref(), Some("g"), "{flag} should leave the story path alone");
+        }
+        // Value-taking flags: the value must be consumed, not read as the story.
+        for (flag, value) in [("--volume", "50"), ("-I", "6"), ("--interpreter", "6"),
+                              ("--data-dir", "/tmp/x")] {
+            let a = parse_args(&["zvm-cli".into(), flag.into(), value.into(), "g".into()]).expect("valid args");
+            assert_eq!(a.story.as_deref(), Some("g"), "{flag} {value} swallowed the story path");
+        }
+    }
+
+    /// SQ-0614. A mistyped flag used to be ignored outright: `--no-statu` did
+    /// nothing and the process exited 0, so the spelling was never the suspect.
+    #[test]
+    fn unknown_and_malformed_arguments_are_rejected() {
+        let err = |args: &[&str]| {
+            let v: Vec<String> = std::iter::once("zvm-cli".to_string())
+                .chain(args.iter().map(|s| s.to_string()))
+                .collect();
+            parse_args(&v).expect_err("should be rejected")
+        };
+        assert!(err(&["--no-statu", "g"]).contains("unknown option: --no-statu"));
+        // Single-dash forms too: `-x` used to be taken as the story path and
+        // then reported as a missing file.
+        assert!(err(&["-x"]).contains("unknown option: -x"));
+        assert!(err(&["--data-dir"]).contains("--data-dir needs a value"));
+        assert!(err(&["a.z5", "b.z5"]).contains("unexpected extra argument: b.z5"));
     }
 
     /// SQ-0613. `--no-status` read as the same thing plain mode does to the
@@ -1374,7 +1407,7 @@ mod arg_tests {
     #[test]
     fn the_old_and_new_spellings_all_select_story_only() {
         for flag in ["--story-only", "--lower-only", "--no-status"] {
-            let a = parse_args(&["zvm-cli".into(), flag.into(), "g".into()]);
+            let a = parse_args(&["zvm-cli".into(), flag.into(), "g".into()]).expect("valid args");
             assert!(a.story_only, "{flag} should select story-only");
             assert_eq!(a.story.as_deref(), Some("g"), "{flag} is not the story path");
         }
@@ -1382,55 +1415,52 @@ mod arg_tests {
 
     #[test]
     fn parses_no_more_flag() {
-        let a = parse_args(&["zvm-cli".into(), "--no-more".into(), "g".into()]);
+        let a = parse_args(&["zvm-cli".into(), "--no-more".into(), "g".into()]).expect("valid args");
         assert!(a.no_more);
-        let b = parse_args(&["zvm-cli".into(), "g".into()]);
+        let b = parse_args(&["zvm-cli".into(), "g".into()]).expect("valid args");
         assert!(!b.no_more);
     }
 
     #[test]
     fn parses_no_timed_input_flag() {
-        let a = parse_args(&["zvm-cli".into(), "--no-timed-input".into(), "g".into()]);
+        let a = parse_args(&["zvm-cli".into(), "--no-timed-input".into(), "g".into()]).expect("valid args");
         assert!(a.no_timed_input);
-        let b = parse_args(&["zvm-cli".into(), "g".into()]);
+        let b = parse_args(&["zvm-cli".into(), "g".into()]).expect("valid args");
         assert!(!b.no_timed_input);
     }
 
     #[test]
     fn parses_no_sound_flag() {
-        let a = parse_args(&["zvm-cli".into(), "--no-sound".into(), "g".into()]);
+        let a = parse_args(&["zvm-cli".into(), "--no-sound".into(), "g".into()]).expect("valid args");
         assert!(a.no_sound);
-        let b = parse_args(&["zvm-cli".into(), "g".into()]);
+        let b = parse_args(&["zvm-cli".into(), "g".into()]).expect("valid args");
         assert!(!b.no_sound);
     }
 
+    /// These were three separate scans of argv; they read off the one scan now
+    /// (SQ-0614), so the behaviour is pinned through `parse_args`.
     #[test]
-    fn parse_volume_reads_flag() {
-        assert_eq!(parse_volume(&["--volume".into(), "60".into(), "g".into()]), Some(60));
-        assert_eq!(parse_volume(&["g".into()]), None);
-    }
+    fn value_options_are_read_leniently() {
+        let p = |args: &[&str]| {
+            let v: Vec<String> = std::iter::once("zvm-cli")
+                .chain(args.iter().copied())
+                .map(String::from)
+                .collect();
+            parse_args(&v).expect("valid args")
+        };
+        assert_eq!(p(&["--volume", "60", "g"]).volume, Some(60));
+        assert_eq!(p(&["--volume", "200", "g"]).volume, Some(100), "clamped");
+        assert_eq!(p(&["g"]).volume, None);
 
-    #[test]
-    fn game_colours_default_on_unless_disabled() {
-        assert!(parse_game_colours(&[]));
-        assert!(parse_game_colours(&["story.z5".into()]));
-        assert!(!parse_game_colours(&["--no-game-colours".into(), "story.z5".into()]));
-    }
+        assert!(p(&["g"]).honor_colours);
+        assert!(!p(&["--no-game-colours", "g"]).honor_colours);
 
-    #[test]
-    fn parse_interpreter_reads_flag() {
-        assert_eq!(parse_interpreter(&["-I".into(), "4".into(), "story.z5".into()]), Some(4));
-        assert_eq!(parse_interpreter(&["--interpreter".into(), "3".into(), "story.z5".into()]), Some(3));
-    }
-
-    #[test]
-    fn parse_interpreter_absent_is_none() {
-        assert_eq!(parse_interpreter(&["story.z5".into()]), None);
-    }
-
-    #[test]
-    fn parse_interpreter_bad_value_is_none() {
-        assert_eq!(parse_interpreter(&["-I".into(), "notanumber".into(), "story.z5".into()]), None);
+        assert_eq!(p(&["-I", "4", "g"]).interpreter, Some(4));
+        assert_eq!(p(&["--interpreter", "3", "g"]).interpreter, Some(3));
+        assert_eq!(p(&["g"]).interpreter, None);
+        // Lenient: a bad value falls back to the engine default rather than
+        // refusing to start.
+        assert_eq!(p(&["-I", "notanumber", "g"]).interpreter, None);
     }
 
     #[test]

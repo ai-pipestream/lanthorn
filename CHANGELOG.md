@@ -36,6 +36,14 @@ identifies which beta it is without reading its git hash.
   were previously tracked and then dropped, losing the status line from piped
   output entirely.
 
+### Fixed
+
+- **Unknown command-line options are now an error** in all three CLIs, naming
+  the option, printing the help, and exiting 2. `zvm-cli` and `gvm-cli`
+  previously ignored them — a mistyped `--no-statu` did nothing and exited 0 —
+  and `zvm-cli` took an unknown single-dash argument such as `-x` for the story
+  path. A missing option value and a second positional argument are errors too.
+
 ---
 
 ## v0.1.0-beta.3 — 2026-08-03

@@ -567,6 +567,18 @@ Options:
   -h, --help            Print this help and exit
 ";
 
+/// Every option `gvm-cli` accepts; `cli_host::args` applies the rules.
+const OPTS: &[cli_host::Opt] = &[
+    cli_host::Opt::flag(&["--no-game-colours"]),
+    cli_host::Opt::flag(&["--no-accel"]),
+    cli_host::Opt::flag(&["--story-only"]),
+    cli_host::Opt::flag(&["--show-status"]),
+    cli_host::Opt::flag(&["--plain", "--screen-reader"]),
+    cli_host::Opt::flag(&["--help", "-h"]),
+    cli_host::Opt::flag(&["--version", "-V"]),
+    cli_host::Opt::valued(&["--data-dir"]),
+];
+
 fn main() {
     let argv: Vec<String> = env::args().collect();
     if cli_host::handled_common_flags(&argv, HELP, env!("CARGO_PKG_NAME"), buildinfo::LONG) {
@@ -576,34 +588,29 @@ fn main() {
     // installed mode to decide whether it may emit escapes, so `--plain` has to
     // be known before the backend exists (SQ-0606).
     let mode = HostMode::detect_with(cli_host::plain_requested(&argv)).install();
+    let name = env!("CARGO_PKG_NAME");
+    let m = match cli_host::scan(&argv, OPTS) {
+        Ok(m) => m,
+        Err(e) => cli_host::usage_error(name, &e, HELP),
+    };
+    if m.positional.len() > 1 {
+        cli_host::usage_error(
+            name,
+            &format!("unexpected extra argument: {}", m.positional[1]),
+            HELP,
+        );
+    }
     // Honour the game's stylehint colours by default; --no-game-colours opts out
     // (mirrors zvm-cli), as does NO_COLOR — which is about colour only, not
-    // layout. The story path is the first non-flag argument.
-    let honor = !argv.iter().any(|a| a == "--no-game-colours") && !cli_host::no_color();
-    // Acceleration (Glulx accelfunc interception) is on by default; --no-accel opts out.
-    let accel = !argv.iter().any(|a| a == "--no-accel");
-    // --data-dir takes a value, so it (and its value) must be consumed before
-    // scanning for the positional story path — otherwise the path scan would
-    // mistake the --data-dir value for the story argument.
-    let mut data_dir: Option<String> = None;
-    let mut path: Option<&String> = None;
-    {
-        let mut it = argv.iter().skip(1);
-        while let Some(a) = it.next() {
-            if a == "--data-dir" {
-                data_dir = it.next().cloned();
-            } else if !a.starts_with("--") && path.is_none() {
-                path = Some(a);
-            }
-        }
-    }
-    let Some(path) = path else {
-        eprintln!(
-            "Usage: {} [--no-game-colours] [--no-accel] [--data-dir <path>] <story.ulx | story.gblorb>",
-            argv[0]
-        );
-        process::exit(1);
+    // layout.
+    let honor = !m.has("--no-game-colours") && !cli_host::no_color();
+    // Acceleration (Glulx accelfunc interception) is on by default.
+    let accel = !m.has("--no-accel");
+    let data_dir: Option<String> = m.value("--data-dir").map(str::to_string);
+    let Some(path) = m.first_positional().map(str::to_string) else {
+        cli_host::usage_error(name, "no story file given", HELP);
     };
+    let path = &path;
 
     let bytes = match fs::read(path) {
         Ok(b) => b,
@@ -631,8 +638,8 @@ fn main() {
     backend.set_honor_colours(honor);
     // Plain mode does not narrate a one-row status grid every turn unless asked
     // (SQ-0612); taller grids — menus, forms — always come through.
-    backend.set_quiet_status_line(mode.plain() && !argv.iter().any(|a| a == "--show-status"));
-    backend.set_story_only(argv.iter().any(|a| a == "--story-only"));
+    backend.set_quiet_status_line(mode.plain() && !m.has("--show-status"));
+    backend.set_story_only(m.has("--story-only"));
     backend.set_data_blorb(blorb);
     let mut machine = Machine::with_glk(mem, Box::new(backend));
     machine.set_acceleration(accel);
