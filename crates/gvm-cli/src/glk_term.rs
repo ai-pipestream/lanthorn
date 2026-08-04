@@ -785,6 +785,22 @@ impl TerminalBackend {
             .join("\n")
     }
 
+    /// Write a host line above the held prompt — a score announcement, say.
+    ///
+    /// Unlike [`write_host_answer`](Self::write_host_answer) this does NOT put
+    /// the prompt back, because the prompt has not been released yet: this runs
+    /// before input, between the status and the prompt, so the held tail follows
+    /// naturally (SQ-0616).
+    pub fn write_host_line(&mut self, text: &str) {
+        let mut out = String::new();
+        if !self.hold.at_line_start() {
+            out.push('\n');
+        }
+        out.push_str(text);
+        out.push('\n');
+        let _ = self.out.write_all(out.as_bytes());
+    }
+
     /// Write a host answer (`/status`) mid-turn: start a fresh line, print it,
     /// then put the prompt back so the player can see it is still their turn.
     pub fn write_host_answer(&mut self, text: &str) {

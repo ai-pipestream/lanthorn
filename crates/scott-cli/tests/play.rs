@@ -82,3 +82,31 @@ take lamp\ndown\nrub lamp\nget idol\nup\ndown\ndown\nscore\ndrop idol\nscore\n";
     let transcript = play(script, &["--seed", "1"]);
     assert!(transcript.contains("*** You have won! ***"), "win reached:\n{transcript}");
 }
+
+/// SQ-0616. Screen-reader mode stops narrating the status every turn, which
+/// takes the score with it — so a score that moves is announced instead. Scott
+/// stores no score at all: it is the count of treasures in the treasure room,
+/// recounted each turn, and `drop idol` in the win script is what moves it.
+#[test]
+fn a_score_change_is_announced_in_screen_reader_mode() {
+    let script = "\
+push button\npull lever\npush button\ncount\ntally\nstash\ntally\nmark\nstash\ntally\n\
+take lamp\ndown\nrub lamp\nget idol\nup\ndown\ndown\nscore\ndrop idol\nscore\n";
+    let transcript = play(script, &["--seed", "1", "--screen-reader"]);
+    assert!(
+        transcript.contains("[Score 1, up 1]"),
+        "depositing the idol should be announced:\n{transcript}"
+    );
+    // Exactly once — the score is recounted every turn and must not be
+    // re-announced while it sits unchanged.
+    assert_eq!(transcript.matches("[Score 1, up 1]").count(), 1, "announced once only");
+}
+
+/// ...and not at all outside screen-reader mode, where the game's own SCORE
+/// verb is the way to ask and an extra line would change every transcript.
+#[test]
+fn no_score_announcement_without_screen_reader_mode() {
+    let script = "take lamp\ndown\nrub lamp\nget idol\nup\ndown\ndown\ndrop idol\n";
+    let transcript = play(script, &["--seed", "1"]);
+    assert!(!transcript.contains("[Score"), "no announcement by default:\n{transcript}");
+}

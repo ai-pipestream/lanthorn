@@ -22,6 +22,12 @@ identifies which beta it is without reading its git hash.
   drops the `[MORE]` pager. `NO_COLOR` is honoured separately, as colour only.
 - **`/status`** — a host command, at any line prompt in any of the three CLIs,
   that repeats the current status without the game seeing the command.
+- **Score announcements** — in `--screen-reader`, a score that changes is
+  announced above the prompt (`[Score 1, up 1]`), since quietening the status
+  line otherwise takes the score with it. Exact for Z-machine v1–v3 (a global the
+  standard reserves) and for Scott Adams (treasures deposited); recovered from
+  the status text for v4+ and Glulx, where no score is exposed to the
+  interpreter at all.
 - **`--show-status`** — narrate the status line whenever the story updates it.
   Off under `--screen-reader`, because a Z-machine v3 status line carries a move counter
   and so changes on every single turn.

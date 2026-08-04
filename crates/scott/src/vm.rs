@@ -926,9 +926,14 @@ impl Vm {
         }
     }
 
-    fn print_score(&mut self) {
-        let total = self.db.num_treasures;
-        let in_treasure_room = self
+    /// The player's score as Scott counts it: treasures deposited in the
+    /// treasure room, and the total there are to find.
+    ///
+    /// Scott stores no score anywhere — the `SCORE` verb recomputes this each
+    /// time it is asked — so a host that wants to notice the score changing has
+    /// to recount too. Cheap: it is a scan of the item table.
+    pub fn treasures_stored(&self) -> (i32, i32) {
+        let stored = self
             .db
             .items
             .iter()
@@ -936,6 +941,11 @@ impl Vm {
             .filter(|(_, it)| it.treasure)
             .filter(|(i, _)| self.item_loc_of(*i) == Some(self.db.treasure_room as i32))
             .count() as i32;
+        (stored, self.db.num_treasures)
+    }
+
+    fn print_score(&mut self) {
+        let (in_treasure_room, total) = self.treasures_stored();
         self.out.push_str(&format!(
             "You have {in_treasure_room} out of {total} treasures.\n"
         ));

@@ -296,6 +296,34 @@ fn release_prompt(machine: &mut Machine) {
     }
 }
 
+/// The game's current score, or `None` when there is no reading it.
+///
+/// Two different questions behind one name. In v1–v3 the interpreter owns the
+/// status line and the standard puts the score in global 2 (ZMSD §8.2), so the
+/// number is exact — and a *time* game has a clock there instead, and no score
+/// at all. From v4 the game draws its own status line and the globals mean
+/// whatever it likes, so the only score available is whatever it wrote on the
+/// screen, recovered by pattern (SQ-0616).
+fn current_score(machine: &Machine) -> Option<i32> {
+    if machine.mem.version() < 4 {
+        return match machine.status_line().right {
+            zvm::screen::StatusRight::ScoreTurns { score, .. } => Some(score as i32),
+            zvm::screen::StatusRight::Time { .. } => None,
+        };
+    }
+    cli_host::score_in_status(&screen::ScreenView::status_now(machine))
+}
+
+/// Announce the score if it moved, above the prompt the sink is holding.
+fn announce_score(machine: &mut Machine, watch: &mut cli_host::ScoreWatch, on: bool) {
+    if !on {
+        return;
+    }
+    if let Some(line) = watch.update(current_score(machine)) {
+        println!("{line}");
+    }
+}
+
 /// Answer a host command (`/status`) mid-turn without wrecking the transcript.
 ///
 /// The prompt has already gone out by now, so the answer would otherwise land on
@@ -1009,6 +1037,10 @@ fn main() {
     let quiet_status_line = mode.plain() && !args.show_status;
     let mut view =
         screen::ScreenView::new(stdout_is_tty, args.story_only, quiet_status_line, term_rows);
+    // Screen-reader mode only: elsewhere the status line is on screen the whole
+    // time, so announcing what it already says would be noise (SQ-0616).
+    let mut score_watch = cli_host::ScoreWatch::new();
+    let announce_scores = mode.plain() && !args.story_only;
     print!("{}", view.start());
     let _ = io::stdout().flush();
 
@@ -1110,6 +1142,10 @@ fn main() {
                 // current size; on piped stdout this is a no-op via is_tty guard).
                 maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
                 print!("{}", view.frame(&machine));
+                // Between the status and the held prompt: the announcement is
+                // about the turn that just ended, so it belongs with it rather
+                // than after the prompt (SQ-0611/0616).
+                announce_score(&mut machine, &mut score_watch, announce_scores);
                 release_prompt(&mut machine);
                 let _ = io::stdout().flush();
                 let cur_bg = if stdout_is_tty && machine.honor_game_colours {
@@ -1166,6 +1202,10 @@ fn main() {
                 // Poll for terminal resize before char input.
                 maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
                 print!("{}", view.frame(&machine));
+                // Between the status and the held prompt: the announcement is
+                // about the turn that just ended, so it belongs with it rather
+                // than after the prompt (SQ-0611/0616).
+                announce_score(&mut machine, &mut score_watch, announce_scores);
                 release_prompt(&mut machine);
                 let _ = io::stdout().flush();
                 let cur_bg = if stdout_is_tty && machine.honor_game_colours {
@@ -1263,6 +1303,42 @@ mod v6_tests {
 
     fn build(story: Vec<u8>) -> Result<Machine, String> {
         build_machine(story, false, false, 24, 24, 80, true, None, false)
+    }
+
+    /// SQ-0616. Where the score comes from is a different question per version,
+    /// and getting it wrong is silent: v1-v3 have it in a global the standard
+    /// pins down, v4+ do not, and a time game has a clock there instead.
+    #[test]
+    fn the_score_source_follows_the_story_version() {
+        // Ask the header rather than assuming: the synthetic story puts static
+        // memory at 0x0200, so a hard-coded globals base lands in read-only
+        // memory and panics.
+        let globals = |m: &Machine| m.mem.global_vars() as u32;
+
+        // v3: the interpreter owns the status line, and global 2 is the score
+        // (ZMSD §8.2). Exact, and it must survive being negative.
+        let mut m = build(story_of_version(3)).expect("v3 builds");
+        let g = globals(&m);
+        m.mem.write_word(g + 2, 42);
+        assert_eq!(current_score(&m), Some(42));
+        m.mem.write_word(g + 2, (-7i16) as u16);
+        assert_eq!(current_score(&m), Some(-7), "scores can go negative");
+
+        // A v3 *time* game (Flags 1 bit 1) keeps a clock there, not a score.
+        let mut time_story = story_of_version(3);
+        time_story[0x01] |= 1 << 1;
+        let m = build(time_story).expect("v3 time game builds");
+        assert_eq!(current_score(&m), None, "a clock is not a score");
+
+        // v4+: the game draws its own status line and the globals mean whatever
+        // it likes, so the same global must NOT be read as a score.
+        let mut m = build(story_of_version(5)).expect("v5 builds");
+        let g = globals(&m);
+        m.mem.write_word(g + 2, 42);
+        assert_eq!(
+            current_score(&m), None,
+            "v4+ globals are the game's own; the score has to come from the text"
+        );
     }
 
     /// SQ-0601: v6 is a graphical, mouse-and-menu format this front-end cannot

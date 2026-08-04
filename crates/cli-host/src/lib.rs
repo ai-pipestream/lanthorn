@@ -23,6 +23,7 @@ pub mod flags;
 pub mod input;
 pub mod line;
 pub mod mode;
+pub mod score;
 pub mod term;
 
 pub use args::{Matches, Opt, scan};
@@ -30,6 +31,7 @@ pub use flags::{EXIT_USAGE, handled_common_flags, looks_like_flag, usage_error};
 pub use line::LineHold;
 pub use input::{read_byte_or_eof, read_byte_stdin, read_line_or_eof, read_line_stdin};
 pub use mode::{HostMode, PLAIN_FLAGS, no_color, plain_requested};
+pub use score::{ScoreWatch, score_in_status};
 pub use term::{
     TerminalGuard, cursor_reset, cursor_steady_block, end_raw_mode, osc_reset_bg, osc_set_bg,
     page_bg_escape, restore_and_exit, restore_terminal, rgb24,

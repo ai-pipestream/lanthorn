@@ -204,6 +204,41 @@ boundary a real Scott terminal drew between its two windows, and a reader either
 announces thirty-odd em-dashes one at a time or swallows the line — neither of
 which conveys a boundary.
 
+### Score changes are announced
+
+Quietening the status line takes the score with it, and the score is the part
+that carries news — a sighted player watches it tick over, a listener would have
+to keep asking. So in screen-reader mode a score that *moves* is announced above
+the prompt:
+
+```
+You put the gold idol on the pedestal.
+
+[Score 1, up 1]
+>
+```
+
+Only on change, never on the first sighting (the score you started with is not an
+event), and words rather than `+1`, because a reader announces "plus" only at
+higher punctuation settings.
+
+Where the number comes from differs sharply by format, and two of the three are
+exact while the rest is pattern-matching:
+
+| | source | |
+|---|---|---|
+| Z-machine v1–v3 | global 2, which the standard reserves for the score (ZMSD §8.2) | exact |
+| Z-machine v4+ | the status line the game drew | recovered from text |
+| Glulx | the Glk grid window — Glk has no concept of a score at all | recovered from text |
+| Scott Adams | treasures deposited in the treasure room, recounted each turn | exact |
+
+The text-recovery cases look for a `Score: N` field and take the last one on the
+line, so a room called "Score Board" doesn't become your score. A game that words
+it differently — "Points", a bare number, a translated status line — simply isn't
+matched, and the announcement stays silent rather than reporting a wrong figure.
+A Z-machine *time* game has a clock where the score would be, and is correctly
+never announced.
+
 ### `/status`
 
 Status text reaches a listener only when the game chooses to write it, and then

@@ -283,11 +283,30 @@ fn emit_page_bg(machine: &mut Machine, honor: bool, stdout_is_tty: bool, last: &
 /// CLI uses it to flush output so the prompt is visible). This is the shared,
 /// backend-agnostic loop — the CLI wires real stdin/terminal readers; tests wire
 /// scripted ones.
+/// Announce the score if it moved, above the prompt the backend is holding.
+///
+/// Glk has no concept of a score, so unlike the Z-machine there is no number to
+/// read anywhere — Glulx games write it into a grid window and that text is all
+/// there is. Recovered by pattern, which fails to silence rather than to a wrong
+/// figure (SQ-0616).
+fn announce_score(machine: &mut Machine, watch: &mut cli_host::ScoreWatch, on: bool) {
+    if !on {
+        return;
+    }
+    if let Some(t) = machine.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>() {
+        let score = cli_host::score_in_status(&t.grids_plain_now());
+        if let Some(line) = watch.update(score) {
+            t.write_host_line(&line);
+        }
+    }
+}
+
 fn drive(
     machine: &mut Machine,
     vfs_path: &std::path::Path,
     honor: bool,
     stdout_is_tty: bool,
+    announce_scores: bool,
     mut before_input: impl FnMut(&mut Machine),
     mut read_line: impl FnMut(LineEcho) -> (String, u32),
     mut read_char: impl FnMut() -> u32,
@@ -298,6 +317,7 @@ fn drive(
     // per-instruction step loop free of the lookup. Emits only on change; reset
     // (OSC 111) happens once at the single teardown point in `main`.
     let mut last_page_bg: Option<(u8, u8, u8)> = None;
+    let mut score_watch = cli_host::ScoreWatch::new();
     // The per-game directory: `vfs_path` is always `game_dir/default.glkvfs`
     // (constructed that way in `main`, and by the tests below), so its parent
     // is the game dir — no need to thread a second path through.
@@ -343,6 +363,7 @@ fn drive(
                 consecutive_timer_ticks = 0;
                 emit_page_bg(machine, honor, stdout_is_tty, &mut last_page_bg);
                 before_input(machine);
+                announce_score(machine, &mut score_watch, announce_scores);
                 // Show live typing in raw mode and erase it on Enter, then arm a
                 // deferred echo: if the game reprints the command itself in
                 // style_Input (Inform 7 / Counterfeit Monkey) that stands; otherwise
@@ -704,6 +725,7 @@ fn main() {
         &vfs_path,
         honor,
         stdout_is_tty,
+        mode.plain() && !m.has("--story-only"),
         |m| {
             // Re-poll terminal size before each input (interactive TTY only).
             if both_tty {
@@ -1112,7 +1134,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut keys = vec![b'Z' as u32].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glkvfs"), true, false, |_| {}, |_echo| (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
+        drive(&mut m, std::path::Path::new("unused.glkvfs"), true, false, false, |_| {}, |_echo| (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Z", "the typed key was supplied, stored, and echoed");
     }
@@ -1136,7 +1158,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut lines = vec!["hello".to_string()].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glkvfs"), true, false, |_| {}, move |_echo| (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
+        drive(&mut m, std::path::Path::new("unused.glkvfs"), true, false, false, |_| {}, move |_echo| (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "hello", "the typed line was supplied into the buffer and printed");
     }
@@ -1238,7 +1260,7 @@ mod tests {
         // Run 1: a game writes "Hi" into a Glk file, then quits. drive's in-loop,
         // dirty-gated flush should persist the VFS to the sidecar.
         let mut m = build_machine(vfs_image(write_hi_program(), 2), Box::new(TestBackend::new())).unwrap();
-        drive(&mut m, &vfs_path, true, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
+        drive(&mut m, &vfs_path, true, false, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
 
         assert!(vfs_path.exists(), "the .glkvfs sidecar is written to disk");
         let blob = fs::read(&vfs_path).unwrap();
@@ -1251,7 +1273,7 @@ mod tests {
         let mut m2 = build_machine(vfs_image(read_hi_program(), 4), Box::new(TestBackend::new())).unwrap();
         m2.load_vfs(&fs::read(&vfs_path).unwrap());
         m2.clear_vfs_dirty();
-        drive(&mut m2, &vfs_path, true, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
+        drive(&mut m2, &vfs_path, true, false, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
         let text = m2.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Hi", "the persisted bytes are readable after load_vfs");
 
@@ -1331,7 +1353,7 @@ mod tests {
         let save_path_str = save_path.to_str().unwrap().to_string();
         let mut m =
             build_machine(vfs_image(save_restore_by_prompt_program(), 4), Box::new(TestBackend::new())).unwrap();
-        drive(&mut m, &vfs_path, true, false, |_| {}, move |_echo| (save_path_str.clone(), 0), || {
+        drive(&mut m, &vfs_path, true, false, false, |_| {}, move |_echo| (save_path_str.clone(), 0), || {
             keycode::RETURN
         });
 

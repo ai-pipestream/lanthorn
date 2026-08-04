@@ -216,6 +216,11 @@ fn main() {
 
     let mut turns = 0u64;
     let mut last_block = String::new();
+    // Scott stores no score: it is the count of treasures deposited in the
+    // treasure room, recomputed each turn (SQ-0616). Screen-reader mode only —
+    // otherwise the SCORE verb is the way to ask.
+    let mut score_watch = cli_host::ScoreWatch::new();
+    let announce_scores = mode.plain();
     loop {
         if vm.has_quit() {
             break;
@@ -235,6 +240,12 @@ fn main() {
                 let _ = writeln!(out, "{rule}");
             }
             last_block = block;
+        }
+        if announce_scores {
+            let (stored, _total) = vm.treasures_stored();
+            if let Some(line) = score_watch.update(Some(stored)) {
+                let _ = writeln!(out, "{line}");
+            }
         }
         let _ = write!(out, "{PROMPT}");
         let _ = out.flush();
