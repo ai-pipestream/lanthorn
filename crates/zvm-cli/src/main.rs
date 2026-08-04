@@ -474,29 +474,6 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
     })
 }
 
-/// Per-game directory name: the story file's basename (incl. extension),
-/// sanitized to a filesystem-safe token. Empty -> "game".
-fn story_key(story_path: &std::path::Path) -> String {
-    let name = story_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    let s: String = name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
-        .collect();
-    if s.is_empty() { "game".to_string() } else { s }
-}
-
-/// Resolve an interactive `@save`/`@restore` filename prompt: a bare name
-/// (no path separator) lands in `game_dir` with a `.qzl` extension; a
-/// path-bearing value is honored verbatim.
-fn resolve_save_input(input: &str, game_dir: &std::path::Path) -> std::path::PathBuf {
-    let t = input.trim();
-    if t.contains('/') || t.contains('\\') {
-        std::path::PathBuf::from(t)
-    } else {
-        let name = if t.ends_with(".qzl") { t.to_string() } else { format!("{t}.qzl") };
-        game_dir.join(name)
-    }
-}
-
 // ── terminal size ─────────────────────────────────────────────────────────────
 
 /// Detect the terminal size. Returns `(rows, cols)` using crossterm; falls
@@ -906,14 +883,7 @@ fn main() {
     // Keep the original bytes for Restart.
     let original_bytes = story_bytes.clone();
 
-    // Per-game directory: base (--data-dir override, else the story's own
-    // directory) joined with the sanitized story filename.
-    let base = args.data_dir.as_deref().map(std::path::PathBuf::from)
-        .unwrap_or_else(|| story_path.parent().filter(|p| !p.as_os_str().is_empty())
-            .map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from(".")));
-    // `.save` suffix keeps the dir from colliding with the story file itself
-    // when `base` is the story's own directory (SQ-0294).
-    let game_dir = base.join(format!("{}.save", story_key(&story_path)));
+    let game_dir = cli_host::game_dir(&story_path, args.data_dir.as_deref());
     let aux_file = auxiliary::aux_path(&game_dir);
 
     // One decision about what this terminal can take, published process-wide so
@@ -1202,7 +1172,7 @@ fn main() {
             StepResult::SaveRequest => {
                 let filename = prompt_and_read_line("\nSave to file: ");
                 let filename = filename.trim();
-                let path = resolve_save_input(filename, &game_dir);
+                let path = cli_host::resolve_save_input(filename, &game_dir);
                 if let Some(dir) = path.parent() {
                     let _ = fs::create_dir_all(dir);
                 }
@@ -1222,7 +1192,7 @@ fn main() {
             StepResult::RestoreRequest => {
                 let filename = prompt_and_read_line("\nRestore from file: ");
                 let filename = filename.trim();
-                let path = resolve_save_input(filename, &game_dir);
+                let path = cli_host::resolve_save_input(filename, &game_dir);
                 match fs::read(&path) {
                     Ok(data) => match machine.complete_restore_success(&data) {
                         Ok(()) => {} // restored; @save descriptor completed forward
@@ -1480,44 +1450,6 @@ mod arg_tests {
         assert_eq!(p(&["-I", "notanumber", "g"]).interpreter, None);
     }
 
-    #[test]
-    fn story_key_keeps_extension_and_sanitizes() {
-        use std::path::Path;
-        assert_eq!(story_key(Path::new("/g/Zork1.z5")), "Zork1.z5");
-        assert_ne!(story_key(Path::new("/g/Zork1.z5")), story_key(Path::new("/g/Zork1.gblorb")));
-        assert_eq!(story_key(Path::new("/g/a b?.z5")), "a_b_.z5");
-        assert_eq!(story_key(Path::new("")), "game");
-    }
-
-    /// Regression for SQ-0284/SQ-0294: the CLI's default `base` is the
-    /// story's own directory, so `base.join(story_key(..))` used to collide
-    /// with the story file itself (`mkdir` on an existing filename fails).
-    /// The `.save` suffix makes the per-game dir a distinct path.
-    #[test]
-    fn game_dir_does_not_collide_with_same_named_story_file() {
-        let tmp = std::env::temp_dir().join(format!("zvm-cli-storage-collision-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        let story_path = tmp.join("game.z5");
-        std::fs::write(&story_path, b"x").unwrap(); // a FILE named game.z5
-
-        let game_dir = tmp.join(format!("{}.save", story_key(&story_path)));
-        assert_eq!(game_dir, tmp.join("game.z5.save"));
-        std::fs::create_dir_all(&game_dir).expect("must not collide with the story file");
-        assert!(game_dir.is_dir());
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn resolve_save_input_bare_vs_path() {
-        use std::path::{Path, PathBuf};
-        let gd = Path::new("/data/Zork1.z5");
-        assert_eq!(resolve_save_input("quick", gd), PathBuf::from("/data/Zork1.z5/quick.qzl"));
-        assert_eq!(resolve_save_input("quick.qzl", gd), PathBuf::from("/data/Zork1.z5/quick.qzl"));
-        assert_eq!(resolve_save_input("/tmp/foo.qzl", gd), PathBuf::from("/tmp/foo.qzl"));
-    }
 }
 
 #[cfg(test)]

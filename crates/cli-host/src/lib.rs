@@ -25,6 +25,7 @@ pub mod line;
 pub mod mode;
 pub mod pager;
 pub mod score;
+pub mod storage;
 pub mod term;
 
 pub use args::{Matches, Opt, scan};
@@ -34,6 +35,7 @@ pub use input::{read_byte_or_eof, read_byte_stdin, read_line_or_eof, read_line_s
 pub use mode::{HostMode, PLAIN_FLAGS, no_color, plain_requested};
 pub use pager::{Pager, wait_for_keypress};
 pub use score::{ScoreWatch, score_in_status};
+pub use storage::{game_dir, resolve_save_input, story_key};
 pub use term::{
     TerminalGuard, cursor_reset, cursor_steady_block, end_raw_mode, osc_reset_bg, osc_set_bg,
     page_bg_escape, restore_and_exit, restore_terminal, rgb24,

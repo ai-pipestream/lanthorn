@@ -440,7 +440,7 @@ fn drive(
                     if name.is_empty() {
                         machine.complete_save(false);
                     } else {
-                        let path = resolve_save_input(name, game_dir);
+                        let path = cli_host::resolve_save_input(name, game_dir);
                         std::fs::create_dir_all(path.parent().unwrap_or(std::path::Path::new("."))).ok();
                         let ok = fs::write(&path, machine.save_quetzal()).is_ok();
                         if ok {
@@ -471,7 +471,7 @@ fn drive(
                     if name.is_empty() {
                         machine.complete_restore_failure();
                     } else {
-                        let path = resolve_save_input(name, game_dir);
+                        let path = cli_host::resolve_save_input(name, game_dir);
                         match fs::read(&path) {
                             Ok(bytes) if machine.complete_restore_quetzal(&bytes) => {
                                 eprintln!("[restored from {}]", path.display());
@@ -496,16 +496,6 @@ fn drive(
 }
 
 // ── story-key / per-game save resolution ────────────────────────────────────
-
-/// Per-game directory name: the story file's basename (incl. extension),
-/// sanitized to a filesystem-safe token. Empty -> "game".
-fn story_key(story_path: &std::path::Path) -> String {
-    let name = story_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    let s: String = name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
-        .collect();
-    if s.is_empty() { "game".to_string() } else { s }
-}
 
 /// The fixed path for a game-managed (create_by_name) save slot:
 /// `<game_dir>/<sanitized fileref name>.qzl`. `name` is already sanitized by the
@@ -537,19 +527,6 @@ fn seed_saved_games(machine: &mut Machine, game_dir: &std::path::Path) {
         };
         let size = entry.metadata().map(|m| m.len()).unwrap_or(0) as u32;
         machine.seed_saved_game_file(name.to_string(), size);
-    }
-}
-
-/// Resolve an interactive `@save`/`@restore` filename prompt: a bare name
-/// (no path separator) lands in `game_dir` with a `.qzl` extension; a
-/// path-bearing value is honored verbatim.
-fn resolve_save_input(input: &str, game_dir: &std::path::Path) -> std::path::PathBuf {
-    let t = input.trim();
-    if t.contains('/') || t.contains('\\') {
-        std::path::PathBuf::from(t)
-    } else {
-        let name = if t.ends_with(".qzl") { t.to_string() } else { format!("{t}.qzl") };
-        game_dir.join(name)
     }
 }
 
@@ -700,15 +677,8 @@ fn main() {
         None
     };
 
-    // Per-game directory: base (--data-dir override, else the story's own
-    // directory) joined with the sanitized story filename.
     let story_path = std::path::PathBuf::from(path);
-    let base = data_dir.map(std::path::PathBuf::from)
-        .unwrap_or_else(|| story_path.parent().filter(|p| !p.as_os_str().is_empty())
-            .map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from(".")));
-    // `.save` suffix keeps the dir from colliding with the story file itself
-    // when `base` is the story's own directory (SQ-0294).
-    let game_dir = base.join(format!("{}.save", story_key(&story_path)));
+    let game_dir = cli_host::game_dir(&story_path, data_dir.as_deref());
 
     // The Glk file VFS sidecar: `<game_dir>/default.glkvfs`. Loaded here before
     // the run, flushed dirty-gated inside `drive`, so a game's external files
@@ -965,44 +935,6 @@ mod tests {
 
     // ── story-key / per-game save resolution ──────────────────────────────────
 
-    #[test]
-    fn story_key_keeps_extension_and_sanitizes() {
-        use std::path::Path;
-        assert_eq!(story_key(Path::new("/g/Zork1.z5")), "Zork1.z5");
-        assert_ne!(story_key(Path::new("/g/Zork1.z5")), story_key(Path::new("/g/Zork1.gblorb")));
-        assert_eq!(story_key(Path::new("/g/a b?.z5")), "a_b_.z5");
-        assert_eq!(story_key(Path::new("")), "game");
-    }
-
-    /// Regression for SQ-0284/SQ-0294: the CLI's default `base` is the
-    /// story's own directory, so `base.join(story_key(..))` used to collide
-    /// with the story file itself (`mkdir` on an existing filename fails).
-    /// The `.save` suffix makes the per-game dir a distinct path.
-    #[test]
-    fn game_dir_does_not_collide_with_same_named_story_file() {
-        let tmp = std::env::temp_dir().join(format!("gvm-cli-storage-collision-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        let story_path = tmp.join("game.gblorb");
-        std::fs::write(&story_path, b"x").unwrap(); // a FILE named game.gblorb
-
-        let game_dir = tmp.join(format!("{}.save", story_key(&story_path)));
-        assert_eq!(game_dir, tmp.join("game.gblorb.save"));
-        std::fs::create_dir_all(&game_dir).expect("must not collide with the story file");
-        assert!(game_dir.is_dir());
-
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn resolve_save_input_bare_vs_path() {
-        use std::path::{Path, PathBuf};
-        let gd = Path::new("/data/Zork1.z5");
-        assert_eq!(resolve_save_input("quick", gd), PathBuf::from("/data/Zork1.z5/quick.qzl"));
-        assert_eq!(resolve_save_input("quick.qzl", gd), PathBuf::from("/data/Zork1.z5/quick.qzl"));
-        assert_eq!(resolve_save_input("/tmp/foo.qzl", gd), PathBuf::from("/tmp/foo.qzl"));
-    }
 
     #[test]
     fn game_auto_save_path_is_fixed_named_in_game_dir() {
