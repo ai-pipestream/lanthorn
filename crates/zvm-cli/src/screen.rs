@@ -103,12 +103,6 @@ pub fn bleep_bytes(count: usize, is_tty: bool) -> String {
     }
 }
 
-/// True once `lines` reaches the page limit (`page_height - 1`); a height < 2
-/// never pages (avoids a zero/looping page).
-pub fn should_page(lines: u16, page_height: u16) -> bool {
-    page_height >= 2 && lines >= page_height - 1
-}
-
 fn right_field(right: &StatusRight) -> String {
     match right {
         StatusRight::ScoreTurns { score, turns } => format!("Score: {score}  Moves: {turns}"),
@@ -869,15 +863,6 @@ mod tests {
             "leading blank cells carry the screen bg before the spaces: {out:?}"
         );
         assert!(out.contains('H'), "text preserved: {out:?}");
-    }
-
-    #[test]
-    fn should_page_at_threshold() {
-        assert!(!should_page(0, 24));
-        assert!(!should_page(22, 24));
-        assert!(should_page(23, 24)); // page_height - 1
-        assert!(should_page(99, 24));
-        assert!(!should_page(5, 1)); // degenerate height never pages
     }
 
     #[test]

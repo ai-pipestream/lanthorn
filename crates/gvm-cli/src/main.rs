@@ -583,6 +583,7 @@ Options:
                         undoing --screen-reader's quietening.
       --no-game-colours Ignore the game's Glk stylehint colours
                         (also honoured: NO_COLOR)
+      --no-more         Disable [MORE] paging on long output (alias: --no-page)
       --no-accel        Disable Glulx accelerated-function interception
       --data-dir <path> Base dir for saves/sidecars (default: beside the story)
   -V, --version         Print version and exit
@@ -593,6 +594,7 @@ Options:
 const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--no-game-colours"]),
     cli_host::Opt::flag(&["--no-accel"]),
+    cli_host::Opt::flag(&["--no-more", "--no-page"]),
     cli_host::Opt::flag(&["--story-only"]),
     cli_host::Opt::flag(&["--show-status"]),
     cli_host::Opt::flag(&["--screen-reader", "--plain"]),
@@ -662,6 +664,12 @@ fn main() {
     // (SQ-0612); taller grids — menus, forms — always come through.
     backend.set_quiet_status_line(mode.plain() && !m.has("--show-status"));
     backend.set_story_only(m.has("--story-only"));
+    // Paging needs both ends to be a terminal (a pipe would never answer the
+    // prompt) and is off in screen-reader mode by choice — a blocking prompt
+    // hiding the rest of the output is the worst shape for a reader (SQ-0617).
+    let interactive = mode.both_tty();
+    let paging = interactive && !m.has("--no-more") && !mode.plain();
+    backend.set_paging(paging, interactive);
     backend.set_data_blorb(blorb);
     let mut machine = Machine::with_glk(mem, Box::new(backend));
     machine.set_acceleration(accel);

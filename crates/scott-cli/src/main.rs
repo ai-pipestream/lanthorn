@@ -44,6 +44,22 @@ fn separator(block: &str, plain: bool) -> Option<String> {
     Some(format!("<{}>", "\u{2014}".repeat(width.saturating_sub(2))))
 }
 
+/// Write `text`, pausing at the bottom of each page.
+///
+/// Scott prints in blocks — a room description, a turn's response — rather than
+/// a character at a time, so the newlines are counted as the block goes out and
+/// the pause lands at the line that filled the page.
+fn page_out(out: &mut impl Write, pager: &mut cli_host::Pager, interactive: bool, text: &str) {
+    for (i, piece) in text.split_inclusive('\n').enumerate() {
+        let _ = write!(out, "{piece}");
+        if piece.ends_with('\n') && pager.line() {
+            let _ = out.flush();
+            pager.pause(out, interactive);
+        }
+        let _ = i;
+    }
+}
+
 /// Read one command line. Returns `None` at end of input (EOF, or Ctrl-C/Ctrl-D
 /// when interactive).
 ///
@@ -105,6 +121,7 @@ struct Args {
     path: String,
     seed: Option<u32>,
     max_turns: Option<u64>,
+    no_more: bool,
 }
 
 /// Every option `scott-cli` accepts; `cli_host::args` applies the rules.
@@ -112,6 +129,7 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--screen-reader", "--plain"]),
     cli_host::Opt::flag(&["--help", "-h"]),
     cli_host::Opt::flag(&["--version", "-V"]),
+    cli_host::Opt::flag(&["--no-more", "--no-page"]),
     cli_host::Opt::valued(&["--seed"]),
     cli_host::Opt::valued(&["--max-turns"]),
 ];
@@ -134,6 +152,7 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
         path: m.first_positional().ok_or("no story file given")?.to_string(),
         seed: num("--seed")?.map(|v| v as u32),
         max_turns: num("--max-turns")?,
+        no_more: m.has("--no-more"),
     })
 }
 
@@ -156,6 +175,7 @@ Options:
                       suppress — the room block IS the story — so there is no
                       --story-only here. Ask for the room again any time with
                       /status.
+      --no-more       Disable [MORE] paging on long output (alias: --no-page)
       --seed <n>      Seed the RNG for reproducible play
       --max-turns <n> Stop after n turns (headless/testing)
   -V, --version       Print version and exit
@@ -221,6 +241,14 @@ fn main() {
     // otherwise the SCORE verb is the way to ask.
     let mut score_watch = cli_host::ScoreWatch::new();
     let announce_scores = mode.plain();
+    // `[MORE]` paging (SQ-0617). Needs both ends to be a terminal — a pipe would
+    // never answer the prompt — and is off in screen-reader mode by choice.
+    let term_rows = terminal::size().map(|(_, r)| r).unwrap_or(24);
+    let mut pager = cli_host::Pager::new(
+        mode.both_tty() && !args.no_more && !mode.plain(),
+        cli_host::Pager::height_for(term_rows),
+    );
+    let interactive_pager = mode.both_tty();
     loop {
         if vm.has_quit() {
             break;
@@ -235,9 +263,9 @@ fn main() {
         // we print it inline whenever the room (or its contents) changes.
         let block = vm.room_block();
         if block != last_block {
-            let _ = writeln!(out, "\n{block}");
+            page_out(&mut out, &mut pager, interactive_pager, &format!("\n{block}\n"));
             if let Some(rule) = separator(&block, mode.plain()) {
-                let _ = writeln!(out, "{rule}");
+                page_out(&mut out, &mut pager, interactive_pager, &format!("{rule}\n"));
             }
             last_block = block;
         }
@@ -247,6 +275,8 @@ fn main() {
                 let _ = writeln!(out, "{line}");
             }
         }
+        // The player is about to be asked something, so they have caught up.
+        pager.reset();
         let _ = write!(out, "{PROMPT}");
         let _ = out.flush();
 
@@ -279,7 +309,7 @@ fn main() {
         turns += 1;
         // Prints this turn's output; a quitting turn (win/death) is drained here
         // and the loop's top-of-iteration `has_quit` check ends the session.
-        let _ = write!(out, "{}", vm.take_output());
+        page_out(&mut out, &mut pager, interactive_pager, &vm.take_output());
 
         // On game end, print the final room block: the panel (upper "window")
         // reflects the closing state, but the loop's top-of-iteration block print

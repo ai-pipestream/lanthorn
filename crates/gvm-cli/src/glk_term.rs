@@ -521,6 +521,15 @@ pub struct TerminalBackend {
     /// counter and is not maintained off a TTY. Shared with zvm-cli, which had
     /// no answer to this at all (`cli_host::LineHold`, SQ-0611).
     hold: cli_host::LineHold,
+    /// `[MORE]` paging for the streaming story window (`cli_host::Pager`).
+    ///
+    /// Only ever consulted on the streaming path — windowed mode paints fixed
+    /// rects with its own scrollback, so there is no "bottom of the page" to
+    /// stop at.
+    pager: cli_host::Pager,
+    /// Both ends are a terminal, so a `[MORE]` prompt has someone to answer it.
+    /// Pausing for a key a pipe will never send is a hang.
+    interactive: bool,
     /// `--story-only`: suppress every grid window — status bar, menus, forms.
     /// Stronger than `quiet_status_line`, which only quietens one-row chrome.
     /// On a TTY the rows the layout reserved stay blank; the game still believes
@@ -602,6 +611,8 @@ impl TerminalBackend {
             honor: true,
             grids: Vec::new(),
             hold: cli_host::LineHold::new(hold_prompt),
+            pager: cli_host::Pager::new(false, cli_host::Pager::height_for(rows as u16)),
+            interactive: false,
             story_only: false,
             quiet_status_line: false,
             last_grid_plain: Vec::new(),
@@ -629,6 +640,13 @@ impl TerminalBackend {
     /// Stop narrating a one-row status grid every turn (plain mode, SQ-0612).
     pub fn set_quiet_status_line(&mut self, on: bool) {
         self.quiet_status_line = on;
+    }
+
+    /// Enable `[MORE]` paging (SQ-0617). `interactive` must mean both ends are
+    /// a terminal, or the prompt waits for a key that never arrives.
+    pub fn set_paging(&mut self, on: bool, interactive: bool) {
+        self.pager = cli_host::Pager::new(on, cli_host::Pager::height_for(self.rows as u16));
+        self.interactive = interactive;
     }
 
     /// Show only the story window — suppress every grid (SQ-0613).
@@ -659,6 +677,8 @@ impl TerminalBackend {
             honor: true,
             grids: Vec::new(),
             hold: cli_host::LineHold::new(hold_prompt),
+            pager: cli_host::Pager::new(false, cli_host::Pager::height_for(rows as u16)),
+            interactive: false,
             story_only: false,
             quiet_status_line: false,
             last_grid_plain: Vec::new(),
@@ -691,6 +711,30 @@ impl TerminalBackend {
         }
     }
 
+    /// Write one newline to the streaming story window, pausing at the bottom
+    /// of the page.
+    ///
+    /// Every newline the story stream emits goes through here — soft wrap, hard
+    /// wrap, an explicit `\n` from the game, the library echo — because the page
+    /// fills the same way whichever put the line there.
+    fn story_newline(&mut self) {
+        let _ = self.out.write_all(b"\n");
+        self.current_col = 0;
+        // Belt and braces. Windowed output does not normally get here at all —
+        // `put_text_attr` returns early into each window's own line store — but
+        // a game that streams first and *then* opens its panels can leave a
+        // pending word for `flush` to emit after the switch. Fixed rects have no
+        // bottom of the page to stop at, and a prompt there would land on a
+        // window.
+        if self.windowed() {
+            return;
+        }
+        if self.pager.line() {
+            let _ = self.out.flush();
+            self.pager.pause(&mut self.out, self.interactive);
+        }
+    }
+
     /// Emit the pending word (if any) to the output, inserting a newline before
     /// it when the word would overflow the current line. Updates `current_col`.
     fn flush_pending_word(&mut self) {
@@ -700,8 +744,7 @@ impl TerminalBackend {
         let style = self.pending_word_style;
         let wlen = self.pending_word.chars().count() as u32;
         if self.current_col > 0 && self.current_col + wlen > self.cols {
-            let _ = self.out.write_all(b"\n");
-            self.current_col = 0;
+            self.story_newline();
         }
         let text =
             style_wrap(&self.pending_word, style, self.pending_word_colour, self.pending_word_attrs, self.honor, self.is_tty);
@@ -719,8 +762,7 @@ impl TerminalBackend {
         // Move to a new line first if the word won't fit from the current column.
         let wlen = word.chars().count() as u32;
         if self.current_col > 0 && self.current_col + wlen > self.cols {
-            let _ = self.out.write_all(b"\n");
-            self.current_col = 0;
+            self.story_newline();
         }
         // Emit chars one at a time, inserting '\n' each time we reach the limit.
         let mut result = String::with_capacity(word.len() + 4);
@@ -734,6 +776,21 @@ impl TerminalBackend {
         }
         let text = style_wrap(&result, style, self.pending_word_colour, self.pending_word_attrs, self.honor, self.is_tty);
         let _ = self.out.write_all(text.as_bytes());
+        // This chunk carries its own hard-wrap newlines, so they are counted
+        // here rather than through `story_newline`. The pause lands after the
+        // chunk rather than exactly at the line — a word longer than the
+        // terminal is wide is rare enough not to warrant splitting the write.
+        let breaks = result.matches('\n').count();
+        if breaks > 0 && !self.windowed() {
+            let mut full = false;
+            for _ in 0..breaks {
+                full |= self.pager.line();
+            }
+            if full {
+                let _ = self.out.flush();
+                self.pager.pause(&mut self.out, self.interactive);
+            }
+        }
     }
 
     /// Flush buffered output to the display **without** tearing down the scroll
@@ -767,6 +824,9 @@ impl TerminalBackend {
             self.flush_pending_word();
         }
         self.emit_grids_plain();
+        // The player has caught up: a count carried across would pause partway
+        // through the next turn for no reason.
+        self.pager.reset();
         let _ = self.out.flush();
     }
 
@@ -888,8 +948,7 @@ impl TerminalBackend {
     fn emit_library_echo(&mut self, cmd: &str) {
         let text = style_wrap(cmd, GlkStyle::Input, StyleColour::default(), StyleAttrs::default(), self.honor, self.is_tty);
         let _ = self.out.write_all(text.as_bytes());
-        let _ = self.out.write_all(b"\n");
-        self.current_col = 0;
+        self.story_newline();
     }
 
     /// Redraw all static chrome (TTY only): every grid at its rect, the graphics
@@ -1316,8 +1375,7 @@ impl GlkBackend for TerminalBackend {
             match ch {
                 '\n' => {
                     self.flush_pending_word();
-                    let _ = self.out.write_all(b"\n");
-                    self.current_col = 0;
+                    self.story_newline();
                 }
                 ' ' => {
                     self.flush_pending_word();

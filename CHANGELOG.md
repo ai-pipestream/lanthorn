@@ -28,6 +28,11 @@ identifies which beta it is without reading its git hash.
   standard reserves) and for Scott Adams (treasures deposited); recovered from
   the status text for v4+ and Glulx, where no score is exposed to the
   interpreter at all.
+- **`[MORE]` paging in `gvm-cli` and `scott-cli`** — previously only `zvm-cli`
+  paused at the bottom of a page, so a Glulx game with a long turn scrolled
+  straight past; an ordinary Glk library pauses a text-buffer window the same
+  way. All three now take `--no-more` (alias `--no-page`), page only when both
+  ends are a terminal, and never page in `--screen-reader`.
 - **`--show-status`** — narrate the status line whenever the story updates it.
   Off under `--screen-reader`, because a Z-machine v3 status line carries a move counter
   and so changes on every single turn.

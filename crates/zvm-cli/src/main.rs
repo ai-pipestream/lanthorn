@@ -146,11 +146,10 @@ fn wrap_line(text: &str, cols: u16, current_col: u16) -> (String, u16) {
 /// On a TTY it wraps styled lower-window text in SGR; when piped it stays plain.
 struct StdoutOutput {
     is_tty: bool,
-    paging: bool,
-    page_height: u16,
+    /// `[MORE]` paging, shared with the other two hosts (`cli_host::Pager`).
+    pager: cli_host::Pager,
     cols: u16,
     current_col: u16,
-    lines: u16,
     /// Mirrors `machine.screen.buffer_mode`: when `false`, soft word-wrap at
     /// the column limit is suppressed (per Z-spec, unwrapped output is flushed
     /// immediately; explicit `\n` and `[MORE]` paging still apply).
@@ -178,11 +177,9 @@ impl StdoutOutput {
     ) -> Self {
         StdoutOutput {
             is_tty,
-            paging,
-            page_height,
+            pager: cli_host::Pager::new(paging, page_height),
             cols,
             current_col: 0,
-            lines: 0,
             buffer_mode: false,
             honor_game_colours,
             hold: cli_host::LineHold::new(hold_partial),
@@ -209,17 +206,6 @@ impl StdoutOutput {
         }
     }
 
-    fn check_paging(&mut self) {
-        if self.paging && crate::screen::should_page(self.lines, self.page_height) {
-            let _ = io::stdout().flush();
-            print!("\x1b[7m[MORE]\x1b[0m");
-            let _ = io::stdout().flush();
-            wait_for_keypress(self.is_tty);
-            print!("\r\x1b[2K"); // erase the [MORE] prompt
-            self.lines = 0;
-        }
-    }
-
     /// Emit `s` with optional token-based word wrapping (gated by `buffer_mode`).
     /// Calls `check_paging` after each newline (soft or hard).
     fn write_counted(&mut self, s: &str) {
@@ -229,16 +215,9 @@ impl StdoutOutput {
         let (wrapped, new_col) = wrap_line(s, cols, self.current_col);
         for ch in wrapped.chars() {
             self.emit_char(ch);
-            if ch == '\n' {
-                // Saturating: `lines` is only ever reset by `check_paging`, an
-                // `erase_window`, or an input request, so a story that prints
-                // without pausing — piped output, `--no-more`, or a game in a
-                // print loop — climbs forever and used to panic on overflow at
-                // exactly 65_536 newlines (SQ-0601). Nothing reads the count
-                // once it is past `page_height`, so pinning it at the ceiling
-                // is behaviour-neutral.
-                self.lines = self.lines.saturating_add(1);
-                self.check_paging();
+            if ch == '\n' && self.pager.line() {
+                let _ = io::stdout().flush();
+                self.pager.pause(&mut io::stdout(), self.is_tty);
             }
         }
         self.current_col = new_col;
@@ -553,22 +532,6 @@ fn decode_keycode(code: KeyCode) -> u8 {
     }
 }
 
-/// Wait for any key press (used by the `[MORE]` prompt). Resize events during
-/// the wait are discarded; the next NeedLine/NeedChar poll will pick them up.
-fn wait_for_keypress(is_tty: bool) {
-    if !is_tty {
-        read_byte_stdin();
-        return;
-    }
-    let _ = terminal::enable_raw_mode();
-    loop {
-        if let Ok(Event::Key(_)) = event::read() {
-            break;
-        }
-    }
-    let _ = terminal::disable_raw_mode();
-}
-
 /// Read one keypress in raw mode. Resize events that arrive before the key are
 /// captured and returned alongside the key so the caller can update its state.
 /// Piped stdin: reads the first byte of the next line.
@@ -836,7 +799,7 @@ fn apply_resize(
     view.set_term_rows(new_rows);
     if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
         o.cols = new_cols;
-        o.page_height = *page_height;
+        o.pager.set_page_height(*page_height);
     }
     // Keep the game's view of the screen size current so it re-centres and
     // re-wraps against the new pane width on its next redraw.
@@ -1086,7 +1049,7 @@ fn main() {
             print!("{}", view.erase(machine.screen.current_bg, machine.honor_game_colours));
             let _ = io::stdout().flush();
             if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
-                o.lines = 0;
+                o.pager.reset();
                 o.current_col = 0;
             }
             machine.screen.erase_lower_requested = false;
@@ -1193,7 +1156,7 @@ fn main() {
                     machine.supply_line(line.trim_end(), terminator);
                 }
                 if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
-                    o.lines = 0;
+                    o.pager.reset();
                     o.current_col = 0; // cursor is at line start after user input + Enter
                 }
             }
@@ -1231,7 +1194,7 @@ fn main() {
                     machine.supply_char(ch);
                 }
                 if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
-                    o.lines = 0;
+                    o.pager.reset();
                     o.current_col = 0;
                 }
             }
@@ -1305,6 +1268,37 @@ mod v6_tests {
         build_machine(story, false, false, 24, 24, 80, true, None, false)
     }
 
+    /// SQ-0601: v6 is a graphical, mouse-and-menu format this front-end cannot
+    /// present, and every v6 story we have runs away the moment its opening
+    /// screen asks for input — whatever key it is given. Zork Zero and Arthur
+    /// flood the terminal; Shogun spins silently with nothing to interrupt.
+    /// Refusing at load is the only outcome that neither crashes nor hangs.
+    #[test]
+    fn a_v6_story_is_refused_rather_than_run() {
+        let err = match build(story_of_version(6)) {
+            Err(e) => e,
+            Ok(_) => panic!("v6 must be refused, not loaded"),
+        };
+        assert!(err.contains("not supported by zvm-cli"), "{err}");
+        assert!(err.contains("babelmap"), "the message points at the front-end that can: {err}");
+    }
+
+    /// The refusal is zvm-cli's alone — the library still supports v6, which is
+    /// what babelmap plays. A version check that lived in `Memory::new` would
+    /// take the TUI's v6 support down with it.
+    #[test]
+    fn the_library_still_loads_a_v6_story() {
+        let mem = Memory::new(story_of_version(6)).expect("zvm itself accepts v6");
+        assert_eq!(mem.version(), 6);
+    }
+
+    #[test]
+    fn the_ordinary_versions_still_load() {
+        for v in [3u8, 5, 8] {
+            assert!(build(story_of_version(v)).is_ok(), "v{v} must still load");
+        }
+    }
+
     /// SQ-0616. Where the score comes from is a different question per version,
     /// and getting it wrong is silent: v1-v3 have it in a global the standard
     /// pins down, v4+ do not, and a time game has a clock there instead.
@@ -1339,58 +1333,6 @@ mod v6_tests {
             current_score(&m), None,
             "v4+ globals are the game's own; the score has to come from the text"
         );
-    }
-
-    /// SQ-0601: v6 is a graphical, mouse-and-menu format this front-end cannot
-    /// present, and every v6 story we have runs away the moment its opening
-    /// screen asks for input — whatever key it is given. Zork Zero and Arthur
-    /// flood the terminal; Shogun spins silently with nothing to interrupt.
-    /// Refusing at load is the only outcome that neither crashes nor hangs.
-    #[test]
-    fn a_v6_story_is_refused_rather_than_run() {
-        let err = match build(story_of_version(6)) {
-            Err(e) => e,
-            Ok(_) => panic!("v6 must be refused, not loaded"),
-        };
-        assert!(err.contains("not supported by zvm-cli"), "{err}");
-        assert!(err.contains("babelmap"), "the message points at the front-end that can: {err}");
-    }
-
-    /// The refusal is zvm-cli's alone — the library still supports v6, which is
-    /// what babelmap plays. A version check that lived in `Memory::new` would
-    /// take the TUI's v6 support down with it.
-    #[test]
-    fn the_library_still_loads_a_v6_story() {
-        let mem = Memory::new(story_of_version(6)).expect("zvm itself accepts v6");
-        assert_eq!(mem.version(), 6);
-    }
-
-    #[test]
-    fn the_ordinary_versions_still_load() {
-        for v in [3u8, 5, 8] {
-            assert!(build(story_of_version(v)).is_ok(), "v{v} must still load");
-        }
-    }
-}
-
-#[cfg(test)]
-mod paging_tests {
-    use super::*;
-
-    /// SQ-0601: `lines` only resets on a page break, an `erase_window`, or an
-    /// input request, so a story printing without pause climbs without bound —
-    /// piped output and `--no-more` never page at all. It used to be a `u16`
-    /// incremented with `+=`, which panicked with "attempt to add with
-    /// overflow" at exactly 65_536 newlines. Zork Zero reached that in under
-    /// twenty seconds.
-    #[test]
-    fn the_line_counter_saturates_instead_of_overflowing() {
-        let mut o = StdoutOutput::new(false, false, 24, 80, true, false);
-        o.lines = u16::MAX - 2;
-        for _ in 0..10 {
-            o.write_counted("\n");
-        }
-        assert_eq!(o.lines, u16::MAX, "the counter pins at its ceiling and never wraps");
     }
 
     /// SQ-0611. The sink writes to the real stdout, so what is testable here is

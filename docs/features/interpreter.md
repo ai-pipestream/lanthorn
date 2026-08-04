@@ -261,6 +261,20 @@ someone who sets it has not asked to lose their status line.
 > paths, and TTY gating are measured; NVDA/Orca/VoiceOver behaviour is not. If
 > you use one, we would like to hear how this goes.
 
+## `[MORE]` paging in the CLIs
+
+A turn that prints more than a screenful used to scroll its own beginning away in
+`gvm-cli` and `scott-cli`; only `zvm-cli` paused. All three now stop at the
+bottom of a page with a reverse-video `[MORE]` bar and wait for a key, the way
+the original interpreters did and the way the TUI already did. `--no-more`
+(alias `--no-page`) turns it off.
+
+Paging requires **both** ends to be a terminal — pausing for a key that a pipe
+will never send is a hang, which is why the headless harnesses never see it — and
+is off in `--screen-reader` by choice. `gvm-cli` pages only its streaming story
+window; a game using several buffer windows is painted as fixed panels with their
+own scrollback, so there is no bottom of the page to stop at.
+
 ## Robustness
 
 When a story faults — out-of-bounds memory, stack under/overflow, an unimplemented
