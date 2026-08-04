@@ -107,7 +107,7 @@ mod tests {
     use super::*;
 
     const OPTS: &[Opt] = &[
-        Opt::flag(&["--plain", "--screen-reader"]),
+        Opt::flag(&["--screen-reader", "--plain"]),
         Opt::flag(&["--story-only", "--lower-only"]),
         Opt::valued(&["--data-dir"]),
         Opt::valued(&["--interpreter", "-I"]),
@@ -121,13 +121,13 @@ mod tests {
 
     #[test]
     fn flags_answer_to_their_canonical_name_whichever_alias_was_typed() {
-        for alias in ["--plain", "--screen-reader"] {
+        for alias in ["--screen-reader", "--plain"] {
             let m = scan_of(&[alias, "game.z5"]).unwrap();
-            assert!(m.has("--plain"), "{alias} should set --plain");
+            assert!(m.has("--screen-reader"), "{alias} should set --screen-reader");
             assert_eq!(m.first_positional(), Some("game.z5"));
         }
         assert!(scan_of(&["--lower-only"]).unwrap().has("--story-only"));
-        assert!(!scan_of(&["game.z5"]).unwrap().has("--plain"));
+        assert!(!scan_of(&["game.z5"]).unwrap().has("--screen-reader"));
     }
 
     #[test]

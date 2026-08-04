@@ -427,7 +427,7 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--no-timed-input"]),
     cli_host::Opt::flag(&["--no-sound"]),
     cli_host::Opt::flag(&["--no-game-colours"]),
-    cli_host::Opt::flag(&["--plain", "--screen-reader"]),
+    cli_host::Opt::flag(&["--screen-reader", "--plain"]),
     cli_host::Opt::flag(&["--help", "-h"]),
     cli_host::Opt::flag(&["--version", "-V"]),
     cli_host::Opt::valued(&["--volume"]),
@@ -852,20 +852,19 @@ Host commands (typed at any line prompt, never passed to the game):
   /status               Repeat the current status line / upper window
 
 Options:
-      --plain           Linear plain text, for screen readers (alias:
-                        --screen-reader; also selected by TERM=dumb). Emits no
-                        escape sequences at all — no colour, no cursor
-                        addressing, no pinned status line — hands line editing
-                        and echo back to the terminal, and turns off the [MORE]
-                        pager. The status line is not narrated every turn (see
-                        --show-status); menus and forms still are. Ask for the
-                        status any time with /status.
+      --screen-reader   Linear plain text (alias: --plain; also selected by
+                        TERM=dumb). Emits no escape sequences at all — no
+                        colour, no cursor addressing, no pinned status line —
+                        hands line editing and echo back to the terminal, and
+                        turns off the [MORE] pager. The status line is not
+                        narrated every turn (see --show-status); menus and forms
+                        still are. Ask for the status any time with /status.
       --story-only      Show only the story text: suppress the whole upper
                         window, menus and forms included. Stronger than what
-                        --plain does to the status line, and independent of it.
-                        (alias: --lower-only)
+                        --screen-reader does to the status line, and independent
+                        of it. (alias: --lower-only)
       --show-status     Narrate the status line whenever the story updates it,
-                        undoing --plain's quietening. Off under --plain because
+                        undoing --screen-reader's quietening. Off there because
                         a v3 status line carries a move counter, so it changes —
                         and would be re-read — on every single turn.
       --no-aux          Don't read or write v5 auxiliary (VFS) sidecar files
@@ -1370,7 +1369,7 @@ mod arg_tests {
         for flag in [
             "--story-only", "--lower-only", "--no-status", "--show-status", "--no-aux",
             "--no-more", "--no-page", "--no-timed-input", "--no-sound", "--no-game-colours",
-            "--plain", "--screen-reader",
+            "--screen-reader", "--plain",
         ] {
             let a = parse_args(&["zvm-cli".into(), flag.into(), "g".into()]).expect("valid args");
             assert_eq!(a.story.as_deref(), Some("g"), "{flag} should leave the story path alone");

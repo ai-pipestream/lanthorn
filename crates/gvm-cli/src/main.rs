@@ -546,19 +546,20 @@ Host commands (typed at any line prompt, never passed to the game):
   /status           Repeat the current Glk grid windows (status line)
 
 Options:
-      --plain           Linear plain text, for screen readers (alias:
-                        --screen-reader; also selected by TERM=dumb). Emits no
-                        escape sequences at all — no colour, no cursor
-                        addressing, no window rects — and hands line editing and
-                        echo back to the terminal. Grid windows stream inline as
-                        text instead of being painted in place. The status bar is
-                        not narrated every turn (see --show-status); menus still
-                        are. Ask for the status any time with /status.
+      --screen-reader   Linear plain text (alias: --plain; also selected by
+                        TERM=dumb). Emits no escape sequences at all — no
+                        colour, no cursor addressing, no window rects — and
+                        hands line editing and echo back to the terminal. Grid
+                        windows stream inline as text instead of being painted
+                        in place. The status bar is not narrated every turn (see
+                        --show-status); menus still are. Ask for the status any
+                        time with /status.
       --story-only      Show only the story window: suppress every grid window,
-                        menus and forms included. Stronger than what --plain does
-                        to the status bar, and independent of it.
+                        menus and forms included. Stronger than what
+                        --screen-reader does to the status bar, and independent
+                        of it.
       --show-status     Narrate the status bar whenever the story updates it,
-                        undoing --plain's quietening.
+                        undoing --screen-reader's quietening.
       --no-game-colours Ignore the game's Glk stylehint colours
                         (also honoured: NO_COLOR)
       --no-accel        Disable Glulx accelerated-function interception
@@ -573,7 +574,7 @@ const OPTS: &[cli_host::Opt] = &[
     cli_host::Opt::flag(&["--no-accel"]),
     cli_host::Opt::flag(&["--story-only"]),
     cli_host::Opt::flag(&["--show-status"]),
-    cli_host::Opt::flag(&["--plain", "--screen-reader"]),
+    cli_host::Opt::flag(&["--screen-reader", "--plain"]),
     cli_host::Opt::flag(&["--help", "-h"]),
     cli_host::Opt::flag(&["--version", "-V"]),
     cli_host::Opt::valued(&["--data-dir"]),

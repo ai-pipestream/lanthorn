@@ -107,9 +107,14 @@ impl HostMode {
     }
 }
 
-/// The flags that ask for plain-text output. `--screen-reader` is the same
-/// switch under the name the people who need it will look for.
-pub const PLAIN_FLAGS: [&str; 2] = ["--plain", "--screen-reader"];
+/// The flags that ask for plain-text output.
+///
+/// `--screen-reader` is first, and is the canonical spelling: it says what the
+/// mode is *for*, where `--plain` describes only the mechanism. `--plain`
+/// remains as an alias for anyone who wants escape-free output without being a
+/// screen-reader user — piping to a log, say — which is a real use even though
+/// it is not the one that motivated the mode.
+pub const PLAIN_FLAGS: [&str; 2] = ["--screen-reader", "--plain"];
 
 /// Was plain-text output asked for — by flag, or by `TERM=dumb`?
 pub fn plain_requested(argv: &[String]) -> bool {

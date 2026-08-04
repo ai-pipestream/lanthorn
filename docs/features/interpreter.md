@@ -154,7 +154,7 @@ to opt out, as does setting `NO_COLOR` to a non-empty value.
 
 ## Plain text, for screen readers
 
-All three CLIs accept **`--plain`** (alias `--screen-reader`), and select it
+All three CLIs accept **`--screen-reader`** (alias `--plain`), and select it
 automatically under `TERM=dumb`. It emits no escape sequences at all: no colour,
 no cursor addressing, no scroll region, no pinned status line, no alternate
 screen — just linear, append-only text a screen reader can follow and scrollback
@@ -176,7 +176,7 @@ rather than guessing at.
 **The status line is not narrated every turn.** A Z-machine v3 status line
 carries a move counter, so it differs on every single turn and no amount of
 change-detection will suppress it — measured, Ballyhoo repeats it on four turns
-out of four. Plain mode therefore leaves it out and lets you ask with `/status`.
+out of four. Screen-reader mode therefore leaves it out and lets you ask with `/status`.
 `--show-status` puts it back if you would rather have it whenever the story
 updates it.
 
@@ -195,11 +195,11 @@ The status also lands in the right place. A game writes its prompt last and
 without a trailing newline, and the host only learns the turn is over when the
 game asks for input — so a naive host can only append the status *after* the
 prompt, giving `> In the Wings   Score: 0`, which reads as though the prompt were
-showing you a room. In plain mode the prompt is held back until the status has
+showing you a room. In this mode the prompt is held back until the status has
 gone out, so a turn reads description, then status, then prompt. `/status`
 answers the same way, and puts the prompt back after itself.
 
-`scott-cli` drops its em-dash divider rule in plain mode. It stands in for the
+`scott-cli` drops its em-dash divider rule in this mode. It stands in for the
 boundary a real Scott terminal drew between its two windows, and a reader either
 announces thirty-odd em-dashes one at a time or swallows the line — neither of
 which conveys a boundary.
@@ -217,9 +217,9 @@ prompt — "press any key" — takes the keypress as itself; `/status` is a line
 command.)
 
 This is the same output path piped/redirected use has always taken — kept honest
-by the test harnesses that read it — so `--plain` mostly makes it *selectable*
+by the test harnesses that read it — so `--screen-reader` mostly makes it *selectable*
 without giving up an interactive terminal. `NO_COLOR` deliberately does **not**
-imply plain mode: [the convention](https://no-color.org/) is about colour, and
+imply this mode: [the convention](https://no-color.org/) is about colour, and
 someone who sets it has not asked to lose their status line.
 
 > **Not yet validated with a real screen reader.** The escape output, input

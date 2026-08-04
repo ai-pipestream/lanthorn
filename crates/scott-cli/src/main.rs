@@ -109,7 +109,7 @@ struct Args {
 
 /// Every option `scott-cli` accepts; `cli_host::args` applies the rules.
 const OPTS: &[cli_host::Opt] = &[
-    cli_host::Opt::flag(&["--plain", "--screen-reader"]),
+    cli_host::Opt::flag(&["--screen-reader", "--plain"]),
     cli_host::Opt::flag(&["--help", "-h"]),
     cli_host::Opt::flag(&["--version", "-V"]),
     cli_host::Opt::valued(&["--seed"]),
@@ -149,13 +149,13 @@ Host commands (typed at any prompt, never passed to the game):
   /status         Repeat the room block (location, exits, what is here)
 
 Options:
-      --plain         Linear plain text, for screen readers (alias:
-                      --screen-reader; also selected by TERM=dumb). Hands line
-                      editing and echo back to the terminal and drops the
-                      em-dash divider rule, which a reader can only spell out.
-                      Scott has no status window to suppress — the room block
-                      IS the story — so there is no --story-only here. Ask for
-                      the room again any time with /status.
+      --screen-reader Linear plain text (alias: --plain; also selected by
+                      TERM=dumb). Hands line editing and echo back to the
+                      terminal and drops the em-dash divider rule, which a
+                      reader can only spell out. Scott has no status window to
+                      suppress — the room block IS the story — so there is no
+                      --story-only here. Ask for the room again any time with
+                      /status.
       --seed <n>      Seed the RNG for reproducible play
       --max-turns <n> Stop after n turns (headless/testing)
   -V, --version       Print version and exit

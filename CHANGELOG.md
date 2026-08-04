@@ -16,14 +16,14 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
-- **Plain-text mode for screen readers** — all three CLIs take `--plain` (alias
-  `--screen-reader`), and select it automatically under `TERM=dumb`. It emits no
+- **Screen-reader mode** — all three CLIs take `--screen-reader` (alias
+  `--plain`), and select it automatically under `TERM=dumb`. It emits no
   escape sequences at all, hands line editing and echo back to the terminal, and
   drops the `[MORE]` pager. `NO_COLOR` is honoured separately, as colour only.
 - **`/status`** — a host command, at any line prompt in any of the three CLIs,
   that repeats the current status without the game seeing the command.
 - **`--show-status`** — narrate the status line whenever the story updates it.
-  Off under `--plain`, because a Z-machine v3 status line carries a move counter
+  Off under `--screen-reader`, because a Z-machine v3 status line carries a move counter
   and so changes on every single turn.
 
 ### Changed
