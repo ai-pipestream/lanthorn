@@ -521,6 +521,11 @@ pub struct TerminalBackend {
     /// counter and is not maintained off a TTY. Shared with zvm-cli, which had
     /// no answer to this at all (`cli_host::LineHold`, SQ-0611).
     hold: cli_host::LineHold,
+    /// Plain mode without `--show-status`: don't narrate a one-row grid on every
+    /// turn (SQ-0612). Judged by size for the same reason as zvm-cli: a one-row
+    /// TextGrid is a status bar, while Counterfeit Monkey's hint menu is the
+    /// same window grown to four rows and must still come through.
+    quiet_status_line: bool,
     /// The last plain-text block emitted for each grid, keyed by window id.
     /// Off-TTY only — grids have no rect to be painted at, so they are streamed
     /// inline instead, and a status line that says the same thing this turn as
@@ -591,6 +596,7 @@ impl TerminalBackend {
             honor: true,
             grids: Vec::new(),
             hold: cli_host::LineHold::new(hold_prompt),
+            quiet_status_line: false,
             last_grid_plain: Vec::new(),
             graphics: Vec::new(),
             buffers: Vec::new(),
@@ -611,6 +617,11 @@ impl TerminalBackend {
     /// own palette shows through, matching zvm-cli's `--no-game-colours`.
     pub fn set_honor_colours(&mut self, on: bool) {
         self.honor = on;
+    }
+
+    /// Stop narrating a one-row status grid every turn (plain mode, SQ-0612).
+    pub fn set_quiet_status_line(&mut self, on: bool) {
+        self.quiet_status_line = on;
     }
 
     /// Retain the story Blorb so `glk_stream_open_resource` can read its `Data`
@@ -636,6 +647,7 @@ impl TerminalBackend {
             honor: true,
             grids: Vec::new(),
             hold: cli_host::LineHold::new(hold_prompt),
+            quiet_status_line: false,
             last_grid_plain: Vec::new(),
             graphics: Vec::new(),
             buffers: Vec::new(),
@@ -795,6 +807,11 @@ impl TerminalBackend {
         }
         for i in 0..self.grids.len() {
             let id = self.grids[i].id;
+            // A one-row grid is the status bar; quietened in plain mode because
+            // it is rewritten every turn. Taller grids are menus and forms.
+            if self.quiet_status_line && self.grids[i].rect.height <= 1 {
+                continue;
+            }
             let text = grid_plain_text(&self.grids[i]);
             if text.is_empty() {
                 continue;
@@ -1766,6 +1783,37 @@ mod tests {
         // ...but asking directly always answers.
         assert_eq!(b.grids_plain_now(), "Hall  Score: 3");
         assert_eq!(b.grids_plain_now(), "Hall  Score: 3", "and answers again");
+    }
+
+    #[test]
+    fn quiet_mode_drops_a_one_row_grid_but_keeps_a_menu() {
+        // SQ-0612, same rule as zvm-cli: a one-row grid is the status bar, and
+        // Counterfeit Monkey's hint menu is that same window grown to four rows.
+        let (mut b, buf) = backend(false);
+        b.set_quiet_status_line(true);
+        status_layout(&mut b, 1);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Back Alley  Score: 0");
+        b.flush_out();
+        assert_eq!(out_string(&buf), "", "a one-row status grid is quietened");
+
+        status_layout(&mut b, 4); // the menu opens in the same window
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "> Introduction");
+        b.grid_put(2, 0, 3, GlkStyle::Normal, "N = Next   Q = Quit Menu");
+        b.flush_out();
+        let out = out_string(&buf);
+        assert!(out.contains("> Introduction"), "the menu still comes through: {out:?}");
+        assert!(out.contains("Q = Quit Menu"), "legend and all: {out:?}");
+    }
+
+    #[test]
+    fn a_quietened_status_still_answers_on_demand() {
+        // `/status` exists precisely so the quiet default costs nothing.
+        let (mut b, _buf) = backend(false);
+        b.set_quiet_status_line(true);
+        status_layout(&mut b, 1);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Back Alley  Score: 0");
+        b.flush_out();
+        assert_eq!(b.grids_plain_now(), "Back Alley  Score: 0");
     }
 
     #[test]

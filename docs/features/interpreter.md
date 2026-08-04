@@ -173,6 +173,21 @@ a numbered-list convention would be quieter, but that changes the interaction
 model and is the kind of thing worth designing *with* someone who uses a reader
 rather than guessing at.
 
+**The status line is not narrated every turn.** A Z-machine v3 status line
+carries a move counter, so it differs on every single turn and no amount of
+change-detection will suppress it — measured, Ballyhoo repeats it on four turns
+out of four. Plain mode therefore leaves it out and lets you ask with `/status`.
+`--show-status` puts it back if you would rather have it whenever the story
+updates it.
+
+The suppression goes by *size*, and only a one-row region is treated as chrome.
+Anything taller is content the game means you to read: the Infocom releases with
+integrated InvisiClues draw their hint menus in the upper window — Planetfall's
+is twelve chapter headings and a `RETURN = See hint / Q = Resume story` legend —
+and Lost Pig's HELP menu and Bureaucracy's licence-application form are the same
+shape. Those always come through. (`--no-status` remains the blunt instrument
+that suppresses the upper window entirely, menus included.)
+
 The status also lands in the right place. A game writes its prompt last and
 without a trailing newline, and the host only learns the turn is over when the
 game asks for input — so a naive host can only append the status *after* the

@@ -402,6 +402,7 @@ fn build_machine(
 struct Args {
     story: Option<String>,
     no_status: bool,
+    show_status: bool,
     no_aux: bool,
     no_more: bool,
     no_timed_input: bool,
@@ -410,11 +411,12 @@ struct Args {
 }
 
 fn parse_args(argv: &[String]) -> Args {
-    let mut a = Args { story: None, no_status: false, no_aux: false, no_more: false, no_timed_input: false, no_sound: false, data_dir: None };
+    let mut a = Args { story: None, no_status: false, show_status: false, no_aux: false, no_more: false, no_timed_input: false, no_sound: false, data_dir: None };
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
             "--no-status" | "--lower-only" => a.no_status = true,
+            "--show-status" => a.show_status = true,
             "--no-aux" => a.no_aux = true,
             "--no-more" | "--no-page" => a.no_more = true,
             "--no-timed-input" => a.no_timed_input = true,
@@ -853,6 +855,11 @@ Options:
                         for screen readers (alias: --screen-reader). Also
                         selected by TERM=dumb.
       --no-status       Suppress the pinned status/upper-window line (alias: --lower-only)
+      --show-status     In --plain, narrate the status line whenever the story
+                        updates it. Off by default there, because a v3 status
+                        line carries a move counter and so changes every turn;
+                        ask for it with /status instead. Menus and multi-row
+                        upper windows always come through.
       --no-aux          Don't read or write v5 auxiliary (VFS) sidecar files
       --no-more         Disable [MORE] paging on long output (alias: --no-page)
       --no-timed-input  Ignore timed-input interrupts
@@ -987,7 +994,12 @@ fn main() {
         None
     };
 
-    let mut view = screen::ScreenView::new(stdout_is_tty, args.no_status, term_rows);
+    // Plain mode does not narrate the status line every turn unless asked
+    // (SQ-0612). `--no-status` still wins outright: it is the stronger,
+    // already-documented switch and suppresses the upper window entirely.
+    let quiet_status_line = mode.plain() && !args.show_status;
+    let mut view =
+        screen::ScreenView::new(stdout_is_tty, args.no_status, quiet_status_line, term_rows);
     print!("{}", view.start());
     let _ = io::stdout().flush();
 

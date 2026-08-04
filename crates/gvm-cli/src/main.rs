@@ -549,6 +549,10 @@ Options:
       --plain           Plain text only: no escape sequences, and the terminal's
                         own line editing and echo. Intended for screen readers
                         (alias: --screen-reader). Also selected by TERM=dumb.
+      --show-status     In --plain, narrate the status grid whenever the story
+                        updates it. Off by default there; ask for it with
+                        /status instead. Menus and multi-row grids always come
+                        through.
       --no-game-colours Ignore the game's Glk stylehint colours
                         (also honoured: NO_COLOR)
       --no-accel        Disable Glulx accelerated-function interception
@@ -619,6 +623,9 @@ fn main() {
     };
     let mut backend = TerminalBackend::new();
     backend.set_honor_colours(honor);
+    // Plain mode does not narrate a one-row status grid every turn unless asked
+    // (SQ-0612); taller grids — menus, forms — always come through.
+    backend.set_quiet_status_line(mode.plain() && !argv.iter().any(|a| a == "--show-status"));
     backend.set_data_blorb(blorb);
     let mut machine = Machine::with_glk(mem, Box::new(backend));
     machine.set_acceleration(accel);

@@ -218,6 +218,24 @@ use zvm::cpu::exec::Machine;
 pub struct ScreenView {
     is_tty: bool,
     no_status: bool,
+    /// Plain mode without `--show-status`: don't narrate a one-row status
+    /// region on every turn (SQ-0612).
+    ///
+    /// It is one row that makes this safe to do by size. A v3 status line is
+    /// exactly one row by definition, and a v4+ game that splits off a single
+    /// row is drawing the same thing; anything taller is a menu, a form, or a
+    /// panel the game means you to read. The measured cases are the Infocom
+    /// releases with integrated InvisiClues — Planetfall's hint menu is twelve
+    /// chapter headings and a `RETURN = See hint / Q = Resume story` legend, all
+    /// drawn in the upper window, and a blanket suppression loses every line of
+    /// it. Lost Pig's HELP menu and Bureaucracy's licence-application form are
+    /// the same shape. Chrome is what gets quietened, not content.
+    ///
+    /// And it is the one-row case that is actually noisy: a v3 status line
+    /// carries `Moves: N`, so it differs every turn and the dedupe never fires.
+    /// Measured on Ballyhoo, that is a status line narrated on four turns out of
+    /// four. `/status` still answers on demand.
+    quiet_status_line: bool,
     term_rows: u16,
     active_rows: u16,           // current scroll-region top height (TTY)
     last_block: Option<String>, // last inline block emitted (non-TTY dedupe)
@@ -229,10 +247,11 @@ pub struct ScreenView {
 }
 
 impl ScreenView {
-    pub fn new(is_tty: bool, no_status: bool, term_rows: u16) -> Self {
+    pub fn new(is_tty: bool, no_status: bool, quiet_status_line: bool, term_rows: u16) -> Self {
         ScreenView {
             is_tty,
             no_status,
+            quiet_status_line,
             term_rows,
             active_rows: 0,
             last_block: None,
@@ -304,6 +323,9 @@ impl ScreenView {
     /// plain/ANSI rows, advance the view's state and return the bytes to write.
     fn render(&mut self, top: u16, rows_plain: &[String], rows_ansi: &[String], bg_paint: &str) -> String {
         if self.no_status {
+            return String::new();
+        }
+        if self.quiet_status_line && top <= 1 {
             return String::new();
         }
         if self.is_tty {
@@ -473,16 +495,16 @@ mod view_tests {
     #[test]
     fn no_status_suppresses_everything() {
         let (p, a) = v3_rows();
-        let mut piped = ScreenView::new(false, true, 24);
+        let mut piped = ScreenView::new(false, true, false, 24);
         assert_eq!(piped.render(1, &p, &a, ""), "");
-        let mut tty = ScreenView::new(true, true, 24);
+        let mut tty = ScreenView::new(true, true, false, 24);
         assert_eq!(tty.render(1, &p, &a, ""), "");
     }
 
     #[test]
     fn piped_emits_inline_block_once_then_dedupes() {
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(false, false, 24);
+        let mut v = ScreenView::new(false, false, false, 24);
         let first = v.render(1, &p, &a, "");
         assert!(first.contains("West of House"), "first frame emits block: {first:?}");
         assert!(!first.contains('\x1b'), "inline block carries no ANSI: {first:?}");
@@ -493,7 +515,7 @@ mod view_tests {
     #[test]
     fn tty_enters_region_then_resets_on_leave() {
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(true, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24);
         let f = v.render(1, &p, &a, "");
         assert!(f.contains("\x1b[2;24r"), "sets scroll region: {f:?}");
         assert!(f.contains("\x1b[7m"), "v3 status bar is reverse-video: {f:?}");
@@ -511,13 +533,44 @@ mod view_tests {
     }
 
     #[test]
+    fn quiet_mode_drops_a_one_row_status_but_keeps_a_menu() {
+        // SQ-0612. A v3 status line carries `Moves: N`, so it differs every turn
+        // and the dedupe never fires — measured, Ballyhoo narrated it on four
+        // turns out of four. Plain mode quietens that. But the suppression is by
+        // SIZE: the games with integrated InvisiClues draw their hint menus in
+        // the upper window — Planetfall's twelve chapter headings and its
+        // `RETURN = See hint` legend all vanish under a blanket suppression
+        // (measured), as does Lost Pig's HELP menu.
+        let (p, a) = v3_rows();
+        let mut quiet = ScreenView::new(false, false, true, 24);
+        assert_eq!(quiet.render(1, &p, &a, ""), "", "a one-row status is chrome — quietened");
+
+        let menu = menu_rows(0);
+        let out = quiet.render(4, &menu, &menu, "");
+        assert!(out.contains("> Credits"), "a four-row menu is content — kept: {out:?}");
+
+        // Asking for it back restores the status line.
+        let mut loud = ScreenView::new(false, false, false, 24);
+        assert!(loud.render(1, &p, &a, "").contains("West of House"), "--show-status restores it");
+    }
+
+    #[test]
+    fn no_status_still_beats_show_status() {
+        // `--no-status` is the stronger, already-documented switch: it suppresses
+        // the upper window outright, menu or not.
+        let menu = menu_rows(0);
+        let mut v = ScreenView::new(false, true, false, 24);
+        assert_eq!(v.render(4, &menu, &menu, ""), "");
+    }
+
+    #[test]
     fn piped_menu_is_re_emitted_when_the_selection_moves() {
         // SQ-0609: a game whose UI is a grid redrawn in place (Arthur's menus,
         // Shogun's startup menu) is spatial by construction. Off a TTY it comes
         // through as text, and the whole block repeats whenever anything in it
         // changes — so a listener hears where the marker went. Noisy for a long
         // menu, but followable, which the pinned-region path is not.
-        let mut v = ScreenView::new(false, false, 24);
+        let mut v = ScreenView::new(false, false, false, 24);
         let first = menu_rows(0);
         let out = v.render(4, &first, &first, "");
         assert!(out.contains("> Credits"), "menu comes through as text: {out:?}");
@@ -539,7 +592,7 @@ mod view_tests {
         // status has scrolled away, so it must not go through the dedupe that
         // `render` applies.
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(false, false, 24);
+        let mut v = ScreenView::new(false, false, false, 24);
         assert!(!v.render(1, &p, &a, "").is_empty(), "first frame emits");
         assert_eq!(v.render(1, &p, &a, ""), "", "second is deduped away");
         // ScreenView::status_now goes to the machine, which these row-level tests
@@ -549,15 +602,15 @@ mod view_tests {
 
     #[test]
     fn start_clears_screen_only_when_interactive() {
-        assert_eq!(ScreenView::new(true, false, 24).start(), "\x1b[2J\x1b[H");
-        assert_eq!(ScreenView::new(false, false, 24).start(), ""); // piped
-        assert_eq!(ScreenView::new(true, true, 24).start(), ""); // --no-status
+        assert_eq!(ScreenView::new(true, false, false, 24).start(), "\x1b[2J\x1b[H");
+        assert_eq!(ScreenView::new(false, false, false, 24).start(), ""); // piped
+        assert_eq!(ScreenView::new(true, true, false, 24).start(), ""); // --no-status
     }
 
     #[test]
     fn erase_clears_screen_and_resets_region_on_tty() {
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(true, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24);
         let _ = v.render(1, &p, &a, ""); // activate a region (active_rows = 1)
         let out = v.erase(ZColour::Default, true);
         assert!(out.contains("\x1b[r"), "erase leaves the scroll region: {out:?}");
@@ -571,14 +624,14 @@ mod view_tests {
 
     #[test]
     fn erase_is_noop_when_piped() {
-        let mut v = ScreenView::new(false, false, 24);
+        let mut v = ScreenView::new(false, false, false, 24);
         assert_eq!(v.erase(ZColour::Default, true), "", "piped erase emits nothing");
     }
 
     #[test]
     fn tty_dropping_to_zero_rows_resets_region() {
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(true, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24);
         let _ = v.render(1, &p, &a, ""); // activate region
         let out = v.render(0, &[], &[], "");
         assert!(out.contains("\x1b[r"), "dropping to 0 rows resets region: {out:?}");
@@ -590,7 +643,7 @@ mod view_tests {
         // a short lower prompt already streamed at the top. The next frame must
         // scroll the lower window down and follow the cursor below the region.
         let rows = vec![String::new(); 12];
-        let mut v = ScreenView::new(true, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24);
         let _ = v.erase(ZColour::Default, true); // arms the one-shot shift
         let out = v.render(12, &rows, &rows, "");
         assert!(out.contains("\x1b[12T"), "scrolls the display down by 12 (SD): {out:?}");
@@ -613,7 +666,7 @@ mod view_tests {
         // must NOT trigger a shift — it streams a full screen of narrative that
         // scrolling would garble.
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(true, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24);
         let _ = v.erase(ZColour::Default, true);
         let out = v.render(1, &p, &a, "");
         assert!(!out.contains("\x1b[1T"), "1-row status line is not shifted: {out:?}");
@@ -625,7 +678,7 @@ mod view_tests {
         // Continuous flow (no preceding erase): the content is already positioned
         // correctly, so a multi-row upper window must NOT scroll the lower window.
         let rows = vec![String::new(); 12];
-        let mut v = ScreenView::new(true, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24);
         let out = v.render(12, &rows, &rows, "");
         assert!(!out.contains("\x1b[12T"), "no erase means no shift: {out:?}");
         assert!(out.contains("\x1b[13;24r"), "still pins the region: {out:?}");
@@ -659,7 +712,7 @@ mod colour_tests {
     #[test]
     fn erase_paints_current_bg() {
         use zvm::screen::ZColour;
-        let mut v = ScreenView::new(true, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24);
         let out = v.erase(ZColour::Standard(2), true);
         assert!(out.contains("\x1b[40m"), "bg SGR before clear: {out:?}");
         assert!(out.contains("\x1b[2J"), "screen clear present: {out:?}");
