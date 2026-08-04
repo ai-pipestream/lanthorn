@@ -20,10 +20,12 @@
 
 pub mod flags;
 pub mod input;
+pub mod line;
 pub mod mode;
 pub mod term;
 
 pub use flags::handled_common_flags;
+pub use line::LineHold;
 pub use input::{read_byte_or_eof, read_byte_stdin, read_line_or_eof, read_line_stdin};
 pub use mode::{HostMode, PLAIN_FLAGS, no_color, plain_requested};
 pub use term::{

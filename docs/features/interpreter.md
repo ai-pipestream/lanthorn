@@ -173,6 +173,14 @@ a numbered-list convention would be quieter, but that changes the interaction
 model and is the kind of thing worth designing *with* someone who uses a reader
 rather than guessing at.
 
+The status also lands in the right place. A game writes its prompt last and
+without a trailing newline, and the host only learns the turn is over when the
+game asks for input — so a naive host can only append the status *after* the
+prompt, giving `> In the Wings   Score: 0`, which reads as though the prompt were
+showing you a room. In plain mode the prompt is held back until the status has
+gone out, so a turn reads description, then status, then prompt. `/status`
+answers the same way, and puts the prompt back after itself.
+
 `scott-cli` drops its em-dash divider rule in plain mode. It stands in for the
 boundary a real Scott terminal drew between its two windows, and a reader either
 announces thirty-odd em-dashes one at a time or swallows the line — neither of

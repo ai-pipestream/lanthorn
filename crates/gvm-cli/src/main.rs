@@ -362,14 +362,17 @@ fn drive(
                     if !cli_host::input::is_status_request(&r.0) {
                         break r;
                     }
-                    let status = machine
-                        .backend_mut()
-                        .as_any_mut()
-                        .downcast_mut::<TerminalBackend>()
-                        .map(|t| t.grids_plain_now())
-                        .unwrap_or_default();
-                    println!("{}", if status.is_empty() { "[no status]" } else { &status });
-                    let _ = io::Write::flush(&mut io::stdout());
+                    // The prompt has already gone out by now, so the answer must
+                    // start a fresh line and put the prompt back after itself —
+                    // otherwise it lands on the prompt line, the very thing
+                    // SQ-0611 fixed one layer down.
+                    if let Some(t) =
+                        machine.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>()
+                    {
+                        let status = t.grids_plain_now();
+                        let text = if status.is_empty() { "[no status]" } else { &status };
+                        t.write_host_answer(text);
+                    }
                 };
                 let cmd = line.trim_end_matches(['\n', '\r']);
                 if let Some(t) =

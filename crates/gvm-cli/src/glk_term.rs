@@ -515,10 +515,12 @@ pub struct TerminalBackend {
     /// Every tracked TextGrid window with its resolved rect + cell buffer. Each
     /// is drawn at its own rect (grids no longer collapse to one status line).
     grids: Vec<GridWin>,
-    /// Whether the off-TTY output stream is at the start of a line. Tracked
-    /// separately from `current_col`, which is a TTY-only wrap counter, so the
-    /// inline grid stream can tell whether it needs to break the line first.
-    plain_at_line_start: bool,
+    /// Off-TTY line position, and — in plain mode — the game's prompt held back
+    /// so the status can be written before it rather than welded onto the end of
+    /// it. Tracked separately from `current_col`, which is a TTY-only wrap
+    /// counter and is not maintained off a TTY. Shared with zvm-cli, which had
+    /// no answer to this at all (`cli_host::LineHold`, SQ-0611).
+    hold: cli_host::LineHold,
     /// The last plain-text block emitted for each grid, keyed by window id.
     /// Off-TTY only — grids have no rect to be painted at, so they are streamed
     /// inline instead, and a status line that says the same thing this turn as
@@ -570,6 +572,7 @@ impl TerminalBackend {
     /// `main` must install the mode before constructing this.
     pub fn new() -> Self {
         let is_tty = cli_host::HostMode::current().rich();
+        let hold_prompt = cli_host::HostMode::current().plain();
         let (cols, rows) = detect_size();
         let debug = std::env::var_os("BABELMAP_DEBUG_TERM").is_some();
         if debug {
@@ -587,7 +590,7 @@ impl TerminalBackend {
             pending_word_attrs: StyleAttrs::default(),
             honor: true,
             grids: Vec::new(),
-            plain_at_line_start: true,
+            hold: cli_host::LineHold::new(hold_prompt),
             last_grid_plain: Vec::new(),
             graphics: Vec::new(),
             buffers: Vec::new(),
@@ -619,6 +622,7 @@ impl TerminalBackend {
     /// Build a backend over an explicit writer (for tests).
     #[cfg(test)]
     fn with_writer(out: Box<dyn Write>, is_tty: bool, cols: u32, rows: u32) -> Self {
+        let hold_prompt = false;
         TerminalBackend {
             out,
             is_tty,
@@ -631,7 +635,7 @@ impl TerminalBackend {
             pending_word_attrs: StyleAttrs::default(),
             honor: true,
             grids: Vec::new(),
-            plain_at_line_start: true,
+            hold: cli_host::LineHold::new(hold_prompt),
             last_grid_plain: Vec::new(),
             graphics: Vec::new(),
             buffers: Vec::new(),
@@ -756,6 +760,20 @@ impl TerminalBackend {
             .join("\n")
     }
 
+    /// Write a host answer (`/status`) mid-turn: start a fresh line, print it,
+    /// then put the prompt back so the player can see it is still their turn.
+    pub fn write_host_answer(&mut self, text: &str) {
+        let mut out = String::new();
+        if !self.hold.at_line_start() {
+            out.push('\n');
+        }
+        out.push_str(text);
+        out.push('\n');
+        out.push_str(self.hold.last_prompt());
+        let _ = self.out.write_all(out.as_bytes());
+        let _ = self.out.flush();
+    }
+
     /// Stream each grid's text inline (off-TTY only), deduped against the last
     /// block emitted for that window.
     ///
@@ -789,12 +807,21 @@ impl TerminalBackend {
             // Start on a fresh line. The game has just written its prompt, so
             // the stream is mid-line more often than not, and a status bar
             // welded to the end of `>` is worse than a bare prompt above it.
-            if !self.plain_at_line_start {
+            // Not holding (a plain pipe): the prompt is already out, so break
+            // the line first. Holding (plain mode): the prompt has not left, so
+            // we are genuinely at a line start and the status goes above it.
+            if !self.hold.at_line_start() {
                 let _ = self.out.write_all(b"\n");
             }
             let _ = self.out.write_all(text.as_bytes());
             let _ = self.out.write_all(b"\n");
-            self.plain_at_line_start = true;
+        }
+        // Release the prompt last, so it is the final thing before the cursor.
+        // Unconditional: a game with no grid windows still has a prompt to let
+        // go of, and this is the only point that does it before input.
+        let held = self.hold.release();
+        if !held.is_empty() {
+            let _ = self.out.write_all(held.as_bytes());
         }
     }
 
@@ -1212,13 +1239,11 @@ impl GlkBackend for TerminalBackend {
             );
         }
         if !self.is_tty {
-            let _ = self.out.write_all(s.as_bytes());
             // `current_col` is a TTY word-wrap counter and is not maintained
-            // here, but the inline grid stream still needs to know whether it
-            // would be interrupting a line (SQ-0607).
-            if let Some(last) = s.chars().last() {
-                self.plain_at_line_start = last == '\n';
-            }
+            // here; `hold` tracks the line position instead, and in plain mode
+            // withholds the trailing prompt (SQ-0607/0611).
+            let out = self.hold.feed(s);
+            let _ = self.out.write_all(out.as_bytes());
             return;
         }
 
@@ -1594,6 +1619,44 @@ mod tests {
         let out = out_string(&buf);
         assert!(out.contains(">\nHall\n"), "grid breaks the prompt line: {out:?}");
         assert!(!out.contains(">Hall"), "never welded to the prompt: {out:?}");
+    }
+
+    /// A backend that holds the prompt back, as plain mode does.
+    fn holding_backend() -> (TerminalBackend, Rc<RefCell<Vec<u8>>>) {
+        let buf = Rc::new(RefCell::new(Vec::new()));
+        let mut b = TerminalBackend::with_writer(Box::new(SharedWriter(buf.clone())), false, 40, 24);
+        b.hold = cli_host::LineHold::new(true);
+        (b, buf)
+    }
+
+    #[test]
+    fn plain_mode_puts_the_status_above_the_prompt_not_after_it() {
+        // SQ-0611. The game writes its prompt last and with no trailing newline,
+        // and we only learn the turn is over when it asks for input — so without
+        // holding, the status can only follow the prompt and the turn reads
+        // "> Back Alley, noon  Goals: 1", as though the prompt were showing a
+        // room. Holding lets it read description / status / prompt.
+        let (mut b, buf) = holding_backend();
+        status_layout(&mut b, 1);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Back Alley  Score: 0");
+        b.put_text(1, GlkStyle::Normal, "You are in an alley.\n>");
+        b.flush_out();
+        let out = out_string(&buf);
+        assert!(
+            out.contains("You are in an alley.\nBack Alley  Score: 0\n>"),
+            "description, then status, then prompt: {out:?}"
+        );
+        assert!(!out.contains(">Back Alley"), "never welded to the prompt: {out:?}");
+    }
+
+    #[test]
+    fn a_held_prompt_is_released_even_with_no_grids_to_show() {
+        // The release is what actually gets the prompt on screen before input,
+        // so a game with no status window must not be left holding it.
+        let (mut b, buf) = holding_backend();
+        b.put_text(1, GlkStyle::Normal, "Nothing here.\n>");
+        b.flush_out();
+        assert!(out_string(&buf).ends_with(">"), "prompt released: {:?}", out_string(&buf));
     }
 
     #[test]

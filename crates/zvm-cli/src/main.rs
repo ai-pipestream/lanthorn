@@ -105,6 +105,7 @@ fn poll_sound_finish(sound: Option<&mut CliSound>, machine: &mut Machine, view: 
     }
     if ran && is_tty {
         print!("{}", view.frame(machine));
+        release_prompt(machine);
         let _ = io::stdout().flush();
     }
 }
@@ -158,10 +159,23 @@ struct StdoutOutput {
     /// even if a non-conformant game sets colour after the header bit is cleared.
     /// Style bits (reverse/bold/italic) are always preserved.
     honor_game_colours: bool,
+    /// Line-position tracking, and — in plain mode — holding the prompt back so
+    /// the status block can be written before it. Shared with gvm-cli, which had
+    /// grown its own half of the same answer (`cli_host::LineHold`, SQ-0611).
+    /// Outside plain mode it holds nothing: the status is painted in a pinned
+    /// region and never enters the text flow at all.
+    hold: cli_host::LineHold,
 }
 
 impl StdoutOutput {
-    fn new(is_tty: bool, paging: bool, page_height: u16, cols: u16, honor_game_colours: bool) -> Self {
+    fn new(
+        is_tty: bool,
+        paging: bool,
+        page_height: u16,
+        cols: u16,
+        honor_game_colours: bool,
+        hold_partial: bool,
+    ) -> Self {
         StdoutOutput {
             is_tty,
             paging,
@@ -171,6 +185,27 @@ impl StdoutOutput {
             lines: 0,
             buffer_mode: false,
             honor_game_colours,
+            hold: cli_host::LineHold::new(hold_partial),
+        }
+    }
+
+    /// Write one character, holding it back when it is an unterminated tail and
+    /// this sink is holding. A complete line always goes straight out.
+    fn emit_char(&mut self, ch: char) {
+        let mut buf = [0u8; 4];
+        print!("{}", self.hold.feed(ch.encode_utf8(&mut buf)));
+    }
+
+    /// Release the held prompt.
+    ///
+    /// Must be called before anything else writes to stdout, and before
+    /// blocking or exiting — otherwise the prompt arrives after whatever
+    /// overtook it, or never.
+    fn release_partial(&mut self) {
+        let held = self.hold.release();
+        if !held.is_empty() {
+            print!("{held}");
+            let _ = io::stdout().flush();
         }
     }
 
@@ -193,7 +228,7 @@ impl StdoutOutput {
         let cols = if self.buffer_mode { self.cols } else { u16::MAX };
         let (wrapped, new_col) = wrap_line(s, cols, self.current_col);
         for ch in wrapped.chars() {
-            print!("{}", ch);
+            self.emit_char(ch);
             if ch == '\n' {
                 // Saturating: `lines` is only ever reset by `check_paging`, an
                 // `erase_window`, or an input request, so a story that prints
@@ -251,6 +286,35 @@ impl Output for StdoutOutput {
     }
 }
 
+/// Let go of the prompt the sink is holding back (plain mode — SQ-0611).
+///
+/// Pair it with every status emission (status first, then this) and call it
+/// before anything else writes to stdout, blocks, or exits.
+fn release_prompt(machine: &mut Machine) {
+    if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+        o.release_partial();
+    }
+}
+
+/// Answer a host command (`/status`) mid-turn without wrecking the transcript.
+///
+/// The prompt has already gone out by now, so the answer would otherwise land on
+/// the prompt line — the very thing SQ-0611 fixed one layer down. Start a fresh
+/// line, print the answer, then put the prompt back so the player can see it is
+/// still their turn.
+fn print_host_answer(machine: &mut Machine, text: &str) {
+    let (at_line_start, prompt) = match machine.out.as_any().downcast_ref::<StdoutOutput>() {
+        Some(o) => (o.hold.at_line_start(), o.hold.last_prompt().to_string()),
+        None => (true, String::new()),
+    };
+    if !at_line_start {
+        println!();
+    }
+    println!("{text}");
+    print!("{prompt}");
+    let _ = io::stdout().flush();
+}
+
 // ── Blorb extraction ──────────────────────────────────────────────────────────
 
 /// If `bytes` is a Blorb, return its Z-code executable; reject Glulx with a
@@ -283,6 +347,8 @@ fn build_machine(
     term_cols: u16,
     honor_game_colours: bool,
     interpreter_number: Option<u8>,
+    // Plain mode: hold the game's prompt back so the status can precede it.
+    hold_prompt: bool,
 ) -> Result<Machine, String> {
     use zvm::error::ZError;
     let mem = Memory::new(story).map_err(|e| match e {
@@ -315,6 +381,7 @@ fn build_machine(
         page_height,
         term_cols,
         honor_game_colours,
+        hold_prompt,
     )));
     machine.set_interpreter_number(interpreter_number);
     machine.init_caps();
@@ -510,6 +577,7 @@ fn read_char_input(
                     break (0u8, last_resize, true);
                 }
                 print!("{}", view.frame(machine));
+                release_prompt(machine);
                 let _ = io::stdout().flush();
                 continue;
             }
@@ -635,6 +703,7 @@ fn read_line_raw(
                     break;
                 }
                 print!("{}", view.frame(machine));
+                release_prompt(machine);
                 let _ = io::stdout().flush();
                 continue;
             }
@@ -888,6 +957,7 @@ fn main() {
         term_cols,
         honor,
         interpreter,
+        mode.plain(),
     ) {
         Ok(m) => m,
         Err(e) => {
@@ -951,6 +1021,7 @@ fn main() {
         // v3 show_status redraw request.
         if machine.screen.show_status_requested {
             print!("{}", view.frame(&machine));
+            release_prompt(&mut machine);
             let _ = io::stdout().flush();
             machine.screen.show_status_requested = false;
         }
@@ -1000,6 +1071,7 @@ fn main() {
                     term_cols,
                     honor,
                     interpreter,
+                    mode.plain(),
                 ) {
                     Ok(m) => m,
                     Err(e) => {
@@ -1017,6 +1089,7 @@ fn main() {
                 // current size; on piped stdout this is a no-op via is_tty guard).
                 maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
                 print!("{}", view.frame(&machine));
+                release_prompt(&mut machine);
                 let _ = io::stdout().flush();
                 let cur_bg = if stdout_is_tty && machine.honor_game_colours {
                     screen::zcolour_rgb(machine.screen.current_bg)
@@ -1050,8 +1123,8 @@ fn main() {
                         break r;
                     }
                     let status = screen::ScreenView::status_now(&machine);
-                    println!("{}", if status.is_empty() { "[no status]" } else { &status });
-                    let _ = io::stdout().flush();
+                    let text = if status.is_empty() { "[no status]".to_string() } else { status };
+                    print_host_answer(&mut machine, &text);
                 };
                 if let Some((new_cols, new_rows)) = resize {
                     apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,
@@ -1072,6 +1145,7 @@ fn main() {
                 // Poll for terminal resize before char input.
                 maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
                 print!("{}", view.frame(&machine));
+                release_prompt(&mut machine);
                 let _ = io::stdout().flush();
                 let cur_bg = if stdout_is_tty && machine.honor_game_colours {
                     screen::zcolour_rgb(machine.screen.current_bg)
@@ -1167,7 +1241,7 @@ mod v6_tests {
     }
 
     fn build(story: Vec<u8>) -> Result<Machine, String> {
-        build_machine(story, false, false, 24, 24, 80, true, None)
+        build_machine(story, false, false, 24, 24, 80, true, None, false)
     }
 
     /// SQ-0601: v6 is a graphical, mouse-and-menu format this front-end cannot
@@ -1214,12 +1288,37 @@ mod paging_tests {
     /// twenty seconds.
     #[test]
     fn the_line_counter_saturates_instead_of_overflowing() {
-        let mut o = StdoutOutput::new(false, false, 24, 80, true);
+        let mut o = StdoutOutput::new(false, false, 24, 80, true, false);
         o.lines = u16::MAX - 2;
         for _ in 0..10 {
             o.write_counted("\n");
         }
         assert_eq!(o.lines, u16::MAX, "the counter pins at its ceiling and never wraps");
+    }
+
+    /// SQ-0611. The sink writes to the real stdout, so what is testable here is
+    /// the holding decision itself: with holding on, an unterminated prompt must
+    /// still be pending after the write, leaving the stream at a line start for
+    /// the status block to occupy — and gone once released.
+    #[test]
+    fn plain_mode_holds_the_prompt_so_the_status_can_precede_it() {
+        let mut o = StdoutOutput::new(false, false, 24, 80, true, true);
+        o.write_counted("You are in a room.\n");
+        assert!(!o.hold.is_holding(), "a complete line goes straight out");
+        o.write_counted("\n>");
+        assert!(o.hold.is_holding(), "the prompt is held back");
+        assert!(o.hold.at_line_start(), "so the status starts its own line");
+        o.release_partial();
+        assert!(!o.hold.is_holding(), "and the prompt follows the status");
+    }
+
+    #[test]
+    fn without_plain_mode_nothing_is_ever_held() {
+        // The pinned-region path must keep writing straight through: its status
+        // never enters the text flow, so there is nothing to make room for.
+        let mut o = StdoutOutput::new(true, false, 24, 80, true, false);
+        o.write_counted("\n>");
+        assert!(!o.hold.is_holding(), "the TTY path holds nothing");
     }
 }
 
