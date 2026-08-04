@@ -217,7 +217,10 @@ use zvm::cpu::exec::Machine;
 /// plain-text block when piped.
 pub struct ScreenView {
     is_tty: bool,
-    no_status: bool,
+    /// `--story-only`: suppress the pinned region entirely — status line,
+    /// menus, forms, everything the game draws above the story. Stronger than
+    /// plain mode's `quiet_status_line`, which only quietens one-row chrome.
+    story_only: bool,
     /// Plain mode without `--show-status`: don't narrate a one-row status
     /// region on every turn (SQ-0612).
     ///
@@ -247,10 +250,10 @@ pub struct ScreenView {
 }
 
 impl ScreenView {
-    pub fn new(is_tty: bool, no_status: bool, quiet_status_line: bool, term_rows: u16) -> Self {
+    pub fn new(is_tty: bool, story_only: bool, quiet_status_line: bool, term_rows: u16) -> Self {
         ScreenView {
             is_tty,
-            no_status,
+            story_only,
             quiet_status_line,
             term_rows,
             active_rows: 0,
@@ -309,7 +312,7 @@ impl ScreenView {
 
     /// Bytes to emit just before an input prompt.
     pub fn frame(&mut self, machine: &Machine) -> String {
-        if self.no_status {
+        if self.story_only {
             return String::new();
         }
         let top = Self::top_rows(machine);
@@ -322,7 +325,7 @@ impl ScreenView {
     /// Pure-core renderer: given the pinned-row count and the already-formatted
     /// plain/ANSI rows, advance the view's state and return the bytes to write.
     fn render(&mut self, top: u16, rows_plain: &[String], rows_ansi: &[String], bg_paint: &str) -> String {
-        if self.no_status {
+        if self.story_only {
             return String::new();
         }
         if self.quiet_status_line && top <= 1 {
@@ -434,7 +437,7 @@ impl ScreenView {
     /// Clear+home the screen at startup (interactive only), so existing
     /// scrollback is not overwritten by the pinned region.
     pub fn start(&self) -> String {
-        if self.is_tty && !self.no_status {
+        if self.is_tty && !self.story_only {
             "\x1b[2J\x1b[H".to_string()
         } else {
             String::new()

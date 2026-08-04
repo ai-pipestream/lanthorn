@@ -401,7 +401,7 @@ fn build_machine(
 
 struct Args {
     story: Option<String>,
-    no_status: bool,
+    story_only: bool,
     show_status: bool,
     no_aux: bool,
     no_more: bool,
@@ -411,11 +411,22 @@ struct Args {
 }
 
 fn parse_args(argv: &[String]) -> Args {
-    let mut a = Args { story: None, no_status: false, show_status: false, no_aux: false, no_more: false, no_timed_input: false, no_sound: false, data_dir: None };
+    let mut a = Args { story: None, story_only: false, show_status: false, no_aux: false, no_more: false, no_timed_input: false, no_sound: false, data_dir: None };
     let mut i = 1;
     while i < argv.len() {
         match argv[i].as_str() {
-            "--no-status" | "--lower-only" => a.no_status = true,
+            "--story-only" | "--lower-only" => a.story_only = true,
+            // Renamed in SQ-0613: `--no-status` read as the same thing plain
+            // mode does to the status line, and it is stronger than that. Say
+            // so rather than ignoring it, which would look like it worked.
+            "--no-status" => {
+                eprintln!(
+                    "{}: --no-status has been renamed --story-only (it suppresses the whole \
+                     upper window, menus included); honouring it this time.",
+                    env!("CARGO_PKG_NAME")
+                );
+                a.story_only = true;
+            }
             "--show-status" => a.show_status = true,
             "--no-aux" => a.no_aux = true,
             "--no-more" | "--no-page" => a.no_more = true,
@@ -850,16 +861,22 @@ Host commands (typed at any line prompt, never passed to the game):
   /status               Repeat the current status line / upper window
 
 Options:
-      --plain           Plain text only: no escape sequences, no [MORE] pager,
-                        and the terminal's own line editing and echo. Intended
-                        for screen readers (alias: --screen-reader). Also
-                        selected by TERM=dumb.
-      --no-status       Suppress the pinned status/upper-window line (alias: --lower-only)
-      --show-status     In --plain, narrate the status line whenever the story
-                        updates it. Off by default there, because a v3 status
-                        line carries a move counter and so changes every turn;
-                        ask for it with /status instead. Menus and multi-row
-                        upper windows always come through.
+      --plain           Linear plain text, for screen readers (alias:
+                        --screen-reader; also selected by TERM=dumb). Emits no
+                        escape sequences at all — no colour, no cursor
+                        addressing, no pinned status line — hands line editing
+                        and echo back to the terminal, and turns off the [MORE]
+                        pager. The status line is not narrated every turn (see
+                        --show-status); menus and forms still are. Ask for the
+                        status any time with /status.
+      --story-only      Show only the story text: suppress the whole upper
+                        window, menus and forms included. Stronger than what
+                        --plain does to the status line, and independent of it.
+                        (alias: --lower-only)
+      --show-status     Narrate the status line whenever the story updates it,
+                        undoing --plain's quietening. Off under --plain because
+                        a v3 status line carries a move counter, so it changes —
+                        and would be re-read — on every single turn.
       --no-aux          Don't read or write v5 auxiliary (VFS) sidecar files
       --no-more         Disable [MORE] paging on long output (alias: --no-page)
       --no-timed-input  Ignore timed-input interrupts
@@ -999,7 +1016,7 @@ fn main() {
     // already-documented switch and suppresses the upper window entirely.
     let quiet_status_line = mode.plain() && !args.show_status;
     let mut view =
-        screen::ScreenView::new(stdout_is_tty, args.no_status, quiet_status_line, term_rows);
+        screen::ScreenView::new(stdout_is_tty, args.story_only, quiet_status_line, term_rows);
     print!("{}", view.start());
     let _ = io::stdout().flush();
 
@@ -1340,15 +1357,27 @@ mod arg_tests {
 
     #[test]
     fn parses_flags_and_story() {
-        let a = parse_args(&["zvm-cli".into(), "--no-status".into(), "game.z5".into()]);
+        let a = parse_args(&["zvm-cli".into(), "--story-only".into(), "game.z5".into()]);
         assert_eq!(a.story.as_deref(), Some("game.z5"));
-        assert!(a.no_status && !a.no_aux);
+        assert!(a.story_only && !a.no_aux);
 
         let b = parse_args(&["zvm-cli".into(), "--no-aux".into(), "g".into()]);
-        assert!(b.no_aux && !b.no_status);
+        assert!(b.no_aux && !b.story_only);
 
         let c = parse_args(&["zvm-cli".into(), "g".into()]);
-        assert!(!c.no_status && !c.no_aux);
+        assert!(!c.story_only && !c.no_aux);
+    }
+
+    /// SQ-0613. `--no-status` read as the same thing plain mode does to the
+    /// status line while being stronger than it, so it was renamed. The old
+    /// spelling still works — silently ignoring it would look like it had.
+    #[test]
+    fn the_old_and_new_spellings_all_select_story_only() {
+        for flag in ["--story-only", "--lower-only", "--no-status"] {
+            let a = parse_args(&["zvm-cli".into(), flag.into(), "g".into()]);
+            assert!(a.story_only, "{flag} should select story-only");
+            assert_eq!(a.story.as_deref(), Some("g"), "{flag} is not the story path");
+        }
     }
 
     #[test]

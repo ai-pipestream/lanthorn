@@ -12,6 +12,32 @@ identifies which beta it is without reading its git hash.
 
 ---
 
+## Unreleased
+
+### Added
+
+- **Plain-text mode for screen readers** — all three CLIs take `--plain` (alias
+  `--screen-reader`), and select it automatically under `TERM=dumb`. It emits no
+  escape sequences at all, hands line editing and echo back to the terminal, and
+  drops the `[MORE]` pager. `NO_COLOR` is honoured separately, as colour only.
+- **`/status`** — a host command, at any line prompt in any of the three CLIs,
+  that repeats the current status without the game seeing the command.
+- **`--show-status`** — narrate the status line whenever the story updates it.
+  Off under `--plain`, because a Z-machine v3 status line carries a move counter
+  and so changes on every single turn.
+
+### Changed
+
+- **`--no-status` is now `--story-only`** (`zvm-cli`; `--lower-only` remains an
+  alias, and the old spelling still works with a notice). It reads too much like
+  what `--plain` does to the status line while being stronger — it suppresses the
+  whole upper window, menus and forms included. `gvm-cli` gains the same flag.
+- `gvm-cli` renders Glk grid windows as inline text when there is no TTY; they
+  were previously tracked and then dropped, losing the status line from piped
+  output entirely.
+
+---
+
 ## v0.1.0-beta.3 — 2026-08-03
 
 Fifty commits, and most of them are about honesty: a saved game that restores into a

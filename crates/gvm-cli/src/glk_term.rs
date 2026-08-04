@@ -521,6 +521,12 @@ pub struct TerminalBackend {
     /// counter and is not maintained off a TTY. Shared with zvm-cli, which had
     /// no answer to this at all (`cli_host::LineHold`, SQ-0611).
     hold: cli_host::LineHold,
+    /// `--story-only`: suppress every grid window — status bar, menus, forms.
+    /// Stronger than `quiet_status_line`, which only quietens one-row chrome.
+    /// On a TTY the rows the layout reserved stay blank; the game still believes
+    /// its windows exist, because a Glk game lays itself out from the window
+    /// tree and lying to it about that would change what it draws.
+    story_only: bool,
     /// Plain mode without `--show-status`: don't narrate a one-row grid on every
     /// turn (SQ-0612). Judged by size for the same reason as zvm-cli: a one-row
     /// TextGrid is a status bar, while Counterfeit Monkey's hint menu is the
@@ -596,6 +602,7 @@ impl TerminalBackend {
             honor: true,
             grids: Vec::new(),
             hold: cli_host::LineHold::new(hold_prompt),
+            story_only: false,
             quiet_status_line: false,
             last_grid_plain: Vec::new(),
             graphics: Vec::new(),
@@ -624,6 +631,11 @@ impl TerminalBackend {
         self.quiet_status_line = on;
     }
 
+    /// Show only the story window — suppress every grid (SQ-0613).
+    pub fn set_story_only(&mut self, on: bool) {
+        self.story_only = on;
+    }
+
     /// Retain the story Blorb so `glk_stream_open_resource` can read its `Data`
     /// chunks. `None` for a plain `.ulx` (resource opens then fail).
     pub fn set_data_blorb(&mut self, blorb: Option<blorb::Blorb>) {
@@ -647,6 +659,7 @@ impl TerminalBackend {
             honor: true,
             grids: Vec::new(),
             hold: cli_host::LineHold::new(hold_prompt),
+            story_only: false,
             quiet_status_line: false,
             last_grid_plain: Vec::new(),
             graphics: Vec::new(),
@@ -806,6 +819,9 @@ impl TerminalBackend {
             return;
         }
         for i in 0..self.grids.len() {
+            if self.story_only {
+                break;
+            }
             let id = self.grids[i].id;
             // A one-row grid is the status bar; quietened in plain mode because
             // it is rewritten every turn. Taller grids are menus and forms.
@@ -872,8 +888,10 @@ impl TerminalBackend {
         if !windowed {
             out.push_str("\x1b7"); // DECSC save cursor
         }
-        for g in &self.grids {
-            append_grid(&mut out, g, self.cols, self.honor, true);
+        if !self.story_only {
+            for g in &self.grids {
+                append_grid(&mut out, g, self.cols, self.honor, true);
+            }
         }
         // Windowed mode positions the cursor itself (at the active buffer's
         // prompt), so it must not be saved/restored around the redraw.
@@ -1803,6 +1821,24 @@ mod tests {
         let out = out_string(&buf);
         assert!(out.contains("> Introduction"), "the menu still comes through: {out:?}");
         assert!(out.contains("Q = Quit Menu"), "legend and all: {out:?}");
+    }
+
+    #[test]
+    fn story_only_suppresses_menus_too_unlike_the_quiet_status_line() {
+        // SQ-0613. The two switches are deliberately different strengths, which
+        // is why `--no-status` was a confusing name for this one: plain mode
+        // quietens one-row chrome and keeps menus, `--story-only` takes the lot.
+        let (mut b, buf) = holding_backend();
+        b.set_story_only(true);
+        status_layout(&mut b, 4); // a menu, which quiet mode would have kept
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "> Introduction");
+        b.grid_put(2, 0, 3, GlkStyle::Normal, "N = Next   Q = Quit Menu");
+        b.put_text(1, GlkStyle::Normal, "Story text.\n>");
+        b.flush_out();
+        let out = out_string(&buf);
+        assert!(!out.contains("Introduction"), "the menu is gone too: {out:?}");
+        assert!(out.contains("Story text."), "the story survives: {out:?}");
+        assert!(out.ends_with(">"), "and the prompt is still released: {out:?}");
     }
 
     #[test]

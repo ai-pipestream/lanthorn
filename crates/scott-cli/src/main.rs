@@ -149,9 +149,13 @@ Host commands (typed at any prompt, never passed to the game):
   /status         Repeat the room block (location, exits, what is here)
 
 Options:
-      --plain         Use the terminal's own line editing and echo rather than
-                      the built-in editor. Intended for screen readers
-                      (alias: --screen-reader). Also selected by TERM=dumb.
+      --plain         Linear plain text, for screen readers (alias:
+                      --screen-reader; also selected by TERM=dumb). Hands line
+                      editing and echo back to the terminal and drops the
+                      em-dash divider rule, which a reader can only spell out.
+                      Scott has no status window to suppress — the room block
+                      IS the story — so there is no --story-only here. Ask for
+                      the room again any time with /status.
       --seed <n>      Seed the RNG for reproducible play
       --max-turns <n> Stop after n turns (headless/testing)
   -V, --version       Print version and exit

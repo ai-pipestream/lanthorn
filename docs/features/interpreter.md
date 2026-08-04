@@ -185,8 +185,11 @@ Anything taller is content the game means you to read: the Infocom releases with
 integrated InvisiClues draw their hint menus in the upper window — Planetfall's
 is twelve chapter headings and a `RETURN = See hint / Q = Resume story` legend —
 and Lost Pig's HELP menu and Bureaucracy's licence-application form are the same
-shape. Those always come through. (`--no-status` remains the blunt instrument
-that suppresses the upper window entirely, menus included.)
+shape. Those always come through. **`--story-only`** is the blunt instrument for
+anyone who wants the whole upper window gone, menus included — it is deliberately
+a separate, stronger switch, and it works with or without `--plain`. `gvm-cli`
+takes it too, where it suppresses every Glk grid window. (Scott has no status
+window to suppress: its room block *is* the story.)
 
 The status also lands in the right place. A game writes its prompt last and
 without a trailing newline, and the host only learns the turn is over when the
