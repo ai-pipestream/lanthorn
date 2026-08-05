@@ -923,6 +923,40 @@ impl SaveNameDialog {
     }
 }
 
+// ── Overwrite-confirm dialog (SQ-0648) ──────────────────────────────────────────
+
+/// What a confirmed [`ConfirmOverwriteSave`] resumes.
+///
+/// The save-as dialog path and the slash `/save <name>` path both write named
+/// saves through `save_named`, but only the dialog path has a modal to fall
+/// back into on Cancel — the slash path has nothing to reopen, so its pending
+/// name has to ride along here instead of being re-read off a dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingOverwrite {
+    /// The save-as dialog path (host Save State slot or in-game `@save`). The
+    /// save-name dialog is left open BEHIND the confirm overlay the whole
+    /// time it's up, so a confirm reads the typed name back off it and a
+    /// cancel needs no recovery at all — the dialog is exactly as the player
+    /// left it.
+    SaveAs,
+    /// The slash `/save <name>` path: there is no dialog to read the name
+    /// back from, so it travels with the pending state instead.
+    Slash(String),
+}
+
+/// Pending overwrite-confirmation state (SQ-0648): a save-as target whose file
+/// already exists. Confirm writes, replacing it; cancel leaves it untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmOverwriteSave {
+    /// Absolute path to the target `.babelmap` file.
+    pub path: std::path::PathBuf,
+    /// Display name of the EXISTING save at `path` — may differ from the name
+    /// the player just typed when two names slugify to the same file.
+    pub existing_name: String,
+    /// What to do once the player answers.
+    pub pending: PendingOverwrite,
+}
+
 // ── Text-entry dialog ─────────────────────────────────────────────────────────
 
 /// A single-field text-entry modal (title, one caret field, OK/Cancel) — the
@@ -1298,6 +1332,11 @@ pub struct OverlayState {
     /// When `Some`, the two-button "delete this save?" confirm dialog is open for
     /// the named save at this path. Confirm deletes it; cancel keeps it. (SQ-0307)
     pub confirm_delete_save: Option<std::path::PathBuf>,
+    /// When `Some`, the two-button "overwrite existing save?" confirm dialog is
+    /// open: a save-as target that already exists. Confirm writes, replacing
+    /// it; cancel leaves it untouched. See [`PendingOverwrite`] for what a
+    /// confirm resumes. (SQ-0648)
+    pub confirm_overwrite_save: Option<ConfirmOverwriteSave>,
     /// When true, the first-use aux-storage prompt is open.
     pub aux_prompt: bool,
     /// When true, the "Save state before quitting?" confirmation dialog is open.
@@ -2252,6 +2291,7 @@ impl AppState {
             || self.overlays.hotkey_dialog
             || self.overlays.text_entry.is_some()
             || self.overlays.confirm_delete_save.is_some()
+            || self.overlays.confirm_overwrite_save.is_some()
             || self.overlays.reset_dialog
             || self.overlays.game_over
             || self.overlays.save_name_dialog.is_some()
@@ -2311,6 +2351,7 @@ impl AppState {
         if self.overlays.hotkey_dialog { v.push("hotkey_dialog"); }
         if self.overlays.text_entry.is_some() { v.push("text_entry"); }
         if self.overlays.confirm_delete_save.is_some() { v.push("confirm_delete_save"); }
+        if self.overlays.confirm_overwrite_save.is_some() { v.push("confirm_overwrite_save"); }
         if self.overlays.reset_dialog { v.push("reset_dialog"); }
         if self.overlays.game_over { v.push("game_over"); }
         if self.overlays.save_name_dialog.is_some() { v.push("save_name_dialog"); }
@@ -4353,6 +4394,15 @@ mod tests {
         s.overlays.confirm_delete_save = Some(std::path::PathBuf::from("/x.babelmap"));
         assert!(s.any_overlay_open(), "confirm_delete_save active => any_overlay_open true");
         s.overlays.confirm_delete_save = None;
+
+        // confirm_overwrite_save
+        s.overlays.confirm_overwrite_save = Some(ConfirmOverwriteSave {
+            path: std::path::PathBuf::from("/x.babelmap"),
+            existing_name: "x".to_string(),
+            pending: PendingOverwrite::SaveAs,
+        });
+        assert!(s.any_overlay_open(), "confirm_overwrite_save active => any_overlay_open true");
+        s.overlays.confirm_overwrite_save = None;
 
         // launch_dialog
         s.overlays.launch_dialog = true;

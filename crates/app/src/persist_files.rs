@@ -127,14 +127,7 @@ pub fn save_named(
     transcript_para: &[crate::state::ParaFmt],
     transcript_images: &[Option<crate::inline_image::InlineImage>],
 ) -> io::Result<()> {
-    let slug = slugify(name);
-    if slug.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "save name is empty after sanitization"));
-    }
-    if crate::storage::is_reserved_slug(&slug) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "\"default\" is a reserved save name"));
-    }
-    let path = game_dir.join(format!("{}.babelmap", slug));
+    let path = named_save_path(game_dir, name)?;
 
     let saved_at = rfc3339_now();
     let meta = crate::archive::Meta {
@@ -175,6 +168,41 @@ pub fn game_save_bytes(session: &dyn crate::engine::Engine, trigger: crate::arch
 /// Remove a save file.
 pub fn delete_save(path: &Path) -> io::Result<()> {
     std::fs::remove_file(path)
+}
+
+/// Resolve `name` to the `.babelmap` path it would write to inside
+/// `game_dir`, without touching the filesystem — the same validation
+/// `save_named` applies to its own `path`, factored out so a caller can ask
+/// "what file would this name hit?" before deciding to write it (SQ-0648: the
+/// overwrite-confirm prompt needs to know the target ahead of the write).
+pub fn named_save_path(game_dir: &Path, name: &str) -> io::Result<PathBuf> {
+    let slug = slugify(name);
+    if slug.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "save name is empty after sanitization"));
+    }
+    if crate::storage::is_reserved_slug(&slug) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "\"default\" is a reserved save name"));
+    }
+    Ok(game_dir.join(format!("{}.babelmap", slug)))
+}
+
+/// The display name of the save ALREADY at `path`, if any (SQ-0648).
+///
+/// Two different typed names can slugify to the same filename (`"Before
+/// Troll"` and `"before, troll!"` both land on `before-troll.babelmap`), so an
+/// overwrite-confirm prompt built from the typed name alone would hide exactly
+/// the collision it exists to surface. This reads the CURRENT occupant's name
+/// instead — `Meta::name` if the archive parses, else the filename stem —
+/// mirroring `list_saves`'s own name resolution. `None` when nothing exists at
+/// `path` yet, meaning there is nothing to confirm.
+pub fn existing_save_display_name(path: &Path) -> Option<String> {
+    if !path.exists() {
+        return None;
+    }
+    let name = crate::archive::read_archive_meta(path).ok().and_then(|m| m.name);
+    Some(name.unwrap_or_else(|| {
+        path.file_stem().and_then(|s| s.to_str()).unwrap_or("this save").to_string()
+    }))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

@@ -49,6 +49,12 @@ pub(crate) fn delete_save_confirmed(
 /// archive); an in-game save also sets `ingame_resume_save` so the run loop
 /// resumes the VM. An empty name or a write error re-opens the dialog when
 /// in-game so the user can retry.
+///
+/// `force`: when the target file already exists, SKIP the overwrite-confirm
+/// prompt and write straight over it. Callers pass `false` for the player's
+/// original submit (so a colliding target opens the confirm overlay instead
+/// of silently clobbering the existing save — SQ-0648) and `true` when
+/// resuming after the player has already confirmed the overwrite.
 pub(crate) fn handle_save_as(
     buf: String,
     dir: &std::path::Path,
@@ -56,6 +62,7 @@ pub(crate) fn handle_save_as(
     mapper: &mut Mapper,
     session: &mut dyn Engine,
     state: &mut AppState,
+    force: bool,
 ) {
     let ingame = state.ingame_io == Some(app::session::PendingIo::Save);
     if buf.is_empty() {
@@ -68,6 +75,27 @@ pub(crate) fn handle_save_as(
             ));
         }
         return;
+    }
+    // SQ-0648: a save-as target that already exists silently overwrote whatever
+    // was there — including a save with a DIFFERENT typed name that happens to
+    // slugify to the same file ("Before Troll" and "before, troll!" both land
+    // on before-troll.babelmap). Confirm before clobbering it: open the
+    // overwrite dialog and leave THIS dialog open behind it (reopened here with
+    // the same typed text, since the caller may already have cleared it) so
+    // Cancel needs no recovery. `force` skips this once the player has answered.
+    if !force {
+        if let Ok(path) = app::persist_files::named_save_path(dir, &buf) {
+            if let Some(existing_name) = app::persist_files::existing_save_display_name(&path) {
+                state.overlays.confirm_overwrite_save = Some(app::state::ConfirmOverwriteSave {
+                    path,
+                    existing_name,
+                    pending: app::state::PendingOverwrite::SaveAs,
+                });
+                state.overlays.save_name_dialog = Some(app::state::SaveNameDialog::new(buf, ingame));
+                state.overlays.dialog_focus = 1; // Cancel default
+                return;
+            }
+        }
     }
     // ONE writer for both triggers (SQ-0531): an in-game `@save` and a host
     // "Save State" named slot both produce the same `.babelmap` archive — map,
@@ -332,7 +360,7 @@ mod tests {
         let mut state = state_with_session(Some(PendingIo::Save));
         let mut mapper = mapper_with_room();
 
-        super::handle_save_as("chapter one".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+        super::handle_save_as("chapter one".into(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
 
         let path = dir.join("chapter-one.babelmap");
         assert!(path.exists(), "@save writes the archive");
@@ -375,7 +403,7 @@ mod tests {
         let mut state = state_with_session(None); // not in-game -> host Save State
         let mut mapper = mapper_with_room();
 
-        super::handle_save_as("chapter one".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+        super::handle_save_as("chapter one".into(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
 
         let path = dir.join("chapter-one.babelmap");
         let meta = app::archive::read_archive_meta(&path).expect("meta");
@@ -390,6 +418,85 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ── SQ-0648: overwrite confirmation ──────────────────────────────────────
+
+    /// A save-as target that already exists must open the overwrite-confirm
+    /// overlay INSTEAD of writing — including a cross-name slugify collision
+    /// ("Before Troll" and "before, troll!" both land on
+    /// `before-troll.babelmap`), where the prompt must name the EXISTING
+    /// save, not what was just typed, or the collision would be invisible.
+    #[test]
+    fn handle_save_as_prompts_before_overwriting_an_existing_target() {
+        let dir = temp_dir("overwrite-prompt");
+        let mut mapper = mapper_with_room();
+
+        // First save: "Before Troll" -> before-troll.babelmap.
+        let mut sess1 = minizork();
+        let mut state1 = state_with_session(None);
+        super::handle_save_as("Before Troll".into(), &dir, IFID, &mut mapper, &mut sess1, &mut state1, false);
+        let path = dir.join("before-troll.babelmap");
+        assert!(path.exists());
+        let original_bytes = std::fs::read(&path).expect("read original archive");
+        let meta1 = app::archive::read_archive_meta(&path).expect("meta");
+        assert_eq!(meta1.name.as_deref(), Some("Before Troll"));
+
+        // Second save: a DIFFERENT typed name that slugifies to the SAME file.
+        let mut sess2 = minizork();
+        assert!(!sess2.submit("open mailbox").quit); // perturb the session
+        let mut state2 = state_with_session(None);
+        super::handle_save_as("before, troll!".into(), &dir, IFID, &mut mapper, &mut sess2, &mut state2, false);
+
+        // (a)+(b): NOTHING was written — the file is byte-identical to before.
+        let after_bytes = std::fs::read(&path).expect("read archive after the collision attempt");
+        assert_eq!(after_bytes, original_bytes, "no write happens until the overwrite is confirmed");
+
+        // The overlay opened instead, carrying the EXISTING save's display name
+        // — "Before Troll", not "before, troll!" — which is what makes the
+        // collision visible. (c)
+        let pending = state2.overlays.confirm_overwrite_save.as_ref().expect("confirm overlay opens");
+        assert_eq!(pending.path, path);
+        assert_eq!(
+            pending.existing_name, "Before Troll",
+            "the prompt must name the save ALREADY there, not the name just typed"
+        );
+        assert!(matches!(pending.pending, app::state::PendingOverwrite::SaveAs));
+
+        // The save-name dialog stays open behind it, with the typed text intact —
+        // Cancel needs nowhere else to fall back to.
+        let dlg = state2.overlays.save_name_dialog.as_ref().expect("save-name dialog stays open behind the overlay");
+        assert_eq!(dlg.field.value, "before, troll!");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Confirming the overwrite (`force: true`, as the run loop's
+    /// `OverlayAct::ConfirmOverwrite(true)` handler does once the player
+    /// answers) performs the write for real.
+    #[test]
+    fn handle_save_as_force_overwrites_after_confirmation() {
+        let dir = temp_dir("overwrite-confirm");
+        let mut mapper = mapper_with_room();
+
+        let mut sess1 = minizork();
+        let mut state1 = state_with_session(None);
+        super::handle_save_as("Before Troll".into(), &dir, IFID, &mut mapper, &mut sess1, &mut state1, false);
+        let path = dir.join("before-troll.babelmap");
+        let original_bytes = std::fs::read(&path).expect("read original archive");
+
+        let mut sess2 = minizork();
+        assert!(!sess2.submit("open mailbox").quit);
+        let mut state2 = state_with_session(None);
+        super::handle_save_as("before, troll!".into(), &dir, IFID, &mut mapper, &mut sess2, &mut state2, true);
+
+        let new_bytes = std::fs::read(&path).expect("read archive after the confirmed overwrite");
+        assert_ne!(new_bytes, original_bytes, "the confirmed overwrite actually wrote");
+        let meta = app::archive::read_archive_meta(&path).expect("meta");
+        assert_eq!(meta.name.as_deref(), Some("before, troll!"), "the file now belongs to the new name");
+        assert!(state2.overlays.confirm_overwrite_save.is_none(), "force writes directly, no confirm prompt");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn empty_name_and_write_errors_still_reopen_the_dialog_in_game() {
         // Format unification must not disturb the retry loop.
@@ -398,13 +505,13 @@ mod tests {
         let mut state = state_with_session(Some(PendingIo::Save));
         let mut mapper = Mapper::default();
 
-        super::handle_save_as(String::new(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+        super::handle_save_as(String::new(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
         assert!(state.overlays.save_name_dialog.is_some(), "empty name re-opens the dialog");
         assert_eq!(state.ingame_resume_save, None, "and does not resume the VM");
 
         // "default" is the reserved slug -> the writer errors -> retry.
         state.overlays.save_name_dialog = None;
-        super::handle_save_as("default".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+        super::handle_save_as("default".into(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
         assert!(state.overlays.save_name_dialog.is_some(), "a write error re-opens the dialog");
         assert_eq!(state.ingame_resume_save, None);
 
@@ -422,7 +529,7 @@ mod tests {
         let mut sess = at_ingame_save();
         let mut state = state_with_session(Some(PendingIo::Save));
         let mut mapper = mapper_with_room();
-        super::handle_save_as("slot".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+        super::handle_save_as("slot".into(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
         let path = dir.join("slot.babelmap");
 
         let _ = sess.resume_save(true); // @save completes; the game runs on
@@ -472,13 +579,13 @@ mod tests {
         // (1) An @save archive -> descriptor completion, sidecars included.
         let mut sess = at_ingame_save();
         let mut state = state_with_session(Some(PendingIo::Save));
-        super::handle_save_as("game-slot".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+        super::handle_save_as("game-slot".into(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
         let ingame_path = dir.join("game-slot.babelmap");
 
         // (2) A host Save State archive -> full resume.
         let mut host_sess = minizork();
         let mut host_state = state_with_session(None);
-        super::handle_save_as("host-slot".into(), &dir, IFID, &mut mapper, &mut host_sess, &mut host_state);
+        super::handle_save_as("host-slot".into(), &dir, IFID, &mut mapper, &mut host_sess, &mut host_state, false);
         let host_path = dir.join("host-slot.babelmap");
 
         // (3) A bare foreign .qzl -> descriptor completion, no sidecars.
@@ -516,11 +623,11 @@ mod tests {
 
         let mut sess = at_ingame_save();
         let mut state = state_with_session(Some(PendingIo::Save));
-        super::handle_save_as("from the game".into(), &dir, IFID, &mut mapper, &mut sess, &mut state);
+        super::handle_save_as("from the game".into(), &dir, IFID, &mut mapper, &mut sess, &mut state, false);
 
         let mut host_sess = minizork();
         let mut host_state = state_with_session(None);
-        super::handle_save_as("from the host".into(), &dir, IFID, &mut mapper, &mut host_sess, &mut host_state);
+        super::handle_save_as("from the host".into(), &dir, IFID, &mut mapper, &mut host_sess, &mut host_state, false);
 
         std::fs::write(dir.join("from-frotz.qzl"), b"carried in from elsewhere").unwrap();
 

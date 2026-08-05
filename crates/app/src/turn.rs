@@ -984,7 +984,7 @@ mod tests {
         let panes = crate::PaneRects {
             map: ratatui::layout::Rect::default(), story: ratatui::layout::Rect::default(),
             room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None,
-            reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
+            reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, confirm_overwrite: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
             verb_menu: Default::default(),
             palette: Vec::new(),
             transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_surface: false,
@@ -1067,7 +1067,7 @@ mod tests {
         let panes = crate::PaneRects {
             map: ratatui::layout::Rect::default(), story: ratatui::layout::Rect::default(),
             room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None,
-            reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
+            reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, confirm_overwrite: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
             verb_menu: Default::default(),
             palette: Vec::new(),
             transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_surface: false,
@@ -1362,5 +1362,55 @@ mod tests {
         assert!(log.contains("some fault line"), "crash.log must record the fault line");
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── Per-turn auto-save never prompts (SQ-0648) ──────────────────────────────
+
+    /// The overwrite-confirm prompt exists for save-as (a name the PLAYER typed).
+    /// The per-turn auto-save writes the fixed `default.babelmap` slot every turn
+    /// regardless of what is already there, and must keep doing that silently —
+    /// it calls `save_archive_meta_pics` directly, never `save_named` /
+    /// `handle_save_as`, so there is no typed name to collide on. This guards
+    /// that architecture: even seeding the slot with a DIFFERENT save first (the
+    /// exact shape that triggers the prompt on the save-as path) must not open
+    /// the overlay here.
+    #[test]
+    fn per_turn_auto_save_never_prompts_even_when_the_slot_already_has_a_different_save() {
+        use app::engine::Engine;
+        use app::session::GameSession;
+
+        let dir = std::env::temp_dir().join(format!("bm-sq0648-autosave-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let arc_file = dir.join("default.babelmap");
+
+        // Pre-seed the slot as if from an earlier session.
+        let seed_sess = GameSession::new(crate::tests::read_char_then_save_v4_story(), true, false, None).expect("new");
+        let seed_meta = app::archive::Meta {
+            format_version: app::archive::CURRENT_FORMAT_VERSION,
+            ifid: None, name: None, turns: 1, saved_at: String::new(), location: None, score: None,
+            trigger: app::archive::SaveTrigger::HostState,
+        };
+        app::archive::save_archive_meta(
+            &arc_file, &mapper::mapper::Mapper::default(), &seed_sess.save_state(), None,
+            &std::collections::BTreeMap::new(), seed_meta, &[], &[], &[], &[], &[], &[],
+        ).expect("seed default.babelmap");
+        let before = std::fs::read(&arc_file).unwrap();
+
+        let mut sess = GameSession::new(crate::tests::read_char_then_save_v4_story(), true, false, None).expect("new");
+        let mut state = app::state::AppState::default();
+        state.config.auto_save = true;
+        let mapper = mapper::mapper::Mapper::default();
+        let result = game_driven_result(None);
+
+        super::post_turn_bookkeeping(&mut state, &mapper, &mut sess, &result, "look", 0, 0, "TEST-IFID", &arc_file);
+
+        assert!(
+            state.overlays.confirm_overwrite_save.is_none(),
+            "the auto-save path must never open the overwrite-confirm overlay"
+        );
+        let after = std::fs::read(&arc_file).unwrap();
+        assert_ne!(after, before, "the auto-save actually wrote over the existing slot, silently");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

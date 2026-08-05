@@ -213,53 +213,58 @@ pub(crate) fn dispatch_slash_outcome(
                 state.push_transcript_internal(&line, TranscriptKind::Meta);
             }
         }
-        SlashOutcome::Save(name_opt) => {
-            // Named save or default archive save. SQ-0588: the display list travels
-            // with BOTH — this is the interactive Save State path, and an archive
-            // written without it restores art that can never be recoloured.
-            let (v6_pics, v6_display, v6_diags) = crate::engine_helpers::v6_save_payload(&mut *session);
-            for d in &v6_diags { state.note_v6_save(d); }
-            let result = match name_opt {
-                Some(ref name) => {
-                    let (location, score) = crate::engine_helpers::save_summary(&*session, state);
-                    save_named(game_dir, ifid, name, app::archive::SaveTrigger::HostState, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(), session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images)
-                        .map(|()| format!("saved as \"{}\"", name))
-                        .map_err(|e| format!("save failed: {}", e))
-                }
-                None => {
-                    let (location, score) = crate::engine_helpers::save_summary(&*session, state);
-                    let meta = app::archive::Meta {
-                        format_version: app::archive::CURRENT_FORMAT_VERSION,
-                        ifid: Some(ifid.to_string()),
-                        name: None,
-                        turns: state.turns,
-                        saved_at: format_rfc3339(
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|d| d.as_secs())
-                                .unwrap_or(0),
-                        ),
-                        location,
-                        score,
-                        trigger: app::archive::SaveTrigger::HostState,
-                    };
-                    save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref())
-                        .map(|()| "saved".to_string())
-                        .map_err(|e| format!("save failed: {}", e))
-                }
-            };
-            match result {
-                Ok(msg) => {
-                    // Progress is now captured in a Save State — quitting is safe.
-                    state.unsaved_progress = false;
-                    if state.config.trace.hostio {
-                        app::trace::hostio(&state.config.user_dir, true, format!("save_state({} bytes)", session.save_state().bytes.len()));
+        SlashOutcome::Save(name_opt) => match name_opt {
+            Some(ref name) => match app::persist_files::named_save_path(game_dir, name) {
+                // SQ-0648: `/save <name>` clobbering an existing file with no
+                // warning is exactly the bug — including a cross-name slugify
+                // collision, which is why the prompt names the EXISTING
+                // save's display name rather than echoing what was just typed.
+                Ok(path) => match app::persist_files::existing_save_display_name(&path) {
+                    Some(existing_name) => {
+                        state.overlays.confirm_overwrite_save = Some(app::state::ConfirmOverwriteSave {
+                            path,
+                            existing_name,
+                            pending: app::state::PendingOverwrite::Slash(name.clone()),
+                        });
+                        state.overlays.dialog_focus = 1; // Cancel default
                     }
-                    state.set_status(msg);
-                }
-                Err(e) => state.set_status(e),
+                    None => {
+                        let result = write_named_save(game_dir, ifid, name, mapper, session, state);
+                        apply_slash_save_result(result, session, state);
+                    }
+                },
+                Err(e) => state.set_status(format!("save failed: {}", e)),
+            },
+            None => {
+                // The default archive slot is the auto/quick-save equivalent —
+                // never a name the player typed — so it never prompts (SQ-0648).
+                // SQ-0588: the display list travels with this save too — this is
+                // the interactive Save State path, and an archive written
+                // without it restores art that can never be recoloured.
+                let (v6_pics, v6_display, v6_diags) = crate::engine_helpers::v6_save_payload(&mut *session);
+                for d in &v6_diags { state.note_v6_save(d); }
+                let (location, score) = crate::engine_helpers::save_summary(&*session, state);
+                let meta = app::archive::Meta {
+                    format_version: app::archive::CURRENT_FORMAT_VERSION,
+                    ifid: Some(ifid.to_string()),
+                    name: None,
+                    turns: state.turns,
+                    saved_at: format_rfc3339(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                    ),
+                    location,
+                    score,
+                    trigger: app::archive::SaveTrigger::HostState,
+                };
+                let result = save_archive_meta_pics(arc_file, &*mapper, &session.save_state(), zvm_session_opt(&*session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref())
+                    .map(|()| "saved".to_string())
+                    .map_err(|e| format!("save failed: {}", e));
+                apply_slash_save_result(result, session, state);
             }
-        }
+        },
         SlashOutcome::Load(name_opt) => {
             // Named-slot load or default archive load. Named slots may be a
             // .babelmap Save State or a .qzl game save (SQ-0227 Task 3).
@@ -536,6 +541,54 @@ pub(crate) fn dispatch_slash_outcome(
     false
 }
 
+/// Write a named Save State via the slash `/save <name>` path (SQ-0648).
+///
+/// Factored out of the `SlashOutcome::Save(Some(name))` arm so the
+/// overwrite-confirm resolver (`main.rs`'s `OverlayAct::ConfirmOverwrite`
+/// handler, reached once the player answers the prompt) can perform the SAME
+/// write without re-deriving it. Always writes — the existence check that
+/// decides whether to prompt lives in the caller, not here.
+pub(crate) fn write_named_save(
+    game_dir: &std::path::Path,
+    ifid: &str,
+    name: &str,
+    mapper: &Mapper,
+    session: &mut dyn Engine,
+    state: &mut AppState,
+) -> Result<String, String> {
+    // SQ-0588: the display list travels with every host save — an archive
+    // written without it restores art that can never be recoloured.
+    let (v6_pics, v6_display, v6_diags) = crate::engine_helpers::v6_save_payload(session);
+    for d in &v6_diags { state.note_v6_save(d); }
+    let (location, score) = crate::engine_helpers::save_summary(&*session, state);
+    save_named(
+        game_dir, ifid, name, app::archive::SaveTrigger::HostState, mapper, &session.save_state(),
+        zvm_session_opt(&*session).map(|z| &z.machine.screen), &v6_pics, v6_display.as_ref(),
+        session.aux_data(), state.turns, location, score, &state.transcript, &state.transcript_kinds,
+        &state.transcript_runs, &state.transcript_para, &state.transcript_images,
+    )
+        .map(|()| format!("saved as \"{}\"", name))
+        .map_err(|e| format!("save failed: {}", e))
+}
+
+/// Apply the result of a slash-path save write (named or default archive) to
+/// `state`: clear the unsaved-progress flag and post the status line on
+/// success, trace it, or just post the error on failure. Shared by the direct
+/// write and the overwrite-confirm resolver (SQ-0648).
+pub(crate) fn apply_slash_save_result(result: Result<String, String>, session: &mut dyn Engine, state: &mut AppState) {
+    match result {
+        Ok(msg) => {
+            // Progress is now captured in a Save State — quitting is safe.
+            state.unsaved_progress = false;
+            if state.config.trace.hostio {
+                app::trace::hostio(&state.config.user_dir, true, format!("save_state({} bytes)", session.save_state().bytes.len()));
+            }
+            state.set_status(msg);
+        }
+        Err(e) => state.set_status(e),
+    }
+}
+
 /// Toggle the Z-machine debug inspector pane: activate it at the engine's current PC
 /// (focusing the region), or deactivate it (map returns, focus back to the game).
 /// Factored out of the `ToggleDebug` arm so it's testable without a full
@@ -723,5 +776,130 @@ mod debug_dispatch_tests {
         let should_break = dispatch_quit_like(&mut state, SlashOutcome::Quit);
         assert!(should_break, "no unsaved progress → quit breaks immediately");
         assert_eq!(state.exit_target, ExitTarget::Exit, "quit must resolve to Exit");
+    }
+
+    // ── SQ-0648: overwrite confirmation on the slash `/save <name>` path ───────
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bm-sq0648-slash-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A save-as target that already exists must open the overwrite-confirm
+    /// overlay INSTEAD of writing — same rule as the dialog path, reached here
+    /// through `/save <name>`. The prompt names the EXISTING save, so a
+    /// cross-name slugify collision ("Before Troll" / "before, troll!" both
+    /// land on `before-troll.babelmap`) is visible rather than reading as a
+    /// harmless same-name re-save.
+    #[test]
+    fn slash_save_named_prompts_before_overwriting_an_existing_target() {
+        let dir = temp_dir("prompt");
+        let mut mapper = Mapper::default();
+
+        // Seed "Before Troll" through the very writer `/save` itself uses.
+        let mut seed_engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut seed_state = AppState::default();
+        super::write_named_save(&dir, "IFIDTEST", "Before Troll", &mapper, &mut seed_engine, &mut seed_state)
+            .expect("seed write succeeds");
+        let path = dir.join("before-troll.babelmap");
+        let original_bytes = std::fs::read(&path).expect("seed archive written");
+
+        // `/save "before, troll!"` — a DIFFERENT typed name, same target file.
+        let mut state = AppState::default();
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut style_watcher: Option<app::watch::StyleWatcher> = None;
+        let arc_file = dir.join("default.babelmap");
+        let should_break = dispatch_slash_outcome(
+            SlashOutcome::Save(Some("before, troll!".to_string())),
+            &mut state, &mut mapper, &mut engine, &mut style_watcher,
+            &dir, "IFIDTEST", &arc_file, &[], &dir,
+            Rect::default(), Rect::default(), false,
+        );
+        assert!(!should_break);
+
+        // Nothing was written — byte-identical to the seed.
+        let after_bytes = std::fs::read(&path).expect("archive still there");
+        assert_eq!(after_bytes, original_bytes, "no write until the overwrite is confirmed");
+
+        let pending = state.overlays.confirm_overwrite_save.as_ref().expect("confirm overlay opens");
+        assert_eq!(pending.path, path);
+        assert_eq!(
+            pending.existing_name, "Before Troll",
+            "the prompt must name the save ALREADY there, not the name just typed"
+        );
+        assert_eq!(pending.pending, app::state::PendingOverwrite::Slash("before, troll!".to_string()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `write_named_save` is exactly what the run loop's
+    /// `OverlayAct::ConfirmOverwrite(true)` handler calls once the player
+    /// confirms — calling it directly here mirrors that resumed write and
+    /// proves it actually replaces the file.
+    #[test]
+    fn slash_write_named_save_overwrites_when_the_overwrite_is_confirmed() {
+        let dir = temp_dir("confirm");
+        let mapper = Mapper::default();
+
+        let mut seed_engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut seed_state = AppState::default();
+        super::write_named_save(&dir, "IFIDTEST", "Before Troll", &mapper, &mut seed_engine, &mut seed_state)
+            .expect("seed write succeeds");
+        let path = dir.join("before-troll.babelmap");
+        let original_bytes = std::fs::read(&path).expect("seed archive written");
+
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut state = AppState::default();
+        let result = super::write_named_save(&dir, "IFIDTEST", "before, troll!", &mapper, &mut engine, &mut state);
+        assert!(result.is_ok(), "{result:?}");
+
+        let new_bytes = std::fs::read(&path).expect("archive overwritten");
+        assert_ne!(new_bytes, original_bytes, "the confirmed overwrite actually wrote");
+        let meta = app::archive::read_archive_meta(&path).expect("meta");
+        assert_eq!(meta.name.as_deref(), Some("before, troll!"), "the file now belongs to the new name");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The default archive slot (`/save` with no name) is the quick-save
+    /// equivalent, never a name the player typed — it must keep overwriting
+    /// silently even when the slot already holds an earlier save, exactly like
+    /// the per-turn auto-save (SQ-0648).
+    #[test]
+    fn slash_save_default_archive_never_prompts_even_when_it_already_exists() {
+        let dir = temp_dir("default-slot");
+        let arc_file = dir.join("default.babelmap");
+
+        let seed_meta = app::archive::Meta {
+            format_version: app::archive::CURRENT_FORMAT_VERSION,
+            ifid: None, name: None, turns: 1, saved_at: String::new(), location: None, score: None,
+            trigger: app::archive::SaveTrigger::HostState,
+        };
+        app::archive::save_archive_meta(
+            &arc_file, &Mapper::default(), &EngineSave::new("mock", 1, vec![1, 2, 3]), None,
+            &BTreeMap::new(), seed_meta, &[], &[], &[], &[], &[], &[],
+        ).expect("seed default.babelmap");
+        let before = std::fs::read(&arc_file).expect("seed archive written");
+
+        let mut state = AppState::default();
+        let mut mapper = Mapper::default();
+        let mut engine = MockEngine { has_debugger: false, aux: BTreeMap::new() };
+        let mut style_watcher: Option<app::watch::StyleWatcher> = None;
+        let should_break = dispatch_slash_outcome(
+            SlashOutcome::Save(None),
+            &mut state, &mut mapper, &mut engine, &mut style_watcher,
+            &dir, "IFIDTEST", &arc_file, &[], &dir,
+            Rect::default(), Rect::default(), false,
+        );
+        assert!(!should_break);
+        assert!(
+            state.overlays.confirm_overwrite_save.is_none(),
+            "the default archive slot must never open the overwrite-confirm overlay"
+        );
+        let after = std::fs::read(&arc_file).expect("archive still there");
+        assert_ne!(after, before, "it wrote silently, straight over the existing slot");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

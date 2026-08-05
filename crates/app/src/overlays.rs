@@ -19,6 +19,9 @@ use app::render::config_screen::draw_config_screen;
 use app::render::confirm_delete_dialog::{
     confirm_delete_key_focused, draw_confirm_delete_dialog, ConfirmDeleteAction, ConfirmDeleteDialogRects,
 };
+use app::render::confirm_overwrite_dialog::{
+    confirm_overwrite_key_focused, draw_confirm_overwrite_dialog, ConfirmOverwriteAction, ConfirmOverwriteDialogRects,
+};
 use app::render::dialog::DialogRects;
 use app::render::filebrowser::draw_file_browser;
 use app::render::game_over_dialog::{
@@ -57,6 +60,7 @@ pub(crate) struct OverlayRects {
     pub save_name_dialog: Option<SaveNameDialogRects>,
     pub text_entry: Option<TextEntryDialogRects>,
     pub confirm_delete: Option<ConfirmDeleteDialogRects>,
+    pub confirm_overwrite: Option<ConfirmOverwriteDialogRects>,
     pub quit_dialog: Option<QuitDialogRects>,
     pub launch_dialog: Option<LaunchDialogRects>,
     pub hints_panel: Option<HintsPanelRects>,
@@ -90,6 +94,7 @@ pub(crate) fn draw_all(
         save_name_dialog: None,
         text_entry: None,
         confirm_delete: None,
+        confirm_overwrite: None,
         quit_dialog: None,
         launch_dialog: None,
         hints_panel: None,
@@ -198,6 +203,7 @@ pub(crate) enum OverlayAct {
     TextEntrySubmit,
     TextEntryCancel,
     ConfirmDelete(bool),
+    ConfirmOverwrite(bool),
     QuitSave,
     QuitQuit,
     QuitCancel,
@@ -221,6 +227,7 @@ pub(crate) enum OverlayKind {
     Aux,
     Reset,
     GameOver,
+    ConfirmOverwrite,
     SaveName,
     TextEntry,
     ConfirmDelete,
@@ -243,12 +250,17 @@ pub(crate) trait Overlay {
 }
 
 /// The common-dialog overlays in strict input-priority / draw z-order (highest
-/// priority first): aux ▸ reset ▸ save-name ▸ text-entry ▸ confirm-delete ▸ quit
-/// ▸ launch. This is the exact order of the old run-loop `if`-ladder.
+/// priority first): aux ▸ reset ▸ game-over ▸ confirm-overwrite ▸ save-name ▸
+/// text-entry ▸ confirm-delete ▸ quit ▸ launch. Confirm-overwrite sits ABOVE
+/// save-name deliberately (SQ-0648): the save-as flow leaves the save-name
+/// dialog open behind it while it asks, so it must win the priority scan
+/// whenever both are `Some` at once, or Cancel would have nothing to fall
+/// back into. This is otherwise the exact order of the old run-loop `if`-ladder.
 pub(crate) const COMMON_DIALOGS: &[&dyn Overlay] = &[
     &AuxOverlay,
     &ResetOverlay,
     &GameOverOverlay,
+    &ConfirmOverwriteOverlay,
     &SaveNameOverlay,
     &TextEntryOverlay,
     &ConfirmDeleteOverlay,
@@ -417,6 +429,47 @@ impl Overlay for GameOverOverlay {
             OverlayOutcome::Act(OverlayAct::GameOverQuit)
         } else {
             // Click outside the dialog: swallow, keep it open (the game is over).
+            OverlayOutcome::Consumed
+        }
+    }
+}
+
+// ── Confirm-overwrite (two-button, over the save-name dialog) ──────────────
+struct ConfirmOverwriteOverlay;
+impl Overlay for ConfirmOverwriteOverlay {
+    fn kind(&self) -> OverlayKind { OverlayKind::ConfirmOverwrite }
+    fn is_open(&self, ov: &OverlayState) -> bool { ov.confirm_overwrite_save.is_some() }
+    fn draw(&self, state: &AppState, area: Rect, buf: &mut Buffer, out: &mut OverlayRects) {
+        out.confirm_overwrite = draw_confirm_overwrite_dialog(state, area, buf);
+    }
+    fn key(&self, state: &mut AppState, key: &KeyEvent) -> OverlayOutcome {
+        match key.code {
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, 1);
+                OverlayOutcome::Consumed
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+                state.overlays.dialog_focus = cycle_focus(state.overlays.dialog_focus, 2, -1);
+                OverlayOutcome::Consumed
+            }
+            code => match confirm_overwrite_key_focused(code, state.overlays.dialog_focus) {
+                ConfirmOverwriteAction::Confirm => OverlayOutcome::Act(OverlayAct::ConfirmOverwrite(true)),
+                ConfirmOverwriteAction::Cancel => OverlayOutcome::Act(OverlayAct::ConfirmOverwrite(false)),
+                ConfirmOverwriteAction::None => OverlayOutcome::Consumed,
+            },
+        }
+    }
+    fn mouse(&self, _state: &mut AppState, m: &MouseEvent, panes: &PaneRects) -> OverlayOutcome {
+        let Some(pt) = left_down(m) else { return OverlayOutcome::Consumed };
+        let Some(cd) = &panes.confirm_overwrite else { return OverlayOutcome::Consumed };
+        let in_close = cd.close.is_some_and(|r| r.contains(pt));
+        let in_overwrite = cd.overwrite.is_some_and(|r| r.contains(pt));
+        let in_cancel = cd.cancel.is_some_and(|r| r.contains(pt));
+        if in_close || in_cancel {
+            OverlayOutcome::Act(OverlayAct::ConfirmOverwrite(false))
+        } else if in_overwrite {
+            OverlayOutcome::Act(OverlayAct::ConfirmOverwrite(true))
+        } else {
             OverlayOutcome::Consumed
         }
     }
@@ -673,9 +726,10 @@ mod tests {
     }
 
     /// The common-dialog priority ladder resolves to the exact z-order the old
-    /// run-loop if-ladder used: aux ▸ reset ▸ save-name ▸ text-entry ▸
-    /// confirm-delete ▸ quit ▸ launch. `topmost_common_dialog` must return the
-    /// highest-priority open overlay regardless of which lower ones are also open.
+    /// run-loop if-ladder used: aux ▸ reset ▸ game-over ▸ confirm-overwrite ▸
+    /// save-name ▸ text-entry ▸ confirm-delete ▸ quit ▸ launch.
+    /// `topmost_common_dialog` must return the highest-priority open overlay
+    /// regardless of which lower ones are also open.
     #[test]
     fn topmost_common_dialog_preserves_ladder_order() {
         // No overlay open → None.
@@ -688,6 +742,11 @@ mod tests {
             (|o| o.aux_prompt = true, OverlayKind::Aux),
             (|o| o.reset_dialog = true, OverlayKind::Reset),
             (|o| o.game_over = true, OverlayKind::GameOver),
+            (|o| o.confirm_overwrite_save = Some(app::state::ConfirmOverwriteSave {
+                path: std::path::PathBuf::from("s.babelmap"),
+                existing_name: "s".to_string(),
+                pending: app::state::PendingOverwrite::SaveAs,
+            }), OverlayKind::ConfirmOverwrite),
             (|o| o.save_name_dialog = Some(app::state::SaveNameDialog::new(String::new(), false)), OverlayKind::SaveName),
             (|o| o.text_entry = Some(app::state::TextEntryDialog::new(app::state::TextEntryKind::CreateFile, "")), OverlayKind::TextEntry),
             (|o| o.confirm_delete_save = Some(std::path::PathBuf::from("s.sav")), OverlayKind::ConfirmDelete),
@@ -714,5 +773,25 @@ mod tests {
         // Aux sits above everything.
         o.aux_prompt = true;
         assert_eq!(topmost_common_dialog(&o).unwrap().kind(), OverlayKind::Aux);
+    }
+
+    /// SQ-0648: the save-as flow leaves the save-name dialog open BEHIND the
+    /// confirm-overwrite overlay so Cancel needs no recovery. Confirm-overwrite
+    /// must win the priority scan whenever both are open at once, or the
+    /// overlay ladder would route input to the wrong modal.
+    #[test]
+    fn confirm_overwrite_outranks_save_name_when_both_open() {
+        let mut o = OverlayState::default();
+        o.save_name_dialog = Some(app::state::SaveNameDialog::new("chapter one".to_string(), false));
+        o.confirm_overwrite_save = Some(app::state::ConfirmOverwriteSave {
+            path: std::path::PathBuf::from("chapter-one.babelmap"),
+            existing_name: "Chapter One".to_string(),
+            pending: app::state::PendingOverwrite::SaveAs,
+        });
+        assert_eq!(
+            topmost_common_dialog(&o).unwrap().kind(),
+            OverlayKind::ConfirmOverwrite,
+            "confirm-overwrite must be topmost while the save-name dialog waits behind it"
+        );
     }
 }

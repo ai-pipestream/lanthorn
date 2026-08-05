@@ -488,6 +488,8 @@ struct PaneRects {
     pub text_entry: Option<app::render::text_entry_dialog::TextEntryDialogRects>,
     /// Hit-rects for the confirm-delete dialog (when open).
     pub confirm_delete: Option<app::render::confirm_delete_dialog::ConfirmDeleteDialogRects>,
+    /// Hit-rects for the confirm-overwrite dialog (when open).
+    pub confirm_overwrite: Option<app::render::confirm_overwrite_dialog::ConfirmOverwriteDialogRects>,
     /// Hit-rects for the quit dialog (when open).
     pub quit_dialog: Option<app::render::quit_dialog::QuitDialogRects>,
     /// Hit-rects for the launch dialog (when open).
@@ -999,7 +1001,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, verb_menu: verb_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, verb_menu: verb_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -1339,7 +1341,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, quit_dialog: None, launch_dialog: None, hints_panel: None, verb_menu: Default::default(), palette: Vec::new(), transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_surface: false, transcript_total_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, confirm_overwrite: None, quit_dialog: None, launch_dialog: None, hints_panel: None, verb_menu: Default::default(), palette: Vec::new(), transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_surface: false, transcript_total_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1750,8 +1752,12 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             state.push_notice("[Save name cannot be empty]");
                         } else {
                             state.overlays.save_name_dialog = None;
+                            // SQ-0648: `force: false` — if the target already exists,
+                            // `handle_save_as` opens the overwrite-confirm overlay
+                            // (reopening this dialog behind it with `value`) instead
+                            // of writing straight over it.
                             handle_save_as(
-                                value, &game_dir, &ifid, &mut mapper, &mut *session, &mut state,
+                                value, &game_dir, &ifid, &mut mapper, &mut *session, &mut state, false,
                             );
                             let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
                                 || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
@@ -1796,6 +1802,47 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         }
                         // Return the saves manager (still open behind us) to default focus.
                         state.overlays.dialog_focus = 0;
+                    }
+                    OverlayAct::ConfirmOverwrite(confirmed) => {
+                        // SQ-0648: resume whichever entry point asked for confirmation.
+                        if let Some(pending) = state.overlays.confirm_overwrite_save.take() {
+                            match pending.pending {
+                                app::state::PendingOverwrite::SaveAs => {
+                                    if confirmed {
+                                        // The save-name dialog was left open BEHIND this
+                                        // overlay the whole time; the typed name lives
+                                        // there, not in `pending`.
+                                        let value = state
+                                            .overlays.save_name_dialog
+                                            .take()
+                                            .map(|d| d.field.value.clone())
+                                            .unwrap_or_default();
+                                        handle_save_as(
+                                            value, &game_dir, &ifid, &mut mapper, &mut *session, &mut state, true,
+                                        );
+                                        let quit = resolve_ingame_dialog(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map)
+                                            || resolve_filename_request(&mut *session, &mut mapper, &mut state, &game_dir, &ifid, last_panes.map);
+                                        turn::persist_aux_after_turn(&mut *session, &mut state, &game_dir);
+                                        turn::persist_vfs_after_turn(&mut *session, &state, &game_dir);
+                                        if quit { break 'event_loop state.exit_target.into(); }
+                                    }
+                                    // Cancelled: the save-name dialog is untouched behind
+                                    // us, showing exactly what the player typed — refocus
+                                    // its text field.
+                                    state.overlays.dialog_focus = 0;
+                                }
+                                app::state::PendingOverwrite::Slash(name) => {
+                                    if confirmed {
+                                        let result = slash_dispatch::write_named_save(&game_dir, &ifid, &name, &mapper, &mut *session, &mut state);
+                                        slash_dispatch::apply_slash_save_result(result, &mut *session, &mut state);
+                                    } else {
+                                        // No dialog to return to for the slash path — say so.
+                                        state.set_status("save cancelled");
+                                    }
+                                    state.overlays.dialog_focus = 0;
+                                }
+                            }
+                        }
                     }
                     OverlayAct::QuitSave => {
                         // Same save/archive whether quitting or returning to the
