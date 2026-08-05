@@ -520,8 +520,16 @@ impl ColorScheme {
 
         ColorScheme {
             transcript: Style::new().fg(transcript_fg),
-            map_border_style: BorderStyle::None,
-            story_border_style: BorderStyle::None,
+            // SQ-0641: a colour scheme recolours, it must not change border
+            // STRUCTURE. These used to be seeded `None` here and then flipped to
+            // Single by the (since-removed) `apply_color_decls` pass over
+            // DEFAULT_STYLE_TOML's map_border/story_border decls; when that pass
+            // went away only `terminal_default()` was fixed up, so configuring
+            // any scheme silently dropped the pane borders (and re-enabled the
+            // in-content map layer strip → double tab strip). Match
+            // `terminal_default()`.
+            map_border_style: BorderStyle::Single,
+            story_border_style: BorderStyle::Single,
             status_header_style: BorderStyle::None,
             input_line_style: BorderStyle::None,
             suggestion_line_style: BorderStyle::None,
@@ -531,8 +539,8 @@ impl ColorScheme {
             dialog_placement: DialogPlacement::Center,
             dialog_margin: 0,
             virtual_window_border: BorderStyle::Single,
-            map_border_sides: PaneSides::all(BorderStyle::None),
-            story_border_sides: PaneSides::all(BorderStyle::None),
+            map_border_sides: PaneSides::all(BorderStyle::Single),
+            story_border_sides: PaneSides::all(BorderStyle::Single),
             status_header_sides: PaneSides::all(BorderStyle::None),
             input_line_sides: PaneSides::all(BorderStyle::None),
             suggestion_line_sides: PaneSides::all(BorderStyle::None),
@@ -737,12 +745,15 @@ pub fn parse_color_value(value: &str, scheme: &GhosttyScheme) -> Option<Color> {
         return Some(c);
     }
 
-    // 256-index
-    if let Ok(idx) = v.parse::<u8>() {
-        return Some(Color::Indexed(idx));
+    // 256-index: at most 3 decimal digits ("17", "255"). SQ-0642: a longer
+    // all-digit string is NOT an index — a hashless 6-digit hex colour whose
+    // digits happen to read ≤255 after leading zeros ("000080") used to win the
+    // u8 parse here and come out as Indexed(80) instead of Rgb(0,0,128).
+    if v.len() <= 3 && v.bytes().all(|b| b.is_ascii_digit()) {
+        return v.parse::<u8>().ok().map(Color::Indexed);
     }
 
-    // hex
+    // hex (documented: #rrggbb or rrggbb — a 6-char all-digit string lands here)
     parse_hex_color(v)
 }
 
@@ -931,6 +942,38 @@ mod tests {
         assert_eq!(parse_color_value("red", &scheme), Some(Color::Red));
         assert_eq!(parse_color_value("bright-blue", &scheme), Some(Color::LightBlue));
         assert_eq!(parse_color_value("white", &scheme), Some(Color::White));
+    }
+
+    #[test]
+    fn parse_color_value_disambiguates_hex_from_256_index() {
+        // SQ-0642: 6-char all-hex-digit strings are hex (the documented hashless
+        // form); only a 1-3 digit decimal ≤255 is a 256-index. "000080" used to
+        // hit the u8 parse first and misparse as Indexed(80).
+        let gs = GhosttyScheme::default();
+        assert_eq!(parse_color_value("000080", &gs), Some(Color::Rgb(0, 0, 0x80)));
+        assert_eq!(parse_color_value("000000", &gs), Some(Color::Rgb(0, 0, 0)));
+        assert_eq!(parse_color_value("80", &gs), Some(Color::Indexed(80)));
+        assert_eq!(parse_color_value("255", &gs), Some(Color::Indexed(255)));
+        assert_eq!(parse_color_value("ff0000", &gs), Some(Color::Rgb(0xff, 0, 0)));
+        // Out-of-range decimals and non-colours stay unparsed.
+        assert_eq!(parse_color_value("999", &gs), None);
+        assert_eq!(parse_color_value("1234", &gs), None);
+    }
+
+    #[test]
+    fn from_ghostty_keeps_the_default_border_structure() {
+        // SQ-0641: choosing a colour scheme must not change border STRUCTURE.
+        // from_ghostty used to seed map/story borders as None (vs terminal
+        // default Single), so any scheme dropped the pane borders and re-enabled
+        // the in-content map layer strip alongside the header tabs.
+        use crate::render::paneframe::{BorderStyle, PaneSides};
+        let cs = ColorScheme::from_ghostty(&sample_scheme(), &BTreeMap::new());
+        let def = ColorScheme::terminal_default();
+        assert_eq!(cs.map_border_style, def.map_border_style);
+        assert_eq!(cs.story_border_style, def.story_border_style);
+        assert_eq!(cs.map_border_style, BorderStyle::Single);
+        assert_eq!(cs.map_border_sides, PaneSides::all(BorderStyle::Single));
+        assert_eq!(cs.story_border_sides, PaneSides::all(BorderStyle::Single));
     }
 
     #[test]

@@ -9,9 +9,7 @@
 //! `style.toml` on first run, and the file is then edited by hand + applied
 //! live with `/reload`.
 
-use super::registry::{
-    Kind, RegRow, Section, DIAGONAL_CORNERS_DEFAULT, LAYER_CYCLE_DEFAULT, REGISTRY,
-};
+use super::registry::{Kind, RegRow, Section, DIAGONAL_CORNERS_DEFAULT, REGISTRY};
 use crate::style::{color_to_str, personal_style_path};
 
 /// Auto-seed `user_dir/style.toml` with [`commented_template`] if it does not
@@ -136,18 +134,14 @@ fn row_line(section: Section, row: &RegRow) -> String {
         return role_line(row.name);
     }
 
-    // The two map rows whose value `Delta` cannot carry: a list and a bool.
+    // The one map row whose value `Delta` cannot carry: a bool.
+    // (SQ-0641: `map.layer_cycle`, the other special case, was removed — the
+    // list was documented in the template but had no consumer anywhere.)
     if row.name == "map.diagonal_corners" {
         return format!(
             "# diagonal_corners = {DIAGONAL_CORNERS_DEFAULT}   \
              # false = plain orthogonal corner exits, for fonts without Unicode 13 (🮠🮡🮢🮣)"
         );
-    }
-
-    if row.name == "map.layer_cycle" {
-        let list =
-            LAYER_CYCLE_DEFAULT.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
-        return format!("# layer_cycle = [{list}]");
     }
 
     let key = toml_key(&strip_section_prefix(section, row.name));
@@ -398,7 +392,11 @@ mod tests {
 
         // roles: every one's template default must resolve back to the registry
         // default, so the hand-written [roles] block can't drift from the resolver.
-        for role in ["text", "chrome", "border", "accent", "muted", "alert", "heading"] {
+        // SQ-0642: this list said "border" — not a role; the real role is "line",
+        // whose template row was therefore never checked (both sides fell back to
+        // the text fallback and compared equal vacuously). Pin it to ROLE_NAMES
+        // so the list itself can't drift again.
+        for role in super::super::registry::ROLE_NAMES {
             assert_eq!(seeded.get(role).style, default.get(role).style, "role {role} drifted");
         }
         // an element

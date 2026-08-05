@@ -510,6 +510,119 @@ fn parse_decl_from_table(t: &toml::value::Table) -> Decl {
     }
 }
 
+// ── structural selector application ──────────────────────────────────────────
+
+/// Resolve a border selector's per-side styles: each `style_<side>` override
+/// parses on its own; an unset side falls back to the selector's base style.
+fn resolve_sides(base: paneframe::BorderStyle, decl: &Decl) -> paneframe::PaneSides {
+    let side = |ov: &Option<String>| -> paneframe::BorderStyle {
+        match ov {
+            None => base,
+            Some(s) => paneframe::parse_border_style(s),
+        }
+    };
+    paneframe::PaneSides {
+        top: side(&decl.style_top),
+        bottom: side(&decl.style_bottom),
+        left: side(&decl.style_left),
+        right: side(&decl.style_right),
+    }
+}
+
+/// Collect a border selector's per-side/corner glyph overrides.
+fn decl_glyphs(decl: &Decl) -> paneframe::PaneGlyphs {
+    paneframe::PaneGlyphs {
+        top:    decl.glyph_top.clone(),
+        bottom: decl.glyph_bottom.clone(),
+        left:   decl.glyph_left.clone(),
+        right:  decl.glyph_right.clone(),
+        tl:     decl.glyph_tl.clone(),
+        tr:     decl.glyph_tr.clone(),
+        bl:     decl.glyph_bl.clone(),
+        br:     decl.glyph_br.clone(),
+    }
+}
+
+/// Apply the STRUCTURAL channels of the `[colors]` selector decls onto the
+/// `ColorScheme` (SQ-0641). Colour channels (fg/bg/modifiers) ride the registry
+/// theme since SQ-0309 and are NOT applied here; but the structural fields —
+/// border style + per-side styles, per-side/corner glyphs, the pane header
+/// toggles, and the dialog's shadow/placement/margin — still live on
+/// `ColorScheme` and had lost their only writer when `apply_color_decls` was
+/// deleted, so `"dialog" = { shadow = true }` parsed, merged, round-tripped and
+/// did nothing. Unknown selectors are ignored (they are colour selectors, or
+/// forward-compat).
+fn apply_structural_decls(cs: &mut ColorScheme, selectors: &BTreeMap<String, Decl>) {
+    for (selector, decl) in selectors {
+        match selector.as_str() {
+            "map_border" => {
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.map_border_style);
+                cs.map_border_style = base;
+                cs.map_border_sides = resolve_sides(base, decl);
+                cs.map_border_glyphs = decl_glyphs(decl);
+                if let Some(h) = decl.header {
+                    cs.map_header_on = h;
+                }
+            }
+            "story_border" => {
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.story_border_style);
+                cs.story_border_style = base;
+                cs.story_border_sides = resolve_sides(base, decl);
+                cs.story_border_glyphs = decl_glyphs(decl);
+                if let Some(h) = decl.header {
+                    cs.story_header_on = h;
+                }
+            }
+            "status_header" => {
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.status_header_style);
+                cs.status_header_style = base;
+                cs.status_header_sides = resolve_sides(base, decl);
+                cs.status_header_glyphs = decl_glyphs(decl);
+            }
+            "input_line" => {
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.input_line_style);
+                cs.input_line_style = base;
+                cs.input_line_sides = resolve_sides(base, decl);
+                cs.input_line_glyphs = decl_glyphs(decl);
+            }
+            "suggestion_line" => {
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.suggestion_line_style);
+                cs.suggestion_line_style = base;
+                cs.suggestion_line_sides = resolve_sides(base, decl);
+                cs.suggestion_line_glyphs = decl_glyphs(decl);
+            }
+            "notification" => {
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.notification_style);
+                cs.notification_style = base;
+                cs.notification_sides = resolve_sides(base, decl);
+                cs.notification_glyphs = decl_glyphs(decl);
+            }
+            "upper_window_border" => {
+                let base = decl.style.as_deref().map(paneframe::parse_border_style).unwrap_or(cs.virtual_window_border);
+                cs.virtual_window_border = base;
+                cs.upper_window_border_sides = resolve_sides(base, decl);
+                cs.upper_window_border_glyphs = decl_glyphs(decl);
+            }
+            "dialog" => {
+                if let Some(ref s) = decl.style {
+                    cs.dialog_box_style = paneframe::parse_border_style(s);
+                }
+                if let Some(shadow_on) = decl.shadow {
+                    cs.dialog_shadow_on = shadow_on;
+                }
+                if let Some(ref p) = decl.placement {
+                    cs.dialog_placement = crate::render::dialog::DialogPlacement::from_token(p);
+                }
+                if let Some(m) = decl.margin {
+                    cs.dialog_margin = m;
+                }
+                cs.dialog_glyphs = decl_glyphs(decl);
+            }
+            _ => {} // colour selectors (theme-resolved) and unknown names
+        }
+    }
+}
+
 // ── resolve ───────────────────────────────────────────────────────────────────
 
 /// Resolve a [`StyleDoc`] into a concrete [`ColorScheme`], [`SymbolSet`](crate::symbols::SymbolSet), and warnings.
@@ -519,7 +632,10 @@ fn parse_decl_from_table(t: &toml::value::Table) -> Decl {
 ///    (handles `None` → terminal-default, built-in name, or file path).
 /// 2. Obtain the active `GhosttyScheme` returned by `resolve_base` (or
 ///    `GhosttyScheme::default()` for the terminal-default case).
-/// 3. Resolve symbols via `SymbolSet::resolve(&finalize_symbols(&doc.symbols))`.
+/// 3. Apply the structural channels of `doc.colors.selectors` (border styles,
+///    sides, glyphs, headers, dialog shadow/placement/margin) — colour channels
+///    ride the registry theme instead (SQ-0309/SQ-0641).
+/// 4. Resolve symbols via `SymbolSet::resolve(&finalize_symbols(&doc.symbols))`.
 ///
 /// Returns all warnings: base-scheme path/parse warnings.
 pub fn resolve(
@@ -529,6 +645,9 @@ pub fn resolve(
     // Step 1+2: build base ColorScheme and get the active GhosttyScheme.
     let (mut cs, gs, mut warnings) =
         colors::resolve_base(doc.colors.scheme.as_deref(), dir);
+
+    // Step 3: structural selector channels (SQ-0641).
+    apply_structural_decls(&mut cs, &doc.colors.selectors);
 
     // Compile user transcript rules; an invalid regex warns and is skipped.
     for r in &doc.transcript_rules {
@@ -1277,6 +1396,129 @@ room = { fg = "white" }
         let (cs, _set, _w) = resolve(&doc, std::path::Path::new("."));
         assert!(matches!(cs.map_border_style, crate::render::paneframe::BorderStyle::Single));
         assert!(matches!(cs.story_border_style, crate::render::paneframe::BorderStyle::Single));
+
+        // SQ-0641: the SCHEME case must pin the same structure. This test used
+        // to cover only the no-scheme doc, which is exactly how from_ghostty's
+        // None seeding (scheme choice silently dropping the pane borders and
+        // doubling the map layer strip) shipped unnoticed.
+        let doc = parse_style_toml("[colors]\nscheme = \"tomorrow-night\"\n").unwrap();
+        let (cs, _set, w) = resolve(&doc, std::path::Path::new("."));
+        assert!(w.is_empty(), "built-in scheme resolves clean: {w:?}");
+        assert!(
+            matches!(cs.map_border_style, crate::render::paneframe::BorderStyle::Single),
+            "a colour scheme must not flip the map border to None"
+        );
+        assert!(matches!(cs.story_border_style, crate::render::paneframe::BorderStyle::Single));
+        assert_eq!(
+            cs.map_border_sides,
+            crate::render::paneframe::PaneSides::all(crate::render::paneframe::BorderStyle::Single)
+        );
+    }
+
+    // ── SQ-0641: [colors] structural selectors reach the ColorScheme ──────────
+    //
+    // `resolve` stopped reading `doc.colors.selectors` when apply_color_decls
+    // was deleted (SQ-0309), so every structural field (dialog shadow/placement/
+    // margin, pane headers, per-side border styles, border glyphs) parsed,
+    // merged, round-tripped — and did nothing. These walk style.toml TEXT → the
+    // exact ColorScheme field the render path consumes.
+
+    /// Resolve a style.toml string straight to the ColorScheme.
+    fn colors_from_toml(text: &str) -> crate::colors::ColorScheme {
+        let doc = parse_style_toml(text).expect("style text must parse");
+        resolve(&doc, std::path::Path::new(".")).0
+    }
+
+    #[test]
+    fn dialog_shadow_placement_margin_reach_the_colorscheme() {
+        let base = crate::colors::ColorScheme::terminal_default();
+        assert!(!base.dialog_shadow_on, "guard: shadow defaults off, so true below is a change");
+        let cs = colors_from_toml(
+            "[colors]\n\"dialog\" = { shadow = true, placement = \"bottom\", margin = 2 }\n",
+        );
+        assert!(cs.dialog_shadow_on, "dialog shadow = true must reach dialog_shadow_on");
+        assert_eq!(cs.dialog_placement, crate::render::dialog::DialogPlacement::Bottom);
+        assert_eq!(cs.dialog_margin, 2);
+        // The render seam consumes exactly these fields (DialogStyle::from_colors).
+        let ds = crate::render::dialog::DialogStyle::from_colors(&cs);
+        assert!(ds.shadow_on);
+        assert_eq!(ds.placement, crate::render::dialog::DialogPlacement::Bottom);
+        assert_eq!(ds.margin, 2);
+    }
+
+    #[test]
+    fn dialog_border_style_and_glyphs_reach_the_colorscheme() {
+        let cs = colors_from_toml(
+            "[colors]\n\"dialog\" = { style = \"double\", glyph_tl = \"+\" }\n",
+        );
+        assert!(matches!(cs.dialog_box_style, crate::render::paneframe::BorderStyle::Double));
+        assert_eq!(cs.dialog_glyphs.tl.as_deref(), Some("+"));
+    }
+
+    #[test]
+    fn pane_header_toggles_reach_the_colorscheme() {
+        let base = crate::colors::ColorScheme::terminal_default();
+        assert!(base.map_header_on && base.story_header_on, "guard: headers default on");
+        let cs = colors_from_toml(
+            "[colors]\n\"map_border\" = { header = false }\n\"story_border\" = { header = false }\n",
+        );
+        assert!(!cs.map_header_on, "map_border header = false must reach map_header_on");
+        assert!(!cs.story_header_on, "story_border header = false must reach story_header_on");
+    }
+
+    #[test]
+    fn border_style_sides_and_glyphs_reach_the_colorscheme() {
+        use crate::render::paneframe::BorderStyle;
+        let cs = colors_from_toml(
+            "[colors]\n\
+             \"map_border\" = { style = \"double\", style_top = \"thick\", glyph_tl = \"◆\" }\n\
+             \"story_border\" = { style_bottom = \"none\" }\n",
+        );
+        assert!(matches!(cs.map_border_style, BorderStyle::Double));
+        assert!(matches!(cs.map_border_sides.top, BorderStyle::Thick), "per-side override wins");
+        assert!(matches!(cs.map_border_sides.bottom, BorderStyle::Double), "unset side = base");
+        assert_eq!(cs.map_border_glyphs.tl.as_deref(), Some("◆"));
+        // story: no base style set → sides derive from the default Single base.
+        assert!(matches!(cs.story_border_style, BorderStyle::Single));
+        assert!(matches!(cs.story_border_sides.bottom, BorderStyle::None));
+        assert!(matches!(cs.story_border_sides.top, BorderStyle::Single));
+    }
+
+    #[test]
+    fn every_border_selector_family_member_reaches_its_fields() {
+        use crate::render::paneframe::BorderStyle;
+        let cs = colors_from_toml(
+            "[colors]\n\
+             \"status_header\" = { style = \"single\", glyph_left = \"|\" }\n\
+             \"input_line\" = { style = \"single\" }\n\
+             \"suggestion_line\" = { style = \"rounded\" }\n\
+             \"notification\" = { style = \"double\" }\n\
+             \"upper_window_border\" = { style = \"thick\", style_right = \"none\" }\n",
+        );
+        assert!(matches!(cs.status_header_style, BorderStyle::Single));
+        assert_eq!(cs.status_header_glyphs.left.as_deref(), Some("|"));
+        assert!(matches!(cs.input_line_style, BorderStyle::Single));
+        assert_eq!(cs.input_line_sides, crate::render::paneframe::PaneSides::all(BorderStyle::Single));
+        assert!(matches!(cs.suggestion_line_style, BorderStyle::Rounded));
+        assert!(matches!(cs.notification_style, BorderStyle::Double));
+        assert!(matches!(cs.virtual_window_border, BorderStyle::Thick));
+        assert!(matches!(cs.upper_window_border_sides.right, BorderStyle::None));
+        assert!(matches!(cs.upper_window_border_sides.left, BorderStyle::Thick));
+    }
+
+    #[test]
+    fn per_game_style_layers_over_the_global_structural_decls() {
+        // The `merge` layering must carry the structural channels end to end:
+        // the per-game file wins where it speaks, the global stands elsewhere.
+        let global = parse_style_toml(
+            "[colors]\n\"dialog\" = { shadow = true, margin = 3 }\n\"map_border\" = { header = false }\n",
+        )
+        .unwrap();
+        let per_game = parse_style_toml("[colors]\n\"dialog\" = { margin = 1 }\n").unwrap();
+        let (cs, _set, _w) = resolve(&merge(&global, &per_game), std::path::Path::new("."));
+        assert_eq!(cs.dialog_margin, 1, "per-game margin wins");
+        assert!(cs.dialog_shadow_on, "global shadow stands");
+        assert!(!cs.map_header_on, "global header toggle stands");
     }
 
 }

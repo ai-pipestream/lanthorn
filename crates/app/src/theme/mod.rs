@@ -29,6 +29,11 @@ pub fn describe_theme(theme: &resolve::Theme) -> Vec<(String, Option<ratatui::st
         (registry::Section::GlkGrid, "glk.grid"),
         (registry::Section::Map, "map"),
         (registry::Section::Debug, "debug"),
+        // SQ-0642: the surface sections were missing, so /colors never listed
+        // the dialog.* / tooltip.* selectors. Only Statusbar is intentionally
+        // skipped (dynamic segment rows, no fixed registry rows).
+        (registry::Section::Dialog, "dialog"),
+        (registry::Section::Tooltip, "tooltip"),
     ];
 
     let mut out: Vec<(String, Option<ratatui::style::Style>)> = Vec::new();
@@ -49,4 +54,38 @@ pub fn describe_theme(theme: &resolve::Theme) -> Vec<(String, Option<ratatui::st
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describe_theme_lists_every_section_except_statusbar() {
+        // SQ-0642: Dialog and Tooltip were missing from describe_theme's SECTIONS,
+        // so /colors never listed dialog.* / tooltip.* selectors. Only Statusbar
+        // (dynamic rows, no fixed registry entries) is intentionally skipped.
+        let theme = resolve::resolve(
+            &resolve::Roles::terminal_default(),
+            &resolve::Decls::new(),
+            &resolve::Decls::new(),
+            &resolve::Decls::new(),
+        );
+        let lines = describe_theme(&theme);
+        let has = |needle: &str| lines.iter().any(|(l, _)| l.contains(needle));
+        assert!(has("dialog.shadow"), "dialog.* selectors must be listed");
+        assert!(has("dialog.border"));
+        assert!(has("tooltip.border"), "tooltip.* selectors must be listed");
+        assert!(has("tooltip.background"));
+        assert!(has("── dialog ──") && has("── tooltip ──"), "section headers present");
+
+        // Completeness: every non-Statusbar registry row appears exactly once.
+        for row in registry::REGISTRY.iter().filter(|r| r.section != registry::Section::Statusbar) {
+            assert!(
+                lines.iter().any(|(l, _)| l.trim_start().starts_with(&format!("{}:", row.name))),
+                "registry row {:?} missing from describe_theme output",
+                row.name
+            );
+        }
+    }
 }

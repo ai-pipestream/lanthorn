@@ -94,13 +94,27 @@ impl Roles {
         }
         let fg = scheme.foreground;
         let bg = scheme.background;
+        // SQ-0642: a VALID scheme may still carry an incomplete palette (a
+        // Ghostty theme only needs background+foreground; unset palette slots
+        // stay `Reset`). A role derived from a Reset slot resolves every
+        // dependent selector to Reset — the whole UI goes monochrome and
+        // `palette:N` values vanish. Fall back PER ROLE to the terminal-default
+        // role colour rather than mixing a half-resolved layer into everything.
+        let fallback = Roles::terminal_default();
+        let slot = |idx: usize, fb: Style| -> Style {
+            if scheme.palette[idx] == Color::Reset {
+                fb
+            } else {
+                Style::default().fg(scheme.palette[idx])
+            }
+        };
         Roles {
             text: Style::default().fg(fg),               // transcript = foreground
             chrome: Style::default().fg(fg).bg(bg),       // ink on a UI surface
-            line: Style::default().fg(scheme.palette[6]), // cyan slot (focused_border/connector)
-            accent: Style::default().fg(scheme.palette[6]), // highlight = cyan slot
-            muted: Style::default().fg(scheme.palette[8]),  // suggestion = bright-black slot
-            alert: Style::default().fg(scheme.palette[3]),  // yellow slot (room_selected)
+            line: slot(6, fallback.line),   // cyan slot (focused_border/connector)
+            accent: slot(6, fallback.accent), // highlight = cyan slot
+            muted: slot(8, fallback.muted),   // suggestion = bright-black slot
+            alert: slot(3, fallback.alert),   // yellow slot (room_selected)
             heading: Style::default().fg(fg).add_modifier(Modifier::BOLD),
         }
     }
@@ -148,7 +162,36 @@ pub struct Resolved {
     pub style: Style,
     pub glyph: Option<GlyphSet>,
     pub border: Option<crate::render::paneframe::BorderStyle>,
+    /// Per-side border-style overrides (SQ-0641): a set side wins over `border`
+    /// for that edge; an unset side uses `border`. Lowered from `style_top` /
+    /// `style_bottom` / `style_left` / `style_right`.
+    pub border_top: Option<crate::render::paneframe::BorderStyle>,
+    pub border_bottom: Option<crate::render::paneframe::BorderStyle>,
+    pub border_left: Option<crate::render::paneframe::BorderStyle>,
+    pub border_right: Option<crate::render::paneframe::BorderStyle>,
+    /// Pane header-strip toggle (`header = true/false`); `None` = consumer default.
+    pub header: Option<bool>,
+    /// Drop-shadow toggle (`shadow = true/false`); `None` = consumer default.
+    pub shadow: Option<bool>,
     pub provenance: Provenance,
+}
+
+impl Resolved {
+    /// A bare resolution: just a style, nothing else set.
+    fn bare(style: Style) -> Resolved {
+        Resolved {
+            style,
+            glyph: None,
+            border: None,
+            border_top: None,
+            border_bottom: None,
+            border_left: None,
+            border_right: None,
+            header: None,
+            shadow: None,
+            provenance: Provenance::Default,
+        }
+    }
 }
 
 /// Explicit per-selector overrides for a single layer, on top of the registry
@@ -161,6 +204,12 @@ pub struct Theme {
     map: HashMap<String, Resolved>,
     /// Fallback for an unknown selector — the `text` role.
     fallback: Resolved,
+    /// Non-fatal resolution diagnostics (SQ-0642): e.g. a `parent` re-root
+    /// naming an unknown selector or forming a cycle — the offending rows fell
+    /// back to their registry parents. Carried on the theme because the
+    /// resolvers have no warnings channel of their own (style-load warnings are
+    /// returned by `style::resolve`, which does not build the layered theme).
+    warnings: Vec<String>,
 }
 
 impl Theme {
@@ -168,6 +217,11 @@ impl Theme {
     /// (the body-ink default) so a stray name never panics or renders unstyled.
     pub fn get(&self, sel: &str) -> Resolved {
         self.map.get(sel).cloned().unwrap_or_else(|| self.fallback.clone())
+    }
+
+    /// Non-fatal diagnostics from the resolution pass (empty when clean).
+    pub fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 }
 
@@ -233,9 +287,17 @@ fn apply_border(
 /// [`Provenance`] stamp, so the stamp reflects the highest layer that wrote it.
 fn resolve_row(row: &RegRow, parent: &Resolved, layers: &[(&Decls, Provenance)]) -> Resolved {
     // 1. registry default delta on the parent.
-    let mut style = apply_style(parent.style, &row.default_delta);
-    let mut glyph = apply_glyph(parent.glyph.clone(), &row.default_delta);
-    let mut border = apply_border(parent.border, &row.default_delta);
+    let d = &row.default_delta;
+    let mut style = apply_style(parent.style, d);
+    let mut glyph = apply_glyph(parent.glyph.clone(), d);
+    let mut border = apply_border(parent.border, d);
+    // Structural channels (SQ-0641): same set-wins-else-inherit rule as border.
+    let mut border_top = d.border_top.or(parent.border_top);
+    let mut border_bottom = d.border_bottom.or(parent.border_bottom);
+    let mut border_left = d.border_left.or(parent.border_left);
+    let mut border_right = d.border_right.or(parent.border_right);
+    let mut header = d.header.or(parent.header);
+    let mut shadow = d.shadow.or(parent.shadow);
     // 2. each explicit layer, lowest→highest; the last to touch wins the stamp.
     let mut provenance = Provenance::Default;
     for (decls, prov) in layers {
@@ -243,10 +305,27 @@ fn resolve_row(row: &RegRow, parent: &Resolved, layers: &[(&Decls, Provenance)])
             style = apply_style(style, over);
             glyph = apply_glyph(glyph, over);
             border = apply_border(border, over);
+            border_top = over.border_top.or(border_top);
+            border_bottom = over.border_bottom.or(border_bottom);
+            border_left = over.border_left.or(border_left);
+            border_right = over.border_right.or(border_right);
+            header = over.header.or(header);
+            shadow = over.shadow.or(shadow);
             provenance = *prov;
         }
     }
-    Resolved { style, glyph, border, provenance }
+    Resolved {
+        style,
+        glyph,
+        border,
+        border_top,
+        border_bottom,
+        border_left,
+        border_right,
+        header,
+        shadow,
+        provenance,
+    }
 }
 
 /// The effective parent selector for a row: a user layer's `parent` override
@@ -279,16 +358,16 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
     ];
 
     let mut map: HashMap<String, Resolved> = HashMap::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     // Roles first: their Resolved is the bare role style (no glyph, no delta).
     for name in ROLE_NAMES {
         let style = roles.by_name(name).expect("ROLE_NAMES entry has a role style");
         // A role row may still carry an explicit override.
-        let base = Resolved { style, glyph: None, border: None, provenance: Provenance::Default };
         let row = REGISTRY.iter().find(|r| r.name == name);
         let resolved = match row {
-            Some(r) => resolve_row(r, &Resolved { style, glyph: None, border: None, provenance: Provenance::Default }, &layers),
-            None => base,
+            Some(r) => resolve_row(r, &Resolved::bare(style), &layers),
+            None => Resolved::bare(style),
         };
         map.insert(name.to_string(), resolved);
     }
@@ -303,7 +382,7 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
         let before = pending.len();
         pending.retain(|row| {
             let parent = match effective_parent(row, &layers) {
-                None => Resolved { style: Style::default(), glyph: None, border: None, provenance: Provenance::Default },
+                None => Resolved::bare(Style::default()),
                 Some(p) => match map.get(&p) {
                     Some(res) => res.clone(),
                     None => return true, // parent not resolved yet; keep pending.
@@ -317,11 +396,26 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
             break;
         }
         if pending.len() == before {
-            // No progress: an unresolvable parent (cycle or dangling reference).
-            // The registry test guarantees parents exist, so treat any remainder
-            // as parentless roots rather than looping forever.
+            // No progress: a user `parent` re-root names a selector that does
+            // not exist (a typo) or forms a cycle — the registry test
+            // guarantees REGISTRY parents themselves always exist. SQ-0642:
+            // the remainder used to resolve against an empty `Style::default()`
+            // root, stripping even the row's registry-default styling. Fall
+            // back to each row's REGISTRY parent instead (ignoring the bad
+            // user re-root) and surface a warning.
             for row in pending.drain(..) {
-                let parent = Resolved { style: Style::default(), glyph: None, border: None, provenance: Provenance::Default };
+                let user_parent = effective_parent(row, &layers);
+                let registry_parent = row.parent.map(str::to_string);
+                if user_parent != registry_parent {
+                    warnings.push(format!(
+                        "style: selector '{}' re-roots onto parent '{}' which is unknown or forms a cycle; keeping its default parent",
+                        row.name,
+                        user_parent.as_deref().unwrap_or("(none)"),
+                    ));
+                }
+                let parent = registry_parent
+                    .and_then(|p| map.get(&p).cloned())
+                    .unwrap_or_else(|| Resolved::bare(Style::default()));
                 let resolved = resolve_row(row, &parent, &layers);
                 map.insert(row.name.to_string(), resolved);
             }
@@ -330,7 +424,7 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
     }
 
     let fallback = map.get("text").cloned().expect("text role is always resolved");
-    Theme { map, fallback }
+    Theme { map, fallback, warnings }
 }
 
 /// Build the flat [`Theme`] from a base colour `scheme` and a parsed style document.
@@ -433,6 +527,9 @@ fn lower_decls(
 
     let mut decls = Decls::new();
     for (name, raw) in raw_decls {
+        let side = |s: &Option<String>| {
+            s.as_deref().map(crate::render::paneframe::parse_border_style)
+        };
         let delta = Delta {
             fg: raw.fg.as_deref().and_then(|s| parse_color_value(s, scheme)),
             bg: raw.bg.as_deref().and_then(|s| parse_color_value(s, scheme)),
@@ -446,6 +543,16 @@ fn lower_decls(
             // a `glyphs = { … }` sub-map reached no renderer, so it is gone (SQ-0560).
             glyph: raw.glyph.clone(),
             border: raw.style.as_deref().map(crate::render::paneframe::parse_border_style),
+            // SQ-0641: the per-side border styles and the header/shadow toggles
+            // are declared by the schema (toml_schema::RawDelta) and used to be
+            // dropped right here, so `style_top` / `header` / `shadow` parsed
+            // and did nothing.
+            border_top: side(&raw.style_top),
+            border_bottom: side(&raw.style_bottom),
+            border_left: side(&raw.style_left),
+            border_right: side(&raw.style_right),
+            header: raw.header,
+            shadow: raw.shadow,
             parent: raw.parent.clone(),
         };
         decls.insert(name.clone(), delta);
@@ -644,6 +751,123 @@ mod tests {
             plain.get("debug.disasm_executed").glyph.and_then(|g| g.single),
             Some("|".to_string())
         );
+    }
+
+    // ── SQ-0641: per-side border styles + header/shadow lower through ─────────
+
+    #[test]
+    fn dropped_structural_channels_now_lower_into_the_theme() {
+        // style_top / header / shadow are declared by the schema (RawDelta) and
+        // used to be dropped by lower_decls, so they parsed and did nothing.
+        use crate::render::paneframe::BorderStyle;
+        let scheme = terminal_default_scheme();
+        let parsed = super::super::toml_schema::parse(
+            "[panel]\n\
+             border = { style_top = \"double\", style_left = \"none\", header = false }\n\
+             [dialog]\n\
+             border = { shadow = true }\n",
+        )
+        .unwrap();
+        let theme = resolve_theme(&scheme, &parsed);
+
+        let pb = theme.get("panel.border");
+        assert_eq!(pb.border_top, Some(BorderStyle::Double), "style_top must lower");
+        assert_eq!(pb.border_left, Some(BorderStyle::None), "style_left must lower");
+        assert_eq!(pb.border_bottom, None, "unset side stays inherit-from-border");
+        assert_eq!(pb.border, Some(BorderStyle::Single), "registry border default intact");
+        assert_eq!(pb.header, Some(false), "header toggle must lower");
+        assert_eq!(theme.get("dialog.border").shadow, Some(true), "shadow toggle must lower");
+
+        // Untouched selectors carry no structural overrides.
+        let plain = theme.get("transcript");
+        assert_eq!(plain.border_top, None);
+        assert_eq!(plain.header, None);
+        assert_eq!(plain.shadow, None);
+    }
+
+    // ── SQ-0642: a bad `parent` re-root must not strip registry defaults ──────
+
+    #[test]
+    fn unknown_parent_reroot_falls_back_to_the_registry_default() {
+        use crate::render::paneframe::BorderStyle;
+        let scheme = terminal_default_scheme();
+        // "acent" is a typo for "accent": no such selector exists.
+        let parsed =
+            super::super::toml_schema::parse("[panel]\ntitle = { parent = \"acent\" }\n").unwrap();
+        let theme = resolve_theme(&scheme, &parsed);
+
+        // panel.title keeps its registry default (heading: white + bold), not an
+        // empty Style::default() root.
+        let title = theme.get("panel.title");
+        assert_eq!(title.style.fg, theme.get("heading").style.fg);
+        assert!(title.style.add_modifier.contains(Modifier::BOLD), "registry default styling survives");
+        // The rest of the theme is untouched by the stall.
+        assert_eq!(theme.get("panel.border").border, Some(BorderStyle::Single));
+        // And the typo is surfaced as a diagnostic.
+        assert!(
+            theme.warnings().iter().any(|w| w.contains("panel.title") && w.contains("acent")),
+            "warning names the offending selector: {:?}",
+            theme.warnings()
+        );
+    }
+
+    #[test]
+    fn parent_cycle_resolves_to_registry_defaults_without_hanging() {
+        let scheme = terminal_default_scheme();
+        // transcript ⇄ suggestion: a two-selector re-root cycle.
+        let parsed = super::super::toml_schema::parse(
+            "[elements]\n\
+             transcript = { parent = \"suggestion\" }\n\
+             suggestion = { parent = \"transcript\" }\n",
+        )
+        .unwrap();
+        let theme = resolve_theme(&scheme, &parsed);
+        // Both fall back to their registry parents: transcript→text (white),
+        // suggestion→muted (dark-gray) — not Style::default().
+        assert_eq!(theme.get("transcript").style.fg, Some(Color::White));
+        assert_eq!(theme.get("suggestion").style.fg, Some(Color::DarkGray));
+        assert_eq!(theme.warnings().len(), 2, "{:?}", theme.warnings());
+    }
+
+    #[test]
+    fn clean_resolution_carries_no_warnings() {
+        let scheme = terminal_default_scheme();
+        let theme = resolve_theme(&scheme, &ParsedStyle::default());
+        assert!(theme.warnings().is_empty(), "{:?}", theme.warnings());
+    }
+
+    // ── SQ-0642: an fg/bg-only scheme must not go monochrome ─────────────────
+
+    #[test]
+    fn incomplete_palette_falls_back_per_role() {
+        // A VALID Ghostty scheme needs only background+foreground; every unset
+        // palette slot stays Reset. Roles derived from Reset slots used to send
+        // line/accent/muted/alert — and every dependent selector — to Reset.
+        let gs = GhosttyScheme::parse("background = 1d1f21\nforeground = c5c8c6\n").unwrap();
+        let roles = Roles::from_scheme(&gs);
+        assert_eq!(roles.text.fg, Some(Color::Rgb(0xc5, 0xc8, 0xc6)), "fg-derived roles keep the scheme");
+        assert_eq!(roles.line.fg, Some(Color::Cyan), "empty cyan slot → terminal-default line role");
+        assert_eq!(roles.accent.fg, Some(Color::Cyan));
+        assert_eq!(roles.muted.fg, Some(Color::DarkGray));
+        assert_eq!(roles.alert.fg, Some(Color::Yellow));
+
+        let theme = resolve_theme(&gs, &ParsedStyle::default());
+        assert_ne!(theme.get("map.connector").style.fg, Some(Color::Reset), "UI must not go monochrome");
+        assert_eq!(theme.get("panel.border").style.fg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn partially_filled_palette_uses_set_slots_and_falls_back_for_the_rest() {
+        // palette[6] (cyan slot) is set; 3 and 8 are not.
+        let gs = GhosttyScheme::parse(
+            "background = 1d1f21\nforeground = c5c8c6\npalette = 6=#70c0ba\n",
+        )
+        .unwrap();
+        let roles = Roles::from_scheme(&gs);
+        assert_eq!(roles.line.fg, Some(Color::Rgb(0x70, 0xc0, 0xba)), "set slot is used");
+        assert_eq!(roles.accent.fg, Some(Color::Rgb(0x70, 0xc0, 0xba)));
+        assert_eq!(roles.muted.fg, Some(Color::DarkGray), "unset slot falls back per-role");
+        assert_eq!(roles.alert.fg, Some(Color::Yellow));
     }
 
     #[test]

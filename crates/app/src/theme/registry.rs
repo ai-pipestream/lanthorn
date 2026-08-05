@@ -75,6 +75,17 @@ pub struct Delta {
     pub dim: bool,
     pub glyph: Option<String>,
     pub border: Option<crate::render::paneframe::BorderStyle>,
+    /// Per-side border-style overrides (SQ-0641): a set side wins over `border`
+    /// for that edge. Lowered from a decl's `style_top`/`style_bottom`/
+    /// `style_left`/`style_right` keys, which used to parse and then be dropped.
+    pub border_top: Option<crate::render::paneframe::BorderStyle>,
+    pub border_bottom: Option<crate::render::paneframe::BorderStyle>,
+    pub border_left: Option<crate::render::paneframe::BorderStyle>,
+    pub border_right: Option<crate::render::paneframe::BorderStyle>,
+    /// Whether the pane's header strip is shown (`header = true/false`).
+    pub header: Option<bool>,
+    /// Whether the surface draws a drop shadow (`shadow = true/false`).
+    pub shadow: Option<bool>,
     pub parent: Option<String>,
 }
 
@@ -90,6 +101,12 @@ impl Delta {
         dim: false,
         glyph: None,
         border: None,
+        border_top: None,
+        border_bottom: None,
+        border_left: None,
+        border_right: None,
+        header: None,
+        shadow: None,
         parent: None,
     };
 }
@@ -110,14 +127,15 @@ pub struct RegRow {
 pub const ROLE_NAMES: [&str; 7] =
     ["text", "chrome", "line", "accent", "muted", "alert", "heading"];
 
-/// The default per-layer edge colour cycle for `map.layer_cycle` (§4). This is
-/// the sole list-valued selector, so its value lives here rather than in a
-/// [`Delta`]; the `map.layer_cycle` registry row exists only for completeness.
-pub const LAYER_CYCLE_DEFAULT: [&str; 5] = ["cyan", "green", "magenta", "yellow", "blue"];
-
 /// The default for `map.diagonal_corners` (§4) — the sole bool-valued selector,
-/// so its value lives here rather than in a [`Delta`], as with
-/// [`LAYER_CYCLE_DEFAULT`]. Must equal `config::default_diagonal_corners()`.
+/// so its value lives here rather than in a [`Delta`]. Must equal
+/// `config::default_diagonal_corners()`.
+///
+/// SQ-0641: `map.layer_cycle` (a list-valued per-layer edge-colour cycle) used
+/// to sit beside this. It was documented in the shipped template but had no
+/// consumer anywhere — no renderer cycles edge colours per layer (layer tabs are
+/// styled via `panel.tab`/`panel.tab:active`) — so the row, its default and its
+/// template line were removed rather than shipping a knob that does nothing.
 pub const DIAGONAL_CORNERS_DEFAULT: bool = true;
 
 /// Build a row concisely.
@@ -251,8 +269,6 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // it is a prompt about absence, and must never out-shout a passage that actually exists.
     row("map.untried_exit", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     row("map.loc_indicator", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
-    // layer_cycle: sole list-valued selector; value in LAYER_CYCLE_DEFAULT.
-    row("map.layer_cycle", Section::Map, Kind::Style, None, Delta::EMPTY),
     // Glyph-set presets (the old [symbols] section, merged in): preset name in `glyph`.
     row("map.box_style", Section::Map, Kind::Placement, None, glyph("rounded")),
     row("map.arrow_set", Section::Map, Kind::Placement, None, glyph("filled")),
@@ -260,10 +276,9 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("map.path_style", Section::Map, Kind::Placement, None, glyph("light")),
     row("map.portal_path_style", Section::Map, Kind::Placement, None, glyph("dotted")),
     // diagonal_corners is the one map knob that is a BOOL, not a preset name.
-    // `Delta`'s only value channels are colours, text modifiers and `glyph:
-    // Option<String>` — none can carry it — so, exactly like `map.layer_cycle`
-    // (the sole list-valued row), the row exists for completeness and its value
-    // lives in `DIAGONAL_CORNERS_DEFAULT`, emitted by a `template::row_line` case.
+    // `Delta`'s value channels (colours, text modifiers, `glyph`) cannot carry
+    // it, so the row exists for completeness and its value lives in
+    // `DIAGONAL_CORNERS_DEFAULT`, emitted by a `template::row_line` case.
     row("map.diagonal_corners", Section::Map, Kind::Placement, None, Delta::EMPTY),
     // ── §4b debug.* (disasm-only; each tier carries a gutter glyph) ───────────
     row("debug.pc", Section::Debug, Kind::Style, Some("accent"), mods(false, false, false, true)),
@@ -431,7 +446,6 @@ mod tests {
         "map.shared_path",
         "map.untried_exit",
         "map.loc_indicator",
-        "map.layer_cycle",
         "map.box_style",
         "map.arrow_set",
         "map.portal_icons",

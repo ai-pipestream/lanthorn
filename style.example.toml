@@ -136,7 +136,6 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # shared_path = { fg = "light-cyan" }
 # untried_exit = { parent = "muted" }
 # loc_indicator = { parent = "muted" }
-# layer_cycle = ["cyan", "green", "magenta", "yellow", "blue"]
 # box_style = "rounded"   # rounded | thick | double | solid | super-thick | ascii | borderless
 # arrow_set = "filled"   # filled | line | nerdfont | nf-bold | nf-box | nf-circle | nf-outline
 # portal_icons = "ascii"   # ascii | nerdfont | nerdfont-stairs

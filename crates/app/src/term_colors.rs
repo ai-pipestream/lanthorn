@@ -8,25 +8,32 @@
 //! default colours so the raster canvas can follow the terminal (and thus the
 //! theme's "default" intent) everywhere.
 //!
-//! Safety: the query must never hang and must never leak reply bytes into the
-//! app's own input stream. We terminate the query with a Device Status Report
-//! (`ESC[5n`) that every responding terminal answers, read on a worker thread
-//! until that DSR reply arrives — which fully drains the preceding OSC replies
-//! with it — and bail on a short recv timeout. A terminal that answers nothing
-//! (e.g. Windows Terminal) sent nothing, so there is nothing left to leak; we
-//! simply return `None` for both colours and the caller keeps its old fallbacks.
+//! Safety: the query must never hang, must never leak reply bytes into the
+//! app's own input stream, and must never EAT the user's real input. We
+//! terminate the query with a Device Status Report (`ESC[5n`) that every
+//! responding terminal answers, and drain stdin NON-BLOCKING (`O_NONBLOCK` on
+//! the already-raw fd) until that DSR reply arrives — which fully drains the
+//! preceding OSC replies with it — giving up after a short silent window.
+//! SQ-0642: this used to spawn a worker thread doing blocking `stdin.read()`s;
+//! after the timeout the thread stayed parked in `read()` and, on a terminal
+//! that never answers, later swallowed up to 64 bytes of the player's first
+//! keystrokes before noticing the dead channel. The non-blocking drain leaves
+//! nothing behind: when this function returns, nobody is reading stdin.
+//! A terminal that answers nothing sent nothing, so there is nothing left to
+//! leak; we return `None` for both colours and the caller keeps its fallbacks.
 
-use std::io::{Read, Write};
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
+use std::io::Write;
+use std::time::{Duration, Instant};
 
 use image::Rgba;
 
-/// Per-heartbeat read window. Reset on every worker heartbeat, so a slow but
-/// responsive terminal is not cut off; only a fully silent terminal waits this
-/// long once before we give up.
+/// Silence window: how long we wait without any reply bytes before giving up.
+/// Reset whenever a chunk arrives, so a slow but responsive terminal is not cut
+/// off; only a fully silent terminal waits this long once.
 const READ_TIMEOUT: Duration = Duration::from_millis(200);
+
+/// Poll interval between non-blocking read attempts while draining the reply.
+const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 /// The terminal's probed default colours. Each is `None` when the terminal did
 /// not answer that query (degrade gracefully — the caller keeps its fallback).
@@ -69,7 +76,10 @@ pub(crate) fn query_with(query: &[u8]) -> Option<String> {
     (!reply.is_empty()).then_some(reply)
 }
 
-/// Write `query` and read the reply, bounded by a timeout.
+/// Write `query` and read the reply, bounded by a timeout. SQ-0642: the drain
+/// is a non-blocking poll loop on this thread — no worker thread is ever left
+/// parked in a blocking `stdin.read()` to eat the user's first keystrokes on a
+/// terminal that never answers.
 fn read_query_reply(query: &[u8]) -> String {
     {
         let mut out = std::io::stdout();
@@ -77,45 +87,91 @@ fn read_query_reply(query: &[u8]) -> String {
             return String::new();
         }
     }
+    drain_stdin_nonblocking()
+}
 
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let mut buf = String::new();
-        let mut chunk = [0u8; 64];
-        let mut stdin = std::io::stdin();
-        loop {
-            // Heartbeat before each blocking read so a responsive-but-slow
-            // terminal keeps the recv window open (mirrors ratatui-image's
-            // query loop). A dead channel means the main side gave up.
-            if tx.send(None).is_err() {
-                return;
-            }
-            match stdin.read(&mut chunk) {
-                Ok(0) | Err(_) => {
-                    let _ = tx.send(Some(buf));
-                    return;
-                }
-                Ok(n) => {
-                    // OSC/DSR replies are pure ASCII, so a chunk boundary never
-                    // splits a multi-byte char.
-                    buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
-                    if buf.contains("\x1b[0n") {
-                        // DSR reply seen — every earlier OSC reply is now drained.
-                        let _ = tx.send(Some(buf));
-                        return;
-                    }
-                }
-            }
-        }
-    });
+/// One non-blocking read attempt's outcome, as seen by [`drain_until_dsr`].
+#[cfg(any(unix, test))]
+enum ReadStep {
+    /// `n` bytes were read into the chunk.
+    Data(usize),
+    /// Nothing available right now (`EWOULDBLOCK`).
+    NotReady,
+    /// EOF or a hard read error — stop and return what we have.
+    Closed,
+}
 
+/// The pure drain loop, factored over the read primitive so it is unit-testable
+/// without a tty. Reads chunks until the DSR reply (`ESC[0n`) arrives (return
+/// the full buffer), the source closes (return what arrived), or a silent
+/// [`READ_TIMEOUT`] window passes with no bytes at all (give up → empty, the
+/// same as the old worker-thread behaviour). The window resets on every chunk
+/// so a slow-but-responsive terminal is not cut off. When this returns, no
+/// reader of any kind remains — that is the point (SQ-0642).
+#[cfg(any(unix, test))]
+fn drain_until_dsr(mut read: impl FnMut(&mut [u8; 64]) -> ReadStep) -> String {
+    let mut buf = String::new();
+    let mut chunk = [0u8; 64];
+    let mut deadline = Instant::now() + READ_TIMEOUT;
     loop {
-        match rx.recv_timeout(READ_TIMEOUT) {
-            Ok(Some(buf)) => return buf,
-            Ok(None) => continue, // heartbeat: restart the window
-            Err(_) => return String::new(), // silent terminal — give up
+        match read(&mut chunk) {
+            ReadStep::Data(n) => {
+                // OSC/DSR replies are pure ASCII, so a chunk boundary never
+                // splits a multi-byte char.
+                buf.push_str(&String::from_utf8_lossy(&chunk[..n.min(chunk.len())]));
+                if buf.contains("\x1b[0n") {
+                    // DSR reply seen — every earlier OSC reply is now drained.
+                    return buf;
+                }
+                deadline = Instant::now() + READ_TIMEOUT;
+            }
+            ReadStep::NotReady => {
+                if Instant::now() >= deadline {
+                    return String::new(); // silent terminal — give up
+                }
+                std::thread::sleep(POLL_INTERVAL);
+            }
+            ReadStep::Closed => return buf,
         }
     }
+}
+
+/// Drain the reply from the real stdin fd with `O_NONBLOCK` toggled on for the
+/// duration (the fd is already in raw mode — see [`query_with`]). Restores the
+/// original fd flags before returning.
+#[cfg(unix)]
+fn drain_stdin_nonblocking() -> String {
+    let fd = libc::STDIN_FILENO;
+    // SAFETY: fcntl F_GETFL/F_SETFL on a valid fd; no memory is involved.
+    let old = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if old < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, old | libc::O_NONBLOCK) } < 0 {
+        return String::new(); // cannot go non-blocking — skip rather than risk a hang
+    }
+    let out = drain_until_dsr(|chunk| {
+        // SAFETY: reading at most `chunk.len()` bytes into a valid buffer.
+        let n = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if n > 0 {
+            ReadStep::Data(n as usize)
+        } else if n == 0 {
+            ReadStep::Closed
+        } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock {
+            ReadStep::NotReady
+        } else {
+            ReadStep::Closed
+        }
+    });
+    // SAFETY: restore the original flags.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, old) };
+    out
+}
+
+/// Non-Unix (Windows): there is no portable non-blocking console read, and the
+/// old blocking worker thread is exactly what swallowed user keystrokes on
+/// terminals that never answer (SQ-0642). Skip the drain entirely — the caller
+/// degrades to its fallbacks, same as a silent terminal.
+#[cfg(not(unix))]
+fn drain_stdin_nonblocking() -> String {
+    String::new()
 }
 
 /// Extract the OSC 10 (fg) and OSC 11 (bg) colours from a raw query reply.
@@ -214,5 +270,85 @@ mod tests {
         assert_eq!(c, TermDefaultColors::default());
         assert_eq!(c.fg, None);
         assert_eq!(c.bg, None);
+    }
+
+    // ── SQ-0642: the non-blocking drain loop ─────────────────────────────────
+
+    /// Feed a scripted sequence of read outcomes to `drain_until_dsr`.
+    fn scripted(steps: Vec<Vec<u8>>) -> impl FnMut(&mut [u8; 64]) -> ReadStep {
+        let mut steps = steps.into_iter();
+        move |chunk: &mut [u8; 64]| match steps.next() {
+            Some(bytes) if bytes.is_empty() => ReadStep::NotReady,
+            Some(bytes) => {
+                let n = bytes.len().min(chunk.len());
+                chunk[..n].copy_from_slice(&bytes[..n]);
+                ReadStep::Data(n)
+            }
+            None => ReadStep::Closed,
+        }
+    }
+
+    #[test]
+    fn drain_stops_at_the_dsr_reply() {
+        let reply = b"\x1b]10;rgb:e8/e8/e8\x07\x1b[0n".to_vec();
+        let out = drain_until_dsr(scripted(vec![reply.clone()]));
+        assert_eq!(out.as_bytes(), &reply[..]);
+    }
+
+    #[test]
+    fn drain_handles_a_dsr_split_across_chunks_and_notready_gaps() {
+        // The DSR arrives byte-split with WouldBlock gaps in between — the
+        // window must reset on each chunk instead of timing out mid-reply.
+        let out = drain_until_dsr(scripted(vec![
+            b"\x1b]11;rgb:1c/1c/1c\x07".to_vec(),
+            vec![], // NotReady
+            b"\x1b[0".to_vec(),
+            vec![], // NotReady
+            b"n".to_vec(),
+        ]));
+        assert!(out.contains("\x1b[0n"));
+        assert!(out.contains("]11;"));
+    }
+
+    #[test]
+    fn drain_gives_up_on_a_silent_source_within_the_window() {
+        // A source that never has data (a terminal that never answers): the
+        // drain must return empty on THIS thread within roughly the timeout —
+        // with no reader left behind to swallow later real input. The old
+        // worker-thread version parked a blocking stdin.read() here forever.
+        let start = std::time::Instant::now();
+        let out = drain_until_dsr(|_| ReadStep::NotReady);
+        assert_eq!(out, "");
+        let elapsed = start.elapsed();
+        assert!(elapsed >= READ_TIMEOUT, "waits out the silence window: {elapsed:?}");
+        assert!(elapsed < READ_TIMEOUT * 5, "but does not hang: {elapsed:?}");
+    }
+
+    #[test]
+    fn drain_returns_partial_data_when_the_source_closes() {
+        // EOF mid-reply (piped stdin): keep what arrived rather than hanging.
+        let out = drain_until_dsr(scripted(vec![b"\x1b]10;rgb:aa/bb/cc\x07".to_vec()]));
+        assert_eq!(out, "\x1b]10;rgb:aa/bb/cc\x07");
+    }
+
+    #[test]
+    fn drain_never_reads_again_after_returning() {
+        // Structural pin for the SQ-0642 symptom: once drain_until_dsr returns,
+        // its reader is never invoked again — there is no detached thread to
+        // consume the user's first keystrokes later. (The old implementation
+        // cannot pass this shape at all: its blocked reader outlived the call.)
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_in = calls.clone();
+        let out = drain_until_dsr(move |chunk| {
+            calls_in.fetch_add(1, Ordering::SeqCst);
+            chunk[..4].copy_from_slice(b"\x1b[0n");
+            ReadStep::Data(4)
+        });
+        assert_eq!(out, "\x1b[0n");
+        let after_return = calls.load(Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(calls.load(Ordering::SeqCst), after_return, "no reads after return");
     }
 }

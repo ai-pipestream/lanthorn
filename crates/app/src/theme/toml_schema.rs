@@ -24,8 +24,6 @@ pub struct RawDelta {
     /// A single glyph the selector carries (gutter mark, tab divider, terminator
     /// cap) OR — for a map preset key like `box_style = "rounded"` — the preset name.
     pub glyph: Option<String>,
-    /// A list value — only `map.layer_cycle = ["cyan", ...]` uses this.
-    pub list: Option<Vec<String>>,
     /// Border keys (carried raw; applied later): `style`, `style_<side>`, `header`, `shadow`.
     pub style: Option<String>,
     pub style_top: Option<String>,
@@ -145,14 +143,8 @@ pub fn parse(text: &str) -> Result<ParsedStyle, Vec<String>> {
                         RawDelta { glyph: Some(s.clone()), ..RawDelta::default() },
                     );
                 }
-                toml::Value::Array(items) => {
-                    let list: Vec<String> =
-                        items.iter().filter_map(|v| v.as_str().map(String::from)).collect();
-                    parsed.decls.insert(
-                        full_key,
-                        RawDelta { list: Some(list), ..RawDelta::default() },
-                    );
-                }
+                // SQ-0641: array values (the old `map.layer_cycle` list) are
+                // ignored — the list channel reached no consumer anywhere.
                 _ => {}
             }
         }
@@ -227,7 +219,6 @@ fn delta_from_table(t: &toml::value::Table) -> RawDelta {
         dim: t.get("dim").and_then(toml::Value::as_bool),
         reversed: t.get("reversed").and_then(toml::Value::as_bool),
         glyph: t.get("glyph").and_then(toml::Value::as_str).map(String::from),
-        list: None,
         style: t.get("style").and_then(toml::Value::as_str).map(String::from),
         style_top: t.get("style_top").and_then(toml::Value::as_str).map(String::from),
         style_bottom: t.get("style_bottom").and_then(toml::Value::as_str).map(String::from),
@@ -410,16 +401,9 @@ align = "right"
 
         assert_eq!(p.decls["map.box_style"].glyph, Some("rounded".to_string()));
 
-        assert_eq!(
-            p.decls["map.layer_cycle"].list,
-            Some(vec![
-                "cyan".to_string(),
-                "green".to_string(),
-                "magenta".to_string(),
-                "yellow".to_string(),
-                "blue".to_string(),
-            ])
-        );
+        // SQ-0641: `map.layer_cycle` (the sole list value) had no consumer and
+        // was removed; an array under [map] now parses to no decl at all.
+        assert!(!p.decls.contains_key("map.layer_cycle"));
 
         assert!(p.decls.contains_key("map.room"));
 
