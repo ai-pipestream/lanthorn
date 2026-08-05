@@ -304,15 +304,14 @@ pub(crate) fn wrap_line_ranges(line: &str, width: u16) -> Vec<(String, usize, us
 /// char-breaks. This matches the spec's model (buffering is a property of the
 /// moment the text was printed) without needing per-word state.
 ///
-/// KNOWN GAP (SQ-0655): the fit is measured in CHARS, not display cells, so a
-/// double-width (CJK/emoji) row wraps at half its real width. The body's draw path
-/// makes the matching assumption — `draw_str_runs` puts char *i* in cell *i*, and
-/// the link map, the coloured-background fill and the selection highlight all read
-/// columns off that — so the two are self-consistent today and moving only one of
-/// them would put the transcript further out of joint. Fixing it means converting
-/// the whole body pipeline (this wrap, `wrap_line_ranges_var`, `wrap_para_ranges`,
-/// `draw_str_runs`, the link/background column math) to cells in one step, the way
-/// the input line already went via `draw_str_cells`.
+/// The fit is measured in display CELLS, not chars (SQ-0662): a double-width
+/// CJK/emoji glyph costs two columns, so `width` here is a cell budget and a wide
+/// glyph that only half-fits moves WHOLE to the next row. The row's `[start, end)`
+/// range stays in CHARS, because that is the coordinate system `StyleRun` uses;
+/// only the fitting is in cells. The rest of the body pipeline measures the same
+/// way — `draw_str_runs` advances by each glyph's width, and the link map, the
+/// coloured-background fill and the selection highlight all derive their columns
+/// from `textwidth` — so the wrap, the draw and the copy agree cell for cell.
 fn wrap_line_ranges_nw(line: &str, width: u16, nowrap_from: Option<usize>) -> Vec<(String, usize, usize)> {
     let width = width as usize;
     if width == 0 {
@@ -327,33 +326,20 @@ fn wrap_line_ranges_nw(line: &str, width: u16, nowrap_from: Option<usize>) -> Ve
     let mut base_col = 0usize; // char offset of `remaining`'s start within `line`
 
     while !remaining.is_empty() {
-        let char_count: usize = remaining.chars().count();
-        if char_count <= width {
+        // One scan finds the cell budget's end, how many chars fit inside it, and
+        // the last space to word-wrap at (see `textwidth::row_break`).
+        let br = crate::textwidth::row_break(remaining, width);
+        let Some(byte_at_width) = br.overflow else {
+            let char_count = remaining.chars().count();
             rows.push((remaining.to_string(), base_col, base_col + char_count));
             break;
-        }
-
-        // This row reaches into text printed with buffering off → hard char-break.
-        let unbuffered = nowrap_from.is_some_and(|n| n < base_col + width);
-
-        // Collect byte offsets for chars 0..=width (inclusive so we see the boundary char).
-        // We want the last space at char index ≤ width to break at.
-        let mut last_space_before: Option<usize> = None; // byte offset of last space in 0..width
-        let mut byte_at_width: usize = remaining.len();  // byte offset of char #width (the first that doesn't fit)
-        for (i, (byte_i, ch)) in remaining.char_indices().enumerate() {
-            if i == width {
-                byte_at_width = byte_i;
-                // If the char right at the boundary is a space, break here
-                // (the row is exactly `width` non-space chars).
-                if ch == ' ' && !unbuffered {
-                    last_space_before = Some(byte_i);
-                }
-                break;
-            }
-            if ch == ' ' && !unbuffered {
-                last_space_before = Some(byte_i);
-            }
-        }
+        };
+        // This row reaches into text printed with buffering off → hard char-break,
+        // so the word-wrap point is discarded. The row covers chars
+        // `[base_col, base_col + fit_chars)`, which is where the unbuffered region
+        // has to be tested against.
+        let unbuffered = nowrap_from.is_some_and(|n| n < base_col + br.fit_chars);
+        let last_space_before = if unbuffered { None } else { br.last_space };
 
         if let Some(sp) = last_space_before {
             // Break at the space: take everything before it, skip the space.
@@ -365,7 +351,9 @@ fn wrap_line_ranges_nw(line: &str, width: u16, nowrap_from: Option<usize>) -> Ve
             remaining = &remaining[next..];
             base_col += head_chars + 1; // +1 for the dropped break space
         } else {
-            // No space found: hard-break at `width` chars.
+            // No space found: hard-break at the cell budget. A wide glyph in a
+            // 1-cell column fits nowhere, so take it anyway rather than spin.
+            let byte_at_width = force_progress(remaining, byte_at_width);
             let head = &remaining[..byte_at_width];
             let head_chars = head.chars().count();
             rows.push((head.to_string(), base_col, base_col + head_chars));
@@ -378,6 +366,19 @@ fn wrap_line_ranges_nw(line: &str, width: u16, nowrap_from: Option<usize>) -> Ve
         rows.push((String::new(), 0, 0));
     }
     rows
+}
+
+/// The hard-break offset to actually cut at, guaranteeing the wrap makes progress.
+///
+/// A cell budget can fit NOTHING — a double-width glyph in a one-column pane — and
+/// the fitting prefix is then empty, which would emit an empty row forever. Cut
+/// after the first char instead: the glyph overflows its row and the draw clips it,
+/// which is the only lossless option in a column too narrow to hold it. (SQ-0662)
+fn force_progress(s: &str, byte_at_width: usize) -> usize {
+    if byte_at_width > 0 {
+        return byte_at_width;
+    }
+    s.chars().next().map(|c| c.len_utf8()).unwrap_or(0)
 }
 
 /// Intersect a logical line's `StyleRun`s with a wrapped row's `[start, end)`
@@ -471,7 +472,10 @@ fn wrap_para_ranges(line: &str, width: u16, pf: ParaFmt) -> Vec<(String, usize, 
         .map(|(ri, (text, s, e))| {
             let lead = if ri == 0 { row0_indent } else { indent };
             let usable = if ri == 0 { first_w } else { cont_w };
-            let rowlen = text.chars().count() as u16;
+            // Cells (SQ-0662): justification pads a row out to the usable COLUMN
+            // count, so a CJK row's own width has to be measured the same way the
+            // wrap fitted it — by display width, not by char count.
+            let rowlen = crate::textwidth::str_cells(&text) as u16;
             let slack = usable.saturating_sub(rowlen);
             let just_pad = match pf.justify {
                 2 => slack / 2,   // Centered
@@ -489,7 +493,7 @@ fn wrap_para_ranges(line: &str, width: u16, pf: ParaFmt) -> Vec<(String, usize, 
 /// with `indent` spaces so wrapped text hangs under the first row's content.
 pub(crate) fn wrap_line_hanging(line: &str, width: u16, indent: u16) -> Vec<String> {
     let indent = (indent as usize).min(width.saturating_sub(1) as usize);
-    if width == 0 || (line.chars().count() as u16) <= width {
+    if width == 0 || (crate::textwidth::str_cells(line) as u16) <= width {
         return wrap_line(line, width);
     }
     // Wrap the body at the reduced width, then re-prefix continuations.
@@ -832,28 +836,17 @@ fn wrap_line_ranges_var(line: &str, nowrap_from: Option<usize>, width_for: impl 
 
     while !remaining.is_empty() {
         let width = width_for(rows.len()).max(1) as usize;
-        let char_count = remaining.chars().count();
-        if char_count <= width {
+        // Cells, not chars (SQ-0662) — same measurement as `wrap_line_ranges_nw`.
+        let br = crate::textwidth::row_break(remaining, width);
+        let Some(byte_at_width) = br.overflow else {
+            let char_count = remaining.chars().count();
             rows.push((remaining.to_string(), base_col, base_col + char_count));
             break;
-        }
-        // Last space at char index ≤ width to break at (see `wrap_line_ranges`);
-        // suppressed once the row reaches unbuffered text (hard char-break).
-        let unbuffered = nowrap_from.is_some_and(|n| n < base_col + width);
-        let mut last_space_before: Option<usize> = None;
-        let mut byte_at_width = remaining.len();
-        for (idx, (byte_i, ch)) in remaining.char_indices().enumerate() {
-            if idx == width {
-                byte_at_width = byte_i;
-                if ch == ' ' && !unbuffered {
-                    last_space_before = Some(byte_i);
-                }
-                break;
-            }
-            if ch == ' ' && !unbuffered {
-                last_space_before = Some(byte_i);
-            }
-        }
+        };
+        // Last space to break at (see `wrap_line_ranges`); suppressed once the row
+        // reaches unbuffered text (hard char-break).
+        let unbuffered = nowrap_from.is_some_and(|n| n < base_col + br.fit_chars);
+        let last_space_before = if unbuffered { None } else { br.last_space };
         if let Some(sp) = last_space_before {
             let head = &remaining[..sp];
             let head_chars = head.chars().count();
@@ -862,6 +855,7 @@ fn wrap_line_ranges_var(line: &str, nowrap_from: Option<usize>, width_for: impl 
             remaining = &remaining[next..];
             base_col += head_chars + 1; // +1 for the dropped break space
         } else {
+            let byte_at_width = force_progress(remaining, byte_at_width);
             let head = &remaining[..byte_at_width];
             let head_chars = head.chars().count();
             rows.push((head.to_string(), base_col, base_col + head_chars));
@@ -1148,8 +1142,9 @@ fn highlight_mask(text: &str, query_lower: &str) -> Vec<bool> {
 /// identical to [`draw_str_clipped`]. (SQ-0655)
 ///
 /// Used by the input line, whose caret and click-to-caret mapping
-/// (`AppState::input_click_index`) are in cells. The transcript body still draws
-/// one char per cell — see the module note on `wrap_line_ranges_nw`.
+/// (`AppState::input_click_index`) are in cells. The transcript body measures the
+/// same way (SQ-0662) but draws through `draw_str_runs`, which has to keep the
+/// per-CHAR `StyleRun` indexing the wrap hands it.
 fn draw_str_cells(
     buf: &mut ratatui::buffer::Buffer,
     x: u16,
@@ -1206,6 +1201,14 @@ fn draw_str_cells(
 /// game-set fg/bg is IGNORED, but the theme slot and element base still apply
 /// (SQ-0331). Style bits (bold/italic/reverse) and the hyperlink affordance are
 /// unaffected by `honor`, exactly as before.
+///
+/// Columns advance by each glyph's DISPLAY WIDTH (SQ-0662), so a CJK/emoji glyph
+/// occupies two cells — its trailing cell blanked in the same style, ratatui's own
+/// convention — and a zero-width scalar (combining mark, ZWJ) is appended to the
+/// cell of the glyph it modifies instead of claiming a column of its own. `runs`
+/// and the search mask stay indexed by CHAR, the coordinate the wrap re-bases them
+/// in; only the column each char lands on is a width. For pure ASCII this is
+/// cell-for-cell what the old one-char-per-cell loop drew.
 pub(crate) fn draw_str_runs(
     buf: &mut ratatui::buffer::Buffer,
     x: u16,
@@ -1225,7 +1228,11 @@ pub(crate) fn draw_str_runs(
         Some((q, _)) if !q.is_empty() => highlight_mask(text, q),
         _ => Vec::new(),
     };
-    for (col, (i, ch)) in (x..).zip(text.chars().enumerate()) {
+    let mut col = x;
+    // The cell the last real glyph went into, so a following combining mark can
+    // join it rather than overwrite the column with a bare mark.
+    let mut glyph_col: Option<u16> = None;
+    for (i, ch) in text.chars().enumerate() {
         if col >= area.right() {
             break;
         }
@@ -1279,7 +1286,30 @@ pub(crate) fn draw_str_runs(
             }
             s
         };
+        let w = crate::textwidth::char_cells(ch);
+        if w == 0 {
+            // A combining mark / ZWJ owns no column: append it to the cell holding
+            // the glyph it modifies, so "e" + U+0301 renders as one "é" cell.
+            if let Some(gc) = glyph_col {
+                if gc >= area.x && gc < area.right() {
+                    if let Some(cell) = buf.cell_mut((gc, y)) {
+                        let mut sym = cell.symbol().to_string();
+                        sym.push(ch);
+                        cell.set_symbol(&sym);
+                    }
+                }
+            }
+            continue;
+        }
         crate::render::draw_char_clipped(buf, col, y, ch, style, area);
+        // Blank the trailing cell of a double-width glyph in the same style: the
+        // terminal's own wide-glyph cell skip would otherwise swallow whatever
+        // followed it (which is exactly how the char==cell body dropped glyphs).
+        for k in 1..w as u16 {
+            crate::render::draw_char_clipped(buf, col.saturating_add(k), y, ' ', style, area);
+        }
+        glyph_col = Some(col);
+        col = col.saturating_add(w as u16);
     }
 }
 
@@ -2088,15 +2118,34 @@ fn render_middle(
         let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
         draw_str_runs(buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area, &state.colors, state.config.honor_game_colours);
 
-        // Record cell→link for every linked span on this row. `run.start/end`
-        // are char offsets within `wr.text` (re-based by `rebase_runs`), and
-        // `draw_str_runs` draws char index `j` at column `text_x + j`, so the
-        // rendered cell for a char is exactly that column. Clip to the body.
+        // Record cell→link for every linked span on this row. `run.start/end` are
+        // CHAR offsets within `wr.text` (re-based by `rebase_runs`), while the
+        // cells they were drawn in are DISPLAY columns — a wide glyph or a
+        // multibyte prefix moves the link's columns right of its char indices
+        // (SQ-0662). Convert through the same width table `draw_str_runs` advanced
+        // by, so the click lands on the link's actual glyphs. Clip to the body.
+        // One pass builds char index → start column for the whole row, so N linked
+        // runs cost one scan rather than N (wrapping and drawing are per-frame work
+        // over the whole window; nothing here may go quadratic in the row length).
+        let link_cols: Vec<usize> = if wr.runs.iter().any(|r| r.link != 0) {
+            let mut v = Vec::with_capacity(wr.text.chars().count() + 1);
+            let mut c = 0usize;
+            for ch in wr.text.chars() {
+                v.push(c);
+                c += crate::textwidth::char_cells(ch);
+            }
+            v.push(c);
+            v
+        } else {
+            Vec::new()
+        };
+        let col_of = |i: usize| -> usize { link_cols.get(i).copied().unwrap_or_else(|| link_cols.last().copied().unwrap_or(0)) };
         for run in &wr.runs {
             if run.link == 0 {
                 continue;
             }
-            for j in run.start..run.end {
+            let (c0, c1) = (col_of(run.start), col_of(run.end));
+            for j in c0..c1 {
                 let col = text_x.saturating_add(j as u16);
                 if col >= body_area.right() {
                     break;
@@ -2122,7 +2171,9 @@ fn render_middle(
             if let Some(bg) = row_bg {
                 // A coloured row: fill trailing space and (re)open the band.
                 let fill = Style::default().bg(bg);
-                let start = text_x.saturating_add(wr.text.chars().count() as u16);
+                // Cells, not chars: the fill starts where the drawn text ENDS on
+                // screen, which a wide glyph pushes past its char count (SQ-0662).
+                let start = text_x.saturating_add(crate::textwidth::str_cells(&wr.text) as u16);
                 for x in start..body_area.right() {
                     if let Some(cell) = buf.cell_mut((x, row_y)) {
                         cell.set_symbol(" ").set_style(fill);
@@ -2207,7 +2258,8 @@ fn render_middle(
                 TranscriptKind::Meta | TranscriptKind::Warning => body_area.x + META_GUTTER,
                 TranscriptKind::Story | TranscriptKind::Input => body_area.x,
             };
-            let start_col = row_text_x + last.text.chars().count() as u16;
+            // Where the row's text ENDS on screen — cells, not chars (SQ-0662).
+            let start_col = row_text_x + crate::textwidth::str_cells(&last.text) as u16;
             let avail = body_area.right().saturating_sub(start_col) as usize;
             // Cells, not chars, for the typed line — see `draw_str_cells` (SQ-0655).
             let input_trunc = crate::textwidth::truncate_to_cols(state.input.as_str(), avail);
@@ -2259,17 +2311,21 @@ fn render_middle(
     }));
     if let Some(sel) = state.selection {
         let width = body_area.width;
-        // Highlight the visible portion (reverse video) by absolute row.
-        for (i, _wr) in lines.iter().enumerate() {
+        // Highlight the visible portion (reverse video) by absolute row. The span
+        // is snapped out to whole glyphs, so it covers exactly the cells
+        // `clipboard::extract` copies (SQ-0662): a selection edge that lands on
+        // the second cell of a CJK glyph copies that glyph whole, and the
+        // highlight has to say so rather than reverse half a character.
+        for (i, wr) in lines.iter().enumerate() {
             let row_y = transcript_top + i as u16;
             if row_y >= transcript_bottom { break; }
             let abs = first_abs_row + i;
-            for col in 0..width {
-                if crate::clipboard::contains(width, sel, abs, col) {
-                    if let Some(cell) = buf.cell_mut((body_area.x + col, row_y)) {
-                        let s = cell.style();
-                        cell.set_style(s.add_modifier(ratatui::style::Modifier::REVERSED));
-                    }
+            let Some((c0, c1)) = crate::clipboard::row_span(width, sel, abs) else { continue };
+            let (c0, c1) = crate::textwidth::snap_cols_to_glyphs(&wr.text, c0 as usize, c1 as usize);
+            for col in c0..=c1.min(width.saturating_sub(1) as usize) {
+                if let Some(cell) = buf.cell_mut((body_area.x + col as u16, row_y)) {
+                    let s = cell.style();
+                    cell.set_style(s.add_modifier(ratatui::style::Modifier::REVERSED));
                 }
             }
         }
@@ -3359,6 +3415,226 @@ mod tests {
         assert_eq!(rows.iter().map(|r| (r.1, r.2)).collect::<Vec<_>>(), vec![(0, 8), (8, 11)]);
         assert_eq!(rows.iter().map(|r| r.0.chars().count()).sum::<usize>(), 11,
                    "no break space is swallowed when buffering is off");
+    }
+
+    // ── SQ-0662: the body fits, draws and selects in display CELLS ────────────
+
+    #[test]
+    fn wide_glyphs_wrap_by_cells_not_chars() {
+        // A 10-cell pane fits FIVE CJK ideographs, not ten: each costs two columns.
+        // Fitting by char count packed all seven onto one row, and the terminal's
+        // wide-glyph cell skip then dropped every second one.
+        let rows = wrap_line("日本語です朝日", 10);
+        assert_eq!(rows, vec!["日本語です", "朝日"]);
+        for r in &rows {
+            assert!(crate::textwidth::str_cells(r) <= 10, "row {r:?} fits the cell budget");
+        }
+        // ASCII is untouched: one char, one cell.
+        assert_eq!(wrap_line("ABCDEFGHIJKL", 10), vec!["ABCDEFGHIJ", "KL"]);
+    }
+
+    #[test]
+    fn a_wide_glyph_that_half_fits_moves_whole_to_the_next_row() {
+        // Odd pane width: the 5th ideograph would straddle columns 8/9, so it goes
+        // whole to the next row rather than being split (or silently eaten).
+        let rows = wrap_line_ranges("日本語です朝日", 9);
+        assert_eq!(rows.iter().map(|r| r.0.clone()).collect::<Vec<_>>(), vec!["日本語で", "す朝日"]);
+        for (t, _, _) in &rows {
+            assert!(crate::textwidth::str_cells(t) <= 9, "no row overflows the pane");
+        }
+        // The source char ranges stay contiguous — style runs re-base off them.
+        assert_eq!(rows.iter().map(|r| (r.1, r.2)).collect::<Vec<_>>(), vec![(0, 4), (4, 7)]);
+        assert_eq!(rows.iter().map(|r| r.0.clone()).collect::<String>(), "日本語です朝日");
+    }
+
+    #[test]
+    fn mixed_width_line_word_wraps_by_cells() {
+        // "ab 日本語" is 3 + 6 = 9 cells: in an 8-cell pane the CJK word no longer
+        // fits after "ab ", so it wraps at the space. By char count it was 6 chars
+        // and stayed on one row, overflowing the pane.
+        assert_eq!(wrap_line("ab 日本語", 8), vec!["ab", "日本語"]);
+    }
+
+    #[test]
+    fn a_wide_glyph_in_a_one_cell_pane_still_makes_progress() {
+        // Nothing fits a 1-column pane, but the wrap must terminate: the glyph
+        // takes its own (overflowing) row and the draw clips it.
+        let rows = wrap_line("日本", 1);
+        assert_eq!(rows, vec!["日", "本"]);
+    }
+
+    #[test]
+    fn justification_measures_the_row_in_cells() {
+        // "日本" is 4 cells; centred in 10 → (10-4)/2 = 3 leading spaces. Measured
+        // by char count it was 2 "wide", and the row came out pushed 4 right.
+        let lines = vec!["日本".to_string()];
+        let kinds = vec![TranscriptKind::Story];
+        let styles = vec![Style::default()];
+        let para = vec![ParaFmt { indent: 0, para_indent: 0, justify: 2, nowrap_from: None }];
+        let out = wrap_lines_kinded(&lines, &kinds, &styles, &[], &para, &[], (1, 1), false, false, 10);
+        assert_eq!(out[0].text, "   日本");
+        assert_eq!(crate::textwidth::str_cells(&out[0].text), 7, "3 pad + 4 text cells");
+    }
+
+    #[test]
+    fn prose_beside_a_float_wraps_by_cells_too() {
+        // The float's own geometry was always in cells (`fitted_cells`), but the
+        // prose that rides beside it goes through `wrap_line_ranges_var` — which
+        // fitted by char count, so a CJK paragraph overran the picture's column and
+        // the viewport. 16x24 px at 8x8 cells → 2 cols wide, indent/reserve 3, so
+        // the covered rows have 37 cells for text after a 3-cell pad.
+        let para: String = "日".repeat(30);
+        let full_transcript = vec![String::new(), para];
+        let full_images = vec![Some(left_img(16, 24, None)), None];
+        let kinds = vec![TranscriptKind::Story; 2];
+        let styles = vec![Style::default(); 2];
+        let runs = vec![Vec::new(); 2];
+        let rows = wrap_lines_kinded(&full_transcript, &kinds, &styles, &runs, &[], &full_images, (8, 8), true, true, 40);
+        for r in &rows {
+            assert!(crate::textwidth::str_cells(&r.text) <= 40, "row {:?} fits the viewport", r.text);
+        }
+        let first = &rows[0];
+        assert!(first.text.starts_with("   "), "float-row prose indented past the picture");
+        assert_eq!(first.text.chars().filter(|c| *c == '日').count(), 18,
+                   "18 ideographs = 36 cells, the most that fit in the 37-cell narrowed column");
+    }
+
+    #[test]
+    fn draw_str_runs_paints_both_cells_of_a_wide_glyph() {
+        let area = Rect::new(0, 0, 10, 1);
+        let mut b = Buffer::empty(area);
+        let cs = crate::colors::ColorScheme::terminal_default();
+        draw_str_runs(&mut b, 0, 0, "日本x", Style::default(), &[], None, area, &cs, false);
+        assert_eq!(b[(0, 0)].symbol(), "日");
+        assert_eq!(b[(1, 0)].symbol(), " ", "the wide glyph's trailing cell is blanked…");
+        assert_eq!(b[(2, 0)].symbol(), "本", "…so the next glyph is not swallowed by the cell skip");
+        assert_eq!(b[(3, 0)].symbol(), " ");
+        assert_eq!(b[(4, 0)].symbol(), "x");
+    }
+
+    #[test]
+    fn draw_str_runs_keeps_a_combining_mark_with_its_base() {
+        // "e" + U+0301 is ONE cell: the mark joins the base's cell instead of
+        // claiming a column of its own (which shifted everything after it right).
+        let area = Rect::new(0, 0, 10, 1);
+        let mut b = Buffer::empty(area);
+        let cs = crate::colors::ColorScheme::terminal_default();
+        draw_str_runs(&mut b, 0, 0, "e\u{0301}!", Style::default(), &[], None, area, &cs, false);
+        assert_eq!(b[(0, 0)].symbol(), "e\u{0301}");
+        assert_eq!(b[(1, 0)].symbol(), "!");
+    }
+
+    #[test]
+    fn draw_str_runs_styles_the_cells_of_the_char_its_run_covers() {
+        // Runs stay CHAR-indexed (the wrap re-bases them that way); the cells they
+        // paint are display columns. A bold run on char 1 of "日本x" must land on
+        // columns 2..3, not on column 1.
+        let area = Rect::new(0, 0, 10, 1);
+        let mut b = Buffer::empty(area);
+        let cs = crate::colors::ColorScheme::terminal_default();
+        let runs = vec![StyleRun { start: 1, end: 2, bits: 0x02, fg: 0, bg: 0, link: 0, glk_style: 0 }];
+        draw_str_runs(&mut b, 0, 0, "日本x", Style::default(), &runs, None, area, &cs, false);
+        assert!(!b[(0, 0)].modifier.contains(Modifier::BOLD));
+        assert!(b[(2, 0)].modifier.contains(Modifier::BOLD), "run lands on 本's own cell");
+        assert!(b[(3, 0)].modifier.contains(Modifier::BOLD), "…and on its trailing cell");
+        assert!(!b[(4, 0)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_transcript_link_cells_follow_a_wide_prefix() {
+        use zvm::screen::ZColour;
+        // "日本 north" links only "north": chars 3..8, but COLUMNS 5..10 — the two
+        // ideographs are two cells each. Mapping the link by char index put the
+        // clickable cells two columns left of the word.
+        for honor in [true, false] {
+            let machine = minimal_machine();
+            let mut state = AppState::default();
+            state.config.honor_game_colours = honor;
+            state.push_transcript_runs(
+                "日本 north",
+                TranscriptKind::Story,
+                &[
+                    (3, 0, ZColour::Default, ZColour::Default, 0, ParaFmt::default(), 0, false),
+                    (5, 0, ZColour::Default, ZColour::Default, 7, ParaFmt::default(), 0, false),
+                ],
+            );
+            state.focus = Focus::Game;
+            let area = Rect::new(0, 0, 40, 10);
+            let mut buf = Buffer::empty(area);
+            let (_sb, _ms, _total, links) = render_transcript(
+                &crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None,
+            );
+            assert_eq!(links.len(), 5, "one cell per linked char (honor={honor})");
+            let cols: Vec<u16> = links.iter().map(|((c, _), _)| *c).collect();
+            assert_eq!(cols, vec![5, 6, 7, 8, 9], "link cells sit on north's glyphs");
+            for &((cx, cy), v) in &links {
+                assert_eq!(v, 7);
+                assert!("north".contains(buf.cell((cx, cy)).unwrap().symbol()),
+                        "cell ({cx},{cy}) holds a glyph of the link");
+            }
+        }
+    }
+
+    #[test]
+    fn cjk_story_line_renders_both_cells_of_every_glyph() {
+        // The char==cell body wrote 日 at col 0 and 本 at col 1; the terminal skips
+        // the cell after a wide glyph, so 本 was never seen. Both cells now belong
+        // to their glyph.
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.push_transcript("日本語");
+        state.focus = Focus::Game;
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+        let row_y = (0..10u16)
+            .find(|&y| buf.cell((0, y)).map(|c| c.symbol()) == Some("日"))
+            .expect("the CJK line rendered");
+        assert_eq!(buf.cell((1, row_y)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((2, row_y)).unwrap().symbol(), "本");
+        assert_eq!(buf.cell((3, row_y)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((4, row_y)).unwrap().symbol(), "語");
+    }
+
+    #[test]
+    fn selection_highlight_covers_exactly_the_cells_copy_takes() {
+        use ratatui::style::Modifier;
+        // The highlight and `clipboard::extract` share one coordinate system now,
+        // so they must agree on a CJK row: dragging from the SECOND cell of 日 to
+        // the FIRST cell of 語 copies all three glyphs whole, and the highlight has
+        // to paint all six of their cells — the char-indexed highlight reversed
+        // four cells while the (cell-based) copy took three glyphs.
+        for honor in [true, false] {
+            let machine = minimal_machine();
+            let mut state = AppState::default();
+            state.config.honor_game_colours = honor;
+            // The bottom input bar keeps the block caret (also reverse video) off
+            // the transcript row, so every reversed cell here is the selection.
+            state.config.command_bar = true;
+            state.push_transcript("日本語です");
+            assert_eq!(state.transcript.len(), 1, "one logical line → wrapped row 0");
+            state.focus = Focus::Game;
+            state.selection = Some(crate::clipboard::Selection {
+                anchor: crate::clipboard::Point { row: 0, col: 1 },
+                head: crate::clipboard::Point { row: 0, col: 4 },
+            });
+            let area = Rect::new(0, 0, 40, 10);
+            let mut buf = Buffer::empty(area);
+            render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+            let copied = state.selection_text.borrow().clone().expect("copy published");
+            assert_eq!(copied, "日本語", "a clipped wide glyph copies whole");
+            let row_y = (0..10u16)
+                .find(|&y| buf.cell((0, y)).map(|c| c.symbol()) == Some("日"))
+                .expect("the CJK line rendered");
+            let reversed: Vec<u16> = (0..40u16)
+                .filter(|&x| buf.cell((x, row_y)).unwrap().modifier.contains(Modifier::REVERSED))
+                .collect();
+            assert_eq!(reversed, (0..6).collect::<Vec<u16>>(),
+                       "highlight spans exactly the copied glyphs' cells (honor={honor})");
+            assert_eq!(reversed.len(), crate::textwidth::str_cells(&copied),
+                       "highlighted cell count == copied text's display width");
+        }
     }
 
     // ── SQ-0330: Glk paragraph layout (indent / para_indent / justification) ──

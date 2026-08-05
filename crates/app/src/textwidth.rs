@@ -101,6 +101,81 @@ pub fn truncate_to_cols(s: &str, max: usize) -> &str {
     s
 }
 
+/// Where a row of at most `max` display cells has to break inside `s`, as found
+/// by ONE left-to-right scan (see [`row_break`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowBreak {
+    /// Byte offset of the first char that does NOT fit in `max` cells, or `None`
+    /// when the whole of `s` fits.
+    pub overflow: Option<usize>,
+    /// How many CHARS fit in `max` cells. Trailing zero-width scalars count as
+    /// fitting (they ride on the glyph before them).
+    pub fit_chars: usize,
+    /// Byte offset of the last ASCII space at or before the break boundary — the
+    /// word-wrap point. The space sitting exactly AT the boundary counts, so a row
+    /// of exactly `max` cells followed by a space breaks there and swallows it.
+    pub last_space: Option<usize>,
+}
+
+/// Scan `s` for the point at which a row of at most `max` display CELLS must
+/// break. The scan stops at the first char that doesn't fit, so wrapping a long
+/// line costs `O(max)` per row rather than re-measuring the whole remainder.
+///
+/// A double-width glyph is never split: if only one of its two cells is left in
+/// the budget it is reported as the overflow char and moves whole to the next row.
+///
+/// For pure ASCII `fit_chars == max` (when the string is longer) and the reported
+/// offsets are exactly the char-counted ones, so an ASCII wrap is unchanged.
+pub fn row_break(s: &str, max: usize) -> RowBreak {
+    let mut col = 0usize;
+    let mut fit_chars = 0usize;
+    let mut last_space = None;
+    for (b, ch) in s.char_indices() {
+        let w = char_cells(ch);
+        if col + w > max {
+            if ch == ' ' {
+                last_space = Some(b);
+            }
+            return RowBreak { overflow: Some(b), fit_chars, last_space };
+        }
+        if ch == ' ' {
+            last_space = Some(b);
+        }
+        col += w;
+        fit_chars += 1;
+    }
+    RowBreak { overflow: None, fit_chars, last_space }
+}
+
+/// Grow the INCLUSIVE cell range `[c0, c1]` so it starts and ends on glyph
+/// boundaries of `s` — the cells [`slice_cols`] would copy for that range.
+///
+/// A range that clips a double-width glyph in half is widened to cover both of
+/// its cells, so a selection highlight paints exactly the glyphs the copy takes.
+/// Columns past the end of `s` are left alone (they are blank padding, not text).
+pub fn snap_cols_to_glyphs(s: &str, c0: usize, c1: usize) -> (usize, usize) {
+    let (mut lo, mut hi) = (c0, c1);
+    let mut col = 0usize;
+    for ch in s.chars() {
+        let w = char_cells(ch);
+        if w == 0 {
+            continue; // rides on the preceding glyph; owns no cell
+        }
+        let end = col + w; // exclusive
+        if col < c0 && end > c0 {
+            lo = col;
+        }
+        if col <= c1 && end - 1 > c1 {
+            hi = end - 1;
+        }
+        col = end;
+        if col > c1 {
+            break;
+        }
+    }
+    (lo, hi)
+}
+
 /// Clip `s` to at most `max` display columns, marking a shortened string with a
 /// trailing `…` (which costs one of those columns).
 pub fn clip_to_cols_ellipsis(s: &str, max: usize) -> String {
@@ -179,6 +254,58 @@ mod tests {
         let s = "e\u{0301}x"; // "é" as e + combining acute, then x
         assert_eq!(slice_cols(s, 0, 0), "e\u{0301}");
         assert_eq!(slice_cols(s, 1, 1), "x");
+    }
+
+    #[test]
+    fn row_break_is_char_counting_for_ascii() {
+        // The wrap's ASCII behaviour is unchanged: `max` chars fit, the char at the
+        // boundary is the overflow, and the last space at or before it word-wraps.
+        let br = row_break("AAAAA BBBBB", 8);
+        assert_eq!(br.overflow, Some(8));
+        assert_eq!(br.fit_chars, 8);
+        assert_eq!(br.last_space, Some(5));
+        // A string that fits reports no overflow.
+        let br = row_break("hello", 8);
+        assert_eq!((br.overflow, br.fit_chars, br.last_space), (None, 5, None));
+        // A space sitting exactly AT the boundary is a break point (the row is
+        // exactly `max` chars of text, the space is swallowed).
+        let br = row_break("AAAAA BBBBB", 5);
+        assert_eq!((br.overflow, br.last_space), (Some(5), Some(5)));
+    }
+
+    #[test]
+    fn row_break_never_splits_a_wide_glyph() {
+        // 9 cells: four ideographs fit (8 cells), the fifth would straddle 8/9.
+        let br = row_break("日本語です朝", 9);
+        assert_eq!(br.fit_chars, 4);
+        assert_eq!(br.overflow, Some("日本語で".len()));
+        // An exact fit takes them all.
+        let br = row_break("日本語です朝", 12);
+        assert_eq!((br.overflow, br.fit_chars), (None, 6));
+        // Nothing fits a one-cell budget: the caller must force progress.
+        let br = row_break("日", 1);
+        assert_eq!((br.overflow, br.fit_chars), (Some(0), 0));
+        // Zero-width scalars ride along with the glyph before them.
+        let br = row_break("e\u{0301}x", 1);
+        assert_eq!(br.fit_chars, 2, "the combining mark fits with its base");
+    }
+
+    #[test]
+    fn snap_cols_to_glyphs_matches_what_slice_cols_takes() {
+        // "日本語" occupies columns 0..5.
+        assert_eq!(snap_cols_to_glyphs("日本語", 1, 2), (0, 3), "a half-clipped glyph is covered whole");
+        assert_eq!(snap_cols_to_glyphs("日本語", 0, 3), (0, 3), "already on boundaries");
+        assert_eq!(snap_cols_to_glyphs("日本語", 3, 5), (2, 5));
+        // ASCII never moves.
+        assert_eq!(snap_cols_to_glyphs("HELLOWORLD", 2, 5), (2, 5));
+        // Columns past the text are blank padding, not glyphs.
+        assert_eq!(snap_cols_to_glyphs("hi", 0, 9), (0, 9));
+        // The snapped span is exactly the span `slice_cols` copies.
+        for (c0, c1) in [(0usize, 1usize), (1, 2), (1, 4), (2, 3), (3, 4)] {
+            let (s0, s1) = snap_cols_to_glyphs("日本語", c0, c1);
+            let taken = slice_cols("日本語", c0, c1);
+            assert_eq!(s1 - s0 + 1, str_cells(&taken), "snap({c0},{c1}) covers {taken:?}");
+        }
     }
 
     #[test]
