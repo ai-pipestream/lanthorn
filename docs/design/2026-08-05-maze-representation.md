@@ -76,9 +76,14 @@ selected room: its known entrances, i.e. the answer to "how do I get back
 here". Selection moves with ↑/↓ or by clicking a row; clicking a
 destination cell jumps selection to that room's row.
 
-**Geometry:** the full table is ~82 cells wide; inside a narrower map pane
-the matrix scrolls horizontally (the label column stays pinned), reusing
-the pane-scroll conventions. Vertical scrolling as any list.
+**Geometry:** the full table is ~82 cells wide with return directions.
+When the pane is too narrow for the full form, the matrix degrades before
+it scrolls: first the `⇠x` return-direction suffixes drop (cells shrink to
+`→5` / `⇢9` form, ~46 cells total — the return is still discoverable on
+the destination's row and in its room-info card); only when even that
+doesn't fit does horizontal scrolling engage (the label column stays
+pinned), reusing the pane-scroll conventions. The threshold is computed,
+not configured. Vertical scrolling as any list.
 
 **Style selectors** (all new elements styleable per CLAUDE.md):
 `map.matrix.header`, `map.matrix.row:here`, `map.matrix.row:selected`,
