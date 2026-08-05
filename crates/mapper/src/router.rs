@@ -204,6 +204,11 @@ pub fn route_all(graph: &MapGraph) -> Vec<RoutedEdge> {
     let mut result = Vec::new();
 
     for conn in graph.connections() {
+        // A self-loop is not a route between two places — the drawn view shows it as a badge
+        // on the room box, never a connector looping out and back (SQ-0666).
+        if conn.is_self_loop() {
+            continue;
+        }
         let origin_pos = match graph.room(conn.origin).and_then(|r| r.pos) {
             Some(p) => p,
             None => continue, // origin not placed — skip

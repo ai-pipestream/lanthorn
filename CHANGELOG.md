@@ -16,6 +16,20 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
+- **The matrix map view** — mazes finally have a representation that tells the
+  truth. Any layer can switch between the drawn map and a **direction matrix**
+  (`/view-map`): one row per room, a column for every direction, each cell
+  saying exactly what is known — mutual passage, goes-there-returns-elsewhere
+  (with the return direction), one-way, self-loop, tried-but-flat, or untried
+  frontier. Selecting a room bolds its known entrances; identically-named
+  rooms number themselves; the table thins its cells before it scrolls. A
+  layer marked as a maze (`/mark-maze-layer`, or accept the offer babelmap
+  makes when it notices a tangle) defaults to the matrix. Self-loops — "west
+  leads back here" — are now recordable at all, one-way passages grow
+  arrowheads on the drawn map, and the room panel gains the full per-direction
+  exit card (retiring the explored rose and untried-exits list it replaces).
+  Designed against a real player's half-mapped Colossal Cave maze, which now
+  lives in the test suite. → [mapping](docs/features/mapping.md)
 - **The command band** replaces the verb menu (which was a left-edge token
   palette nobody could drive). Modeled on Journey's clickable menu system: a
   bottom band (`F2`, or `open-command-band`) whose columns fill in

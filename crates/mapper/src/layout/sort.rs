@@ -96,6 +96,9 @@ pub(crate) fn align_free_axes(
     let mut ew: Vec<Vec<usize>> = vec![Vec::new(); n]; // E/W neighbours → align Y
     let mut ns: Vec<Vec<usize>> = vec![Vec::new(); n]; // N/S neighbours → align X
     for c in graph.connections() {
+        if c.is_self_loop() {
+            continue; // no geometry: a room is not east of itself (SQ-0666)
+        }
         let (Some(&a), Some(&b)) = (index.get(&c.origin), index.get(&c.dest)) else {
             continue;
         };
@@ -179,6 +182,9 @@ pub(crate) fn sort_layout(graph: &MapGraph) -> BTreeMap<RoomId, (i32, i32)> {
         let mut xe: Vec<(usize, usize)> = Vec::new();
         let mut ye: Vec<(usize, usize)> = Vec::new();
         for c in graph.connections() {
+            if c.is_self_loop() {
+                continue; // a self-edge in a topological order is a cycle (SQ-0666)
+            }
             let (Some(&a), Some(&b)) = (index.get(&c.origin), index.get(&c.dest)) else {
                 continue;
             };

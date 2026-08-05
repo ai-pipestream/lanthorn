@@ -21,7 +21,32 @@ pub struct Mapper {
 }
 
 impl Mapper {
+    /// Observe the player's location after a turn. The conservative form: when the location has
+    /// not changed, nothing is minted — the direction is merely recorded as tried.
     pub fn observe(&mut self, location: RoomId, name: &str, via: Option<Direction>) {
+        self.observe_inner(location, name, via, false);
+    }
+
+    /// [`Mapper::observe`] for a turn where the caller can PROVE the player moved (SQ-0666).
+    ///
+    /// When the room they arrived in is the room they left, that is a self-loop — Adventure's
+    /// maze is full of them, and the old code threw the fact away because it could not tell a
+    /// loop from a wall. It still cannot, which is why the proof has to come from the caller: a
+    /// direction that bounced off a wall reaches [`Mapper::observe`] and stays a probe (`_`),
+    /// while an observed arrival reaches this and mints the loop (`↩`).
+    pub fn observe_moved(&mut self, location: RoomId, name: &str, via: Option<Direction>) {
+        self.observe_inner(location, name, via, true);
+    }
+
+    /// Record an observed same-room arrival directly: `dir` out of the current room leads back
+    /// into it. For the retroactive path — a player converting a probe they know is a loop.
+    /// Returns false when there is no current room, or `dir` is not a passage.
+    pub fn record_self_loop(&mut self, dir: Direction) -> bool {
+        let Some(here) = self.graph.current() else { return false };
+        self.graph.add_self_loop(here, dir)
+    }
+
+    fn observe_inner(&mut self, location: RoomId, name: &str, via: Option<Direction>, moved: bool) {
         self.graph.upsert_room(location, name.to_string());
         let prev = self.graph.current();
         // Record the direction against the room it was TYPED IN — the one we are leaving, not the
@@ -50,6 +75,13 @@ impl Mapper {
                     // this move was Unknown. Edge hygiene is independent of layout mode. (SQ-0220)
                     self.graph.collapse_unknown_edges();
                     place_incremental(&mut self.graph, prev_id, location, edge_dir);
+                } else if let (true, Some(d)) = (moved, via) {
+                    // The player walked `d` and came out where they went in: a self-loop
+                    // (SQ-0666). No placement and no `collapse_unknown_edges` — the edge carries
+                    // no geometry, so there is nothing to lay out and no `?` stub it could make
+                    // redundant. `arrived_via` still records the passage: it IS the one walked.
+                    self.arrived_via = Some((prev_id, d));
+                    self.graph.add_self_loop(prev_id, d);
                 }
             }
         }
@@ -333,6 +365,46 @@ mod tests {
         m.observe(1, "Hall", None);
         m.observe(1, "Hall", Some(Direction::N)); // look/again — same room
         assert_eq!(m.graph.connections().len(), 0);
+    }
+
+    /// SQ-0666: a maze's "west leads back here" and a wall's "you can't go that way" look
+    /// identical to the mapper — same room before, same room after. Only the caller can tell them
+    /// apart, so only the caller may mint the loop. `observe` stays conservative; `observe_moved`
+    /// is the one that has been given the proof.
+    #[test]
+    fn a_same_room_turn_mints_a_loop_only_when_the_caller_proves_a_move() {
+        let mut m = Mapper::default();
+        m.observe(1, "Maze", None);
+
+        m.observe(1, "Maze", Some(Direction::E)); // bounced off a wall
+        assert_eq!(m.graph.connections().len(), 0, "a wall must not become a passage");
+        assert!(m.graph.is_tried(1, Direction::E), "but it is on the record as tried");
+        assert!(m.graph.self_loops(1).is_empty());
+
+        m.observe_moved(1, "Maze", Some(Direction::W)); // walked west, came out here
+        assert_eq!(m.graph.self_loops(1), vec![Direction::W], "an observed arrival IS a loop");
+        assert_eq!(m.graph.room(1).unwrap().pos, Some((0, 0)), "a loop moves nothing: no geometry");
+        assert_eq!(m.arrived_via(), Some((1, Direction::W)), "it is still the passage just walked");
+
+        m.observe_moved(1, "Maze", Some(Direction::W)); // walk it again
+        assert_eq!(m.graph.connections().len(), 1, "a second lap is the same loop");
+
+        m.observe_moved(1, "Maze", None); // a proven move with no direction named
+        assert_eq!(m.graph.connections().len(), 1, "nothing to record a loop against");
+
+        // A loop never marks itself distorted, however many relayouts run over it.
+        assert!(m.graph.connections().iter().all(|c| !c.distorted));
+    }
+
+    /// The retroactive path: a player who KNOWS a probe is a loop can say so, and the fact lands
+    /// on the room they are standing in.
+    #[test]
+    fn record_self_loop_needs_somewhere_to_stand() {
+        let mut m = Mapper::default();
+        assert!(!m.record_self_loop(Direction::N), "no current room, nothing to record against");
+        m.observe(1, "Maze", None);
+        assert!(m.record_self_loop(Direction::N));
+        assert_eq!(m.graph.self_loops(1), vec![Direction::N]);
     }
 
     #[test]

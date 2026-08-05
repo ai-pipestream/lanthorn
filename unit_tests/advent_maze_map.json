@@ -1,0 +1,943 @@
+{
+  "version": 1,
+  "rooms": [
+    {
+      "id": 33457,
+      "name": "Maze",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        0,
+        -1
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "S",
+        "N",
+        "E",
+        "W"
+      ]
+    },
+    {
+      "id": 34441,
+      "name": "Inside Building",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        0,
+        0
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "W"
+      ]
+    },
+    {
+      "id": 34888,
+      "name": "Maze",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -1,
+        1
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "E",
+        "S",
+        "W",
+        "N",
+        "Down"
+      ]
+    },
+    {
+      "id": 35561,
+      "name": "In Debris Room",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -5,
+        2
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "W"
+      ]
+    },
+    {
+      "id": 35770,
+      "name": "Outside Grate",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -2,
+        3
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "Down"
+      ]
+    },
+    {
+      "id": 35949,
+      "name": "Hall of the Mountain King",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -10,
+        4
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "E",
+        "W"
+      ]
+    },
+    {
+      "id": 37214,
+      "name": "At West End of Long Hall",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -12,
+        5
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "S"
+      ]
+    },
+    {
+      "id": 40591,
+      "name": "In Hall of Mists",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -9,
+        3
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "Down",
+        "W",
+        "N"
+      ]
+    },
+    {
+      "id": 40808,
+      "name": "Maze",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -1,
+        3
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "E",
+        "S",
+        "W",
+        "N",
+        "Up"
+      ]
+    },
+    {
+      "id": 41864,
+      "name": "Dead End, near Vending Machine",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -1,
+        0
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "E",
+        "N"
+      ]
+    },
+    {
+      "id": 45246,
+      "name": "On East Bank of Fissure",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -10,
+        3
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "E",
+        "W",
+        "S",
+        "Down"
+      ]
+    },
+    {
+      "id": 45297,
+      "name": "Maze",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -1,
+        -1
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "E",
+        "S",
+        "W",
+        "N",
+        "Up",
+        "Down"
+      ]
+    },
+    {
+      "id": 46353,
+      "name": "Maze",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        1,
+        -1
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "W",
+        "S",
+        "Up",
+        "E"
+      ]
+    },
+    {
+      "id": 47401,
+      "name": "In Cobble Crawl",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -4,
+        4
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "W"
+      ]
+    },
+    {
+      "id": 47784,
+      "name": "Maze",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -2,
+        -1
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "S",
+        "W",
+        "N"
+      ]
+    },
+    {
+      "id": 49722,
+      "name": "In A Valley",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -1,
+        1
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "S"
+      ]
+    },
+    {
+      "id": 49901,
+      "name": "N/S and E/W Crossover",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -12,
+        4
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "W",
+        "S"
+      ]
+    },
+    {
+      "id": 53329,
+      "name": "Maze",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        1,
+        2
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "N",
+        "E",
+        "W",
+        "S"
+      ]
+    },
+    {
+      "id": 54377,
+      "name": "Below the Grate",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -3,
+        4
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "W"
+      ]
+    },
+    {
+      "id": 54752,
+      "name": "At Top of Small Pit",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -8,
+        2
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "Down"
+      ]
+    },
+    {
+      "id": 54760,
+      "name": "Maze",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -1,
+        -2
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "W",
+        "E",
+        "S"
+      ]
+    },
+    {
+      "id": 55808,
+      "name": "Sloping E/W Canyon",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -6,
+        2
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "W"
+      ]
+    },
+    {
+      "id": 57086,
+      "name": "At East End of Long Hall",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -13,
+        5
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "S",
+        "N"
+      ]
+    },
+    {
+      "id": 58308,
+      "name": "In West Side Chamber",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -11,
+        4
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "W"
+      ]
+    },
+    {
+      "id": 59249,
+      "name": "Maze",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        0,
+        1
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "N",
+        "S",
+        "E"
+      ]
+    },
+    {
+      "id": 60680,
+      "name": "Maze",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -1,
+        2
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "N",
+        "S",
+        "W",
+        "E"
+      ]
+    },
+    {
+      "id": 61562,
+      "name": "At Slit In Streambed",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -2,
+        2
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "S"
+      ]
+    },
+    {
+      "id": 61728,
+      "name": "Orange River Chamber",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -7,
+        2
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "S",
+        "Down",
+        "W"
+      ]
+    },
+    {
+      "id": 63776,
+      "name": "At End Of Road",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        -1,
+        0
+      ],
+      "layer": 0,
+      "loc_method": "via room heading",
+      "tried": [
+        "E",
+        "S"
+      ]
+    },
+    {
+      "id": 65169,
+      "name": "Maze",
+      "label_override": null,
+      "notes": "",
+      "pos": [
+        1,
+        1
+      ],
+      "layer": 1,
+      "loc_method": "via room heading",
+      "tried": [
+        "W",
+        "Down",
+        "E",
+        "S",
+        "N",
+        "Up"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "origin": 63776,
+      "dir": "E",
+      "dest": 34441,
+      "distorted": false
+    },
+    {
+      "origin": 34441,
+      "dir": "W",
+      "dest": 63776,
+      "distorted": false
+    },
+    {
+      "origin": 63776,
+      "dir": "S",
+      "dest": 49722,
+      "distorted": false
+    },
+    {
+      "origin": 49722,
+      "dir": "S",
+      "dest": 61562,
+      "distorted": true
+    },
+    {
+      "origin": 61562,
+      "dir": "S",
+      "dest": 35770,
+      "distorted": false
+    },
+    {
+      "origin": 35770,
+      "dir": "Down",
+      "dest": 54377,
+      "distorted": false
+    },
+    {
+      "origin": 54377,
+      "dir": "W",
+      "dest": 47401,
+      "distorted": false
+    },
+    {
+      "origin": 47401,
+      "dir": "W",
+      "dest": 35561,
+      "distorted": true
+    },
+    {
+      "origin": 35561,
+      "dir": "W",
+      "dest": 55808,
+      "distorted": false
+    },
+    {
+      "origin": 55808,
+      "dir": "W",
+      "dest": 61728,
+      "distorted": false
+    },
+    {
+      "origin": 61728,
+      "dir": "W",
+      "dest": 54752,
+      "distorted": false
+    },
+    {
+      "origin": 54752,
+      "dir": "Down",
+      "dest": 40591,
+      "distorted": false
+    },
+    {
+      "origin": 40591,
+      "dir": "Down",
+      "dest": 35949,
+      "distorted": false
+    },
+    {
+      "origin": 35949,
+      "dir": "E",
+      "dest": 40591,
+      "distorted": true
+    },
+    {
+      "origin": 40591,
+      "dir": "W",
+      "dest": 45246,
+      "distorted": false
+    },
+    {
+      "origin": 45246,
+      "dir": "E",
+      "dest": 40591,
+      "distorted": false
+    },
+    {
+      "origin": 40591,
+      "dir": "N",
+      "dest": 35949,
+      "distorted": true
+    },
+    {
+      "origin": 35949,
+      "dir": "W",
+      "dest": 58308,
+      "distorted": false
+    },
+    {
+      "origin": 58308,
+      "dir": "W",
+      "dest": 49901,
+      "distorted": false
+    },
+    {
+      "origin": 49901,
+      "dir": "W",
+      "dest": 57086,
+      "distorted": true
+    },
+    {
+      "origin": 57086,
+      "dir": "N",
+      "dest": 49901,
+      "distorted": true
+    },
+    {
+      "origin": 49901,
+      "dir": "S",
+      "dest": 37214,
+      "distorted": false
+    },
+    {
+      "origin": 37214,
+      "dir": "S",
+      "dest": 65169,
+      "distorted": true
+    },
+    {
+      "origin": 65169,
+      "dir": "W",
+      "dest": 34888,
+      "distorted": false
+    },
+    {
+      "origin": 34888,
+      "dir": "E",
+      "dest": 53329,
+      "distorted": true
+    },
+    {
+      "origin": 53329,
+      "dir": "N",
+      "dest": 34888,
+      "distorted": true
+    },
+    {
+      "origin": 34888,
+      "dir": "S",
+      "dest": 60680,
+      "distorted": false
+    },
+    {
+      "origin": 60680,
+      "dir": "N",
+      "dest": 45297,
+      "distorted": false
+    },
+    {
+      "origin": 45297,
+      "dir": "E",
+      "dest": 46353,
+      "distorted": false
+    },
+    {
+      "origin": 46353,
+      "dir": "W",
+      "dest": 33457,
+      "distorted": false
+    },
+    {
+      "origin": 33457,
+      "dir": "S",
+      "dest": 59249,
+      "distorted": false
+    },
+    {
+      "origin": 59249,
+      "dir": "N",
+      "dest": 53329,
+      "distorted": true
+    },
+    {
+      "origin": 53329,
+      "dir": "E",
+      "dest": 45297,
+      "distorted": true
+    },
+    {
+      "origin": 45297,
+      "dir": "S",
+      "dest": 41864,
+      "distorted": false
+    },
+    {
+      "origin": 41864,
+      "dir": "N",
+      "dest": 45297,
+      "distorted": false
+    },
+    {
+      "origin": 45297,
+      "dir": "W",
+      "dest": 47784,
+      "distorted": false
+    },
+    {
+      "origin": 47784,
+      "dir": "S",
+      "dest": 33457,
+      "distorted": true
+    },
+    {
+      "origin": 33457,
+      "dir": "N",
+      "dest": 46353,
+      "distorted": true
+    },
+    {
+      "origin": 46353,
+      "dir": "S",
+      "dest": 45297,
+      "distorted": true
+    },
+    {
+      "origin": 45297,
+      "dir": "N",
+      "dest": 33457,
+      "distorted": true
+    },
+    {
+      "origin": 33457,
+      "dir": "E",
+      "dest": 34888,
+      "distorted": true
+    },
+    {
+      "origin": 34888,
+      "dir": "W",
+      "dest": 59249,
+      "distorted": true
+    },
+    {
+      "origin": 59249,
+      "dir": "S",
+      "dest": 47784,
+      "distorted": true
+    },
+    {
+      "origin": 47784,
+      "dir": "W",
+      "dest": 45297,
+      "distorted": true
+    },
+    {
+      "origin": 45297,
+      "dir": "Up",
+      "dest": 54760,
+      "distorted": false
+    },
+    {
+      "origin": 54760,
+      "dir": "W",
+      "dest": 46353,
+      "distorted": true
+    },
+    {
+      "origin": 46353,
+      "dir": "Up",
+      "dest": 65169,
+      "distorted": false
+    },
+    {
+      "origin": 65169,
+      "dir": "Down",
+      "dest": 37214,
+      "distorted": false
+    },
+    {
+      "origin": 65169,
+      "dir": "E",
+      "dest": 47784,
+      "distorted": true
+    },
+    {
+      "origin": 47784,
+      "dir": "N",
+      "dest": 60680,
+      "distorted": true
+    },
+    {
+      "origin": 60680,
+      "dir": "S",
+      "dest": 40808,
+      "distorted": false
+    },
+    {
+      "origin": 40808,
+      "dir": "E",
+      "dest": 59249,
+      "distorted": true
+    },
+    {
+      "origin": 59249,
+      "dir": "E",
+      "dest": 40808,
+      "distorted": true
+    },
+    {
+      "origin": 40808,
+      "dir": "S",
+      "dest": 46353,
+      "distorted": true
+    },
+    {
+      "origin": 46353,
+      "dir": "E",
+      "dest": 60680,
+      "distorted": true
+    },
+    {
+      "origin": 60680,
+      "dir": "W",
+      "dest": 53329,
+      "distorted": true
+    },
+    {
+      "origin": 53329,
+      "dir": "W",
+      "dest": 65169,
+      "distorted": true
+    },
+    {
+      "origin": 65169,
+      "dir": "S",
+      "dest": 53329,
+      "distorted": false
+    },
+    {
+      "origin": 53329,
+      "dir": "S",
+      "dest": 54760,
+      "distorted": true
+    },
+    {
+      "origin": 54760,
+      "dir": "E",
+      "dest": 33457,
+      "distorted": true
+    },
+    {
+      "origin": 33457,
+      "dir": "W",
+      "dest": 40808,
+      "distorted": true
+    },
+    {
+      "origin": 40808,
+      "dir": "W",
+      "dest": 60680,
+      "distorted": true
+    },
+    {
+      "origin": 60680,
+      "dir": "E",
+      "dest": 65169,
+      "distorted": true
+    },
+    {
+      "origin": 65169,
+      "dir": "N",
+      "dest": 54760,
+      "distorted": true
+    },
+    {
+      "origin": 54760,
+      "dir": "S",
+      "dest": 34888,
+      "distorted": false
+    },
+    {
+      "origin": 34888,
+      "dir": "N",
+      "dest": 40808,
+      "distorted": true
+    },
+    {
+      "origin": 40808,
+      "dir": "N",
+      "dest": 65169,
+      "distorted": true
+    },
+    {
+      "origin": 65169,
+      "dir": "Up",
+      "dest": 40808,
+      "distorted": false
+    },
+    {
+      "origin": 40808,
+      "dir": "Up",
+      "dest": 45297,
+      "distorted": false
+    },
+    {
+      "origin": 45297,
+      "dir": "Down",
+      "dest": 34888,
+      "distorted": false
+    },
+    {
+      "origin": 34888,
+      "dir": "Down",
+      "dest": 65169,
+      "distorted": false
+    }
+  ],
+  "current": 65169,
+  "layers": {
+    "0": {
+      "name": "Main",
+      "parent": null
+    },
+    "1": {
+      "name": "Maze",
+      "parent": 0
+    }
+  },
+  "next_layer_id": 2
+}

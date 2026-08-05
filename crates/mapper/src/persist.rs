@@ -60,6 +60,46 @@ mod tests {
         assert_eq!(m2.graph.next_layer_id(), m.graph.next_layer_id());
     }
 
+    /// SQ-0666: the maze flag, the per-layer view mode and self-loop edges all have to survive
+    /// the map file, or `/mark-maze-layer` and `/view-map` would be undone by every reload.
+    #[test]
+    fn round_trips_maze_flag_view_mode_and_self_loops() {
+        use crate::layer::MapView;
+        let mut m = Mapper::default();
+        m.observe(1, "Maze", None);
+        m.observe(2, "Maze", Some(Direction::N));
+        let l = m.graph.new_layer(Some(0), "Maze".into());
+        m.graph.set_room_layer(2, l);
+        m.graph.set_layer_maze(l, true);
+        m.graph.set_layer_view(l, Some(MapView::Drawn)); // an explicit choice AGAINST the default
+        assert!(m.graph.add_self_loop(1, Direction::W));
+
+        let m2 = from_json(&to_json(&m)).unwrap();
+        assert!(m2.graph.layer_is_maze(l), "the maze flag survives");
+        assert_eq!(
+            m2.graph.layer_view(l),
+            MapView::Drawn,
+            "an explicit view choice survives and still beats the maze default"
+        );
+        assert_eq!(m2.graph.layer_view_choice(0), None, "an unchosen layer stays unchosen");
+        assert_eq!(m2.graph.self_loops(1), vec![Direction::W], "the self-loop edge survives");
+    }
+
+    /// A layer written before SQ-0666 has neither field; it must load as an ordinary drawn,
+    /// non-maze layer rather than failing the whole map.
+    #[test]
+    fn a_layer_saved_before_the_maze_flag_loads_as_a_plain_drawn_layer() {
+        use crate::layer::MapView;
+        let json = r#"{"version":1,
+            "rooms":[{"id":1,"name":"A","label_override":null,"notes":"","pos":[0,0],"layer":1}],
+            "connections":[],"current":1,
+            "layers":{"0":{"name":"Main","parent":null},"1":{"name":"Cellar","parent":0}},
+            "next_layer_id":2}"#;
+        let m = from_json(json).expect("a pre-SQ-0666 map still loads");
+        assert!(!m.graph.layer_is_maze(1));
+        assert_eq!(m.graph.layer_view(1), MapView::Drawn);
+    }
+
     /// Maps written before SQ-0600 carry a `"mode"` field that no longer exists
     /// on `PersistState`. Serde ignores unknown fields, so they still load —
     /// pinned here because a stray `deny_unknown_fields` would silently make

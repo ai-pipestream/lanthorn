@@ -24,6 +24,9 @@ pub fn detect_chains(graph: &MapGraph) -> Chains {
     let mut ew_pairs: Vec<(RoomId, RoomId)> = Vec::new();
     let mut ns_pairs: Vec<(RoomId, RoomId)> = Vec::new();
     for c in conns {
+        if c.is_self_loop() {
+            continue; // a room is not chained to itself (SQ-0666)
+        }
         match grid_offset(c.dir) {
             Some((dx, dy)) if dx != 0 && dy == 0 => {
                 if reciprocal(c.origin, c.dest, c.dir) {

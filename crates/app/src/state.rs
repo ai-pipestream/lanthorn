@@ -507,6 +507,11 @@ use mapper::direction::Direction;
 use mapper::graph::{MapGraph, RoomId};
 use mapper::layer::LayerId;
 
+/// How many walked rooms the maze breadcrumb remembers (SQ-0666). Eight is about as far back as
+/// "which way did I come in?" is still a live question in a maze; past that the trail is just a
+/// second highlight competing with the here-marker.
+pub const MAP_TRAIL_LEN: usize = 8;
+
 // ── Transcript kind ───────────────────────────────────────────────────────────
 
 /// Category tag for each transcript entry.
@@ -1674,6 +1679,20 @@ pub struct AppState {
     /// Map scroll offset in grid cells: (x, y).
     pub scroll: (i32, i32),
     pub selected_room: Option<RoomId>,
+    /// Matrix-view scroll offset: `(first direction column, first room row)` (SQ-0666).
+    ///
+    /// Separate from `scroll`, which is the drawn map's viewport in grid cells. They measure
+    /// different things in different units, and sharing one field would make a pan of one view
+    /// silently derange the other every time `/view-map` was pressed.
+    pub matrix_scroll: (u16, u16),
+    /// Layers the tangle detector has already offered `/mark-maze-layer` for (SQ-0666). Session
+    /// state, not persisted: the offer is a nudge, and a nudge you have to remember forever is a
+    /// setting. Once the layer is flagged the detector stops on its own.
+    pub tangle_suggested: std::collections::BTreeSet<LayerId>,
+    /// The last few rooms the player walked into, most recent LAST (SQ-0666). Bounded at
+    /// [`MAP_TRAIL_LEN`]; used only on maze-flagged layers, where "how did I get here" is the
+    /// question a drawn map would have answered by itself.
+    pub map_trail: std::collections::VecDeque<RoomId>,
     pub transcript: Vec<String>,
     /// Parallel kind tag for each entry in `transcript` (always same length).
     pub transcript_kinds: Vec<TranscriptKind>,
@@ -2098,9 +2117,6 @@ pub struct AppState {
     pub pending_resume: PendingResume,
     /// When true, room numbers (#id) are shown in Boxes-zoom room boxes.
     pub show_room_numbers: bool,
-    /// Mark compass directions never tried from a room with a `?` on its border (SQ-0391).
-    /// Off by default: it is an exploration aid you reach for, not a permanent decoration.
-    pub show_untried_exits: bool,
     /// How the current room was detected (for the map indicator). Retained
     /// across turns; updated when a turn reports a method.
     pub loc_method: Option<zvm::location::LocationMethod>,
@@ -2189,6 +2205,9 @@ impl Default for AppState {
             zoom_level: 7, // default = Boxes (level 7)
             scroll: (0, 0),
             selected_room: None,
+            matrix_scroll: (0, 0),
+            tangle_suggested: std::collections::BTreeSet::new(),
+            map_trail: std::collections::VecDeque::new(),
             transcript: Vec::new(),
             transcript_kinds: Vec::new(),
             transcript_styles: Vec::new(),
@@ -2291,7 +2310,6 @@ impl Default for AppState {
             prev_objects_here: std::collections::BTreeSet::new(),
             pending_resume: None,
             show_room_numbers: false,
-            show_untried_exits: false,
             loc_method: None,
             current_room_name: None,
             show_status_bar: true,
@@ -2757,14 +2775,6 @@ impl AppState {
                 r.is_current = Some(r.id) == current;
                 if let Some(room) = graph.room(r.id) {
                     r.label = room.label().to_string();
-                    // Untried exits belong here too (SQ-0391). A direction that goes NOWHERE
-                    // adds no room and no connection, so `graph_gen` deliberately does not bump
-                    // for it — which left the overlay showing a `?` on a direction just tried,
-                    // until some later move happened to change the geometry. It is exactly the
-                    // per-move-changeable kind of field this refresh exists for.
-                    if self.show_untried_exits {
-                        r.untried = graph.untried(r.id);
-                    }
                 }
             }
         }
@@ -3587,6 +3597,27 @@ impl AppState {
     /// Set the selected room.
     pub fn select_room(&mut self, room: Option<RoomId>) {
         self.selected_room = room;
+    }
+
+    /// Note that the player just walked into `room`, for the maze breadcrumb (SQ-0666).
+    ///
+    /// A repeat of the room already at the head is dropped: a `look` or a failed move is not a
+    /// step, and letting either one in would flush the trail with eight copies of where you are
+    /// standing. Bounded at [`MAP_TRAIL_LEN`].
+    pub fn push_trail(&mut self, room: RoomId) {
+        if self.map_trail.back() == Some(&room) {
+            return;
+        }
+        self.map_trail.push_back(room);
+        while self.map_trail.len() > MAP_TRAIL_LEN {
+            self.map_trail.pop_front();
+        }
+    }
+
+    /// How far back in the trail `room` is: 0 for the room just entered, `None` when it is not on
+    /// the trail at all. Drives the breadcrumb's fade.
+    pub fn trail_age(&self, room: RoomId) -> Option<usize> {
+        self.map_trail.iter().rev().position(|&r| r == room)
     }
 
     /// Insert a character at the caret.
@@ -5053,29 +5084,25 @@ mod tests {
         s.poll_render_job();
     }
 
-    /// SQ-0391: a direction that goes NOWHERE adds no room and no connection, so `graph_gen`
-    /// deliberately does not bump for it (SQ-0378 keeps a plain step from re-routing the whole
-    /// map). The map render is memoised on that generation, so the untried-exits overlay kept
-    /// showing a `?` on a direction the player had just tried, until some later move happened to
-    /// change the geometry. It has to be refreshed on the cached model, beside the current-room
-    /// highlight.
+    /// SQ-0391, flipped by SQ-0666: a direction that goes NOWHERE adds no room and no
+    /// connection, so `graph_gen` deliberately does not bump for it (SQ-0378 keeps a plain step
+    /// from re-routing the whole map). The untried-exits OVERLAY was memoised on that generation
+    /// and needed a hand-written refresh to notice a foiled move; the matrix view that replaced
+    /// it reads the graph directly on every frame and so cannot go stale at all. Same fact, same
+    /// awkward turn, one fewer cache to keep honest.
     #[test]
-    fn a_foiled_move_clears_its_untried_mark_without_a_geometry_change() {
+    fn a_foiled_move_shows_up_immediately_without_a_geometry_change() {
         use mapper::direction::Direction;
         use mapper::mapper::Mapper;
+        use mapper::matrix::{classify, MatrixCell};
 
         let mut m = Mapper::default();
         m.observe(1, "Hall", None);
         let mut s = AppState::default();
-        s.show_untried_exits = true;
         let _ = s.cached_map_render(0, &m.graph);
         drain_render_job(&mut s);
 
-        let marks = |s: &AppState, m: &Mapper| {
-            let rm = s.cached_map_render(0, &m.graph);
-            rm.rooms.iter().find(|r| r.id == 1).map(|r| r.untried.clone()).unwrap_or_default()
-        };
-        assert!(marks(&s, &m).contains(&Direction::N), "north starts untried");
+        assert_eq!(classify(&m.graph, 1, Direction::N), MatrixCell::Untried, "north starts `·`");
 
         let (gen, rooms, conns) =
             (s.graph_gen, m.graph.rooms().count(), m.graph.connections().len());
@@ -5084,9 +5111,10 @@ mod tests {
         assert_eq!(m.graph.connections().len(), conns, "and no connection");
         assert_eq!(s.graph_gen, gen, "so the map memo is NOT invalidated");
 
-        assert!(
-            !marks(&s, &m).contains(&Direction::N),
-            "the mark clears anyway — the overlay cannot wait for the geometry to change"
+        assert_eq!(
+            classify(&m.graph, 1, Direction::N),
+            MatrixCell::Probed,
+            "the cell becomes `_` on the same turn — nothing waits for the geometry to change"
         );
     }
 

@@ -11,9 +11,11 @@ inspecting the machine, and firing commands — without ever leaving the story.
   exits, objects); right-click a room for layout diagnostics; middle-drag
   anywhere to pan the whole map around. Neither panel interrupts the game: they
   are corner overlays, so the keyboard stays on the story prompt and you can keep
-  typing and pressing Enter with one open — handy for watching a room's compass
-  rose fill in as you walk. Close one with **Esc**, its **✕**, or a click on empty
-  map space.
+  typing and pressing Enter with one open — handy for watching a room's exit card
+  fill in as you walk. Close one with **Esc**, its **✕**, or a click on empty
+  map space. On a layer showing the [matrix view](mapping.md#mazes-the-matrix-view)
+  the same click selects a row — and a click on a destination cell jumps the
+  selection to the room it names.
 - **Mouse wheel** pans the map (hold Shift for horizontal, Ctrl to zoom) and
   scrolls every other scrollable surface too — the transcript and the lists
   inside modals (saves, file browser, gallery, hotkey dialog, …).

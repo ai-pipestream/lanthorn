@@ -1998,6 +1998,7 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
         {
             return;
         }
+        let arrived = reprinted_room_heading(&result.transcript, &snap.name);
         if is_death_relocation(&result.transcript) {
             // The game printed a death banner this turn and resurrected the player
             // into a room that is NOT reachable by the command they typed (e.g. a
@@ -2005,6 +2006,12 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
             // an involuntary relocation so no false directional edge is minted from
             // the room you died in to the resurrection room. (SQ-0259)
             mapper.observe_relocation(snap.number, &snap.name);
+        } else if arrived {
+            // The game printed this room's heading again, so the player MOVED — even if they
+            // came out where they went in. That is the only evidence a maze self-loop ever
+            // leaves, and without it "west leads back here" is indistinguishable from walking
+            // into a wall and thrown away (SQ-0666).
+            mapper.observe_moved(snap.number, &snap.name, parse_direction(command));
         } else {
             mapper.observe(snap.number, &snap.name, parse_direction(command));
         }
@@ -2020,6 +2027,22 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
         // background cleanup (or full tidy) job — see `finish_command_turn` and
         // `cleanup_overlaps_layer_silent`. (SQ-0379)
     }
+}
+
+/// True when this turn's output REPRINTED `name` as a room heading: a line of its own holding
+/// exactly the room's name (SQ-0666).
+///
+/// It is the interpreter-independent signal that the player arrived somewhere — every engine here
+/// prints the room heading on a successful move and prints a refusal ("You can't go that way.")
+/// without one. That distinction is the whole difference between a maze's "west leads back here"
+/// and a wall, and the mapper cannot make it: both leave the location unchanged.
+///
+/// Deliberately strict. A false positive invents a passage out of a wall; a false negative merely
+/// leaves the direction recorded as tried, which is what happened to every self-loop before this
+/// existed. A `look` reprints the heading too, but names no direction, so it mints nothing.
+fn reprinted_room_heading(transcript: &str, name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty() && transcript.lines().any(|l| l.trim().eq_ignore_ascii_case(name))
 }
 
 /// True when this turn's output carries a death/end banner — the interpreter

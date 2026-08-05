@@ -318,8 +318,8 @@ The automapper comes along for the ride. A click types nothing, so there is no
 command to parse a direction from — but the game echoes the command it
 synthesized (`north`, alone on the first output line), and babelmap adopts that
 echo as the turn's movement command. A compass-clicked move draws the same
-directional edge on the map, and retires the same untried-exit marker, as if
-you had typed it.
+directional edge on the map, and records the direction as tried, as if you had
+typed it.
 
 ## Not yet there
 - **Proportional fonts** — status and chrome text currently use fixed-width

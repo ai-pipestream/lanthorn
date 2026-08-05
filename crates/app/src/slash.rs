@@ -320,9 +320,21 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec { name: "toggle-room-numbers", category: Category::Map, context: Context::Global,
         usage: "toggle-room-numbers", description: "toggle room-number labels",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleRoomNumbers) },
-    CommandSpec { name: "toggle-untried-exits", category: Category::Map, context: Context::Global,
-        usage: "toggle-untried-exits", description: "mark compass directions you haven't tried yet with ?",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleUntriedExits) },
+    CommandSpec { name: "view-map", category: Category::Map, context: Context::Global,
+        usage: "view-map [drawn|matrix]", description: "how the active layer draws: bare cycles, a name sets it",
+        dispatch: |a| {
+            use crate::input::Action;
+            use mapper::layer::MapView;
+            match a.first().copied() {
+                None => SlashOutcome::Action(Action::ViewMap(None)),
+                Some(s) if s.eq_ignore_ascii_case("drawn") => SlashOutcome::Action(Action::ViewMap(Some(MapView::Drawn))),
+                Some(s) if s.eq_ignore_ascii_case("matrix") => SlashOutcome::Action(Action::ViewMap(Some(MapView::Matrix))),
+                Some(s) => err(format!("view-map: '{s}' is not a view (drawn | matrix)")),
+            }
+        } },
+    CommandSpec { name: "mark-maze-layer", category: Category::Map, context: Context::Map,
+        usage: "mark-maze-layer", description: "flag the active layer as a maze (defaults it to the matrix view)",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::MarkMazeLayer) },
         CommandSpec { name: "toggle-alignment", category: Category::Map, context: Context::Global,
         usage: "toggle-alignment", description: "toggle alignment guides",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleAlignment) },
@@ -775,7 +787,7 @@ mod tests {
         assert_eq!(by("save-state").category, Category::Game);
         assert_eq!(by("zoom-map").category, Category::Map);
         assert_eq!(by("anim-step").context, Context::Anim);
-        // Total count matches the spec table (Game 12, Map 20, View 6,
+        // Total count matches the spec table (Game 12, Map 21, View 6,
         // Transcript 3, Style 7, Export 3, Animation 4, Help 3). `open-saves`
         // was removed — `restore-state` (bare) opens the saves dialog instead.
         // `debug` (SQ-0169) opens the Z-machine debug inspector. `open-gallery`
@@ -784,7 +796,9 @@ mod tests {
         // `quit-to-library` (SQ-0435) exits to the story picker.
         // `set-v6-render` switches/cycles the v6 render mode live.
         // `nudge-room` was removed with Manual layout mode (SQ-0600).
-        assert_eq!(COMMANDS.len(), 59, "registry must match the spec's Full command table");
+        // `toggle-untried-exits` was retired with the overlay it drove (SQ-0666); `view-map`
+        // and `mark-maze-layer` arrived with the matrix view.
+        assert_eq!(COMMANDS.len(), 60, "registry must match the spec's Full command table");
     }
 
     #[test]

@@ -571,6 +571,10 @@ fn draw_frame(
     let mut map_area = Rect::default();
     let mut story_area = Rect::default();
     let mut room_rects_out: Vec<(RoomId, Rect)> = Vec::new();
+    // Hit rects handed back by the map renderer itself. The matrix view's rows and destination
+    // cells are not room BOXES, so they cannot be recomputed from the render model afterwards
+    // the way `room_screen_rects` recomputes the drawn view's (SQ-0666).
+    let mut map_hits: Option<Vec<(RoomId, Rect)>> = None;
     let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
     let mut debug_tabs_out: Vec<(usize, usize, Rect)> = Vec::new();
     let mut dialog_rects_out: Option<DialogRects> = None;
@@ -799,7 +803,7 @@ fn draw_frame(
                     }, &state.colors.theme);
                     layer_tabs_out = layer_ids.into_iter().zip(map_fp.tab_rects).collect();
 
-                    render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf);
+                    map_hits = Some(render_map_layered(&rm, &mapper.graph, state, map_fp.content, buf));
                     if let Some(anim) = &state.tidy_anim {
                         let tidy_ds = make_dialog_style(state);
                         if let Some(dr) = draw_tidy_panel(anim.current(), map_fp.content, buf, &tidy_ds) {
@@ -849,7 +853,9 @@ fn draw_frame(
         // the debug inspector occupies the map slot — `map_area` is the debug
         // rect, not a real map, so there is nothing to hit-test.
         room_rects_out = if map_area.height > 0 && state.debug.is_none() {
-            room_screen_rects(&rm, state, map_area)
+            // The renderer's own hits when it produced any (the matrix view's rows and cells);
+            // otherwise recompute the drawn view's room boxes, as before.
+            map_hits.take().unwrap_or_else(|| room_screen_rects(&rm, state, map_area))
         } else {
             Vec::new()
         };
@@ -883,7 +889,7 @@ fn draw_frame(
                     }
                     RoomPanelMode::Diagnostics => {
                         if let Some(diag) = room_diagnostics(graph, panel.id) {
-                            if let Some(dr) = draw_inspector(&diag, map_area, buf, &panel_ds, &state.symbols.portal) {
+                            if let Some(dr) = draw_inspector(&diag, map_area, buf, &panel_ds) {
                                 dialog_rects_out = Some(dr);
                             }
                         }

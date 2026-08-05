@@ -266,9 +266,23 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("map.connector_portal", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
     row("map.shared_path", Section::Map, Kind::Style, None, fg(Color::LightCyan)),
     // The `?` marking a compass direction never tried from a room (SQ-0391). `muted` on purpose:
-    // it is a prompt about absence, and must never out-shout a passage that actually exists.
-    row("map.untried_exit", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     row("map.loc_indicator", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
+    // ── The matrix view (SQ-0666). Defaults reproduce the design's mockup: a heading row,
+    // the standing-in room reversed like a selected room, the selected row accented, its
+    // entrances elsewhere BOLD (the cross-highlight is style, never a glyph, so the table's
+    // vocabulary stays one glyph per fact), and the `·`/`_` frontier dimmed out of the way.
+    row("map.matrix.header", Section::Map, Kind::Style, Some("heading"), Delta::EMPTY),
+    row("map.matrix.row:here", Section::Map, Kind::Style, Some("accent"), mods(false, false, false, true)),
+    row("map.matrix.row:selected", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),
+    row("map.matrix.cell:entrance", Section::Map, Kind::Style, Some("text"), mods(true, false, false, false)),
+    row("map.matrix.cell:frontier", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("map.matrix.footnote", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
+    // ── Honest asymmetric edges in the DRAWN view (SQ-0666). Both default to the current
+    // connector appearance, so nothing changes look until someone styles them.
+    row("map.edge:oneway", Section::Map, Kind::Style, Some("map.connector"), Delta::EMPTY),
+    row("map.edge:asym", Section::Map, Kind::Style, Some("map.connector"), Delta::EMPTY),
+    // The last few passages walked, on a maze layer — a breadcrumb, so: quiet.
+    row("map.trail", Section::Map, Kind::Style, Some("muted"), Delta::EMPTY),
     // Glyph-set presets (the old [symbols] section, merged in): preset name in `glyph`.
     row("map.box_style", Section::Map, Kind::Placement, None, glyph("rounded")),
     row("map.arrow_set", Section::Map, Kind::Placement, None, glyph("filled")),
@@ -484,8 +498,16 @@ mod tests {
         "map.connector_distorted",
         "map.connector_portal",
         "map.shared_path",
-        "map.untried_exit",
         "map.loc_indicator",
+        "map.matrix.header",
+        "map.matrix.row:here",
+        "map.matrix.row:selected",
+        "map.matrix.cell:entrance",
+        "map.matrix.cell:frontier",
+        "map.matrix.footnote",
+        "map.edge:oneway",
+        "map.edge:asym",
+        "map.trail",
         "map.box_style",
         "map.arrow_set",
         "map.portal_icons",

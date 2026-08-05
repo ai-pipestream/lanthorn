@@ -71,6 +71,26 @@ pub const UNTRIED_DIRS: [Direction; 10] = [
     Direction::Down,
 ];
 
+/// A direction's short tag, lower case: `n`, `ne`, `u`, `d`, `i`, `o` (SQ-0666). Uppercased it is
+/// the matrix view's column header; as-is it is the `⇠w` return suffix inside a cell.
+pub fn short_label(d: Direction) -> &'static str {
+    match d {
+        Direction::N => "n",
+        Direction::S => "s",
+        Direction::E => "e",
+        Direction::W => "w",
+        Direction::NE => "ne",
+        Direction::NW => "nw",
+        Direction::SE => "se",
+        Direction::SW => "sw",
+        Direction::Up => "u",
+        Direction::Down => "d",
+        Direction::In => "i",
+        Direction::Out => "o",
+        Direction::Unknown => "?",
+    }
+}
+
 pub fn grid_offset(d: Direction) -> Option<(i32, i32)> {
     match d {
         Direction::N => Some((0, -1)),

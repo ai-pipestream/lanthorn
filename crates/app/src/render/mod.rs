@@ -19,6 +19,7 @@ pub mod inspector;
 pub mod inventory_dock;
 pub mod launch_dialog;
 pub mod map;
+pub mod matrix;
 pub mod palette;
 pub mod quit_dialog;
 pub mod reset_dialog;

@@ -192,7 +192,7 @@ pub(crate) fn connected_components(graph: &MapGraph, ids: &[RoomId]) -> Vec<Vec<
         // Unknown-direction edges (e.g. a death/respawn transition the game gave no direction for)
         // are non-spatial: they must not group rooms into a component they have no real position
         // relation to.
-        if conn.dir == Direction::Unknown {
+        if conn.dir == Direction::Unknown || conn.is_self_loop() {
             continue;
         }
         adjacency.entry(conn.origin).or_default().push(conn.dest);
@@ -391,7 +391,9 @@ pub fn room_compass_degree(graph: &MapGraph, id: RoomId) -> usize {
     graph
         .connections()
         .iter()
-        .filter(|c| (c.origin == id || c.dest == id) && grid_offset(c.dir).is_some())
+        .filter(|c| {
+            (c.origin == id || c.dest == id) && grid_offset(c.dir).is_some() && !c.is_self_loop()
+        })
         .count()
 }
 
@@ -561,8 +563,10 @@ pub(crate) fn mark_distorted(graph: &mut MapGraph, dropped: &BTreeSet<usize>) {
     let n_conns = graph.connections().len();
     for idx in 0..n_conns {
         let conn = graph.connections()[idx].clone();
+        // A self-loop has no geometry to violate — it is never distorted (SQ-0666).
         let distorted = match grid_offset(conn.dir) {
             None => false,
+            Some(_) if conn.is_self_loop() => false,
             Some(_) => dropped.contains(&idx) || !edge_is_satisfied(graph, &conn),
         };
         graph.set_conn_distorted(idx, distorted);
@@ -672,7 +676,7 @@ pub fn relayout_auto_observed(graph: &mut MapGraph, mut obs: Option<TidyObserver
         // up-down structure decides positions).
         let mut adj = vec![Vec::new(); n];
         for c in graph.connections() {
-            if c.dir == Direction::Unknown {
+            if c.dir == Direction::Unknown || c.is_self_loop() {
                 continue;
             }
             if let (Some(&a), Some(&b)) = (index.get(&c.origin), index.get(&c.dest)) {

@@ -1,8 +1,14 @@
 //! Room-info panel: story-facing view of a clicked room.
 //!
-//! Shows the room's name, notes, and outgoing exits from the mapper graph.
-//! When the displayed room is the player's current room, also lists the objects
-//! in that room queried live from the Z-machine object tree.
+//! Shows the room's name, notes, and its EXIT CARD — one line per direction, in the matrix view's
+//! vocabulary, with destination names spelled out (SQ-0666). When the displayed room is the
+//! player's current room, also lists the objects in that room queried live from the Z-machine
+//! object tree.
+//!
+//! The card is the per-room form of the matrix: same seven cells, same meanings, one room at a
+//! time and no numbering to decode. It replaced a plain `dir -> name` list that could not say
+//! whether a direction had been tried, and — with the matrix — the room inspector's compass rose
+//! and the map's untried-exits overlay, which each said less.
 
 use mapper::direction::Direction;
 use mapper::graph::{MapGraph, RoomId};
@@ -12,6 +18,31 @@ use ratatui::style::Style;
 
 use super::dialog::{DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use super::draw_str_clipped;
+
+/// One card line for a direction: the glyph, and what it means spelled out.
+///
+/// Deliberately more verbose than the matrix cell it mirrors. The matrix is a table you scan
+/// across twelve columns; the card is one room you are reading about, so there is room to say
+/// "Maze 4" instead of "4" and "back: W" instead of "⇠w".
+fn card_detail(graph: &MapGraph, cell: mapper::matrix::MatrixCell) -> (&'static str, String) {
+    use mapper::matrix::MatrixCell as C;
+    let name = |id: RoomId| {
+        graph.room(id).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{id}"))
+    };
+    match cell {
+        C::Reciprocal { dest } => ("⇄", name(dest)),
+        C::ReturnBy { dest, back } => {
+            ("→", format!("{}  back: {}", name(dest), dir_label(back)))
+        }
+        C::OneWay { dest } => ("⇢", name(dest)),
+        C::SelfLoop => ("↩", "leads back here".to_string()),
+        C::LeavesLayer { dest } => {
+            ("⇱", format!("{} · {}", name(dest), graph.layer_name(graph.layer_of(dest))))
+        }
+        C::Probed => ("_", "tried, no way through".to_string()),
+        C::Untried => ("·", String::new()),
+    }
+}
 
 // Direction display labels (cardinal + diagonal + portal).
 fn dir_label(dir: Direction) -> &'static str {
@@ -54,15 +85,25 @@ pub fn draw_room_info(
 ) -> Option<DialogRects> {
     let room = graph.room(room_id)?;
 
-    // Compute exits for this room.
-    let exits: Vec<_> = graph
+    // The exit card: every one of the twelve travel directions, classified exactly as the matrix
+    // view classifies it. All twelve, including the untried ones — "where haven't I been?" is the
+    // question this panel inherited when the untried-exits overlay was retired, and a direction
+    // left off the card is a direction the player stops considering.
+    let card: Vec<(Direction, &'static str, String)> = mapper::matrix::MATRIX_DIRS
+        .iter()
+        .map(|&d| {
+            let (glyph, detail) = card_detail(graph, mapper::matrix::classify(graph, room_id, d));
+            (d, glyph, detail)
+        })
+        .collect();
+    // Non-compass passages (xyzzy, pray) have no column in the twelve and would otherwise vanish
+    // from the card entirely.
+    let odd: Vec<String> = graph
         .connections()
         .iter()
-        .filter(|c| c.origin == room_id)
+        .filter(|c| c.origin == room_id && c.dir == Direction::Unknown)
         .map(|c| {
-            let dest_name = graph.room(c.dest).map(|r| r.label().to_owned())
-                .unwrap_or_else(|| format!("#{}", c.dest));
-            (c.dir, dest_name)
+            graph.room(c.dest).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{}", c.dest))
         })
         .collect();
 
@@ -74,7 +115,9 @@ pub fn draw_room_info(
     };
 
     // Panel sizing.
-    const WIDTH: u16 = 36;
+    // Wider than the old `dir -> name` list needed: a card line carries a glyph, a room name and
+    // sometimes a return direction.
+    const WIDTH: u16 = 44;
     const FIXED_ROWS: u16 = 7; // border-top + name + exits-header + border-bot + OK button row + 2 spare
     let notes_lines = if room.notes.is_empty() { 0u16 } else {
         // Wrap notes to panel inner width, char/width-aware (SQ-0638): a
@@ -85,7 +128,7 @@ pub fn draw_room_info(
         let inner_w = WIDTH.saturating_sub(2);
         crate::render::transcript::wrap_line(&room.notes, inner_w).len() as u16
     };
-    let exit_rows = exits.len() as u16;
+    let exit_rows = card.len() as u16 + odd.len() as u16;
     let obj_rows = if objects.is_empty() { 0u16 } else { objects.len() as u16 + 1 }; // +1 for header
     let needed_h = FIXED_ROWS + notes_lines + exit_rows + obj_rows;
     let panel_h = needed_h.min(map_area.height);
@@ -146,19 +189,23 @@ pub fn draw_room_info(
         }
     }
 
-    // Exits.
+    // Exits — the card. Untried and dead-end directions are dimmed with the same selector the
+    // matrix dims its frontier cells with, so the two surfaces read alike.
+    let frontier_style = dialog_style.theme.get("map.matrix.cell:frontier").style;
     if row <= max_y {
         draw_str_clipped(buf, inner_x, row, "Exits:", section_style, clip);
         row += 1;
     }
-    for (dir, dest) in &exits {
+    for (dir, glyph, detail) in &card {
         if row > max_y { break; }
-        let line = format!("  {} -> {}", dir_label(*dir), dest);
-        draw_str_clipped(buf, inner_x, row, &line, value_style, clip);
+        let line = format!("  {:<3} {} {}", dir_label(*dir), glyph, detail);
+        let style = if detail.is_empty() || *glyph == "_" { frontier_style } else { value_style };
+        draw_str_clipped(buf, inner_x, row, line.trim_end(), style, clip);
         row += 1;
     }
-    if exits.is_empty() && row <= max_y {
-        draw_str_clipped(buf, inner_x, row, "  (none)", value_style, clip);
+    for dest in &odd {
+        if row > max_y { break; }
+        draw_str_clipped(buf, inner_x, row, &format!("  ?   ⇢ {dest}"), value_style, clip);
         row += 1;
     }
 
@@ -281,6 +328,51 @@ mod tests {
         g.set_pos(2, (1, 0));
         g.add_edge(1, mapper::direction::Direction::E, 2);
         (g, 1, 2)
+    }
+
+    /// SQ-0666: the exits list became a CARD — one line per direction, in the matrix view's
+    /// vocabulary, with the destination spelled out. It has to say all four things the old
+    /// `dir -> name` list could not: which way a passage comes back, that it does not, that a
+    /// direction was tried and refused, and that a direction was never tried at all. The last
+    /// two are the coverage the retired untried-exits overlay handed over.
+    #[test]
+    fn the_exit_card_states_every_direction_in_the_matrix_vocabulary() {
+        use mapper::direction::Direction;
+        let (mut g, room1, room2) = make_graph_with_rooms();
+        g.add_edge(room2, Direction::W, room1); // E is reciprocal
+        g.upsert_room(3, "Cellar".into());
+        g.set_pos(3, (0, 1));
+        g.add_edge(room1, Direction::S, 3); // one-way
+        g.add_edge(3, Direction::N, room1);
+        g.relabel_connection(3, Direction::N, Direction::NE); // …no: comes back by NE
+        g.mark_tried(room1, Direction::W); // typed west, hit a wall
+
+        let backend = TestBackend::new(70, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
+        terminal.draw(|f| {
+            let area = f.area();
+            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
+        })
+        .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let text: String = (0..buf.area().height)
+            .map(|y| {
+                (0..buf.area().width)
+                    .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("⇄ Forest Path"), "east is reciprocal, and names where it goes:\n{text}");
+        assert!(text.contains("→ Cellar"), "south reaches the Cellar:\n{text}");
+        assert!(text.contains("back: NE"), "…and the way back is spelled out, not left as `⇠ne`");
+        assert!(text.contains("W   _ tried, no way through"), "west was typed and refused:\n{text}");
+        assert!(text.contains("NE  ·"), "and an untried direction is still listed:\n{text}");
+        for d in ["N ", "S ", "E ", "W ", "NE", "NW", "SE", "SW", "Up", "Dn", "In", "Out"] {
+            assert!(text.contains(d), "the card lists every travel direction; {d} is missing:\n{text}");
+        }
     }
 
     /// SQ-0638: a room note packed with multibyte chars (each '€' is 3 bytes)

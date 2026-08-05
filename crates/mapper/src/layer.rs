@@ -10,17 +10,51 @@ pub type LayerId = u16;
 /// The permanent base layer every room starts in.
 pub const MAIN_LAYER: LayerId = 0;
 
+/// How the map pane draws a layer (SQ-0666). A view mode, not a maze feature: any layer
+/// can be shown either way, and the choice is per-layer and persisted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MapView {
+    /// The compass-laid-out map (rooms in boxes, connectors between them).
+    #[default]
+    Drawn,
+    /// One row per room, one column per direction — the knowledge a maze actually gives
+    /// you, without drawing geometry that is mostly wrong.
+    Matrix,
+}
+
 /// Per-layer metadata: a display name and the layer it was peeled from (for merge default).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LayerMeta {
     pub name: String,
     pub parent: Option<LayerId>,
+    /// The player has declared this layer a maze (SQ-0666). It changes nothing on its own —
+    /// it merely decides the DEFAULT view (matrix) for a layer whose view the player has not
+    /// chosen explicitly, and turns on maze-only furniture like the walked-trail breadcrumb.
+    #[serde(default)]
+    pub maze: bool,
+    /// The player's EXPLICIT view choice for this layer, when they have made one. `None`
+    /// means "whatever the default is", which [`LayerMeta::maze`] decides — so flagging a
+    /// layer as a maze switches it to the matrix, but never overrides a view the player
+    /// picked by hand, and unflagging it puts an unchosen layer back to drawn.
+    #[serde(default)]
+    pub view: Option<MapView>,
 }
 
 impl LayerMeta {
     /// Metadata for the base "Main" layer.
     pub fn main() -> Self {
-        LayerMeta { name: "Main".to_string(), parent: None }
+        LayerMeta::new("Main".to_string(), None)
+    }
+
+    /// A fresh layer with the default flags.
+    pub fn new(name: String, parent: Option<LayerId>) -> Self {
+        LayerMeta { name, parent, maze: false, view: None }
+    }
+
+    /// The view this layer actually draws in: the player's explicit choice when they made
+    /// one, otherwise the default that [`LayerMeta::maze`] implies.
+    pub fn effective_view(&self) -> MapView {
+        self.view.unwrap_or(if self.maze { MapView::Matrix } else { MapView::Drawn })
     }
 }
 

@@ -92,3 +92,18 @@ Use `--data-dir <dir>` to sandbox file/fileref writes.
 - **Need graphics / sound / a real TTY** (out of terminal scope):
   `imagetest`, `graphwintest` (report "does not support graphics"),
   `startsavetest*`, `autosavetest` (kill-and-restart autosave protocol).
+
+## Map fixtures
+
+`advent_maze_map.json` — a player's real, partial mapping of Colossal Cave
+(`advent.blb`), lifted verbatim from the `map.json` inside a babelmap archive.
+30 rooms across two layers; layer 1 is the hand-peeled "all alike" maze (12
+rooms, 47 in-layer edges, 11 of them sharing the name "Maze"). Player-generated
+data, freely redistributable, and the calibration set behind the matrix view and
+its tangle threshold (SQ-0666): 2 of the 47 edges are reciprocal, 18 return by a
+different direction, 27 have no known return, and 29 are marked distorted.
+
+It is committed as-is rather than regenerated, because the point of it is that
+it is real: it is an actual snapshot of what a player knew mid-game, and no
+synthetic graph reproduces the particular mess. Loaded by
+`crates/app/tests/matrix_view.rs` and `crates/mapper/tests/advent_maze.rs`.

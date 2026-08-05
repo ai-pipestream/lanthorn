@@ -80,6 +80,9 @@ pub fn build_axis_constraints(graph: &MapGraph, ids: &[RoomId], gap: f64) -> Axi
     }
 
     for (ci, conn) in graph.connections().iter().enumerate() {
+        if conn.is_self_loop() {
+            continue; // "x < x" is not a solvable constraint (SQ-0666)
+        }
         let (Some(&o), Some(&d)) = (index.get(&conn.origin), index.get(&conn.dest)) else {
             continue;
         };

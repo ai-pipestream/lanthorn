@@ -143,8 +143,16 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # connector_distorted = { fg = "magenta" }
 # connector_portal = { parent = "accent" }
 # shared_path = { fg = "light-cyan" }
-# untried_exit = { parent = "muted" }
 # loc_indicator = { parent = "muted" }
+# "matrix.header" = { parent = "heading" }
+# "matrix.row:here" = { parent = "accent", reversed = true }
+# "matrix.row:selected" = { parent = "accent" }
+# "matrix.cell:entrance" = { parent = "text", bold = true }
+# "matrix.cell:frontier" = { parent = "muted" }
+# "matrix.footnote" = { parent = "muted" }
+# "edge:oneway" = { parent = "map.connector" }
+# "edge:asym" = { parent = "map.connector" }
+# trail = { parent = "muted" }
 # box_style = "rounded"   # rounded | thick | double | solid | super-thick | ascii | borderless
 # arrow_set = "filled"   # filled | line | nerdfont | nf-bold | nf-box | nf-circle | nf-outline
 # portal_icons = "ascii"   # ascii | nerdfont | nerdfont-stairs

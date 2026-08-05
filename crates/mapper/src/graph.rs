@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::direction::Direction;
-use crate::layer::{LayerId, LayerMeta, MAIN_LAYER};
+use crate::layer::{LayerId, LayerMeta, MapView, MAIN_LAYER};
 
 pub type RoomId = u16;
 
@@ -47,6 +47,17 @@ pub struct Connection {
     pub dir: Direction,
     pub dest: RoomId,
     pub distorted: bool,
+}
+
+impl Connection {
+    /// True when this edge leads back into the room it leaves — "west takes me back here"
+    /// (SQ-0666). Recordable knowledge, but not GEOMETRY: it says nothing about where any room
+    /// is, so layout, routing and distortion skip it (the drawn view shows it as a badge on the
+    /// room box, the matrix view as `↩`). Feeding one to a compass-offset placer would ask
+    /// where a room sits relative to itself, and answer "distorted" forever.
+    pub fn is_self_loop(&self) -> bool {
+        self.origin == self.dest
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -142,8 +153,40 @@ impl MapGraph {
     pub fn new_layer(&mut self, parent: Option<LayerId>, name: String) -> LayerId {
         let id = self.next_layer_id;
         self.next_layer_id += 1;
-        self.layers.insert(id, LayerMeta { name, parent });
+        self.layers.insert(id, LayerMeta::new(name, parent));
         id
+    }
+
+    /// True when the player has flagged `layer` as a maze (SQ-0666).
+    pub fn layer_is_maze(&self, layer: LayerId) -> bool {
+        self.layers.get(&layer).is_some_and(|m| m.maze)
+    }
+
+    /// Flag/unflag `layer` as a maze. Returns the new value (unchanged for an unknown layer).
+    /// The flag only decides the DEFAULT view, so a layer whose view the player chose by hand
+    /// keeps that choice either way.
+    pub fn set_layer_maze(&mut self, layer: LayerId, maze: bool) -> bool {
+        if let Some(m) = self.layers.get_mut(&layer) {
+            m.maze = maze;
+        }
+        self.layer_is_maze(layer)
+    }
+
+    /// The view `layer` draws in — the player's explicit choice, else the maze-flag default.
+    pub fn layer_view(&self, layer: LayerId) -> MapView {
+        self.layers.get(&layer).map(|m| m.effective_view()).unwrap_or_default()
+    }
+
+    /// The player's EXPLICIT view choice for `layer`, or `None` when they have not made one.
+    pub fn layer_view_choice(&self, layer: LayerId) -> Option<MapView> {
+        self.layers.get(&layer).and_then(|m| m.view)
+    }
+
+    /// Set (or clear, with `None`) the player's explicit view choice for `layer`.
+    pub fn set_layer_view(&mut self, layer: LayerId, view: Option<MapView>) {
+        if let Some(m) = self.layers.get_mut(&layer) {
+            m.view = view;
+        }
     }
 
     pub fn remove_layer(&mut self, layer: LayerId) {
@@ -182,16 +225,48 @@ impl MapGraph {
         // a second passage adds a second `?` stub instead of silently erasing the first, and an
         // exact repeat is still one edge (SQ-0632). Layout already treats Unknown as non-spatial
         // (skipped in components, drawn as a stub), so multiples cost nothing there.
-        if dir == Direction::Unknown {
+        //
+        // A SELF-LOOP (`origin == dest`) is triple-keyed for the same reason (SQ-0666): "west
+        // leads back here" is a fact about a maze, and it must neither erase a known passage
+        // that shares its key nor be erased by one. Keeping both lets the graph hold the
+        // contradiction honestly — the matrix view prefers the real destination and falls back
+        // to `↩` — rather than silently picking a winner.
+        if dir == Direction::Unknown || origin == dest {
             if !self.conns.iter().any(|c| c.origin == origin && c.dir == dir && c.dest == dest) {
                 self.conns.push(Connection { origin, dir, dest, distorted: false });
             }
-        } else if let Some(conn) = self.conns.iter_mut().find(|c| c.origin == origin && c.dir == dir)
+        } else if let Some(conn) =
+            self.conns.iter_mut().find(|c| c.origin == origin && c.dir == dir && c.dest != c.origin)
         {
             conn.dest = dest;
         } else {
             self.conns.push(Connection { origin, dir, dest, distorted: false });
         }
+    }
+
+    /// Record that `dir` out of `room` leads back INTO `room` — an observed same-room arrival
+    /// (SQ-0666). Returns false for an unknown room or a direction with no meaning
+    /// ([`Direction::Unknown`], which is a bucket, not a passage).
+    ///
+    /// Only an observed arrival may call this. A direction that was TYPED and went nowhere is
+    /// already recorded by [`MapGraph::mark_tried`] and shows as "tried, no path"; guessing that
+    /// every such direction is a loop would invent passages out of walls.
+    pub fn add_self_loop(&mut self, room: RoomId, dir: Direction) -> bool {
+        if dir == Direction::Unknown || !self.rooms.contains_key(&room) {
+            return false;
+        }
+        self.add_edge(room, dir, room);
+        self.mark_tried(room, dir);
+        true
+    }
+
+    /// The self-loop directions recorded for `room`, in connection order.
+    pub fn self_loops(&self, room: RoomId) -> Vec<Direction> {
+        self.conns
+            .iter()
+            .filter(|c| c.origin == room && c.dest == room)
+            .map(|c| c.dir)
+            .collect()
     }
 
     /// Drop every Unknown-direction edge whose room pair (same origin→dest) already carries a
@@ -461,6 +536,64 @@ mod tests {
         assert_eq!(g.rooms_in_layer(MAIN_LAYER), vec![1]);
         assert_eq!(g.rooms_in_layer(l), vec![2]);
         assert_eq!(g.layer_name(l), "Basement");
+    }
+
+    /// SQ-0666: the maze flag only ever changes the DEFAULT view. A view the player picked by
+    /// hand must survive being flagged and unflagged, or `/mark-maze-layer` would silently undo
+    /// `/view-map`.
+    #[test]
+    fn the_maze_flag_moves_the_default_view_but_never_overrides_a_chosen_one() {
+        use crate::layer::MapView;
+        let mut g = MapGraph::new();
+        let l = g.new_layer(None, "Maze".into());
+        assert!(!g.layer_is_maze(l));
+        assert_eq!(g.layer_view(l), MapView::Drawn, "an ordinary layer draws");
+        assert_eq!(g.layer_view_choice(l), None, "and has made no choice");
+
+        assert!(g.set_layer_maze(l, true));
+        assert_eq!(g.layer_view(l), MapView::Matrix, "flagging a maze defaults it to the matrix");
+        assert_eq!(g.layer_view_choice(l), None, "…without recording a choice the player never made");
+
+        g.set_layer_view(l, Some(MapView::Drawn));
+        assert_eq!(g.layer_view(l), MapView::Drawn, "an explicit choice beats the maze default");
+        assert!(!g.set_layer_maze(l, false));
+        assert_eq!(g.layer_view(l), MapView::Drawn, "and survives the flag going away again");
+
+        g.set_layer_view(l, None);
+        assert_eq!(g.layer_view(l), MapView::Drawn, "clearing the choice falls back to the default");
+
+        // An unknown layer answers without panicking.
+        assert!(!g.layer_is_maze(999));
+        assert_eq!(g.layer_view(999), MapView::Drawn);
+    }
+
+    /// SQ-0666: "west leads back here" is a fact, and recording it must not cost the map a
+    /// passage it already knew about on the same key.
+    #[test]
+    fn a_self_loop_is_recorded_beside_a_real_passage_not_instead_of_it() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Maze".into());
+        g.upsert_room(2, "Maze".into());
+        g.add_edge(1, Direction::W, 2);
+
+        assert!(g.add_self_loop(1, Direction::W), "an observed loop on a used key is recordable");
+        assert!(
+            g.connections().iter().any(|c| c.origin == 1 && c.dir == Direction::W && c.dest == 2),
+            "the real passage 1-W->2 is still there: {:?}",
+            g.connections()
+        );
+        assert_eq!(g.self_loops(1), vec![Direction::W], "and the loop sits beside it");
+        assert!(g.is_tried(1, Direction::W), "recording a loop marks the direction tried");
+
+        g.add_self_loop(1, Direction::W); // an exact repeat
+        assert_eq!(g.connections().len(), 2, "a repeated observation is still one loop");
+
+        // …and the reverse: a later real destination on that key must not eat the loop.
+        g.add_edge(1, Direction::W, 2);
+        assert_eq!(g.self_loops(1), vec![Direction::W], "the loop survives a re-observed passage");
+
+        assert!(!g.add_self_loop(1, Direction::Unknown), "`?` is a bucket, not a passage");
+        assert!(!g.add_self_loop(404, Direction::N), "an unknown room records nothing");
     }
 
     #[test]

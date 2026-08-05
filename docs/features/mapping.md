@@ -78,27 +78,17 @@ The map is a place you can move through, not just a picture.
   is one-way or the way back is some other direction entirely. `peel-layer <direction>`
   names the seam yourself; with neither, it falls back to hunting for a stairway or
   other portal to cut at.
-- **Untried exits** — `toggle-untried-exits` (leader `u`) draws a compass rose of everything you
-  have *not* tried from each room: a `?` on all eight compass points — diagonals on the box
-  corners — plus a lower-case `u` or `d` beside the north and south marks for an unexplored way
-  up or down. A half-explored map then shows where to go next at a glance. A direction that
-  bounced off a wall counts as tried, so the map stops nagging about it, and one that actually
-  led somewhere keeps its arrow. It's a transient overlay — off by default, and the box outlines
-  come straight back when you toggle it off — styled by the `map.untried_exit` selector.
+- **View mode** — `view-map` (leader `u`) switches the active layer between the **drawn**
+  map and the **matrix** — the direction table described below. Bare, it cycles; `view-map
+  drawn` / `view-map matrix` sets it outright. The choice is per-layer and saved with the map,
+  so a maze can stay a table while everything around it stays a map.
+- **Room card** — a room's info panel (left-click a room) lists **every** travel direction, not
+  just the ones that go somewhere: where each leads, how it comes back, which you tried and
+  found walled up (`_`), and which you have never tried at all (`·`). That is the map's answer
+  to "where haven't I been?", one room at a time.
 - **Room inspector** — `toggle-inspector` opens an overlay for the selected room:
   its id, name, layer, position, and the per-edge layout constraints, so you can
-  see *why* a room landed where it did. It also draws a **compass rose** of the ways out.
-  Exploration reads as colour: a direction you have never tried is drawn `muted`, and
-  turns `accent` once you have. Compass points additionally go from lower-case to
-  UPPER-case, while up, down, in and out keep the same glyphs the map itself uses —
-  whatever `portal_icons` and `[map.overrides]` give them — since a glyph has no case
-  to change:
-
-  ```
-  nw  N  ne   ↑
-   w  +  E   ⊙ ⊗
-  sw  s  se   ↓
-  ```
+  see *why* a room landed where it did.
 - **Hand edits** — select rooms with `select-room next|prev`, `rename-room` /
   `rename-layer`, jot `edit-notes`, or clean up the graph with
   `delete-connection` and `relabel-edge`. Room-number labels toggle with
@@ -163,6 +153,99 @@ overlap with 193"). Step it with `anim-step forward|back`, play/pause with
 `anim-play`, and leave with `anim-exit`. It's equal parts diagnostic and quietly
 mesmerising.
 
+## Mazes: the matrix view
+
+A compass map of a maze is a lie told carefully. In one real, half-explored
+mapping of Colossal Cave's "all alike" maze — twelve rooms, forty-seven passages —
+**two** passages come back the way you went. Eighteen come back by some other
+direction, twenty-seven have no known return at all, and the layout engine has to
+mark twenty-nine of the forty-seven "distorted" because no arrangement of boxes on
+a grid can satisfy them. Eleven of the twelve rooms are called "Maze".
+
+Compass geometry is not what a maze *is*. What you actually know in a maze is a
+direction table per room: *west from here goes to that one, and the way back is
+north*. So babelmap will draw you the table.
+
+```
+               N     S     E     W    NE    NW    SE    SW     U     D     I     O
+──────────────────────────────────────────────────────────────────────────────────
+ Maze 1     →5⇠w    ⇢9    ⇢2    ⇢3     ·     ·     ·     ·     ·     ·     ·     ·
+ Maze 2       ⇢3   ⇢10  →7⇠n    ⇢9     ·     ·     ·     ·     · →11⇠w     ·     ·
+ Maze 3    →11⇠u    ⇢5  →9⇠e →10⇠s     ·     ·     ·     ·    ⇢4     ·     ·     ·
+ Dead End¹    ⇄4     ·     _     ·     ·     ·     ·     ·     ·     ·     ·     ·
+ Maze 4       ⇢1   ⇄DE  →5⇠s  →6⇠w     ·     ·     ·     ·    ⇢8    ⇢2     ·     ·
+ …
+▸Maze 11      ⇢8  →7⇠w    ⇢6  →2⇠d     ·     ·     ·     ·  →3⇠n  ⇱out     ·     ·
+──────────────────────────────────────────────────────────────────────────────────
+¹ Dead End, near Vending Machine
+⇱out: D from 11 → At West End of Long Hall
+```
+
+One row per room, one column per direction — **all twelve, always**. An untried
+cell in any direction may be exactly the thing full exploration needs, so none are
+hidden however empty the column looks.
+
+| Cell   | Meaning |
+|--------|---------|
+| `⇄4`   | reciprocal — the compass inverse brings you back |
+| `→5⇠w` | goes to 5, and **w**est is the way back (the row is self-contained) |
+| `⇢9`   | one-way — no return known |
+| `↩`    | self-loop — this direction leads back into this very room |
+| `⇱out` | leaves the layer; the destination is footnoted below the table |
+| `_`    | tried, and there is no path that way |
+| `·`    | untried — the exploration frontier |
+
+**Reading it.** `▸` marks the room you are standing in. Rooms sharing a display
+name are numbered in row order ("Maze 1…11") — display-only; identity is still the
+room's own id, so the numbers are the same tomorrow and after a reload. Names too
+long for the label column are abbreviated and spelled out in a footnote.
+
+**Selection** moves with ↑/↓ (or Home/End, PageUp/PageDown) when the map pane has
+focus, or by clicking a row. Clicking a *destination cell* jumps the selection to
+that room's row. Selecting a room **bolds every cell elsewhere that arrives at it**
+— its known entrances, which is the answer to "how do I get back here", and the one
+question a row cannot answer about itself. That highlight is style, never a glyph:
+the table's text does not change.
+
+**Narrow panes** degrade before they scroll. First the `⇠x` return suffixes drop
+(cells shrink to `→5`, and the return is still readable on the destination's own row
+and in its room card); only when even that will not fit does the table scroll
+sideways, with the label column pinned. The thresholds are computed from the table's
+own contents — there is nothing to configure.
+
+The matrix is also the one map view a screen reader can read: a table linearises
+where a drawing cannot.
+
+### Marking a maze
+
+`mark-maze-layer` (leader `z`) flags the active layer as a maze. The flag moves the
+layer's *default* view to the matrix; it never overrides a `view-map` you chose by
+hand, and unflagging puts an unchosen layer straight back to drawn. On a
+maze-flagged layer the last few rooms you walked through are also highlighted as a
+fading breadcrumb (`map.trail`) — the "how did I get here" a drawn map would have
+answered by itself.
+
+babelmap will offer, once per layer, when a connected cluster starts to look like
+one: at least six rooms, at least eight passages walked in *both* directions, and
+three-quarters of those coming back by some direction other than the compass
+inverse. That last measure is deliberately over round trips actually walked, not
+over all edges — a passage nobody has walked back through yet says nothing about
+geometry, only about how far exploration has got. (On the reference save the maze
+scores 0.90 by that measure and the ordinary cave beside it 0.56; over *all* edges
+the two are 0.96 and 0.82, which separates nothing.)
+
+### Honest edges on the drawn map
+
+The same asymmetry shows up outside mazes, so the drawn view stopped pretending
+too. A **one-way** passage now carries an arrowhead where it *arrives*, pointing
+in — you can get there, and nothing known brings you back. One-way and
+disagreeing-direction edges each have their own style selector (`map.edge:oneway`,
+`map.edge:asym`), both defaulting to the ordinary connector so nothing changes
+appearance until you choose to style it. A **self-loop** draws as a compact `↩w`
+badge on the room box, never as a line looping out and back: a loop has no
+geometry, and a drawn one would need its own lane to say less than three characters
+do.
+
 ## Making it yours
 
 Every glyph the map draws is a themeable preset in the `[map]` section of
@@ -180,6 +263,12 @@ touching a line of code:
   up/down/in/out portal links: `dotted` (default) keeps the familiar ┊/┄ threads.
 - `portal_icons` — up/down/in/out markers: `ascii` (default), `nerdfont`, or
   `nerdfont-stairs` for distinct stairway icons.
+
+The matrix view has its own selectors beside the map's colours:
+`map.matrix.header`, `map.matrix.row:here`, `map.matrix.row:selected`,
+`map.matrix.cell:entrance` (the bold cross-highlight), `map.matrix.cell:frontier`
+(the dimmed `·`/`_` cells) and `map.matrix.footnote`; `map.trail` colours the
+maze breadcrumb.
 
 Individual glyphs can be overridden one at a time in `[map.overrides]`, and
 `diagonal_corners = false` drops the half-diagonal corner stubs (🮠🮡🮢🮣, Unicode 13

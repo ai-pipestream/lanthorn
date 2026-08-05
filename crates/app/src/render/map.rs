@@ -579,7 +579,7 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     //       the rooms drawn below them in step 2.
     let mut arrowheads: Vec<Arrowhead> = Vec::new();
     if let Some((cols, rows)) = &axes {
-        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.symbols.portal, &state.colors, state.symbols.diagonal_corners);
+        arrowheads = render_lane_connectors(&rm.plan, cols, rows, (off_x, off_y), area, buf, &state.symbols.arrows, &state.symbols.path, &state.symbols.portal, &state.colors, state.symbols.diagonal_corners, &edge_kinds(rm));
     }
 
     // ── 4. Draw rooms on top of the line-art (translate + clip) ───────────────
@@ -595,12 +595,6 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
     // they move onto the border and the destination names float outside the box.
     if boxes {
         draw_portal_icons(rm, &placed, state, state.show_portal_labels, (off_x, off_y), area, buf);
-    }
-
-    // Untried compass directions (SQ-0391), before the arrowheads so a passage that DOES exist
-    // always wins its border cell — an arrow drawn over a `?` is the correct outcome, not a clash.
-    if boxes && state.show_untried_exits {
-        draw_untried_exits(rm, &placed, state, (off_x, off_y), area, buf);
     }
 
     // ── 5. Draw departure/arrival arrowheads LAST, so each embeds in the room ─
@@ -715,7 +709,7 @@ pub fn render_map_layered(
     state: &AppState,
     area: Rect,
     buf: &mut Buffer,
-) {
+) -> Vec<(RoomId, Rect)> {
     use crate::render::paneframe::BorderStyle;
     // Hand the pane's size to input handlers that never see a pane rect (`Action::Recenter`).
     // Recorded here, from the rect actually drawn into, so it cannot drift from what the player
@@ -728,13 +722,24 @@ pub fn render_map_layered(
     } else {
         area
     };
-    render_map(rm, state, body_area, buf);
+    // SQ-0666: a layer set to the matrix view draws a direction TABLE instead of a map. The fork
+    // is here, at the single production entry point, so every caller of `render_map` (the dump
+    // harness, the tidy animation, the map.rs tests) keeps drawing the drawn view unconditionally
+    // — none of them is showing the player a layer they chose a view for.
+    let layer = state.active_layer(graph);
+    let hits = if graph.layer_view(layer) == mapper::layer::MapView::Matrix {
+        crate::render::matrix::render_matrix(graph, layer, state, body_area, buf)
+    } else {
+        render_map(rm, state, body_area, buf);
+        room_screen_rects(rm, state, body_area)
+    };
 
     // Progress bar while the `animate-tidy` frames are built on a worker thread.
     // The bar vanishes when the build completes and `anim_build_job` becomes None.
     if let Some(job) = &state.anim_build_job {
         draw_tidy_progress(job, state, area, buf);
     }
+    hits
 }
 
 /// Draw a centered, bordered progress box in the map pane while the tidy animation
@@ -904,7 +909,77 @@ fn lane_pixel(
 /// shared)`. `is_portal` selects the `map.connector_portal` theme style for up/down glyphs instead
 /// of `map.connector`/`map.connector_distorted`. `shared` selects `map.shared_path` for a
 /// connector that collapsed secondary compass directions into itself.
-type Arrowhead = ((i32, i32), String, bool, bool, RoomId, bool);
+/// How honest a drawn edge is about the trip back (SQ-0666).
+///
+/// The drawn view used to say the same thing about all three: one arrow leaving the origin, and
+/// (for a collapsed reciprocal pair) one at the far end. A one-way passage and a passage whose
+/// return is a different direction entirely looked identical to a two-way corridor with an
+/// arrowhead spare. Now each gets its own selector — both defaulting to `map.connector`, so
+/// nothing changes appearance until someone chooses to style it — and a one-way edge gets an
+/// arrowhead at the END it arrives at, pointing in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeKind {
+    /// The compass inverse comes back: an ordinary two-way corridor.
+    Reciprocal,
+    /// A return exists, but by some other direction.
+    Asymmetric,
+    /// No way back is known.
+    OneWay,
+}
+
+impl EdgeKind {
+    fn selector(self) -> &'static str {
+        match self {
+            EdgeKind::Reciprocal => "map.connector",
+            EdgeKind::Asymmetric => "map.edge:asym",
+            EdgeKind::OneWay => "map.edge:oneway",
+        }
+    }
+}
+
+/// One arrowhead to stamp on a room border after the rooms are drawn.
+#[derive(Debug, Clone)]
+struct Arrowhead {
+    at: (i32, i32),
+    glyph: String,
+    distorted: bool,
+    is_portal: bool,
+    room: RoomId,
+    shared: bool,
+    kind: EdgeKind,
+}
+
+/// Classify each drawn edge from the render model's own reverse-edge lookup.
+///
+/// Keyed by the full `(origin, dest, dir)` triple because a room pair can hold several passages
+/// and they need not agree about the way back.
+fn edge_kinds(rm: &RenderMap) -> std::collections::HashMap<(RoomId, RoomId, Direction), EdgeKind> {
+    rm.edges
+        .iter()
+        .map(|e| {
+            let kind = match e.arrival_dir {
+                None => EdgeKind::OneWay,
+                Some(d) if d == mapper::direction::opposite(e.dir) => EdgeKind::Reciprocal,
+                Some(_) => EdgeKind::Asymmetric,
+            };
+            ((e.origin, e.dest, e.dir), kind)
+        })
+        .collect()
+}
+
+/// The arrow that points INTO a box arriving on `entry` — the mirror of [`arrow_for_departure`],
+/// which points out of it.
+fn arrow_into_arrival(entry: Side, arrows: &crate::symbols::Arrows) -> char {
+    arrow_for_departure(
+        match entry {
+            Side::Left => Side::Right,
+            Side::Right => Side::Left,
+            Side::Top => Side::Bottom,
+            Side::Bottom => Side::Top,
+        },
+        arrows,
+    )
+}
 
 /// The cells (in virtual space) one connector writes, each with the direction-bit mask it
 /// contributes there, plus its departure/arrival arrowhead anchors. This is the single
@@ -1279,6 +1354,7 @@ fn render_lane_connectors(
     portal: &crate::symbols::PortalGlyphs,
     colors: &crate::colors::ColorScheme,
     diagonal_corners: bool,
+    kinds: &std::collections::HashMap<(RoomId, RoomId, Direction), EdgeKind>,
 ) -> Vec<Arrowhead> {
     let (off_x, off_y) = offset;
     // SQ-0314: when on, a diagonal exit leaves its corner on a chain of half-diagonals; `None`
@@ -1337,12 +1413,23 @@ fn render_lane_connectors(
         // Up/down connectors always use the portal selector (they're never distorted);
         // a connector with collapsed secondaries uses the brighter shared_path color;
         // compass connectors otherwise keep their existing connector/connector_distorted styling.
+        // How honest this edge is about the trip back (SQ-0666). Unknown to the plan — a
+        // connector records where it is drawn, not what comes back along it — so it is looked up
+        // from the render model's reverse-edge scan.
+        let kind = kinds
+            .get(&(conn.origin, conn.dest, conn.exit_dir))
+            .copied()
+            .unwrap_or(EdgeKind::Reciprocal);
         let style = if is_updown {
             connector_portal
         } else if has_secondary {
             shared_path
         } else if conn.distorted {
             connector_distorted
+        } else if kind != EdgeKind::Reciprocal {
+            // Both default to `map.connector`, so this is invisible until it is styled — which is
+            // the point: it puts the hook where the fact is, without changing anyone's map.
+            colors.theme.get(kind.selector()).style
         } else {
             connector
         };
@@ -1430,10 +1517,18 @@ fn render_lane_connectors(
         } else {
             arrow_for_departure(conn.exit, arrows)
         };
-        arrowheads.push((plot.dep_anchor, dep_ch.to_string(), conn.distorted, is_updown, conn.origin, has_secondary));
-        // Far-end glyph only for true reciprocal connectors (collapsed opposite pairs). An
-        // up/down reciprocal draws its own up/down glyph (from the back-edge's direction) at
-        // the far end too, same as the departure end, rather than an arrow.
+        arrowheads.push(Arrowhead {
+            at: plot.dep_anchor,
+            glyph: dep_ch.to_string(),
+            distorted: conn.distorted,
+            is_portal: is_updown,
+            room: conn.origin,
+            shared: has_secondary,
+            kind,
+        });
+        // Far-end glyph for a true reciprocal connector (collapsed opposite pair). An up/down
+        // reciprocal draws its own up/down glyph (from the back-edge's direction) at the far end
+        // too, same as the departure end, rather than an arrow.
         if conn.reciprocal {
             let arr_ch = match conn.entry_dir {
                 Some(Direction::Up) if is_updown => portal.up,
@@ -1441,7 +1536,31 @@ fn render_lane_connectors(
                 Some(d) if mapper::direction::is_diagonal(d) => diagonal_arrow(d, arrows),
                 _ => arrow_for_departure(conn.entry, arrows),
             };
-            arrowheads.push((plot.arr_anchor, arr_ch.to_string(), conn.distorted, is_updown, conn.dest, has_secondary));
+            arrowheads.push(Arrowhead {
+                at: plot.arr_anchor,
+                glyph: arr_ch.to_string(),
+                distorted: conn.distorted,
+                is_portal: is_updown,
+                room: conn.dest,
+                shared: has_secondary,
+                kind,
+            });
+        } else if kind == EdgeKind::OneWay && !conn.merge {
+            // SQ-0666: a ONE-WAY passage gets an arrowhead where it ARRIVES, pointing in. A
+            // reciprocal's far-end arrow points OUT (it is the back-edge's own departure); this
+            // one points the other way, which is exactly the fact worth showing — you can get in
+            // there, and nothing known brings you back. A merge stub ends on another connector's
+            // trunk rather than on the destination box, so it has no arrival border to sit on.
+            let arr_ch = arrow_into_arrival(conn.entry, arrows);
+            arrowheads.push(Arrowhead {
+                at: plot.arr_anchor,
+                glyph: arr_ch.to_string(),
+                distorted: conn.distorted,
+                is_portal: is_updown,
+                room: conn.dest,
+                shared: has_secondary,
+                kind,
+            });
         }
     }
     arrowheads
@@ -1474,8 +1593,10 @@ fn draw_connector_arrows(
     let room_selected = colors.theme.get("map.room_selected").style;
     let room_current = colors.theme.get("map.room_current").style;
     let room_normal = colors.theme.get("map.room").style;
-    for (pos, glyph, distorted, is_portal, room_id, shared) in arrowheads {
-        let (vx, vy) = *pos;
+    let edge_oneway = colors.theme.get("map.edge:oneway").style;
+    let edge_asym = colors.theme.get("map.edge:asym").style;
+    for Arrowhead { at, glyph, distorted, is_portal, room: room_id, shared, kind } in arrowheads {
+        let (vx, vy) = *at;
         let (sx, sy) = (vx + off_x, vy + off_y);
         if in_area(sx, sy, area) {
             let connector_style = if *is_portal {
@@ -1485,7 +1606,11 @@ fn draw_connector_arrows(
             } else if *distorted {
                 connector_distorted
             } else {
-                connector
+                match kind {
+                    EdgeKind::OneWay => edge_oneway,
+                    EdgeKind::Asymmetric => edge_asym,
+                    EdgeKind::Reciprocal => connector,
+                }
             };
             let connector_fg = connector_style.fg;
             // Pick the room box's base style with the same precedence as room_style, then
@@ -1798,54 +1923,6 @@ fn mid_precedence(dir: Direction) -> u8 {
 /// One room's portal icon choices: three slots (Up / Mid / Down), each holding an optional
 /// `(glyph_char, dest_label)` pair chosen with `mid_precedence` for the shared mid slot.
 type PortalSlots<'a> = [Option<(char, Option<&'a str>)>; 3];
-
-/// Mark each direction never tried from a room on the box outline, laid out as a compass rose:
-/// N at top centre, NE at the top-right corner, E at the right centre, and so on, with a
-/// lower-case `u`/`d` beside the N/S marks for an unexplored way up or down (SQ-0391).
-///
-/// Off by default and reached with `toggle-untried-exits` — it answers "where haven't I been?",
-/// which is a question you ask now and then rather than one worth ten glyphs per room all the
-/// time. Because it is transient, the diagonals sit ON the box corners: that is where a reader
-/// looks for them, and the outline coming back the moment you toggle it off costs nothing.
-///
-/// Placement is by MEANING, not by where a connector happens to sit: a mark in the top-right
-/// corner is the north-east you have not walked, wherever this room's other passages leave from.
-///
-/// Drawn before the arrowheads, so a direction that turns out to have a passage keeps its arrow.
-fn draw_untried_exits(
-    rm: &RenderMap,
-    placed: &std::collections::HashMap<RoomId, VRect>,
-    state: &AppState,
-    offset: (i32, i32),
-    area: Rect,
-    buf: &mut Buffer,
-) {
-    let (off_x, off_y) = offset;
-    let style = state.colors.theme.get("map.untried_exit").style;
-    let unknown = state.symbols.portal.unknown;
-    for room in &rm.rooms {
-        let Some(&rect) = placed.get(&room.id) else { continue };
-        let (bx, by) = (rect.x, rect.y);
-        for dir in &room.untried {
-            // The rose, on the outline: corners for the diagonals, edge centres for the cardinals,
-            // and the vertical pair tucked in beside N and S where they read as a matched set.
-            let (dx, dy, glyph) = match *dir {
-                Direction::NW => (0, 0, unknown),
-                Direction::N => (BOX_W / 2, 0, unknown),
-                Direction::NE => (BOX_W - 1, 0, unknown),
-                Direction::W => (0, BOX_H / 2, unknown),
-                Direction::E => (BOX_W - 1, BOX_H / 2, unknown),
-                Direction::SW => (0, BOX_H - 1, unknown),
-                Direction::S => (BOX_W / 2, BOX_H - 1, unknown),
-                Direction::SE => (BOX_W - 1, BOX_H - 1, unknown),
-                Direction::Up => (BOX_W / 2 + 1, 0, 'u'),
-                Direction::Down => (BOX_W / 2 + 1, BOX_H - 1, 'd'),
-                _ => continue,
-            };
-            put_char(buf, bx + dx + off_x, by + dy + off_y, glyph, style, area);
-        }
-    }
-}
 
 /// Draw in-room portal indicators at Boxes zoom as a post-room overlay (so icons sit on top of
 /// the box interior). Each room's portal (stub) edges map to a right-interior-column slot:
@@ -2230,6 +2307,23 @@ fn draw_box_room(
     // Notes marker in top-right inner corner (row 1, col w-2).
     if room.has_notes {
         put_char(buf, sx + w - 2, sy + 1, sym.portal.marker, style, area);
+    }
+
+    // Self-loop badge (SQ-0666): `↩` plus the directions that lead back into this room, on the
+    // bottom interior row. A BADGE, never a drawn loop — a loop out of a box and back into it
+    // would need a lane, cross whatever is beside the room, and say no more than three
+    // characters do. It is deliberately in the box, not on the border: it is a fact about the
+    // room, not a passage to anywhere the reader could follow.
+    if !room.self_loops.is_empty() {
+        let dirs: String = room
+            .self_loops
+            .iter()
+            .map(|&d| mapper::direction::short_label(d))
+            .collect::<Vec<_>>()
+            .join("");
+        let badge = format!("↩{dirs}");
+        let badge: String = badge.chars().take(iw).collect();
+        put_str(buf, sx + 1, sy + h - 2, &badge, style, area);
     }
 
     // Bottom border
@@ -2874,12 +2968,13 @@ mod tests {
             &state.symbols.portal,
             &state.colors,
             state.symbols.diagonal_corners,
+            &edge_kinds(&rm),
         );
 
-        let dep = arrowheads.iter().find(|(_, _, _, _, room, _)| *room == 1).expect("A's departure glyph");
-        let arr = arrowheads.iter().find(|(_, _, _, _, room, _)| *room == 2).expect("B's arrival glyph");
-        assert_eq!(dep.1, "↑", "A (lower room) shows the up glyph on its top border");
-        assert_eq!(arr.1, "↓", "B (upper room) shows the down glyph on its bottom border, not an arrow");
+        let dep = arrowheads.iter().find(|a| a.room == 1).expect("A's departure glyph");
+        let arr = arrowheads.iter().find(|a| a.room == 2).expect("B's arrival glyph");
+        assert_eq!(dep.glyph, "↑", "A (lower room) shows the up glyph on its top border");
+        assert_eq!(arr.glyph, "↓", "B (upper room) shows the down glyph on its bottom border, not an arrow");
     }
 
     #[test]
@@ -5251,7 +5346,7 @@ mod tests {
             label: "Test".into(),
             is_current: true,
             has_layer_portal: false,
-            untried: Vec::new(),
+            self_loops: Vec::new(),
             has_notes: false,
             align_code: String::new(),
         };
@@ -5285,7 +5380,7 @@ mod tests {
             label: "Test".into(),
             is_current: true,
             has_layer_portal: false,
-            untried: Vec::new(),
+            self_loops: Vec::new(),
             has_notes: false,
             align_code: String::new(),
         };
@@ -5309,7 +5404,7 @@ mod tests {
             label: "Test".into(),
             is_current: false,
             has_layer_portal: false,
-            untried: Vec::new(),
+            self_loops: Vec::new(),
             has_notes: false,
             align_code: String::new(),
         };
@@ -5344,7 +5439,7 @@ mod tests {
         assert_eq!(buf.cell((5, 5)).unwrap().bg, selection_bg);
 
         // Room 10's arrow; selected_room is None (no selection) — bg must be reset.
-        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 10, false)];
+        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 10, shared: false, kind: EdgeKind::Reciprocal }];
         let colors = ColorScheme::terminal_default();
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None, None);
 
@@ -5377,7 +5472,7 @@ mod tests {
         ]);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is the selected room (not current).
-        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7, false)];
+        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 7, shared: false, kind: EdgeKind::Reciprocal }];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None);
 
         let cell = buf.cell((5, 5)).unwrap();
@@ -5413,7 +5508,7 @@ mod tests {
         ]);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is BOTH selected AND current.
-        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7, false)];
+        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 7, shared: false, kind: EdgeKind::Reciprocal }];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), Some(7));
 
         let cell = buf.cell((5, 5)).unwrap();
@@ -5447,7 +5542,7 @@ mod tests {
         ]);
 
         // Arrow at (5, 5) belongs to room 7; room 7 is the current room, NOT selected.
-        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 7, false)];
+        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 7, shared: false, kind: EdgeKind::Reciprocal }];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, None, Some(7));
 
         let cell = buf.cell((5, 5)).unwrap();
@@ -5478,7 +5573,7 @@ mod tests {
         ]);
 
         // Arrow belongs to room 5; selected room is 7 — different rooms.
-        let arrowheads: Vec<Arrowhead> = vec![((5, 5), ">".to_string(), false, false, 5, false)];
+        let arrowheads: Vec<Arrowhead> = vec![Arrowhead { at: (5, 5), glyph: ">".to_string(), distorted: false, is_portal: false, room: 5, shared: false, kind: EdgeKind::Reciprocal }];
         draw_connector_arrows(&arrowheads, (0, 0), area, &mut buf, &colors, Some(7), None);
 
         let cell = buf.cell((5, 5)).unwrap();

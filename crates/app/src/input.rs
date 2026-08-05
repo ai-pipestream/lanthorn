@@ -195,7 +195,6 @@ pub enum Action {
     TogglePortalLabels,
     /// Toggle room-number (#id) visibility in Boxes-zoom room boxes.
     ToggleRoomNumbers,
-    ToggleUntriedExits,
     ToggleStatusBar,
     /// Toggle honoring the Z-machine's timed-input (`read`/`read_char` timers).
     ToggleTimedInput,
@@ -219,6 +218,16 @@ pub enum Action {
     PeelLayer(Option<Direction>),
     /// Merge the active layer into its parent layer.
     MergeLayer,
+    /// Set the active layer's map view (SQ-0666). `None` cycles drawn ⇄ matrix.
+    ViewMap(Option<mapper::layer::MapView>),
+    /// Toggle the maze flag on the active layer (SQ-0666).
+    MarkMazeLayer,
+    /// Move the matrix view's row selection by `delta` rows, scrolling to keep it visible
+    /// (SQ-0666). Saturating: `i32::MIN`/`i32::MAX` are Home/End. A no-op on a drawn layer.
+    MatrixMove(i32),
+    /// Scroll the matrix view sideways by `delta` direction columns; the label column stays
+    /// pinned. Only reachable at the narrowest density, where the table cannot be read across.
+    MatrixPanColumns(i32),
     /// Advance autocomplete to the next suggestion, applying the current one to
     /// the input buffer (game focus, Tab key — only when a partial word is being
     /// typed AND suggestions are available; otherwise Tab keeps its ToggleFocus
@@ -643,6 +652,23 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
             }
         }
         Focus::Map => {
+            // SQ-0666: with the map focused, the arrows drive the matrix view's row selection and
+            // its sideways scroll — the list conventions every other pane already uses. They are
+            // hardwired rather than bound, because they are the table's own navigation and not a
+            // command a player would think to rebind; and they are emitted unconditionally
+            // because `key_to_command` cannot see the graph. On a drawn layer the handler is a
+            // no-op, which is exactly what these keys did in map focus before.
+            match key.code {
+                KeyCode::Up => return KeyResolve::Action(Action::MatrixMove(-1)),
+                KeyCode::Down => return KeyResolve::Action(Action::MatrixMove(1)),
+                KeyCode::PageUp => return KeyResolve::Action(Action::MatrixMove(-10)),
+                KeyCode::PageDown => return KeyResolve::Action(Action::MatrixMove(10)),
+                KeyCode::Home => return KeyResolve::Action(Action::MatrixMove(i32::MIN)),
+                KeyCode::End => return KeyResolve::Action(Action::MatrixMove(i32::MAX)),
+                KeyCode::Left => return KeyResolve::Action(Action::MatrixPanColumns(-1)),
+                KeyCode::Right => return KeyResolve::Action(Action::MatrixPanColumns(1)),
+                _ => {}
+            }
             // Map context lookup with direct filter: only return the command if it
             // is in the direct (always-available) set. Dialog-only commands return
             // None when the dialog is closed.
@@ -1652,7 +1678,22 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ZoomInFine => state.zoom_in_fine(),
         Action::ZoomOutFine => state.zoom_out_fine(),
         Action::ZoomReset => state.zoom_reset(),
-        Action::Pan(dx, dy) => state.pan(dx, dy),
+        Action::Pan(dx, dy) => {
+            // SQ-0666: on a layer showing the matrix, panning IS list scrolling — the wheel and
+            // Shift+arrows are the pane-scroll conventions every other surface uses, and the
+            // drawn map's grid-cell viewport means nothing to a table. `pan` would otherwise
+            // move a viewport nobody is looking at while the table sat still.
+            if mapper.graph.layer_view(state.active_layer(&mapper.graph))
+                == mapper::layer::MapView::Matrix
+            {
+                let rows = mapper.graph.rooms_in_layer(state.active_layer(&mapper.graph)).len();
+                let max = rows.saturating_sub(1) as i32;
+                state.matrix_scroll.1 = (state.matrix_scroll.1 as i32 + dy).clamp(0, max) as u16;
+                state.matrix_scroll.0 = (state.matrix_scroll.0 as i32 + dx).clamp(0, 11) as u16;
+            } else {
+                state.pan(dx, dy);
+            }
+        }
         Action::Recenter => apply_recenter(state, mapper),
         Action::SelectNext => select_adjacent(state, mapper, 1),
         Action::SelectPrev => select_adjacent(state, mapper, -1),
@@ -1696,6 +1737,78 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 Err(why) => state.notifications.push(peel_refusal_message(&mapper.graph, room, seam, why)),
             }
         }
+        // ── SQ-0666: navigating the matrix ──────────────────────────────────────────
+        Action::MatrixMove(delta) => {
+            let layer = state.active_layer(&mapper.graph);
+            if mapper.graph.layer_view(layer) == mapper::layer::MapView::Matrix {
+                if let Some(id) =
+                    crate::render::matrix::step_selection(&mapper.graph, layer, state.selected_room, delta)
+                {
+                    // Selection only. Opening the room panel on every arrow press would cover
+                    // the very table the player is stepping through; a CLICK still opens it,
+                    // because a click is a deliberate "tell me about this one".
+                    state.select_room(Some(id));
+                    if let Some((w, h)) = state.map_pane_size.get() {
+                        let area = ratatui::layout::Rect::new(0, 0, w, h);
+                        state.matrix_scroll.1 = crate::render::matrix::scroll_to_show(
+                            &mapper.graph,
+                            layer,
+                            id,
+                            area,
+                            state.matrix_scroll.1,
+                        );
+                    }
+                }
+            }
+        }
+        Action::MatrixPanColumns(delta) => {
+            let layer = state.active_layer(&mapper.graph);
+            if mapper.graph.layer_view(layer) == mapper::layer::MapView::Matrix {
+                // Clamped to the twelve columns here; the renderer clamps again to whatever
+                // actually fits, which is the only place that knows the column width.
+                let next = (state.matrix_scroll.0 as i32 + delta).clamp(0, 11);
+                state.matrix_scroll.0 = next as u16;
+            }
+        }
+
+        // ── SQ-0666: how the active layer draws, and whether it is a maze ────────────
+        Action::ViewMap(want) => {
+            use mapper::layer::MapView;
+            let layer = state.active_layer(&mapper.graph);
+            // A bare `/view-map` cycles from what you are LOOKING at, not from what was stored:
+            // on a maze-flagged layer that has never been set by hand the stored choice is None,
+            // and cycling from the default is what the player means by "the other one".
+            let next = want.unwrap_or(match mapper.graph.layer_view(layer) {
+                MapView::Drawn => MapView::Matrix,
+                MapView::Matrix => MapView::Drawn,
+            });
+            mapper.graph.set_layer_view(layer, Some(next));
+            state.bump_graph_gen(); // the pane draws something else entirely (SQ-0305)
+            let label = match next {
+                MapView::Drawn => "drawn",
+                MapView::Matrix => "matrix",
+            };
+            state.set_status(format!("{}: {label} view", mapper.graph.layer_name(layer)));
+        }
+        Action::MarkMazeLayer => {
+            use mapper::layer::MapView;
+            let layer = state.active_layer(&mapper.graph);
+            let maze = !mapper.graph.layer_is_maze(layer);
+            mapper.graph.set_layer_maze(layer, maze);
+            state.bump_graph_gen();
+            // Flagging a maze is how most players will ever reach the matrix, and the flag alone
+            // takes them there: it moves the layer's DEFAULT view. Nothing is written to the
+            // layer's explicit choice, so an earlier `/view-map` still wins, and unflagging puts
+            // an unchosen layer straight back to drawn instead of stranding it on the matrix.
+            let name = mapper.graph.layer_name(layer).to_string();
+            let showing = mapper.graph.layer_view(layer);
+            state.set_status(match (maze, showing) {
+                (true, MapView::Matrix) => format!("{name}: maze — showing the direction matrix"),
+                (true, MapView::Drawn) => format!("{name}: maze (still drawn — /view-map matrix)"),
+                (false, _) => format!("{name}: no longer a maze"),
+            });
+        }
+
         Action::MergeLayer => {
             let active = state.active_layer(&mapper.graph);
             let target = mapper::layer::merge_layer(&mut mapper.graph, active); // into its parent
@@ -1848,7 +1961,6 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
         Action::TogglePortalLabels => state.show_portal_labels = !state.show_portal_labels,
         Action::ToggleRoomNumbers => state.show_room_numbers = !state.show_room_numbers,
-        Action::ToggleUntriedExits => state.show_untried_exits = !state.show_untried_exits,
         Action::ToggleStatusBar => state.show_status_bar = !state.show_status_bar,
         Action::ToggleTimedInput => {
             state.config.honor_timed_input = !state.config.honor_timed_input;
@@ -3575,9 +3687,9 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::OpenCommandBand));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::TogglePortalLabels));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
-        // 'u' now fires SQ-0391's untried-exits overlay; it was one of this test's examples of
-        // an unbound letter, and 'x' (reset-game's old letter) still is.
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::ToggleUntriedExits));
+        // 'u' fires the map view-mode cycle (SQ-0666, inheriting SQ-0391's freed letter);
+        // 'x' (reset-game's old letter) is still unbound.
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('u'))), Action::ViewMap(None)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('x'))), Action::CloseHotkeyDialog));
     }
 

@@ -1,0 +1,460 @@
+//! The matrix view: a layer drawn as a direction TABLE rather than a map (SQ-0666).
+//!
+//! One row per room, one column per direction — all twelve, always. Inside a maze the compass
+//! layout is wrong about most of what it draws (29 of 47 edges in the reference map are flagged
+//! distorted), because a maze is not a place with geometry; it is a set of facts of the form "west
+//! from here goes to that one, and the way back is north". This draws exactly those facts.
+//!
+//! The classification lives in `mapper::matrix`, which knows nothing about terminals. Everything
+//! here is presentation: glyphs, widths, styles, hit rects, and the responsive degradation.
+//!
+//! It is also, incidentally, the only map view a screen reader can read: a table linearises.
+
+use mapper::direction::short_label;
+use mapper::graph::{MapGraph, RoomId};
+use mapper::layer::LayerId;
+use mapper::matrix::{self, Matrix, MatrixCell, MATRIX_DIRS};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+
+use crate::render::draw_str_clipped;
+use crate::state::AppState;
+
+/// Width of the pinned label column, including the one-cell `▸` here-marker gutter.
+///
+/// Ten columns of name is enough for `"Maze 11"` and for most short room names; anything longer is
+/// abbreviated and footnoted rather than allowed to push the table sideways, because the table's
+/// value is that all twelve directions stay on screen together.
+pub const LABEL_W: u16 = 11;
+
+/// Minimum width of a direction column: two for the widest header (`NE`) plus a separating space.
+const MIN_CELL_W: u16 = 3;
+
+/// How much of each cell is spelled out — the responsive ladder (see [`density`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Density {
+    /// Cells carry the return direction: `→5⇠w`. The row is self-contained.
+    Full,
+    /// The `⇠x` suffix is dropped: `→5`. The return is still on the destination's own row and in
+    /// its room-info card, so nothing is lost — only a lookup is added.
+    Compact,
+    /// Compact cells AND horizontal scrolling, with the label column pinned. The last resort:
+    /// once the table cannot be read across, it has to be read a piece at a time.
+    Scroll,
+}
+
+/// The chosen density and the column width it implies, for a given pane width.
+///
+/// Computed, never configured. The player is not in a position to know that their pane is four
+/// columns short of the full form, and a setting would only let them get it wrong.
+pub fn density(m: &Matrix, width: u16) -> (Density, u16) {
+    let full = cell_width(m, true);
+    if LABEL_W + full * 12 <= width {
+        return (Density::Full, full);
+    }
+    let compact = cell_width(m, false);
+    if LABEL_W + compact * 12 <= width {
+        return (Density::Compact, compact);
+    }
+    (Density::Scroll, compact)
+}
+
+/// The column width this particular table needs: the widest cell it actually contains, plus a
+/// separating space. Measured from the data, so a layer whose destinations are all one digit gets
+/// a tighter table than one numbering to 11.
+fn cell_width(m: &Matrix, with_return: bool) -> u16 {
+    let mut w = MIN_CELL_W - 1;
+    for row in &m.rows {
+        for cell in row.cells {
+            w = w.max(cell_text(m, &cell, with_return).chars().count() as u16);
+        }
+    }
+    w + 1
+}
+
+/// One cell's text.
+///
+/// | glyph  | means                                          |
+/// |--------|------------------------------------------------|
+/// | `⇄4`   | reciprocal — the compass inverse returns        |
+/// | `→5⇠w` | goes to 5, and W comes back                    |
+/// | `⇢9`   | one-way — no return known                      |
+/// | `↩`    | self-loop — this direction leads back here     |
+/// | `⇱out` | leaves the layer; the destination is footnoted |
+/// | `_`    | tried, and there is no path that way           |
+/// | `·`    | untried — the exploration frontier             |
+pub fn cell_text(m: &Matrix, cell: &MatrixCell, with_return: bool) -> String {
+    let tag = |id: RoomId| m.labels.tag_of(id).to_string();
+    match cell {
+        MatrixCell::Reciprocal { dest } => format!("⇄{}", tag(*dest)),
+        MatrixCell::ReturnBy { dest, back } => {
+            if with_return {
+                format!("→{}⇠{}", tag(*dest), short_label(*back))
+            } else {
+                format!("→{}", tag(*dest))
+            }
+        }
+        MatrixCell::OneWay { dest } => format!("⇢{}", tag(*dest)),
+        MatrixCell::SelfLoop => "↩".to_string(),
+        // The compact form drops `out` for the same reason it drops `⇠x`: the word is a nicety,
+        // and one crossing cell was otherwise widening all twelve columns by one for the whole
+        // table. The footnote below says where it goes either way.
+        MatrixCell::LeavesLayer { .. } => {
+            if with_return { "⇱out".to_string() } else { "⇱".to_string() }
+        }
+        MatrixCell::Probed => "_".to_string(),
+        MatrixCell::Untried => "·".to_string(),
+    }
+}
+
+/// A footnote under the table: its marker and the line it explains.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Footnote {
+    pub marker: String,
+    pub text: String,
+}
+
+/// Superscript digits, so a footnote marker costs one column and cannot be mistaken for part of
+/// the room's name.
+const SUPERSCRIPTS: [char; 9] = ['¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+
+fn marker(n: usize) -> String {
+    SUPERSCRIPTS.get(n).copied().map(String::from).unwrap_or_else(|| format!("({})", n + 1))
+}
+
+/// The label column's text for a row, plus the footnote it needs (if any).
+///
+/// A name that does not fit is cut at its first comma before it is cut mid-word — IF room names
+/// nearly always carry their qualifier after a comma, so `"Dead End, near Vending Machine"`
+/// becomes `"Dead End"` rather than `"Dead End,…"`. Either way the full name goes in a footnote:
+/// an abbreviation that cannot be resolved is worse than no abbreviation.
+fn label_cell(full: &str, width: usize) -> (String, Option<String>) {
+    if full.chars().count() <= width {
+        return (full.to_string(), None);
+    }
+    let head = full.split(',').next().unwrap_or(full).trim();
+    let room = width.saturating_sub(1); // one column for the marker
+    let short: String = if head.chars().count() <= room {
+        head.to_string()
+    } else {
+        head.chars().take(room).collect()
+    };
+    (short, Some(full.to_string()))
+}
+
+/// Everything the matrix needs to draw, resolved for one pane width.
+pub struct MatrixLayout {
+    pub matrix: Matrix,
+    pub density: Density,
+    pub cell_w: u16,
+    pub footnotes: Vec<Footnote>,
+    /// Per-row label text and the footnote marker it carries (empty when it needs none).
+    pub labels: Vec<(String, String)>,
+}
+
+/// Resolve the table for a pane `width`: density, column width, abbreviated labels and footnotes.
+pub fn layout(graph: &MapGraph, layer: LayerId, width: u16) -> MatrixLayout {
+    let m = matrix::build(graph, layer);
+    let (density, cell_w) = density(&m, width);
+
+    let mut footnotes: Vec<Footnote> = Vec::new();
+    let mut labels = Vec::with_capacity(m.rows.len());
+    for row in &m.rows {
+        let (text, long) = label_cell(&row.label, LABEL_W as usize - 1);
+        let mark = match long {
+            Some(full) => {
+                let mk = marker(footnotes.len());
+                footnotes.push(Footnote { marker: mk.clone(), text: full });
+                mk
+            }
+            None => String::new(),
+        };
+        labels.push((text, mark));
+    }
+
+    // `⇱out` cells name a room with no row here, so the cell cannot print its destination. One
+    // footnote per distinct crossing, in row-then-column order.
+    for row in &m.rows {
+        for (i, cell) in row.cells.iter().enumerate() {
+            let MatrixCell::LeavesLayer { dest } = cell else { continue };
+            let name =
+                graph.room(*dest).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{dest}"));
+            let text = format!(
+                "⇱out: {} from {} → {}",
+                short_label(MATRIX_DIRS[i]).to_uppercase(),
+                row.tag,
+                name
+            );
+            if !footnotes.iter().any(|f| f.text == text) {
+                footnotes.push(Footnote { marker: String::new(), text });
+            }
+        }
+    }
+
+    MatrixLayout { matrix: m, density, cell_w, footnotes, labels }
+}
+
+/// Rows of chrome the table spends before and after its data: header, rule, rule.
+const HEADER_ROWS: u16 = 2;
+const FOOTER_RULE_ROWS: u16 = 1;
+
+/// How many data rows fit in `area`, given the footnotes that must also fit.
+pub fn visible_rows(area: Rect, footnotes: usize) -> usize {
+    let chrome = HEADER_ROWS + FOOTER_RULE_ROWS + footnotes.min(4) as u16;
+    area.height.saturating_sub(chrome) as usize
+}
+
+/// Draw the matrix into `area`, returning click targets as `(room, rect)` pairs.
+///
+/// The rects go straight into the same `room_rects` list the drawn view publishes, so a click on a
+/// row — or on a cell that NAMES a room — reaches the existing `ShowRoomInfo` path and selects it.
+/// That is what makes "clicking a destination cell jumps selection to that room" a one-line
+/// consequence rather than a second input pathway.
+pub fn render_matrix(
+    graph: &MapGraph,
+    layer: LayerId,
+    state: &AppState,
+    area: Rect,
+    buf: &mut Buffer,
+) -> Vec<(RoomId, Rect)> {
+    let mut hits = Vec::new();
+    if area.width < LABEL_W + MIN_CELL_W || area.height < HEADER_ROWS + 1 {
+        return hits;
+    }
+    let ml = layout(graph, layer, area.width);
+    let m = &ml.matrix;
+
+    let header_style = state.colors.theme.get("map.matrix.header").style;
+    let base_style = state.colors.theme.get("map.room").style;
+    let here_style = state.colors.theme.get("map.matrix.row:here").style;
+    let selected_style = state.colors.theme.get("map.matrix.row:selected").style;
+    let entrance_style = state.colors.theme.get("map.matrix.cell:entrance").style;
+    let frontier_style = state.colors.theme.get("map.matrix.cell:frontier").style;
+    let footnote_style = state.colors.theme.get("map.matrix.footnote").style;
+    let trail_style = state.colors.theme.get("map.trail").style;
+
+    // The columns actually shown. Horizontal scroll drops whole columns off the LEFT while the
+    // label column stays put — a half-column would be unreadable and a floating label column
+    // would lose the reader entirely.
+    let per_row = ((area.width - LABEL_W) / ml.cell_w) as usize;
+    let shown = per_row.min(12);
+    let first_col = if ml.density == Density::Scroll {
+        (state.matrix_scroll.0 as usize).min(12usize.saturating_sub(shown))
+    } else {
+        0
+    };
+
+    // ── Header + rule ────────────────────────────────────────────────────────
+    let table_w = LABEL_W + ml.cell_w * shown as u16;
+    for (slot, i) in (first_col..first_col + shown).enumerate() {
+        let text = short_label(MATRIX_DIRS[i]).to_uppercase();
+        let x = area.x + LABEL_W + ml.cell_w * slot as u16 + ml.cell_w - text.chars().count() as u16;
+        draw_str_clipped(buf, x, area.y, &text, header_style, area);
+    }
+    let rule: String = "─".repeat(table_w.min(area.width) as usize);
+    draw_str_clipped(buf, area.x, area.y + 1, &rule, header_style, area);
+
+    // ── Rows ─────────────────────────────────────────────────────────────────
+    let rows_fit = visible_rows(area, ml.footnotes.len());
+    let first_row = (state.matrix_scroll.1 as usize).min(m.rows.len().saturating_sub(rows_fit.max(1)));
+    let selected = state.selected_room;
+    // Bolding the cells that ARRIVE at the selected room answers "how do I get back here" — the
+    // one question the table cannot answer by reading across a row.
+    let entrances = selected.map(|id| matrix::entrances(graph, id)).unwrap_or_default();
+    // The walked trail is maze furniture: on an ordinary layer a breadcrumb is noise, because the
+    // drawn map already shows you where you came from.
+    let maze = graph.layer_is_maze(layer);
+    // The fade is one selector plus DIM on the older half, rather than eight registry rows for
+    // eight steps of the same idea: what the reader needs is "recent" vs "a while ago", and a
+    // themer who wants a different trail colour should have one knob to turn, not eight.
+    let trail_at = |room: RoomId| -> Option<Style> {
+        if !maze {
+            return None;
+        }
+        let age = state.trail_age(room)?;
+        Some(if age * 2 >= crate::state::MAP_TRAIL_LEN {
+            trail_style.add_modifier(ratatui::style::Modifier::DIM)
+        } else {
+            trail_style
+        })
+    };
+
+    for (slot, row) in m.rows.iter().skip(first_row).take(rows_fit).enumerate() {
+        let y = area.y + HEADER_ROWS + slot as u16;
+        let is_here = m.here == Some(row.room);
+        let is_selected = selected == Some(row.room);
+        let row_style = match (is_selected, is_here) {
+            (true, _) => selected_style,
+            (_, true) => here_style,
+            _ => trail_at(row.room).unwrap_or(base_style),
+        };
+
+        let (text, mark) = &ml.labels[first_row + slot];
+        let lead = if is_here { "▸" } else { " " };
+        let label = format!("{lead}{text}{mark}");
+        draw_str_clipped(buf, area.x, y, &label, row_style, area);
+        hits.push((row.room, Rect::new(area.x, y, LABEL_W.min(area.width), 1)));
+
+        for (col_slot, i) in (first_col..first_col + shown).enumerate() {
+            let cell = row.cells[i];
+            let text = cell_text(m, &cell, ml.density == Density::Full);
+            let w = text.chars().count() as u16;
+            let x = area.x + LABEL_W + ml.cell_w * col_slot as u16 + ml.cell_w - w;
+            // An entrance to the selected room is bolded wherever it appears — style, not a
+            // glyph, so the cell keeps saying exactly one thing.
+            let style = if entrances.contains(&(row.room, MATRIX_DIRS[i])) {
+                entrance_style
+            } else if cell.is_frontier() {
+                frontier_style
+            } else {
+                row_style
+            };
+            draw_str_clipped(buf, x, y, &text, style, area);
+            if let Some(dest) = cell.dest() {
+                if m.index_of(dest).is_some() {
+                    hits.push((dest, Rect::new(x, y, w, 1)));
+                }
+            }
+        }
+    }
+
+    // ── Closing rule + footnotes ─────────────────────────────────────────────
+    let shown_rows = m.rows.len().saturating_sub(first_row).min(rows_fit) as u16;
+    let mut y = area.y + HEADER_ROWS + shown_rows;
+    if y < area.bottom() {
+        draw_str_clipped(buf, area.x, y, &rule, header_style, area);
+        y += 1;
+    }
+    for f in &ml.footnotes {
+        if y >= area.bottom() {
+            break;
+        }
+        let line = if f.marker.is_empty() {
+            f.text.clone()
+        } else {
+            format!("{} {}", f.marker, f.text)
+        };
+        draw_str_clipped(buf, area.x, y, &line, footnote_style, area);
+        y += 1;
+    }
+    hits
+}
+
+/// Move the selection `delta` rows through the matrix, scrolling to keep it visible.
+///
+/// Returns the newly selected room, or `None` when the layer has no rows. Selection lands on the
+/// room you are standing in when nothing was selected, because that is where a player who just
+/// pressed a key is looking.
+pub fn step_selection(
+    graph: &MapGraph,
+    layer: LayerId,
+    current: Option<RoomId>,
+    delta: i32,
+) -> Option<RoomId> {
+    let m = matrix::build(graph, layer);
+    if m.rows.is_empty() {
+        return None;
+    }
+    // With nothing selected the FIRST press lands on the room you are standing in and moves no
+    // further — otherwise the first arrow both creates a selection and immediately steps it past
+    // the row the player was looking at.
+    let Some(at) = current.and_then(|id| m.index_of(id)) else {
+        let start = m.here.and_then(|id| m.index_of(id)).unwrap_or(0);
+        return Some(m.rows[start].room);
+    };
+    // Saturating, so Home/End can be spelled `i32::MIN`/`i32::MAX` without overflowing.
+    let next = (at as i32).saturating_add(delta).clamp(0, m.rows.len() as i32 - 1);
+    Some(m.rows[next as usize].room)
+}
+
+/// The row-scroll offset that keeps `room` on screen, given the current offset.
+pub fn scroll_to_show(graph: &MapGraph, layer: LayerId, room: RoomId, area: Rect, at: u16) -> u16 {
+    let ml = layout(graph, layer, area.width);
+    let Some(idx) = ml.matrix.index_of(room) else { return at };
+    let fit = visible_rows(area, ml.footnotes.len()).max(1);
+    let at = at as usize;
+    if idx < at {
+        idx as u16
+    } else if idx >= at + fit {
+        (idx + 1 - fit) as u16
+    } else {
+        at as u16
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mapper::direction::Direction;
+    use mapper::graph::MapGraph;
+    use mapper::layer::MAIN_LAYER;
+
+    fn tiny() -> MapGraph {
+        let mut g = MapGraph::new();
+        for (id, n) in [(1u16, "Maze"), (2, "Maze"), (3, "Dead End, near Vending Machine")] {
+            g.upsert_room(id, n.into());
+        }
+        g.add_edge(1, Direction::N, 2);
+        g.add_edge(2, Direction::W, 1);
+        g.add_edge(2, Direction::S, 3);
+        g.add_edge(3, Direction::N, 2);
+        g.mark_tried(3, Direction::E);
+        g.set_current(1);
+        g
+    }
+
+    #[test]
+    fn cells_spell_the_vocabulary_the_design_settled_on() {
+        let g = tiny();
+        let m = matrix::build(&g, MAIN_LAYER);
+        let t = |room, dir, full| cell_text(&m, &matrix::classify(&g, room, dir), full);
+        assert_eq!(t(1, Direction::N, true), "→2⇠w", "goes to 2; west comes back");
+        assert_eq!(t(1, Direction::N, false), "→2", "compact drops the return, not the destination");
+        assert_eq!(t(2, Direction::S, true), "⇄DE", "reciprocal, pointing at an initials tag");
+        assert_eq!(t(3, Direction::E, true), "_", "tried, no path");
+        assert_eq!(t(3, Direction::W, true), "·", "untried");
+        assert_eq!(t(1, Direction::S, true), "·");
+    }
+
+    /// A long name is cut at its comma, marked, and spelled out below the table — never left as
+    /// an abbreviation the reader cannot resolve.
+    #[test]
+    fn a_long_name_is_abbreviated_and_footnoted() {
+        let (text, long) = label_cell("Dead End, near Vending Machine", 10);
+        assert_eq!(text, "Dead End", "cut at the comma, not mid-word");
+        assert_eq!(long.as_deref(), Some("Dead End, near Vending Machine"));
+        assert_eq!(label_cell("Maze 3", 10), ("Maze 3".into(), None), "a name that fits is untouched");
+    }
+
+    /// The degradation ladder: spell the return out when there is room, drop it when there is not,
+    /// and only scroll when even that will not fit.
+    #[test]
+    fn density_degrades_before_it_scrolls() {
+        let g = tiny();
+        let m = matrix::build(&g, MAIN_LAYER);
+        let full = cell_width(&m, true);
+        let compact = cell_width(&m, false);
+        assert!(compact < full, "dropping `⇠x` really does buy width");
+
+        assert_eq!(density(&m, LABEL_W + full * 12).0, Density::Full, "exactly enough is enough");
+        assert_eq!(density(&m, LABEL_W + full * 12 - 1).0, Density::Compact, "one short → compact");
+        assert_eq!(density(&m, LABEL_W + compact * 12).0, Density::Compact);
+        assert_eq!(
+            density(&m, LABEL_W + compact * 12 - 1).0,
+            Density::Scroll,
+            "scrolling is the last resort, not the first"
+        );
+    }
+
+    #[test]
+    fn selection_steps_through_rows_and_stops_at_the_ends() {
+        let g = tiny();
+        assert_eq!(step_selection(&g, MAIN_LAYER, None, 1), Some(1), "nothing selected → where you are");
+        assert_eq!(step_selection(&g, MAIN_LAYER, Some(1), 1), Some(2));
+        assert_eq!(step_selection(&g, MAIN_LAYER, Some(3), 1), Some(3), "the last row does not wrap");
+        assert_eq!(step_selection(&g, MAIN_LAYER, Some(1), -1), Some(1), "nor the first");
+        assert_eq!(step_selection(&g, MAIN_LAYER, Some(3), -2), Some(1));
+        assert_eq!(step_selection(&MapGraph::new(), MAIN_LAYER, None, 1), None, "an empty layer");
+    }
+}

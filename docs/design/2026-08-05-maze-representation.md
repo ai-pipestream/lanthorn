@@ -1,7 +1,8 @@
 # Maze representation: the matrix view
 
-**Status:** settled design (iterated against real data with the user,
-2026-08-05); not yet implemented. Example renders in this doc come from a
+**Status:** implemented (SQ-0666). Settled design, iterated against real data
+with the user, 2026-08-05; see `docs/features/mapping.md` for the shipped
+behaviour and the fixture note in `unit_tests/README.md`. Example renders in this doc come from a
 player's actual partial mapping of Colossal Cave's "all alike" maze
 (`advent.blb`, save `default`, 12 rooms / 47 edges).
 
