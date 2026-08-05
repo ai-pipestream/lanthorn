@@ -46,7 +46,7 @@ direction may be exactly what full exploration needs, so none are hidden.
  Maze 1     →5⇠w    ⇢9    ⇢2    ⇢3     ·     ·     ·     ·     ·     ·     ·     ·
  Maze 2       ⇢3   ⇢10  →7⇠n    ⇢9     ·     ·     ·     ·     · →11⇠w     ·     ·
 ▸Maze 3    →11⇠u    ⇢5  →9⇠e →10⇠s     ·     ·     ·     ·    ⇢4     ·     ·     ·
- DeadEnd¹     ⇄4     ·     ?     ·     ·     ·     ·     ·     ·     ·     ·     ·
+ DeadEnd¹     ⇄4     ·     _     ·     ·     ·     ·     ·     ·     ·     ·     ·
  Maze 4       ⇢1   ⇄DE  →5⇠s  →6⇠w     ·     ·     ·     ·    ⇢8    ⇢2     ·     ·
  ...
 ──────────────────────────────────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ direction may be exactly what full exploration needs, so none are hidden.
 | `⇢9`        | one-way — no return known |
 | `↩`         | self-loop — this direction leads back here |
 | `⇱out`      | leaves the maze/layer; destination footnoted |
-| `?`         | tried, nowhere new (probable self-loop/refusal, not yet proven) |
+| `_`         | tried, no path found (a later observed loop upgrades it to `↩`) |
 | `·`         | untried — the exploration frontier |
 
 **Row furniture:** `▸` marks the room you are standing in; rooms sharing a
@@ -88,7 +88,7 @@ not configured. Vertical scrolling as any list.
 **Style selectors** (all new elements styleable per CLAUDE.md):
 `map.matrix.header`, `map.matrix.row:here`, `map.matrix.row:selected`,
 `map.matrix.cell:entrance` (the bold cross-highlight), `map.matrix.cell:frontier`
-(`·`/`?` cells), `map.matrix.footnote`. Defaults reproduce the mockup
+(`·`/`_` cells), `map.matrix.footnote`. Defaults reproduce the mockup
 (bold for entrances, dim for frontier).
 
 ## Supporting changes (unchanged from the first draft)
@@ -109,7 +109,7 @@ not configured. Vertical scrolling as any list.
 
 ## Removals (user decision, 2026-08-05)
 
-One representation per fact: with the matrix's `?`/`·` cells and the
+One representation per fact: with the matrix's `_`/`·` cells and the
 room-info card carrying tried/untried per direction, the **room
 inspector's explored rose** and the **"untried exits" listing** are
 retired — they are older dialects for the same knowledge. The `tried`
@@ -139,6 +139,6 @@ stability across save/load; entrance cross-highlight set; footnote
 assignment; view-mode persistence per layer. Integration: a sanitized copy
 of the advent.blb map.json in unit_tests/ (player data, redistributable):
 flag the layer, render the matrix, assert known cells (`DeadEnd¹` row `E`
-is `?`, Maze 11 `D` is `⇱out`, the two reciprocal pairs, ▸ on the current
+is `_`, Maze 11 `D` is `⇱out`, the two reciprocal pairs, ▸ on the current
 room, bold entrances for a selected room in both honor_game_colours
 modes). Falsification per CLAUDE.md throughout.
