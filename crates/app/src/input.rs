@@ -1731,6 +1731,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 Ok(new) => {
                     state.bump_graph_gen(); // rooms peeled into a new layer → invalidate memo (SQ-0305)
                     state.set_viewed_layer(Some(new));
+                    recenter_for_active_layer(state, &mapper.graph);
                 }
                 // A refusal used to be silent, which reads as a broken command — say which of the
                 // several quite different reasons it was (SQ-0360).
@@ -1819,6 +1820,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // simply off-screen. Mirrors peel, which pins the view to the layer it creates
             // (SQ-0361).
             state.set_viewed_layer(Some(target));
+            recenter_for_active_layer(state, &mapper.graph);
         }
 
         // Re-tidy: re-derive the clean Auto layout (constrained stress majorization,
@@ -1956,6 +1958,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                 let i = ids.iter().position(|&l| l == cur).unwrap_or(0) as i32;
                 let j = (i + delta).clamp(0, ids.len() as i32 - 1) as usize;
                 state.set_viewed_layer(Some(ids[j]));
+                recenter_for_active_layer(state, &mapper.graph);
             }
         }
 
@@ -1963,6 +1966,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // A click on a map layer tab selects that layer as the viewed one.
             // set_viewed_layer + active_layer tolerate a stale id (falls back).
             state.set_viewed_layer(Some(layer));
+            recenter_for_active_layer(state, &mapper.graph);
         }
 
         Action::ToggleAlignment => state.show_alignment = !state.show_alignment,
@@ -3341,6 +3345,98 @@ fn recenter_target(state: &AppState, graph: &mapper::graph::MapGraph) -> (i32, i
         .and_then(pos_of)
         .or_else(|| graph.current().and_then(pos_of))
         .unwrap_or((0, 0))
+}
+
+/// Recentre the map — or, on a matrix layer, select and scroll to show — the room a layer switch
+/// should land on, so switching layers never leaves the viewport sitting on empty scroll space
+/// (SQ-0672). Every place `active_layer(graph)` can change value for a reason other than "the
+/// player walked" — cycling, a tab click, a peel, a merge, loading a whole new map — calls this
+/// right after making the switch.
+///
+/// The room aimed at, in order:
+/// 1. The room the player is currently standing in, if it is on the newly active layer — the same
+///    follow-the-player centering the per-turn recenter already uses.
+/// 2. Else the last room visited on that layer ([`mapper::graph::MapGraph::last_visited`],
+///    recorded every time the current room changes). A dangling id — the room is gone, or has
+///    since been peeled/merged to another layer — is treated exactly like "never visited".
+/// 3. Else the bounding-box centre of the layer's own rooms (never visited at all, or the one
+///    candidate above was dangling).
+///
+/// A drawn layer just scrolls its viewport to that point. A matrix layer has no scroll grid of
+/// its own to centre — rule 1/2's room becomes the SELECTED row and the table scrolls to show it
+/// ([`crate::render::matrix::scroll_to_show`]); rule 3's fallback has no room of its own to select,
+/// so the room nearest the bounding-box centre stands in for it.
+pub fn recenter_for_active_layer(state: &mut AppState, graph: &mapper::graph::MapGraph) {
+    let layer = state.active_layer(graph);
+    let rooms = graph.rooms_in_layer(layer);
+
+    // Rules 1 and 2: a specific room the switch should land on.
+    let focus = graph
+        .current()
+        .filter(|&id| graph.layer_of(id) == layer)
+        .or_else(|| {
+            graph
+                .last_visited(layer)
+                .filter(|&id| graph.room(id).is_some() && graph.layer_of(id) == layer)
+        });
+
+    // Rule 3: the layer's own bounding-box centre, when neither rule above named a room.
+    let target = focus
+        .and_then(|id| graph.room(id).and_then(|r| r.pos))
+        .unwrap_or_else(|| layer_bbox_center(graph, &rooms));
+
+    // The matrix still needs SOME row to select even when rule 3 fired with no room of its own —
+    // the room nearest the target point stands in.
+    let select = focus.or_else(|| nearest_room(graph, &rooms, target));
+    if let Some(id) = select {
+        state.select_room(Some(id));
+    }
+
+    if graph.layer_view(layer) == mapper::layer::MapView::Matrix {
+        if let (Some(id), Some((w, h))) = (select, state.map_pane_size.get()) {
+            let area = ratatui::layout::Rect::new(0, 0, w, h);
+            state.matrix_scroll.1 =
+                crate::render::matrix::scroll_to_show(graph, layer, id, area, state.matrix_scroll.1);
+        }
+    } else {
+        let (pw, ph) = state.map_pane_size.get().unwrap_or((80, 24));
+        state.recenter_on(target, pw, ph);
+    }
+}
+
+/// The centre of the smallest box containing every POSITIONED room in `rooms`, or the origin when
+/// none of them have a position yet (a brand-new, still-empty layer).
+fn layer_bbox_center(
+    graph: &mapper::graph::MapGraph,
+    rooms: &[mapper::graph::RoomId],
+) -> (i32, i32) {
+    let mut positions = rooms.iter().filter_map(|&id| graph.room(id).and_then(|r| r.pos));
+    let Some(first) = positions.next() else { return (0, 0) };
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (first.0, first.0, first.1, first.1);
+    for (x, y) in positions {
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    ((min_x + max_x) / 2, (min_y + max_y) / 2)
+}
+
+/// The positioned room in `rooms` closest to `target`, by squared distance — the matrix's stand-in
+/// for a bounding-box centre, which names a POINT rather than a room.
+fn nearest_room(
+    graph: &mapper::graph::MapGraph,
+    rooms: &[mapper::graph::RoomId],
+    target: (i32, i32),
+) -> Option<mapper::graph::RoomId> {
+    rooms
+        .iter()
+        .filter_map(|&id| graph.room(id).and_then(|r| r.pos).map(|p| (id, p)))
+        .min_by_key(|&(_, (x, y))| {
+            let (dx, dy) = (x - target.0, y - target.1);
+            dx * dx + dy * dy
+        })
+        .map(|(id, _)| id)
 }
 
 // ── Config screen helpers ─────────────────────────────────────────────────────
@@ -7507,6 +7603,138 @@ mod tests {
         let mut want = AppState::default();
         want.recenter_on((0, 0), 80, 24);
         assert_eq!(s.scroll, want.scroll);
+    }
+
+    // ── SQ-0672: recenter the map whenever the active layer changes ──────────
+
+    /// A room on layer 1 and a room on Main, no positions shared, so any wrong-layer centering
+    /// shows up immediately as the wrong scroll.
+    fn two_layer_fixture() -> (AppState, Mapper) {
+        let mut m = Mapper::default();
+        m.graph.upsert_room(1, "Hall".into());
+        m.graph.set_pos(1, (0, 0));
+        m.graph.set_current(1);
+        m.graph.upsert_room(2, "Attic".into());
+        m.graph.set_pos(2, (5, 5));
+        let l = m.graph.new_layer(Some(mapper::layer::MAIN_LAYER), "Attic".into());
+        m.graph.set_room_layer(2, l);
+        (AppState::default(), m)
+    }
+
+    #[test]
+    fn switching_layers_centers_on_the_current_room_when_it_is_there() {
+        let (mut s, mut m) = two_layer_fixture();
+        let attic = m.graph.layer_of(2);
+        m.graph.set_current(2); // the player is standing in the layer being switched TO
+        apply_action(Action::SetViewedLayer(attic), &mut s, &mut m);
+
+        let mut want = AppState::default();
+        want.recenter_on((5, 5), 80, 24);
+        assert_eq!(s.scroll, want.scroll, "centred on the current room, which is on the new layer");
+        assert_eq!(s.selected_room, Some(2));
+    }
+
+    #[test]
+    fn switching_layers_centers_on_the_last_room_visited_there_when_the_player_is_elsewhere() {
+        let (mut s, mut m) = two_layer_fixture();
+        let attic = m.graph.layer_of(2);
+        m.graph.set_current(2); // visits the Attic once — recorded as its last-visited room
+        m.graph.set_current(1); // then leaves; the player is back on Main
+        assert_eq!(m.graph.last_visited(attic), Some(2), "the visit was recorded");
+
+        apply_action(Action::SetViewedLayer(attic), &mut s, &mut m);
+        let mut want = AppState::default();
+        want.recenter_on((5, 5), 80, 24);
+        assert_eq!(
+            s.scroll, want.scroll,
+            "centred on the last room visited there, not the current (Main) room"
+        );
+        assert_eq!(s.selected_room, Some(2));
+    }
+
+    #[test]
+    fn switching_to_a_never_visited_layer_centers_on_its_bounding_box() {
+        let mut m = Mapper::default();
+        m.graph.upsert_room(1, "Hall".into());
+        m.graph.set_pos(1, (0, 0));
+        m.graph.set_current(1);
+        let l = m.graph.new_layer(Some(mapper::layer::MAIN_LAYER), "Cellar".into());
+        // Three rooms whose bounding box centres uniquely on room 3, at (6, 6): the box runs
+        // (2,2)-(10,2) x (2,2)-(6,6) → centre (6, 4), and only room 3 sits near it.
+        for (id, pos) in [(2u16, (2, 2)), (3, (6, 6)), (4, (10, 2))] {
+            m.graph.upsert_room(id, format!("Room {id}"));
+            m.graph.set_pos(id, pos);
+            m.graph.set_room_layer(id, l);
+        }
+        assert_eq!(m.graph.last_visited(l), None, "never visited");
+
+        let mut s = AppState::default();
+        apply_action(Action::SetViewedLayer(l), &mut s, &mut m);
+        let mut want = AppState::default();
+        want.recenter_on((6, 4), 80, 24);
+        assert_eq!(s.scroll, want.scroll, "centred on the layer's own bounding box");
+        assert_eq!(
+            s.selected_room, Some(3),
+            "the room nearest the box centre stands in for selection"
+        );
+    }
+
+    /// A room recorded as a layer's last-visited can later be peeled onto ANOTHER layer — the
+    /// memory is now stale for the layer that recorded it, and must be treated exactly like a
+    /// dangling id: fall through to the bounding-box centre, not a room that lives elsewhere now.
+    #[test]
+    fn a_last_visited_room_since_moved_to_another_layer_falls_back_to_the_bounding_box() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cellar", Some(Direction::N)); // Main; last_visited(Main) = 2; arrived via N
+        let mut s = AppState::default();
+        // A bare peel cuts the passage just walked in through, taking room 2 (and nothing else)
+        // onto a fresh layer — current stays on room 2, but its LAYER changes.
+        apply_action(Action::PeelLayer(None), &mut s, &mut m);
+        let new_layer = s.viewed_layer.expect("the peel selected the new layer");
+        assert_ne!(new_layer, mapper::layer::MAIN_LAYER);
+        assert_eq!(m.graph.layer_of(2), new_layer, "room 2 left Main");
+        assert_eq!(m.graph.layer_of(1), mapper::layer::MAIN_LAYER, "room 1 stayed");
+        assert_eq!(
+            m.graph.last_visited(mapper::layer::MAIN_LAYER), Some(2),
+            "Main's last-visited memory still names room 2 — it is now stale"
+        );
+
+        apply_action(Action::SetViewedLayer(mapper::layer::MAIN_LAYER), &mut s, &mut m);
+        let mut want = AppState::default();
+        want.recenter_on(m.graph.room(1).unwrap().pos.unwrap(), 80, 24);
+        assert_eq!(
+            s.scroll, want.scroll,
+            "the stale last-visited id is skipped — falls back to the bounding box (room 1 alone)"
+        );
+        assert_eq!(s.selected_room, Some(1));
+    }
+
+    #[test]
+    fn switching_to_a_matrix_layer_selects_and_scrolls_to_the_target_room() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None); // Main
+        let maze = m.graph.new_layer(Some(mapper::layer::MAIN_LAYER), "Maze".into());
+        m.graph.set_layer_view(maze, Some(mapper::layer::MapView::Matrix));
+        // Ten rooms on the maze layer — more than a small pane can show at once.
+        for id in 2..=11u16 {
+            m.graph.upsert_room(id, format!("Room {id}"));
+            m.graph.set_room_layer(id, maze);
+            m.graph.set_pos(id, (0, id as i32));
+        }
+        m.graph.set_current(9); // visits room 9 — recorded as the maze's last-visited room
+        m.graph.set_current(1); // then leaves, back to Main
+        assert_eq!(m.graph.last_visited(maze), Some(9));
+
+        let mut s = AppState::default();
+        s.map_pane_size.set(Some((80, 10))); // small pane: not all ten rows fit
+        apply_action(Action::SetViewedLayer(maze), &mut s, &mut m);
+
+        assert_eq!(s.selected_room, Some(9), "the last-visited room becomes the selected row");
+        let area = ratatui::layout::Rect::new(0, 0, 80, 10);
+        let want_scroll = crate::render::matrix::scroll_to_show(&m.graph, maze, 9, area, 0);
+        assert_eq!(s.matrix_scroll.1, want_scroll, "and the table scrolls to show it");
+        assert_ne!(s.matrix_scroll.1, 0, "room 9 does not fit at the top of a ten-row table in this pane");
     }
 
     // ── SQ-0354: caret editing on the command line ───────────────────────────

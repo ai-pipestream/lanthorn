@@ -789,7 +789,7 @@ fn draw_frame(
                     let layer_ids: Vec<LayerId> = graph.layers().keys().copied().collect();
                     let active_layer = layer;
                     let owned_segs = build_layer_segments(&layer_ids, active_layer,
-                        |id| format!("{}({})", graph.layer_name(id), graph.rooms_in_layer(id).len()));
+                        |id| app::render::map::layer_tab_title(graph, id));
                     let inset_segs: Vec<_> = owned_segs.iter().map(|s| s.as_inset()).collect();
                     let map_fp = draw_panel(buf, &PanelSpec {
                         area: pane_layout.map,

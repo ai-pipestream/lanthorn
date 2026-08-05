@@ -67,13 +67,28 @@ pub struct MapGraph {
     current: Option<RoomId>,
     layers: BTreeMap<LayerId, LayerMeta>,
     next_layer_id: LayerId,
+    /// The last room the player stood in on each layer (SQ-0672), keyed by that room's layer AT
+    /// THE MOMENT of the visit. Updated by [`MapGraph::set_current`] — the one place the current
+    /// room ever changes — so every path that moves the player (a walked step, a relocation, a
+    /// restore) keeps it current for free. A room recorded here can later be peeled/merged to a
+    /// DIFFERENT layer, which leaves this entry stale; callers treat that exactly like a dangling
+    /// id (see the `layer_of` re-check at the recenter call site) rather than this map trying to
+    /// stay in sync with every layer edit.
+    last_visited: BTreeMap<LayerId, RoomId>,
 }
 
 impl Default for MapGraph {
     fn default() -> Self {
         let mut layers = BTreeMap::new();
         layers.insert(MAIN_LAYER, LayerMeta::main());
-        Self { rooms: BTreeMap::new(), conns: Vec::new(), current: None, layers, next_layer_id: 1 }
+        Self {
+            rooms: BTreeMap::new(),
+            conns: Vec::new(),
+            current: None,
+            layers,
+            next_layer_id: 1,
+            last_visited: BTreeMap::new(),
+        }
     }
 }
 
@@ -95,6 +110,7 @@ impl MapGraph {
         current: Option<RoomId>,
         layers: BTreeMap<LayerId, LayerMeta>,
         next_layer_id: LayerId,
+        last_visited: BTreeMap<LayerId, RoomId>,
     ) -> Self {
         let rooms: BTreeMap<RoomId, Room> = rooms.into_iter().map(|r| (r.id, r)).collect();
         let conns: Vec<Connection> = connections
@@ -107,7 +123,14 @@ impl MapGraph {
             layers.insert(MAIN_LAYER, LayerMeta::main());
         }
         let next_layer_id = next_layer_id.max(1);
-        Self { rooms, conns, current, layers, next_layer_id }
+        // A dangling last-visited room id (hand-edited or corrupt file, same hazard as
+        // `connections`/`current` above) is dropped rather than kept around to misdirect a
+        // layer-switch recenter at a room that no longer exists (SQ-0672).
+        let last_visited: BTreeMap<LayerId, RoomId> = last_visited
+            .into_iter()
+            .filter(|(_, room)| rooms.contains_key(room))
+            .collect();
+        Self { rooms, conns, current, layers, next_layer_id, last_visited }
     }
 
     pub fn room(&self, id: RoomId) -> Option<&Room> {
@@ -400,6 +423,24 @@ impl MapGraph {
 
     pub fn set_current(&mut self, id: RoomId) {
         self.current = Some(id);
+        // Record this as the last room visited on whichever layer it is CURRENTLY on (SQ-0672).
+        // Every path that moves the player funnels through here (`Mapper::observe*`), so this is
+        // the single choke point for the memory a layer switch recenters against.
+        if let Some(layer) = self.rooms.get(&id).map(|r| r.layer) {
+            self.last_visited.insert(layer, id);
+        }
+    }
+
+    /// The last room the player stood in on `layer`, if the mapper has ever recorded a visit
+    /// there (SQ-0672). May name a room that has since been peeled/merged to a different layer —
+    /// callers wanting a room CURRENTLY on `layer` must re-check `layer_of`.
+    pub fn last_visited(&self, layer: LayerId) -> Option<RoomId> {
+        self.last_visited.get(&layer).copied()
+    }
+
+    /// The full per-layer last-visited map, for persistence.
+    pub fn last_visited_map(&self) -> &BTreeMap<LayerId, RoomId> {
+        &self.last_visited
     }
 
     pub fn room_mut_notes(&mut self, id: RoomId, notes: &str) {
@@ -476,7 +517,7 @@ impl MapGraph {
         let current = self.current.filter(|id| in_layer.contains(id));
         let mut layers = BTreeMap::new();
         layers.insert(MAIN_LAYER, LayerMeta::main());
-        MapGraph { rooms, conns, current, layers, next_layer_id: 1 }
+        MapGraph { rooms, conns, current, layers, next_layer_id: 1, last_visited: BTreeMap::new() }
     }
 
     /// Change the direction of the edge keyed (origin, old) to (origin, new).

@@ -17,7 +17,7 @@ use ratatui::layout::Rect;
 use crate::engine_helpers::{apply_archive_state, restore_from_file, zvm_session_opt, RestoreOutcome};
 use crate::reset::reset_game;
 use crate::{
-    combined_saves, format_rfc3339, handle_map_export, map_pane_dims, open_hints, reobserve_location,
+    combined_saves, format_rfc3339, handle_map_export, open_hints, reobserve_location,
     scroll_for_match, should_prompt_save_on_quit, toggle_style_watch,
 };
 
@@ -313,13 +313,11 @@ pub(crate) fn dispatch_slash_outcome(
                     *mapper = m;
                     state.bump_graph_gen(); // imported map replaced the graph → invalidate memo (SQ-0305)
                     state.set_viewed_layer(None);
-                    if let Some(rid) = mapper.graph.current() {
-                        state.select_room(Some(rid));
-                        if let Some(pos) = mapper.graph.room(rid).and_then(|r| r.pos) {
-                            let (pw, ph) = map_pane_dims(map_rect);
-                            state.recenter_on(pos, pw, ph);
-                        }
-                    }
+                    // A whole new graph switches the active layer to whatever the loaded map's
+                    // current room sits on — route it through the same layer-switch recenter as
+                    // cycling/tab-clicking/peel/merge, so a loaded map with no `pos` on its
+                    // current room (or none at all) still lands somewhere sane (SQ-0672).
+                    app::input::recenter_for_active_layer(state, &mapper.graph);
                     state.set_status(format!("loaded map: {}", full.display()));
                 }
                 None => state.set_status(format!("load-map failed: {}", full.display())),

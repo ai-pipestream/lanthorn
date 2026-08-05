@@ -71,13 +71,19 @@ The map is a place you can move through, not just a picture.
   selected room, or the room you're standing in.
 - **Layer tabs** — multi-level areas are split into named **layers** shown as a tab
   strip across the top of the map (e.g. `Main  Cellar  Maze`, each with its room
-  count); the active tab is highlighted. `cycle-layer next|prev` switches between
-  them. Carve a region off with `peel-layer` or fold one back with `merge-layer`.
-  A bare `peel-layer` cuts at the passage you just walked in through — step into the
-  maze, peel, and the maze goes to its own layer — which works even when the entrance
-  is one-way or the way back is some other direction entirely. `peel-layer <direction>`
-  names the seam yourself; with neither, it falls back to hunting for a stairway or
-  other portal to cut at.
+  count); the active tab is highlighted, and a layer flagged as a maze carries a
+  trailing `⌗` marker (`Maze ⌗`) in both tab strips. `cycle-layer next|prev` switches
+  between them. Carve a region off with `peel-layer` or fold one back with
+  `merge-layer`. A bare `peel-layer` cuts at the passage you just walked in through —
+  step into the maze, peel, and the maze goes to its own layer — which works even
+  when the entrance is one-way or the way back is some other direction entirely.
+  `peel-layer <direction>` names the seam yourself; with neither, it falls back to
+  hunting for a stairway or other portal to cut at.
+- **Switching layers recenters the view** — cycling, clicking a tab, peeling, merging,
+  or loading a map all land the viewport somewhere with a room in it, never on empty
+  scroll space: on the room you're standing in if it's on the layer you switched to,
+  else the last room you visited there, else that layer's own bounding-box centre. A
+  matrix layer selects the same room as its row and scrolls the table to show it.
 - **View mode** — `view-map` (leader `u`) switches the active layer between the **drawn**
   map and the **matrix** — the direction table described below. Bare, it cycles; `view-map
   drawn` / `view-map matrix` sets it outright. The choice is per-layer and saved with the map,
@@ -243,7 +249,8 @@ layer's *default* view to the matrix; it never overrides a `view-map` you chose 
 hand, and unflagging puts an unchosen layer straight back to drawn. On a
 maze-flagged layer the last few rooms you walked through are also highlighted as a
 fading breadcrumb (`map.trail`) — the "how did I get here" a drawn map would have
-answered by itself.
+answered by itself. The flag also puts a `⌗` marker on the layer's tab (`Maze ⌗`) in
+both tab strips, and takes it away again when unflagged.
 
 babelmap will offer, once per layer, when a connected cluster starts to look like
 one: at least six rooms, at least eight passages walked in *both* directions, and

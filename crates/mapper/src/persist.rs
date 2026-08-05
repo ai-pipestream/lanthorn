@@ -13,6 +13,10 @@ pub struct PersistState {
     pub layers: BTreeMap<LayerId, LayerMeta>,
     #[serde(default)]
     pub next_layer_id: LayerId,
+    /// Per-layer "last room visited" memory (SQ-0672): absent from any file written before this,
+    /// which loads as though nothing had ever been visited on any layer.
+    #[serde(default)]
+    pub last_visited: BTreeMap<LayerId, RoomId>,
 }
 
 pub fn to_json(mapper: &Mapper) -> String {
@@ -23,6 +27,7 @@ pub fn to_json(mapper: &Mapper) -> String {
         current: mapper.graph.current(),
         layers: mapper.graph.layers().clone(),
         next_layer_id: mapper.graph.next_layer_id(),
+        last_visited: mapper.graph.last_visited_map().clone(),
     };
     serde_json::to_string_pretty(&state).expect("PersistState is always serializable")
 }
@@ -31,6 +36,7 @@ pub fn from_json(s: &str) -> Result<Mapper, serde_json::Error> {
     let state: PersistState = serde_json::from_str(s)?;
     let mut graph = MapGraph::from_parts(
         state.rooms, state.connections, state.current, state.layers, state.next_layer_id,
+        state.last_visited,
     );
     // Collapse `?` stubs that a real directional edge already covers, so existing saved maps
     // clean up on load. (SQ-0220)
@@ -83,6 +89,53 @@ mod tests {
         );
         assert_eq!(m2.graph.layer_view_choice(0), None, "an unchosen layer stays unchosen");
         assert_eq!(m2.graph.self_loops(1), vec![Direction::W], "the self-loop edge survives");
+    }
+
+    /// SQ-0672: the per-layer "last room visited" memory must survive a save/load round trip, or
+    /// a layer switch after a restore would always fall back to the bounding-box centre instead
+    /// of the room the player actually last stood on there.
+    #[test]
+    fn round_trips_last_visited_memory() {
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None); // Main; last_visited(Main) = 1
+        m.observe(2, "Forest", Some(Direction::N)); // Main; last_visited(Main) = 2
+        let l = m.graph.new_layer(Some(0), "Basement".into());
+        m.observe(3, "Cellar", Some(Direction::Down)); // still on Main when observed
+        m.graph.set_room_layer(3, l); // peeled onto the new layer AFTER the visit was recorded
+        m.observe(2, "Forest", Some(Direction::S)); // back on Main; last_visited(Main) = 2 again
+
+        let m2 = from_json(&to_json(&m)).unwrap();
+        assert_eq!(m2.graph.last_visited(0), Some(2), "Main's last-visited survives the round trip");
+        assert_eq!(
+            m2.graph.last_visited(l), None,
+            "layer l was never re-observed after the peel, so it has no memory of its own yet"
+        );
+    }
+
+    /// A last-visited entry naming a room id that no longer exists (hand-edited or truncated
+    /// file) must be dropped on load, exactly like a dangling `current` or connection endpoint —
+    /// otherwise a layer switch would recenter on a phantom room instead of falling back to the
+    /// bounding-box centre (SQ-0672).
+    #[test]
+    fn a_dangling_last_visited_room_id_is_dropped_on_load() {
+        let json = r#"{"version":1,
+            "rooms":[{"id":1,"name":"A","label_override":null,"notes":"","pos":[0,0]}],
+            "connections":[],"current":1,
+            "last_visited":{"0":1,"7":99}}"#;
+        let m = from_json(json).unwrap();
+        assert_eq!(m.graph.last_visited(0), Some(1), "the entry naming a real room survives");
+        assert_eq!(m.graph.last_visited(7), None, "the entry naming room 99 (does not exist) is dropped");
+    }
+
+    /// A map saved before SQ-0672 carries no `last_visited` field at all; it must still load,
+    /// with every layer's memory simply absent (mirrors the pre-SQ-0666 maze-flag test above).
+    #[test]
+    fn a_map_saved_before_last_visited_existed_still_loads() {
+        let json = r#"{"version":1,
+            "rooms":[{"id":1,"name":"A","label_override":null,"notes":"","pos":[0,0]}],
+            "connections":[],"current":1}"#;
+        let m = from_json(json).expect("a pre-SQ-0672 map still loads");
+        assert_eq!(m.graph.last_visited(0), None);
     }
 
     /// A layer written before SQ-0666 has neither field; it must load as an ordinary drawn,

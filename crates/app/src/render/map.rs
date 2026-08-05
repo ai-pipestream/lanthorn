@@ -608,6 +608,20 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 
 // ── Layer tab strip ───────────────────────────────────────────────────────────
 
+/// The tab title for `layer`: its name and room count, with a trailing `⌗` marker when the
+/// layer is flagged a maze (SQ-0672). Shared by both tab strips — the bordered panel-header
+/// inset (`main.rs`) and this borderless in-content one — so the marker can never appear in one
+/// and not the other, and toggling `/mark-maze-layer` moves it in both at once.
+pub fn layer_tab_title(graph: &mapper::graph::MapGraph, layer: mapper::layer::LayerId) -> String {
+    let name = graph.layer_name(layer);
+    let count = graph.rooms_in_layer(layer).len();
+    if graph.layer_is_maze(layer) {
+        format!("{name} ⌗({count})")
+    } else {
+        format!("{name}({count})")
+    }
+}
+
 /// Draw a one-row layer tab strip at the top of `area` and return the remaining body area.
 ///
 /// Draws nothing (returns `area` unchanged) when:
@@ -662,9 +676,7 @@ pub fn draw_layer_strip(
     let active_style = state.colors.theme.get("panel.tab:active").style;
     let mut x = area.x;
     for layer_id in &layers {
-        let name = graph.layer_name(*layer_id);
-        let count = graph.rooms_in_layer(*layer_id).len();
-        let label = format!(" {}({}) ", name, count);
+        let label = format!(" {} ", layer_tab_title(graph, *layer_id));
         let style = if *layer_id == active { active_style } else { normal_style };
         // Clip label to available width.
         let remaining = area.right().saturating_sub(x);
@@ -5810,6 +5822,46 @@ mod tests {
         let has_magenta = (area.x..area.right())
             .any(|x| buf.cell((x, area.y)).is_some_and(|c| c.style().fg == Some(Color::Magenta)));
         assert!(has_magenta, "the active tab must render in the overridden panel.tab:active colour");
+    }
+
+    // ── SQ-0672: the maze tab marker ──────────────────────────────────────────
+
+    #[test]
+    fn layer_tab_title_carries_the_maze_marker_only_when_flagged() {
+        let g = two_layer_graph();
+        let cellar = g.layer_of(2);
+        assert_eq!(layer_tab_title(&g, cellar), "Cellar(1)", "no marker while unflagged");
+
+        let mut g2 = two_layer_graph();
+        g2.set_layer_maze(cellar, true);
+        assert_eq!(
+            layer_tab_title(&g2, cellar), "Cellar ⌗(1)",
+            "flagged as a maze: a trailing ⌗ marker after the name"
+        );
+        g2.set_layer_maze(cellar, false);
+        assert_eq!(layer_tab_title(&g2, cellar), "Cellar(1)", "unflagging removes it again");
+    }
+
+    /// The in-content (borderless) tab strip must show the same `⌗` marker
+    /// `layer_tab_title` produces — it is the single source both strips draw from.
+    #[test]
+    fn draw_layer_strip_shows_the_maze_marker_when_flagged() {
+        use crate::render::paneframe::BorderStyle;
+        let mut g = two_layer_graph();
+        let cellar = g.layer_of(2);
+        g.set_layer_maze(cellar, true);
+
+        let mut state = AppState::default();
+        state.zoom = crate::state::Zoom::Boxes;
+        state.colors.map_border_style = BorderStyle::None;
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        draw_layer_strip(&g, &state, area, &mut buf);
+
+        let row0: String = (area.x..area.right())
+            .map(|x| buf.cell((x, area.y)).map(|c| c.symbol().to_owned()).unwrap_or_default())
+            .collect();
+        assert!(row0.contains('⌗'), "the maze-flagged tab must carry the ⌗ marker, got {row0:?}");
     }
 
     #[test]
