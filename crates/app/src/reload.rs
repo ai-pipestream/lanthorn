@@ -7,7 +7,12 @@ use crate::state::AppState;
 
 /// Result of a reload attempt.
 pub enum ReloadOutcome {
-    /// Applied; carries any non-fatal resolve warnings.
+    /// Applied; carries any non-fatal resolve warnings — both `style::resolve`'s
+    /// (legacy scheme-path warnings) and, appended after (SQ-0663), the
+    /// registry theme's own [`crate::theme::resolve::Theme::warnings`]
+    /// (formatted via [`crate::theme::resolve::describe_theme_warnings`]), so a
+    /// `parent` typo or cycle in style.toml surfaces through the exact same
+    /// notice path every other reload warning already uses.
     Reloaded { warnings: Vec<String> },
     /// Not applied (read/parse error); the current look is untouched.
     Failed { msg: String },
@@ -115,6 +120,16 @@ pub fn reload_style(state: &mut AppState) -> ReloadOutcome {
         let garglk_decls = state.garglk_overlay.as_ref().map(|o| o.color_decls()).unwrap_or_default();
         state.colors.theme = resolve_theme_layered(&gs, &global, &garglk_decls, &per_game);
     }
+
+    // SQ-0663: append the freshly-rebuilt theme's own diagnostics (a `parent`
+    // re-root naming an unknown selector, or a cycle) after style::resolve's.
+    // Every consumer of `ReloadOutcome::Reloaded` already loops over `warnings`
+    // and pushes each as a transcript Warning, so folding these in here — rather
+    // than adding a second warnings channel — reuses that path for free and
+    // keeps the "quiet when clean" property: a reload whose theme resolves
+    // cleanly appends nothing, so nothing is re-announced.
+    let mut warnings = warnings;
+    warnings.extend(crate::theme::resolve::describe_theme_warnings(state.colors.theme.warnings()));
 
     ReloadOutcome::Reloaded { warnings }
 }
@@ -273,6 +288,56 @@ mod tests {
             "per-game box_style wins"
         );
         assert!(!state.symbols.diagonal_corners, "global diagonal_corners stands");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── SQ-0663: theme resolution warnings ride the same reload notice path ──
+
+    #[test]
+    fn reload_surfaces_a_theme_warning_for_a_typo_d_parent() {
+        // Falsification (a)/(b): with the SQ-0663 surfacing removed, this fails
+        // because `warnings` never carries a line naming the typo.
+        let dir = temp_dir("theme-warn");
+        let global = dir.join("style.toml");
+        std::fs::write(&global, "[panel]\ntitle = { parent = \"acent\" }\n").unwrap();
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.style = Some(global.to_string_lossy().to_string());
+
+        match reload_style(&mut state) {
+            ReloadOutcome::Reloaded { warnings } => {
+                assert!(
+                    warnings.iter().any(|w| w.contains("panel.title") && w.contains("acent")),
+                    "theme warning must ride the reload's warnings: {:?}",
+                    warnings
+                );
+            }
+            ReloadOutcome::Failed { msg } => panic!("expected Reloaded, got Failed({msg})"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reload_stays_quiet_when_the_theme_resolves_cleanly() {
+        // The other half of the falsification: a reload whose style.toml has no
+        // `parent` issues must not manufacture a warning out of nothing, and a
+        // SECOND clean reload must not re-announce anything either.
+        let dir = temp_dir("theme-warn-clean");
+        let global = seed_style(&dir);
+
+        let mut state = AppState::default();
+        state.config.user_dir = dir.clone();
+        state.config.style = Some(global.to_string_lossy().to_string());
+
+        for _ in 0..2 {
+            match reload_style(&mut state) {
+                ReloadOutcome::Reloaded { warnings } => {
+                    assert!(warnings.is_empty(), "clean style.toml must carry no warnings: {:?}", warnings);
+                }
+                ReloadOutcome::Failed { msg } => panic!("expected Reloaded, got Failed({msg})"),
+            }
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

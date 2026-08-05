@@ -659,6 +659,18 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
         state.push_transcript_internal(&msg, app::state::TranscriptKind::Warning);
     }
 
+    // SQ-0663: the theme just rebuilt by reload_style above may carry its own
+    // non-fatal diagnostics (a `parent` re-root naming an unknown selector, or
+    // a cycle — see `Theme::warnings`), which used to fall back to registry
+    // defaults with no visible sign anything was wrong. Surface them the same
+    // way the broken-config.toml case just above is surfaced: one transcript
+    // Warning line per issue (collapsed to a summary beyond a few — see
+    // `describe_theme_warnings`), so a typo like `parent = "acent"` in
+    // style.toml no longer degrades silently.
+    for line in app::theme::resolve::describe_theme_warnings(state.colors.theme.warnings()) {
+        state.push_transcript_internal(&line, app::state::TranscriptKind::Warning);
+    }
+
     // One-time notice: config.toml no longer carries style — those moved to style.toml.
     if let Ok(raw_cfg) = std::fs::read_to_string(app::config::config_path(cli)) {
         if app::config::config_has_style_sections(&raw_cfg) {

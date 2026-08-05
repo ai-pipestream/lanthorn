@@ -209,7 +209,7 @@ pub struct Theme {
     /// back to their registry parents. Carried on the theme because the
     /// resolvers have no warnings channel of their own (style-load warnings are
     /// returned by `style::resolve`, which does not build the layered theme).
-    warnings: Vec<String>,
+    warnings: Vec<ThemeWarning>,
 }
 
 impl Theme {
@@ -220,9 +220,93 @@ impl Theme {
     }
 
     /// Non-fatal diagnostics from the resolution pass (empty when clean).
-    pub fn warnings(&self) -> &[String] {
+    pub fn warnings(&self) -> &[ThemeWarning] {
         &self.warnings
     }
+}
+
+/// Whether a rejected `parent` re-root named something that does not exist at
+/// all (a typo) or named a real selector/role that only fails to resolve
+/// because it takes part in a re-root cycle (SQ-0663). Distinguishing the two
+/// makes the surfaced message say something more useful than "unknown or
+/// forms a cycle" for every case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeWarningKind {
+    /// `parent` names no role and no registry selector.
+    UnknownParent,
+    /// `parent` names a real role/selector, but re-rooting onto it cycles.
+    Cycle,
+}
+
+/// A non-fatal theme-resolution diagnostic (SQ-0642/SQ-0663): a selector's
+/// `parent` override was rejected — the name doesn't resolve to anything, or
+/// re-rooting onto it forms a cycle — so the selector fell back to its
+/// registry-default parent instead.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeWarning {
+    /// The selector whose `parent` override was rejected, e.g. `"panel.title"`.
+    pub selector: String,
+    /// The parent name the user wrote, e.g. `"acent"`.
+    pub parent: String,
+    pub kind: ThemeWarningKind,
+}
+
+impl ThemeWarning {
+    /// One human-readable line for the transcript/startup surface (SQ-0663),
+    /// e.g. `style.toml: [panel.title] parent = "acent" does not name a
+    /// selector — using defaults for it`. Not attributed to a specific file:
+    /// the resolver sees only already-lowered `Decls`/`ParsedStyle` layers, not
+    /// the paths they came from (global style.toml, a discovered garglk.ini, or
+    /// the per-game sidecar all fold into one resolve() pass) — see
+    /// `describe_theme_warnings`'s doc comment for the same caveat.
+    pub fn describe(&self) -> String {
+        let reason = match self.kind {
+            ThemeWarningKind::UnknownParent => "does not name a selector",
+            ThemeWarningKind::Cycle => "forms a parent cycle",
+        };
+        format!(
+            "style.toml: [{}] parent = \"{}\" {reason} — using defaults for it",
+            self.selector, self.parent,
+        )
+    }
+}
+
+/// How many [`ThemeWarning`]s to print individually before collapsing to one
+/// summarizing line (SQ-0663): a single bad base selector that many rows
+/// re-root onto (or re-root onto each other) could otherwise spam the
+/// transcript with one line per affected selector.
+const WARNING_LINES_MAX: usize = 4;
+/// How many offending selectors to name in the summarized line.
+const WARNING_NAMED_MAX: usize = 3;
+
+/// Render a theme's resolution warnings as the notice lines shown at startup
+/// and on a live style reload (SQ-0663): empty input yields no lines (a clean
+/// resolve stays silent — nothing is re-announced); up to [`WARNING_LINES_MAX`]
+/// warnings each get their own [`ThemeWarning::describe`] line; beyond that,
+/// one line names the first [`WARNING_NAMED_MAX`] offending selectors plus a
+/// total count.
+///
+/// Per-file/per-layer attribution (global `style.toml` vs. a discovered
+/// `garglk.ini` vs. a per-game sidecar) is deliberately not attempted here:
+/// [`resolve_theme_layered`] folds all three `Decls`/`ParsedStyle` layers into
+/// one `resolve()` pass and the warning only records the selector/parent
+/// names, not which layer's `parent` override was the one that lost the
+/// fixpoint race. Adding that would mean threading path/layer context through
+/// the resolver just for diagnostics, so every line reads `style.toml:` (the
+/// generic "your styling" prefix) rather than naming a specific file.
+pub fn describe_theme_warnings(warnings: &[ThemeWarning]) -> Vec<String> {
+    if warnings.is_empty() {
+        return Vec::new();
+    }
+    if warnings.len() <= WARNING_LINES_MAX {
+        return warnings.iter().map(ThemeWarning::describe).collect();
+    }
+    let named: Vec<&str> = warnings.iter().take(WARNING_NAMED_MAX).map(|w| w.selector.as_str()).collect();
+    vec![format!(
+        "style.toml: {} selectors have an invalid `parent` override ({}, …) — using defaults for them",
+        warnings.len(),
+        named.join(", "),
+    )]
 }
 
 /// Layer a [`Delta`] onto a base [`Style`]: override fg/bg only where the delta
@@ -358,7 +442,7 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
     ];
 
     let mut map: HashMap<String, Resolved> = HashMap::new();
-    let mut warnings: Vec<String> = Vec::new();
+    let mut warnings: Vec<ThemeWarning> = Vec::new();
 
     // Roles first: their Resolved is the bare role style (no glyph, no delta).
     for name in ROLE_NAMES {
@@ -407,11 +491,17 @@ pub fn resolve(roles: &Roles, global: &Decls, garglk: &Decls, per_game: &Decls) 
                 let user_parent = effective_parent(row, &layers);
                 let registry_parent = row.parent.map(str::to_string);
                 if user_parent != registry_parent {
-                    warnings.push(format!(
-                        "style: selector '{}' re-roots onto parent '{}' which is unknown or forms a cycle; keeping its default parent",
-                        row.name,
-                        user_parent.as_deref().unwrap_or("(none)"),
-                    ));
+                    // `user_parent` is always `Some` here: it only differs from
+                    // `registry_parent` when some layer's `Decls` actually set a
+                    // `parent` override for this row (see `effective_parent`).
+                    let bad_parent = user_parent.clone().unwrap_or_default();
+                    let known = ROLE_NAMES.contains(&bad_parent.as_str())
+                        || REGISTRY.iter().any(|r| r.name == bad_parent);
+                    warnings.push(ThemeWarning {
+                        selector: row.name.to_string(),
+                        parent: bad_parent,
+                        kind: if known { ThemeWarningKind::Cycle } else { ThemeWarningKind::UnknownParent },
+                    });
                 }
                 let parent = registry_parent
                     .and_then(|p| map.get(&p).cloned())
@@ -805,9 +895,15 @@ mod tests {
         assert_eq!(theme.get("panel.border").border, Some(BorderStyle::Single));
         // And the typo is surfaced as a diagnostic.
         assert!(
-            theme.warnings().iter().any(|w| w.contains("panel.title") && w.contains("acent")),
+            theme.warnings().iter().any(|w| w.selector == "panel.title"
+                && w.parent == "acent"
+                && w.kind == ThemeWarningKind::UnknownParent),
             "warning names the offending selector: {:?}",
             theme.warnings()
+        );
+        assert_eq!(
+            theme.warnings()[0].describe(),
+            "style.toml: [panel.title] parent = \"acent\" does not name a selector — using defaults for it",
         );
     }
 
@@ -827,6 +923,11 @@ mod tests {
         assert_eq!(theme.get("transcript").style.fg, Some(Color::White));
         assert_eq!(theme.get("suggestion").style.fg, Some(Color::DarkGray));
         assert_eq!(theme.warnings().len(), 2, "{:?}", theme.warnings());
+        assert!(
+            theme.warnings().iter().all(|w| w.kind == ThemeWarningKind::Cycle),
+            "both re-roots name real (existing) selectors, so this is a cycle, not a typo: {:?}",
+            theme.warnings()
+        );
     }
 
     #[test]
@@ -834,6 +935,47 @@ mod tests {
         let scheme = terminal_default_scheme();
         let theme = resolve_theme(&scheme, &ParsedStyle::default());
         assert!(theme.warnings().is_empty(), "{:?}", theme.warnings());
+    }
+
+    // ── SQ-0663: describe_theme_warnings (startup/reload notice formatting) ──
+
+    #[test]
+    fn describe_theme_warnings_empty_is_silent() {
+        assert!(describe_theme_warnings(&[]).is_empty());
+    }
+
+    #[test]
+    fn describe_theme_warnings_one_line_per_warning_under_the_threshold() {
+        let warnings = vec![
+            ThemeWarning { selector: "panel.title".into(), parent: "acent".into(), kind: ThemeWarningKind::UnknownParent },
+            ThemeWarning { selector: "transcript".into(), parent: "suggestion".into(), kind: ThemeWarningKind::Cycle },
+        ];
+        let lines = describe_theme_warnings(&warnings);
+        assert_eq!(lines.len(), 2, "{:?}", lines);
+        assert_eq!(
+            lines[0],
+            "style.toml: [panel.title] parent = \"acent\" does not name a selector — using defaults for it"
+        );
+        assert_eq!(
+            lines[1],
+            "style.toml: [transcript] parent = \"suggestion\" forms a parent cycle — using defaults for it"
+        );
+    }
+
+    #[test]
+    fn describe_theme_warnings_summarizes_beyond_the_threshold() {
+        let warnings: Vec<ThemeWarning> = (0..6)
+            .map(|i| ThemeWarning {
+                selector: format!("sel{i}"),
+                parent: "acent".into(),
+                kind: ThemeWarningKind::UnknownParent,
+            })
+            .collect();
+        let lines = describe_theme_warnings(&warnings);
+        assert_eq!(lines.len(), 1, "collapses to one summary line: {:?}", lines);
+        assert!(lines[0].contains("6 selectors"), "{}", lines[0]);
+        assert!(lines[0].contains("sel0") && lines[0].contains("sel1") && lines[0].contains("sel2"));
+        assert!(!lines[0].contains("sel3"), "only the first few are named: {}", lines[0]);
     }
 
     // ── SQ-0642: an fg/bg-only scheme must not go monochrome ─────────────────
