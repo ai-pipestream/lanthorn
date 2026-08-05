@@ -102,6 +102,17 @@ the pane-scroll conventions. Vertical scrolling as any list.
 4. **Walked-trail breadcrumb** — on maze-flagged layers, the last N
    traversed edges/rows highlight with a fading `map.trail` style (N ~ 8).
 
+## Removals (user decision, 2026-08-05)
+
+One representation per fact: with the matrix's `?`/`·` cells and the
+room-info card carrying tried/untried per direction, the **room
+inspector's explored rose** and the **"untried exits" listing** are
+retired — they are older dialects for the same knowledge. The `tried`
+data itself is untouched (it feeds the new cells); only the duplicate UI
+surfaces go, along with their style selectors and template lines. If
+implementation turns up further duplicate surfaces for exit-exploration
+state, consolidate them into the card/matrix rather than keeping them.
+
 ## Persistence
 
 LayerMeta: `maze: bool` and the per-layer view mode. Self-loop edges join
