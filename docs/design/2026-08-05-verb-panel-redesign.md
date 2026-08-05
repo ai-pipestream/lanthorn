@@ -61,7 +61,7 @@ adopts that shape, minus the party column (babelmap has no actors to select).
    whose picks also just fill the phrase line. (A complete-alone verb like
    `look` arms immediately, so it is still click + Enter, never a surprise
    turn.)
-3. **Configurable grammar: yes.** A `[verb_menu]` config section (below).
+3. **Configurable grammar: yes.** A `[command_band]` config section (below).
 4. **Focus: the band owns the keyboard while open.** Letters type-to-filter
    the active column, Tab jumps to the story input for free typing (the band
    stays visible), Esc clears the phrase first and closes when empty.
@@ -97,7 +97,7 @@ active column back.
 
 ## Interaction spec
 
-Opening: the existing `open-verb-menu` slash command and leader binding stay;
+Opening: the existing `open-command-band` slash command (renamed from `open-verb-menu`) and leader binding stay;
 additionally a **direct default keybinding** (`F2`, rebindable — keys bind to
 command strings) because leader-only is why nobody finds it.
 
@@ -134,7 +134,7 @@ The band is a dock, not dialog chrome:
 ## Config
 
 ```toml
-[verb_menu]
+[command_band]
 # height = 8            # band rows including frame
 # auto_open = false     # open the band on story start
 # verbs = [             # replaces the built-in table when set
@@ -146,13 +146,13 @@ The band is a dock, not dialog chrome:
 ```
 
 `verb_dock_pct` (the left dock's width) is retired; resize mode targets the
-band's height instead, mirrored to `verb_menu.height`.
+band's height instead, mirrored to `command_band.height`.
 
 ## Style
 
 New selectors (registry + template, defaults reproducing the mockup):
-`verbband.phrase` (armed/disarmed variants), `verbband.column_header` /
-`:active`, `verbband.quick`, `verbband.group_label`; rows reuse
+`band.phrase` (armed/disarmed variants), `band.column_header` /
+`:active`, `band.quick`, `band.group_label`; rows reuse
 `dialog.list_selected` and the panel frame reuses `panel.border[:active]`.
 Every new element styleable per the CLAUDE.md rule.
 
@@ -161,7 +161,7 @@ Every new element styleable per the CLAUDE.md rule.
 - Unit: arity table → column reachability; filter; backspace un-pick ladder;
   phrase materialization (incl. multi-word object names quoting nothing —
   games take "iron door" fine as plain words).
-- Config: `[verb_menu]` round-trip, replace-vs-additive verb lists.
+- Config: `[command_band]` round-trip, replace-vs-additive verb lists.
 - Integration: a Z-machine story (Zork-era fixture in unit_tests/) — open
   band, compose take/unlock phrases from live objects, send, assert the turn
   ran; per-turn refresh (object taken moves from *here* to *carried*);
