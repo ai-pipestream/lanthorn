@@ -522,6 +522,22 @@ pub(crate) fn leading_spaces(s: &str) -> u16 {
 /// Columns reserved at the left of a META line for the gutter marker (`▏` + space).
 pub(crate) const META_GUTTER: u16 = 2;
 
+/// Screen-column offset (relative to the row's own left edge, i.e. `body_area.x`)
+/// at which a row's TEXT actually starts. Meta/Warning rows reserve `META_GUTTER`
+/// columns for their marker glyph before the text; Story/Input draw flush left. A
+/// `WrappedRow`'s `text` field never includes this prefix — the marker is drawn
+/// separately — so anything that maps a screen column onto `text` (the draw loop,
+/// the live-input row, the selection highlight, and the clipboard extract) has to
+/// shift by this SAME offset. Kept in one place: every one of those reads this
+/// function rather than re-deriving `META_GUTTER` from `kind` itself, so drawing
+/// and selecting can never drift apart again (SQ-0665).
+pub(crate) fn text_origin_col(kind: TranscriptKind) -> u16 {
+    match kind {
+        TranscriptKind::Meta | TranscriptKind::Warning => META_GUTTER,
+        TranscriptKind::Story | TranscriptKind::Input => 0,
+    }
+}
+
 /// Expand a slice of logical transcript lines into wrapped display rows, carrying
 /// each row's `TranscriptKind`. META lines wrap to `width - META_GUTTER` so the
 /// gutter marker has room; STORY lines use the full `width`. `kinds` parallels
@@ -2109,12 +2125,10 @@ fn render_middle(
             TranscriptKind::Warning => (Some(state.symbols.warning_gutter), warning_marker),
             TranscriptKind::Story | TranscriptKind::Input => (None, Style::default()),
         };
-        let text_x = if let Some(glyph) = gutter {
+        if let Some(glyph) = gutter {
             draw_str_clipped(buf, body_area.x, row_y, &glyph.to_string(), marker_style, body_area);
-            body_area.x + META_GUTTER
-        } else {
-            body_area.x
-        };
+        }
+        let text_x = body_area.x + text_origin_col(wr.kind);
         let search = has_search.then_some((query_lower.as_str(), search_highlight_style));
         draw_str_runs(buf, text_x, row_y, &wr.text, wr.style, &wr.runs, search, body_area, &state.colors, state.config.honor_game_colours);
 
@@ -2254,10 +2268,7 @@ fn render_middle(
                 Some(gs) => base_text.patch(gs),
                 None => base_text,
             };
-            let row_text_x = match last.kind {
-                TranscriptKind::Meta | TranscriptKind::Warning => body_area.x + META_GUTTER,
-                TranscriptKind::Story | TranscriptKind::Input => body_area.x,
-            };
+            let row_text_x = body_area.x + text_origin_col(last.kind);
             // Where the row's text ENDS on screen — cells, not chars (SQ-0662).
             let start_col = row_text_x + crate::textwidth::str_cells(&last.text) as u16;
             let avail = body_area.right().saturating_sub(start_col) as usize;
@@ -2320,10 +2331,21 @@ fn render_middle(
             let row_y = transcript_top + i as u16;
             if row_y >= transcript_bottom { break; }
             let abs = first_abs_row + i;
-            let Some((c0, c1)) = crate::clipboard::row_span(width, sel, abs) else { continue };
-            let (c0, c1) = crate::textwidth::snap_cols_to_glyphs(&wr.text, c0 as usize, c1 as usize);
-            for col in c0..=c1.min(width.saturating_sub(1) as usize) {
-                if let Some(cell) = buf.cell_mut((body_area.x + col as u16, row_y)) {
+            // A Meta/Warning row's text starts at screen column `origin` (its
+            // gutter marker occupies the columns before it); `row_span` pulls a
+            // span that lands in the gutter up to the first real text cell, so
+            // the highlight never paints the marker and a gutter click behaves
+            // like a click on the row's own first glyph (SQ-0665).
+            let origin = text_origin_col(wr.kind);
+            let Some((c0, c1)) = crate::clipboard::row_span(width, sel, abs, origin) else { continue };
+            // Snap in TEXT-relative space — `wr.text` holds only the text, not
+            // the gutter prefix — then shift back to the screen column the
+            // glyph actually occupies to paint the buffer.
+            let (tc0, tc1) = crate::textwidth::snap_cols_to_glyphs(&wr.text, (c0 - origin) as usize, (c1 - origin) as usize);
+            let last_col = width.saturating_sub(1);
+            let hi = (tc1 as u16 + origin).min(last_col);
+            for col in (tc0 as u16 + origin)..=hi {
+                if let Some(cell) = buf.cell_mut((body_area.x + col, row_y)) {
                     let s = cell.style();
                     cell.set_style(s.add_modifier(ratatui::style::Modifier::REVERSED));
                 }
@@ -2335,7 +2357,8 @@ fn render_middle(
             *state.selection_text.borrow_mut() = None;
         } else {
             let texts: Vec<&str> = entry.rows.iter().map(|r| r.text.as_str()).collect();
-            *state.selection_text.borrow_mut() = Some(crate::clipboard::extract(&texts, width, sel));
+            let origins: Vec<u16> = entry.rows.iter().map(|r| text_origin_col(r.kind)).collect();
+            *state.selection_text.borrow_mut() = Some(crate::clipboard::extract(&texts, &origins, width, sel));
         }
     }
 
@@ -3635,6 +3658,109 @@ mod tests {
             assert_eq!(reversed.len(), crate::textwidth::str_cells(&copied),
                        "highlighted cell count == copied text's display width");
         }
+    }
+
+    #[test]
+    fn meta_row_selection_highlight_and_copy_share_the_gutter_offset() {
+        use ratatui::style::Modifier;
+        // SQ-0665: a Meta/Warning row draws its TEXT at body_area.x + META_GUTTER
+        // (the marker glyph + a blank cell occupy the first two columns), but
+        // `wr.text` holds ONLY the text — no gutter prefix. A selection column is
+        // always relative to the row's own left edge (screen col 0 = body_area.x),
+        // so both the highlight and the copy must shift by META_GUTTER before
+        // they mean anything against `wr.text`, or they land on the wrong glyphs.
+        for honor in [true, false] {
+            let machine = minimal_machine();
+            let mut state = AppState::default();
+            state.config.honor_game_colours = honor;
+            // Keep the block caret (also reverse video) off this row.
+            state.config.command_bar = true;
+            state.push_transcript_kind("hello world", TranscriptKind::Meta);
+            state.focus = Focus::Game;
+            // Screen columns 2..=6 (past the 2-col gutter) should select "hello".
+            state.selection = Some(crate::clipboard::Selection {
+                anchor: crate::clipboard::Point { row: 0, col: 2 },
+                head: crate::clipboard::Point { row: 0, col: 6 },
+            });
+            let area = Rect::new(0, 0, 40, 10);
+            let mut buf = Buffer::empty(area);
+            render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+            // v3's status bar occupies screen row 0, so find the Meta row rather
+            // than assume it's first.
+            let row_y = (0..10u16)
+                .find(|&y| buf.cell((2, y)).map(|c| c.symbol()) == Some("h"))
+                .expect("the Meta line rendered");
+            // The marker glyph drew at col 0; "hello world" starts at col 2.
+            assert_eq!(buf.cell((0, row_y)).unwrap().symbol(), "▏", "gutter marker drawn (honor={honor})");
+
+            let copied = state.selection_text.borrow().clone().expect("copy published");
+            assert_eq!(copied, "hello",
+                       "copy matches the glyphs under the highlight, not shifted by the gutter (honor={honor})");
+
+            let reversed: Vec<u16> = (0..40u16)
+                .filter(|&x| buf.cell((x, row_y)).unwrap().modifier.contains(Modifier::REVERSED))
+                .collect();
+            assert_eq!(reversed, (2..=6).collect::<Vec<u16>>(),
+                       "highlight lands on the drawn glyph cells, gutter excluded (honor={honor})");
+        }
+    }
+
+    #[test]
+    fn meta_row_gutter_click_selects_from_the_first_text_cell() {
+        // A selection edge that lands IN the gutter (screen col 0, before the
+        // marker's blank cell at col 1 and the text at col 2) must not copy or
+        // highlight any of it — the gutter is never itself selectable.
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.config.command_bar = true;
+        state.push_transcript_kind("hello", TranscriptKind::Meta);
+        state.focus = Focus::Game;
+        // Anchor sits IN the gutter (col 0); head is on the 3rd text glyph.
+        state.selection = Some(crate::clipboard::Selection {
+            anchor: crate::clipboard::Point { row: 0, col: 0 },
+            head: crate::clipboard::Point { row: 0, col: 4 },
+        });
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+
+        let copied = state.selection_text.borrow().clone().expect("copy published");
+        assert_eq!(copied, "hel", "a gutter-anchored selection starts at the first text cell, not the marker");
+
+        use ratatui::style::Modifier;
+        // v3's status bar occupies screen row 0, so find the Meta row rather than
+        // assume it's first.
+        let row_y = (0..10u16)
+            .find(|&y| buf.cell((2, y)).map(|c| c.symbol()) == Some("h"))
+            .expect("the Meta line rendered");
+        assert!(!buf.cell((0, row_y)).unwrap().modifier.contains(Modifier::REVERSED),
+                 "the gutter marker cell itself is never highlighted");
+        assert!(!buf.cell((1, row_y)).unwrap().modifier.contains(Modifier::REVERSED),
+                 "the gutter's blank cell is never highlighted");
+        assert!(buf.cell((2, row_y)).unwrap().modifier.contains(Modifier::REVERSED),
+                 "the first text cell IS highlighted");
+    }
+
+    #[test]
+    fn story_row_selection_is_unaffected_by_the_meta_gutter_fix() {
+        // Regression: an ordinary Story/Input row has no gutter (text_origin_col
+        // == 0), so threading the per-row origin through must not shift its
+        // selection at all.
+        let machine = minimal_machine();
+        let mut state = AppState::default();
+        state.config.command_bar = true;
+        state.push_transcript("hello world");
+        state.focus = Focus::Game;
+        state.selection = Some(crate::clipboard::Selection {
+            anchor: crate::clipboard::Point { row: 0, col: 0 },
+            head: crate::clipboard::Point { row: 0, col: 4 },
+        });
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        render_transcript(&crate::session::status_model_from_machine(&machine), None, &state, area, &mut buf, None);
+        let copied = state.selection_text.borrow().clone().expect("copy published");
+        assert_eq!(copied, "hello");
     }
 
     // ── SQ-0330: Glk paragraph layout (indent / para_indent / justification) ──

@@ -355,7 +355,7 @@ pub fn draw_debug_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Vec<(
             if let Some(content) = debug_panel::window_content(area, win) {
                 let mut out: Vec<String> = Vec::new();
                 for r in 0..content.height {
-                    if let Some((c0, c1)) = crate::clipboard::row_span(content.width, sel, r as usize) {
+                    if let Some((c0, c1)) = crate::clipboard::row_span(content.width, sel, r as usize, 0) {
                         let mut line = String::new();
                         for c in c0..=c1 {
                             if let Some(cell) = buf.cell_mut((content.x + c, content.y + r)) {

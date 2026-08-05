@@ -49,36 +49,57 @@ fn ordered(a: Point, b: Point) -> (Point, Point) {
 }
 
 /// Inclusive column span [c0,c1] selected on absolute wrapped `row`, within a story
-/// band `width` cells wide (0-based). `None` if `row` is outside the selection.
-pub fn row_span(width: u16, sel: Selection, row: usize) -> Option<(u16, u16)> {
+/// band `width` cells wide (0-based), given `origin` — the screen column at which
+/// the row's own selectable content actually starts. Ordinary rows pass `origin =
+/// 0`; a row that reserves a leading gutter no glyph occupies (the transcript's
+/// Meta/Warning marker column) passes its gutter width, and any part of the span
+/// that falls left of it is pulled up to `origin` — so the gutter itself is never
+/// selectable and a click inside it behaves as a click on the row's first real
+/// cell (SQ-0665). `None` if `row` is outside the selection, or the origin-clamped
+/// span is empty (the whole selected part of this row was gutter).
+pub fn row_span(width: u16, sel: Selection, row: usize, origin: u16) -> Option<(u16, u16)> {
     if width == 0 { return None; }
     let (s, e) = ordered(sel.anchor, sel.head);
     if row < s.row || row > e.row { return None; }
     let last = width - 1;
     let c0 = if row == s.row { s.col.min(last) } else { 0 };
     let c1 = if row == e.row { e.col.min(last) } else { last };
+    let c0 = c0.max(origin.min(last));
     if c0 > c1 { return None; }
     Some((c0, c1))
 }
 
-/// True if absolute cell (row, col) is inside the selection.
-pub fn contains(width: u16, sel: Selection, row: usize, col: u16) -> bool {
-    match row_span(width, sel, row) { Some((c0, c1)) => col >= c0 && col <= c1, None => false }
+/// True if absolute cell (row, col) is inside the selection. See [`row_span`] for
+/// `origin`.
+pub fn contains(width: u16, sel: Selection, row: usize, col: u16, origin: u16) -> bool {
+    match row_span(width, sel, row, origin) { Some((c0, c1)) => col >= c0 && col <= c1, None => false }
 }
 
 /// Extract the selected text from the full set of wrapped-row texts. `rows[i]` is the
-/// plain text of absolute wrapped row `i`. Rows joined with `\n`, trailing ws trimmed.
-pub fn extract(rows: &[&str], width: u16, sel: Selection) -> String {
+/// plain text of absolute wrapped row `i`, already stripped of any leading gutter —
+/// `origins[i]` (missing/short entries default to 0) is the screen column at which
+/// that text starts, so a screen-column selection can be shifted back to index into
+/// it (SQ-0665). Rows joined with `\n`, trailing ws trimmed; a row whose selected
+/// span is entirely gutter contributes an empty line, keeping row correspondence
+/// with what the highlight painted.
+pub fn extract(rows: &[&str], origins: &[u16], width: u16, sel: Selection) -> String {
     let (s, e) = ordered(sel.anchor, sel.head);
     let mut out: Vec<String> = Vec::new();
     for row in s.row..=e.row {
-        if let Some((c0, c1)) = row_span(width, sel, row) {
-            // Columns are CELLS, not chars: a CJK ideograph or emoji covers two of
-            // them, so indexing the row by char number copied a different span than
-            // the one highlighted on screen (SQ-0655).
-            let text = rows.get(row).copied().unwrap_or("");
-            let line = crate::textwidth::slice_cols(text, c0 as usize, c1 as usize);
-            out.push(line.trim_end().to_string());
+        let origin = origins.get(row).copied().unwrap_or(0);
+        match row_span(width, sel, row, origin) {
+            Some((c0, c1)) => {
+                // Columns are CELLS, not chars: a CJK ideograph or emoji covers two
+                // of them, so indexing the row by char number copied a different
+                // span than the one highlighted on screen (SQ-0655). And they're
+                // relative to the row's own text, which starts at screen column
+                // `origin` — a Meta/Warning row's gutter marker occupies the
+                // columns before it (SQ-0665).
+                let text = rows.get(row).copied().unwrap_or("");
+                let line = crate::textwidth::slice_cols(text, (c0 - origin) as usize, (c1 - origin) as usize);
+                out.push(line.trim_end().to_string());
+            }
+            None => out.push(String::new()),
         }
     }
     out.join("\n")
@@ -145,47 +166,76 @@ mod tests {
     fn row_span_first_last_middle() {
         // Selection from (row 1, col 3) to (row 3, col 6), width 10.
         let sel = Selection { anchor: p(1, 3), head: p(3, 6) };
-        assert_eq!(row_span(10, sel, 1), Some((3, 9)), "first row from col to right edge");
-        assert_eq!(row_span(10, sel, 2), Some((0, 9)), "middle row is full width");
-        assert_eq!(row_span(10, sel, 3), Some((0, 6)), "last row from left edge to head col");
+        assert_eq!(row_span(10, sel, 1, 0), Some((3, 9)), "first row from col to right edge");
+        assert_eq!(row_span(10, sel, 2, 0), Some((0, 9)), "middle row is full width");
+        assert_eq!(row_span(10, sel, 3, 0), Some((0, 6)), "last row from left edge to head col");
     }
 
     #[test]
     fn row_span_single_row() {
         let sel = Selection { anchor: p(2, 2), head: p(2, 5) };
-        assert_eq!(row_span(10, sel, 2), Some((2, 5)));
+        assert_eq!(row_span(10, sel, 2, 0), Some((2, 5)));
     }
 
     #[test]
     fn row_span_out_of_range_is_none() {
         let sel = Selection { anchor: p(1, 0), head: p(3, 0) };
-        assert_eq!(row_span(10, sel, 0), None);
-        assert_eq!(row_span(10, sel, 4), None);
+        assert_eq!(row_span(10, sel, 0, 0), None);
+        assert_eq!(row_span(10, sel, 4, 0), None);
     }
 
     #[test]
     fn row_span_clamps_to_width() {
         // Head col 50 but width only 10 → clamp to last col 9.
         let sel = Selection { anchor: p(1, 3), head: p(1, 50) };
-        assert_eq!(row_span(10, sel, 1), Some((3, 9)));
+        assert_eq!(row_span(10, sel, 1, 0), Some((3, 9)));
         // Width 0 yields None.
-        assert_eq!(row_span(0, sel, 1), None);
+        assert_eq!(row_span(0, sel, 1, 0), None);
     }
 
     #[test]
     fn contains_inside_and_outside() {
         let sel = Selection { anchor: p(1, 3), head: p(3, 6) };
         // Middle row: full width is contained.
-        assert!(contains(10, sel, 2, 0));
-        assert!(contains(10, sel, 2, 9));
+        assert!(contains(10, sel, 2, 0, 0));
+        assert!(contains(10, sel, 2, 9, 0));
         // First row: before c0 not contained.
-        assert!(!contains(10, sel, 1, 2));
-        assert!(contains(10, sel, 1, 3));
+        assert!(!contains(10, sel, 1, 2, 0));
+        assert!(contains(10, sel, 1, 3, 0));
         // Last row: after head col not contained.
-        assert!(!contains(10, sel, 3, 7));
-        assert!(contains(10, sel, 3, 6));
+        assert!(!contains(10, sel, 3, 7, 0));
+        assert!(contains(10, sel, 3, 6, 0));
         // Row beyond selection not contained.
-        assert!(!contains(10, sel, 4, 0));
+        assert!(!contains(10, sel, 4, 0, 0));
+    }
+
+    // ── SQ-0665: per-row text origin (the transcript's Meta/Warning gutter) ──
+
+    #[test]
+    fn row_span_origin_pulls_a_gutter_click_up_to_the_first_text_cell() {
+        // A row whose text starts at screen column `origin` (a Meta/Warning
+        // row's gutter marker occupies the columns before it) must never
+        // report the gutter itself as selectable: a span that starts inside
+        // it is pulled up to `origin`.
+        let sel = Selection { anchor: p(0, 0), head: p(0, 5) };
+        assert_eq!(row_span(10, sel, 0, 0), Some((0, 5)), "origin 0: ordinary row unaffected");
+        assert_eq!(row_span(10, sel, 0, 2), Some((2, 5)), "origin 2: pulled up past the gutter");
+    }
+
+    #[test]
+    fn row_span_origin_spanning_only_the_gutter_is_none() {
+        // The whole selected span on this row falls inside the gutter (cols
+        // 0..=1, origin 2): nothing on this row to highlight or copy.
+        let sel = Selection { anchor: p(0, 0), head: p(0, 1) };
+        assert_eq!(row_span(10, sel, 0, 2), None);
+    }
+
+    #[test]
+    fn row_span_origin_wider_than_the_row_never_panics() {
+        // Pathologically narrow row (width 1) with a larger origin: the
+        // origin clamps to the row's own last column rather than underflowing.
+        let sel = Selection { anchor: p(0, 0), head: p(0, 5) };
+        assert_eq!(row_span(1, sel, 0, 5), Some((0, 0)));
     }
 
     #[test]
@@ -194,7 +244,7 @@ mod tests {
         // Select columns 2..=5 → "LLOW".
         let sel = Selection { anchor: p(0, 2), head: p(0, 5) };
         let refs: Vec<&str> = rows.to_vec();
-        assert_eq!(extract(&refs, 10, sel), "LLOW");
+        assert_eq!(extract(&refs, &[], 10, sel), "LLOW");
     }
 
     #[test]
@@ -203,7 +253,7 @@ mod tests {
         // From (row 0, col 3) to (row 2, col 4).
         let sel = Selection { anchor: p(0, 3), head: p(2, 4) };
         let refs: Vec<&str> = rows.to_vec();
-        let out = extract(&refs, 10, sel);
+        let out = extract(&refs, &[], 10, sel);
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines[0], "aaaaaaa", "first row from col 3 to right edge");
         assert_eq!(lines[1], "bbbbbbbbbb", "middle row is full width");
@@ -219,18 +269,18 @@ mod tests {
         let refs: Vec<&str> = rows.to_vec();
         // Cells 0..=3 cover 日本.
         let sel = Selection { anchor: p(0, 0), head: p(0, 3) };
-        assert_eq!(extract(&refs, 10, sel), "日本");
+        assert_eq!(extract(&refs, &[], 10, sel), "日本");
         // Cells 4..=7 cover 語で.
         let sel2 = Selection { anchor: p(0, 4), head: p(0, 7) };
-        assert_eq!(extract(&refs, 10, sel2), "語で");
+        assert_eq!(extract(&refs, &[], 10, sel2), "語で");
         // A span that clips a glyph in half still copies it whole.
         let sel3 = Selection { anchor: p(0, 1), head: p(0, 2) };
-        assert_eq!(extract(&refs, 10, sel3), "日本");
+        assert_eq!(extract(&refs, &[], 10, sel3), "日本");
         // Mixed widths: "a日b" is cells a=0, 日=1..2, b=3.
         let mixed = ["a日b"];
         let mrefs: Vec<&str> = mixed.to_vec();
         let sel4 = Selection { anchor: p(0, 1), head: p(0, 3) };
-        assert_eq!(extract(&mrefs, 10, sel4), "日b");
+        assert_eq!(extract(&mrefs, &[], 10, sel4), "日b");
     }
 
     #[test]
@@ -238,7 +288,7 @@ mod tests {
         let rows = ["hi        "];
         let sel = Selection { anchor: p(0, 0), head: p(0, 9) };
         let refs: Vec<&str> = rows.to_vec();
-        assert_eq!(extract(&refs, 10, sel), "hi");
+        assert_eq!(extract(&refs, &[], 10, sel), "hi");
     }
 
     #[test]
@@ -247,11 +297,54 @@ mod tests {
         let rows = ["hello"];
         let sel = Selection { anchor: p(0, 0), head: p(2, 4) };
         let refs: Vec<&str> = rows.to_vec();
-        let out = extract(&refs, 10, sel);
+        let out = extract(&refs, &[], 10, sel);
         let lines: Vec<&str> = out.split('\n').collect();
         assert_eq!(lines[0], "hello");
         assert_eq!(lines[1], "", "missing row yields empty line");
         assert_eq!(lines[2], "", "missing row yields empty line");
+    }
+
+    #[test]
+    fn extract_shifts_by_the_row_s_own_text_origin() {
+        // SQ-0665: `rows[i]` holds ONLY the text — a Meta row's gutter marker
+        // is drawn separately and never appears in it — so a screen-column
+        // selection has to shift left by that row's origin before it means
+        // anything as an index into the row's text, or it reads a span
+        // shifted by the gutter width relative to what's on screen.
+        let rows = ["hello world"];
+        let refs: Vec<&str> = rows.to_vec();
+        let origins = [2u16];
+        // Screen cols 2..=6 (past the 2-col gutter) cover "hello".
+        let sel = Selection { anchor: p(0, 2), head: p(0, 6) };
+        assert_eq!(extract(&refs, &origins, 20, sel), "hello");
+    }
+
+    #[test]
+    fn extract_gutter_anchored_selection_starts_at_the_first_text_cell() {
+        // A selection that starts IN the gutter (screen col 0, before the
+        // row's text starts at col `origin`) must not copy blank gutter
+        // cells — it behaves as if it started at the first text cell.
+        let rows = ["hello"];
+        let refs: Vec<&str> = rows.to_vec();
+        let origins = [2u16];
+        let sel = Selection { anchor: p(0, 0), head: p(0, 3) }; // screen cols 0..=3
+        // origin 2 pulls the start to col 2 → text cols 0..=1 → "he".
+        assert_eq!(extract(&refs, &origins, 20, sel), "he");
+    }
+
+    #[test]
+    fn extract_row_wholly_inside_the_gutter_is_an_empty_line_not_skipped() {
+        // Row 0 is ordinary; row 1's selected span (head col 1, origin 2) is
+        // entirely gutter. The empty line for row 1 must still be emitted —
+        // not omitted — so the copied text keeps one line per selected row,
+        // matching what the highlight painted.
+        let rows = ["story line", "meta line"];
+        let refs: Vec<&str> = rows.to_vec();
+        let origins = [0u16, 2u16];
+        let sel = Selection { anchor: p(0, 0), head: p(1, 1) };
+        let out = extract(&refs, &origins, 20, sel);
+        let lines: Vec<&str> = out.split('\n').collect();
+        assert_eq!(lines, vec!["story line", ""]);
     }
 
     #[test]
