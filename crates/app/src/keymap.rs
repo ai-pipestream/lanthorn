@@ -23,12 +23,29 @@ pub enum Context {
 // ── KeySpec ────────────────────────────────────────────────────────────────────
 
 /// A parsed keystroke: key code plus modifier flags.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+///
+/// Equality is **canonical**, not field-by-field (SQ-0653): a spec parsed from
+/// config text and the live crossterm event it is meant to match describe the
+/// same keystroke differently, and a raw field comparison made whole classes of
+/// binding unmatchable. See [`KeySpec::canonical`].
+#[derive(Clone, Copy, Debug)]
 pub struct KeySpec {
     pub code: KeyCode,
     pub ctrl: bool,
     pub shift: bool,
     pub alt: bool,
+}
+
+/// Uppercase `c` when that is a single character; otherwise leave it alone.
+///
+/// `char::to_uppercase` is a 1→N mapping ('ß' → "SS"), and a key spec holds one
+/// `char` — so a multi-char expansion has no canonical form and stays as it is.
+fn upper1(c: char) -> char {
+    let mut it = c.to_uppercase();
+    match (it.next(), it.next()) {
+        (Some(u), None) => u,
+        _ => c,
+    }
 }
 
 impl KeySpec {
@@ -40,6 +57,44 @@ impl KeySpec {
             shift: k.modifiers.contains(KeyModifiers::SHIFT),
             alt: k.modifiers.contains(KeyModifiers::ALT),
         }
+        .canonical()
+    }
+
+    /// The canonical form of this keystroke — the single representation both a
+    /// config-parsed spec and a live terminal event reduce to (SQ-0653).
+    ///
+    /// Three rules, applied symmetrically to *both* sides of every comparison:
+    ///
+    /// - **Letters carry their shift in the case.** `FromStr` lowercases the
+    ///   whole spec, so `"shift+s"` parsed to `Char('s')` + shift while every
+    ///   terminal delivers `Char('S')` + SHIFT — the binding could never match.
+    ///   Canonically a shifted letter is uppercase *and* keeps `shift`, so both
+    ///   spellings (and a bare `"S"`) meet at `Char('S')` + shift.
+    /// - **Other characters drop shift.** A terminal reports the *produced*
+    ///   character, so Shift+`=` arrives as `Char('+')` + SHIFT while the spec
+    ///   `"+"` has no modifier; the shift is already encoded in the glyph.
+    /// - **Tab encodes shift as `BackTab`.** `"shift+tab"` and `"backtab"` both
+    ///   parse to `BackTab`, but terminals deliver `BackTab` *with* SHIFT set —
+    ///   so the flag is stripped, and a `Tab` + shift event folds to `BackTab`.
+    ///
+    /// Ctrl and Alt are untouched: they never change the character a terminal
+    /// reports.
+    pub fn canonical(self) -> KeySpec {
+        let KeySpec { code, ctrl, shift, alt } = self;
+        let (code, shift) = match code {
+            KeyCode::Char(c) if c.is_alphabetic() => {
+                if shift || c.is_uppercase() {
+                    (KeyCode::Char(upper1(c)), true)
+                } else {
+                    (KeyCode::Char(c), false)
+                }
+            }
+            KeyCode::Char(c) => (KeyCode::Char(c), false),
+            KeyCode::BackTab => (KeyCode::BackTab, false),
+            KeyCode::Tab if shift => (KeyCode::BackTab, false),
+            other => (other, shift),
+        };
+        KeySpec { code, ctrl, shift, alt }
     }
 
     /// Human-readable label for the hint bar / help screen.
@@ -79,7 +134,27 @@ impl KeySpec {
         s.push_str(&key_str);
         s
     }
+
+    /// The tuple two specs are compared on: canonical code + modifier flags.
+    fn eq_key(&self) -> (KeyCode, bool, bool, bool) {
+        let c = self.canonical();
+        (c.code, c.ctrl, c.shift, c.alt)
+    }
 }
+
+/// Canonical equality (SQ-0653). Implemented by hand rather than derived so that
+/// EVERY comparison site — `KeyMap::lookup`, the `resolve` de-dup `retain`, the
+/// run loop's hotkey-prefix check — normalizes both sides, instead of each site
+/// having to remember to. It is a proper equivalence relation (equality of
+/// `canonical()`), so the `Eq` below is sound. `KeySpec` deliberately derives no
+/// `Hash`: a hash would have to hash the canonical form to stay consistent.
+impl PartialEq for KeySpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.eq_key() == other.eq_key()
+    }
+}
+
+impl Eq for KeySpec {}
 
 impl std::str::FromStr for KeySpec {
     type Err = String;
@@ -169,7 +244,11 @@ impl std::str::FromStr for KeySpec {
             other => return Err(format!("unknown key token: '{other}'")),
         };
 
-        Ok(KeySpec { code, ctrl, shift, alt })
+        // Canonicalize on the way out (SQ-0653): the spec text was lowercased
+        // wholesale above, so "shift+s" would otherwise store Char('s') and never
+        // match the Char('S') + SHIFT the terminal delivers. Storing the canonical
+        // form also keeps `label()` honest ("Shift+S", not "Shift+s").
+        Ok(KeySpec { code, ctrl, shift, alt }.canonical())
     }
 }
 
@@ -554,6 +633,63 @@ mod tests {
         assert_eq!("space".parse::<KeySpec>().unwrap().code, KeyCode::Char(' '));
         assert!("nope".parse::<KeySpec>().is_err());
         assert_eq!("ctrl+s".parse::<KeySpec>().unwrap().label(), "Ctrl+S");
+    }
+
+    // ── SQ-0653: shifted bindings must match the events terminals deliver ──────
+
+    /// `FromStr` lowercases the whole spec, so "shift+d" used to store
+    /// `Char('d')` + shift while crossterm delivers `Char('D')` + SHIFT — the
+    /// binding could never fire. Canonical equality folds both to `Char('D')`.
+    #[test]
+    fn shift_letter_spec_matches_the_uppercase_event_a_terminal_sends() {
+        let spec: KeySpec = "shift+d".parse().unwrap();
+        let event = KeySpec::from_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        assert_eq!(spec, event, "'shift+d' must match Char('D') + SHIFT");
+        // Some terminals (and Caps Lock) send the capital with no SHIFT flag.
+        let bare_capital = KeySpec::from_key_event(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE));
+        assert_eq!(spec, bare_capital, "'shift+d' must match a bare Char('D')");
+        // …and a plain lowercase 'd' is still a DIFFERENT key.
+        let plain = KeySpec::from_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_ne!(spec, plain, "'shift+d' must not swallow a plain 'd'");
+        // The binding resolves through a real KeyMap lookup, not just ==.
+        let km = KeyMap {
+            bindings: vec![(spec, "tidy-map".to_string(), Context::Global)],
+        };
+        assert_eq!(km.lookup(&event, Context::Global), Some("tidy-map"));
+        assert_eq!(spec.label(), "Shift+D");
+    }
+
+    /// Both spellings of Shift+Tab must match `BackTab` whether or not the
+    /// terminal also sets SHIFT (most do; the spec forms never did).
+    #[test]
+    fn shift_tab_and_backtab_specs_match_backtab_with_or_without_shift() {
+        let with_shift = KeySpec::from_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        let without = KeySpec::from_key_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        for text in ["shift+tab", "backtab"] {
+            let spec: KeySpec = text.parse().unwrap();
+            assert_eq!(spec, with_shift, "'{text}' must match BackTab + SHIFT");
+            assert_eq!(spec, without, "'{text}' must match a bare BackTab");
+            let km = KeyMap { bindings: vec![(spec, "toggle-focus".to_string(), Context::Global)] };
+            assert_eq!(km.lookup(&with_shift, Context::Global), Some("toggle-focus"));
+            assert_eq!(spec.label(), "Shift+Tab");
+        }
+        // A terminal that reports Tab + SHIFT instead of BackTab lands there too.
+        let tab_shift = KeySpec::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!("shift+tab".parse::<KeySpec>().unwrap(), tab_shift);
+        // Plain Tab stays plain Tab.
+        let tab = KeySpec::from_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_ne!("shift+tab".parse::<KeySpec>().unwrap(), tab);
+    }
+
+    /// A punctuation key already encodes its shift in the glyph the terminal
+    /// reports, so the stray SHIFT flag must not defeat a plain "+" binding.
+    #[test]
+    fn punctuation_specs_ignore_the_shift_flag_the_terminal_adds() {
+        let spec: KeySpec = "+".parse().unwrap();
+        let plus_shifted = KeySpec::from_key_event(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::SHIFT));
+        assert_eq!(spec, plus_shifted, "Shift+= delivers Char('+') + SHIFT");
+        let km = KeyMap::default();
+        assert_eq!(km.lookup(&plus_shifted, Context::Anim), Some("zoom-map in"));
     }
 
     // Task 3a: default keymap matches today's bindings

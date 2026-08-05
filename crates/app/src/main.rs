@@ -5,7 +5,9 @@
 use std::io::stdout;
 use std::time::Duration;
 
-use crossterm::event::{poll, read, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
+use crossterm::event::{
+    poll, read, DisableBracketedPaste, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, LeaveAlternateScreen};
 use mapper::mapper::Mapper;
@@ -133,9 +135,14 @@ fn restore_terminal() {
     // Mode 1016 (pixel mouse reporting) is terminal state that outlives us, and
     // DisableMouseCapture does not clear it — a shell left in PixelMode would hand
     // pixel coordinates to the next program that reads the mouse. (SQ-0563)
+    // DisableBracketedPaste for the same reason as the pixel-mouse reset: the mode
+    // outlives us, and a shell left in bracketed-paste mode hands the next program
+    // `ESC[200~`-wrapped pastes it never asked for. Idempotent and safe when it was
+    // never enabled. (SQ-0653)
     let _ = execute!(
         stdout(),
         crossterm::style::Print(app::pixel_mouse::RESET),
+        DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     );
@@ -205,9 +212,20 @@ fn install_termination_handlers() {
         // best-effort save the wedged loop cannot run anyway.
         let wflag = std::sync::Arc::clone(&flag);
         std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::thread::sleep(std::time::Duration::from_millis(TERM_WATCHDOG_POLL_MS));
             if wflag.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(std::time::Duration::from_millis(TERM_WATCHDOG_GRACE_MS));
+                // The fixed grace alone could fire mid-save and lose the exit
+                // auto-save outright (SQ-0644): a large archive on a slow disk
+                // takes longer than 600ms, and the loop that IS making progress
+                // looks identical to a wedged one from out here. Keep waiting
+                // while the save is actively running, up to a hard cap so a save
+                // that itself hangs can never keep the process alive.
+                let mut waited = TERM_WATCHDOG_GRACE_MS;
+                while watchdog_should_keep_waiting(waited, exit_save_in_progress()) {
+                    std::thread::sleep(std::time::Duration::from_millis(TERM_WATCHDOG_POLL_MS));
+                    waited += TERM_WATCHDOG_POLL_MS;
+                }
                 restore_terminal();
                 std::process::exit(term_exit_code());
             }
@@ -220,6 +238,52 @@ fn install_termination_handlers() {
 /// force-exits, giving a responsive interactive loop time to run its auto-save and
 /// exit cleanly first.
 const TERM_WATCHDOG_GRACE_MS: u64 = 600;
+
+/// How often the termination watchdog wakes, both while waiting for the flag and
+/// while extending the grace for an in-progress exit save.
+const TERM_WATCHDOG_POLL_MS: u64 = 50;
+
+/// Hard cap on the watchdog's total wait after a termination signal, however
+/// busy the exit save looks. A save that hangs must not keep the process alive
+/// after its terminal is gone (the whole point of the watchdog); 10s is far more
+/// than a real archive write needs and far less than "lingering forever".
+const TERM_WATCHDOG_HARD_CAP_MS: u64 = 10_000;
+
+/// Whether the termination watchdog should extend its grace for another tick:
+/// only while an exit auto-save is actively writing, and never past the hard cap.
+/// (SQ-0651 / partial SQ-0644.)
+fn watchdog_should_keep_waiting(waited_ms: u64, save_in_progress: bool) -> bool {
+    save_in_progress && waited_ms < TERM_WATCHDOG_HARD_CAP_MS
+}
+
+/// Set while an exit auto-save is actively writing. Read by the termination
+/// watchdog (so it does not kill a save in flight) and by the error-exit paths
+/// (so an exit save cannot re-enter itself).
+static EXIT_SAVE_IN_PROGRESS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// True while an exit auto-save is running.
+fn exit_save_in_progress() -> bool {
+    EXIT_SAVE_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// RAII marker for the duration of an exit auto-save. Held by
+/// [`lifecycle::exit_auto_save`]; clears on drop, including on an unwind, so a
+/// panicking save cannot leave the watchdog waiting for the hard cap.
+pub(crate) struct ExitSaveGuard;
+
+impl ExitSaveGuard {
+    pub(crate) fn new() -> ExitSaveGuard {
+        EXIT_SAVE_IN_PROGRESS.store(true, std::sync::atomic::Ordering::SeqCst);
+        ExitSaveGuard
+    }
+}
+
+impl Drop for ExitSaveGuard {
+    fn drop(&mut self) {
+        EXIT_SAVE_IN_PROGRESS.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 
 /// The signal number of the external termination signal that fired (0 until one
 /// does). Drives the conventional `128 + signum` exit code.
@@ -281,8 +345,61 @@ fn exit_if_terminated_saving(
     }
 }
 
-/// Install a panic hook that restores the terminal, writes the panic and a
-/// backtrace to a durable `crash.log`, and then prints the panic message.
+/// Whether a panic on the currently-panicking thread is FATAL to the session —
+/// the only case in which the panic hook may tear the terminal down (SQ-0649).
+///
+/// Every worker thread the app spawns is *recovered*: each `join()` in the
+/// production paths handles the `Err` case and the session plays on (the map
+/// render worker in `state.rs::poll_render_job`, the background tidy and
+/// anim-build workers in `loop_tick.rs`, the v6 encode worker in
+/// `render/graphics.rs::poll_v6_job`), and the never-joined service workers
+/// (cover decode, IFDB search/fetch, hint download, the boot spinner, the
+/// termination watchdog) simply close their channel, which every reader treats
+/// as "no more results". Tearing the terminal down for one of those left the app
+/// drawing frames onto a cooked normal screen — the game still running, the
+/// display wrecked, and a "babelmap crashed" banner over a session that had not.
+///
+/// So: the main thread's panic is fatal (it unwinds out of the event loop and
+/// ends the process); no other thread's is. `main` is `None` only if the id was
+/// never captured, where the safe answer is the old behavior.
+fn panic_is_fatal(panicking: std::thread::ThreadId, main: Option<std::thread::ThreadId>) -> bool {
+    main.is_none_or(|m| panicking == m)
+}
+
+/// The main thread's id, captured when the panic hook is installed. Read by the
+/// hook to tell a fatal panic from a recovered worker's (see [`panic_is_fatal`]).
+static MAIN_THREAD: std::sync::OnceLock<std::thread::ThreadId> = std::sync::OnceLock::new();
+
+/// Guard so the hook is installed exactly ONCE per process (SQ-0649). `boot_story`
+/// runs again for every story the picker→play loop launches, and `set_hook` chains
+/// the previous hook in as `default_hook` — so the Nth boot's panic wrote N
+/// duplicate `crash.log` records and printed N stderr lines.
+static PANIC_HOOK_ONCE: std::sync::Once = std::sync::Once::new();
+
+/// Run the exit auto-save from an *error* exit (a failed draw / read / poll):
+/// the terminal broke, but the engine is intact and the player's progress is
+/// still saveable, so these paths must persist it like every other exit does
+/// (SQ-0651).
+///
+/// Skipped when an exit save is already running: the only way to arrive here
+/// while that is true is from inside the save itself, and re-entering it would
+/// recurse (and rewrite the archive) instead of exiting.
+fn exit_save_on_error_exit(
+    session: &mut dyn Engine,
+    mapper: &Mapper,
+    state: &app::state::AppState,
+    ifid: &str,
+    arc_file: &std::path::Path,
+) {
+    if exit_save_in_progress() {
+        return;
+    }
+    lifecycle::exit_auto_save(session, mapper, state, ifid, arc_file);
+}
+
+/// Install a panic hook that writes the panic and a backtrace to a durable
+/// `crash.log`, and — for a panic that is fatal to the session — restores the
+/// terminal and prints the panic message. Idempotent: only the first call installs.
 ///
 /// The durable file matters because the panic message is printed to stderr
 /// only *after* `LeaveAlternateScreen`, where the terminal's alternate-screen
@@ -290,24 +407,36 @@ fn exit_if_terminated_saving(
 /// visible trace. The log survives that teardown. (An abort — OOM, stack
 /// overflow, double-panic — bypasses this hook entirely and leaves no entry;
 /// an empty `crash.log` after a crash is itself evidence of an abort.)
+///
+/// A *recovered* worker panic still gets its `crash.log` record — the crash is
+/// real and worth diagnosing — but no teardown, no banner, and no chaining to the
+/// default hook, whose own stderr dump would land mid-frame on a live screen.
 fn install_panic_hook(user_dir: std::path::PathBuf) {
-    let default_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        restore_terminal();
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        let log_path = user_dir.join("crash.log");
-        let path = match write_crash_log(&log_path, info, &backtrace) {
-            Ok(()) => log_path,
-            // Fall back to the temp dir if the user dir isn't writable.
-            Err(_) => {
-                let tmp = std::env::temp_dir().join("babelmap-crash.log");
-                let _ = write_crash_log(&tmp, info, &backtrace);
-                tmp
+    PANIC_HOOK_ONCE.call_once(move || {
+        let _ = MAIN_THREAD.set(std::thread::current().id());
+        let default_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let fatal = panic_is_fatal(std::thread::current().id(), MAIN_THREAD.get().copied());
+            if fatal {
+                restore_terminal();
             }
-        };
-        eprintln!("babelmap crashed — details written to {}", path.display());
-        default_hook(info);
-    }));
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            let log_path = user_dir.join("crash.log");
+            let path = match write_crash_log(&log_path, info, &backtrace) {
+                Ok(()) => log_path,
+                // Fall back to the temp dir if the user dir isn't writable.
+                Err(_) => {
+                    let tmp = std::env::temp_dir().join("babelmap-crash.log");
+                    let _ = write_crash_log(&tmp, info, &backtrace);
+                    tmp
+                }
+            };
+            if fatal {
+                eprintln!("babelmap crashed — details written to {}", path.display());
+                default_hook(info);
+            }
+        }));
+    });
 }
 
 /// Append one panic record (message + backtrace) to `path`.
@@ -1010,6 +1139,135 @@ fn clear_terminal<B: ratatui::backend::Backend>(
     gr.invalidate_v6();
 }
 
+/// True when an armed deadline has come due. Extracted so the "is this clock
+/// due?" decision is testable on its own (SQ-0650). `None` = not armed.
+fn deadline_due(deadline: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    deadline.is_some_and(|dl| now >= dl)
+}
+
+/// Fire every game clock whose deadline has come due: the Z-machine timed-input
+/// interrupt, the Glulx Glk timer, sampled-sound finish routines / sound-notify,
+/// and Sound2 volume ramps + their volume-notify. Returns
+/// `(redraw_needed, should_quit)`.
+///
+/// **Runs once per loop iteration, on every path** (SQ-0650). This used to live
+/// inside the poll-timeout branch, which meant it only ran on a tick where NO
+/// terminal event arrived — so a mouse whose motion events keep `poll()`
+/// permanently "ready" froze every one of these clocks: a timed-input puzzle
+/// stopped counting down, a Glk timer stopped ticking, and a finished sound never
+/// ran its finish routine, for as long as the pointer kept moving. The loop top
+/// is the same safe point the timeout branch used (both sit between whole event
+/// dispatches, with nothing borrowed), so this is a move, not a new re-entrancy.
+///
+/// Each fired clock disarms itself before dispatching so an elapsed deadline
+/// cannot re-fire every iteration until the game re-arms it.
+fn dispatch_due_game_clocks(
+    state: &mut app::state::AppState,
+    mapper: &mut Mapper,
+    session: &mut dyn Engine,
+    game_dir: &std::path::Path,
+    map_rect: Rect,
+) -> (bool, bool) {
+    let mut redraw = false;
+    // Timed-input interrupt: the deadline elapsed with no key pressed. Run the
+    // game's interrupt routine and apply its output through the same path a
+    // char-mode keypress uses. If the read continues, the pre-input pollers
+    // re-arm the deadline next iteration from `pending_timeout()`; if the routine
+    // aborted the read, it returns `None` and the timer simply stops.
+    if deadline_due(state.input_deadline, std::time::Instant::now()) {
+        if let Some(zs) = zvm_session_opt_mut(session) {
+            let result = zs.run_timed_interrupt();
+            // Fired: disarm so the next armed iteration re-arms fresh at
+            // now + interval (otherwise the elapsed deadline would refire
+            // immediately every iteration).
+            state.input_deadline = None;
+            redraw = true; // interrupt ran → repaint any output
+            if turn::apply_game_driven_result(
+                state, mapper, &result, game_dir, map_rect, &*session, app::pager::Driver::Timeout,
+            ) {
+                return (redraw, true);
+            }
+        }
+    }
+    // Glulx Glk timer tick: the interval elapsed with no key pressed. Deliver an
+    // evtype_Timer to the game and apply its output; disarm so the next armed
+    // iteration re-arms fresh at now + interval (mirroring the guard above).
+    if deadline_due(state.glulx_timer_next_fire, std::time::Instant::now()) {
+        state.glulx_timer_next_fire = None;
+        redraw = true; // timer event delivered → repaint any output
+        if let Some(gs) = glulx_session_opt_mut(session) {
+            let result = gs.deliver_timer();
+            if turn::apply_game_driven_result(
+                state, mapper, &result, game_dir, map_rect, &*session, app::pager::Driver::Timeout,
+            ) {
+                return (redraw, true);
+            }
+        }
+    }
+    // Poll for finished sampled sounds and fire their finish-routines.
+    let done: Vec<u32> = state.audio.as_mut().map(|b| b.finished()).unwrap_or_default();
+    if !done.is_empty() {
+        redraw = true; // finish-routine output / channel state changed
+    }
+    for id in done {
+        // Always forget the number->id mapping for a finished sound, even one
+        // with no finish routine.
+        state.sound_ids.retain(|_, v| *v != id);
+        if let Some(routine) = state.sound_routines.remove(&id) {
+            if routine != 0 {
+                if let Some(zs) = zvm_session_opt_mut(session) {
+                    let result = zs.run_sound_finish(routine);
+                    if turn::apply_game_driven_result(
+                        state, mapper, &result, game_dir, map_rect, &*session, app::pager::Driver::Timeout,
+                    ) {
+                        return (redraw, true);
+                    }
+                }
+            }
+        }
+        // Glulx sound-notify: a finished channel delivers Evtype_SoundNotify.
+        if let Some((snd, notify)) = state.glulx_sound_notify.remove(&id) {
+            state.glulx_channels.retain(|_, v| *v != id);
+            if let Some(gs) = glulx_session_opt_mut(session) {
+                let result = gs.sound_notify(snd, notify);
+                if turn::apply_game_driven_result(
+                    state, mapper, &result, game_dir, map_rect, &*session, app::pager::Driver::Timeout,
+                ) {
+                    return (redraw, true);
+                }
+            }
+        }
+    }
+    // Glulx Sound2 volume-ramp completion: a gradual set_volume_ext whose
+    // duration has elapsed delivers an evtype_VolumeNotify. The host owns the
+    // ramp clock (mirroring the sound-finish notify above); deliver every due one.
+    let now = std::time::Instant::now();
+    // Step any in-flight Sound2 volume ramp toward its target (host owns the ramp
+    // clock). Pure audio — no redraw needed.
+    state.advance_volume_ramps(now);
+    let due_volume: Vec<(u32, u32)> = state
+        .glulx_volume_notify
+        .iter()
+        .filter(|(_, (deadline, _))| *deadline <= now)
+        .map(|(&chan, &(_, notify))| (chan, notify))
+        .collect();
+    if !due_volume.is_empty() {
+        redraw = true;
+    }
+    for (chan, notify) in due_volume {
+        state.glulx_volume_notify.remove(&chan);
+        if let Some(gs) = glulx_session_opt_mut(session) {
+            let result = gs.volume_notify(notify);
+            if turn::apply_game_driven_result(
+                state, mapper, &result, game_dir, map_rect, &*session, app::pager::Driver::Timeout,
+            ) {
+                return (redraw, true);
+            }
+        }
+    }
+    (redraw, false)
+}
+
 fn main() {
     // ── ONE-TIME setup ────────────────────────────────────────────────────────
     // Register termination-signal handlers before any raw-mode entry (the picker
@@ -1134,11 +1392,34 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
     // draw, not the tick.
     let mut needs_redraw = true;
 
+    // Deferred warning from the quit dialog's "Save State & quit" (SQ-0651).
+    // Printed after `restore_terminal()` below, where the user can actually read
+    // it — the dialog is the last frame the alternate screen ever shows.
+    let mut quit_save_warning: Option<String> = None;
+
     let outcome: RunOutcome = 'event_loop: loop {
         // Restore the terminal + auto-save + exit if an external termination signal
         // arrived (SIGTERM/SIGHUP/out-of-band SIGINT); the poll below wakes at least
         // every ~50ms, so this is checked promptly.
         exit_if_terminated_saving(&mut *session, &mapper, &state, &ifid, &arc_file);
+
+        // ── Game clocks (SQ-0650) ─────────────────────────────────────────────
+        // Timed-input interrupts, Glk timer events, sound finish-routines and
+        // Sound2 volume-notify used to be dispatched only from the poll-TIMEOUT
+        // branch below — so with mouse capture on, a moving pointer kept `poll()`
+        // permanently ready and the game's clocks stopped dead. They run here
+        // instead, once per iteration, on every path. (The timeout branch reached
+        // this same point via its `continue`, so the ordering is unchanged for the
+        // idle case that already worked.)
+        {
+            let (redraw, quit) = dispatch_due_game_clocks(
+                &mut state, &mut mapper, &mut *session, &game_dir, last_panes.map,
+            );
+            needs_redraw |= redraw;
+            if quit {
+                break 'event_loop state.exit_target.into();
+            }
+        }
 
         // ── Pre-input pollers (SQ-0306) ───────────────────────────────────────
         // The per-iteration housekeeping that runs BEFORE the draw/poll: each
@@ -1206,6 +1487,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             Err(e) => {
                 restore_terminal();
                 eprintln!("babelmap: draw error: {}", e);
+                // The engine is intact — only the terminal write failed — so the
+                // turn the player just took is still saveable. Without this, an
+                // error exit silently dropped it while every other exit path
+                // (clean quit, signal) saved. (SQ-0651)
+                exit_save_on_error_exit(&mut *session, &mapper, &state, &ifid, &arc_file);
                 std::process::exit(1);
             }
         }
@@ -1260,6 +1546,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 exit_if_terminated_saving(&mut *session, &mapper, &state, &ifid, &arc_file);
                 restore_terminal();
                 eprintln!("babelmap: poll error: {}", e);
+                // Same reasoning as the draw/read error exits: the terminal died,
+                // the engine did not. (SQ-0651)
+                exit_save_on_error_exit(&mut *session, &mapper, &state, &ifid, &arc_file);
                 std::process::exit(1);
             }
         };
@@ -1278,110 +1567,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 app::input::apply_selection_autoscroll(&mut state);
                 needs_redraw = true;
             }
-            // Timed-input interrupt: the deadline elapsed with no key pressed. Run
-            // the game's interrupt routine and apply its output through the same
-            // path a char-mode keypress uses; the next loop iteration redraws
-            // unconditionally, so no explicit redraw flag is needed. If the read
-            // continues, Step 2 above re-arms the deadline next iteration from
-            // `pending_timeout()`; if the routine aborted the read, it returns
-            // `None` and the timer simply stops.
-            if let Some(dl) = state.input_deadline {
-                if std::time::Instant::now() >= dl {
-                    if let Some(zs) = zvm_session_opt_mut(&mut *session) {
-                        let result = zs.run_timed_interrupt();
-                        // Fired: disarm so the next armed iteration re-arms fresh at
-                        // now + interval (otherwise the elapsed deadline would refire
-                        // immediately every iteration).
-                        state.input_deadline = None;
-                        needs_redraw = true; // interrupt ran → repaint any output
-                        if turn::apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::Timeout,
-                        ) {
-                            break 'event_loop state.exit_target.into();
-                        }
-                    }
-                }
-            }
-            // Glulx Glk timer tick: the interval elapsed with no key pressed.
-            // Deliver an evtype_Timer to the game and apply its output; disarm so
-            // the next armed iteration re-arms fresh at now + interval (mirroring
-            // the input-deadline refire guard above).
-            if let Some(dl) = state.glulx_timer_next_fire {
-                if std::time::Instant::now() >= dl {
-                    state.glulx_timer_next_fire = None;
-                    needs_redraw = true; // timer event delivered → repaint any output
-                    if let Some(gs) = glulx_session_opt_mut(&mut *session) {
-                        let result = gs.deliver_timer();
-                        if turn::apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::Timeout,
-                        ) {
-                            break 'event_loop state.exit_target.into();
-                        }
-                    }
-                }
-            }
-            // Poll for finished sampled sounds and fire their finish-routines.
-            let done: Vec<u32> = state.audio.as_mut().map(|b| b.finished()).unwrap_or_default();
-            if !done.is_empty() {
-                needs_redraw = true; // finish-routine output / channel state changed
-            }
-            for id in done {
-                // Always forget the number->id mapping for a finished sound, even
-                // one with no finish routine.
-                state.sound_ids.retain(|_, v| *v != id);
-                if let Some(routine) = state.sound_routines.remove(&id) {
-                    if routine != 0 {
-                        if let Some(zs) = zvm_session_opt_mut(&mut *session) {
-                            let result = zs.run_sound_finish(routine);
-                            if turn::apply_game_driven_result(
-                                &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::Timeout,
-                            ) {
-                                break 'event_loop state.exit_target.into();
-                            }
-                        }
-                    }
-                }
-                // Glulx sound-notify: a finished channel delivers Evtype_SoundNotify.
-                if let Some((snd, notify)) = state.glulx_sound_notify.remove(&id) {
-                    state.glulx_channels.retain(|_, v| *v != id);
-                    if let Some(gs) = glulx_session_opt_mut(&mut *session) {
-                        let result = gs.sound_notify(snd, notify);
-                        if turn::apply_game_driven_result(
-                            &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::Timeout,
-                        ) {
-                            break 'event_loop state.exit_target.into();
-                        }
-                    }
-                }
-            }
-            // Glulx Sound2 volume-ramp completion: a gradual set_volume_ext whose
-            // duration has elapsed delivers an evtype_VolumeNotify. The host owns
-            // the ramp clock (mirroring the sound-finish notify above); deliver every
-            // due one, newest-driven output redrawn next iteration.
-            let now = std::time::Instant::now();
-            // Step any in-flight Sound2 volume ramp toward its target (host owns
-            // the ramp clock). Pure audio — no redraw needed.
-            state.advance_volume_ramps(now);
-            let due_volume: Vec<(u32, u32)> = state
-                .glulx_volume_notify
-                .iter()
-                .filter(|(_, (deadline, _))| *deadline <= now)
-                .map(|(&chan, &(_, notify))| (chan, notify))
-                .collect();
-            if !due_volume.is_empty() {
-                needs_redraw = true;
-            }
-            for (chan, notify) in due_volume {
-                state.glulx_volume_notify.remove(&chan);
-                if let Some(gs) = glulx_session_opt_mut(&mut *session) {
-                    let result = gs.volume_notify(notify);
-                    if turn::apply_game_driven_result(
-                        &mut state, &mut mapper, &result, &game_dir, last_panes.map, &*session, app::pager::Driver::Timeout,
-                    ) {
-                        break 'event_loop state.exit_target.into();
-                    }
-                }
-            }
+            // Game clocks (timed input, Glk timer, sound finish/notify, volume
+            // ramps) are dispatched at the LOOP TOP now, on every path, so a
+            // stream of mouse events can no longer freeze them (SQ-0650).
             // No key this tick — advance the tidy animation if one is playing. The next loop
             // iteration redraws, so an advanced frame appears without waiting for input.
             if let Some(anim) = &mut state.tidy_anim {
@@ -1449,6 +1637,8 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             Err(e) => {
                 restore_terminal();
                 eprintln!("babelmap: read error: {}", e);
+                // Input is gone, but the engine is not: keep the progress. (SQ-0651)
+                exit_save_on_error_exit(&mut *session, &mapper, &state, &ifid, &arc_file);
                 std::process::exit(1);
             }
         };
@@ -1475,6 +1665,18 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         // redraw so the whole burst collapses into a single frame. Cleared at
         // the draw gate once the queue empties (poll(ZERO) == false).
         skip_draw = poll(Duration::ZERO).unwrap_or(false);
+
+        // ── Bracketed paste (SQ-0653) ─────────────────────────────────────────
+        // Handled BEFORE every intercept below: pasted text is data, not
+        // keystrokes, so it must not reach the char-mode gate (which would feed it
+        // to the story a character at a time), the '/'-opens-the-palette rule, or
+        // an overlay's key handler. It lands as literal characters in whatever
+        // text field currently owns typing and does NOT submit — the user reads it
+        // back and presses Enter.
+        if let Event::Paste(text) = &event {
+            app::input::apply_paste(&mut state, text);
+            continue;
+        }
 
         // ── Common-dialog overlay intercept ladder (SQ-0307) ──────────────────
         // The aux / reset / save-name / text-entry / confirm-delete / quit /
@@ -1600,7 +1802,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         // library; the target (Exit vs Library) was set when the
                         // dialog opened. (SQ-0435)
                         state.overlays.quit_dialog = false;
-                        lifecycle::quit_dialog_save(&mut *session, &mapper, &state, &ifid, &arc_file);
+                        // A failed save here is the user's own explicit "Save State
+                        // & quit"; carry the reason out so it can be printed once
+                        // the terminal is back (SQ-0651).
+                        quit_save_warning =
+                            lifecycle::quit_dialog_save(&mut *session, &mapper, &state, &ifid, &arc_file);
                         break 'event_loop state.exit_target.into();
                     }
                     OverlayAct::QuitQuit => {
@@ -2785,6 +2991,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             // nothing but the bytes.
                             if let Some(ac) = ac {
                                 state.ingame_io = None;
+                                state.pending_filename = None;
                                 apply_archive_state(*ac, &mut *session, &mut mapper, &mut state);
                             }
                             reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
@@ -2792,6 +2999,10 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         }
                         Ok(RestoreOutcome::Resumed(ac)) => {
                             state.ingame_io = None;
+                            // A restore abandons any suspended create_by_prompt in the
+                            // session, so the host-side request must not outlive it and
+                            // fire a spurious resume_filename turn.
+                            state.pending_filename = None;
                             apply_archive_state(*ac, &mut *session, &mut mapper, &mut state);
                             // Re-observe current location.
                             reobserve_location(&mut state, &mut mapper, &*session, last_panes.map);
@@ -2993,6 +3204,12 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
 
     restore_terminal();
     report_captured_stderr();
+
+    // "Save State & quit" that could not save: say so now that stderr reaches the
+    // user's terminal again (SQ-0651).
+    if let Some(w) = &quit_save_warning {
+        eprintln!("{w}");
+    }
 
     lifecycle::exit_auto_save(&mut *session, &mapper, &state, &ifid, &arc_file);
 
@@ -3346,6 +3563,132 @@ mod tests {
 
     use super::{dim_area, is_slash, scroll_for_match, should_prompt_save_on_quit};
     use app::render::paneframe::{draw_pane_frame, draw_top_inset, InsetCaps, InsetSegment, PaneGlyphs};
+
+    // ── SQ-0649: the panic hook must not tear down a live session ──────────────
+
+    /// A recovered worker's panic must not restore the terminal (which would
+    /// leave the still-running loop drawing onto a cooked normal screen) nor
+    /// print a "crashed" banner over a session that is very much alive. Only the
+    /// main thread's panic — the one that unwinds out of the event loop and ends
+    /// the process — is fatal.
+    #[test]
+    fn only_the_main_threads_panic_tears_the_terminal_down() {
+        let main_id = std::thread::current().id();
+        let worker_id = std::thread::spawn(|| std::thread::current().id())
+            .join()
+            .expect("worker returns its id");
+        assert_ne!(main_id, worker_id, "the ids must actually differ");
+
+        assert!(
+            super::panic_is_fatal(main_id, Some(main_id)),
+            "a main-thread panic ends the process: restore the terminal"
+        );
+        assert!(
+            !super::panic_is_fatal(worker_id, Some(main_id)),
+            "a recovered worker panic must leave the live session's terminal alone"
+        );
+        // Id never captured (hook somehow ran before install): fail safe.
+        assert!(super::panic_is_fatal(worker_id, None));
+    }
+
+    // ── SQ-0651 / SQ-0644: the watchdog must not kill an exit save in flight ───
+
+    #[test]
+    fn watchdog_extends_its_grace_only_while_a_save_is_running() {
+        use super::{watchdog_should_keep_waiting, TERM_WATCHDOG_GRACE_MS, TERM_WATCHDOG_HARD_CAP_MS};
+        // Nothing saving: the fixed grace has expired, exit now.
+        assert!(!watchdog_should_keep_waiting(TERM_WATCHDOG_GRACE_MS, false));
+        // A save actively writing past the grace: keep waiting rather than
+        // killing the process mid-write and losing it.
+        assert!(watchdog_should_keep_waiting(TERM_WATCHDOG_GRACE_MS, true));
+        assert!(watchdog_should_keep_waiting(TERM_WATCHDOG_HARD_CAP_MS - 1, true));
+        // …but never past the hard cap: a hung save must not keep a process alive
+        // after its terminal is gone.
+        assert!(!watchdog_should_keep_waiting(TERM_WATCHDOG_HARD_CAP_MS, true));
+        assert!(!watchdog_should_keep_waiting(TERM_WATCHDOG_HARD_CAP_MS + 5_000, true));
+        // The cap must leave room beyond the fixed grace, or the extension is a
+        // no-op; both are consts, so this is checked at compile time.
+        const { assert!(TERM_WATCHDOG_HARD_CAP_MS > TERM_WATCHDOG_GRACE_MS) };
+    }
+
+    // ── SQ-0650: game clocks must not be starved by a busy event stream ────────
+
+    #[test]
+    fn deadline_due_only_once_armed_and_elapsed() {
+        let now = std::time::Instant::now();
+        assert!(!super::deadline_due(None, now), "not armed: never due");
+        assert!(
+            super::deadline_due(Some(now - std::time::Duration::from_millis(1)), now),
+            "elapsed deadline is due"
+        );
+        assert!(super::deadline_due(Some(now), now), "exactly at the deadline is due");
+        assert!(
+            !super::deadline_due(Some(now + std::time::Duration::from_secs(1)), now),
+            "a future deadline is not due yet"
+        );
+    }
+
+    /// The Glulx timer arm of the clock dispatch, driven with a non-Glulx engine:
+    /// an elapsed deadline must DISARM and report a redraw regardless of which
+    /// engine is running, which is what makes the loop-top dispatch safe to run on
+    /// every path. (The engine-specific delivery is covered by the Glulx suites.)
+    #[test]
+    fn due_game_clocks_disarm_an_elapsed_glulx_timer() {
+        let mut state = app::state::AppState::default();
+        let mut mapper = mapper::mapper::Mapper::default();
+        let mut engine = ClocklessEngine;
+        state.glulx_timer_next_fire = Some(std::time::Instant::now() - std::time::Duration::from_millis(5));
+
+        let (redraw, quit) = super::dispatch_due_game_clocks(
+            &mut state,
+            &mut mapper,
+            &mut engine,
+            std::path::Path::new("/nonexistent"),
+            Rect::default(),
+        );
+        assert!(redraw, "a fired timer repaints");
+        assert!(!quit);
+        assert!(state.glulx_timer_next_fire.is_none(), "an elapsed deadline must disarm, not refire every tick");
+
+        // A future deadline is left alone.
+        let future = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        state.glulx_timer_next_fire = Some(future);
+        let (redraw, _) = super::dispatch_due_game_clocks(
+            &mut state,
+            &mut mapper,
+            &mut engine,
+            std::path::Path::new("/nonexistent"),
+            Rect::default(),
+        );
+        assert!(!redraw, "nothing due: no repaint");
+        assert_eq!(state.glulx_timer_next_fire, Some(future), "still armed");
+    }
+
+    /// Minimal engine that is neither a Z-machine nor a Glulx session, so the
+    /// clock dispatch's downcasts all miss. Only the engine-neutral bookkeeping
+    /// (disarm + redraw) is exercised.
+    struct ClocklessEngine;
+
+    impl app::engine::Engine for ClocklessEngine {
+        fn submit(&mut self, _command: &str) -> app::session::TurnResult { unreachable!() }
+        fn submit_key(&mut self, _key: app::engine::KeyInput) -> Option<app::session::TurnResult> { unreachable!() }
+        fn take_transcript(&mut self) -> String { unreachable!() }
+        fn pending_input(&self) -> app::session::InputKind { unreachable!() }
+        fn resume_save(&mut self, _wrote_ok: bool) -> app::session::TurnResult { unreachable!() }
+        fn resume_restore(&mut self, _data: Option<&[u8]>) -> app::session::TurnResult { unreachable!() }
+        fn has_quit(&self) -> bool { false }
+        fn screen(&self) -> app::engine::ScreenModel { unreachable!() }
+        fn save_state(&self) -> app::engine::EngineSave { unreachable!() }
+        fn restore_state(&mut self, _save: &app::engine::EngineSave) -> Result<(), app::engine::EngineError> { unreachable!() }
+        fn restore_game_save(&mut self, _bytes: &[u8]) -> Result<(), app::engine::EngineError> { unreachable!() }
+        fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> { unreachable!() }
+        fn set_aux_data(&mut self, _data: std::collections::BTreeMap<String, Vec<u8>>) {}
+        fn aux_dirty(&self) -> bool { false }
+        fn clear_aux_dirty(&mut self) {}
+        fn current_location(&self) -> Option<app::engine::LocationInfo> { None }
+        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    }
 
     // ── SQ-0502: termination-signal exit code ──────────────────────────────────
 

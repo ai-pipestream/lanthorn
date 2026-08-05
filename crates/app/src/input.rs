@@ -2748,6 +2748,115 @@ pub(crate) fn recompute_suggestions(state: &mut AppState) {
     state.suggestions = suggest(&state.dict_words, &room_words, &partial, SUGGESTION_LIMIT);
 }
 
+// ── Bracketed paste (SQ-0653) ─────────────────────────────────────────────────
+
+/// Flatten pasted text into something a single-line field can hold.
+///
+/// A paste is the terminal handing us a block of text; the fields it can land in
+/// are all single-line. Line breaks (`\r\n`, `\n`, `\r`) and tabs collapse to a
+/// single space each — a CRLF counts once — and every other control character is
+/// dropped. Nothing is trimmed: leading/trailing spaces are the user's, and a
+/// paste that is *only* whitespace still inserts that whitespace.
+///
+/// Newlines deliberately do NOT submit (SQ-0653). Before bracketed paste was
+/// enabled the terminal replayed a paste as keystrokes and every newline fired a
+/// turn — a multi-line paste played several moves before the player could look at
+/// it. The text now lands in the field and waits for Enter.
+pub fn sanitize_pasted_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next(); // CRLF is one break
+                }
+                out.push(' ');
+            }
+            '\n' | '\t' => out.push(' '),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Insert bracketed-paste text into whichever text field currently owns typing,
+/// as literal characters (SQ-0653). Returns true when the paste landed somewhere.
+///
+/// The priority order mirrors the run loop's own intercept ladder, so a paste
+/// goes exactly where the next typed character would have gone: the top-most open
+/// modal that HAS a field takes it, a modal without one swallows it (typing does
+/// nothing there either), and with nothing open it reaches the game's input line.
+/// Nothing here submits — the user reviews the text and presses Enter.
+pub fn apply_paste(state: &mut AppState, text: &str) -> bool {
+    let text = sanitize_pasted_text(text);
+    if text.is_empty() {
+        return false;
+    }
+    // Common-dialog ladder, in `overlays::topmost_common_dialog` order:
+    // aux ▸ reset/game-over ▸ save-name ▸ text-entry ▸ confirm-delete ▸ quit ▸ launch.
+    if state.overlays.aux_prompt || state.overlays.reset_dialog || state.overlays.game_over {
+        return false;
+    }
+    // Field slot only (focus 0) — a button-focused dialog ignores typing too.
+    let name_field_focused = state.overlays.dialog_focus == 0;
+    if let Some(dlg) = state.overlays.save_name_dialog.as_mut() {
+        if !name_field_focused {
+            return false;
+        }
+        if !dlg.active {
+            // Pasting onto the greyed placeholder replaces it, exactly as typing does.
+            dlg.field.set(String::new(), false);
+            dlg.active = true;
+        }
+        dlg.field.insert_str(&text);
+        return true;
+    }
+    if let Some(dlg) = state.overlays.text_entry.as_mut() {
+        dlg.field.insert_str(&text);
+        return true;
+    }
+    if state.overlays.confirm_delete_save.is_some()
+        || state.overlays.quit_dialog
+        || state.overlays.launch_dialog
+    {
+        return false;
+    }
+    // Hints panel: its own line buffer, ahead of the palette in the ladder.
+    if let Some(hs) = state.overlays.hints.as_mut() {
+        hs.input.push_str(&text);
+        return true;
+    }
+    let vp = state.modal_list_viewport;
+    let anim = state.config.animation.clone();
+    if let Some(p) = state.overlays.palette.as_mut() {
+        p.input.insert_str(&text);
+        // A changed query re-ranks the list; snap the selection to the top
+        // (mirrors `Action::PaletteChar`).
+        let len = crate::complete::palette_candidates(p.query()).len();
+        p.scroll.len(len);
+        p.scroll.select(0, vp, &anim);
+        return true;
+    }
+    // Any other MODAL overlay (saves manager, file browser, config screen, verb
+    // menu, replay, hotkey dialog, resize mode…) owns the keyboard but has no text
+    // field: swallow, rather than typing behind the modal. The corner overlays the
+    // modal test excludes (room panel, tidy animation) leave the story input line
+    // live, so a paste still reaches it there — same rule typing follows.
+    if state.any_modal_overlay_open() {
+        return false;
+    }
+    state.input.insert_str(&text);
+    // Same tail as `Action::InputChar`: a changed line re-ranks the completions.
+    if state.focus == Focus::Game {
+        recompute_suggestions(state);
+        state.suggestion_idx = 0;
+        state.suggestion_active = false;
+    }
+    true
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Apply a submitted text-entry dialog. Byte-identical to the retired
@@ -3018,7 +3127,7 @@ fn config_cycle(working: &mut crate::config::Config, row: usize, delta: i32) {
         // ← from 1 returns to "default"; → from "default" goes to 1.
         19 => {
             let pos = (working.interpreter_number.map(|n| n as i32).unwrap_or(0) + delta).clamp(0, 10);
-            working.interpreter_number = if pos == 0 { None } else { Some(pos as u8) };
+            working.set_interpreter_number(if pos == 0 { None } else { Some(pos as u8) });
         }
         20 => working.hint_skip_screen_warning = !working.hint_skip_screen_warning,
         24 => working.v6_arrow_keys = !working.v6_arrow_keys,
@@ -7293,4 +7402,91 @@ mod tests {
         );
     }
 
+
+    // ── SQ-0653: bracketed paste lands as literal text in the focused field ────
+
+    #[test]
+    fn sanitize_pasted_text_flattens_line_breaks_and_drops_controls() {
+        // CRLF counts once; bare \n and \r and tabs each become one space.
+        assert_eq!(super::sanitize_pasted_text("go north\r\nget lamp"), "go north get lamp");
+        assert_eq!(super::sanitize_pasted_text("a\nb\rc\td"), "a b c d");
+        // Other control characters (here: ESC and BEL) are dropped outright — a
+        // paste must never smuggle an escape sequence into a field.
+        assert_eq!(super::sanitize_pasted_text("ab\u{1b}[31mc\u{7}"), "ab[31mc");
+        // Whitespace is the user's; nothing is trimmed.
+        assert_eq!(super::sanitize_pasted_text("  x  "), "  x  ");
+        assert!(super::sanitize_pasted_text("").is_empty());
+    }
+
+    #[test]
+    fn paste_inserts_into_the_game_input_line_at_the_caret_without_submitting() {
+        let mut s = AppState::default();
+        s.input = crate::text_field::TextField::new("go ");
+        let turns_before = s.turns;
+
+        assert!(apply_paste(&mut s, "north"));
+        assert_eq!(s.input.value, "go north", "pasted text is inserted literally");
+        assert_eq!(s.input.cursor, 8, "the caret follows the pasted text");
+        assert_eq!(s.turns, turns_before, "a paste must NOT submit a turn");
+
+        // Mid-line insert honours the caret.
+        s.input.cursor = 3;
+        assert!(apply_paste(&mut s, "far "));
+        assert_eq!(s.input.value, "go far north");
+    }
+
+    #[test]
+    fn paste_with_newlines_never_submits_the_line_to_the_game() {
+        // The whole point of enabling bracketed paste: before it, a pasted
+        // walkthrough was replayed as keystrokes and every newline fired a turn.
+        let mut s = AppState::default();
+        assert!(apply_paste(&mut s, "north\nsouth\neast"));
+        assert_eq!(s.input.value, "north south east");
+        assert_eq!(s.turns, 0, "no turn was taken");
+    }
+
+    #[test]
+    fn paste_routes_to_the_topmost_modal_text_field() {
+        // Text-entry dialog (rename room, notes, …) owns typing while open.
+        let mut s = AppState::default();
+        s.overlays.text_entry = Some(crate::state::TextEntryDialog::new(
+            crate::state::TextEntryKind::RenameLayer(mapper::layer::MAIN_LAYER),
+            "Cave",
+        ));
+        assert!(apply_paste(&mut s, " of Wonders"));
+        assert_eq!(s.overlays.text_entry.as_ref().unwrap().field.value, "Cave of Wonders");
+        assert!(s.input.value.is_empty(), "the game line must not see the paste");
+
+        // Save-name dialog: pasting onto the greyed placeholder replaces it and
+        // activates the field, exactly as typing a character does.
+        let mut s = AppState::default();
+        s.overlays.save_name_dialog = Some(crate::state::SaveNameDialog::new("2026-01-01".into(), false));
+        assert!(apply_paste(&mut s, "before the troll"));
+        let d = s.overlays.save_name_dialog.as_ref().unwrap();
+        assert_eq!(d.field.value, "before the troll");
+        assert!(d.active, "the field is now being edited");
+
+        // Command palette: the paste edits its query and re-ranks the list.
+        let mut s = AppState::default();
+        s.overlays.palette = Some(crate::state::PaletteState::new(false));
+        assert!(apply_paste(&mut s, "tidy"));
+        assert_eq!(s.overlays.palette.as_ref().unwrap().input.value, "tidy");
+        assert_eq!(s.overlays.palette.as_ref().unwrap().scroll.selected, 0);
+    }
+
+    #[test]
+    fn paste_is_swallowed_by_a_modal_with_no_text_field() {
+        // The saves manager owns the keyboard but has nothing to type into;
+        // the paste must not leak onto the game line hidden behind it.
+        let mut s = AppState::default();
+        s.overlays.saves = Some(crate::state::SavesState { entries: Vec::new(), scroll: Default::default() });
+        assert!(!apply_paste(&mut s, "north"));
+        assert!(s.input.value.is_empty());
+
+        // Same for the quit confirmation.
+        let mut s = AppState::default();
+        s.overlays.quit_dialog = true;
+        assert!(!apply_paste(&mut s, "north"));
+        assert!(s.input.value.is_empty());
+    }
 }

@@ -35,6 +35,10 @@ pub(crate) fn exit_auto_save(
     if !state.config.auto_save || session.is_saveload_pending() {
         return;
     }
+    // Tell the termination watchdog a save is actively running so its fixed grace
+    // does not kill the process mid-write and lose it (SQ-0651 / partial SQ-0644).
+    // Held for the whole snapshot+write; cleared on drop, unwind included.
+    let _writing = crate::ExitSaveGuard::new();
     let (location, score) = crate::engine_helpers::save_summary(session, state);
     let exit_meta = app::archive::Meta {
         format_version: app::archive::CURRENT_FORMAT_VERSION,
@@ -71,15 +75,22 @@ pub(crate) fn exit_auto_save(
 /// restore (SQ-0283 carry-forward fix). The in-game save the player was already
 /// making is the relevant persistence in that case; the dialog still proceeds
 /// to quit either way.
+///
+/// Returns the failure message when the save the user explicitly asked for did
+/// not happen, so the caller can print it AFTER the terminal is restored (SQ-0651
+/// — this used to be `let _ =`, and "Save State & quit" quit silently with
+/// nothing saved). `None` on success and on the pending-save skip above, which is
+/// a deliberate no-op rather than a failure.
+#[must_use = "a failed Save State & quit must be reported to the user"]
 pub(crate) fn quit_dialog_save(
     session: &mut dyn Engine,
     mapper: &Mapper,
     state: &app::state::AppState,
     ifid: &str,
     arc_file: &std::path::Path,
-) {
+) -> Option<String> {
     if session.is_saveload_pending() {
-        return;
+        return None;
     }
     let (location, score) = crate::engine_helpers::save_summary(session, state);
     let meta = app::archive::Meta {
@@ -99,7 +110,14 @@ pub(crate) fn quit_dialog_save(
     };
     let (v6_pics, v6_display, v6_diags) = crate::engine_helpers::v6_save_payload(session);
     for d in &v6_diags { state.note_v6_save(d); }
-    let _ = app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref());
+    match app::archive::save_archive_meta_pics(arc_file, mapper, &session.save_state(), zvm_session_opt(session).map(|z| &z.machine.screen), session.aux_data(), meta, &state.transcript, &state.transcript_kinds, &state.transcript_runs, &state.transcript_para, &state.transcript_images, &state.history, &state.command_history, &v6_pics, v6_display.as_ref()) {
+        Ok(()) => None,
+        Err(e) => Some(format!(
+            "babelmap: warning: \"Save State & quit\" could not save to {}: {}",
+            arc_file.display(),
+            e
+        )),
+    }
 }
 
 // ── Pending config-write flush ────────────────────────────────────────────────
@@ -156,6 +174,119 @@ mod tests {
         fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
     }
 
+    /// Engine stand-in that CAN be snapshotted, so the archive write is actually
+    /// attempted. `saw_in_progress` records the exit-save flag as observed from
+    /// *inside* the save (the archive writer reads `aux_data` mid-write).
+    struct SnapshotableEngine {
+        aux: std::collections::BTreeMap<String, Vec<u8>>,
+        saw_in_progress: std::cell::Cell<bool>,
+    }
+
+    impl app::engine::Engine for SnapshotableEngine {
+        fn submit(&mut self, _command: &str) -> app::session::TurnResult { unreachable!() }
+        fn submit_key(&mut self, _key: app::engine::KeyInput) -> Option<app::session::TurnResult> { unreachable!() }
+        fn take_transcript(&mut self) -> String { unreachable!() }
+        fn pending_input(&self) -> app::session::InputKind { unreachable!() }
+        fn resume_save(&mut self, _wrote_ok: bool) -> app::session::TurnResult { unreachable!() }
+        fn resume_restore(&mut self, _data: Option<&[u8]>) -> app::session::TurnResult { unreachable!() }
+        fn has_quit(&self) -> bool { false }
+        fn screen(&self) -> app::engine::ScreenModel { unreachable!() }
+        fn save_state(&self) -> app::engine::EngineSave {
+            app::engine::EngineSave::new("test", 1, vec![1, 2, 3])
+        }
+        fn restore_state(&mut self, _save: &app::engine::EngineSave) -> Result<(), app::engine::EngineError> { unreachable!() }
+        fn restore_game_save(&mut self, _bytes: &[u8]) -> Result<(), app::engine::EngineError> { unreachable!() }
+        fn is_saveload_pending(&self) -> bool { false }
+        fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> {
+            if crate::exit_save_in_progress() {
+                self.saw_in_progress.set(true);
+            }
+            &self.aux
+        }
+        fn set_aux_data(&mut self, _data: std::collections::BTreeMap<String, Vec<u8>>) {}
+        fn aux_dirty(&self) -> bool { false }
+        fn clear_aux_dirty(&mut self) {}
+        fn current_location(&self) -> Option<app::engine::LocationInfo> { None }
+        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    }
+
+    impl SnapshotableEngine {
+        fn new() -> SnapshotableEngine {
+            SnapshotableEngine { aux: Default::default(), saw_in_progress: std::cell::Cell::new(false) }
+        }
+    }
+
+    #[test]
+    fn quit_dialog_save_reports_a_failed_write() {
+        // SQ-0651: "Save State & quit" is a save the user explicitly asked for.
+        // The call site used to be `let _ =`, so a failed write quit the app with
+        // no message and no save. The failure must come back as a message the run
+        // loop can print once the terminal is restored.
+        let mut engine = SnapshotableEngine::new();
+        let state = app::state::AppState::default();
+        let mapper = mapper::mapper::Mapper::default();
+        // A path whose parent is a FILE, not a directory: the write cannot succeed.
+        let blocker = std::env::temp_dir().join(format!("bm-quitsave-blocker-{}", std::process::id()));
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let arc_file = blocker.join("save.babelmap");
+
+        let warn = super::quit_dialog_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file)
+            .expect("a failed Save State & quit must report why");
+        assert!(
+            warn.contains("could not save"),
+            "the message must say the save failed: {warn}"
+        );
+        let _ = std::fs::remove_file(&blocker);
+    }
+
+    #[test]
+    fn quit_dialog_save_reports_nothing_when_the_write_succeeds() {
+        let mut engine = SnapshotableEngine::new();
+        let state = app::state::AppState::default();
+        let mapper = mapper::mapper::Mapper::default();
+        let arc_file = std::env::temp_dir().join(format!("bm-quitsave-ok-{}.babelmap", std::process::id()));
+        let _ = std::fs::remove_file(&arc_file);
+
+        let warn = super::quit_dialog_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file);
+        assert!(warn.is_none(), "a successful save reports nothing: {warn:?}");
+        assert!(arc_file.exists(), "the archive was written");
+        let _ = std::fs::remove_file(&arc_file);
+    }
+
+    /// SQ-0651 / partial SQ-0644: the termination watchdog's fixed 600ms grace
+    /// could kill the process mid exit-save. `exit_auto_save` must publish "a save
+    /// is running" for the whole write — observed here from INSIDE the save, via
+    /// the `aux_data` the archive writer calls mid-write — and clear it after.
+    ///
+    /// One test, not three: the flag is process-global, so separate tests
+    /// asserting "not running" would race each other under the parallel harness.
+    #[test]
+    fn exit_auto_save_publishes_its_progress_to_the_termination_watchdog() {
+        assert!(!crate::exit_save_in_progress(), "nothing running before");
+        {
+            let _g = crate::ExitSaveGuard::new();
+            assert!(crate::exit_save_in_progress(), "the watchdog must see the save running");
+        }
+        assert!(!crate::exit_save_in_progress(), "cleared on drop");
+
+        let mut engine = SnapshotableEngine::new();
+        let mut state = app::state::AppState::default();
+        state.config.auto_save = true;
+        let mapper = mapper::mapper::Mapper::default();
+        let arc_file = std::env::temp_dir().join(format!("bm-exitsave-flag-{}.babelmap", std::process::id()));
+        let _ = std::fs::remove_file(&arc_file);
+
+        super::exit_auto_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file);
+        assert!(
+            engine.saw_in_progress.get(),
+            "the flag must be set for the whole write, not just around it"
+        );
+        assert!(!crate::exit_save_in_progress(), "cleared once the save returns");
+        assert!(arc_file.exists());
+        let _ = std::fs::remove_file(&arc_file);
+    }
+
     #[test]
     fn exit_auto_save_skips_snapshot_while_a_save_is_pending() {
         // SQ-0283 carry-forward fix: a host save_state() snapshot captured while
@@ -193,7 +324,8 @@ mod tests {
 
         // Must not panic (save_state()/aux_data() are unreachable!()) and must not
         // write the archive file.
-        super::quit_dialog_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file);
+        let warn = super::quit_dialog_save(&mut engine, &mapper, &state, "ZCODE-1", &arc_file);
+        assert!(warn.is_none(), "a deliberate skip is not a failure to report");
 
         assert!(!arc_file.exists(), "quit-dialog save must not write while a save/restore is pending");
         let _ = std::fs::remove_file(&arc_file);

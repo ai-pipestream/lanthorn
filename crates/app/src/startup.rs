@@ -12,7 +12,7 @@
 
 use std::io::{stdout, Stdout};
 
-use crossterm::event::EnableMouseCapture;
+use crossterm::event::{EnableBracketedPaste, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
 use mapper::mapper::Mapper;
@@ -645,13 +645,14 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
         app::state::apply_transcript_elems(&mut state, &banner_elems);
     }
 
-    // A config.toml that doesn't parse is ignored WHOLESALE — TOML is one document, so
-    // a single stray character costs every setting in the file. Say so, with the error
-    // TOML reported, rather than letting the user wonder why their config has no effect
-    // (SQ-0580). Saving is refused while it's broken, so nothing overwrites it.
+    // A config.toml that doesn't load — bad syntax or a value of the wrong type — is
+    // ignored WHOLESALE: TOML is one document, so a single stray character costs every
+    // setting in the file. Say so, with the error TOML reported, rather than letting
+    // the user wonder why their config has no effect (SQ-0580, SQ-0645). Saving is
+    // refused while it's broken, so nothing overwrites it.
     if let Some(err) = state.config.config_error.clone() {
         let msg = format!(
-            "{} could not be parsed ({err}) — running on defaults, and settings will \
+            "{} could not be loaded ({err}) — running on defaults, and settings will \
              not be saved until it is fixed",
             state.config.config_file.display(),
         );
@@ -816,6 +817,16 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
         eprintln!("babelmap: cannot enter alternate screen: {}", e);
         std::process::exit(1);
     }
+    // Bracketed paste (SQ-0653). Without it the terminal replays a paste as raw
+    // keystrokes, and the app cannot tell them from typing: a Tab fired
+    // autocomplete, a leading '/' opened the command palette, and every newline
+    // SUBMITTED a line to the game — so pasting a walkthrough played it. With the
+    // mode on, the paste arrives as one `Event::Paste` and lands in the focused
+    // field as literal text. Best-effort: a terminal that ignores the sequence
+    // simply never sends `Event::Paste`, which is exactly today's behavior.
+    // `restore_terminal()` always issues DisableBracketedPaste.
+    let _ = execute!(stdout(), EnableBracketedPaste);
+
     // Mouse capture is opt-in (config `mouse = true`). Capture puts the terminal
     // in any-motion reporting mode, so every mouse movement wakes the event loop
     // and forces a full redraw; leaving it off keeps idle/scroll responsive and
