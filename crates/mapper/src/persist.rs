@@ -101,6 +101,32 @@ mod tests {
         assert_eq!(m.graph.connections().len(), 2);
     }
 
+    /// SQ-0632: a map file referencing room ids that do not exist (hand-edited, truncated, or
+    /// corrupt) must be cleaned on load. Phantom endpoint ids otherwise enter layout components
+    /// via `connected_components`' adjacency insertion, permanently wasting a grid cell and
+    /// flagging a stray distorted edge; a dangling `current` misdraws the highlight forever.
+    #[test]
+    fn dangling_connections_and_current_are_dropped_on_load() {
+        let json = r#"{"version":1,
+            "rooms":[
+                {"id":1,"name":"A","label_override":null,"notes":"","pos":[0,0]},
+                {"id":2,"name":"B","label_override":null,"notes":"","pos":[1,0]}],
+            "connections":[
+                {"origin":1,"dir":"E","dest":2,"distorted":false},
+                {"origin":1,"dir":"N","dest":99,"distorted":false},
+                {"origin":98,"dir":"S","dest":1,"distorted":false}],
+            "current":42}"#;
+        let m = from_json(json).unwrap();
+        assert_eq!(
+            m.graph.connections().len(),
+            1,
+            "both connections with a phantom endpoint are dropped: {:?}",
+            m.graph.connections()
+        );
+        assert_eq!(m.graph.connections()[0].dest, 2, "the valid edge survives");
+        assert_eq!(m.graph.current(), None, "a current naming no room is reset");
+    }
+
     #[test]
     fn legacy_save_without_layers_loads_as_main() {
         // A v1 save predating layers: no `layer` on rooms, no `layers`/`next_layer_id`.

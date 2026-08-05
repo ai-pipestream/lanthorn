@@ -100,6 +100,24 @@ impl Mapper {
         mark_distorted(&mut self.graph, &BTreeSet::new());
     }
 
+    /// Give room `old` the id `new`, rewriting every reference — the graph's rooms, connections
+    /// and current pointer ([`MapGraph::rekey_room`]) AND the mapper's own `arrived_via`, which
+    /// the graph knows nothing about. Callers must use this, not the graph method, whenever a
+    /// `Mapper` owns the graph: re-keying underneath it leaves `arrived_via` holding the dead id,
+    /// and a bare `/peel-layer` within the one-turn window then refuses with `NoSuchPassage`
+    /// (SQ-0632). Same return contract as the graph method.
+    pub fn rekey_room(&mut self, old: RoomId, new: RoomId) -> bool {
+        let done = self.graph.rekey_room(old, new);
+        if done {
+            if let Some((room, dir)) = self.arrived_via {
+                if room == old {
+                    self.arrived_via = Some((new, dir));
+                }
+            }
+        }
+        done
+    }
+
     /// Set or clear the label_override for a room.
     pub fn rename_room(&mut self, id: RoomId, label: Option<String>) {
         self.graph.set_label_override(id, label);
@@ -151,6 +169,35 @@ mod arrival_tests {
         m.observe_relocation(5, "Forest");
         assert_eq!(m.arrived_via(), None, "death or teleport is not a walked passage");
     }
+
+    /// SQ-0632: the SQ-0526 Glulx id remap re-keys rooms mapped during the learning window —
+    /// including, possibly, the room the player just walked out of. `arrived_via` must follow
+    /// the rename, or a bare `/peel-layer` in the one-turn window refuses with `NoSuchPassage`
+    /// because the edge it looks for now hangs off the new id.
+    #[test]
+    fn rekeying_a_room_carries_arrived_via_with_it() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cave", Some(Direction::N));
+        assert_eq!(m.arrived_via(), Some((1, Direction::N)));
+
+        assert!(m.rekey_room(1, 99), "the rename itself succeeds");
+        assert_eq!(
+            m.arrived_via(),
+            Some((99, Direction::N)),
+            "arrived_via follows the room it referenced to its new id"
+        );
+        assert!(
+            m.graph.connections().iter().any(|c| c.origin == 99 && c.dir == Direction::N),
+            "and the edge it names exists under that id, so a bare peel can find it"
+        );
+
+        assert!(m.rekey_room(2, 77), "re-keying the CURRENT room, not the one left");
+        assert_eq!(m.arrived_via(), Some((99, Direction::N)), "an unrelated rekey leaves it alone");
+
+        assert!(!m.rekey_room(1234, 5678), "a refused rekey…");
+        assert_eq!(m.arrived_via(), Some((99, Direction::N)), "…changes nothing");
+    }
 }
 
 #[cfg(test)]
@@ -182,6 +229,26 @@ mod tests {
         m.observe_command(2, "Secret Grotto", "xyzzy"); // teleport
         assert!(m.graph.room(2).is_some());
         assert_eq!(m.graph.connections()[0].dir, Direction::Unknown);
+    }
+
+    /// SQ-0632: xyzzy then pray from the same room — the second non-compass passage must not
+    /// silently overwrite the first's recorded destination.
+    #[test]
+    fn two_noncompass_passages_from_one_room_both_survive() {
+        let mut m = Mapper::default();
+        m.observe(1, "Cave", None);
+        m.observe_command(2, "Grotto", "xyzzy");
+        m.observe(1, "Cave", Some(Direction::S)); // walk back
+        m.observe_command(3, "Chapel", "pray");
+        assert!(
+            m.graph.connections().iter().any(|c| c.origin == 1 && c.dir == Direction::Unknown && c.dest == 2),
+            "the xyzzy passage 1→2 is still recorded: {:?}",
+            m.graph.connections()
+        );
+        assert!(
+            m.graph.connections().iter().any(|c| c.origin == 1 && c.dir == Direction::Unknown && c.dest == 3),
+            "and the pray passage 1→3 sits beside it"
+        );
     }
 
     #[test]

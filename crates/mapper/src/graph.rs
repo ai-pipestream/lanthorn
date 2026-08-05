@@ -72,6 +72,12 @@ impl MapGraph {
     }
 
     /// Reconstruct a `MapGraph` from persisted vecs. Builds the internal `BTreeMap` keyed by id.
+    ///
+    /// References are validated: a connection whose endpoint is not a room is dropped, and a
+    /// `current` naming no room is reset. A hand-edited or corrupt map file could otherwise
+    /// smuggle phantom ids into layout components (`connected_components` adjacency-inserts
+    /// every connection endpoint), permanently wasting a grid cell and flagging a stray
+    /// distorted edge (SQ-0632).
     pub fn from_parts(
         rooms: Vec<Room>,
         connections: Vec<Connection>,
@@ -79,13 +85,18 @@ impl MapGraph {
         layers: BTreeMap<LayerId, LayerMeta>,
         next_layer_id: LayerId,
     ) -> Self {
-        let rooms = rooms.into_iter().map(|r| (r.id, r)).collect();
+        let rooms: BTreeMap<RoomId, Room> = rooms.into_iter().map(|r| (r.id, r)).collect();
+        let conns: Vec<Connection> = connections
+            .into_iter()
+            .filter(|c| rooms.contains_key(&c.origin) && rooms.contains_key(&c.dest))
+            .collect();
+        let current = current.filter(|id| rooms.contains_key(id));
         let mut layers = layers;
         if layers.is_empty() {
             layers.insert(MAIN_LAYER, LayerMeta::main());
         }
         let next_layer_id = next_layer_id.max(1);
-        Self { rooms, conns: connections, current, layers, next_layer_id }
+        Self { rooms, conns, current, layers, next_layer_id }
     }
 
     pub fn room(&self, id: RoomId) -> Option<&Room> {
@@ -164,7 +175,19 @@ impl MapGraph {
     }
 
     pub fn add_edge(&mut self, origin: RoomId, dir: Direction, dest: RoomId) {
-        if let Some(conn) = self.conns.iter_mut().find(|c| c.origin == origin && c.dir == dir) {
+        // A compass direction (or Up/Down/In/Out) can only lead one place, so those edges are
+        // keyed (origin, dir) and a repeat observation updates the destination. Unknown is not a
+        // direction but a bucket: a room can hold SEVERAL non-compass passages (xyzzy and pray
+        // from the same room), so Unknown edges are keyed by the full (origin, dir, dest) triple —
+        // a second passage adds a second `?` stub instead of silently erasing the first, and an
+        // exact repeat is still one edge (SQ-0632). Layout already treats Unknown as non-spatial
+        // (skipped in components, drawn as a stub), so multiples cost nothing there.
+        if dir == Direction::Unknown {
+            if !self.conns.iter().any(|c| c.origin == origin && c.dir == dir && c.dest == dest) {
+                self.conns.push(Connection { origin, dir, dest, distorted: false });
+            }
+        } else if let Some(conn) = self.conns.iter_mut().find(|c| c.origin == origin && c.dir == dir)
+        {
             conn.dest = dest;
         } else {
             self.conns.push(Connection { origin, dir, dest, distorted: false });
@@ -332,7 +355,10 @@ impl MapGraph {
         }
     }
 
-    /// Remove the connection with key (origin, dir). Returns true if removed.
+    /// Remove the connection(s) with key (origin, dir). Returns true if any was removed.
+    /// For a real direction that is at most one edge; for `Unknown` — which may hold several
+    /// stubs (see [`MapGraph::add_edge`]) — every `?` edge out of `origin` goes at once, as the
+    /// key names no destination to tell them apart by.
     pub fn remove_connection(&mut self, origin: RoomId, dir: Direction) -> bool {
         let before = self.conns.len();
         self.conns.retain(|c| !(c.origin == origin && c.dir == dir));
@@ -465,6 +491,39 @@ mod tests {
         assert_eq!(g.rooms().count(), 1);
         assert_eq!(g.room(10).unwrap().name, "Lit Room");
         assert_eq!(g.room(10).unwrap().notes, "has lamp"); // edits preserved
+    }
+
+    /// SQ-0632: a room can hold several non-compass passages (xyzzy AND pray). Keying Unknown
+    /// edges by (origin, dir) alone made the second silently overwrite the first's destination,
+    /// losing a recorded passage. Unknown edges to DIFFERENT destinations must coexist; an exact
+    /// repeat is still one edge.
+    #[test]
+    fn a_room_keeps_multiple_unknown_passages() {
+        let mut g = MapGraph::new();
+        for (id, n) in [(1, "Cave"), (2, "Grotto"), (3, "Chapel")] {
+            g.upsert_room(id, n.into());
+        }
+        g.add_edge(1, Direction::Unknown, 2); // xyzzy
+        g.add_edge(1, Direction::Unknown, 3); // pray, from the same room
+        assert!(
+            g.connections().iter().any(|c| c.origin == 1 && c.dir == Direction::Unknown && c.dest == 2),
+            "the xyzzy passage survives the second Unknown edge: {:?}",
+            g.connections()
+        );
+        assert!(
+            g.connections().iter().any(|c| c.origin == 1 && c.dir == Direction::Unknown && c.dest == 3),
+            "and the pray passage was recorded beside it"
+        );
+        g.add_edge(1, Direction::Unknown, 2); // repeat observation of the same passage
+        assert_eq!(g.connections().len(), 2, "an exact repeat is still one edge");
+
+        // A directional edge over one of the pairs collapses only THAT pair's stub.
+        g.add_edge(1, Direction::N, 2);
+        assert_eq!(g.collapse_unknown_edges(), 1);
+        assert!(
+            g.connections().iter().any(|c| c.origin == 1 && c.dir == Direction::Unknown && c.dest == 3),
+            "the other room's passage is untouched"
+        );
     }
 
     #[test]

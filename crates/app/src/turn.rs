@@ -116,7 +116,7 @@ pub(crate) fn finish_command_turn(
         for (name, addr) in g.take_room_remap() {
             let old_id = app::roomid::synthetic_room_id(&name);
             let new_id = app::roomid::glulx_room_id(addr);
-            mapper.graph.rekey_room(old_id, new_id);
+            mapper.rekey_room(old_id, new_id); // Mapper-level: also re-keys arrived_via (SQ-0632)
         }
     }
 

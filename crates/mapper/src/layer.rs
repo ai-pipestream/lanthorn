@@ -154,7 +154,11 @@ fn peel_across(
     let back = opposite(dir);
     let (keep, shed) = if keep_far { (dest, from) } else { (from, dest) };
     let region = region_with_cut(graph, keep, &|c: &Connection| {
-        (c.origin == from && c.dir == dir) || (c.origin == dest && c.dir == back)
+        // Only the named passage and its exact reciprocal — `dest -back-> from`, not dest's
+        // back-direction edge to just ANY room. Without the `c.dest == from` check, a maze-ish
+        // A-E->B, B-W->C, C-E->A wrongly cut B's west edge to C too, so a non-seam peeled and
+        // the surviving B-W->C edge straddled the "boundary" (SQ-0631).
+        (c.origin == from && c.dir == dir) || (c.origin == dest && c.dir == back && c.dest == from)
     });
     if region.contains(&shed) {
         return Err(PeelRefusal::NotASeam);
@@ -196,7 +200,17 @@ pub fn merge_layer(graph: &mut MapGraph, layer: LayerId) -> LayerId {
     if layer == MAIN_LAYER {
         return MAIN_LAYER;
     }
-    let target = graph.layers().get(&layer).and_then(|m| m.parent).unwrap_or(MAIN_LAYER);
+    // The recorded parent may itself have been merged away since the peel (peel L1, peel L2
+    // off it, merge L1, merge L2). Re-homing rooms onto a dead layer id would strand them
+    // invisibly forever — ids are never reused. A merged layer's metadata is removed outright,
+    // so a missing parent has no grandparent left to walk to: fall back to MAIN_LAYER (SQ-0631).
+    let target = graph
+        .layers()
+        .get(&layer)
+        .and_then(|m| m.parent)
+        .filter(|p| graph.layers().contains_key(p))
+        
+        .unwrap_or(MAIN_LAYER);
     for id in graph.rooms_in_layer(layer) {
         graph.set_room_layer(id, target);
     }
@@ -411,6 +425,28 @@ mod tests {
         );
     }
 
+    /// SQ-0631: the cut is the named passage plus its exact reciprocal — `dest`'s back-direction
+    /// edge to a THIRD room is not the reciprocal and must survive. With A-E->B, B-W->C, C-E->A,
+    /// the old predicate also severed B-W->C when peeling (A, E); the region check then passed
+    /// and {A, C} moved to a new layer while the surviving B-W->C edge straddled the seam.
+    #[test]
+    fn a_back_edge_to_a_third_room_is_not_the_reciprocal() {
+        let mut g = MapGraph::new();
+        for (id, n) in [(1, "A"), (2, "B"), (3, "C")] {
+            g.upsert_room(id, n.into());
+        }
+        g.add_edge(1, Direction::E, 2); // the named passage
+        g.add_edge(2, Direction::W, 3); // B's west edge — to C, NOT back to A
+        g.add_edge(3, Direction::E, 1); // the way round that makes A-E-B a non-seam
+        assert_eq!(
+            peel_at_edge(&mut g, 1, Direction::E),
+            Err(PeelRefusal::NotASeam),
+            "cutting A-E->B alone separates nothing: B-W->C and C-E->A hold the ring together"
+        );
+        assert_eq!(g.layers().len(), 1, "and nothing was peeled");
+        assert_eq!(g.rooms_in_layer(MAIN_LAYER), vec![1, 2, 3], "all three rooms stay put");
+    }
+
     /// A passage whose ends stay connected another way is not a boundary, and says so.
     #[test]
     fn a_passage_with_a_way_round_is_not_a_seam() {
@@ -513,6 +549,27 @@ mod tests {
         assert_eq!(g.layer_of(3), MAIN_LAYER);
         assert_eq!(g.layer_of(4), MAIN_LAYER);
         assert!(!g.layers().contains_key(&l), "merged layer's metadata is removed");
+    }
+
+    /// SQ-0631: merging a layer whose recorded parent was itself merged away must not re-home
+    /// rooms onto the dead parent id — layer ids are never reused, so those rooms would be
+    /// invisible to every view forever. Peel L1 from Main, peel L2 from L1, merge L1, merge L2:
+    /// L2's rooms must land on a layer that still exists (Main), not on the ghost of L1.
+    #[test]
+    fn merging_onto_a_dead_parent_falls_back_to_a_live_layer() {
+        let mut g = two_floors();
+        let l1 = peel_region(&mut g, 3).expect("peel the cellar off Main"); // {3, 4}
+        let l2 = peel_at_edge(&mut g, 3, Direction::E).expect("peel room 3 off the cellar");
+        assert_eq!(g.layers()[&l2].parent, Some(l1));
+
+        let t1 = merge_layer(&mut g, l1); // removes l1 — l2's parent is now dead
+        assert_eq!(t1, MAIN_LAYER);
+        assert!(!g.layers().contains_key(&l1));
+
+        let t2 = merge_layer(&mut g, l2);
+        assert!(g.layers().contains_key(&t2), "the merge target must be a layer that exists");
+        assert_eq!(t2, MAIN_LAYER, "the dead parent is skipped in favour of Main");
+        assert_eq!(g.layer_of(3), MAIN_LAYER, "room 3 is visible on Main, not stranded on dead l1");
     }
 
     #[test]
