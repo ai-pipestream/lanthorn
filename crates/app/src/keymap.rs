@@ -292,6 +292,17 @@ impl Default for KeyMap {
         // why nobody found the old verb menu.
         bind!(plain(F(2)), "open-command-band", Context::Global);
 
+        // F3 enters pane-resize mode (SQ-0669). Picked over the alternatives:
+        // Ctrl+Arrows are the natural "resize" chord elsewhere, but terminals
+        // and window managers eat them (and they are the tidy-animation stage
+        // jump here); Alt combos are unreliable across terminals; and every
+        // free letter is a typed character at the story prompt. F3 is the next
+        // unclaimed F-key after F2's command band — F1 stays free for a help
+        // binding, F5 is deliberately unbound (reset-game is leader-only), and
+        // F6-F9 are pinned unbound. Now the mouse can drag the boundaries, the
+        // keyboard path deserved to be more than leader-only too.
+        bind!(plain(F(3)), "resize-panes", Context::Global);
+
         bind!(ctrl(Char('s')), "save-state", Context::Global);
         bind!(ctrl(Char('r')), "restore-state", Context::Global);
 
@@ -1096,6 +1107,27 @@ mod tests {
         assert_eq!(layout.leader_command('k'), None); // reset-pane-size
         assert_eq!(layout.leader_command('x'), None); // reset-game moved to 'g'
         assert_eq!(layout.leader_command('1'), None);
+    }
+
+    /// SQ-0669: resize mode was reachable only through the palette / a leader
+    /// letter that no longer exists. F3 is its direct default — the next
+    /// unclaimed F-key after F2's command band.
+    #[test]
+    fn f3_enters_resize_mode_by_default() {
+        let km = KeyMap::default();
+        let f3 = KeySpec { code: KeyCode::F(3), ctrl: false, shift: false, alt: false };
+        assert_eq!(km.lookup(&f3, Context::Global), Some("resize-panes"));
+        // It must not collide with the other direct F-key defaults.
+        let f2 = KeySpec { code: KeyCode::F(2), ctrl: false, shift: false, alt: false };
+        assert_eq!(km.lookup(&f2, Context::Global), Some("open-command-band"));
+        // …and it resolves through the real key path from the story prompt,
+        // where every plain letter is typing instead.
+        let s = crate::state::AppState::default();
+        let ev = crossterm::event::KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE);
+        assert!(matches!(
+            crate::input::key_to_command(&s, ev),
+            crate::input::KeyResolve::Command(ref c, Context::Global) if c == "resize-panes"
+        ));
     }
 
     #[test]

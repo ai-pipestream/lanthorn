@@ -17,12 +17,48 @@ use crate::state::{AppState, Layout};
 /// (pre-frame) rects passed to `draw_framed`; they are `Rect::default()`
 /// (zero area) when that pane is hidden for the current `Layout`.
 /// `command_band`/`inv_dock` are zero-area when closed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PaneLayout {
+    /// The whole frame this layout was computed from. Kept because the
+    /// inventory dock's height is a PERCENTAGE of it — a drag that moves the
+    /// dock edge by rows has to invert that percentage against the same
+    /// height the layout used (SQ-0669).
+    pub frame: Rect,
     pub story: Rect,
     pub map: Rect,
     pub command_band: Rect,
     pub inv_dock: Rect,
     pub help_row: Rect,
+}
+
+// ── Draggable pane boundaries (SQ-0669) ───────────────────────────────────────
+
+/// Smallest / largest story share of the story-map split, in percent. Resize
+/// mode's arrows and the mouse drag clamp to the SAME limits — one definition,
+/// so the two ways of moving the splitter can never disagree about its range.
+pub const MIN_SPLIT_PCT: u16 = 20;
+pub const MAX_SPLIT_PCT: u16 = 80;
+/// Smallest / largest inventory-dock cap, in percent of the frame height.
+pub const MIN_INV_DOCK_PCT: u16 = 10;
+pub const MAX_INV_DOCK_PCT: u16 = 80;
+
+/// A pane boundary the mouse can grab and drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Boundary {
+    /// The vertical splitter between the story and map panes (moves
+    /// `split_ratio`).
+    StoryMapSplit,
+    /// The inventory dock's top edge (moves `inv_dock_pct`).
+    InvDockTop,
+    /// The command band's top edge (moves `command_band.height`).
+    CommandBandTop,
+}
+
+/// One boundary plus the screen rect that grabs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoundaryZone {
+    pub boundary: Boundary,
+    pub rect: Rect,
 }
 
 impl PaneLayout {
@@ -40,6 +76,133 @@ impl PaneLayout {
             (false, false) => self.story.union(self.map),
         }
     }
+
+    /// The draggable boundaries of this frame, with their grab zones.
+    ///
+    /// A one-cell target is hard to hit with a mouse, so each zone is the whole
+    /// divider that is actually DRAWN there:
+    ///
+    /// - the splitter is two columns — the story pane's right border and the map
+    ///   pane's left border, which abut (`story.right() == map.x`);
+    /// - the inventory dock's top edge is two rows — the pane border above it and
+    ///   the dock's own top border;
+    /// - the command band has no border of its own (SQ-0667 made it a borderless
+    ///   strip), so its zone is the single pane-border row above it. Widening it
+    ///   into the band would swallow clicks on the band's column headers, which
+    ///   is a worse trade than a one-row grab.
+    ///
+    /// The splitter comes first, so the corner cell where it meets a horizontal
+    /// edge grabs the splitter (`boundary_at` takes the first match).
+    pub fn boundary_zones(&self) -> Vec<BoundaryZone> {
+        let mut zones = Vec::new();
+
+        // Splitter: only when both panes are actually on screen and adjacent.
+        let split_live = self.story.width > 0
+            && self.story.height > 0
+            && self.map.width > 0
+            && self.map.height > 0
+            && self.story.right() == self.map.x;
+        if split_live {
+            zones.push(BoundaryZone {
+                boundary: Boundary::StoryMapSplit,
+                rect: Rect::new(
+                    self.story.right().saturating_sub(1),
+                    self.story.y,
+                    2,
+                    self.story.height,
+                ),
+            });
+        }
+
+        // Horizontal edges: the band and the dock are never both up (the band
+        // subsumes the dock while it is open), but derive them independently
+        // anyway — a zone only exists when its band has rows on screen.
+        for (boundary, band) in [
+            (Boundary::CommandBandTop, self.command_band),
+            (Boundary::InvDockTop, self.inv_dock),
+        ] {
+            if band.width == 0 || band.height == 0 {
+                continue;
+            }
+            let top = band.y.saturating_sub(1);
+            // The band's own top row joins the zone only when it draws a border
+            // there; the borderless command band contributes nothing.
+            let bottom = match boundary {
+                Boundary::InvDockTop => band.y,
+                _ => top,
+            };
+            zones.push(BoundaryZone {
+                boundary,
+                rect: Rect::new(band.x, top, band.width, bottom - top + 1),
+            });
+        }
+
+        zones
+    }
+}
+
+/// Which boundary (if any) the cell at `col`/`row` grabs.
+pub fn boundary_at(zones: &[BoundaryZone], col: u16, row: u16) -> Option<Boundary> {
+    zones
+        .iter()
+        .find(|z| {
+            z.rect.width > 0
+                && z.rect.height > 0
+                && col >= z.rect.x
+                && col < z.rect.right()
+                && row >= z.rect.y
+                && row < z.rect.bottom()
+        })
+        .map(|z| z.boundary)
+}
+
+/// Split `panes_area` between the story and map panes at `split_ratio` percent.
+///
+/// The single definition of that split: `compute_pane_layout` draws with it and
+/// the mouse drag INVERTS it (`split_pct_for_story_width`), so the splitter can
+/// track the pointer without re-deriving ratatui's rounding by hand.
+pub fn split_story_map(panes_area: Rect, split_ratio: u16) -> (Rect, Rect) {
+    let chunks = RatatuiLayout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(split_ratio),
+            Constraint::Percentage(100u16.saturating_sub(split_ratio)),
+        ])
+        .split(panes_area);
+    (chunks[0], chunks[1])
+}
+
+/// The `split_ratio` whose resulting story pane sits closest to `want` columns
+/// wide — the inverse of [`split_story_map`], found by asking it.
+///
+/// A percentage is coarser than a column whenever the panes are wider than 100
+/// cells, so the exact width is not always reachable; this returns the closest
+/// achievable one (lowest ratio on a tie), which is what makes a drag track the
+/// pointer as tightly as the persisted unit allows.
+pub fn split_pct_for_story_width(panes_area: Rect, want: u16) -> u16 {
+    (MIN_SPLIT_PCT..=MAX_SPLIT_PCT)
+        .min_by_key(|p| {
+            let (story, _) = split_story_map(panes_area, *p);
+            (story.width as i32 - want as i32).abs()
+        })
+        .unwrap_or(MIN_SPLIT_PCT)
+}
+
+/// The `inv_dock_pct` whose cap admits `rows` rows of dock in a `frame_height`
+/// frame — the inverse of `inventory_dock_target_height`'s
+/// `cap = frame_height * pct / 100`.
+///
+/// Rounded UP so the cap is never a row short of what was asked for: the dock's
+/// height is `min(items + 2, cap)`, so a cap that floors below the current
+/// height would shrink the dock on a drag that meant to hold it still. (When
+/// the item list is the binding constraint, dragging the edge further up is a
+/// no-op — the same ceiling resize mode's arrows hit.)
+pub fn dock_pct_for_rows(frame_height: u16, rows: u16) -> u16 {
+    if frame_height == 0 {
+        return MIN_INV_DOCK_PCT;
+    }
+    let pct = (rows as u32 * 100).div_ceil(frame_height as u32);
+    (pct as u16).clamp(MIN_INV_DOCK_PCT, MAX_INV_DOCK_PCT)
 }
 
 /// Compute this frame's pane geometry. `inv_item_count` is passed in (rather
@@ -86,19 +249,17 @@ pub fn compute_pane_layout(area: Rect, state: &AppState, inv_item_count: usize) 
     let effective_layout = if state.debug.is_some() { Layout::Split } else { state.layout };
     let (story, map) = match effective_layout {
         Layout::TranscriptFull => (panes_area, Rect::default()),
-        Layout::Split => {
-            let chunks = RatatuiLayout::default()
-                .direction(Direction::Horizontal)
-                .constraints([
-                    Constraint::Percentage(state.pane_sizes.split_ratio),
-                    Constraint::Percentage(100u16.saturating_sub(state.pane_sizes.split_ratio)),
-                ])
-                .split(panes_area);
-            (chunks[0], chunks[1])
-        }
+        Layout::Split => split_story_map(panes_area, state.pane_sizes.split_ratio),
     };
 
-    PaneLayout { story, map, command_band: band_area, inv_dock: inv_dock_area, help_row }
+    PaneLayout {
+        frame: area,
+        story,
+        map,
+        command_band: band_area,
+        inv_dock: inv_dock_area,
+        help_row,
+    }
 }
 
 #[cfg(test)]

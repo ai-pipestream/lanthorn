@@ -2524,16 +2524,19 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         Action::ResizeNav(dir) => {
             const STEP: u16 = 3;
+            // The limits are shared with the mouse drag (SQ-0669) so the two
+            // ways of moving a boundary agree about its range.
+            use crate::layout::{MAX_INV_DOCK_PCT, MAX_SPLIT_PCT, MIN_INV_DOCK_PCT, MIN_SPLIT_PCT};
             use ResizeNavKind::*;
             match state.resize_target {
                 crate::state::ResizeTarget::StoryMap => match dir {
-                    Left => state.pane_sizes.split_ratio = state.pane_sizes.split_ratio.saturating_sub(STEP).max(20),
-                    Right => state.pane_sizes.split_ratio = (state.pane_sizes.split_ratio + STEP).min(80),
+                    Left => state.pane_sizes.split_ratio = state.pane_sizes.split_ratio.saturating_sub(STEP).max(MIN_SPLIT_PCT),
+                    Right => state.pane_sizes.split_ratio = (state.pane_sizes.split_ratio + STEP).min(MAX_SPLIT_PCT),
                     _ => {}
                 },
                 crate::state::ResizeTarget::InvDock => match dir {
-                    Up => state.pane_sizes.inv_dock_pct = (state.pane_sizes.inv_dock_pct + STEP).min(80),
-                    Down => state.pane_sizes.inv_dock_pct = state.pane_sizes.inv_dock_pct.saturating_sub(STEP).max(10),
+                    Up => state.pane_sizes.inv_dock_pct = (state.pane_sizes.inv_dock_pct + STEP).min(MAX_INV_DOCK_PCT),
+                    Down => state.pane_sizes.inv_dock_pct = state.pane_sizes.inv_dock_pct.saturating_sub(STEP).max(MIN_INV_DOCK_PCT),
                     _ => {}
                 },
                 // The command band is a bottom band now (SQ-0664), so it resizes
@@ -2555,9 +2558,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     }
                 }
             }
-            state.config.split_ratio = state.pane_sizes.split_ratio;
-            state.config.command_band.height = state.pane_sizes.band_height;
-            state.config.inv_dock_pct = state.pane_sizes.inv_dock_pct;
+            state.sync_pane_sizes_to_config();
         }
 
         // ── Config screen actions ─────────────────────────────────────────────

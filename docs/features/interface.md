@@ -22,6 +22,15 @@ inspecting the machine, and firing commands — without ever leaving the story.
   clipboard via the OSC 52 terminal escape — so a selection copies cleanly even
   over SSH, with no clipboard library in the loop. Each row is clamped to the
   story pane's columns, so a drag never scoops up the map beside the text.
+- **Drag a pane boundary to resize it** — grab the divider between the story and
+  map panes, or the top edge of the inventory dock or the command band, and drag.
+  The boundary lights up as the pointer crosses it, the panes follow the pointer
+  live, and the new size is written to `config.toml` when you let go. What you
+  press the button on decides what the drag means: a drag that starts on a
+  boundary only resizes, and a text selection that starts in the transcript keeps
+  selecting even when it crosses one. For the keyboard, **F3** (or
+  `/resize-panes`) enters resize mode — **Tab** cycles which boundary is live,
+  the arrows move it, `0` resets, **Esc** leaves.
 - **Room inspector overlay** — id, name, layer, position, and the per-edge
   dropped-constraint flags, so you can see *why* the layout engine placed a room
   where it did. The panel stays open while you keep playing.

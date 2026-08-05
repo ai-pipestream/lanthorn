@@ -464,9 +464,15 @@ fn saves_dir(user_dir: &std::path::Path) -> std::path::PathBuf {
 /// `room_rects` maps each visible room to its drawn bounding rect in screen coords.
 /// `layer_tabs` pairs each visible layer tab with its hit-rect (click switches layers).
 /// `dialog` holds the last-drawn dialog chrome rects for mouse hit-testing.
+#[derive(Default)]
 struct PaneRects {
     map: Rect,
     story: Rect,
+    /// This frame's pane geometry, kept whole because a mouse drag on a pane
+    /// boundary anchors against it (SQ-0669).
+    pane_layout: app::layout::PaneLayout,
+    /// The draggable pane boundaries of this frame, with their grab zones.
+    boundaries: Vec<app::layout::BoundaryZone>,
     room_rects: Vec<(RoomId, Rect)>,
     /// Hit-rects for each layer tab, paired with the layer id; the mouse
     /// handler hit-tests these to switch the viewed layer on click.
@@ -577,6 +583,7 @@ fn draw_frame(
     let mut transcript_total_rows: u16 = 0;
     let mut transcript_surface = false;
     let mut transcript_links_out: Vec<((u16, u16), u32)> = Vec::new();
+    let mut pane_layout_out = app::layout::PaneLayout::default();
 
     terminal.draw(|f| {
         let full = f.area();
@@ -624,6 +631,7 @@ fn draw_frame(
             Vec::new()
         };
         let pane_layout = app::layout::compute_pane_layout(full, state, inv_items.len());
+        pane_layout_out = pane_layout;
 
         // While any background map job is in flight — a tidy relayout or the
         // async re-route worker (SQ-0379) — the map pane border pulses between red
@@ -668,7 +676,11 @@ fn draw_frame(
             // tabs, or tidy pulse (those belong to the real map). `pane_layout`
             // already reserved a right-hand rect for this (`compute_pane_layout`
             // treats debug-active as `Layout::Split`).
-            let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
+            // The splitter accents while resize mode targets it, and equally
+            // while the mouse hovers or drags it (SQ-0669) — the same accent, so
+            // the grab affordance costs no new style machinery.
+            let resize_split_hl = (state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap)
+                || state.boundary_active(app::layout::Boundary::StoryMapSplit);
             let story_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { story_border_style };
             let story_focused = resize_split_hl || state.focus == Focus::Game;
             let story_title_style = state.colors.theme.get("story_title").style;
@@ -730,7 +742,10 @@ fn draw_frame(
                     // Split 50/50 horizontally with bordered blocks (no divider column).
                     // In resize mode, the StoryMap target covers this whole split, so
                     // both borders pick up the `focused_border` accent to show it's live.
-                    let resize_split_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap;
+                    // …and equally while the mouse hovers or drags the splitter
+                    // (SQ-0669), so the grab affordance reuses that same accent.
+                    let resize_split_hl = (state.resize_mode && state.resize_target == app::state::ResizeTarget::StoryMap)
+                        || state.boundary_active(app::layout::Boundary::StoryMapSplit);
                     let story_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { story_border_style };
                     let map_border_color = if resize_split_hl { state.colors.theme.get("panel.border:active").style } else { panel_border(&state.colors.theme, state.focus == Focus::Map) };
                     let story_focused = resize_split_hl || state.focus == Focus::Game;
@@ -879,7 +894,8 @@ fn draw_frame(
 
         // ── Inventory dock panel ──────────────────────────────────────────────
         if pane_layout.inv_dock.height > 0 {
-            let inv_resize_hl = state.resize_mode && state.resize_target == app::state::ResizeTarget::InvDock;
+            let inv_resize_hl = (state.resize_mode && state.resize_target == app::state::ResizeTarget::InvDock)
+                || state.boundary_active(app::layout::Boundary::InvDockTop);
             app::render::inventory_dock::draw_inventory_dock(&inv_items, pane_layout.inv_dock, &state.colors, inv_resize_hl, buf);
         }
 
@@ -1007,7 +1023,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
 }
 
 // ── Command-band mouse routing ───────────────────────────────────────────────
@@ -1407,7 +1423,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, confirm_overwrite: None, quit_dialog: None, launch_dialog: None, hints_panel: None, command_band: Default::default(), palette: Vec::new(), transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_surface: false, transcript_total_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects::default();
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1748,6 +1764,30 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         if let Event::Paste(text) = &event {
             app::input::apply_paste(&mut state, text);
             continue;
+        }
+
+        // ── Pane-boundary drag-resize (SQ-0669) ───────────────────────────────
+        // Runs BEFORE every other mouse intercept, because a drag that started on
+        // a boundary owns the mouse until the button comes up: the transcript
+        // selection, the band's rows, the map's rooms and the debug inspector all
+        // sit under one boundary or another, and any of them claiming a mid-drag
+        // event would leave the splitter stuck to the pointer. It claims nothing
+        // else — a Down anywhere but a grab zone (or with a modal open) falls
+        // straight through, so a selection dragged ACROSS a boundary keeps
+        // selecting. A non-mouse event mid-drag ends the drag rather than wedging
+        // it, then goes on to be handled normally.
+        if let Event::Mouse(m) = &event {
+            use app::pane_drag::DragOutcome;
+            match app::pane_drag::on_mouse(&mut state, m, &last_panes.pane_layout, &last_panes.boundaries) {
+                DragOutcome::Ignored => {}
+                DragOutcome::Consumed => continue,
+                DragOutcome::Committed => {
+                    lifecycle::flush_pending_config_write(&mut state);
+                    continue;
+                }
+            }
+        } else if app::pane_drag::interrupt(&mut state) {
+            lifecycle::flush_pending_config_write(&mut state);
         }
 
         // ── Common-dialog overlay intercept ladder (SQ-0307) ──────────────────

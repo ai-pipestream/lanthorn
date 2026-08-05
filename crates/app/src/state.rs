@@ -1966,6 +1966,14 @@ pub struct AppState {
     /// Which visible pane resize mode is currently adjusting.
     pub resize_target: ResizeTarget,
 
+    /// The pane boundary the mouse is currently dragging, if any (SQ-0669).
+    /// While this is set the drag owns every mouse event — see
+    /// [`crate::pane_drag`].
+    pub pane_drag: Option<crate::pane_drag::PaneDrag>,
+    /// The pane boundary the pointer is hovering, if any. Drives the grab
+    /// affordance only; `pane_drag` outranks it while a boundary is held.
+    pub pane_hover: Option<crate::layout::Boundary>,
+
 
 
 
@@ -2256,6 +2264,8 @@ impl Default for AppState {
             pending_config_write: false,
             resize_mode: false,
             resize_target: ResizeTarget::StoryMap,
+            pane_drag: None,
+            pane_hover: None,
             turns: 0,
             unsaved_progress: false,
             exit_target: ExitTarget::Exit,
@@ -2947,6 +2957,17 @@ impl AppState {
         }
     }
 
+    /// Mirror the live pane sizes into `config`, the persisted source of truth.
+    ///
+    /// The one place the three runtime sizes meet their config keys, so resize
+    /// mode's arrows and the mouse drag (SQ-0669) persist through identical
+    /// paths; the actual write still waits for `pending_config_write`.
+    pub fn sync_pane_sizes_to_config(&mut self) {
+        self.config.split_ratio = self.pane_sizes.split_ratio;
+        self.config.command_band.height = self.pane_sizes.band_height;
+        self.config.inv_dock_pct = self.pane_sizes.inv_dock_pct;
+    }
+
     /// Reset all pane sizes to their config defaults and mirror into `config`.
     pub fn reset_pane_sizes(&mut self) {
         self.pane_sizes = PaneSizes {
@@ -2954,9 +2975,16 @@ impl AppState {
             band_height: crate::config::default_band_height(),
             inv_dock_pct: crate::config::default_inv_dock_pct(),
         };
-        self.config.split_ratio = self.pane_sizes.split_ratio;
-        self.config.command_band.height = self.pane_sizes.band_height;
-        self.config.inv_dock_pct = self.pane_sizes.inv_dock_pct;
+        self.sync_pane_sizes_to_config();
+    }
+
+    /// Whether `b` should draw with the resize accent: the boundary being
+    /// dragged, or — when nothing is held — the one under the pointer (SQ-0669).
+    pub fn boundary_active(&self, b: crate::layout::Boundary) -> bool {
+        match self.pane_drag {
+            Some(d) => d.boundary == b,
+            None => self.pane_hover == Some(b),
+        }
     }
 
     /// Zoom in one VISIBLE step (toward Boxes). Already at Boxes → no change; it is the most

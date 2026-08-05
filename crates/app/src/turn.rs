@@ -981,16 +981,7 @@ mod tests {
         let mut fresh = GameSession::new(crate::tests::read_char_then_save_v4_story(), true, false, None).expect("new");
         let mut state = app::state::AppState::default();
         let mut mapper = mapper::mapper::Mapper::default();
-        let panes = crate::PaneRects {
-            map: ratatui::layout::Rect::default(), story: ratatui::layout::Rect::default(),
-            room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None,
-            reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, confirm_overwrite: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
-            command_band: Default::default(),
-            palette: Vec::new(),
-            transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_surface: false,
-            transcript_total_rows: 0,
-            modal_list_viewport: 0,
-        };
+        let panes = crate::PaneRects::default();
         assert_eq!(state.turns, 0, "a fresh AppState starts at turn 0");
 
         super::apply_launch_resume(
@@ -1064,16 +1055,7 @@ mod tests {
 
         let mut state = app::state::AppState::default();
         let mut mapper = mapper::mapper::Mapper::default();
-        let panes = crate::PaneRects {
-            map: ratatui::layout::Rect::default(), story: ratatui::layout::Rect::default(),
-            room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None,
-            reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, confirm_overwrite: None, quit_dialog: None, launch_dialog: None, hints_panel: None,
-            command_band: Default::default(),
-            palette: Vec::new(),
-            transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_surface: false,
-            transcript_total_rows: 0,
-            modal_list_viewport: 0,
-        };
+        let panes = crate::PaneRects::default();
 
         super::apply_launch_resume(
             &save, Vec::new(), Vec::new(), Some(src.machine.screen.clone()),

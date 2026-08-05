@@ -309,8 +309,13 @@ pub fn draw_command_band(
     // visual separation from the story pane above it. Resize mode still
     // needs some affordance that the band is the live target; with no border
     // left to accent, the whole fill picks up `panel.border:active` instead.
-    let resize_hl =
-        state.resize_mode && state.resize_target == crate::state::ResizeTarget::CommandBand;
+    // …and equally while its top edge is being DRAGGED (SQ-0669). Hover is
+    // deliberately excluded here, unlike the bordered panes: with no border to
+    // accent, the whole band would flash every time the pointer crossed the row
+    // above it on its way in.
+    let resize_hl = (state.resize_mode
+        && state.resize_target == crate::state::ResizeTarget::CommandBand)
+        || matches!(state.pane_drag, Some(d) if d.boundary == crate::layout::Boundary::CommandBandTop);
     let base = if resize_hl {
         theme.get("panel.border:active").style
     } else {
