@@ -10,6 +10,8 @@
 //!
 //! It is also, incidentally, the only map view a screen reader can read: a table linearises.
 
+use std::collections::BTreeSet;
+
 use mapper::direction::short_label;
 use mapper::graph::{MapGraph, RoomId};
 use mapper::layer::LayerId;
@@ -21,7 +23,7 @@ use ratatui::style::Style;
 use crate::render::draw_str_clipped;
 use crate::state::AppState;
 
-/// Width of the pinned label column, including the one-cell `▸` here-marker gutter.
+/// Width of the pinned label column, including the one-cell `▸`/`⇲` marker gutter.
 ///
 /// Ten columns of name is enough for `"Maze 11"` and for most short room names; anything longer is
 /// abbreviated and footnoted rather than allowed to push the table sideways, because the table's
@@ -151,6 +153,8 @@ pub struct MatrixLayout {
     pub footnotes: Vec<Footnote>,
     /// Per-row label text and the footnote marker it carries (empty when it needs none).
     pub labels: Vec<(String, String)>,
+    /// Rooms that are the destination of an inbound border edge — where the `⇲` row marker goes.
+    pub entry_rooms: BTreeSet<RoomId>,
 }
 
 /// Resolve the table for a pane `width`: density, column width, abbreviated labels and footnotes.
@@ -192,7 +196,22 @@ pub fn layout(graph: &MapGraph, layer: LayerId, width: u16) -> MatrixLayout {
         }
     }
 
-    MatrixLayout { matrix: m, density, cell_w, footnotes, labels }
+    // `⇲ in:` lines are the mirror of `⇱out`: every border edge that ENTERS the layer from
+    // outside it, one line per edge, in the same deterministic order `inbound_border_edges`
+    // already sorted them in — so the block is stable across a save/load round trip whatever
+    // order the edges were minted in, exactly like the `⇱out` lines above.
+    let mut entry_rooms: BTreeSet<RoomId> = BTreeSet::new();
+    for (origin, dir, dest) in matrix::inbound_border_edges(graph, layer) {
+        entry_rooms.insert(dest);
+        let origin_name =
+            graph.room(origin).map(|r| r.label().to_string()).unwrap_or_else(|| format!("#{origin}"));
+        let dest_label = m.labels.row_of(dest).to_string();
+        let text =
+            format!("⇲ in:  {origin_name} —{}→ {dest_label}", short_label(dir).to_uppercase());
+        footnotes.push(Footnote { marker: String::new(), text });
+    }
+
+    MatrixLayout { matrix: m, density, cell_w, footnotes, labels, entry_rooms }
 }
 
 /// Rows of chrome the table spends before and after its data: header, rule, rule.
@@ -291,9 +310,19 @@ pub fn render_matrix(
         };
 
         let (text, mark) = &ml.labels[first_row + slot];
-        let lead = if is_here { "▸" } else { " " };
-        let label = format!("{lead}{text}{mark}");
-        draw_str_clipped(buf, area.x, y, &label, row_style, area);
+        // `▸` (you are here) wins over `⇲` (a way in) when a room is both: the entrance fact is
+        // still true and still lives in the footnote, but the row only has one marker column and
+        // "you are standing here" is the more urgent thing to say about it.
+        let is_entry = ml.entry_rooms.contains(&row.room);
+        if is_here || !is_entry {
+            let lead = if is_here { "▸" } else { " " };
+            let label = format!("{lead}{text}{mark}");
+            draw_str_clipped(buf, area.x, y, &label, row_style, area);
+        } else {
+            draw_str_clipped(buf, area.x, y, "⇲", entrance_style, area);
+            let rest = format!("{text}{mark}");
+            draw_str_clipped(buf, area.x + 1, y, &rest, row_style, area);
+        }
         hits.push((row.room, Rect::new(area.x, y, LABEL_W.min(area.width), 1)));
 
         for (col_slot, i) in (first_col..first_col + shown).enumerate() {
@@ -445,6 +474,88 @@ mod tests {
             Density::Scroll,
             "scrolling is the last resort, not the first"
         );
+    }
+
+    /// A rendered buffer's lines as plain strings, right-trimmed — enough to search for a
+    /// footnote or a row's leading marker.
+    fn render_lines(g: &MapGraph, layer: LayerId, area: Rect) -> Vec<String> {
+        let st = AppState::default();
+        let mut buf = Buffer::empty(area);
+        render_matrix(g, layer, &st, area, &mut buf);
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" ").to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// A room in ANOTHER layer with a passage into room 2 — the mirror of the `⇱out` crossing
+    /// `tiny()` already has via room 2 → room 3 is in-layer, so this adds a genuinely different
+    /// layer to cross from.
+    fn tiny_with_door() -> MapGraph {
+        let mut g = tiny();
+        g.upsert_room(4, "Outside".into());
+        let other = g.new_layer(Some(MAIN_LAYER), "Other".into());
+        g.set_room_layer(4, other);
+        g.add_edge(4, Direction::S, 2);
+        g
+    }
+
+    #[test]
+    fn an_inbound_border_edge_gets_a_footnote_naming_origin_direction_and_target() {
+        let g = tiny_with_door();
+        let ml = layout(&g, MAIN_LAYER, 200);
+        assert!(
+            ml.footnotes.iter().any(|f| f.text == "⇲ in:  Outside —S→ Maze 2"),
+            "expected an `⇲ in:` footnote, got {:?}",
+            ml.footnotes
+        );
+        assert_eq!(ml.entry_rooms.len(), 1, "only the actual entrance target is marked: {:?}", ml.entry_rooms);
+        assert!(ml.entry_rooms.contains(&2));
+    }
+
+    #[test]
+    fn the_entry_marker_appears_on_the_target_rooms_row_and_nowhere_else() {
+        let g = tiny_with_door();
+        let area = Rect { x: 0, y: 0, width: 100, height: 24 };
+        let lines = render_lines(&g, MAIN_LAYER, area);
+        // Rows start at HEADER_ROWS (2): room 1 (here), room 2 (the entrance), the Dead End.
+        assert!(lines[2].starts_with("▸Maze 1"), "room 1 is `here`, not an entrance: {:?}", lines[2]);
+        assert!(lines[3].starts_with("⇲Maze 2"), "room 2 is the entrance target: {:?}", lines[3]);
+        assert!(!lines[4].starts_with('⇲') && !lines[4].starts_with('▸'), "{:?}", lines[4]);
+        // The table rows only — the footnote block legitimately spells out `⇲ in:` in prose, so a
+        // whole-text search for the glyph would conflate the two.
+        let table_rows = &lines[2..5];
+        assert_eq!(
+            table_rows.iter().filter(|l| l.starts_with('⇲')).count(),
+            1,
+            "exactly one row carries the entry marker: {table_rows:?}"
+        );
+    }
+
+    /// `▸` (here) wins over `⇲` (entrance) when a room is both — the entrance fact still lives in
+    /// the footnote, but the row only has one marker column.
+    #[test]
+    fn the_here_marker_wins_over_the_entry_marker() {
+        let mut g = tiny_with_door();
+        g.set_current(2); // stand in the very room the outside door leads to
+        let area = Rect { x: 0, y: 0, width: 100, height: 24 };
+        let lines = render_lines(&g, MAIN_LAYER, area);
+        assert!(lines[3].starts_with("▸Maze 2"), "the here-marker must win: {:?}", lines[3]);
+        assert!(!lines[3].starts_with('⇲'), "…and the entry marker must not also show: {:?}", lines[3]);
+        // No OTHER row picks up a stray marker either.
+        let table_rows = &lines[2..5];
+        assert!(
+            table_rows.iter().all(|l| !l.starts_with('⇲')),
+            "no bare entry marker anywhere in the table: {table_rows:?}"
+        );
+        // The fact is still recorded — just in the footnote, not the row.
+        let ml = layout(&g, MAIN_LAYER, area.width);
+        assert!(ml.entry_rooms.contains(&2), "room 2 is still a recognised entrance target");
     }
 
     #[test]

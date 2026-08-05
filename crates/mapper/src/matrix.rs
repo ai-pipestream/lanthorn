@@ -137,6 +137,38 @@ pub fn entrances(graph: &MapGraph, target: RoomId) -> Vec<(RoomId, Direction)> {
         .collect()
 }
 
+/// Border edges that ENTER `layer` from outside it — the doors a player could walk in through.
+///
+/// The mirror image of the `⇱out` cells [`classify`] already produces from the other side: there
+/// the test is `layer_of(dest) != layer_of(room)` with `room` inside the layer; here it is
+/// `layer_of(origin) != layer` with `dest` inside it. `⇱out` cells live in the table itself (the
+/// origin has a row to sit on); an inbound edge's origin has no row here at all, so it can only
+/// ever be a footnote — this is the query that footnote is built from.
+///
+/// Ordered by the entering room's row position (ascending room id, [`build`]'s row order), then by
+/// [`MATRIX_DIRS`] column order, then by origin id: deterministic however the edges were minted,
+/// so the block a caller builds from this is stable across a save/load round trip.
+pub fn inbound_border_edges(graph: &MapGraph, layer: LayerId) -> Vec<(RoomId, Direction, RoomId)> {
+    let row_of: BTreeMap<RoomId, usize> =
+        graph.rooms_in_layer(layer).into_iter().enumerate().map(|(i, id)| (id, i)).collect();
+    let col_of = |d: Direction| MATRIX_DIRS.iter().position(|&x| x == d).unwrap_or(usize::MAX);
+
+    let mut out: Vec<(RoomId, Direction, RoomId)> = graph
+        .connections()
+        .iter()
+        .filter(|c| {
+            c.dir != Direction::Unknown
+                && graph.layer_of(c.dest) == layer
+                && graph.layer_of(c.origin) != layer
+        })
+        .map(|c| (c.origin, c.dir, c.dest))
+        .collect();
+    out.sort_by_key(|&(origin, dir, dest)| {
+        (row_of.get(&dest).copied().unwrap_or(usize::MAX), col_of(dir), origin)
+    });
+    out
+}
+
 // ── Display naming ────────────────────────────────────────────────────────────
 
 /// Row labels and cell tags for a layer's rooms.
@@ -553,6 +585,26 @@ mod tests {
         assert!(e.contains(&(1, Direction::E)));
         assert!(e.contains(&(4, Direction::N)));
         assert!(entrances(&g, 9).contains(&(2, Direction::Down)), "a way in from another layer counts");
+    }
+
+    /// The mirror of `⇱out`: an edge whose ORIGIN is outside the layer and whose destination is
+    /// inside it. `maze()` already has one crossing the other way (room 2 → room 9, `Down`); this
+    /// gives room 9 a way back IN, which must show up here and not be confused with the outbound
+    /// one.
+    #[test]
+    fn inbound_border_edges_are_the_doors_into_the_layer() {
+        let (mut g, l) = maze();
+        g.add_edge(9, Direction::W, 1); // enters at the first row
+        g.add_edge(9, Direction::S, 3); // enters at the third row
+        let edges = inbound_border_edges(&g, l);
+        assert_eq!(
+            edges,
+            vec![(9, Direction::W, 1), (9, Direction::S, 3)],
+            "ordered by the entering room's row position, not insertion order"
+        );
+        // The existing OUTBOUND crossing (2 → 9) must never appear as inbound.
+        assert!(edges.iter().all(|&(o, _, d)| o != 2 || d != 9));
+        assert!(inbound_border_edges(&g, l).iter().all(|&(o, _, _)| g.layer_of(o) != l));
     }
 
     // ── Tangle detection ──────────────────────────────────────────────────────

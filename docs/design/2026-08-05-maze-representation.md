@@ -52,6 +52,7 @@ direction may be exactly what full exploration needs, so none are hidden.
  ...
 ──────────────────────────────────────────────────────────────────────────────────
 ¹ Dead End, near Vending Machine    ⇱out: D from 11 → At West End of Long Hall
+⇲ in:  At West End of Long Hall —S→ Maze 11
 ```
 
 **Cell vocabulary** (one glyph + destination number, ≤6 cells wide):
@@ -66,10 +67,17 @@ direction may be exactly what full exploration needs, so none are hidden.
 | `_`         | tried, no path found (a later observed loop upgrades it to `↩`) |
 | `·`         | untried — the exploration frontier |
 
-**Row furniture:** `▸` marks the room you are standing in; rooms sharing a
-display name are numbered by first-visit order ("Maze 1…11", display-only —
-identity is already stable via object address); long or out-of-layer names
-are footnoted below the table (`DeadEnd¹`, `⇱out` destinations).
+**Row furniture:** `▸` marks the room you are standing in; `⇲` marks a room
+that a border edge from OUTSIDE the layer arrives at — the entrances the
+`⇱out` cells have no mirror for, since an inbound edge's origin has no row
+here to sit on. Precedence: `▸` wins when a room is both (you are standing
+there; the entrance fact still reads in the footnote). Entrances are listed
+one per line, `⇲ in:  <origin room> —<D>→ <target label>`, ordered by the
+entering room's row position then by direction column, mirroring the
+`⇱out` footnote's own convention. Rooms sharing a display name are numbered
+by first-visit order ("Maze 1…11", display-only — identity is already
+stable via object address); long or out-of-layer names are footnoted below
+the table (`DeadEnd¹`, `⇱out` destinations).
 
 **Selection cross-highlight:** selecting a row restyles — **bold via a
 style selector, not a glyph** — every cell elsewhere that *arrives* at the
@@ -136,10 +144,14 @@ the connection list. Numbering derives from existing insertion order;
 
 Unit: cell classification (reciprocal/asym/one-way/self-loop/probe/untried)
 against a fixture graph replicating the save's statistics; numbering
-stability across save/load; entrance cross-highlight set; footnote
-assignment; view-mode persistence per layer. Integration: a sanitized copy
-of the advent.blb map.json in unit_tests/ (player data, redistributable):
-flag the layer, render the matrix, assert known cells (`DeadEnd¹` row `E`
-is `_`, Maze 11 `D` is `⇱out`, the two reciprocal pairs, ▸ on the current
-room, bold entrances for a selected room in both honor_game_colours
+stability across save/load; entrance cross-highlight set; inbound border
+edges (the `⇲` query, mirroring the `⇱out` `LeavesLayer` test from the
+other side); footnote assignment; view-mode persistence per layer.
+Integration: a sanitized copy of the advent.blb map.json in unit_tests/
+(player data, redistributable): flag the layer, render the matrix, assert
+known cells (`DeadEnd¹` row `E` is `_`, Maze 11 `D` is `⇱out`, the two
+reciprocal pairs, ▸ on the current room, the fixture's one inbound edge —
+"At West End of Long Hall" `S` into Maze 11 — produces the `⇲ in:` footnote
+line and, because that room is ALSO the save's current room, ▸ wins over
+⇲ on its row; bold entrances for a selected room in both honor_game_colours
 modes). Falsification per CLAUDE.md throughout.

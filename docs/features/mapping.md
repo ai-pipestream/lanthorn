@@ -179,6 +179,7 @@ north*. So babelmap will draw you the table.
 ──────────────────────────────────────────────────────────────────────────────────
 ¹ Dead End, near Vending Machine
 ⇱out: D from 11 → At West End of Long Hall
+⇲ in:  At West End of Long Hall —S→ Maze 11
 ```
 
 One row per room, one column per direction — **all twelve, always**. An untried
@@ -195,10 +196,14 @@ hidden however empty the column looks.
 | `_`    | tried, and there is no path that way |
 | `·`    | untried — the exploration frontier |
 
-**Reading it.** `▸` marks the room you are standing in. Rooms sharing a display
-name are numbered in row order ("Maze 1…11") — display-only; identity is still the
-room's own id, so the numbers are the same tomorrow and after a reload. Names too
-long for the label column are abbreviated and spelled out in a footnote.
+**Reading it.** `▸` marks the room you are standing in. `⇲` marks a room a passage
+from *outside* the layer leads into — a doorway into the maze, listed in a footnote
+(`⇲ in:  <origin room> —<direction>→ <target>`) alongside where `⇱out` cells lead.
+A room that is both here and a doorway shows `▸`: you are standing there, and the
+entrance fact still reads in the footnote. Rooms sharing a display name are
+numbered in row order ("Maze 1…11") — display-only; identity is still the room's
+own id, so the numbers are the same tomorrow and after a reload. Names too long
+for the label column are abbreviated and spelled out in a footnote.
 
 **Selection** moves with ↑/↓ (or Home/End, PageUp/PageDown) when the map pane has
 focus, or by clicking a row. Clicking a *destination cell* jumps the selection to

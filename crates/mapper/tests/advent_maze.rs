@@ -171,6 +171,25 @@ fn entrances_to_a_room_are_every_cell_that_arrives_at_it() {
     }
 }
 
+/// The one door INTO the maze layer in the whole fixture — the mirror of the `⇱out` crossing at
+/// Maze 11. It happens to land on the same passage from the other end: "At West End of Long
+/// Hall" leads back in via `S`, distinct from the `Down` that leaves.
+#[test]
+fn inbound_border_edges_finds_the_one_door_into_the_maze() {
+    let g = advent();
+    let ids = by_label(&g);
+    let long_hall = g
+        .connections()
+        .iter()
+        .find(|c| g.layer_of(c.origin) == MAZE_LAYER && g.layer_of(c.dest) != MAZE_LAYER)
+        .map(|c| c.dest)
+        .expect("the maze has an outbound crossing");
+    assert_eq!(g.room(long_hall).unwrap().label(), "At West End of Long Hall");
+
+    let inbound = matrix::inbound_border_edges(&g, MAZE_LAYER);
+    assert_eq!(inbound, vec![(long_hall, Direction::S, ids["Maze 11"])], "{inbound:?}");
+}
+
 /// Detection has to fire on the maze and stay silent on the ordinary cave beside it — in the
 /// SAME map file, explored by the same player to the same partial degree. That is the only
 /// comparison that means anything, and it is why the threshold is measured over round trips

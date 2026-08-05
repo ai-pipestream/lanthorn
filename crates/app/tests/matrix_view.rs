@@ -130,6 +130,35 @@ fn the_cells_the_spec_names_are_on_screen_in_both_colour_modes() {
     }
 }
 
+/// The one door INTO the maze in the fixture: "At West End of Long Hall" leads back in via `S`,
+/// landing on Maze 11 — which happens to also be the room the save was taken standing in, so this
+/// doubles as the real-data proof that `▸` wins over `⇲` (see the precedence test below for the
+/// synthetic case where they are on different rows).
+#[test]
+fn the_inbound_door_gets_a_footnote_in_both_colour_modes() {
+    for honor in [true, false] {
+        let (m, st) = maze_state(honor);
+        let (buf, _) = draw(&m.graph, &st, WIDE);
+        let text = lines(&buf, WIDE).join("\n");
+
+        assert!(
+            text.contains("⇲ in:  At West End of Long Hall —S→ Maze 11"),
+            "the inbound-edge footnote is missing (honor={honor}):\n{text}"
+        );
+
+        // Maze 11 is ALSO the here-room in this save, so `▸` must win over `⇲` on its row.
+        let maze11 = row_for(&buf, WIDE, "Maze 11");
+        assert!(maze11.starts_with('▸'), "here wins over entrance on Maze 11's row: {maze11:?}");
+        // The ONLY line beginning with `⇲` must be the footnote's own prose, never a row marker —
+        // the entry room's row is `▸`, and nothing else is an entry room in this fixture.
+        assert_eq!(
+            text.lines().filter(|l| l.starts_with('⇲')).count(),
+            1,
+            "only the footnote line should start with `⇲`, no row marker (honor={honor}):\n{text}"
+        );
+    }
+}
+
 /// Selecting a room BOLDS every cell elsewhere that arrives at it — the answer to "how do I get
 /// back here", which is the one thing a row cannot tell you about itself.
 #[test]
