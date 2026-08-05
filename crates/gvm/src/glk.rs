@@ -1342,6 +1342,20 @@ impl Model {
         self.borderless = on;
     }
 
+    /// The current per-game borderless-windows mode (see
+    /// [`Self::set_borderless`]). A host/runtime setting, not game state — the
+    /// exec-side model swaps (`@restart`, `restore_state`) read it off the old
+    /// model and re-apply it to the new one. (SQ-0627)
+    pub fn borderless(&self) -> bool {
+        self.borderless
+    }
+
+    /// Ids of every live window, pairs included — the teardown set `@restart`
+    /// notifies the backend about before discarding the model. (SQ-0627)
+    pub(crate) fn all_window_ids(&self) -> Vec<u32> {
+        self.windows.iter().flatten().map(|w| w.id).collect()
+    }
+
     /// The gutter width (cells) reserved for a split's border under the current
     /// mode: 0 when [`borderless`](Self::borderless), else 1 for a bordered split
     /// (the Glk default) and 0 for `winmethod_NoBorder`. (SQ-0341)
@@ -3356,7 +3370,7 @@ impl Model {
         if !r.done() {
             return Err("Glk snapshot: trailing bytes".to_string());
         }
-        Ok(Model {
+        let model = Model {
             windows,
             streams,
             files,
@@ -3372,10 +3386,105 @@ impl Model {
             saved_game_files: std::collections::BTreeMap::new(),
             savegame_streams: std::collections::BTreeMap::new(),
             resource_streams,
-            // Runtime per-game setting, not part of the snapshot: the host
-            // re-applies it after restore (SQ-0341).
+            // Deliberately NOT serialized: the borderless mode is a host/
+            // runtime per-game setting, not game state. The exec-side model
+            // swaps (restore_state, @restart) carry the LIVE value across
+            // (SQ-0627); the host may still re-apply its config on top (SQ-0341).
             borderless: false,
-        })
+        };
+        model.validate_snapshot()?;
+        Ok(model)
+    }
+
+    /// Structural validation of a deserialized snapshot (SQ-0623). Every id
+    /// the wire format carries is untrusted, but the live-model code indexes
+    /// windows/streams by id unchecked (`free_window_subtree`'s direct stream
+    /// index), unwraps tree links (`build_win_tree` / `layout_window` /
+    /// `window_close`'s pair collapse), and recurses the child links (a cycle
+    /// exhausts the stack). Accept only a model the live open/close paths
+    /// could have produced; anything else is a load error, never a delayed
+    /// panic.
+    fn validate_snapshot(&self) -> Result<(), String> {
+        let fail = |m: &str| Err(format!("Glk snapshot: {m}"));
+        // Slot/id agreement: every accessor maps id → slot id-1.
+        for (i, w) in self.windows.iter().enumerate() {
+            if w.as_ref().is_some_and(|w| w.id as usize != i + 1) {
+                return fail("window id disagrees with its slot");
+            }
+        }
+        for (i, s) in self.streams.iter().enumerate() {
+            if s.as_ref().is_some_and(|s| s.id as usize != i + 1) {
+                return fail("stream id disagrees with its slot");
+            }
+        }
+        let live_windows = self.windows.iter().flatten().count();
+        if self.root == 0 {
+            if live_windows != 0 {
+                return fail("windows exist but there is no root");
+            }
+        } else {
+            match self.win(self.root) {
+                None => return fail("root is not a live window"),
+                Some(r) if r.parent != 0 => return fail("root has a parent"),
+                _ => {}
+            }
+            // Walk the tree iteratively; every live window must be reached
+            // exactly once (single visit ⇒ acyclic, full count ⇒ no orphans).
+            let mut seen = vec![false; self.windows.len()];
+            let mut todo = vec![self.root];
+            let mut visited = 0usize;
+            while let Some(id) = todo.pop() {
+                let Some(w) = self.win(id) else { return fail("tree references a dead window") };
+                let slot = &mut seen[(id - 1) as usize];
+                if std::mem::replace(slot, true) {
+                    return fail("window tree has a cycle or a shared child");
+                }
+                visited += 1;
+                if w.wintype == WinType::Pair {
+                    if w.child1 == 0 || w.child2 == 0 || w.child1 == w.child2 {
+                        return fail("pair window with missing children");
+                    }
+                    for c in [w.child1, w.child2] {
+                        match self.win(c) {
+                            None => return fail("pair child is not a live window"),
+                            Some(cw) if cw.parent != id => {
+                                return fail("child's parent link disagrees with the tree")
+                            }
+                            _ => {}
+                        }
+                        todo.push(c);
+                    }
+                    // (w.key is NOT validated: the live model tolerates a
+                    // dangling key — closing a key window elsewhere in the
+                    // tree leaves it — and every reader handles it as absent.)
+                } else {
+                    if w.child1 != 0 || w.child2 != 0 {
+                        return fail("leaf window with children");
+                    }
+                    // A leaf's stream must exist and point back at it —
+                    // free_window_subtree indexes streams[stream-1] directly.
+                    match self.stream(w.stream) {
+                        Some(s) if matches!(s.kind, StreamKind::Window(wid) if wid == id) => {}
+                        _ => return fail("window stream is missing or mismatched"),
+                    }
+                }
+            }
+            if visited != live_windows {
+                return fail("window not reachable from the root");
+            }
+        }
+        if self.cur_stream != 0 && self.stream(self.cur_stream).is_none() {
+            return fail("current stream is not a live stream");
+        }
+        // Every window-kind stream must belong to the window it names.
+        for s in self.streams.iter().flatten() {
+            if let StreamKind::Window(wid) = s.kind {
+                if self.win(wid).map(|w| w.stream) != Some(s.id) {
+                    return fail("window stream names a window that does not own it");
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -3768,6 +3877,43 @@ mod layout_snap_tests {
             Ok(_) => panic!("a future snapshot version must be rejected"),
             Err(err) => assert!(err.contains("unsupported Glk snapshot version"), "got: {err}"),
         }
+    }
+
+    // ── SQ-0623: structural validation of a deserialized snapshot ──
+    // The "Glk " chunk is untrusted input: every id it carries feeds unchecked
+    // indexing (free_window_subtree's direct stream index) or unwraps
+    // (build_win_tree / layout_window / the window_close pair collapse), and a
+    // child cycle recurses build_win_tree to stack exhaustion. deserialize must
+    // reject such a model instead of installing it and panicking later.
+
+    #[test]
+    fn deserialize_rejects_a_dead_root() {
+        let mut m = Model::new();
+        m.window_open(0, 0, 0, 3, 0).unwrap();
+        m.root = 99; // no such window: build_win_tree/layout_window would panic
+        assert!(Model::deserialize(&m.serialize()).is_err(), "a dead root must not install");
+    }
+
+    #[test]
+    fn deserialize_rejects_a_window_with_a_dead_stream() {
+        let mut m = Model::new();
+        m.window_open(0, 0, 0, 3, 0).unwrap();
+        // free_window_subtree would index streams[41] without a bounds check.
+        m.windows[0].as_mut().unwrap().stream = 42;
+        assert!(Model::deserialize(&m.serialize()).is_err(), "a dead stream id must not install");
+    }
+
+    #[test]
+    fn deserialize_rejects_a_child_cycle() {
+        let mut m = Model::new();
+        let root = m.window_open(0, 0, 0, 3, 0).unwrap();
+        let grid = m.window_open(root, WINMETHOD_LEFT | WINMETHOD_FIXED, 20, 4, 0).unwrap();
+        let pair = m.window_parent(grid).unwrap();
+        m.win_mut(pair).unwrap().child1 = pair; // self-referential child
+        assert!(
+            Model::deserialize(&m.serialize()).is_err(),
+            "a cyclic window tree must not install (build_win_tree would recurse forever)",
+        );
     }
 
     #[test]

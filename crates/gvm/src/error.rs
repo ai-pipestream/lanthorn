@@ -20,4 +20,9 @@ pub enum GError {
     /// Save-state data (Glulx-Quetzal) is corrupt, truncated, or inconsistent.
     /// Returned by [`crate::exec::Machine::restore_state`]; never a panic.
     BadSave(String),
+    /// A header field demands more resource than the interpreter will allocate
+    /// (ENDMEM or the requested stack size beyond the sanity cap): the story
+    /// is rejected at load rather than attempting a multi-gigabyte
+    /// allocation from a 36-byte file. (SQ-0624)
+    LimitExceeded(&'static str),
 }

@@ -615,13 +615,14 @@ pub fn opcode_help(opcode: u32) -> Option<OpcodeHelp> {
         0x1C8 => h!("Branch if a float32 value is NaN.", &["a float32 bit pattern"], branch: "the value is NaN"),
         0x1C9 => h!("Branch if a float32 value is infinite.", &["a float32 bit pattern"], branch: "the value is +/-infinity"),
         // ── double-precision float (GLULX_NOTES §13.1 / spec 3.1.3 §2.13) ────
-        // DISCREPANCY vs. the spec's usual "high word first" convention: this
-        // executor's `store64` writes the LOW word first (S1), high word
-        // second (S2) — while every double LOAD (`dec64`) reads the HIGH word
-        // first (L1), low word second (L2). See exec.rs lines ~1290-1293's own
-        // comment ("reads take the high word first, stores write the low word
-        // first") — an intentional, but spec-atypical and easy-to-miss,
-        // asymmetry. Roles below describe the executor's actual behavior.
+        // Word order IS the spec's convention (verified against spec §2.13 and
+        // glulxe exec.c op_numtod, SQ-0626): "read operands always read the
+        // high word first. Write operands always write the LOW word first" —
+        // e.g. `dadd Xhi Xlo Yhi Ylo RESlo REShi`. So loads take L1=high,
+        // L2=low, while stores write S1=low, S2=high. The asymmetry is
+        // deliberate and load-bearing: pushing lo then hi leaves the high word
+        // on top, exactly where the next double read's first (high-word) pop
+        // looks, so stack round-trips work. Roles below describe this behavior.
         0x200 => h!(
             "Convert a signed integer to the nearest double.",
             &["a signed 32-bit integer", "the double's LOW 32 bits", "the double's HIGH 32 bits"]

@@ -223,6 +223,12 @@ pub struct Machine {
     /// Recursion depth of filter-iosys (mode 1) callbacks, guarding against a
     /// filter function whose own output recurses back into `emit`.
     filter_depth: u32,
+    /// A fault raised inside a filter-iosys callback, latched because `emit`
+    /// has no error channel (printing is fire-and-forget for the opcodes). The
+    /// aborted callee's frame was abandoned mid-flight, so execution must not
+    /// continue: `step`/`run_call_to_return` drain this and surface it as the
+    /// current instruction's fault (SQ-0625).
+    pending_fault: Option<String>,
     /// Recursion depth of echo-stream forwarding in `glk_stream_put`, bounding a
     /// pathological echo loop (windows echoing to each other's streams, which the
     /// Glk spec calls illegal) so output can never infinite-loop.
@@ -345,6 +351,15 @@ pub struct Machine {
 
 fn align_up(v: u32, to: u32) -> u32 {
     v.div_ceil(to) * to
+}
+
+/// Pre-allocation hint for a count read from the story image or VM memory:
+/// clamp it so a hostile 32-bit count (e.g. `@call` with argc 0xFFFFFFFF)
+/// cannot reserve gigabytes up front. Pushes past the hint simply grow the
+/// collection, and the per-element pops/reads fault long before any genuine
+/// multi-billion-entry collection could materialize. (SQ-0624)
+fn cap_hint(n: u32) -> usize {
+    (n as usize).min(1024)
 }
 
 /// Best-effort Glulx opcode mnemonic; hex fallback when unknown.
@@ -517,13 +532,14 @@ pub(crate) fn glk_selector_name(sel: u32) -> String {
         0x0151 => "glk_set_terminators_line_event",
         0x0160 => "glk_current_time",
         0x0161 => "glk_current_simple_time",
-        0x0168 => "glk_time_to_date_local",
-        0x0169 => "glk_simple_time_to_date_utc",
-        0x016A => "glk_simple_time_to_date_local",
-        0x016B => "glk_date_to_time_utc",
-        0x016C => "glk_date_to_time_local",
-        0x016D => "glk_date_to_simple_time_utc",
-        0x016E => "glk_date_to_simple_time_local",
+        0x0168 => "glk_time_to_date_utc",
+        0x0169 => "glk_time_to_date_local",
+        0x016A => "glk_simple_time_to_date_utc",
+        0x016B => "glk_simple_time_to_date_local",
+        0x016C => "glk_date_to_time_utc",
+        0x016D => "glk_date_to_time_local",
+        0x016E => "glk_date_to_simple_time_utc",
+        0x016F => "glk_date_to_simple_time_local",
         0x1100 => "garglk_set_zcolors",
         0x1101 => "garglk_set_zcolors_stream",
         0x1102 => "garglk_set_reversevideo",
@@ -726,8 +742,9 @@ fn parse_ifzs<'a>(data: &'a [u8]) -> Result<IfzsChunks<'a>, GError> {
 }
 
 impl Machine {
-    /// Ceiling on the memory-map size; `malloc` fails rather than grow past it.
-    const MAX_MEMSIZE: u32 = 0x1000_0000; // 256 MiB
+    /// Ceiling on the memory-map size; `malloc` fails rather than grow past
+    /// it, and `parse_header` rejects a story whose ENDMEM starts above it.
+    const MAX_MEMSIZE: u32 = crate::header::MAX_MEMSIZE; // 256 MiB
 
     /// Maximum number of in-memory undo snapshots retained (oldest dropped).
     const UNDO_CAP: usize = 16;
@@ -751,6 +768,7 @@ impl Machine {
             iosys_mode: 0,
             iosys_rock: 0,
             filter_depth: 0,
+            pending_fault: None,
             echo_depth: 0,
             emit_capture: None,
             cur_stringtbl: decode_table,
@@ -897,16 +915,19 @@ impl Machine {
                 let o = self.take32()?;
                 self.local_load(o)?
             }
+            // RAM-relative modes wrap (32-bit address arithmetic, as glulxe's C
+            // uint32 sum does): a huge operand must reach the normal memory
+            // bounds check, not a debug overflow panic (SQ-0627).
             0xD => {
-                let a = self.take8()? + ramstart;
+                let a = self.take8()?.wrapping_add(ramstart);
                 self.m32(a)?
             }
             0xE => {
-                let a = self.take16()? + ramstart;
+                let a = self.take16()?.wrapping_add(ramstart);
                 self.m32(a)?
             }
             0xF => {
-                let a = self.take32()? + ramstart;
+                let a = self.take32()?.wrapping_add(ramstart);
                 self.m32(a)?
             }
             other => return Err(format!("illegal load operand mode {other:#x}")),
@@ -925,9 +946,10 @@ impl Machine {
             0x9 => Dest::Local(self.take8()?),
             0xA => Dest::Local(self.take16()?),
             0xB => Dest::Local(self.take32()?),
-            0xD => Dest::Mem(self.take8()? + ramstart),
-            0xE => Dest::Mem(self.take16()? + ramstart),
-            0xF => Dest::Mem(self.take32()? + ramstart),
+            // Wrapping for the same reason as resolve_load's 0xD..0xF arms.
+            0xD => Dest::Mem(self.take8()?.wrapping_add(ramstart)),
+            0xE => Dest::Mem(self.take16()?.wrapping_add(ramstart)),
+            0xF => Dest::Mem(self.take32()?.wrapping_add(ramstart)),
             other => return Err(format!("illegal store operand mode {other:#x}")),
         })
     }
@@ -1495,12 +1517,21 @@ impl Machine {
     }
 
     /// Decode a Glulx (high, low) word pair as the IEEE-754 double it holds.
-    /// Glulx reads doubles high word first.
+    /// Glulx reads doubles high word first (spec 3.1.3 §2.13: "read operands
+    /// always read the high word first").
     fn dec64(hi: u32, lo: u32) -> f64 {
         f64::from_bits((u64::from(hi) << 32) | u64::from(lo))
     }
 
-    /// Store a double to two dests, low word first (the Glulx write convention).
+    /// Store a double to two dests, LOW word first (S1 = low, S2 = high) —
+    /// the spec's write convention, deliberately the REVERSE of reads: "write
+    /// operands always write the low word first" ("the result is stored as
+    /// S2:S1"; `dadd Xhi Xlo Yhi Ylo RESlo REShi`, spec 3.1.3 §2.13; glulxe
+    /// op_numtod stores lo→inst[1], hi→inst[2]). The asymmetry is what makes
+    /// stack round-trips work: pushing lo then hi leaves the HIGH word on
+    /// top, exactly where the next double read's first (high-word) pop looks,
+    /// so `@numtod Stack Stack` → `@dtonumz Stack Stack` is the identity
+    /// (pinned by `numtod_dtonumz_round_trip_through_the_stack`). (SQ-0626)
     fn store64(&mut self, s: &[Dest], v: f64) -> R<()> {
         let b = v.to_bits();
         self.store(s[0], b as u32)?;
@@ -1623,8 +1654,11 @@ impl Machine {
     }
 
     /// Number of 32-bit values currently on the frame's value stack.
+    /// `reload_frame_meta` guarantees `value_base() <= sp` for any installed
+    /// frame; the saturation is belt-and-braces so a corrupt frame can never
+    /// turn this into a debug panic / huge wrapped count (SQ-0623).
     pub(crate) fn value_count(&self) -> u32 {
-        ((self.sp - self.value_base()) / 4) as u32
+        (self.sp.saturating_sub(self.value_base()) / 4) as u32
     }
 
     // ── call-frame locals (size-aware, per the locals format) ─────────────────
@@ -1666,7 +1700,13 @@ impl Machine {
     // ── frame construction ────────────────────────────────────────────────────
 
     /// Recompute `cur_frame_len`/`cur_localspos`/`cur_locals` from the frame
-    /// header bytes at `fp`.
+    /// header bytes at `fp`, VALIDATING them first. The header may come off a
+    /// restored `Stks` chunk — untrusted input — so accept only what
+    /// [`Machine::build_frame_and_enter`] could have produced: the format list
+    /// between the header and `LocalsPos`, the locals inside `FrameLen`, and
+    /// the whole frame inside the stack and at-or-below `sp`. Without this, a
+    /// crafted `LocalsPos`/`FrameLen` sent `local_load`/`local_store` and
+    /// `value_count` out of bounds (SQ-0623).
     fn reload_frame_meta(&mut self) -> R<()> {
         let fp = self.fp;
         if fp + 8 > self.stack.len() {
@@ -1674,12 +1714,24 @@ impl Machine {
         }
         self.cur_frame_len = self.st_r32(fp);
         self.cur_localspos = self.st_r32(fp + 4);
-        // Parse the locals-format pairs that begin at fp+8.
+        let frame_len = self.cur_frame_len as usize;
+        let localspos = self.cur_localspos as usize;
+        let frame_end = fp as u64 + frame_len as u64;
+        if localspos < 8
+            || localspos > frame_len
+            || frame_end > self.stack.len() as u64
+            || frame_end > self.sp as u64
+        {
+            return Err("corrupt frame header".to_string());
+        }
+        // Parse the locals-format pairs that begin at fp+8; a valid frame's
+        // terminator sits before LocalsPos (LocalsPos = align4(8 + format)).
         let mut locals = Vec::new();
         let mut p = fp + 8;
+        let fmt_end = fp + localspos;
         let mut off = 0u32;
         loop {
-            if p + 2 > self.stack.len() {
+            if p + 2 > fmt_end {
                 return Err("corrupt locals format".to_string());
             }
             let t = self.stack[p];
@@ -1688,8 +1740,15 @@ impl Machine {
             if t == 0 && c == 0 {
                 break;
             }
+            if !matches!(t, 1 | 2 | 4) {
+                return Err("corrupt locals format".to_string());
+            }
             for _ in 0..c {
                 off = align_up(off, t as u32);
+                // Every local must lie inside the frame's locals region.
+                if localspos as u64 + off as u64 + t as u64 > frame_len as u64 {
+                    return Err("corrupt locals format".to_string());
+                }
                 locals.push((off, t));
                 off += t as u32;
             }
@@ -1993,16 +2052,17 @@ impl Machine {
                 let o = self.take32()?;
                 self.local_load(o)?
             }
+            // Wrapping for the same reason as resolve_load's 0xD..0xF arms.
             0xD => {
-                let a = self.take8()? + ramstart;
+                let a = self.take8()?.wrapping_add(ramstart);
                 self.read_width(a, width)?
             }
             0xE => {
-                let a = self.take16()? + ramstart;
+                let a = self.take16()?.wrapping_add(ramstart);
                 self.read_width(a, width)?
             }
             0xF => {
-                let a = self.take32()? + ramstart;
+                let a = self.take32()?.wrapping_add(ramstart);
                 self.read_width(a, width)?
             }
             other => return Err(format!("illegal load operand mode {other:#x}")),
@@ -2292,10 +2352,16 @@ impl Machine {
         // Glk model: reinstall the window/stream tree from the "Glk " chunk so a
         // restore into a fresh Machine has live windows. An older snapshot with
         // no such chunk restores with an empty model (back-compat, no panic).
+        // The per-game borderless mode is a HOST/runtime setting, not game
+        // state: it is deliberately absent from the snapshot, and the live
+        // value survives the model swap — @restoreundo runs through here with
+        // no host callback to re-apply it (SQ-0627).
+        let borderless = self.glk.borderless();
         self.glk = match find(b"Glk ") {
             Some(d) => Model::deserialize(d).map_err(GError::BadSave)?,
             None => Model::new(),
         };
+        self.glk.set_borderless(borderless);
         Ok(())
     }
 
@@ -2522,10 +2588,29 @@ impl Machine {
         if heap_start == 0 && nblocks == 0 {
             return Ok(()); // inactive
         }
-        let mut blocks = Vec::with_capacity(nblocks);
+        // The chunk is untrusted input; accept only a heap the live
+        // malloc/free path could have built (SQ-0623). heap_start is the
+        // memsize at first-malloc time, so it can never sit below the header
+        // ENDMEM floor — a bogus low value would let @mfree truncate memory
+        // below RAMSTART (then compress_ram underflows). Blocks must be
+        // sorted, non-overlapping, non-empty, and inside [heap_start,
+        // memsize]: out-of-order blocks make @malloc's gap walk compute
+        // `a - cursor` with a < cursor (debug panic; release wrap →
+        // overlapping allocations, silent heap corruption).
+        let memsize = self.mem.mem_size() as u64;
+        if heap_start < self.mem.endmem() || heap_start as u64 > memsize {
+            return Err(GError::BadSave("MAll heap-start out of range".into()));
+        }
+        let mut blocks = Vec::with_capacity(nblocks.min(1024));
+        let mut cursor = heap_start as u64;
         for k in 0..nblocks {
             let base = 8 + k * 8;
-            blocks.push((rd(base), rd(base + 4)));
+            let (a, sz) = (rd(base), rd(base + 4));
+            if sz == 0 || (a as u64) < cursor || a as u64 + sz as u64 > memsize {
+                return Err(GError::BadSave("MAll blocks unsorted, overlapping, or out of range".into()));
+            }
+            cursor = a as u64 + sz as u64;
+            blocks.push((a, sz));
         }
         self.heap_start = heap_start;
         self.heap_blocks = blocks;
@@ -2610,7 +2695,18 @@ impl Machine {
         self.cur_stringtbl = decode_table;
         self.heap_start = 0;
         self.heap_blocks.clear();
+        // The model reset invalidates every live window id, and the fresh
+        // model will hand out the SAME ids again — tell the backend each old
+        // window closed first, so a backend keyed by id cannot splice
+        // pre-restart window state (grid cells, buffer logs) into the
+        // restarted game's windows. The borderless mode is a host/runtime
+        // setting, not game state: it survives the reset (SQ-0627).
+        for id in self.glk.all_window_ids() {
+            self.backend.window_close(id);
+        }
+        let borderless = self.glk.borderless();
         self.glk = Model::new();
+        self.glk.set_borderless(borderless);
         self.pending_input = None;
         self.pending_event = None;
         self.pending_fileref = None;
@@ -2623,6 +2719,9 @@ impl Machine {
         self.cur_frame_len = 0;
         self.cur_localspos = 0;
         self.cur_locals.clear();
+        // Push the now-empty layout/tree so the backend stops rendering the
+        // torn-down windows until the game reopens its own (SQ-0627).
+        self.relayout_glk();
         self.build_frame_and_enter(start, &[])
     }
 
@@ -2914,7 +3013,7 @@ impl Machine {
 
     /// Read `n` bytes from main memory into a vector (bounds-checked).
     fn read_bytes(&self, addr: u32, n: u32) -> R<Vec<u8>> {
-        let mut v = Vec::with_capacity(n as usize);
+        let mut v = Vec::with_capacity(cap_hint(n));
         for i in 0..n {
             v.push(self.m8(addr + i)? as u8);
         }
@@ -3069,7 +3168,7 @@ impl Machine {
     fn op_call(&mut self) -> R<()> {
         let (l, s) = self.read_operands(2, 1)?;
         let (func, argc) = (l[0], l[1]);
-        let mut args = Vec::with_capacity(argc as usize);
+        let mut args = Vec::with_capacity(cap_hint(argc));
         for _ in 0..argc {
             args.push(self.pop32()?); // first arg is topmost
         }
@@ -3085,7 +3184,7 @@ impl Machine {
     fn op_tailcall(&mut self) -> R<()> {
         let (l, _) = self.read_operands(2, 0)?;
         let (func, argc) = (l[0], l[1]);
-        let mut args = Vec::with_capacity(argc as usize);
+        let mut args = Vec::with_capacity(cap_hint(argc));
         for _ in 0..argc {
             args.push(self.pop32()?);
         }
@@ -3144,7 +3243,21 @@ impl Machine {
                         let rest: String = std::iter::once(ch).chain(chars).collect();
                         return self.emit(&rest);
                     }
-                    let _ = self.run_call_to_return(self.iosys_rock, &[ch as u32]);
+                    if let Err(e) = self.run_call_to_return(self.iosys_rock, &[ch as u32]) {
+                        // The filter function faulted: its frame was abandoned
+                        // mid-flight, so the machine must not keep printing or
+                        // executing. Latch the fault (first one wins) —
+                        // `step`/`run_call_to_return` surface it as this
+                        // instruction's fault (SQ-0625).
+                        self.pending_fault.get_or_insert(e);
+                        self.filter_depth -= 1;
+                        return;
+                    }
+                    if self.pending_fault.is_some() {
+                        // A nested emit latched a fault below us: stop too.
+                        self.filter_depth -= 1;
+                        return;
+                    }
                 }
                 self.filter_depth -= 1;
             }
@@ -3383,7 +3496,7 @@ impl Machine {
     /// 32-bit arguments.
     fn read_node_args(&self, at: u32) -> R<Vec<u32>> {
         let argc = self.m32(at)?;
-        let mut args = Vec::with_capacity(argc as usize);
+        let mut args = Vec::with_capacity(cap_hint(argc));
         for i in 0..argc {
             args.push(self.m32(at + 4 + 4 * i)?);
         }
@@ -3402,6 +3515,12 @@ impl Machine {
                 return Err("function called within a string halted the machine".to_string());
             }
             self.step_once()?;
+            if let Some(fault) = self.pending_fault.take() {
+                // A filter callback nested under this frame faulted (latched
+                // by `emit`, which has no error channel): stop running in the
+                // abandoned state and propagate (SQ-0625).
+                return Err(fault);
+            }
         }
         Ok(())
     }
@@ -3495,7 +3614,7 @@ impl Machine {
     fn op_glk(&mut self) -> R<()> {
         let (l, s) = self.read_operands(2, 1)?;
         let (selector, argc) = (l[0], l[1]);
-        let mut args = Vec::with_capacity(argc as usize);
+        let mut args = Vec::with_capacity(cap_hint(argc));
         for _ in 0..argc {
             args.push(self.pop32()?); // first @glk arg is topmost
         }
@@ -3893,7 +4012,12 @@ impl Machine {
                 let (sid, buf, maxlen) = (a(0), a(1), a(2));
                 let mut count = 0u32;
                 if let Some((addr, len, pos, unicode)) = self.glk.memory_stream_read_info(sid) {
-                    let available = (len - pos).min(maxlen);
+                    // pos can sit PAST len: writes past a memory stream's end
+                    // advance the cursor without storing (Glk §5.3), so a
+                    // later read must see EOF, not a wrapped `len - pos`
+                    // (SQ-0625 — the 0x0090/0x0091 arms guard with their
+                    // `pos < len` matches; mirror them).
+                    let available = len.saturating_sub(pos).min(maxlen);
                     for i in 0..available {
                         // Unicode memory stream: clamp each 32-bit element to a
                         // byte (> 0xFF → '?') — cheapglk gli_get_buffer.
@@ -3952,7 +4076,8 @@ impl Machine {
                 let (sid, buf, maxlen) = (a(0), a(1), a(2));
                 let mut count = 0u32;
                 if let Some((addr, len, pos, unicode)) = self.glk.memory_stream_read_info(sid) {
-                    let available = (len - pos).min(maxlen);
+                    // pos past len → EOF, exactly as in the 0x0092 arm (SQ-0625).
+                    let available = len.saturating_sub(pos).min(maxlen);
                     for i in 0..available {
                         let cp = if unicode {
                             self.m32(addr + (pos + i) * 4)?
@@ -4510,7 +4635,7 @@ impl Machine {
 
     /// Read `len` Latin-1 bytes at `addr` into a String.
     fn read_latin1_buffer(&self, addr: u32, len: u32) -> R<String> {
-        let mut s = String::with_capacity(len as usize);
+        let mut s = String::with_capacity(cap_hint(len));
         for i in 0..len {
             s.push(self.m8(addr + i)? as u8 as char);
         }
@@ -4518,7 +4643,7 @@ impl Machine {
     }
     /// Read `len` big-endian 32-bit code points at `addr` into a String.
     fn read_uni_buffer(&self, addr: u32, len: u32) -> R<String> {
-        let mut s = String::with_capacity(len as usize);
+        let mut s = String::with_capacity(cap_hint(len));
         for i in 0..len {
             let cp = self.m32(addr + i * 4)?;
             s.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
@@ -4583,6 +4708,9 @@ impl Machine {
     /// * `ptr == 0` → a NULL pointer: discard (no result wanted).
     /// * `ptr == 0xFFFFFFFF` (-1) → push each value onto the VM stack, in order,
     ///   so the **last** field ends up on top (the game pops them back).
+    ///   Verified against glulxe glkop.c `WriteStructField` (SQ-0627): the -1
+    ///   convention writes field 0 at the lowest stack address and ascends,
+    ///   i.e. field 0 is pushed first and ends deepest — same as here.
     /// * otherwise → write the values consecutively to memory at `ptr`, `ptr+4`, …
     fn glk_out_ref(&mut self, ptr: u32, vals: &[u32]) -> R<()> {
         if ptr == 0 {
@@ -4724,7 +4852,7 @@ impl Machine {
     /// length — the same buffer-function contract as [`Self::glk_buffer_case_uni`]
     /// and cheapglk's `cgunicod.c` (truncated on write, untruncated in the value).
     fn glk_buffer_norm_uni(&mut self, buf: u32, buflen: u32, numchars: u32, form: NormForm) -> R<u32> {
-        let mut input = Vec::with_capacity(numchars as usize);
+        let mut input = Vec::with_capacity(cap_hint(numchars));
         for i in 0..numchars {
             input.push(self.m32(buf + i * 4)?);
         }
@@ -5439,7 +5567,14 @@ impl Machine {
         if let Some(sr) = self.fileref_prompt_result() {
             return sr;
         }
-        match self.step_once() {
+        // A fault latched inside a filter-iosys callback (see `pending_fault`)
+        // counts as this instruction's fault — the machine abandoned a frame
+        // mid-flight and must record-the-fault-and-quit (SQ-0625).
+        let stepped = self.step_once().and_then(|()| match self.pending_fault.take() {
+            Some(fault) => Err(fault),
+            None => Ok(()),
+        });
+        match stepped {
             Ok(()) if self.halted => StepResult::Quit,
             // A glk_select this step may have suspended for input, or an
             // @save/@restore this step may have suspended for host file I/O.
@@ -11587,6 +11722,11 @@ mod tests {
 
     #[test]
     fn numtod_encodes_low_word_first() {
+        // The spec's write convention (3.1.3 §2.13): "the result is stored as
+        // S2:S1" — S1 receives the LOW word, S2 the high word (glulxe
+        // op_numtod agrees: lo→inst[1], hi→inst[2]). Reads are the reverse
+        // (high word first); see numtod_dtonumz_round_trip_through_the_stack
+        // for why the asymmetry is load-bearing. (SQ-0626)
         // numtod 3 -> mem[0x100]=low, mem[0x104]=high. 3.0 = 0x4008_0000_0000_0000.
         let mut body = asm::ins(0x200, &[asm::Op::C32(3), asm::Op::Mem16(0x0100), asm::Op::Mem16(0x0104)]);
         body.extend(asm::ins(0x120, &[]));
@@ -11942,5 +12082,254 @@ mod tests {
         let mut plain = machine_with_glk(&[]);
         let win2 = plain.glk.root();
         assert_eq!(plain.glk_dispatch(0x00B3, &[win2, 0, 7, 0x100]).unwrap(), 0, "no info -> unknown");
+    }
+
+    // ── SQ-0623..0627: reviewed-defect regressions ────────────────────────────
+
+    /// Reassemble an IFZS container from `(id, data)` chunks (inverse of
+    /// [`iff_chunks`]) so a test can corrupt one chunk of a real save.
+    fn rebuild_ifzs(chunks: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (id, data) in chunks {
+            push_chunk(&mut body, id, data);
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"FORM");
+        out.extend_from_slice(&((body.len() + 4) as u32).to_be_bytes());
+        out.extend_from_slice(b"IFZS");
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// A copy of `blob` with the data of chunk `id` rewritten by `f`.
+    fn corrupt_chunk(blob: &[u8], id: &[u8; 4], f: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
+        let mut chunks = iff_chunks(blob);
+        let (_, data) = chunks.iter_mut().find(|(cid, _)| cid == id).expect("chunk present");
+        f(data);
+        rebuild_ifzs(&chunks)
+    }
+
+    #[test]
+    fn restore_rejects_crafted_stks_localspos() {
+        // SQ-0623: LocalsPos comes off the restored stack; before validation a
+        // crafted value passed reload_frame_meta and the first local access
+        // indexed stack[fp + 0xFFFF_FFF0 + off] — a panic, not a load error.
+        let body =
+            [asm::ins(0x40, &[asm::Op::Local8(0), asm::Op::Zero]), asm::ins(0x120, &[])].concat();
+        let mut m = machine_with_body(&[(4, 1)], body);
+        let blob = m.save_state();
+        let bad = corrupt_chunk(&blob, b"Stks", |d| {
+            d[4..8].copy_from_slice(&0xFFFF_FFF0u32.to_be_bytes()); // start frame's LocalsPos
+        });
+        assert!(m.restore_state(&bad).is_err(), "crafted LocalsPos must be a BadSave");
+    }
+
+    #[test]
+    fn restore_rejects_frame_len_past_sp() {
+        // SQ-0623: a restored FrameLen that puts value_base() above sp makes
+        // value_count() underflow on the next @stkcount/@stkpeek (debug panic,
+        // release OOB index). Must be rejected at restore.
+        let mut m = machine_with_body(&[], asm::ins(0x120, &[]));
+        let blob = m.save_state();
+        let bad = corrupt_chunk(&blob, b"Stks", |d| {
+            let huge = (d.len() as u32 + 64) & !3;
+            d[0..4].copy_from_slice(&huge.to_be_bytes()); // start frame's FrameLen
+        });
+        assert!(m.restore_state(&bad).is_err(), "FrameLen past sp must be a BadSave");
+    }
+
+    #[test]
+    fn restore_rejects_corrupt_glk_snapshot_root() {
+        // SQ-0623: a bogus root id in the "Glk " chunk previously installed
+        // fine and panicked later in build_win_tree/layout_window.
+        let mut m = machine_with_glk(&[]);
+        assert_ne!(m.glk_open_window(0, 0, 0, 3, 0), 0);
+        let blob = m.save_state();
+        let bad = corrupt_chunk(&blob, b"Glk ", |d| {
+            d[4..8].copy_from_slice(&99u32.to_be_bytes()); // root follows the version word
+        });
+        assert!(m.restore_state(&bad).is_err(), "a dead Glk root must be a BadSave");
+    }
+
+    #[test]
+    fn restore_rejects_hostile_heap_chunks() {
+        // SQ-0623: MAll blocks restored out of order made @malloc's gap walk
+        // compute `a - cursor` with a < cursor (debug panic; release wrap →
+        // overlapping blocks), and a bogus low heap_start would let @mfree
+        // truncate memory below RAMSTART (compress_ram then underflows).
+        let mut m = machine_with_body(&[], asm::ins(0x120, &[]));
+        let blob = m.save_state();
+        let hs = m.mem.endmem();
+
+        // (a) out-of-order blocks, inside a memory map grown to hold them.
+        let grown = corrupt_chunk(&blob, b"CMem", |d| {
+            let memsize = u32::from_be_bytes([d[0], d[1], d[2], d[3]]) + 0x100;
+            d[0..4].copy_from_slice(&memsize.to_be_bytes());
+            d.extend_from_slice(&[0x00, 0xFF]); // 256 more zero diff bytes
+        });
+        let unsorted = corrupt_chunk(&grown, b"MAll", |d| {
+            d.clear();
+            d.extend_from_slice(&hs.to_be_bytes()); // heap_start: valid
+            d.extend_from_slice(&2u32.to_be_bytes());
+            for (a, sz) in [(hs + 0x20, 0x10u32), (hs, 0x10)] {
+                d.extend_from_slice(&a.to_be_bytes());
+                d.extend_from_slice(&sz.to_be_bytes());
+            }
+        });
+        assert!(m.restore_state(&unsorted).is_err(), "unsorted heap blocks must be a BadSave");
+
+        // (b) blocks reaching past the restored memory map.
+        let past_end = corrupt_chunk(&blob, b"MAll", |d| {
+            d.clear();
+            d.extend_from_slice(&hs.to_be_bytes());
+            d.extend_from_slice(&1u32.to_be_bytes());
+            d.extend_from_slice(&hs.to_be_bytes());
+            d.extend_from_slice(&0x1000u32.to_be_bytes()); // block overruns memsize
+        });
+        assert!(m.restore_state(&past_end).is_err(), "a block past memsize must be a BadSave");
+
+        // (c) heap_start below the ENDMEM floor (would truncate RAM on @mfree).
+        let low = corrupt_chunk(&blob, b"MAll", |d| {
+            d.clear();
+            d.extend_from_slice(&0x40u32.to_be_bytes()); // heap_start below RAMSTART
+            d.extend_from_slice(&1u32.to_be_bytes());
+            d.extend_from_slice(&0x40u32.to_be_bytes());
+            d.extend_from_slice(&0x10u32.to_be_bytes());
+        });
+        assert!(m.restore_state(&low).is_err(), "heap_start below ENDMEM must be a BadSave");
+    }
+
+    #[test]
+    fn loader_rejects_absurd_header_resource_requests() {
+        // SQ-0624: a 36-byte file could demand ~4 GiB of zeroed ENDMEM and
+        // another ~4 GiB of stack before the first opcode ran.
+        let huge_mem = asm::image_with_map(0x100, 0x200, 0xFFFF_FF00, 0x1000, 0x124, 0);
+        assert!(Memory::new(huge_mem).is_err(), "ENDMEM beyond the cap must fail the load");
+        let huge_stack = asm::image_with_map(0x100, 0x200, 0x300, 0xFFFF_FF00, 0x124, 0);
+        assert!(Memory::new(huge_stack).is_err(), "a huge stack request must fail the load");
+        // The caps must not reject a normal story.
+        assert!(Memory::new(asm::image_with_map(0x100, 0x200, 0x300, 0x1000, 0x124, 0)).is_ok());
+    }
+
+    #[test]
+    fn get_buffer_stream_past_end_cursor_reads_eof() {
+        // SQ-0625: writes past a memory stream's end advance its cursor beyond
+        // len (Glk §5.3); glk_get_buffer_stream[_uni] then computed `len - pos`
+        // — a debug subtract-overflow (release: a huge wrapped count clamped to
+        // maxlen, copying from past the declared buffer).
+        let mut m = resource_machine(glk::TestBackend::new(), 0x400);
+        let sid = m.glk_dispatch(0x0043, &[0x300, 4, 1, 0]).unwrap(); // byte stream, len 4
+        assert_ne!(sid, 0);
+        for _ in 0..6 {
+            m.glk_dispatch(0x0081, &[sid, b'x' as u32]).unwrap(); // put_char_stream → pos ends at 6
+        }
+        assert_eq!(m.glk_dispatch(0x0092, &[sid, 0x380, 8]).unwrap(), 0, "past-end cursor reads EOF");
+        assert_eq!(m.glk_dispatch(0x0131, &[sid, 0x380, 8]).unwrap(), 0, "uni variant guards too");
+    }
+
+    #[test]
+    fn filter_function_fault_halts_instead_of_being_swallowed() {
+        // SQ-0625: a fault inside the filter-iosys function was discarded
+        // (`let _ =`), leaving the machine executing inside the aborted
+        // callee's frame as if nothing happened.
+        let body = [
+            asm::ins(0x149, &[asm::Op::C8(1), asm::Op::C32(0x0100)]), // setiosys(filter, rock→RAM, not a function)
+            asm::ins(0x70, &[asm::Op::C8(b'A' as i8)]),               // streamchar 'A' → filter call faults
+            asm::ins(0x120, &[]),                                     // quit (must not be reached cleanly)
+        ]
+        .concat();
+        let mut m = machine_with_body(&[], body);
+        assert_eq!(m.step(), StepResult::Continue, "setiosys");
+        assert_eq!(m.step(), StepResult::Quit, "the filter fault surfaces as this instruction's fault");
+        assert!(m.halted);
+        assert!(
+            m.diagnostics.iter().any(|d| d.contains("not a function")),
+            "the underlying fault is reported: {:?}",
+            m.diagnostics
+        );
+    }
+
+    #[test]
+    fn numtod_dtonumz_round_trip_through_the_stack() {
+        // SQ-0626 (verification): spec §2.13 — reads take the high word first,
+        // stores write the LOW word first ("stored as S2:S1"), so numtod's two
+        // pushes leave the high word on top, exactly where dtonumz's first
+        // (high-word) pop looks. The asymmetry is what makes this round-trip.
+        let n = -123_456_789i32;
+        let mut body = asm::ins(0x200, &[asm::Op::C32(n as u32), asm::Op::Stack, asm::Op::Stack]);
+        body.extend(asm::ins(0x201, &[asm::Op::Stack, asm::Op::Stack, asm::Op::Mem16(0x0100)]));
+        body.extend(asm::ins(0x120, &[]));
+        let mut m = machine_with_body(&[], body);
+        m.step_once().unwrap();
+        m.step_once().unwrap();
+        assert_eq!(m.mem.read32(0x100).unwrap() as i32, n, "numtod → dtonumz is the identity");
+    }
+
+    #[test]
+    fn datetime_selector_names_match_the_dispatch_table() {
+        // SQ-0627: the trace-name table was shifted one selector against the
+        // dispatch arms (authoritative ids: cheapglk gi_dispa.c, 0x0168..0x016F).
+        assert_eq!(glk_selector_name(0x0168), "glk_time_to_date_utc");
+        assert_eq!(glk_selector_name(0x0169), "glk_time_to_date_local");
+        assert_eq!(glk_selector_name(0x016A), "glk_simple_time_to_date_utc");
+        assert_eq!(glk_selector_name(0x016B), "glk_simple_time_to_date_local");
+        assert_eq!(glk_selector_name(0x016C), "glk_date_to_time_utc");
+        assert_eq!(glk_selector_name(0x016D), "glk_date_to_time_local");
+        assert_eq!(glk_selector_name(0x016E), "glk_date_to_simple_time_utc");
+        assert_eq!(glk_selector_name(0x016F), "glk_date_to_simple_time_local");
+    }
+
+    #[test]
+    fn restart_preserves_borderless_and_closes_backend_windows() {
+        // SQ-0627: @restart swapped in a fresh Model with no backend
+        // window_close notifications (per-id backend state would splice into
+        // the restarted game's colliding fresh ids) and silently dropped the
+        // per-game borderless mode (a host/runtime setting, not game state).
+        let mut m = machine_with_glk(&[]);
+        m.set_borderless(true);
+        let win = m.glk_open_window(0, 0, 0, 3, 0);
+        assert_ne!(win, 0);
+        m.glk_dispatch(0x002F, &[win]).unwrap(); // set_window
+        m.glk_dispatch(0x0080, &[b'A' as u32]).unwrap(); // put_char
+        assert_eq!(backend_of(&m).runs(win).len(), 1, "backend holds the old window's text");
+
+        m.op_restart().unwrap();
+        assert!(m.glk.borderless(), "borderless survives @restart");
+        assert_eq!(m.glk.root(), 0, "the model itself is fresh");
+        assert!(backend_of(&m).runs(win).is_empty(), "the backend was told the old window closed");
+    }
+
+    #[test]
+    fn restore_state_preserves_borderless() {
+        // SQ-0627: restore_state replaces the Glk model with the deserialized
+        // snapshot, which deliberately never carries the host's borderless
+        // mode — the LIVE value must survive the swap. @restoreundo runs
+        // through this path with no host callback to re-apply it.
+        let mut m = machine_with_glk(&[]);
+        m.set_borderless(true);
+        let blob = m.save_state();
+        m.restore_state(&blob).unwrap();
+        assert!(m.glk.borderless(), "borderless survives restore_state/@restoreundo");
+    }
+
+    #[test]
+    fn ram_relative_operand_overflow_is_not_a_panic() {
+        // SQ-0627: mode 0xD/0xE/0xF added the operand to RAMSTART unwrapped —
+        // a debug overflow panic on a 32-bit wrap. It must wrap (32-bit address
+        // arithmetic, as glulxe's C uint32 does) and take the normal
+        // bounds-check/ROM-write path.
+        let body = [
+            asm::ins(0x40, &[asm::Op::Ram32(0xFFFF_FFFF), asm::Op::Zero]), // load: wraps low
+            asm::ins(0x40, &[asm::Op::C32(7), asm::Op::Ram32(0xFFFF_FFFF)]), // store: wraps into ROM
+            asm::ins(0x120, &[]),
+        ]
+        .concat();
+        let mut m = machine_with_body(&[], body);
+        for _ in 0..8 {
+            if m.step() == StepResult::Quit {
+                break;
+            }
+        }
+        assert!(m.halted, "the program must fault or quit cleanly, never panic");
     }
 }

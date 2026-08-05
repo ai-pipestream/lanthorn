@@ -6,6 +6,16 @@
 
 use crate::error::GError;
 
+/// Ceiling on ENDMEM, shared with the run-time malloc/restore cap
+/// (`Machine::MAX_MEMSIZE`). Applied at load so a 36-byte file cannot demand a
+/// ~4 GiB zeroed allocation before the first opcode runs. (SQ-0624)
+pub(crate) const MAX_MEMSIZE: u32 = 0x1000_0000; // 256 MiB
+
+/// Ceiling on the header-requested stack. Real games ask for kilobytes (glulxe
+/// defaults in the same range); 16 MiB is orders of magnitude of headroom
+/// while keeping a hostile header un-allocatable. (SQ-0624)
+pub(crate) const MAX_STACK_SIZE: u32 = 0x0100_0000; // 16 MiB
+
 /// The parsed Glulx header fields.
 #[derive(Debug, Clone, Copy)]
 pub struct Header {
@@ -63,6 +73,14 @@ pub fn parse_header(image: &[u8]) -> Result<Header, GError> {
     }
     if h.ramstart > h.extstart || h.extstart > h.endmem {
         return Err(GError::BadMemoryMap);
+    }
+
+    // Resource sanity caps (SQ-0624): both fields size an upfront allocation.
+    if h.endmem > MAX_MEMSIZE {
+        return Err(GError::LimitExceeded("ENDMEM exceeds the 256 MiB interpreter cap"));
+    }
+    if h.stack_size > MAX_STACK_SIZE {
+        return Err(GError::LimitExceeded("stack size exceeds the 16 MiB interpreter cap"));
     }
 
     // The stored initial memory runs [0, EXTSTART); the file must be at least
