@@ -24,8 +24,10 @@
 
 use std::io::Write;
 
-use crossterm::event::{self, Event};
+use crossterm::event;
 use crossterm::terminal;
+
+use crate::input::key_press;
 
 /// Reverse-video `[MORE]`, matching the TUI's bar and the original interpreters.
 pub const MORE_PROMPT: &str = "\x1b[7m[MORE]\x1b[0m";
@@ -109,11 +111,14 @@ impl Pager {
 ///
 /// Resize events and mouse reports are skipped: they are not the player saying
 /// "go on", and treating them as one would make a window drag dismiss the page.
+/// So are key *releases* (SQ-0633): on Windows the release of the Enter that
+/// submitted the previous command arrives queued, and taking it would dismiss
+/// the page before the player saw it.
 pub fn wait_for_keypress() {
     let _ = terminal::enable_raw_mode();
     loop {
         match event::read() {
-            Ok(Event::Key(_)) => break,
+            Ok(ev) if key_press(&ev).is_some() => break,
             Ok(_) => {}
             Err(_) => break, // no terminal to read from; do not spin
         }

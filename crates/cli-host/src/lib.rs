@@ -31,7 +31,7 @@ pub mod term;
 pub use args::{Matches, Opt, scan};
 pub use flags::{EXIT_USAGE, handled_common_flags, looks_like_flag, usage_error};
 pub use line::LineHold;
-pub use input::{read_byte_or_eof, read_byte_stdin, read_line_or_eof, read_line_stdin};
+pub use input::{key_press, read_byte_or_eof, read_byte_stdin, read_line_or_eof, read_line_stdin};
 pub use mode::{HostMode, PLAIN_FLAGS, no_color, plain_requested};
 pub use pager::{Pager, wait_for_keypress};
 pub use score::{ScoreWatch, score_in_status};

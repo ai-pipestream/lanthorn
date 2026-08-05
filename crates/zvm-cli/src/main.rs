@@ -18,7 +18,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 
 use cli_host::{HostMode, TerminalGuard};
@@ -555,8 +555,25 @@ fn read_char_input(
             }
         }
         match event::read() {
-            Ok(Event::Key(KeyEvent { code, .. })) => break (decode_keycode(code), last_resize, false),
             Ok(Event::Resize(c, r)) => last_resize = Some((c, r)),
+            // Only a *press* is a keystroke: Windows delivers Release events
+            // too, and taking one doubles every typed character (SQ-0633).
+            Ok(ev) => {
+                if let Some(k) = cli_host::key_press(&ev) {
+                    // Ctrl-C / Ctrl-D: raw mode swallows signals, and without
+                    // this they decode as plain 'c'/'d' — a game looping on
+                    // read_char could never be interrupted (SQ-0636). Exit via
+                    // the same restore path as the line-input arm.
+                    if k.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('d'))
+                    {
+                        print!("\r\n");
+                        let _ = io::stdout().flush();
+                        cli_host::restore_and_exit(&crate::screen::leave_region(), 0);
+                    }
+                    break (decode_keycode(k.code), last_resize, false);
+                }
+            }
             _ => {}
         }
     };
@@ -601,10 +618,64 @@ fn aux_flush(machine: &mut Machine, aux_file: &Path, no_aux: bool) {
 fn prompt_and_read_line(prompt: &str) -> String {
     print!("{}", prompt);
     let _ = io::stdout().flush();
-    // EOF here yields an empty filename, which the caller already treats as
-    // "cancel" — unlike a *game's* input request, an unanswered save prompt is
-    // recoverable, so this one does not exit.
+    // EOF here yields an empty filename, which the caller treats as "cancel"
+    // (see `handle_save_request` / `handle_restore_request`) — unlike a *game's*
+    // input request, an unanswered save prompt is recoverable, so this one does
+    // not exit.
     cli_host::read_line_stdin().unwrap_or_default()
+}
+
+/// Complete a game `@save` with the player's `filename` answer.
+///
+/// An empty filename — a bare Enter, or EOF — is a cancel: the save fails and
+/// the game is told so, matching gvm-cli. It used to fall through to
+/// `resolve_save_input("")`, which writes a hidden `<game_dir>/.qzl` and
+/// reports success for a save the player never asked for (SQ-0635).
+fn handle_save_request(machine: &mut Machine, game_dir: &Path, filename: &str) {
+    if filename.is_empty() {
+        machine.complete_save(false);
+        return;
+    }
+    let path = cli_host::resolve_save_input(filename, game_dir);
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let save_data = machine.save_quetzal();
+    match fs::write(&path, &save_data) {
+        Ok(()) => {
+            println!("Saved to '{}'.", path.display());
+            machine.complete_save(true);
+        }
+        Err(e) => {
+            eprintln!("Save failed: {e}");
+            machine.complete_save(false);
+        }
+    }
+}
+
+/// Complete a game `@restore` with the player's `filename` answer.
+///
+/// Empty = cancel, same rule as [`handle_save_request`]: without it, a bare
+/// Enter silently read whatever `<game_dir>/.qzl` happened to hold.
+fn handle_restore_request(machine: &mut Machine, game_dir: &Path, filename: &str) {
+    if filename.is_empty() {
+        machine.complete_restore_failure();
+        return;
+    }
+    let path = cli_host::resolve_save_input(filename, game_dir);
+    match fs::read(&path) {
+        Ok(data) => match machine.complete_restore_success(&data) {
+            Ok(()) => {} // restored; @save descriptor completed forward
+            Err(e) => {
+                eprintln!("Restore failed: {e:?}");
+                machine.complete_restore_failure();
+            }
+        },
+        Err(e) => {
+            eprintln!("Restore failed: {e}");
+            machine.complete_restore_failure();
+        }
+    }
 }
 
 /// One line of piped input, or a clean exit at true EOF.
@@ -681,47 +752,53 @@ fn read_line_raw(
             }
         }
         match event::read() {
-            Ok(Event::Key(KeyEvent { code, modifiers, .. })) => match code {
-                KeyCode::Enter => break,
-                // Ctrl-C / Ctrl-D: raw mode swallows signals, so exit cleanly
-                // ourselves (drop the colour, leave raw mode + the scroll region).
-                KeyCode::Char('c') | KeyCode::Char('d')
-                    if modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    if !sgr.is_empty() { print!("\x1b[0m"); }
-                    print!("\r\n"); // close the echoed line before the terminal goes back
-                    let _ = io::stdout().flush();
-                    // The scroll region is this renderer's own teardown, so it
-                    // rides along as the prefix; everything after it is the
-                    // shared restore.
-                    cli_host::restore_and_exit(&crate::screen::leave_region(), 0);
-                }
-                KeyCode::Char(c) => {
-                    buf.push(c);
-                    print!("{c}");
-                    let _ = io::stdout().flush();
-                }
-                KeyCode::Backspace => {
-                    if buf.pop().is_some() {
-                        // Move left, erase, move left again.
-                        print!("\x08 \x08");
+            Ok(Event::Resize(c, r)) => last_resize = Some((c, r)),
+            // Only a *press* is a keystroke: Windows delivers Release events
+            // too, and taking one doubles every typed character and lets the
+            // Enter release submit a phantom empty command (SQ-0633).
+            Ok(ev) => {
+                let Some(k) = cli_host::key_press(&ev) else { continue };
+                match k.code {
+                    KeyCode::Enter => break,
+                    // Ctrl-C / Ctrl-D: raw mode swallows signals, so exit cleanly
+                    // ourselves (drop the colour, leave raw mode + the scroll region).
+                    KeyCode::Char('c') | KeyCode::Char('d')
+                        if k.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if !sgr.is_empty() { print!("\x1b[0m"); }
+                        print!("\r\n"); // close the echoed line before the terminal goes back
+                        let _ = io::stdout().flush();
+                        // The scroll region is this renderer's own teardown, so it
+                        // rides along as the prefix; everything after it is the
+                        // shared restore.
+                        cli_host::restore_and_exit(&crate::screen::leave_region(), 0);
+                    }
+                    KeyCode::Char(c) => {
+                        buf.push(c);
+                        print!("{c}");
                         let _ = io::stdout().flush();
                     }
-                }
-                // A function key listed in the game's terminating-characters
-                // table (header 0x2E) ends the line, reported to the game via the
-                // stored terminator — e.g. the cursor keys BeyondZork uses to
-                // scroll its boxed description (ZMSD §10.7). Any other special key
-                // is consumed (no on-screen garbage), as before.
-                _ => {
-                    let z = decode_keycode(code) as u16;
-                    if machine.is_terminator(z) {
-                        terminator = z as u8;
-                        break;
+                    KeyCode::Backspace => {
+                        if buf.pop().is_some() {
+                            // Move left, erase, move left again.
+                            print!("\x08 \x08");
+                            let _ = io::stdout().flush();
+                        }
+                    }
+                    // A function key listed in the game's terminating-characters
+                    // table (header 0x2E) ends the line, reported to the game via the
+                    // stored terminator — e.g. the cursor keys BeyondZork uses to
+                    // scroll its boxed description (ZMSD §10.7). Any other special key
+                    // is consumed (no on-screen garbage), as before.
+                    _ => {
+                        let z = decode_keycode(k.code) as u16;
+                        if machine.is_terminator(z) {
+                            terminator = z as u8;
+                            break;
+                        }
                     }
                 }
-            },
-            Ok(Event::Resize(c, r)) => last_resize = Some((c, r)),
+            }
             _ => {}
         }
     }
@@ -772,8 +849,9 @@ fn apply_resize(
     }
     *last_rows = new_rows;
     *last_cols = new_cols;
-    *page_height = new_rows.saturating_sub(2).max(2);
+    *page_height = cli_host::Pager::height_for(new_rows);
     view.set_term_rows(new_rows);
+    view.set_term_cols(new_cols);
     if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
         o.cols = new_cols;
         o.pager.set_page_height(*page_height);
@@ -913,7 +991,7 @@ fn main() {
     // hides the rest of the output behind a keypress, which is exactly the shape
     // a screen reader cannot cope with (SQ-0606).
     let paging = both_tty && !args.no_more && !mode.plain();
-    let mut page_height = term_rows.saturating_sub(2).max(2);
+    let mut page_height = cli_host::Pager::height_for(term_rows);
     // Timed reads (read/read_char time+routine) are honored unless disabled.
     let timed = !args.no_timed_input;
     let sound_enabled = !args.no_sound;
@@ -968,8 +1046,13 @@ fn main() {
     // (SQ-0612). `--no-status` still wins outright: it is the stronger,
     // already-documented switch and suppresses the upper window entirely.
     let quiet_status_line = mode.plain() && !args.show_status;
-    let mut view =
-        screen::ScreenView::new(stdout_is_tty, args.story_only, quiet_status_line, term_rows);
+    let mut view = screen::ScreenView::new(
+        stdout_is_tty,
+        args.story_only,
+        quiet_status_line,
+        term_rows,
+        term_cols,
+    );
     // Screen-reader mode only: elsewhere the status line is on screen the whole
     // time, so announcing what it already says would be noise (SQ-0616).
     let mut score_watch = cli_host::ScoreWatch::new();
@@ -1170,42 +1253,18 @@ fn main() {
             }
 
             StepResult::SaveRequest => {
+                // Plain mode holds the game's unterminated prompt back; let it
+                // out before the dialog, or it surfaces after — out of order
+                // (the invariant documented at `release_partial`, SQ-0635).
+                release_prompt(&mut machine);
                 let filename = prompt_and_read_line("\nSave to file: ");
-                let filename = filename.trim();
-                let path = cli_host::resolve_save_input(filename, &game_dir);
-                if let Some(dir) = path.parent() {
-                    let _ = fs::create_dir_all(dir);
-                }
-                let save_data = machine.save_quetzal();
-                match fs::write(&path, &save_data) {
-                    Ok(()) => {
-                        println!("Saved to '{}'.", path.display());
-                        machine.complete_save(true);
-                    }
-                    Err(e) => {
-                        eprintln!("Save failed: {e}");
-                        machine.complete_save(false);
-                    }
-                }
+                handle_save_request(&mut machine, &game_dir, filename.trim());
             }
 
             StepResult::RestoreRequest => {
+                release_prompt(&mut machine);
                 let filename = prompt_and_read_line("\nRestore from file: ");
-                let filename = filename.trim();
-                let path = cli_host::resolve_save_input(filename, &game_dir);
-                match fs::read(&path) {
-                    Ok(data) => match machine.complete_restore_success(&data) {
-                        Ok(()) => {} // restored; @save descriptor completed forward
-                        Err(e) => {
-                            eprintln!("Restore failed: {e:?}");
-                            machine.complete_restore_failure();
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("Restore failed: {e}");
-                        machine.complete_restore_failure();
-                    }
-                }
+                handle_restore_request(&mut machine, &game_dir, filename.trim());
             }
         }
     }
@@ -1303,6 +1362,30 @@ mod v6_tests {
             current_score(&m), None,
             "v4+ globals are the game's own; the score has to come from the text"
         );
+    }
+
+    /// SQ-0636: the v3 status bar is padded to the *tracked* terminal width,
+    /// not a hard-coded 80 — on a narrower terminal an 80-column reverse-video
+    /// bar wraps out of its 1-row pinned region into the story text every frame.
+    #[test]
+    fn the_v3_status_bar_is_padded_to_the_tracked_width() {
+        let machine = build(story_of_version(3)).expect("v3 builds");
+        let mut view = screen::ScreenView::new(true, false, false, 24, 40);
+        let frame = view.frame(&machine);
+        let start = frame.find("\x1b[7m").expect("v3 bar is reverse-video") + 4;
+        let end = frame[start..].find("\x1b[0m").expect("bar closes reset") + start;
+        assert_eq!(
+            frame[start..end].chars().count(),
+            40,
+            "bar fills exactly the real width: {frame:?}"
+        );
+
+        // And a resize retunes it — the width is live, not construction-only.
+        view.set_term_cols(60);
+        let frame = view.frame(&machine);
+        let start = frame.find("\x1b[7m").unwrap() + 4;
+        let end = frame[start..].find("\x1b[0m").unwrap() + start;
+        assert_eq!(frame[start..end].chars().count(), 60, "resized: {frame:?}");
     }
 
     /// SQ-0611. The sink writes to the real stdout, so what is testable here is
@@ -1709,5 +1792,76 @@ mod restore_request_tests {
         // A properly-resumed machine must not immediately re-suspend.
         let r2 = m.step();
         assert_ne!(r2, StepResult::SaveRequest, "resumed machine does not re-suspend on save");
+    }
+
+    /// A v4 story: `save -> G0`, then `restore -> G1`, then quit.
+    fn save_then_restore_story() -> Vec<u8> {
+        let mut buf = sample_v4_story();
+        buf[0x40] = 0xB5; // 0OP:0x05 save (store form, v4+)
+        buf[0x41] = 0x10; // store -> global 0
+        buf[0x42] = 0xB6; // 0OP:0x06 restore (store form, v4+)
+        buf[0x43] = 0x11; // store -> global 1
+        buf[0x44] = 0xBA; // quit
+        buf
+    }
+
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("zvmcli-{tag}-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// SQ-0635: an empty filename — a bare Enter at the prompt, or EOF — is a
+    /// cancel. It used to fall through to `resolve_save_input("")`, which wrote
+    /// a hidden `<game_dir>/.qzl` and told the game the save SUCCEEDED.
+    #[test]
+    fn an_empty_save_filename_cancels_instead_of_writing_a_hidden_file() {
+        let dir = scratch_dir("save-cancel");
+        let mem = Memory::new(save_then_restore_story()).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x40;
+        assert_eq!(m.step(), StepResult::SaveRequest);
+
+        handle_save_request(&mut m, &dir, "");
+
+        assert_eq!(m.global(0), 0, "the game is told the save FAILED (cancelled)");
+        assert!(!dir.join(".qzl").exists(), "no hidden .qzl is written");
+        let leftovers: Vec<_> = fs::read_dir(&dir).unwrap().flatten().collect();
+        assert!(leftovers.is_empty(), "nothing at all is written: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The restore arm draws the same line — and the discriminating case is a
+    /// `<game_dir>/.qzl` that happens to exist: a bare Enter must NOT silently
+    /// restore from it (the pre-fix behaviour), it must cancel.
+    #[test]
+    fn an_empty_restore_filename_cancels_even_when_a_hidden_file_exists() {
+        let dir = scratch_dir("restore-cancel");
+        let mem = Memory::new(save_then_restore_story()).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x40;
+
+        // Make a genuine save for this story and plant it where the empty
+        // filename used to resolve.
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let blob = m.save_quetzal();
+        m.complete_save(true);
+        assert_eq!(m.global(0), 1, "save success stored 1");
+        fs::write(dir.join(".qzl"), &blob).unwrap();
+
+        assert_eq!(m.step(), StepResult::RestoreRequest);
+        handle_restore_request(&mut m, &dir, "");
+
+        // Restored, G0 would read 2 (the @save descriptor completed forward)
+        // and execution would be back at the restore; cancelled, G0 keeps its
+        // post-save 1 and the @restore stores 0 (failure).
+        assert_eq!(m.global(0), 1, "the planted .qzl was NOT restored");
+        assert_eq!(m.global(1), 0, "the game is told the restore failed");
+        assert_eq!(m.step(), StepResult::Quit, "play continues past the cancelled restore");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

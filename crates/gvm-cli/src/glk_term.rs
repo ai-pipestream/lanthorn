@@ -794,8 +794,28 @@ impl TerminalBackend {
     }
 
     /// Flush buffered output to the display **without** tearing down the scroll
-    /// region (used before reading input, so the prompt is visible mid-run).
+    /// region, and let the held prompt go.
+    ///
+    /// This is the shape every pre-input stop effectively has —
+    /// [`flush_out_holding`](Self::flush_out_holding) then
+    /// [`release_hold`](Self::release_hold) — but the drive loop performs the
+    /// two steps itself so the score announcement can go between them
+    /// (SQ-0635), leaving this composition to the tests that pin the combined
+    /// behaviour.
+    #[cfg(test)]
     pub fn flush_out(&mut self) {
+        self.flush_out_holding();
+        self.release_hold();
+    }
+
+    /// [`flush_out`](Self::flush_out), but keep any held prompt held.
+    ///
+    /// Plain mode's score announcement must land *between* the status block and
+    /// the prompt — the order zvm-cli prints in (status, announcement, prompt —
+    /// SQ-0616), and before SQ-0635 the flush released the prompt first, so the
+    /// announcement read "> \n[Score 5, up 5]" with the prompt stranded above.
+    /// Flush with this, announce, then [`release_hold`](Self::release_hold).
+    pub fn flush_out_holding(&mut self) {
         // Windowed mode accumulates into each window's line store; the screen is
         // painted here, right before the game blocks on input (SQ-0603).
         if self.windowed() {
@@ -828,6 +848,17 @@ impl TerminalBackend {
         // through the next turn for no reason.
         self.pager.reset();
         let _ = self.out.flush();
+    }
+
+    /// Release the held prompt (plain mode) so it is the last thing before the
+    /// cursor. Must run before blocking for input, or the prompt never arrives;
+    /// a no-op when nothing is held (every non-plain mode).
+    pub fn release_hold(&mut self) {
+        let held = self.hold.release();
+        if !held.is_empty() {
+            let _ = self.out.write_all(held.as_bytes());
+            let _ = self.out.flush();
+        }
     }
 
     /// Every grid's current text, unconditionally — no dedupe, no TTY gate.
@@ -925,13 +956,8 @@ impl TerminalBackend {
             let _ = self.out.write_all(text.as_bytes());
             let _ = self.out.write_all(b"\n");
         }
-        // Release the prompt last, so it is the final thing before the cursor.
-        // Unconditional: a game with no grid windows still has a prompt to let
-        // go of, and this is the only point that does it before input.
-        let held = self.hold.release();
-        if !held.is_empty() {
-            let _ = self.out.write_all(held.as_bytes());
-        }
+        // The held prompt is NOT released here: that is `release_hold`'s job,
+        // sequenced by the caller so a host announcement can still go above it.
     }
 
     /// Arm a deferred echo of `cmd` (a just-read line-input command) to be resolved
@@ -1756,6 +1782,27 @@ mod tests {
             "description, then status, then prompt: {out:?}"
         );
         assert!(!out.contains(">Back Alley"), "never welded to the prompt: {out:?}");
+    }
+
+    #[test]
+    fn a_score_announcement_lands_between_the_status_and_the_prompt() {
+        // SQ-0635. The drive loop flushes, announces the score, then releases:
+        // flush with the hold kept, announcement, release. Before the split,
+        // flush_out released the prompt first and the announcement read
+        // "> \n[Score 5, up 5]" with the prompt stranded above it.
+        let (mut b, buf) = holding_backend();
+        status_layout(&mut b, 1);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Back Alley  Score: 5");
+        b.put_text(1, GlkStyle::Normal, "You win a point.\n>");
+        b.flush_out_holding();
+        b.write_host_line("[Your score has just gone up]");
+        b.release_hold();
+        let out = out_string(&buf);
+        assert!(
+            out.contains("You win a point.\nBack Alley  Score: 5\n[Your score has just gone up]\n>"),
+            "description, status, announcement, THEN prompt: {out:?}"
+        );
+        assert!(!out.contains(">\n[Your"), "the prompt is never stranded above it: {out:?}");
     }
 
     #[test]

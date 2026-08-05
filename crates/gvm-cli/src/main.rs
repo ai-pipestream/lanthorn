@@ -13,7 +13,7 @@ use std::io::{self};
 use std::process;
 
 use cli_host::{HostMode, TerminalGuard};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal;
 
 use gvm::glk::keycode;
@@ -171,34 +171,40 @@ fn read_line_raw(is_tty: bool, echo: LineEcho) -> (String, u32) {
     }
     loop {
         match event::read() {
-            Ok(Event::Key(KeyEvent { code, modifiers, .. })) => match code {
-                KeyCode::Enter => break,
-                // Raw mode swallows signals; exit cleanly on Ctrl-C / Ctrl-D.
-                KeyCode::Char('c') | KeyCode::Char('d')
-                    if modifiers.contains(KeyModifiers::CONTROL) =>
-                {
-                    if !sgr.is_empty() { print!("\x1b[0m"); }
-                    print!("\r\n"); // close the echoed line before the terminal goes back
-                    let _ = io::Write::flush(&mut io::stdout());
-                    // No renderer prefix: this path can't reach the backend to
-                    // drop its scroll region, and never could.
-                    cli_host::restore_and_exit("", 0);
-                }
-                KeyCode::Char(c) => {
-                    buf.push(c);
-                    print!("{c}");
-                    echoed += 1;
-                    let _ = io::Write::flush(&mut io::stdout());
-                }
-                KeyCode::Backspace
-                    if buf.pop().is_some() => {
-                        print!("\x08 \x08");
-                        echoed = echoed.saturating_sub(1);
+            Ok(Event::Resize(..)) => {} // caught by next before_input size poll
+            // Only a *press* is a keystroke: Windows delivers Release events
+            // too, and taking one doubles every typed character and lets the
+            // Enter release submit a phantom empty command (SQ-0633).
+            Ok(ev) => {
+                let Some(k) = cli_host::key_press(&ev) else { continue };
+                match k.code {
+                    KeyCode::Enter => break,
+                    // Raw mode swallows signals; exit cleanly on Ctrl-C / Ctrl-D.
+                    KeyCode::Char('c') | KeyCode::Char('d')
+                        if k.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        if !sgr.is_empty() { print!("\x1b[0m"); }
+                        print!("\r\n"); // close the echoed line before the terminal goes back
+                        let _ = io::Write::flush(&mut io::stdout());
+                        // No renderer prefix: this path can't reach the backend;
+                        // the shared restore drops the scroll region (SQ-0634).
+                        cli_host::restore_and_exit("", 0);
+                    }
+                    KeyCode::Char(c) => {
+                        buf.push(c);
+                        print!("{c}");
+                        echoed += 1;
                         let _ = io::Write::flush(&mut io::stdout());
                     }
-                _ => {} // other special keys consumed (no on-screen garbage)
-            },
-            Ok(Event::Resize(..)) => {} // caught by next before_input size poll
+                    KeyCode::Backspace
+                        if buf.pop().is_some() => {
+                            print!("\x08 \x08");
+                            echoed = echoed.saturating_sub(1);
+                            let _ = io::Write::flush(&mut io::stdout());
+                        }
+                    _ => {} // other special keys consumed (no on-screen garbage)
+                }
+            }
             _ => {}
         }
     }
@@ -239,8 +245,24 @@ fn read_char_input(stdin_is_tty: bool) -> u32 {
     let _ = terminal::enable_raw_mode();
     let key = loop {
         match event::read() {
-            Ok(Event::Key(KeyEvent { code, .. })) => break decode_glk_keycode(code),
             Ok(Event::Resize(..)) => {} // caught by next before_input size poll
+            // Press-only, as in the line reader (SQ-0633).
+            Ok(ev) => {
+                if let Some(k) = cli_host::key_press(&ev) {
+                    // Ctrl-C / Ctrl-D: raw mode swallows signals, and without
+                    // this they decode as plain 'c'/'d' — a game looping on
+                    // char input could never be interrupted (SQ-0636). Same
+                    // restore path as the line-input arm.
+                    if k.modifiers.contains(KeyModifiers::CONTROL)
+                        && matches!(k.code, KeyCode::Char('c') | KeyCode::Char('d'))
+                    {
+                        print!("\r\n");
+                        let _ = io::Write::flush(&mut io::stdout());
+                        cli_host::restore_and_exit("", 0);
+                    }
+                    break decode_glk_keycode(k.code);
+                }
+            }
             _ => {}
         }
     };
@@ -298,6 +320,19 @@ fn announce_score(machine: &mut Machine, watch: &mut cli_host::ScoreWatch, on: b
         if let Some(line) = watch.update(score) {
             t.write_host_line(&line);
         }
+    }
+}
+
+/// Let go of the prompt the backend is holding back (plain mode — SQ-0611).
+///
+/// `before_input` flushes with the hold kept, so the score announcement can
+/// land between the status and the prompt (SQ-0635); this is the matching
+/// release, and it must run before every blocking read or host prompt —
+/// otherwise the game's prompt arrives after whatever overtook it, or never.
+/// Mirrors zvm-cli's `release_prompt`.
+fn release_prompt(machine: &mut Machine) {
+    if let Some(t) = machine.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>() {
+        t.release_hold();
     }
 }
 
@@ -363,7 +398,11 @@ fn drive(
                 consecutive_timer_ticks = 0;
                 emit_page_bg(machine, honor, stdout_is_tty, &mut last_page_bg);
                 before_input(machine);
+                // Status, then the announcement, THEN the released prompt — the
+                // announcement is about the turn that just ended, so it belongs
+                // above the prompt, matching zvm-cli (SQ-0616/0635).
                 announce_score(machine, &mut score_watch, announce_scores);
+                release_prompt(machine);
                 // Show live typing in raw mode and erase it on Enter, then arm a
                 // deferred echo: if the game reprints the command itself in
                 // style_Input (Inform 7 / Counterfeit Monkey) that stands; otherwise
@@ -407,12 +446,13 @@ fn drive(
                 consecutive_timer_ticks = 0;
                 emit_page_bg(machine, honor, stdout_is_tty, &mut last_page_bg);
                 before_input(machine);
+                release_prompt(machine);
                 let key = read_char();
                 machine.supply_char(key);
             }
             // Game create_by_prompt: ask the user for a filename (blank = cancel).
-            // `read_line`/`before_input` are this fn's params; stderr is unbuffered
-            // so eprint! needs no flush.
+            // The prompt goes to STDOUT: it is interactive dialogue, not a
+            // diagnostic, and zvm-cli already prompts there (SQ-0635).
             StepResult::NeedFilename { usage, .. } => {
                 // SavedGame usage is host-intercepted (@save -> fixed default slot),
                 // so don't prompt for it — auto-name and move on.
@@ -420,7 +460,9 @@ fn drive(
                     machine.supply_filename(Some(format!("__prompt_{}__", usage & 0x0f)));
                 } else {
                     before_input(machine);
-                    eprint!("Filename (blank to cancel): ");
+                    release_prompt(machine);
+                    print!("Filename (blank to cancel): ");
+                    let _ = io::Write::flush(&mut io::stdout());
                     let (line, _) = read_line(LineEcho::Shown(String::new()));
                     let name = line.trim_end_matches(['\n', '\r']);
                     machine.supply_filename(if name.is_empty() { None } else { Some(name.to_string()) });
@@ -434,7 +476,9 @@ fn drive(
                 let req = machine.pending_saveload_request().unwrap_or_default();
                 if req.by_prompt || req.name.is_empty() {
                     before_input(machine);
-                    eprint!("Save to file: ");
+                    release_prompt(machine);
+                    print!("Save to file: ");
+                    let _ = io::Write::flush(&mut io::stdout());
                     let (line, _) = read_line(LineEcho::Shown(String::new()));
                     let name = line.trim_end_matches(['\n', '\r']);
                     if name.is_empty() {
@@ -465,7 +509,9 @@ fn drive(
                 let req = machine.pending_saveload_request().unwrap_or_default();
                 if req.by_prompt || req.name.is_empty() {
                     before_input(machine);
-                    eprint!("Restore from file: ");
+                    release_prompt(machine);
+                    print!("Restore from file: ");
+                    let _ = io::Write::flush(&mut io::stdout());
                     let (line, _) = read_line(LineEcho::Shown(String::new()));
                     let name = line.trim_end_matches(['\n', '\r']);
                     if name.is_empty() {
@@ -723,10 +769,12 @@ fn main() {
                     }
                 }
             }
-            // Flush pending output (without tearing down the scroll region) so the
-            // prompt is visible before we block for input.
+            // Flush pending output (without tearing down the scroll region) so
+            // the prompt is visible before we block for input. The hold is kept:
+            // `drive` releases it itself, after any score announcement, so the
+            // announcement lands above the prompt (SQ-0635).
             if let Some(t) = m.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>() {
-                t.flush_out();
+                t.flush_out_holding();
             }
         },
         move |echo| read_line_raw(stdin_is_tty, echo),

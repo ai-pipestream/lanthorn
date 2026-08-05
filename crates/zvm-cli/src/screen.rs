@@ -234,6 +234,11 @@ pub struct ScreenView {
     /// four. `/status` still answers on demand.
     quiet_status_line: bool,
     term_rows: u16,
+    /// Tracked terminal width, kept current on resize. The v3 status bar is
+    /// padded to exactly this: hard-coding `DEFAULT_COLS` made the reverse-video
+    /// bar wrap out of its 1-row pinned region into the story text on any
+    /// terminal narrower than 80 columns (SQ-0636).
+    term_cols: u16,
     active_rows: u16,           // current scroll-region top height (TTY)
     last_block: Option<String>, // last inline block emitted (non-TTY dedupe)
     // Set by `erase`; consumed by the next `render`. When set, a subsequent
@@ -244,12 +249,19 @@ pub struct ScreenView {
 }
 
 impl ScreenView {
-    pub fn new(is_tty: bool, story_only: bool, quiet_status_line: bool, term_rows: u16) -> Self {
+    pub fn new(
+        is_tty: bool,
+        story_only: bool,
+        quiet_status_line: bool,
+        term_rows: u16,
+        term_cols: u16,
+    ) -> Self {
         ScreenView {
             is_tty,
             story_only,
             quiet_status_line,
             term_rows,
+            term_cols,
             active_rows: 0,
             last_block: None,
             pending_erase_shift: false,
@@ -269,13 +281,15 @@ impl ScreenView {
     }
 
     /// Plain-text rows of the top region (status row for v3, the upper grid for
-    /// v4+). Empty vec when there is no region.
-    fn rows_plain(machine: &Machine, top: u16) -> Vec<String> {
+    /// v4+). Empty vec when there is no region. `cols` is the width the v3
+    /// status bar is padded to — the *tracked* terminal width, not
+    /// `DEFAULT_COLS` (SQ-0636).
+    fn rows_plain(machine: &Machine, top: u16, cols: u16) -> Vec<String> {
         if top == 0 {
             return Vec::new();
         }
         if machine.mem.version() < 4 {
-            vec![status_text(&machine.status_line(), DEFAULT_COLS)]
+            vec![status_text(&machine.status_line(), cols)]
         } else {
             (1..=top).map(|r| upper_row_text(&machine.screen.upper, r)).collect()
         }
@@ -283,12 +297,12 @@ impl ScreenView {
 
     /// ANSI rows of the top region (reverse-video bar for v3, per-cell SGR runs
     /// for v4+).
-    fn rows_ansi(machine: &Machine, top: u16) -> Vec<String> {
+    fn rows_ansi(machine: &Machine, top: u16, cols: u16) -> Vec<String> {
         if top == 0 {
             return Vec::new();
         }
         if machine.mem.version() < 4 {
-            vec![format!("\x1b[7m{}\x1b[0m", status_text(&machine.status_line(), DEFAULT_COLS))]
+            vec![format!("\x1b[7m{}\x1b[0m", status_text(&machine.status_line(), cols))]
         } else {
             (1..=top)
                 .map(|r| {
@@ -310,8 +324,8 @@ impl ScreenView {
             return String::new();
         }
         let top = Self::top_rows(machine);
-        let plain = Self::rows_plain(machine, top);
-        let ansi = Self::rows_ansi(machine, top);
+        let plain = Self::rows_plain(machine, top, self.term_cols);
+        let ansi = Self::rows_ansi(machine, top, self.term_cols);
         let bg_paint = bg_sgr(machine.screen.current_bg, machine.honor_game_colours);
         self.render(top, &plain, &ansi, &bg_paint)
     }
@@ -416,7 +430,9 @@ impl ScreenView {
     /// has no status region at all.
     pub fn status_now(machine: &Machine) -> String {
         let top = Self::top_rows(machine);
-        let mut rows = Self::rows_plain(machine, top);
+        // Inline plain text, so the padding width is cosmetic (trailing blanks
+        // are trimmed below); the default is fine without threading a view in.
+        let mut rows = Self::rows_plain(machine, top, DEFAULT_COLS);
         while rows.last().is_some_and(|r| r.trim_end().is_empty()) {
             rows.pop();
         }
@@ -426,6 +442,11 @@ impl ScreenView {
     /// Update the row count used for scroll-region sizing (call on terminal resize).
     pub fn set_term_rows(&mut self, rows: u16) {
         self.term_rows = rows;
+    }
+
+    /// Update the column count the v3 status bar is padded to (call on resize).
+    pub fn set_term_cols(&mut self, cols: u16) {
+        self.term_cols = cols;
     }
 
     /// Clear+home the screen at startup (interactive only), so existing
@@ -492,16 +513,16 @@ mod view_tests {
     #[test]
     fn no_status_suppresses_everything() {
         let (p, a) = v3_rows();
-        let mut piped = ScreenView::new(false, true, false, 24);
+        let mut piped = ScreenView::new(false, true, false, 24, 80);
         assert_eq!(piped.render(1, &p, &a, ""), "");
-        let mut tty = ScreenView::new(true, true, false, 24);
+        let mut tty = ScreenView::new(true, true, false, 24, 80);
         assert_eq!(tty.render(1, &p, &a, ""), "");
     }
 
     #[test]
     fn piped_emits_inline_block_once_then_dedupes() {
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(false, false, false, 24);
+        let mut v = ScreenView::new(false, false, false, 24, 80);
         let first = v.render(1, &p, &a, "");
         assert!(first.contains("West of House"), "first frame emits block: {first:?}");
         assert!(!first.contains('\x1b'), "inline block carries no ANSI: {first:?}");
@@ -512,7 +533,7 @@ mod view_tests {
     #[test]
     fn tty_enters_region_then_resets_on_leave() {
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(true, false, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24, 80);
         let f = v.render(1, &p, &a, "");
         assert!(f.contains("\x1b[2;24r"), "sets scroll region: {f:?}");
         assert!(f.contains("\x1b[7m"), "v3 status bar is reverse-video: {f:?}");
@@ -539,7 +560,7 @@ mod view_tests {
         // `RETURN = See hint` legend all vanish under a blanket suppression
         // (measured), as does Lost Pig's HELP menu.
         let (p, a) = v3_rows();
-        let mut quiet = ScreenView::new(false, false, true, 24);
+        let mut quiet = ScreenView::new(false, false, true, 24, 80);
         assert_eq!(quiet.render(1, &p, &a, ""), "", "a one-row status is chrome — quietened");
 
         let menu = menu_rows(0);
@@ -547,7 +568,7 @@ mod view_tests {
         assert!(out.contains("> Credits"), "a four-row menu is content — kept: {out:?}");
 
         // Asking for it back restores the status line.
-        let mut loud = ScreenView::new(false, false, false, 24);
+        let mut loud = ScreenView::new(false, false, false, 24, 80);
         assert!(loud.render(1, &p, &a, "").contains("West of House"), "--show-status restores it");
     }
 
@@ -556,7 +577,7 @@ mod view_tests {
         // `--no-status` is the stronger, already-documented switch: it suppresses
         // the upper window outright, menu or not.
         let menu = menu_rows(0);
-        let mut v = ScreenView::new(false, true, false, 24);
+        let mut v = ScreenView::new(false, true, false, 24, 80);
         assert_eq!(v.render(4, &menu, &menu, ""), "");
     }
 
@@ -567,7 +588,7 @@ mod view_tests {
         // through as text, and the whole block repeats whenever anything in it
         // changes — so a listener hears where the marker went. Noisy for a long
         // menu, but followable, which the pinned-region path is not.
-        let mut v = ScreenView::new(false, false, false, 24);
+        let mut v = ScreenView::new(false, false, false, 24, 80);
         let first = menu_rows(0);
         let out = v.render(4, &first, &first, "");
         assert!(out.contains("> Credits"), "menu comes through as text: {out:?}");
@@ -589,7 +610,7 @@ mod view_tests {
         // status has scrolled away, so it must not go through the dedupe that
         // `render` applies.
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(false, false, false, 24);
+        let mut v = ScreenView::new(false, false, false, 24, 80);
         assert!(!v.render(1, &p, &a, "").is_empty(), "first frame emits");
         assert_eq!(v.render(1, &p, &a, ""), "", "second is deduped away");
         // ScreenView::status_now goes to the machine, which these row-level tests
@@ -599,15 +620,15 @@ mod view_tests {
 
     #[test]
     fn start_clears_screen_only_when_interactive() {
-        assert_eq!(ScreenView::new(true, false, false, 24).start(), "\x1b[2J\x1b[H");
-        assert_eq!(ScreenView::new(false, false, false, 24).start(), ""); // piped
-        assert_eq!(ScreenView::new(true, true, false, 24).start(), ""); // --no-status
+        assert_eq!(ScreenView::new(true, false, false, 24, 80).start(), "\x1b[2J\x1b[H");
+        assert_eq!(ScreenView::new(false, false, false, 24, 80).start(), ""); // piped
+        assert_eq!(ScreenView::new(true, true, false, 24, 80).start(), ""); // --no-status
     }
 
     #[test]
     fn erase_clears_screen_and_resets_region_on_tty() {
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(true, false, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24, 80);
         let _ = v.render(1, &p, &a, ""); // activate a region (active_rows = 1)
         let out = v.erase(ZColour::Default, true);
         assert!(out.contains("\x1b[r"), "erase leaves the scroll region: {out:?}");
@@ -621,14 +642,14 @@ mod view_tests {
 
     #[test]
     fn erase_is_noop_when_piped() {
-        let mut v = ScreenView::new(false, false, false, 24);
+        let mut v = ScreenView::new(false, false, false, 24, 80);
         assert_eq!(v.erase(ZColour::Default, true), "", "piped erase emits nothing");
     }
 
     #[test]
     fn tty_dropping_to_zero_rows_resets_region() {
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(true, false, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24, 80);
         let _ = v.render(1, &p, &a, ""); // activate region
         let out = v.render(0, &[], &[], "");
         assert!(out.contains("\x1b[r"), "dropping to 0 rows resets region: {out:?}");
@@ -640,7 +661,7 @@ mod view_tests {
         // a short lower prompt already streamed at the top. The next frame must
         // scroll the lower window down and follow the cursor below the region.
         let rows = vec![String::new(); 12];
-        let mut v = ScreenView::new(true, false, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24, 80);
         let _ = v.erase(ZColour::Default, true); // arms the one-shot shift
         let out = v.render(12, &rows, &rows, "");
         assert!(out.contains("\x1b[12T"), "scrolls the display down by 12 (SD): {out:?}");
@@ -663,7 +684,7 @@ mod view_tests {
         // must NOT trigger a shift — it streams a full screen of narrative that
         // scrolling would garble.
         let (p, a) = v3_rows();
-        let mut v = ScreenView::new(true, false, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24, 80);
         let _ = v.erase(ZColour::Default, true);
         let out = v.render(1, &p, &a, "");
         assert!(!out.contains("\x1b[1T"), "1-row status line is not shifted: {out:?}");
@@ -675,7 +696,7 @@ mod view_tests {
         // Continuous flow (no preceding erase): the content is already positioned
         // correctly, so a multi-row upper window must NOT scroll the lower window.
         let rows = vec![String::new(); 12];
-        let mut v = ScreenView::new(true, false, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24, 80);
         let out = v.render(12, &rows, &rows, "");
         assert!(!out.contains("\x1b[12T"), "no erase means no shift: {out:?}");
         assert!(out.contains("\x1b[13;24r"), "still pins the region: {out:?}");
@@ -709,7 +730,7 @@ mod colour_tests {
     #[test]
     fn erase_paints_current_bg() {
         use zvm::screen::ZColour;
-        let mut v = ScreenView::new(true, false, false, 24);
+        let mut v = ScreenView::new(true, false, false, 24, 80);
         let out = v.erase(ZColour::Standard(2), true);
         assert!(out.contains("\x1b[40m"), "bg SGR before clear: {out:?}");
         assert!(out.contains("\x1b[2J"), "screen clear present: {out:?}");

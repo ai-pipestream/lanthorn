@@ -8,17 +8,29 @@
 //! `env!("CARGO_PKG_NAME")` and `buildinfo::LONG` must expand in the *binary's*
 //! crate — a copy baked into this one would report `cli-host` for all three.
 
+/// The arguments before the first `--`, which ends option parsing.
+///
+/// `args::scan` already honours `--` — everything after it is positional even
+/// when it is spelled like a flag — and the pre-scans that run before `scan`
+/// (this module's [`handled_common_flags`], `mode::plain_from`) must agree, or
+/// `zvm-cli -- --help` prints the help instead of opening a story literally
+/// named `--help`.
+pub fn before_double_dash(argv: &[String]) -> impl Iterator<Item = &String> {
+    argv.iter().take_while(|a| a.as_str() != "--")
+}
+
 /// Handle `--help`/`-h` and `--version`/`-V` if present.
 ///
 /// Returns `true` when one was handled and the caller should return from `main`
 /// immediately. Help wins over version when both are given, matching the order
-/// the CLIs checked them in before.
+/// the CLIs checked them in before. Stops at `--`: past it these spellings are
+/// story paths, not flags.
 pub fn handled_common_flags(argv: &[String], help: &str, name: &str, version: &str) -> bool {
-    if argv.iter().any(|a| a == "--help" || a == "-h") {
+    if before_double_dash(argv).any(|a| a == "--help" || a == "-h") {
         print!("{help}");
         return true;
     }
-    if argv.iter().any(|a| a == "--version" || a == "-V") {
+    if before_double_dash(argv).any(|a| a == "--version" || a == "-V") {
         println!("{name} {version}");
         return true;
     }
@@ -98,5 +110,20 @@ mod tests {
     #[test]
     fn a_flag_anywhere_in_the_line_counts() {
         assert!(handled_common_flags(&argv(&["prog", "story.z5", "--help"]), "", "", ""));
+    }
+
+    /// SQ-0636. `args::scan` treats everything after `--` as positional, so the
+    /// pre-scan must too — `zvm-cli -- --help` is a request to open a story
+    /// literally named `--help`, not to print the help.
+    #[test]
+    fn double_dash_ends_the_pre_scan() {
+        for a in ["--help", "-h", "--version", "-V"] {
+            assert!(
+                !handled_common_flags(&argv(&["prog", "--", a]), "", "", ""),
+                "{a} after -- is a story path, not a flag"
+            );
+        }
+        // Before the `--` it is still the flag.
+        assert!(handled_common_flags(&argv(&["prog", "--help", "--", "x"]), "", "", ""));
     }
 }

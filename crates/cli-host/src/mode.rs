@@ -63,7 +63,21 @@ impl HostMode {
     ///
     /// Only the first call wins, so a stray second call cannot retune the exit
     /// paths mid-run.
+    ///
+    /// On Windows this is also where escape output is made to work at all.
+    /// These hosts write their escapes with raw `print!`, and the console only
+    /// interprets those once `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is set on the
+    /// *output* handle. crossterm 0.29 sets it lazily, but only on its own
+    /// Command-API paths (`queue!`/`execute!` → `Command::is_ansi_code_supported`
+    /// → `ansi_support::supports_ansi`, src/command.rs); `enable_raw_mode`
+    /// touches only the *input* handle (src/terminal/sys/windows.rs). Nothing
+    /// these CLIs call would ever trigger it, so run the one-shot enable here —
+    /// the single point every CLI passes before its first escape.
     pub fn install(self) -> Self {
+        #[cfg(windows)]
+        if self.rich() {
+            let _ = crossterm::ansi_support::supports_ansi();
+        }
         let _ = MODE.set(self);
         self
     }
@@ -126,8 +140,11 @@ pub fn plain_requested(argv: &[String]) -> bool {
 /// `TERM=dumb` counts because it is the terminal saying it has no capabilities —
 /// emitting cursor addressing at it would be nonsense whatever the user asked
 /// for. `NO_COLOR` deliberately does **not** count here; see [`no_color`].
+/// Stops at `--`, agreeing with `args::scan`: past it, `--plain` is a story
+/// path.
 pub fn plain_from(argv: &[String], term: Option<&str>) -> bool {
-    argv.iter().any(|a| PLAIN_FLAGS.contains(&a.as_str())) || term == Some("dumb")
+    crate::flags::before_double_dash(argv).any(|a| PLAIN_FLAGS.contains(&a.as_str()))
+        || term == Some("dumb")
 }
 
 /// Is `NO_COLOR` set to a non-empty value?
@@ -179,6 +196,17 @@ mod tests {
         assert!(!plain_from(&argv(&["prog", "story.z5"]), None));
         // Not a prefix match — a story file named like the flag is not the flag.
         assert!(!plain_from(&argv(&["prog", "--plaintext"]), None));
+    }
+
+    /// SQ-0636. Past `--` the spelling is a story path, matching `args::scan`.
+    #[test]
+    fn double_dash_ends_the_plain_pre_scan() {
+        assert!(!plain_from(&argv(&["prog", "--", "--plain"]), None));
+        assert!(!plain_from(&argv(&["prog", "--", "--screen-reader"]), None));
+        assert!(plain_from(&argv(&["prog", "--plain", "--", "x"]), None), "before -- still counts");
+        // TERM=dumb is the terminal's own statement, not an argument — `--`
+        // cannot un-say it.
+        assert!(plain_from(&argv(&["prog", "--", "x"]), Some("dumb")));
     }
 
     #[test]

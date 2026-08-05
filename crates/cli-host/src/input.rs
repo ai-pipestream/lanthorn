@@ -19,7 +19,25 @@
 
 use std::io::{self, BufRead};
 
+use crossterm::event::{Event, KeyEvent, KeyEventKind};
+
 use crate::term::restore_and_exit;
+
+/// The key event inside `ev` — but only when it is a *press*.
+///
+/// Crossterm delivers Release and Repeat key events too: on Windows it always
+/// has (the console reports both edges), and kitty-protocol terminals can on
+/// unix. A host that treats every key event as a keystroke doubles typed
+/// characters, lets the Enter *release* terminate the next line read as a
+/// phantom empty command, and lets a queued release dismiss a `[MORE]` prompt
+/// (SQ-0633). Every place one of these hosts reads a key event must come
+/// through this filter.
+pub fn key_press(ev: &Event) -> Option<&KeyEvent> {
+    match ev {
+        Event::Key(k) if k.kind == KeyEventKind::Press => Some(k),
+        _ => None,
+    }
+}
 
 /// Read one line, or `None` at true EOF.
 ///
@@ -130,6 +148,41 @@ mod tests {
         for line in ["status", "score", "look", "/status now", "x /status", "/", ""] {
             assert!(!is_status_request(line), "{line:?} must reach the game");
         }
+    }
+
+    #[test]
+    fn only_a_press_counts_as_a_keystroke() {
+        use crossterm::event::{KeyCode, KeyEventState, KeyModifiers};
+        let ev = |kind| {
+            Event::Key(KeyEvent {
+                code: KeyCode::Char('x'),
+                modifiers: KeyModifiers::NONE,
+                kind,
+                state: KeyEventState::NONE,
+            })
+        };
+        assert!(key_press(&ev(KeyEventKind::Press)).is_some());
+        // SQ-0633: Windows delivers both edges; the release of the Enter that
+        // submitted the previous command must not be read as a new keystroke.
+        assert!(key_press(&ev(KeyEventKind::Release)).is_none(), "a release is not a keystroke");
+        assert!(key_press(&ev(KeyEventKind::Repeat)).is_none(), "nor is an autorepeat");
+        assert!(key_press(&Event::Resize(80, 24)).is_none(), "nor a resize");
+    }
+
+    #[test]
+    fn key_press_hands_back_the_event_it_accepted() {
+        use crossterm::event::{KeyCode, KeyEventState, KeyModifiers};
+        let k = KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        };
+        let ev = Event::Key(k);
+        let got = key_press(&ev).expect("a press passes through");
+        // The caller needs code AND modifiers — Ctrl-C handling reads both.
+        assert_eq!(got.code, KeyCode::Char('c'));
+        assert!(got.modifiers.contains(KeyModifiers::CONTROL));
     }
 
     #[test]

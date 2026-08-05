@@ -65,16 +65,23 @@ pub fn end_raw_mode() {
     let _ = terminal::disable_raw_mode();
 }
 
-/// The bytes that put a rich terminal back the way we found it: styling
-/// cleared, page background released, default cursor shape.
+/// The bytes that put a rich terminal back the way we found it: scroll region
+/// dropped, styling cleared, page background released, default cursor shape.
 ///
 /// The page-background reset is deliberately *not* gated on whether a game ever
 /// set one. OSC 111 restores the terminal's own configured default, so sending
 /// it when nothing was set is a no-op — and the alternative is asking every exit
 /// path to remember whether colour was honoured, which is precisely the question
 /// the Ctrl-C paths already gave up on answering.
+///
+/// The scroll-region reset (SQ-0634) follows the same logic. Both `zvm-cli` and
+/// `gvm-cli` confine the screen with DECSTBM, and any exit that missed the reset
+/// — the panic-path guard, gvm-cli's Ctrl-C and EOF paths, which have no route
+/// to their renderer's teardown — left the shell scrolling inside the game's
+/// band. `CSI r` with no parameters resets the region to the full screen and is
+/// a no-op when none was set, so it belongs in the unconditional restore.
 pub fn restore_bytes() -> String {
-    format!("\x1b[0m{}{}", osc_reset_bg(), cursor_reset())
+    format!("\x1b[r\x1b[0m{}{}", osc_reset_bg(), cursor_reset())
 }
 
 /// Leave raw mode and put the terminal back.
@@ -211,9 +218,12 @@ mod tests {
     }
 
     #[test]
-    fn restore_bytes_clears_style_background_and_cursor() {
+    fn restore_bytes_clears_region_style_background_and_cursor() {
         let b = restore_bytes();
-        assert!(b.starts_with("\x1b[0m"), "styling cleared first: {b:?}");
+        // SQ-0634: without this, the panic-path guard and every restore that
+        // relied on restore_bytes left a confined DECSTBM scroll region behind.
+        assert!(b.starts_with("\x1b[r"), "scroll region dropped first: {b:?}");
+        assert!(b.contains("\x1b[0m"), "styling cleared: {b:?}");
         assert!(b.contains(osc_reset_bg()), "page background released: {b:?}");
         assert!(b.ends_with(cursor_reset()), "cursor shape restored last: {b:?}");
     }
