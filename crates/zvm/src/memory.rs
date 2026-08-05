@@ -105,18 +105,19 @@ impl Memory {
         }
     }
 
-    /// Write a single byte at `addr`. Only dynamic memory (addr < static_mem_base) is writable.
+    /// Write a single byte at `addr`. Only dynamic memory (addr < static_mem_base)
+    /// is writable (ZMSD §1.1): a story write into static/high memory latches a
+    /// fault and leaves memory untouched. This must be a real runtime check, not
+    /// a debug_assert — Quetzal CMem only saves the dynamic region, so a silent
+    /// release-build write above static_mem_base would mutate state that a
+    /// save/restore round-trip can never reproduce.
     pub fn write_byte(&mut self, addr: u32, v: u8) {
+        if addr >= self.header.static_mem_base as u32 {
+            self.latch_fault(true, 1, addr);
+            return;
+        }
         match self.bytes.get_mut(addr as usize) {
-            Some(slot) => {
-                debug_assert!(
-                    addr < self.header.static_mem_base as u32,
-                    "write to read-only memory at {:#06x} (static_mem_base = {:#06x})",
-                    addr,
-                    self.header.static_mem_base
-                );
-                *slot = v;
-            }
+            Some(slot) => *slot = v,
             None => self.latch_fault(true, 1, addr),
         }
     }
@@ -133,16 +134,17 @@ impl Memory {
         }
     }
 
-    /// Write a big-endian 16-bit word at `addr`. Only dynamic memory is writable.
+    /// Write a big-endian 16-bit word at `addr`. Only dynamic memory is writable
+    /// — same runtime read-only enforcement as [`write_byte`]. The whole word
+    /// must lie below static_mem_base (a word straddling the boundary would
+    /// half-corrupt static memory).
     pub fn write_word(&mut self, addr: u32, v: u16) {
+        if addr + 1 >= self.header.static_mem_base as u32 {
+            self.latch_fault(true, 2, addr);
+            return;
+        }
         let i = addr as usize;
         if i + 1 < self.bytes.len() {
-            debug_assert!(
-                addr < self.header.static_mem_base as u32,
-                "write to read-only memory at {:#06x} (static_mem_base = {:#06x})",
-                addr,
-                self.header.static_mem_base
-            );
             self.bytes[i] = (v >> 8) as u8;
             self.bytes[i + 1] = (v & 0xFF) as u8;
         } else {
@@ -307,6 +309,33 @@ mod tests {
         let end = m.len() as u32;
         m.write_byte(end + 5, 0xAB);
         assert_eq!(m.take_mem_fault(), Some((true, 1, end + 5)));
+    }
+
+    #[test]
+    fn write_to_static_memory_latches_fault_and_leaves_memory_unchanged() {
+        // ZMSD §1.1: only dynamic memory (below static_mem_base) is writable.
+        // This was a debug_assert — debug builds panicked on an illegal story
+        // write and release builds silently mutated memory that Quetzal CMem
+        // never saves. Now a real runtime check latches a fault and skips the
+        // write in every build. (SQ-0622)
+        let mut buf = sample_story(3); // static_mem_base = 0x0400
+        buf.resize(0x500, 0xEE);       // give the file real static memory
+        let mut m = Memory::new(buf).unwrap();
+
+        m.write_byte(0x450, 0x12);
+        assert_eq!(m.take_mem_fault(), Some((true, 1, 0x450)), "byte write faults");
+        assert_eq!(m.read_byte(0x450), 0xEE, "static memory untouched");
+
+        // A word straddling the boundary must not half-corrupt static memory.
+        m.write_word(0x3FF, 0xABCD);
+        assert_eq!(m.take_mem_fault(), Some((true, 2, 0x3FF)), "straddling word write faults");
+        assert_eq!(m.read_byte(0x3FF), 0x00, "dynamic half untouched");
+        assert_eq!(m.read_byte(0x400), 0xEE, "static half untouched");
+
+        // Writes below the boundary still work.
+        m.write_word(0x3F0, 0xBEEF);
+        assert_eq!(m.take_mem_fault(), None);
+        assert_eq!(m.read_word(0x3F0), 0xBEEF);
     }
 
     #[test]

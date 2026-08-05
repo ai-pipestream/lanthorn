@@ -53,6 +53,22 @@ pub fn load_at(mem: &Memory, dict_base: u32) -> Dictionary {
         (raw_count as u16, true)
     };
 
+    // Clamp the entry count so every entry both lies inside loaded memory and
+    // STARTS within the 16-bit address space: entry addresses are returned as
+    // u16 words (the parse buffer stores them in 2 bytes, ZMSD §13.6.1), so an
+    // entry past 0xFFFF is unaddressable — a malformed custom dictionary would
+    // otherwise make `lookup` silently truncate `base + i*entry_length` to a
+    // wrong low address. A zero entry_length is equally malformed (every entry
+    // would alias the first); treat it as an empty dictionary.
+    let count = if entry_length == 0 || cursor > 0xFFFF || cursor as usize >= mem.len() {
+        0
+    } else {
+        let elen = entry_length as u32;
+        let fit_addr = (0xFFFF - cursor) / elen + 1; // entries starting ≤ 0xFFFF
+        let fit_mem = (mem.len() as u32 - cursor) / elen; // entries fully in memory
+        (count as u32).min(fit_addr).min(fit_mem) as u16
+    };
+
     let key_len: u8 = if mem.version() <= 3 { 4 } else { 6 };
 
     Dictionary {
@@ -149,16 +165,21 @@ impl Dictionary {
         (0..klen as u32).map(|i| mem.read_byte(addr + i)).collect()
     }
 
-    /// Tokenise `text` by splitting on spaces and dictionary separators.
+    /// Tokenise `text` — the game text buffer's contents as raw **ZSCII bytes**
+    /// (one byte per character, exactly as stored in memory by `read`) — by
+    /// splitting on spaces and dictionary separators.
     /// Each separator character is itself a token. Returns tokens in order with
     /// their dictionary address (0 if absent), length, and byte position in `text`.
-    pub fn tokenise(&self, mem: &Memory, text: &str) -> Vec<Token> {
-        let bytes = text.as_bytes();
+    ///
+    /// Operating on ZSCII bytes (not `&str`) is load-bearing: separator codes
+    /// and buffer bytes can be ≥ 0x80 (accented ZSCII), and indexing a UTF-8
+    /// `&str` at those byte positions panicked on char boundaries (SQ-0621).
+    pub fn tokenise(&self, mem: &Memory, text: &[u8]) -> Vec<Token> {
         let mut tokens = Vec::new();
         let mut i = 0usize;
 
-        while i < bytes.len() {
-            let b = bytes[i];
+        while i < text.len() {
+            let b = text[i];
 
             // Skip spaces.
             if b == b' ' {
@@ -168,8 +189,7 @@ impl Dictionary {
 
             // Separator character — emit as its own 1-character token.
             if self.separators.contains(&b) {
-                let word = &text[i..i + 1];
-                let addr = self.lookup(mem, word);
+                let addr = self.lookup_zscii(mem, &text[i..i + 1]);
                 tokens.push(Token {
                     dict_addr: addr,
                     len: 1,
@@ -181,11 +201,10 @@ impl Dictionary {
 
             // Regular word — consume until space or separator.
             let start = i;
-            while i < bytes.len() && bytes[i] != b' ' && !self.separators.contains(&bytes[i]) {
+            while i < text.len() && text[i] != b' ' && !self.separators.contains(&text[i]) {
                 i += 1;
             }
-            let word = &text[start..i];
-            let addr = self.lookup(mem, word);
+            let addr = self.lookup_zscii(mem, &text[start..i]);
             tokens.push(Token {
                 dict_addr: addr,
                 len: (i - start) as u8,
@@ -194,6 +213,22 @@ impl Dictionary {
         }
 
         tokens
+    }
+
+    /// [`lookup`](Self::lookup) for a word given as raw ZSCII bytes (the text
+    /// buffer's native representation): decode each ZSCII code to its Unicode
+    /// character (custom Unicode table first, ZMSD §3.8.5.4), then encode for
+    /// the key comparison — the exact inverse of how `supply_line` produced
+    /// the bytes, so accented input round-trips to the right dictionary key.
+    fn lookup_zscii(&self, mem: &Memory, word: &[u8]) -> u16 {
+        let decoded: String = word
+            .iter()
+            .map(|&b| {
+                let z = b as u16;
+                mem.unicode_char(z).unwrap_or_else(|| crate::text::decode::zscii_to_char(z))
+            })
+            .collect();
+        self.lookup(mem, &decoded)
     }
 }
 
@@ -308,7 +343,7 @@ mod tests {
     fn tokenise_two_words_correct_positions() {
         let (m, km, kn, ko) = make_v3_mem_with_dict();
         let d = load(&m);
-        let toks = d.tokenise(&m, "open mailbox");
+        let toks = d.tokenise(&m, b"open mailbox");
 
         assert_eq!(toks.len(), 2);
         assert_eq!(toks[0].text_pos, 0);
@@ -330,7 +365,7 @@ mod tests {
         let (m, _, _, _) = make_v3_mem_with_dict();
         let d = load(&m);
         // "a,b" → tokens: "a" (pos 0, len 1), "," (pos 1, len 1), "b" (pos 2, len 1)
-        let toks = d.tokenise(&m, "a,b");
+        let toks = d.tokenise(&m, b"a,b");
 
         assert_eq!(toks.len(), 3);
         assert_eq!(toks[0].text_pos, 0); assert_eq!(toks[0].len, 1);
@@ -343,7 +378,7 @@ mod tests {
         let (m, _, _, _) = make_v3_mem_with_dict();
         let d = load(&m);
         // "." is a separator — it is a token even if not in dict.
-        let toks = d.tokenise(&m, ".");
+        let toks = d.tokenise(&m, b".");
         assert_eq!(toks.len(), 1);
         assert_eq!(toks[0].len, 1);
         assert_eq!(toks[0].text_pos, 0);
@@ -353,7 +388,7 @@ mod tests {
     fn tokenise_skips_leading_and_trailing_spaces() {
         let (m, _, _, _) = make_v3_mem_with_dict();
         let d = load(&m);
-        let toks = d.tokenise(&m, "  open  ");
+        let toks = d.tokenise(&m, b"  open  ");
         assert_eq!(toks.len(), 1);
         assert_eq!(toks[0].text_pos, 2);
         assert_eq!(toks[0].len, 4);
@@ -393,13 +428,85 @@ mod tests {
         assert_eq!(d.lookup(&m, "north"), 0);
     }
 
+    #[test]
+    fn malformed_dictionary_entries_past_u16_are_clamped() {
+        // A custom dictionary near the top of the 16-bit address space whose
+        // claimed count would place entries past 0xFFFF. Entry addresses are
+        // returned (and stored in the parse buffer) as u16 words, so those
+        // entries are unaddressable: the count is clamped at load. Pre-fix,
+        // lookup silently truncated `base + i*entry_length` and returned a
+        // bogus low address. (SQ-0620)
+        let mut buf = vec![0u8; 0x11000];
+        buf[0x00] = 3;    // v3
+        buf[0x04] = 0x04; // high_mem_base
+        buf[0x07] = 0x40; // initial_pc
+        buf[0x08] = 0x02; // dictionary (unused; we call load_at)
+        buf[0x0A] = 0x01; // object_table
+        buf[0x0C] = 0x03; // global_vars
+        buf[0x0E] = 0x04; // static_mem_base = 0x0400
+        buf[0x19] = 0x40; // abbrev_table
+
+        let dict_base = 0xFFF0usize;
+        buf[dict_base] = 0;     // 0 separators
+        buf[dict_base + 1] = 7; // entry_length
+        // count = -100 (unsorted ⇒ linear scan visits every claimed entry)
+        buf[dict_base + 2] = 0xFF;
+        buf[dict_base + 3] = 0x9C;
+        // Key for "open" placed in entry index 10 — which starts past 0xFFFF.
+        let key = encode_word("open", 3);
+        let entries_base = dict_base + 4;
+        let idx10 = entries_base + 10 * 7;
+        buf[idx10..idx10 + 4].copy_from_slice(&key);
+
+        let m = Memory::new(buf).unwrap();
+        let d = load_at(&m, dict_base as u32);
+        assert!(d.count <= 2, "count clamped to entries starting ≤ 0xFFFF, got {}", d.count);
+        assert_eq!(
+            d.lookup(&m, "open"),
+            0,
+            "an entry past 0xFFFF must miss, not return a truncated address"
+        );
+    }
+
+    #[test]
+    fn zero_entry_length_dictionary_is_empty() {
+        // entry_length 0 would make every entry alias the first (and divide by
+        // zero in the clamp) — treated as an empty dictionary. (SQ-0620)
+        let mut buf = sample_story(3);
+        buf[0x0200] = 0; // 0 separators
+        buf[0x0201] = 0; // entry_length = 0 (malformed)
+        buf[0x0202] = 0;
+        buf[0x0203] = 50; // claims 50 entries
+        let m = Memory::new(buf).unwrap();
+        let d = load(&m);
+        assert_eq!(d.count, 0);
+        assert_eq!(d.lookup(&m, "open"), 0);
+    }
+
+    #[test]
+    fn tokenise_handles_zscii_bytes_above_0x7f() {
+        // The text buffer holds ZSCII bytes, which can be ≥ 0x80 (accented
+        // characters) — both as word characters and as separators. The old
+        // &str-based tokeniser indexed UTF-8 byte positions and panicked on
+        // char boundaries. (SQ-0621)
+        let (m, _, _, _) = make_v3_mem_with_dict();
+        let mut d = load(&m);
+        d.separators.push(155); // 'ä' as a separator code
+        // 'é'(170) 'x' | 'ä'(155) separator | 'é'(170)
+        let toks = d.tokenise(&m, &[170, b'x', 155, 170]);
+        assert_eq!(toks.len(), 3);
+        assert_eq!((toks[0].text_pos, toks[0].len), (0, 2), "word 'éx'");
+        assert_eq!((toks[1].text_pos, toks[1].len), (2, 1), "separator 'ä'");
+        assert_eq!((toks[2].text_pos, toks[2].len), (3, 1), "word 'é'");
+    }
+
     // Fixture-backed test — skips if minizork.z3 is not present.
     #[test]
     fn tokenises_and_resolves_known_words() {
         let Some(story) = crate::fixtures::load("minizork.z3") else { return };
         let m = crate::memory::Memory::new(story).unwrap();
         let d = load(&m);
-        let toks = d.tokenise(&m, "open mailbox");
+        let toks = d.tokenise(&m, b"open mailbox");
         assert_eq!(toks.len(), 2);
         assert!(toks[0].dict_addr != 0, "'open' should be in MiniZork's dictionary");
     }

@@ -15,6 +15,16 @@ use super::{A0, A1, A2};
 /// Custom alphabet tables (header word 0x34, v5+) override the default A0/A1/A2
 /// glyphs when present; otherwise the default table is used.
 pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
+    decode_string_at_depth(mem, addr, 0)
+}
+
+/// `decode_string` with an abbreviation-nesting depth. ZMSD §3.3: "an
+/// abbreviation string must not itself use abbreviations" — so at depth ≥ 1
+/// (i.e. while already expanding an abbreviation) further abbreviation
+/// Z-chars are NOT expanded. Without this rule a crafted story whose
+/// abbreviation table points an abbreviation at itself recurses until the
+/// process aborts with a stack overflow.
+fn decode_string_at_depth(mem: &Memory, addr: u32, depth: u8) -> (String, u32) {
     // Collect all Z-chars first, recording where the string ends.
     let mut zchars: Vec<u8> = Vec::new();
     let mut pos = addr;
@@ -55,6 +65,12 @@ pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
         i += 1;
 
         // Handle abbreviation index byte
+        if abbrev_pending > 0 && depth > 0 {
+            // Inside an abbreviation already — §3.3 forbids nested
+            // abbreviations, so consume the index char without expanding.
+            abbrev_pending = 0;
+            continue;
+        }
         if abbrev_pending > 0 {
             let z = abbrev_pending;
             abbrev_pending = 0;
@@ -63,7 +79,7 @@ pub fn decode_string(mem: &Memory, addr: u32) -> (String, u32) {
             let entry_addr = abbrev_base + 2 * index;
             let word_addr = mem.read_word(entry_addr) as u32;
             let byte_addr = word_addr * 2;
-            let (abbrev_str, _) = decode_string(mem, byte_addr);
+            let (abbrev_str, _) = decode_string_at_depth(mem, byte_addr, depth + 1);
             result.push_str(&abbrev_str);
             // alphabet stays A0 after abbreviation
             continue;
@@ -289,6 +305,28 @@ mod tests {
         let (s, end) = decode_string(&m, 0x0100);
         assert_eq!(s, "abc");
         assert_eq!(end, 0x0102);
+    }
+
+    #[test]
+    fn self_referencing_abbreviation_does_not_recurse_forever() {
+        // ZMSD §3.3: "an abbreviation string must not itself use
+        // abbreviations". A crafted story whose abbreviation 0 expands to a
+        // string that invokes abbreviation 0 again used to recurse until the
+        // process aborted with a stack overflow. Nested abbreviation Z-chars
+        // are now consumed without expanding. (SQ-0620)
+        let bytes = sample_story(3);
+        let mut m = Memory::new(bytes).unwrap();
+        // Abbrev table entry 0 (at 0x0040): word-address 0x0040 → byte 0x0080.
+        m.write_word(0x0040, 0x0040);
+        // The abbreviation string at 0x0080 triggers abbreviation 0 (itself),
+        // then prints 'a': Z-chars [1, 0, 6], terminated.
+        let abbrev_word: u16 = 0x8000 | (1 << 10) | 6;
+        m.write_word(0x0080, abbrev_word);
+        // Main string: [1, 0, 5] — expand abbreviation 0.
+        let main_word: u16 = (0x8000 | (1 << 10)) | 5;
+        m.write_word(0x0100, main_word);
+        let (s, _) = decode_string(&m, 0x0100);
+        assert_eq!(s, "a", "nested abbreviation ignored; outer text still decodes");
     }
 
     #[test]

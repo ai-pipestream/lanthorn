@@ -34,7 +34,7 @@ pub fn save_quetzal(machine: &Machine) -> Vec<u8> {
     let orig = &machine.original_dynamic;
     let ifhd = encode_ifhd(machine);
     let cmem = encode_cmem(&machine.mem, orig);
-    let stks = encode_stks(&machine.state);
+    let stks = encode_stks(&machine.state, machine.mem.version() == 6);
 
     let mut body = Vec::new();
     body.extend_from_slice(b"IFZS");
@@ -75,7 +75,7 @@ pub fn restore_quetzal(machine: &mut Machine, data: &[u8]) -> Result<(), ZError>
 
     // Stks is mandatory
     let stks_data = find_chunk(&chunks, b"Stks").ok_or(ZError::Truncated)?;
-    let (frames, eval_stack) = decode_stks(stks_data)?;
+    let (frames, eval_stack) = decode_stks(stks_data, machine.mem.version() == 6)?;
 
     // All parsing succeeded — apply to machine
     let dyn_len = machine.original_dynamic.len();
@@ -257,8 +257,13 @@ fn decode_umem(umem: &[u8], orig: &[u8]) -> Result<Vec<u8>, ZError> {
 // runs with frames.len() == 0 and its eval words in eval_stack[0..].
 // We emit one dummy frame (return_pc=0, no locals, no args, no stack words)
 // representing the main routine's initial state before frames[0].
+//
+// v6 is the exception: Quetzal §4.11 requires the dummy frame "in all versions
+// other than V6" — a v6 game boots via a genuine call to its `main` routine
+// (ZMSD §5.4), so its outermost frame is a real one and no dummy is written
+// (nor expected on decode). Interoperable interpreters (Frotz) follow this.
 
-fn encode_stks(state: &State) -> Vec<u8> {
+fn encode_stks(state: &State, v6: bool) -> Vec<u8> {
     let mut out = Vec::new();
 
     // Dummy "main routine" frame — Quetzal §4.11.1: "The dummy frame has all
@@ -266,18 +271,22 @@ fn encode_stks(state: &State) -> Vec<u8> {
     // flags byte is 0x00 (NOT 0x10 — the discard bit must be clear here even
     // though main stores no result; dfrotz rejects the save otherwise).
     // Its eval stack words = eval_stack[0..eval_base_of_first_frame]
-    let first_frame_base = state.frames.first().map(|f| f.eval_base).unwrap_or(state.eval_stack.len());
-    let main_eval: &[u16] = &state.eval_stack[..first_frame_base];
+    // Not written for v6 (Quetzal §4.11: dummy frame is for "all versions
+    // other than V6" — v6's base frame is the real call to `main`).
+    if !v6 {
+        let first_frame_base = state.frames.first().map(|f| f.eval_base).unwrap_or(state.eval_stack.len());
+        let main_eval: &[u16] = &state.eval_stack[..first_frame_base];
 
-    write_frame_raw(
-        &mut out,
-        0,         // return_pc
-        0x00,      // flags: dummy frame is all-zero except n (Quetzal §4.11.1)
-        0,         // result var
-        0,         // arg bitmap
-        main_eval,
-        &[],       // no locals
-    );
+        write_frame_raw(
+            &mut out,
+            0,         // return_pc
+            0x00,      // flags: dummy frame is all-zero except n (Quetzal §4.11.1)
+            0,         // result var
+            0,         // arg bitmap
+            main_eval,
+            &[],       // no locals
+        );
+    }
 
     // Real call frames, oldest first
     for (idx, frame) in state.frames.iter().enumerate() {
@@ -340,11 +349,14 @@ fn write_frame_raw(
     }
 }
 
-fn decode_stks(stks: &[u8]) -> Result<(Vec<Frame>, Vec<u16>), ZError> {
+fn decode_stks(stks: &[u8], v6: bool) -> Result<(Vec<Frame>, Vec<u16>), ZError> {
     let mut frames: Vec<Frame> = Vec::new();
     let mut eval_stack: Vec<u16> = Vec::new();
     let mut pos = 0;
-    let mut first = true;
+    // Non-v6: the first frame in the file is the §4.11 dummy frame (skipped —
+    // its eval words go on the global stack but it is not a Frame). v6 saves
+    // have NO dummy frame (§4.11), so the first frame is a real one.
+    let mut first = !v6;
 
     while pos < stks.len() {
         if pos + 8 > stks.len() {
@@ -668,7 +680,7 @@ mod tests {
 
         // IFhd + Stks reuse the normal encoders (PC captured from state.pc).
         let ifhd = encode_ifhd(&m);
-        let stks = encode_stks(&m.state);
+        let stks = encode_stks(&m.state, m.mem.version() == 6);
 
         // UMem = the full dynamic region verbatim, with one byte changed.
         let mut umem = m.original_dynamic.clone();
@@ -691,6 +703,48 @@ mod tests {
         restore_quetzal(&mut m, &save).expect("UMem restore should succeed");
         assert_eq!(m.state.pc, 0x0060, "PC restored from IFhd");
         assert_eq!(m.mem.read_byte(0x100), 0x7E, "dynamic memory restored from UMem");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: v6 Stks has no dummy frame (Quetzal §4.11) and round-trips
+    // -----------------------------------------------------------------------
+    #[test]
+    fn v6_stks_omits_dummy_frame_and_roundtrips() {
+        // Quetzal §4.11: "in all versions other than V6 a dummy stack frame
+        // must be stored as the first in the file" — a v6 game boots via a
+        // genuine call to `main` (ZMSD §5.4), so its Stks begins with that
+        // real frame and NO dummy is written or expected. (SQ-0622)
+        let mut buf = sample_story(6);
+        buf[0x02] = 0x01; buf[0x03] = 0x02; // release
+        buf[0x12] = b'A'; buf[0x13] = b'B'; buf[0x14] = b'C';
+        buf[0x15] = b'D'; buf[0x16] = b'E'; buf[0x17] = b'F';
+        buf[0x1C] = 0x12; buf[0x1D] = 0x34; // checksum
+        let mut m = Machine::new(Memory::new(buf).unwrap());
+
+        // v6 boot pushed the real `main` frame; give it some state to carry.
+        assert_eq!(m.state.frames.len(), 1, "v6 boots with the main call frame");
+        m.state.frames[0].locals = vec![0x1111, 0x2222];
+        m.state.eval_stack.push(0xBEEF);
+        m.state.pc = 0x0123;
+
+        let saved = save_quetzal(&m);
+
+        // The raw Stks chunk holds exactly ONE frame: 8 header bytes +
+        // 2 locals (2 bytes each) + 1 eval word (2 bytes). A leading §4.11
+        // dummy would add 8 more.
+        let chunks = parse_iff(&saved).unwrap();
+        let stks = find_chunk(&chunks, b"Stks").unwrap();
+        assert_eq!(stks.len(), 8 + 2 * 2 + 2, "no dummy frame in v6 Stks");
+
+        // Round-trip: perturb, restore, verify the real frame survives.
+        m.state.frames.clear();
+        m.state.eval_stack.clear();
+        m.state.pc = 0;
+        restore_quetzal(&mut m, &saved).expect("v6 restore");
+        assert_eq!(m.state.pc, 0x0123);
+        assert_eq!(m.state.frames.len(), 1, "the real main frame is a Frame, not a discarded dummy");
+        assert_eq!(m.state.frames[0].locals, vec![0x1111, 0x2222]);
+        assert_eq!(m.state.eval_stack, vec![0xBEEF]);
     }
 
     // -----------------------------------------------------------------------

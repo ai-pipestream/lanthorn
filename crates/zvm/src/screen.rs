@@ -1156,6 +1156,14 @@ pub const DEFAULT_SCREEN_COLS: u8 = 80;
 pub const V6_FONT_WIDTH: u16 = 8;
 pub const V6_FONT_HEIGHT: u16 = 16;
 
+/// Upper bound on any character-grid dimension a story operand can request
+/// (`split_window`, EXT `window_size`). A hostile/buggy story passing 0xFFFF
+/// would otherwise force a rows×cols cell allocation in the hundreds of
+/// megabytes — an OOM abort, where the VM promises graceful faults. 1024
+/// far exceeds any real terminal (a 4K screen at 8 px/cell is ~480×270
+/// cells) yet caps worst-case storage at ~1M cells per window.
+pub const GRID_CELL_CAP: u16 = 1024;
+
 /// Cap on [`ZWindow::prose`] (SQ-0585). A secondary prose window shows what is on
 /// screen and nothing more — the tallest v6 screen is 400px, 25 text rows, and a
 /// game that prints past its window's bottom without erasing has scrolled the

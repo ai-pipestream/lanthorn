@@ -14,7 +14,7 @@ use crate::dictionary;
 use crate::io::{BufferOutput, Output};
 use crate::memory::Memory;
 use crate::objects;
-use crate::screen::{advertise_colour, advertise_sound, init_header_caps, write_default_colours, ScreenState, StreamState, V6Windows, V6_FONT_HEIGHT, V6_FONT_WIDTH};
+use crate::screen::{advertise_colour, advertise_sound, init_header_caps, write_default_colours, ScreenState, StreamState, V6Windows, GRID_CELL_CAP, V6_FONT_HEIGHT, V6_FONT_WIDTH};
 use crate::text::cp437::cp437_to_char;
 use crate::text::decode::{decode_string, zscii_to_char};
 
@@ -954,7 +954,9 @@ impl Machine {
             }
             // 0x0E insert_obj — make object a the first child of object b
             0x0E => {
-                objects::insert_obj(&mut self.mem, a, b);
+                if !objects::insert_obj(&mut self.mem, a, b) {
+                    self.state.fault = Some(format!("insert_obj: sibling cycle in object table (object {a})"));
+                }
                 StepResult::Continue
             }
             // 0x0F loadw — load word from array: result = mem[a + 2*b].
@@ -1034,14 +1036,20 @@ impl Machine {
                 StepResult::Continue
             }
             // 0x17 div (signed); division by zero → 0 (ZMSD §15 "interpreter may halt or trap")
+            //
+            // wrapping_div: i16::MIN / -1 overflows i16 — a plain `/` panics in
+            // both debug and release. Reference interpreters (Frotz) compute in
+            // C `int` and truncate back to 16 bits, so 0x8000 / 0xFFFF = 32768
+            // → 0x8000; `wrapping_div` produces exactly that.
             0x17 => {
-                let result = if b == 0 { 0 } else { ((a as i16) / (b as i16)) as u16 };
+                let result = if b == 0 { 0 } else { (a as i16).wrapping_div(b as i16) as u16 };
                 self.do_store(store, result);
                 StepResult::Continue
             }
-            // 0x18 mod (signed); mod by zero → 0
+            // 0x18 mod (signed); mod by zero → 0. wrapping_rem for the same
+            // i16::MIN % -1 overflow as div above (result 0).
             0x18 => {
-                let result = if b == 0 { 0 } else { ((a as i16) % (b as i16)) as u16 };
+                let result = if b == 0 { 0 } else { (a as i16).wrapping_rem(b as i16) as u16 };
                 self.do_store(store, result);
                 StepResult::Continue
             }
@@ -1178,7 +1186,9 @@ impl Machine {
             }
             // 0x09 remove_obj — remove object a from its parent's child list
             0x09 => {
-                objects::remove_obj(&mut self.mem, a);
+                if !objects::remove_obj(&mut self.mem, a) {
+                    self.state.fault = Some(format!("remove_obj: sibling cycle in object table (object {a})"));
+                }
                 StepResult::Continue
             }
             // 0x0A print_obj — print the short name of object a via the output sink
@@ -1415,12 +1425,17 @@ impl Machine {
                 self.mem.write_byte(array.wrapping_add(index) as u32, val);
                 StepResult::Continue
             }
-            // 0x03 put_prop — set property ops[1] of object ops[0] to value ops[2]
+            // 0x03 put_prop — set property ops[1] of object ops[0] to value ops[2].
+            // A missing property is illegal (ZMSD §15 put_prop: "the interpreter
+            // should halt with a suitable error message") — latch the VM's
+            // graceful fault instead of panicking the process.
             0x03 => {
                 let obj  = ops.first().copied().unwrap_or(0);
                 let prop = ops.get(1).copied().unwrap_or(0) as u8;
                 let val  = ops.get(2).copied().unwrap_or(0);
-                objects::put_prop(&mut self.mem, obj, prop, val);
+                if !objects::put_prop(&mut self.mem, obj, prop, val) {
+                    self.state.fault = Some(format!("put_prop: object {obj} has no property {prop}"));
+                }
                 StepResult::Continue
             }
             // 0x05 print_char — print a single ZSCII character
@@ -1609,6 +1624,11 @@ impl Machine {
                         v6.windows[0].y_size = screen_h.saturating_sub(rows);
                     }
                 } else {
+                    // Cap the row count like EXT window_size does (GRID_CELL_CAP):
+                    // the operand is game-controlled, and split_window(0xFFFF)
+                    // would otherwise allocate rows×cols cells (~400 MB at 80
+                    // cols) before the terminal could ever show them.
+                    let rows = rows.min(GRID_CELL_CAP);
                     self.screen.upper_window_rows = rows;
                     let cols = self.mem.read_byte(0x21) as u16;
                     // ZMSD §15 split_window: "In Version 3 (only) the upper
@@ -2601,7 +2621,6 @@ impl Machine {
                 // real terminal (a 4K screen at 8 px/cell is ~480×270 cells) yet
                 // caps worst-case storage at ~1M cells. The pixel sizes (props
                 // 2/3) are still stored verbatim; only the cell grid is bounded.
-                const GRID_CELL_CAP: u16 = 1024;
                 if let Some(v6) = self.screen.v6.as_mut() {
                     if (win as usize) < v6.windows.len() {
                         let w = &mut v6.windows[win as usize];
@@ -2990,26 +3009,32 @@ impl Machine {
     }
 
     /// Read the already-entered line out of a text buffer (the inverse of the
-    /// write done by `supply_line`). Layout (ZMSD §15):
+    /// write done by `supply_line`), as raw ZSCII bytes — the buffer's native
+    /// representation, and what `Dictionary::tokenise` consumes. Layout (ZMSD §15):
     ///   v1–4: byte 0 = max; text starts at byte 1, 0-terminated.
     ///   v5+:  byte 0 = max; byte 1 = char count; text starts at byte 2.
-    fn read_text_buffer(&self, text_buf: u32) -> String {
+    fn read_text_buffer(&self, text_buf: u32) -> Vec<u8> {
         if self.mem.version() <= 4 {
-            let mut s = String::new();
+            let mut s = Vec::new();
             let mut addr = text_buf + 1;
             loop {
+                // Stop at end-of-memory: a buffer with no 0 terminator would
+                // otherwise latch a spurious OOB fault for the next step().
+                if addr as usize >= self.mem.len() {
+                    break;
+                }
                 let b = self.mem.read_byte(addr);
                 if b == 0 {
                     break;
                 }
-                s.push(b as char);
+                s.push(b);
                 addr += 1;
             }
             s
         } else {
             let count = self.mem.read_byte(text_buf + 1) as u32;
             (0..count)
-                .map(|i| self.mem.read_byte(text_buf + 2 + i) as char)
+                .map(|i| self.mem.read_byte(text_buf + 2 + i))
                 .collect()
         }
     }
@@ -3029,6 +3054,13 @@ impl Machine {
             return false;
         }
         loop {
+            // Bound the walk at end-of-memory: a malformed table with no 0
+            // terminator before EOF would otherwise read past the story image
+            // and latch a spurious memory fault (drained — and reported — by
+            // the NEXT step(), which had nothing to do with it).
+            if p as usize >= self.mem.len() {
+                return false;
+            }
             let t = self.mem.read_byte(p) as u16;
             if t == 0 {
                 return false;
@@ -3681,17 +3713,31 @@ impl Machine {
         let parse_buf = pending.parse_buf;
 
         // Read the max-length cap written by the game (byte 0 of text buffer).
-        let max_len = self.mem.read_byte(text_buf) as usize;
+        // ZMSD §15 `read`: in v1–4 byte 0 holds "the maximum number of letters
+        // which can be typed, minus 1" — Frotz (input.c z_read) reads byte 0
+        // then does `if (h_version <= V4) max--`, so the buffer holds at most
+        // byte0−1 letters plus the 0 terminator (writing byte0 letters + NUL
+        // overran the game's buffer by one byte). v5+: byte 0 IS the cap.
+        let byte0 = self.mem.read_byte(text_buf) as usize;
+        let max_len = if version <= 4 { byte0.saturating_sub(1) } else { byte0 };
 
-        // Lower-case the input and truncate to max_len.
-        let lowered: String = input.chars().map(|c| c.to_lowercase().next().unwrap_or(c)).collect();
-        let text: &str = if lowered.len() > max_len { &lowered[..max_len] } else { &lowered };
+        // Lower-case the input, convert each character to its ZSCII code
+        // (custom Unicode table first, ZMSD §3.8.5.4 — the buffer stores ZSCII
+        // bytes, never raw UTF-8: 'é' must land as one byte, code 170, or it
+        // can never match a dictionary key), and truncate to max_len
+        // CHARACTERS (byte-slicing a UTF-8 string here panicked mid-char).
+        let text: Vec<u8> = input
+            .chars()
+            .map(|c| c.to_lowercase().next().unwrap_or(c))
+            .take(max_len)
+            .map(|c| self.mem.zscii_from_unicode(c))
+            .collect();
 
         // Write the text into the buffer and set the count/terminator bytes.
         if version <= 4 {
             // v1–4: text starts at byte 1, terminated by a 0 byte.
             let text_data_start: u32 = 1;
-            for (i, b) in text.bytes().enumerate() {
+            for (i, &b) in text.iter().enumerate() {
                 self.mem.write_byte(text_buf + text_data_start + i as u32, b);
             }
             // Null-terminate.
@@ -3700,7 +3746,7 @@ impl Machine {
             // v5+: byte 1 = char count; text starts at byte 2, no null terminator.
             let text_data_start: u32 = 2;
             self.mem.write_byte(text_buf + 1, text.len() as u8);
-            for (i, b) in text.bytes().enumerate() {
+            for (i, &b) in text.iter().enumerate() {
                 self.mem.write_byte(text_buf + text_data_start + i as u32, b);
             }
         }
@@ -3709,7 +3755,7 @@ impl Machine {
         if parse_buf != 0 {
             let text_data_start: u8 = if version <= 4 { 1 } else { 2 };
             let dict = dictionary::load(&self.mem);
-            let tokens = dict.tokenise(&self.mem, text);
+            let tokens = dict.tokenise(&self.mem, &text);
             self.write_parse_buffer(parse_buf, &tokens, text_data_start, false);
         }
 
@@ -3806,7 +3852,15 @@ impl Machine {
     /// state already contains the correct resume address (the instruction after
     /// the save opcode) so no additional store/branch is needed.
     pub fn restore_quetzal(&mut self, data: &[u8]) -> Result<(), crate::error::ZError> {
-        crate::quetzal::restore_quetzal(self, data)
+        crate::quetzal::restore_quetzal(self, data)?;
+        // A restore performed while the machine was suspended at a read must
+        // drop that suspension: the restored PC comes from the SAVE, so a
+        // stale PendingInput would make save_pc() rewind any subsequent host
+        // save to the pre-restore read instruction (and supply_line would
+        // write into buffers the restored game never armed). `restart()`
+        // clears it for the same reason.
+        self.pending_input = None;
+        Ok(())
     }
 
     /// Restore from an external save file/archive. Like `restore_quetzal`, but also
@@ -3816,7 +3870,7 @@ impl Machine {
     /// `restore_undo` keeps using `restore_quetzal` directly.
     pub fn restore_file(&mut self, data: &[u8]) -> Result<(), crate::error::ZError> {
         let dims = self.host_screen_dims();
-        crate::quetzal::restore_quetzal(self, data)?;
+        self.restore_quetzal(data)?; // also clears any stale pending_input
         self.undo_stack.clear();
         self.post_restore_fixups(dims);
         Ok(())
@@ -6127,6 +6181,173 @@ pub(crate) mod tests {
             m.supply_char(z);
             assert_eq!(m.global(0), z as u16, "supply_char({z}) stored in G0");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Crafted-story / illegal-instruction hardening (SQ-0619..SQ-0622):
+    // every case here used to panic, hang, overrun a buffer, or corrupt a
+    // save — all must now either compute the reference-interpreter result or
+    // latch a graceful StepResult::Fault.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn div_and_mod_i16_min_by_neg_one_wrap_instead_of_panicking() {
+        // 0x8000 / 0xFFFF (= -32768 / -1) overflows i16: a plain `/` panics in
+        // debug AND release. Frotz computes in C `int` and truncates → 0x8000;
+        // mod likewise → 0. (SQ-0619)
+        for (opcode, expect) in [(0xD7u8, 0x8000u16), (0xD8u8, 0u16)] {
+            let mut buf = sample_story(5);
+            buf[0x10] = opcode; // 2OP div/mod in variable-form encoding
+            buf[0x11] = 0x0F;   // types: large, large, omit, omit
+            buf[0x12] = 0x80; buf[0x13] = 0x00; // a = -32768
+            buf[0x14] = 0xFF; buf[0x15] = 0xFF; // b = -1
+            buf[0x16] = 0x10; // store → G0
+            buf[0x17] = 0xBA; // quit
+            let mut m = Machine::new(Memory::new(buf).unwrap());
+            m.state.pc = 0x10;
+            assert_eq!(m.step(), StepResult::Continue, "opcode {opcode:#x} must not fault");
+            assert_eq!(m.global(0), expect, "opcode {opcode:#x} result");
+        }
+    }
+
+    #[test]
+    fn put_prop_on_missing_property_faults_instead_of_panicking() {
+        // obj2 has NO properties. ZMSD §15 put_prop: "the interpreter should
+        // halt with a suitable error message" — the VM's halt is a latched
+        // Fault, never a process panic. (SQ-0619)
+        let buf = build_obj_story();
+        // VAR put_prop (0xE3); types small,small,small,omit = 0x57
+        let prog: &[u8] = &[0xE3, 0x57, 2, 10, 0x42, 0xBA];
+        let mut m = build_obj_machine_raw(buf, prog);
+        assert_eq!(m.step(), StepResult::Fault);
+        let t = m.take_fault_trace().expect("fault trace present");
+        assert!(t.fault.contains("put_prop"), "fault names the opcode: {}", t.fault);
+    }
+
+    #[test]
+    fn remove_obj_with_sibling_cycle_faults_instead_of_hanging() {
+        // Corrupted object table: obj2.sibling=3 and obj3.sibling=2 form a
+        // cycle, and obj1 (its own parent) is never in that chain — the
+        // predecessor walk used to spin forever. (SQ-0619)
+        let mut buf = build_obj_story();
+        const ENTRIES: usize = 0x0100 + 31 * 2;
+        buf[ENTRIES + 4] = 1;      // obj1.parent = 1 (itself)
+        buf[ENTRIES + 18 + 5] = 2; // obj3.sibling = 2 → 2→3→2 cycle
+        // 1OP remove_obj (0x09), short form, small const: 0x99
+        let prog: &[u8] = &[0x99, 1, 0xBA];
+        let mut m = build_obj_machine_raw(buf, prog);
+        assert_eq!(m.step(), StepResult::Fault);
+        let t = m.take_fault_trace().expect("fault trace present");
+        assert!(t.fault.contains("sibling cycle"), "fault: {}", t.fault);
+    }
+
+    #[test]
+    fn split_window_huge_operand_is_capped() {
+        // split_window 0xFFFF used to allocate rows×cols cells straight from
+        // the operand (~400 MB at 80 cols); the grid is now capped exactly
+        // like EXT window_size (GRID_CELL_CAP). (SQ-0620)
+        let mut buf = sample_story(5);
+        buf[0x21] = 80; // header: 80 columns
+        buf[0x10] = 0xEA; // VAR split_window
+        buf[0x11] = 0x3F; // types: large, omit, omit, omit
+        buf[0x12] = 0xFF; buf[0x13] = 0xFF; // rows = 0xFFFF
+        buf[0x14] = 0xBA; // quit
+        let mut m = Machine::new(Memory::new(buf).unwrap());
+        m.state.pc = 0x10;
+        assert_eq!(m.step(), StepResult::Continue);
+        assert_eq!(m.screen.upper_window_rows, GRID_CELL_CAP, "rows capped");
+        assert_eq!(m.screen.upper.rows, GRID_CELL_CAP, "grid allocation capped");
+    }
+
+    #[test]
+    fn is_terminator_unterminated_table_does_not_latch_spurious_fault() {
+        // A terminating-characters table with no 0 byte before end-of-memory:
+        // the walk must stop at EOF without latching an OOB fault that the
+        // NEXT step() would report against an innocent instruction. (SQ-0620)
+        let mut buf = sample_story(5);
+        let len = buf.len();
+        let tbl = len - 4;
+        buf[0x2E] = (tbl >> 8) as u8;
+        buf[0x2F] = (tbl & 0xFF) as u8;
+        for b in &mut buf[tbl..] {
+            *b = 1; // nonzero, not 255, not a key we ask about
+        }
+        let m = Machine::new(Memory::new(buf).unwrap());
+        assert!(!m.is_terminator(65));
+        assert_eq!(m.mem.take_mem_fault(), None, "no spurious OOB fault latched");
+    }
+
+    #[test]
+    fn supply_line_non_ascii_truncates_by_chars_and_stores_zscii() {
+        // 'é' is 2 bytes of UTF-8 but ONE ZSCII character (code 170 in the
+        // default table). Truncation must count characters (byte-slicing the
+        // UTF-8 input panicked mid-char), and the buffer must receive ZSCII
+        // bytes (raw UTF-8 0xC3 0xA9 can never match a dictionary). (SQ-0621)
+        let (mut buf, ..) = build_input_story(5);
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 5; // v5: max 5 chars — "ééééé" is 10 UTF-8 bytes
+        let n = emit_read(&mut buf, 0x0010, text_buf, 0, 5, Some(0x11));
+        buf[0x0010 + n] = 0xBA;
+        let mut m = Machine::new(Memory::new(buf).unwrap());
+        m.state.pc = 0x0010;
+        assert!(matches!(m.step(), StepResult::NeedLine { .. }));
+        m.supply_line("ééééé", 13);
+        let tb = text_buf as u32;
+        assert_eq!(m.mem.read_byte(tb + 1), 5, "count = 5 CHARACTERS");
+        for i in 0..5 {
+            assert_eq!(m.mem.read_byte(tb + 2 + i), 170, "char {i} is ZSCII 170, not UTF-8 bytes");
+        }
+    }
+
+    #[test]
+    fn supply_line_v14_accepts_byte0_minus_one_letters() {
+        // ZMSD §15 read (v1–4): byte 0 holds "the maximum number of letters
+        // which can be typed, minus 1"; Frotz reads byte 0 then does `max--`.
+        // Writing byte0 letters + NUL overran the game's buffer by one byte.
+        // (SQ-0621)
+        let (mut buf, ..) = build_input_story(3);
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 5;        // byte 0 = 5 → at most 4 letters
+        buf[text_buf as usize + 6] = 0xAA; // sentinel just past the game's buffer
+        let parse_buf: u16 = 0x0260;
+        buf[parse_buf as usize] = 8;
+        let n = emit_read(&mut buf, 0x0010, text_buf, parse_buf, 3, None);
+        buf[0x0010 + n] = 0xBA;
+        let mut m = Machine::new(Memory::new(buf).unwrap());
+        m.state.pc = 0x0010;
+        assert!(matches!(m.step(), StepResult::NeedLine { .. }));
+        m.supply_line("abcdefgh", 13);
+        let tb = text_buf as u32;
+        assert_eq!(m.mem.read_byte(tb + 1), b'a');
+        assert_eq!(m.mem.read_byte(tb + 4), b'd', "4 letters accepted");
+        assert_eq!(m.mem.read_byte(tb + 5), 0, "NUL terminator inside the buffer");
+        assert_eq!(m.mem.read_byte(tb + 6), 0xAA, "byte past the buffer untouched");
+    }
+
+    #[test]
+    fn restore_at_read_prompt_clears_stale_pending_input() {
+        // A restore performed while suspended at a read must drop the stale
+        // PendingInput: save_pc() otherwise rewinds any subsequent host save
+        // to the PRE-restore read instruction. (SQ-0622)
+        let (mut buf, ..) = build_input_story(3);
+        let text_buf: u16 = 0x0250;
+        buf[text_buf as usize] = 10;
+        let parse_buf: u16 = 0x0260;
+        buf[parse_buf as usize] = 8;
+        let read_pc: u32 = 0x0010;
+        let n = emit_read(&mut buf, read_pc as usize, text_buf, parse_buf, 3, None);
+        buf[read_pc as usize + n] = 0xBA;
+        let mut m = Machine::new(Memory::new(buf).unwrap());
+        m.state.pc = read_pc;
+        // Host save of the plain pre-read state.
+        let save = m.save_quetzal();
+        // Suspend at the read, then restore the earlier save over it.
+        assert!(matches!(m.step(), StepResult::NeedLine { .. }));
+        assert!(m.pending_read_pc().is_some(), "suspended at the read");
+        m.restore_file(&save).expect("restore");
+        assert_eq!(m.pending_read_pc(), None, "restore cleared the stale PendingInput");
+        assert_eq!(m.save_pc(), m.state.pc,
+            "a save right after restore records the restored PC, not the dead read's");
     }
 
     // -----------------------------------------------------------------------

@@ -137,7 +137,7 @@ fn shogun_custom_alphabet_words_resolve() {
     // Words whose letters Shogun relocated into A1 (v/q/j) — every one used to
     // miss with «I don't know the word …».
     for word in ["save", "quit", "quill", "japan"] {
-        let toks = d.tokenise(&m, word);
+        let toks = d.tokenise(&m, word.as_bytes());
         assert_eq!(toks.len(), 1, "{word:?} should tokenise to one token");
         assert_ne!(
             toks[0].dict_addr, 0,
@@ -146,6 +146,6 @@ fn shogun_custom_alphabet_words_resolve() {
     }
 
     // Control: an all-A0 word already worked, and a genuine non-word still misses.
-    assert_ne!(d.tokenise(&m, "look")[0].dict_addr, 0, "'look' must resolve");
-    assert_eq!(d.tokenise(&m, "xyzzy")[0].dict_addr, 0, "'xyzzy' must miss");
+    assert_ne!(d.tokenise(&m, b"look")[0].dict_addr, 0, "'look' must resolve");
+    assert_eq!(d.tokenise(&m, b"xyzzy")[0].dict_addr, 0, "'xyzzy' must miss");
 }

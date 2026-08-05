@@ -141,11 +141,16 @@ pub fn set_child(mem: &mut Memory, obj: u16, val: u16) { write_tree_ptr(mem, obj
 
 /// Remove `obj` from its current parent's child list, leaving `obj`'s own
 /// children untouched.  Sets `obj`'s parent and sibling to 0.
-pub fn remove_obj(mem: &mut Memory, obj: u16) {
+///
+/// Returns `false` if the parent's sibling chain exceeded the maximum possible
+/// number of distinct objects — i.e. the object table is corrupted with a
+/// sibling cycle — so the caller can latch a fault instead of hanging the VM.
+#[must_use]
+pub fn remove_obj(mem: &mut Memory, obj: u16) -> bool {
     let parent = get_parent(mem, obj);
     if parent == 0 {
         // Already detached.
-        return;
+        return true;
     }
     let first_child = get_child(mem, parent);
     if first_child == obj {
@@ -153,8 +158,13 @@ pub fn remove_obj(mem: &mut Memory, obj: u16) {
         let sib = get_sibling(mem, obj);
         set_child(mem, parent, sib);
     } else {
-        // Walk sibling chain to find the predecessor of obj.
+        // Walk sibling chain to find the predecessor of obj. A valid chain can
+        // hold at most one entry per object number (object numbers are u16 and
+        // 1-based), so more iterations than that proves a cycle in a corrupted
+        // table — bail out rather than spin forever (cf. the depth bound in
+        // location.rs's nearest_matching_ancestor for the parent-chain analogue).
         let mut cur = first_child;
+        let mut steps = 0u32;
         loop {
             let next = get_sibling(mem, cur);
             if next == obj {
@@ -166,21 +176,30 @@ pub fn remove_obj(mem: &mut Memory, obj: u16) {
                 // obj not found in chain — shouldn't happen in a valid story.
                 break;
             }
+            steps += 1;
+            if steps > u16::MAX as u32 {
+                return false; // sibling cycle — corrupted object table
+            }
             cur = next;
         }
     }
     set_parent(mem, obj, 0);
     set_sibling(mem, obj, 0);
+    true
 }
 
 /// Make `obj` the first child of `dest`, first unlinking it from its current
 /// parent.  (ZMSD §12.4 insert_obj semantics.)
-pub fn insert_obj(mem: &mut Memory, obj: u16, dest: u16) {
-    remove_obj(mem, obj);
+///
+/// Returns `false` on a corrupted sibling chain (see [`remove_obj`]).
+#[must_use]
+pub fn insert_obj(mem: &mut Memory, obj: u16, dest: u16) -> bool {
+    let ok = remove_obj(mem, obj);
     let old_first = get_child(mem, dest);
     set_sibling(mem, obj, old_first);
     set_child(mem, dest, obj);
     set_parent(mem, obj, dest);
+    ok
 }
 
 // ── Property table address ────────────────────────────────────────────────────
@@ -309,6 +328,15 @@ pub fn get_prop_len(mem: &Memory, prop_addr: u16) -> u8 {
 /// table if the property is absent from the object.  (ZMSD §12.1)
 /// Object 0 falls back to property defaults immediately.
 pub fn get_prop(mem: &Memory, obj: u16, prop: u8) -> u16 {
+    // Property 0 does not exist (property numbers are 1..=31 / 1..=63, ZMSD
+    // §12.4.1/§12.4.2) — get_prop 0 is illegal game code. Without this guard
+    // the defaults-table fallback below computes `(0 - 1) * 2`, which
+    // underflows (debug panic / wild read in release). Frotz performs the
+    // equivalent wild read (object table base minus 2) and returns garbage;
+    // we answer with a benign 0 instead.
+    if prop == 0 {
+        return 0;
+    }
     let addr = get_prop_addr(mem, obj, prop);
     if addr == 0 {
         // Property defaults: 0-indexed, prop 1 is at offset 0.
@@ -324,22 +352,29 @@ pub fn get_prop(mem: &Memory, obj: u16, prop: u8) -> u16 {
 
 /// Write property `prop` of object `obj` to `val`.  Only 1- and 2-byte
 /// properties are writable via put_prop. (ZMSD §12.4)
-pub fn put_prop(mem: &mut Memory, obj: u16, prop: u8, val: u16) {
+///
+/// Returns `false` when the object has no such property — ZMSD §15 put_prop:
+/// "If the property does not exist for that object, the interpreter should
+/// halt with a suitable error message" — so the caller latches a VM fault
+/// (never a process panic; illegal story code must not crash the host).
+#[must_use]
+pub fn put_prop(mem: &mut Memory, obj: u16, prop: u8, val: u16) -> bool {
     // An out-of-range object has no property table (get_prop_addr → 0); treat
     // the write as a graceful no-op rather than faulting, matching the read-side
     // null-object handling above.
     if !addressable(mem, obj) {
-        return;
+        return true;
     }
     let addr = get_prop_addr(mem, obj, prop);
     if addr == 0 {
-        panic!("put_prop: object {} has no property {}", obj, prop);
+        return false;
     }
     let len = get_prop_len(mem, addr);
     match len {
         1 => mem.write_byte(addr as u32, val as u8),
         _ => mem.write_word(addr as u32, val),
     }
+    true
 }
 
 /// Return the next property number after `prop` in object `obj`'s property
@@ -602,7 +637,7 @@ mod tests {
         let buf = build_v3_story();
         let mut m = Memory::new(buf).unwrap();
         // Remove obj2 (first child of obj1); obj3 should become first child.
-        remove_obj(&mut m, 2);
+        assert!(remove_obj(&mut m, 2));
         assert_eq!(get_child(&m, 1), 3);
         assert_eq!(get_parent(&m, 2), 0);
         assert_eq!(get_sibling(&m, 2), 0);
@@ -615,7 +650,7 @@ mod tests {
         let buf = build_v3_story();
         let mut m = Memory::new(buf).unwrap();
         // Remove obj3 (sibling of obj2): obj2's sibling should become 0.
-        remove_obj(&mut m, 3);
+        assert!(remove_obj(&mut m, 3));
         assert_eq!(get_sibling(&m, 2), 0);
         assert_eq!(get_parent(&m, 3), 0);
     }
@@ -625,7 +660,7 @@ mod tests {
         let buf = build_v3_story();
         let mut m = Memory::new(buf).unwrap();
         // Insert obj3 into obj2 (obj3 currently child of obj1, sibling of obj2).
-        insert_obj(&mut m, 3, 2);
+        assert!(insert_obj(&mut m, 3, 2));
         // obj3 is now first child of obj2
         assert_eq!(get_child(&m, 2), 3);
         assert_eq!(get_parent(&m, 3), 2);
@@ -684,7 +719,7 @@ mod tests {
     fn v3_put_prop_two_bytes() {
         let buf = build_v3_story();
         let mut m = Memory::new(buf).unwrap();
-        put_prop(&mut m, 1, 10, 0x5678);
+        assert!(put_prop(&mut m, 1, 10, 0x5678));
         assert_eq!(get_prop(&m, 1, 10), 0x5678);
     }
 
@@ -692,7 +727,7 @@ mod tests {
     fn v3_put_prop_one_byte() {
         let buf = build_v3_story();
         let mut m = Memory::new(buf).unwrap();
-        put_prop(&mut m, 1, 5, 0xFF);
+        assert!(put_prop(&mut m, 1, 5, 0xFF));
         assert_eq!(get_prop(&m, 1, 5), 0xFF);
     }
 
@@ -734,6 +769,31 @@ mod tests {
         assert_eq!(next, 5);
         let end = get_next_prop(&m, 1, 5);
         assert_eq!(end, 0); // no more
+    }
+
+    #[test]
+    fn get_prop_zero_returns_benign_zero() {
+        // Property 0 does not exist (property numbers are 1-based, ZMSD
+        // §12.4.1) — get_prop 0 is illegal game code. Pre-fix the defaults
+        // fallback computed (0 - 1) * 2, underflowing u32 (debug panic /
+        // wild read in release). (SQ-0619)
+        let buf = build_v3_story();
+        let m = Memory::new(buf).unwrap();
+        assert_eq!(get_prop(&m, 1, 0), 0, "obj with props");
+        assert_eq!(get_prop(&m, 2, 0), 0, "obj without props");
+    }
+
+    #[test]
+    fn remove_obj_detects_sibling_cycle_instead_of_hanging() {
+        // Corrupted table: obj2.sibling=3 (as built) and obj3.sibling=2 form a
+        // cycle; obj1's parent is set to obj1 so the predecessor walk over
+        // obj1's child chain (2→3→2→…) never finds obj1 or a 0. Pre-fix this
+        // looped forever. (SQ-0619)
+        let mut buf = build_v3_story();
+        buf[OBJ3_ENTRY as usize + 5] = 2; // obj3.sibling = 2 → cycle
+        buf[OBJ1_ENTRY as usize + 4] = 1; // obj1.parent = 1 (itself)
+        let mut m = Memory::new(buf).unwrap();
+        assert!(!remove_obj(&mut m, 1), "cycle must be reported, not spun on");
     }
 
     // ── v3 snapshot ──────────────────────────────────────────────────────────
@@ -875,9 +935,9 @@ mod tests {
         let mut m = Memory::new(buf).unwrap();
         // obj2 is child of obj1; insert obj2 into obj1 again (no-op tree-wise but exercises path)
         // More useful: insert obj2 into itself? No. Let's just test remove then re-insert.
-        remove_obj(&mut m, 2);
+        assert!(remove_obj(&mut m, 2));
         assert_eq!(get_child(&m, 1), 0);
-        insert_obj(&mut m, 2, 1);
+        assert!(insert_obj(&mut m, 2, 1));
         assert_eq!(get_child(&m, 1), 2);
         assert_eq!(get_parent(&m, 2), 1);
     }
@@ -915,7 +975,7 @@ mod tests {
     fn v5_put_prop() {
         let buf = build_v5_story();
         let mut m = Memory::new(buf).unwrap();
-        put_prop(&mut m, 1, 10, 0xDEAD);
+        assert!(put_prop(&mut m, 1, 10, 0xDEAD));
         assert_eq!(get_prop(&m, 1, 10), 0xDEAD);
     }
 
