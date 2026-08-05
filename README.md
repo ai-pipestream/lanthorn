@@ -112,10 +112,19 @@ from a `.zip`, or from a **Blorb** container (`.zblorb`/`.blorb`/`.gblorb`).
   disassembler with PC tracking, opcode hover help, and click-to-jump operands —
   retargeted per engine (Z-machine registers, Glulx routine discovery, Scott
   Adams' action table). → [interface](docs/features/interface.md)
-- **A full TUI** — mouse support, select-and-copy (over SSH via OSC 52), a
-  verb/noun menu, dictionary autocomplete, a `/`-summoned fuzzy **command
-  palette**, an inventory strip, command history, notification toasts, and
-  transcript search / filter / export. → [interface](docs/features/interface.md)
+- **A full TUI** — mouse support, drag-to-resize panes, select-and-copy (over
+  SSH via OSC 52), a Journey-style click-to-compose **command band**, dictionary
+  autocomplete, a `/`-summoned fuzzy **command palette**, an inventory strip,
+  command history, notification toasts, and transcript search / filter /
+  export. → [interface](docs/features/interface.md)
+- **Three lightweight CLI players & a screen-reader mode** — `zvm-cli`,
+  `gvm-cli`, and `scott-cli` play any story in a bare terminal: no map, no
+  panes, happy in a pipe or a script. `--screen-reader` (automatic under
+  `TERM=dumb`) emits **zero escape sequences**, hands echo and line editing
+  back to the terminal, quiets the ever-changing status line while announcing
+  **score changes** and answering **`/status`** on demand, and drops the
+  `[MORE]` pager; `NO_COLOR` is honored separately as colour-only.
+  → [interpreter](docs/features/interpreter.md)
 - **Story picker & IFDB** — browse a library as a badged **list** or `g`
   cover-gallery **grid**, with a live metadata info panel, on-demand IFDB fetch
   cached per game, and `/` **IFDB search + download** into your library.
