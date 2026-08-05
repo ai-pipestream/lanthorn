@@ -170,6 +170,14 @@ pub struct Machine {
     /// Store variable captured from the restore opcode (v4+), used by
     /// complete_restore_failure() to store 0 into the correct variable.
     pending_restore_store: Option<u8>,
+    /// True while a game `@restore` is suspended awaiting the host's bytes, in
+    /// EVERY version. `pending_restore_store` cannot answer that question on its
+    /// own: v3's `@restore` is a BRANCH instruction with no store target, so the
+    /// field stays `None` through a perfectly real v3 suspension. Cleared by
+    /// `complete_restore_success`/`complete_restore_failure` (the two ways the
+    /// suspension resolves), and by `restart`/`restore_file` (the two ways the run
+    /// it belonged to is discarded). Read via [`Machine::is_saveload_pending`].
+    pending_restore: bool,
     /// PRNG state for the `random` opcode (xorshift32).
     /// Initialised to a fixed nonzero constant; seeded by `random` with negative arg.
     rng_state: u32,
@@ -382,6 +390,7 @@ impl Machine {
             undo_cap: 16,
             pending_save: None,
             pending_restore_store: None,
+            pending_restore: false,
             rng_state: 0x12345678, // fixed nonzero seed
             warned_var_opcodes: std::collections::HashSet::new(),
             warned_ext_opcodes: std::collections::HashSet::new(),
@@ -478,6 +487,7 @@ impl Machine {
         self.pending_input = None;
         self.pending_save = None;
         self.pending_restore_store = None;
+        self.pending_restore = false;
         self.pending_sounds.clear();
         self.pending_pictures.clear();
         self.buffer_screen_mode = 0;
@@ -1376,6 +1386,9 @@ impl Machine {
                 if self.mem.version() >= 4 {
                     self.pending_restore_store = store;
                 }
+                // v3 has no store byte to capture, but the suspension is just as
+                // real — flag it separately so `is_saveload_pending` sees it.
+                self.pending_restore = true;
                 StepResult::RestoreRequest
             }
             // 0x0C show_status (v3 only) — signal host to redraw the status line
@@ -2310,6 +2323,7 @@ impl Machine {
                     StepResult::Continue
                 } else {
                     self.pending_restore_store = store;
+                    self.pending_restore = true;
                     StepResult::RestoreRequest
                 }
             }
@@ -3824,6 +3838,22 @@ impl Machine {
         self.state.pc
     }
 
+    /// Whether a game-initiated `@save`/`@restore` is currently suspended,
+    /// awaiting the host's file I/O (`complete_save` / `complete_restore_success`
+    /// / `complete_restore_failure`).
+    ///
+    /// Hosts guard their unconditional snapshot triggers (exit auto-save, the
+    /// quit dialog's "Save State & quit") on this. The Z-machine's hazard is not
+    /// Glulx's un-popped call stub, it is [`save_pc`](Self::save_pc): while an
+    /// `@save` is suspended, `save_pc` deliberately reports the result-descriptor
+    /// address (Quetzal §5.8), so a HOST snapshot taken in that window records a
+    /// PC pointing at a branch/store descriptor byte rather than at an
+    /// instruction — restoring it later resumes by decoding that byte as an
+    /// opcode. The twin of `gvm`'s `Machine::is_saveload_pending` (SQ-0661).
+    pub fn is_saveload_pending(&self) -> bool {
+        self.pending_save.is_some() || self.pending_restore
+    }
+
     /// Deliver the result of a save operation back to the machine.
     ///
     /// `ok = true`  → save succeeded (v3: branch taken; v4+: store 1).
@@ -3859,6 +3889,11 @@ impl Machine {
         // save to the pre-restore read instruction (and supply_line would
         // write into buffers the restored game never armed). `restart()`
         // clears it for the same reason.
+        //
+        // A suspended `@save`/`@restore` is deliberately NOT cleared here: this is
+        // the primitive `complete_restore_success` and `do_restore_undo` call while
+        // their own descriptor is still live. Discarding an abandoned suspension is
+        // the HOST restore's business — see `restore_file` (SQ-0661).
         self.pending_input = None;
         Ok(())
     }
@@ -3873,6 +3908,26 @@ impl Machine {
         self.restore_quetzal(data)?; // also clears any stale pending_input
         self.undo_stack.clear();
         self.post_restore_fixups(dims);
+        // A host restore REPLACES the run, so any game `@save`/`@restore` that run
+        // had suspended on is abandoned along with it — the host will never call
+        // `complete_save`/`complete_restore_*` for a descriptor that belongs to a
+        // discarded machine. Left set, `pending_save` keeps winning in `save_pc`,
+        // so the NEXT host Save State would record the dead run's descriptor PC and
+        // a later restore of it would resume by decoding a branch/store descriptor
+        // byte as an opcode; a stale `pending_restore_store` would likewise let a
+        // later `complete_restore_failure` store 0 into the dead run's variable.
+        // Same reasoning as the `pending_input` clear inside `restore_quetzal`.
+        // (SQ-0661)
+        //
+        // This clearing belongs HERE and not in `restore_quetzal`:
+        // `complete_restore_success` — the in-game `@restore` — calls
+        // `restore_quetzal` *while* its own suspension is live and resolves it
+        // afterwards from these very fields, and `do_restore_undo` calls it
+        // mid-instruction where there is nothing suspended at all. Only the host
+        // path means "that run is gone".
+        self.pending_save = None;
+        self.pending_restore_store = None;
+        self.pending_restore = false;
         Ok(())
     }
 
@@ -3921,6 +3976,7 @@ impl Machine {
     /// when the restore opcode fired, so state.pc is already correct (pointing to
     /// the instruction after restore) and must not be modified here.
     pub fn complete_restore_failure(&mut self) {
+        self.pending_restore = false;
         if self.mem.version() <= 3 {
             // v3 restore is a branch instruction; on failure just fall through
             // (no state change needed — execution continues at state.pc which
@@ -3961,6 +4017,7 @@ impl Machine {
         }
         self.undo_stack.clear();
         self.pending_restore_store = None;
+        self.pending_restore = false;
         Ok(())
     }
 }
@@ -4533,6 +4590,152 @@ pub(crate) mod tests {
         assert_eq!(m.global(0), 2, "the original save_undo 'returns' 2");
         assert_eq!(m.state.pc, 0x0040, "restore_undo restored the snapshot PC (0x0040, not 0x00AB)");
         assert!(m.undo_stack.is_empty(), "snapshot consumed");
+    }
+
+    // ── A host restore ABANDONS the run's suspended @save/@restore (SQ-0661) ───
+
+    /// v4 story: 0x40 `@save -> G0` (store byte at 0x41), 0x42 quit. 0x50 is an
+    /// unrelated "somewhere else" the elsewhere-snapshot is taken at.
+    fn save_v4_with_an_elsewhere_story() -> Vec<u8> {
+        let mut buf = sample_story(4);
+        buf[0x40] = 0xB5; // 0OP:0x05 save (store form, v4+)
+        buf[0x41] = 0x10; // store -> global 0
+        buf[0x42] = 0xBA; // quit
+        buf[0x50] = 0xBA; // the elsewhere run's next instruction
+        buf
+    }
+
+    #[test]
+    fn host_restore_over_a_suspended_ingame_save_drops_the_abandoned_descriptor() {
+        // SQ-0661: a host Save State restore performed while the game's own @save
+        // is suspended REPLACES the run. The abandoned `pending_save` used to
+        // survive, and `save_pc` prefers its descriptor address (Quetzal §5.8) —
+        // so the NEXT host Save State recorded a PC belonging to the discarded
+        // run, and restoring THAT resumed by decoding the @save's store byte as
+        // an opcode.
+        //
+        // The bug is invisible at the moment of the restore (state.pc is already
+        // correct); it surfaces on the next save. So: restore, then save again,
+        // then restore that — and assert where we land.
+        let mem = Memory::new(save_v4_with_an_elsewhere_story()).unwrap();
+        let mut m = Machine::new(mem);
+
+        // A snapshot of a DIFFERENT point in the story, taken with nothing pending.
+        m.state.pc = 0x50;
+        let elsewhere = m.save_quetzal();
+        assert_eq!(crate::quetzal::saved_pc_of(&elsewhere), 0x50);
+
+        // Now suspend on the game's own @save.
+        m.state.pc = 0x40;
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        assert!(m.is_saveload_pending(), "suspended inside the game's @save");
+        assert_eq!(m.save_pc(), 0x41, "while suspended, a save records the descriptor");
+
+        // The player instead loads a host Save State. The @save is abandoned.
+        m.restore_file(&elsewhere).expect("host restore");
+        assert_eq!(m.state.pc, 0x50, "we are running the restored state");
+
+        // Perturb: take the NEXT host Save State — the one the stale descriptor
+        // used to poison.
+        let next = m.save_quetzal();
+        assert_eq!(
+            crate::quetzal::saved_pc_of(&next),
+            0x50,
+            "the next Save State records the restored run's PC, not the dead @save descriptor (0x41)"
+        );
+
+        // And restoring it lands on an instruction, not on the store byte.
+        m.state.pc = 0x00AB;
+        m.restore_file(&next).expect("second host restore");
+        assert_eq!(m.state.pc, 0x50, "restoring it resumes where the player actually was");
+
+        // The suspension is gone too, so the host's snapshot guard is not stuck on.
+        assert!(
+            !m.is_saveload_pending(),
+            "the restore discarded the run the @save belonged to"
+        );
+    }
+
+    #[test]
+    fn host_restore_over_a_suspended_ingame_restore_drops_the_abandoned_store() {
+        // The @restore twin of the test above: a stale `pending_restore_store`
+        // would let a later `complete_restore_failure` store 0 into a variable of
+        // the discarded run, and would keep `is_saveload_pending` stuck true.
+        let mut buf = sample_story(4);
+        buf[0x40] = 0xB6; // 0OP:0x06 restore (store form, v4+)
+        buf[0x41] = 0x10; // store -> global 0
+        buf[0x42] = 0xBA; // quit
+        buf[0x50] = 0xBA;
+        let mut m = Machine::new(Memory::new(buf).unwrap());
+
+        m.state.pc = 0x50;
+        let elsewhere = m.save_quetzal();
+
+        m.state.pc = 0x40;
+        assert_eq!(m.step(), StepResult::RestoreRequest);
+        assert!(m.is_saveload_pending(), "suspended inside the game's @restore");
+
+        m.restore_file(&elsewhere).expect("host restore");
+
+        // Perturb: a later failure completion must not write the dead run's G0.
+        m.do_store(Some(0x10), 0x77);
+        m.complete_restore_failure();
+        assert_eq!(m.global(0), 0x77, "no store into the discarded run's variable");
+        assert!(!m.is_saveload_pending(), "the abandoned @restore is gone");
+    }
+
+    #[test]
+    fn is_saveload_pending_tracks_the_games_own_save_and_restore() {
+        // The host guards its unconditional snapshot triggers (exit auto-save,
+        // "Save State & quit") on this, so it must be true for the whole
+        // suspension and false either side of it — in every version. (SQ-0661)
+
+        // v4 @save, resolved by complete_save.
+        let mut m = Machine::new(Memory::new(save_v4_with_an_elsewhere_story()).unwrap());
+        assert!(!m.is_saveload_pending(), "nothing pending at boot");
+        m.state.pc = 0x40;
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        assert!(m.is_saveload_pending());
+        m.complete_save(true);
+        assert!(!m.is_saveload_pending(), "cleared once the host answers the @save");
+
+        // v4 @restore, resolved by complete_restore_success.
+        let mem = Memory::new(save_v4_with_an_elsewhere_story()).unwrap();
+        let mut m = Machine::new(mem);
+        m.state.pc = 0x40;
+        assert_eq!(m.step(), StepResult::SaveRequest);
+        let blob = m.save_quetzal();
+        m.complete_save(true);
+        let mut buf = save_v4_with_an_elsewhere_story();
+        buf[0x40] = 0xB6; // @restore -> G0 instead
+        let mut m2 = Machine::new(Memory::new(buf).unwrap());
+        m2.state.pc = 0x40;
+        assert_eq!(m2.step(), StepResult::RestoreRequest);
+        assert!(m2.is_saveload_pending());
+        m2.complete_restore_success(&blob).expect("restore succeeds");
+        assert!(!m2.is_saveload_pending(), "cleared once the restore completes");
+
+        // v3 @restore is a BRANCH instruction with NO store byte, so
+        // `pending_restore_store` stays None right through a real suspension —
+        // this is the case a `pending_restore_store.is_some()` test would miss.
+        let mut buf = sample_story(3);
+        buf[0x40] = 0xB6;            // 0OP:0x06 restore (branch form in v3)
+        buf[0x41] = 0x80 | 0x40 | 2; // branch: on-true, short form, offset 2
+        buf[0x42] = 0xBA;            // quit
+        let mut m3 = Machine::new(Memory::new(buf).unwrap());
+        m3.state.pc = 0x40;
+        assert_eq!(m3.step(), StepResult::RestoreRequest);
+        assert!(m3.pending_restore_store.is_none(), "v3 @restore captures no store var");
+        assert!(m3.is_saveload_pending(), "…but the v3 suspension is just as real");
+        m3.complete_restore_failure();
+        assert!(!m3.is_saveload_pending(), "cleared on the failure completion");
+
+        // A @restart drops any suspension along with the run it belonged to.
+        let mut m4 = Machine::new(Memory::new(save_v4_with_an_elsewhere_story()).unwrap());
+        m4.state.pc = 0x40;
+        assert_eq!(m4.step(), StepResult::SaveRequest);
+        m4.restart();
+        assert!(!m4.is_saveload_pending(), "a restart discards the suspension");
     }
 
     #[test]

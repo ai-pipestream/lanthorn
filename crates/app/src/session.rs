@@ -2803,6 +2803,22 @@ impl Engine for GameSession {
         Ok(())
     }
 
+    /// The Z-machine twin of the Glulx override (SQ-0661). The trait's default is
+    /// `false`, which silently made the two host guards that consult it —
+    /// `lifecycle::exit_auto_save` and `lifecycle::quit_dialog_save` — no-ops for
+    /// this engine.
+    ///
+    /// The Z-machine has no un-popped call stub to worry about, but it has its own
+    /// hazard: while the game's `@save` is suspended, `Machine::save_pc` reports
+    /// the result-descriptor address (Quetzal §5.8), so an exit auto-save fired in
+    /// that window writes an archive whose PC points at a branch/store descriptor
+    /// byte. Resuming it decodes that byte as an opcode. A suspended `@restore` is
+    /// the same window from the other side. Both are the player's own in-game save
+    /// in progress, which is the relevant persistence anyway.
+    fn is_saveload_pending(&self) -> bool {
+        self.machine.is_saveload_pending()
+    }
+
     fn aux_data(&self) -> &std::collections::BTreeMap<String, Vec<u8>> {
         &self.machine.aux_data
     }
@@ -4526,6 +4542,67 @@ mod tests {
         assert_eq!(r.pending_io, Some(PendingIo::Restore), "v3 in-game restore now bubbles pending_io");
         let r2 = sess.resume_restore(None);
         assert!(r2.quit, "cancelled v3 restore falls through to quit");
+    }
+
+    #[test]
+    fn engine_is_saveload_pending_follows_the_games_own_save_and_restore() {
+        // SQ-0661: `Engine::is_saveload_pending` was overridden by GlulxSession
+        // only, so the two host guards that consult it — lifecycle::exit_auto_save
+        // and lifecycle::quit_dialog_save — were silently no-ops for the
+        // Z-machine. An exit auto-save fired while the game's @save is suspended
+        // records `save_pc`'s result-descriptor address (Quetzal §5.8) instead of
+        // an instruction address, and resuming that archive decodes a store byte
+        // as an opcode.
+        let mut sess = GameSession::new(read_char_then_save_v4(), true, false, None).expect("new");
+        assert!(!sess.is_saveload_pending(), "nothing pending at the opening prompt");
+
+        // The keypress drives read_char -> @save, which suspends awaiting host I/O.
+        let r = sess.submit_char(b'x');
+        assert_eq!(r.pending_io, Some(PendingIo::Save));
+        assert!(
+            Engine::is_saveload_pending(&sess),
+            "the host must be told the game's @save is suspended"
+        );
+
+        // Resolved once the host answers it.
+        let _ = sess.resume_save(true);
+        assert!(!Engine::is_saveload_pending(&sess), "cleared once the save completes");
+
+        // The @restore side, and via a `dyn Engine` — the shape the guards see.
+        let mut sess = GameSession::new(read_char_then_restore_v4(), true, false, None).expect("new");
+        let engine: &mut dyn Engine = &mut sess;
+        assert!(!engine.is_saveload_pending());
+        let r = engine.submit_key(KeyInput::Char('x')).expect("read_char takes the key");
+        assert_eq!(r.pending_io, Some(PendingIo::Restore));
+        assert!(engine.is_saveload_pending(), "the game's @restore is suspended");
+        let _ = engine.resume_restore(None);
+        assert!(!engine.is_saveload_pending(), "cleared once the restore is cancelled");
+    }
+
+    #[test]
+    fn a_host_restore_clears_a_suspended_ingame_save() {
+        // SQ-0661 (the session-level face of the zvm fix): the player suspends the
+        // game's own @save, then loads a host Save State instead. The abandoned
+        // @save must not keep the guard latched on — with it stuck true, every
+        // later exit auto-save would silently skip for the rest of the session.
+        let mut sess = GameSession::new(read_char_then_save_v4(), true, false, None).expect("new");
+        let snapshot = sess.save_state(); // taken at the clean opening prompt
+        let r = sess.submit_char(b'x');
+        assert_eq!(r.pending_io, Some(PendingIo::Save));
+        assert!(sess.is_saveload_pending());
+
+        sess.restore_state(&snapshot).expect("host Save State restore");
+        assert!(
+            !Engine::is_saveload_pending(&sess),
+            "the restore replaced the run the @save belonged to"
+        );
+
+        // Perturb: the restore re-armed the read_char, so play on — and the host
+        // snapshot taken after that must record the live run, not the dead
+        // descriptor. Driving the same keypress reaches @save again, proving the
+        // restored run (not a wedged one) is what is executing.
+        let r = sess.submit_char(b'x');
+        assert_eq!(r.pending_io, Some(PendingIo::Save), "the restored run reached its own @save");
     }
 
     #[test]
