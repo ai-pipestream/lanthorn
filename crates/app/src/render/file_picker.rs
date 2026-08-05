@@ -2,8 +2,6 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-
 use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use crate::state::AppState;
 
@@ -58,10 +56,7 @@ pub fn draw_file_picker(
     // ── Entry rows ────────────────────────────────────────────────────────────
 
     let normal = state.colors.theme.get("dialog.background").style;
-    let selected_style = Style::new()
-        .fg(ratatui::style::Color::Black)
-        .bg(ratatui::style::Color::Cyan)
-        .add_modifier(Modifier::BOLD);
+    let selected_style = state.colors.theme.get("dialog.list_selected").style;
 
     let entries_area = content;
 
@@ -70,7 +65,7 @@ pub fn draw_file_picker(
     *vp_out = viewport;
 
     if total == 0 {
-        let empty_style = Style::new().fg(ratatui::style::Color::DarkGray).patch(state.colors.theme.get("dialog.background").style);
+        let empty_style = normal.patch(state.colors.theme.get("dialog.list_footer").style);
         if content.height > 0 {
             crate::render::draw_str_clipped(buf, content.x, content.y, "(no files)", empty_style, content);
         }
@@ -122,9 +117,7 @@ pub fn draw_file_picker(
 
     let footer_y = row_area.bottom();
     if footer_y < content.bottom() {
-        let footer_style = Style::new()
-            .fg(ratatui::style::Color::DarkGray)
-            .patch(state.colors.theme.get("dialog.background").style);
+        let footer_style = normal.patch(state.colors.theme.get("dialog.list_footer").style);
         let footer = "Enter:pick  Esc:cancel";
         crate::render::draw_str_clipped(buf, content.x, footer_y, footer, footer_style, content);
     }

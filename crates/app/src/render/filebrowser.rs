@@ -2,8 +2,6 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
-
 use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use crate::state::AppState;
 
@@ -61,7 +59,8 @@ pub fn draw_file_browser(
     // ── CWD row ───────────────────────────────────────────────────────────────
 
     let cwd_str = format!("  {}", fb.cwd.display());
-    let cwd_style = Style::default().fg(Color::Yellow).patch(state.colors.theme.get("dialog.background").style);
+    let dialog_bg = state.colors.theme.get("dialog.background").style;
+    let cwd_style = dialog_bg.patch(state.colors.theme.get("file_browser_cwd").style);
     if content.height > 0 {
         crate::render::draw_str_clipped(buf, content.x, content.y, &cwd_str, cwd_style, content);
     }
@@ -69,15 +68,9 @@ pub fn draw_file_browser(
     // ── Entry rows ────────────────────────────────────────────────────────────
 
     let normal = state.colors.theme.get("dialog.background").style;
-    let selected_style = Style::new()
-        .fg(Color::Black)
-        .bg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
-    let dir_style = Style::default().fg(Color::Cyan).patch(state.colors.theme.get("dialog.background").style);
-    let dir_selected_style = Style::new()
-        .fg(Color::Black)
-        .bg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
+    let selected_style = state.colors.theme.get("dialog.list_selected").style;
+    let dir_style = dialog_bg.patch(state.colors.theme.get("file_browser_dir").style);
+    let dir_selected_style = selected_style;
 
     let entries_area = if content.height > 1 {
         Rect::new(content.x, content.y + 1, content.width, content.height - 1)
@@ -149,7 +142,7 @@ pub fn draw_file_browser(
 
     let footer_y = entries_max_y;
     if footer_y < entries_area.bottom() {
-        let footer_style = Style::default().fg(Color::DarkGray).patch(state.colors.theme.get("dialog.background").style);
+        let footer_style = dialog_bg.patch(state.colors.theme.get("dialog.list_footer").style);
         let footer = match fb.mode {
             FbMode::PickFile => "Up/Dn:move  Enter:open/import  Esc:cancel",
         };
@@ -175,6 +168,34 @@ mod tests {
         let mut s = AppState::default();
         s.overlays.file_browser = Some(FileBrowserState::build(cwd, mode));
         s
+    }
+
+    /// SQ-0643: the cwd row's colour used to be a bare `Style::new().fg(Color::Yellow)`
+    /// patched THE WRONG WAY onto the dialog background (the background's own fg won,
+    /// silently discarding the accent) — no `style.toml` override could ever reach it.
+    /// It must now render in the themed `file_browser_cwd` colour, and an override must
+    /// actually change it.
+    #[test]
+    fn draw_file_browser_cwd_row_follows_file_browser_cwd_override() {
+        let scheme = crate::colors::GhosttyScheme::default();
+        let parsed = crate::theme::toml_schema::parse(
+            "[elements]\nfile_browser_cwd = { fg = \"magenta\" }\n",
+        ).unwrap();
+        let mut state = state_with_browser(PathBuf::from("/tmp"), FbMode::PickFile);
+        state.colors.theme = crate::theme::resolve::resolve_theme(&scheme, &parsed);
+        state.colors.dialog_box_style = BorderStyle::Single;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            draw_file_browser(&state, f.area(), f.buffer_mut(), &mut 0);
+        }).unwrap();
+
+        let want_fg = state.colors.theme.get("file_browser_cwd").style.fg;
+        assert_eq!(want_fg, Some(ratatui::style::Color::Magenta), "guard: override must change the resolved style");
+        let buf = terminal.backend().buffer();
+        let has_override = buf.content().iter().any(|c| c.style().fg == Some(ratatui::style::Color::Magenta));
+        assert!(has_override, "the cwd row must render in the overridden file_browser_cwd colour");
     }
 
     #[test]

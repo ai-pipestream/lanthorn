@@ -620,8 +620,9 @@ pub fn render_map(rm: &RenderMap, state: &AppState, area: Rect, buf: &mut Buffer
 /// - fewer than 2 non-empty layers exist (single-layer maps are visually unchanged), or
 /// - zoom is `Overview`.
 ///
-/// Each non-empty layer is rendered as `name(count)` with a space separator.  The active
-/// layer is highlighted with reverse-video.  All drawing is clipped to the strip row.
+/// Each non-empty layer is rendered as `name(count)` with a space separator, styled via
+/// the `panel.tab` / `panel.tab:active` selectors (the same ones the bordered variant's
+/// top-inset strip uses). All drawing is clipped to the strip row.
 pub fn draw_layer_strip(
     graph: &mapper::graph::MapGraph,
     state: &AppState,
@@ -653,15 +654,18 @@ pub fn draw_layer_strip(
     let strip_y = area.y;
     let strip_area = Rect { x: area.x, y: strip_y, width: area.width, height: 1 };
 
-    // Clear the strip row first.
-    let normal_style = Style::new();
+    // Clear the strip row first. Themed via panel.tab / panel.tab:active — the
+    // SAME selectors the bordered variant's top-inset strip uses (main.rs), so
+    // a borderless map pane's layer tabs match a bordered one's instead of
+    // drawing bare/unthemeable `Style::new()` + a hardcoded REVERSED modifier.
+    let normal_style = state.colors.theme.get("panel.tab").style;
     for x in area.x..area.right() {
         if let Some(cell) = buf.cell_mut((x, strip_y)) {
             cell.set_symbol(" ").set_style(normal_style);
         }
     }
 
-    let active_style = Style::new().add_modifier(Modifier::REVERSED);
+    let active_style = state.colors.theme.get("panel.tab:active").style;
     let mut x = area.x;
     for layer_id in &layers {
         let name = graph.layer_name(*layer_id);
@@ -5671,18 +5675,46 @@ mod tests {
 
         render_map_layered(&rm, &g, &state, area, &mut buf);
 
-        // The strip draws REVERSED on active tab cells in row 0.
-        let reversed_in_row0 = (area.x..area.right())
-            .filter(|&x| {
-                buf.cell((x, area.y))
-                    .map(|c| c.modifier.contains(ratatui::style::Modifier::REVERSED))
-                    .unwrap_or(false)
-            })
-            .count();
+        // SQ-0643: the strip's active-tab marker is now the themed
+        // panel.tab:active selector (unified with the bordered variant's tab
+        // strip), not a hardcoded REVERSED literal — so detect the strip by its
+        // TEXT (a layer name) rather than a specific style bit.
+        let row0: String = (area.x..area.right())
+            .map(|x| buf.cell((x, area.y)).map(|c| c.symbol().to_owned()).unwrap_or_default())
+            .collect();
         assert!(
-            reversed_in_row0 > 0,
-            "with BorderStyle::None, the in-content layer strip MUST be drawn (REVERSED tab cells expected in row 0)"
+            row0.contains("Main") || row0.contains("Layer"),
+            "with BorderStyle::None, the in-content layer strip MUST be drawn (a layer name expected in row 0), got {row0:?}"
         );
+    }
+
+    /// SQ-0643: `draw_layer_strip`'s borderless variant used bare `Style::new()`
+    /// / a hardcoded REVERSED modifier — no `style.toml` selector could reach
+    /// it. It must now read `panel.tab`/`panel.tab:active` like the bordered
+    /// variant does, so a user override actually changes what's drawn.
+    #[test]
+    fn draw_layer_strip_active_tab_follows_panel_tab_active_override() {
+        use crate::render::paneframe::BorderStyle;
+        let g = two_layer_graph();
+
+        let scheme = crate::colors::GhosttyScheme::default();
+        let parsed = crate::theme::toml_schema::parse(
+            "[panel]\n\"tab:active\" = { fg = \"magenta\" }\n",
+        ).unwrap();
+        let mut state = AppState::default();
+        state.colors.theme = crate::theme::resolve::resolve_theme(&scheme, &parsed);
+        state.zoom = crate::state::Zoom::Boxes;
+        state.colors.map_border_style = BorderStyle::None;
+
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        draw_layer_strip(&g, &state, area, &mut buf);
+
+        let want_fg = state.colors.theme.get("panel.tab:active").style.fg;
+        assert_eq!(want_fg, Some(Color::Magenta), "guard: the override must actually change the resolved style");
+        let has_magenta = (area.x..area.right())
+            .any(|x| buf.cell((x, area.y)).is_some_and(|c| c.style().fg == Some(Color::Magenta)));
+        assert!(has_magenta, "the active tab must render in the overridden panel.tab:active colour");
     }
 
     #[test]

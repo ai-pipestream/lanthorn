@@ -18,7 +18,13 @@ use crate::state::AppState;
 fn underline_clickables(buf: &mut Buffer, x_base: u16, y: u16, line: &str, style: Style, section: Section, area: Rect) {
     for (range, _target) in debug_panel::clickable_spans(section, line) {
         let Some(sub) = line.get(range.clone()) else { continue };
-        let x = x_base + range.start as u16;
+        // `range` is a BYTE range into `line`, but the x position is a display
+        // COLUMN — one per char, matching how `draw_str_clipped` walks
+        // `line.chars()` (SQ-0638). Converting via the prefix's char count (not
+        // its byte length) keeps the underline under the link text even when a
+        // multibyte char sits earlier on the line.
+        let prefix_chars = line[..range.start].chars().count() as u16;
+        let x = x_base + prefix_chars;
         draw_str_clipped(buf, x, y, sub, style.add_modifier(Modifier::UNDERLINED), area);
     }
 }
@@ -378,6 +384,31 @@ mod tests {
 
     fn buf_text(buf: &Buffer) -> String {
         buf.content.iter().map(|c| c.symbol()).collect()
+    }
+
+    /// SQ-0638: `clickable_spans` ranges are BYTE offsets, but the x position is
+    /// a display COLUMN. "café " is 5 chars but 6 bytes ('é' is 2 bytes in
+    /// UTF-8), so a byte-offset underline lands one column too far right of the
+    /// "@0x001234" link text that follows it.
+    #[test]
+    fn underline_clickables_uses_char_column_not_byte_offset_for_multibyte_prefix() {
+        let line = "café @0x001234";
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        underline_clickables(&mut buf, 0, 0, line, Style::default(), Section::Objects, area);
+        let underlined_cols: Vec<u16> = (0..area.width)
+            .filter(|&x| buf.cell((x, 0)).unwrap().style().add_modifier.contains(Modifier::UNDERLINED))
+            .collect();
+        // '@' is the 6th CHAR (0-indexed column 5): c-a-f-é-space-@.
+        assert_eq!(
+            underlined_cols.first().copied(), Some(5),
+            "underline must start at the char column of '@', not its byte offset (6)"
+        );
+        // And the underlined text is actually "@0x001234", not shifted.
+        let underlined_text: String = underlined_cols.iter()
+            .map(|&x| buf.cell((x, 0)).unwrap().symbol().to_string())
+            .collect();
+        assert_eq!(underlined_text, "@0x001234");
     }
 
     #[test]

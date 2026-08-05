@@ -2,7 +2,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Modifier;
 
 use crate::config::BackgroundTidy;
 use crate::render::dialog::{ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
@@ -88,10 +88,8 @@ pub fn draw_config_screen(
     let content = rects.content;
 
     // Draw column headers inside content
-    let hdr_style = Style::new()
-        .fg(Color::White)
-        .add_modifier(Modifier::UNDERLINED)
-        .patch(state.colors.theme.get("dialog.background").style);
+    let dialog_bg = state.colors.theme.get("dialog.background").style;
+    let hdr_style = dialog_bg.patch(state.colors.theme.get("dialog.list_header").style);
     let name_col_w = 22usize;
     let hdr = format!("{:<width$}  Value", "Setting", width = name_col_w);
     if content.height > 0 {
@@ -100,10 +98,7 @@ pub fn draw_config_screen(
 
     // Row styles
     let normal = state.colors.theme.get("dialog.background").style;
-    let selected_style = Style::new()
-        .fg(Color::Black)
-        .bg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
+    let selected_style = state.colors.theme.get("dialog.list_selected").style;
 
     // Reserve the bottom lines for the focused row's tooltip when there's room
     // (header line on top + at least one row + the tooltip footer).

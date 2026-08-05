@@ -67,10 +67,7 @@ pub fn draw_saves(
     // ── Entry rows ────────────────────────────────────────────────────────────
 
     let normal = state.colors.theme.get("dialog.background").style;
-    let selected_style = Style::new()
-        .fg(ratatui::style::Color::Black)
-        .bg(ratatui::style::Color::Cyan)
-        .add_modifier(Modifier::BOLD);
+    let selected_style = state.colors.theme.get("dialog.list_selected").style;
 
     let entries_area = if content.height > 1 {
         Rect::new(content.x, content.y + 1, content.width, content.height - 1)
@@ -79,14 +76,18 @@ pub fn draw_saves(
     };
 
     let total = saves.entries.len();
-    let viewport = entries_area.height as usize;
+    // Reserve the LAST row of `entries_area` for the footer (SQ-0639):
+    // `entries_area.bottom() == content.bottom()` whenever content.height > 1,
+    // so the old `footer_y < content.bottom()` check below was always false
+    // and no row was ever actually reserved for the footer text.
+    let viewport = entries_area.height.saturating_sub(1) as usize;
     *vp_out = viewport;
 
     // Reserve a 1-column gutter on the right for the scrollbar when overflowing.
     let scrollbar_visible =
         crate::render::scroll::needs_scrollbar(total, viewport) && content.width >= 2;
     let row_w = if scrollbar_visible { content.width.saturating_sub(1) } else { content.width };
-    let row_area = Rect::new(content.x, entries_area.y, row_w, entries_area.height);
+    let row_area = Rect::new(content.x, entries_area.y, row_w, entries_area.height.saturating_sub(1));
 
     let offset = saves.scroll.display_offset();
     for row in 0..viewport {
@@ -142,7 +143,7 @@ pub fn draw_saves(
     }
 
     if scrollbar_visible {
-        let sb_area = Rect::new(entries_area.right().saturating_sub(1), entries_area.y, 1, entries_area.height);
+        let sb_area = Rect::new(entries_area.right().saturating_sub(1), entries_area.y, 1, row_area.height);
         crate::render::scroll::draw_scrollbar(
             buf,
             sb_area,
@@ -155,11 +156,9 @@ pub fn draw_saves(
 
     // ── Footer hint (below entries) ───────────────────────────────────────────
 
-    let footer_y = entries_area.bottom();
+    let footer_y = row_area.bottom();
     if footer_y < content.bottom() {
-        let footer_style = Style::new()
-            .fg(ratatui::style::Color::DarkGray)
-            .patch(state.colors.theme.get("dialog.background").style);
+        let footer_style = normal.patch(state.colors.theme.get("dialog.list_footer").style);
         let footer = "Enter:load  s:save-as  d:delete  i:import  Esc:close";
         crate::render::draw_str_clipped(buf, content.x, footer_y, footer, footer_style, content);
     }
@@ -188,17 +187,24 @@ fn portable_glyph(state: &AppState) -> String {
 
 /// Format an RFC3339 timestamp for compact display (show only date + HH:MM).
 /// Returns empty string for empty input.
+///
+/// Char-safe (SQ-0638): a saved_at string is normally plain ASCII, but a
+/// corrupt or hand-edited archive can carry anything, and a byte-offset slice
+/// (`&ts[0..10]`) panics the moment a multibyte char sits before that byte
+/// offset. Index by CHAR instead, and fall back to a safely-truncated raw
+/// string for anything shorter than the fixed layout expects.
 fn format_time(ts: &str) -> String {
     if ts.is_empty() {
         return String::new();
     }
     // "2026-06-18T12:34:56Z" → "2026-06-18 12:34"
-    if ts.len() >= 16 {
-        let date = &ts[0..10];
-        let time = &ts[11..16];
+    let chars: Vec<char> = ts.chars().collect();
+    if chars.len() >= 16 {
+        let date: String = chars[0..10].iter().collect();
+        let time: String = chars[11..16].iter().collect();
         return format!("{} {}", date, time);
     }
-    ts[..ts.len().min(16)].to_string()
+    chars.into_iter().take(16).collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -303,6 +309,24 @@ mod tests {
         scroll.selected = selected;
         s.overlays.saves = Some(SavesState { entries, scroll });
         s
+    }
+
+    /// SQ-0639: `entries_area.bottom() == content.bottom()` whenever
+    /// content.height > 1, so the old `footer_y < content.bottom()` guard was
+    /// provably always false — no row was ever reserved and the footer text
+    /// never rendered. It must now show up on a normal-sized modal.
+    #[test]
+    fn draw_saves_footer_hint_is_reachable() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = state_with_saves(vec![dummy_save("(default)", 0, true)], 0);
+        terminal.draw(|f| {
+            draw_saves(&state, f.area(), f.buffer_mut(), &mut 0);
+        }).unwrap();
+        let content: String = terminal.backend().buffer().content().iter()
+            .map(|c| c.symbol().chars().next().unwrap_or(' '))
+            .collect();
+        assert!(content.contains("Enter:load"), "the footer key hint must render, got: {content}");
     }
 
     #[test]
@@ -445,6 +469,24 @@ mod tests {
         assert_eq!(super::format_time("2026-06-18T12:34:56Z"), "2026-06-18 12:34");
         assert_eq!(super::format_time(""), "");
         assert_eq!(super::format_time("2026-06-18T10:00:00Z"), "2026-06-18 10:00");
+    }
+
+    /// SQ-0638: a corrupt/hand-edited archive can put anything into `saved_at`.
+    /// The old `&ts[0..10]`/`&ts[11..16]` byte slices panicked the instant a
+    /// multibyte char sat before byte 16; this must degrade gracefully instead.
+    #[test]
+    fn format_time_is_char_safe_on_multibyte_and_short_strings() {
+        // A multibyte prefix that would misalign any BYTE-offset slice at 10/16
+        // (each '€' is 3 bytes, so byte 16 lands mid-character).
+        let multibyte = "€€€€€€€€€€€€€€€€€€€€";
+        // Must not panic, and must return *something* (a safe truncation).
+        let out = super::format_time(multibyte);
+        assert!(!out.is_empty());
+
+        // Short strings (< 16 chars) fall back to a raw (safely-truncated) string
+        // rather than panicking on an out-of-range slice.
+        assert_eq!(super::format_time("hi"), "hi");
+        assert_eq!(super::format_time("€€€"), "€€€");
     }
 
     #[test]

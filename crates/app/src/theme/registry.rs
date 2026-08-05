@@ -358,6 +358,31 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // gets the accent + the ↗ glyph; a host "State" snapshot stays here. ──
     row("saves_portable", Section::Elements, Kind::Style, Some("accent"), glyph("↗")),
     row("saves_host_only", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    // ── SQ-0643: hard-coded modal/list styles → themed selectors ─────────────
+    // The Black-on-Cyan-Bold row highlight shared by every modal list (Saves,
+    // Replay, file picker/browser, Config, and the verb dock): one family
+    // instead of six one-off `Style::new()` literals.
+    row("dialog.list_selected", Section::Dialog, Kind::Style, None,
+        Delta { fg: Some(Color::Black), bg: Some(Color::Cyan), bold: true, ..Delta::EMPTY }),
+    // Dim hint/footer text on a dialog surface (key-hint footers, the empty-list
+    // hint, a turn's "(no output)" line). `muted` already resolves to dark-gray.
+    row("dialog.list_footer", Section::Dialog, Kind::Style, Some("muted"), Delta::EMPTY),
+    // The Settings screen's underlined column-header row: plain text, underlined.
+    row("dialog.list_header", Section::Dialog, Kind::Style, Some("text"), mods(false, false, true, false)),
+    // The hints panel's dim "this game has its own hints" suggestion line.
+    row("dialog.hint_suggestion", Section::Dialog, Kind::Style, Some("alert"), Delta { dim: true, ..Delta::EMPTY }),
+    // The verb dock's composed-input preview line ("Input: <text>_").
+    row("dialog.input_preview", Section::Dialog, Kind::Style, Some("alert"), Delta::EMPTY),
+    // The file browser's current-directory row and unselected directory entries.
+    row("file_browser_cwd", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
+    row("file_browser_dir", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    // The room inspector's per-edge distorted/ok rows (colorblind-hostile as
+    // bare literals; kept explicit since neither has a matching role).
+    row("inspector_edge_ok", Section::Elements, Kind::Style, None, fg(Color::Green)),
+    row("inspector_edge_distorted", Section::Elements, Kind::Style, None, fg(Color::Red)),
+    // The transcript search-match highlight (Black-on-Yellow).
+    row("transcript_search_highlight", Section::Elements, Kind::Style, None,
+        Delta { fg: Some(Color::Black), bg: Some(Color::Yellow), ..Delta::EMPTY }),
 ]);
 
 #[cfg(test)]
@@ -511,6 +536,17 @@ mod tests {
         "saves_portable",
         "saves_host_only",
         "ifdb_attribution",
+        // SQ-0643: hard-coded modal/list styles → themed selectors
+        "dialog.list_selected",
+        "dialog.list_footer",
+        "dialog.list_header",
+        "dialog.hint_suggestion",
+        "dialog.input_preview",
+        "file_browser_cwd",
+        "file_browser_dir",
+        "inspector_edge_ok",
+        "inspector_edge_distorted",
+        "transcript_search_highlight",
     ];
 
     #[test]
@@ -564,6 +600,101 @@ mod tests {
                     r.name
                 );
             }
+        }
+    }
+
+    // ── SQ-0643: hard-coded modal/list styles → themed selectors ─────────────
+
+    /// The new selectors' registry DEFAULTS must reproduce exactly what the old
+    /// hardcoded `Style::new()...` literals rendered, so shipping this change
+    /// causes no visual change for a user with no `style.toml` override.
+    #[test]
+    fn sq0643_new_selector_defaults_reproduce_the_old_hardcoded_styles() {
+        use crate::theme::resolve::{resolve, Decls, Roles};
+        use ratatui::style::Modifier;
+
+        let roles = Roles::terminal_default();
+        let theme = resolve(&roles, &Decls::new(), &Decls::new(), &Decls::new());
+
+        // dialog.list_selected: old `Style::new().fg(Black).bg(Cyan).BOLD`.
+        let sel = theme.get("dialog.list_selected").style;
+        assert_eq!(sel.fg, Some(Color::Black));
+        assert_eq!(sel.bg, Some(Color::Cyan));
+        assert!(sel.add_modifier.contains(Modifier::BOLD));
+
+        // dialog.list_footer: old `.fg(DarkGray)` (muted role default).
+        assert_eq!(theme.get("dialog.list_footer").style.fg, Some(Color::DarkGray));
+
+        // dialog.list_header: old `.fg(White).UNDERLINED` (text role = White for
+        // terminal default).
+        let hdr = theme.get("dialog.list_header").style;
+        assert_eq!(hdr.fg, Some(Color::White));
+        assert!(hdr.add_modifier.contains(Modifier::UNDERLINED));
+
+        // dialog.hint_suggestion: old `.fg(Yellow).DIM` (alert role = Yellow).
+        let hint = theme.get("dialog.hint_suggestion").style;
+        assert_eq!(hint.fg, Some(Color::Yellow));
+        assert!(hint.add_modifier.contains(Modifier::DIM));
+
+        // dialog.input_preview: old `.fg(Yellow)`.
+        assert_eq!(theme.get("dialog.input_preview").style.fg, Some(Color::Yellow));
+
+        // file_browser_cwd / file_browser_dir: old `.fg(Yellow)` / `.fg(Cyan)`.
+        assert_eq!(theme.get("file_browser_cwd").style.fg, Some(Color::Yellow));
+        assert_eq!(theme.get("file_browser_dir").style.fg, Some(Color::Cyan));
+
+        // inspector_edge_ok / inspector_edge_distorted: old `.fg(Green)` / `.fg(Red)`.
+        assert_eq!(theme.get("inspector_edge_ok").style.fg, Some(Color::Green));
+        assert_eq!(theme.get("inspector_edge_distorted").style.fg, Some(Color::Red));
+
+        // transcript_search_highlight: old `.fg(Black).bg(Yellow)`.
+        let hl = theme.get("transcript_search_highlight").style;
+        assert_eq!(hl.fg, Some(Color::Black));
+        assert_eq!(hl.bg, Some(Color::Yellow));
+    }
+
+    /// A `style.toml` override on each new selector must actually change its
+    /// resolved style — the whole point of moving off a hardcoded literal.
+    /// Falsification: before SQ-0643 these were bare `Style::new()...`
+    /// constants no override could reach; this fails against that code.
+    #[test]
+    fn sq0643_new_selectors_are_actually_overridable() {
+        use crate::theme::resolve::resolve_theme;
+        let scheme = crate::colors::GhosttyScheme::default();
+        let parsed = crate::theme::toml_schema::parse(
+            "[dialog]\n\
+             list_selected = { fg = \"magenta\" }\n\
+             list_footer = { fg = \"magenta\" }\n\
+             list_header = { fg = \"magenta\" }\n\
+             hint_suggestion = { fg = \"magenta\" }\n\
+             input_preview = { fg = \"magenta\" }\n\
+             [elements]\n\
+             file_browser_cwd = { fg = \"magenta\" }\n\
+             file_browser_dir = { fg = \"magenta\" }\n\
+             inspector_edge_ok = { fg = \"magenta\" }\n\
+             inspector_edge_distorted = { fg = \"magenta\" }\n\
+             transcript_search_highlight = { fg = \"magenta\" }\n",
+        )
+        .unwrap();
+        let theme = resolve_theme(&scheme, &parsed);
+
+        for sel in [
+            "dialog.list_selected",
+            "dialog.list_footer",
+            "dialog.list_header",
+            "dialog.hint_suggestion",
+            "dialog.input_preview",
+            "file_browser_cwd",
+            "file_browser_dir",
+            "inspector_edge_ok",
+            "inspector_edge_distorted",
+            "transcript_search_highlight",
+        ] {
+            assert_eq!(
+                theme.get(sel).style.fg,
+                Some(Color::Magenta),
+                "selector {sel} must pick up its style.toml override"
+            );
         }
     }
 }

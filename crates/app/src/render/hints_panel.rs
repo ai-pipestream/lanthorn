@@ -7,7 +7,6 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
 
 use crate::render::dialog::{ButtonId, DialogButton, DialogSpec, DialogStyle, Placement, draw_dialog};
 use crate::render::transcript::wrap_line;
@@ -148,10 +147,8 @@ pub fn draw_hints_panel(state: &AppState, area: Rect, buf: &mut Buffer) -> Optio
     // Draw built-in hint suggestion on the very first content row (row 0 of transcript_area).
     if session.builtin_hint && transcript_area.height >= 1 {
         let suggestion = "This game has its own hints \u{2014} type HINT in the story.";
-        let dim_style = Style::new()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::DIM)
-            .patch(state.colors.theme.get("dialog.background").style);
+        let dim_style = state.colors.theme.get("dialog.background").style
+            .patch(state.colors.theme.get("dialog.hint_suggestion").style);
         crate::render::draw_str_clipped(
             buf,
             transcript_area.x,

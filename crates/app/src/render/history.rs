@@ -2,8 +2,6 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
-
 use crate::render::dialog::{
     ButtonId, DialogButton, DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog,
 };
@@ -49,14 +47,9 @@ pub fn draw_history(
     let content = rects.content;
 
     let normal = state.colors.theme.get("dialog.background").style;
-    let selected_style = Style::new()
-        .fg(ratatui::style::Color::Black)
-        .bg(ratatui::style::Color::Cyan)
-        .add_modifier(Modifier::BOLD);
+    let selected_style = state.colors.theme.get("dialog.list_selected").style;
 
-    let dim_style = Style::new()
-        .fg(ratatui::style::Color::DarkGray)
-        .patch(state.colors.theme.get("dialog.background").style);
+    let dim_style = normal.patch(state.colors.theme.get("dialog.list_footer").style);
 
     // Partition the content: footer (1 row) at the bottom, the selected turn's
     // transcript just above it, and the turn list filling the rest at the top.

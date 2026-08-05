@@ -77,9 +77,13 @@ pub fn draw_room_info(
     const WIDTH: u16 = 36;
     const FIXED_ROWS: u16 = 7; // border-top + name + exits-header + border-bot + OK button row + 2 spare
     let notes_lines = if room.notes.is_empty() { 0u16 } else {
-        // Wrap notes to panel inner width.
-        let inner_w = WIDTH.saturating_sub(2) as usize;
-        room.notes.len().div_ceil(inner_w) as u16
+        // Wrap notes to panel inner width, char/width-aware (SQ-0638): a
+        // byte-offset estimate panics the caller below on a multibyte note
+        // (e.g. one full of '€') long before it ever gets here, but a byte
+        // COUNT here would just under/over-estimate the row count instead —
+        // reuse the same wrapper the draw loop below uses so they agree.
+        let inner_w = WIDTH.saturating_sub(2);
+        crate::render::transcript::wrap_line(&room.notes, inner_w).len() as u16
     };
     let exit_rows = exits.len() as u16;
     let obj_rows = if objects.is_empty() { 0u16 } else { objects.len() as u16 + 1 }; // +1 for header
@@ -131,15 +135,13 @@ pub fn draw_room_info(
         row += 1;
     }
 
-    // Notes (if any), word-wrapped naively by character width.
+    // Notes (if any), word-wrapped char/width-aware (SQ-0638): a raw byte-offset
+    // slice panics on a multibyte note (e.g. one full of '€') since a slice
+    // boundary can land mid-character.
     if !room.notes.is_empty() && row <= max_y {
-        let inner_w_usize = inner_w as usize;
-        let notes = &room.notes;
-        let mut offset = 0;
-        while offset < notes.len() && row <= max_y {
-            let end = (offset + inner_w_usize).min(notes.len());
-            draw_str_clipped(buf, inner_x, row, &notes[offset..end], value_style, clip);
-            offset = end;
+        for line in crate::render::transcript::wrap_line(&room.notes, inner_w) {
+            if row > max_y { break; }
+            draw_str_clipped(buf, inner_x, row, &line, value_style, clip);
             row += 1;
         }
     }
@@ -263,6 +265,25 @@ mod tests {
         g.set_pos(2, (1, 0));
         g.add_edge(1, mapper::direction::Direction::E, 2);
         (g, 1, 2)
+    }
+
+    /// SQ-0638: a room note packed with multibyte chars (each '€' is 3 bytes)
+    /// used to panic — the wrap loop sliced `&notes[offset..end]` at a fixed
+    /// BYTE offset that could land mid-character. Twelve '€' at panel inner
+    /// width 34 chars is comfortably past any single-byte boundary trap.
+    #[test]
+    fn room_info_notes_with_multibyte_chars_does_not_panic() {
+        let (mut g, room1, _) = make_graph_with_rooms();
+        g.set_notes(room1, "€".repeat(12));
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
+        terminal.draw(|f| {
+            let area = f.area();
+            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
+        }).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        assert!(buf_contains(&buf, "€"), "the multibyte note text should still render");
     }
 
     #[test]

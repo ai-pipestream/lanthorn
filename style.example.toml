@@ -95,6 +95,11 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # ifdb_attribution = { parent = "muted", italic = true }
 # saves_portable = { parent = "accent", glyph = "↗" }
 # saves_host_only = { parent = "muted" }
+# file_browser_cwd = { parent = "alert" }
+# file_browser_dir = { parent = "accent" }
+# inspector_edge_ok = { fg = "green" }
+# inspector_edge_distorted = { fg = "red" }
+# transcript_search_highlight = { fg = "black", bg = "yellow" }
 
 # ── The 11 Glk styles for text-buffer windows (base: text).
 [glk.buffer]
@@ -185,6 +190,11 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # button = { parent = "chrome", reversed = true }
 # "button:active" = { parent = "accent", reversed = true }
 # shadow = { parent = "muted", bg = "dark-gray" }
+# list_selected = { fg = "black", bg = "cyan", bold = true }
+# list_footer = { parent = "muted" }
+# list_header = { parent = "text", underline = true }
+# hint_suggestion = { parent = "alert", dim = true }
+# input_preview = { parent = "alert" }
 
 # ── Tooltip: hover pop-ups — background and an optional border.
 [tooltip]

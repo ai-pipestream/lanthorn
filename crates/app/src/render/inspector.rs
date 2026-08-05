@@ -151,8 +151,8 @@ pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, 
     let y = map_area.y;
     let panel = Rect::new(x, y, panel_w, panel_h);
 
-    let distorted_style = Style::default().fg(ratatui::style::Color::Red);
-    let ok_style = Style::default().fg(ratatui::style::Color::Green);
+    let distorted_style = dialog_style.theme.get("inspector_edge_distorted").style;
+    let ok_style = dialog_style.theme.get("inspector_edge_ok").style;
 
     // Render via shared dialog chrome (positioned at the computed rect).
     let spec = DialogSpec {
@@ -570,6 +570,48 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         // The distorted marker `!` should appear.
         assert!(buf_contains(&buf, "!"), "distorted edge should show '!'");
+    }
+
+    /// SQ-0643: `distorted_style`/`ok_style` used to be bare `Style::default().fg(Red/Green)`
+    /// literals no `style.toml` could reach (and colorblind-hostile as a bonus). They must
+    /// now read `inspector_edge_distorted`/`inspector_edge_ok`, and an override must actually
+    /// change what's drawn.
+    #[test]
+    fn inspector_edge_colours_follow_style_overrides() {
+        use crate::render::paneframe::PaneGlyphs;
+        let scheme = crate::colors::GhosttyScheme::default();
+        let parsed = crate::theme::toml_schema::parse(
+            "[elements]\ninspector_edge_ok = { fg = \"magenta\" }\ninspector_edge_distorted = { fg = \"blue\" }\n",
+        ).unwrap();
+        let theme = crate::theme::resolve::resolve_theme(&scheme, &parsed);
+        let ds = DialogStyle {
+            theme: &theme,
+            frame: Style::default().bg(Color::Black),
+            border: Style::default(), box_style: BorderStyle::Single,
+            glyphs: PaneGlyphs::default(),
+            title: Style::default().fg(Color::Yellow),
+            button: Style::default(),
+            button_active: Style::default(),
+            shadow: Style::default(),
+            shadow_on: false,
+            placement: DialogPlacement::Center,
+            margin: 0,
+        };
+        let edges = vec![
+            EdgeInfo { dir: Direction::E, neighbour_id: 2, neighbour_name: "OK Room".into(), distorted: false },
+            EdgeInfo { dir: Direction::W, neighbour_id: 3, neighbour_name: "Bad Room".into(), distorted: true },
+        ];
+        let diag = make_diag(1, "Start", edges);
+        let area = Rect::new(0, 0, 60, 24);
+        let mut buf = Buffer::empty(area);
+        draw_inspector(&diag, area, &mut buf, &ds, &crate::symbols::SymbolSet::default().portal);
+
+        let has_ok_override = (0..area.width).flat_map(|x| (0..area.height).map(move |y| (x, y)))
+            .any(|(x, y)| buf.cell((x, y)).is_some_and(|c| c.style().fg == Some(Color::Magenta)));
+        let has_distorted_override = (0..area.width).flat_map(|x| (0..area.height).map(move |y| (x, y)))
+            .any(|(x, y)| buf.cell((x, y)).is_some_and(|c| c.style().fg == Some(Color::Blue)));
+        assert!(has_ok_override, "an OK edge row must render in the overridden inspector_edge_ok colour");
+        assert!(has_distorted_override, "a distorted edge row must render in the overridden inspector_edge_distorted colour");
     }
 
     #[test]

@@ -12,7 +12,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 
 use super::paneframe::{InsetSegment, PaneGlyphs};
 use crate::render::panel::{draw_panel, PanelSpec, PanelStrip};
@@ -207,6 +207,15 @@ pub fn draw_verb_menu(
         hits.headers.push((*pane, header_area));
 
         let list_h = h.saturating_sub(1);
+        // Always publish the active pane's list viewport (SQ-0639), even when
+        // it's degenerate (0): the old code only wrote `*vp_out` inside the
+        // `list_h > 0` branch, so a narrow dock that leaves the active pane no
+        // list rows at all left `*vp_out` holding a STALE count from whatever
+        // overlay/pane last set it — PageUp/PageDown would then page by that
+        // wrong count instead of doing nothing.
+        if active {
+            *vp_out = list_h as usize;
+        }
         if list_h > 0 {
             let list_area = Rect { x: content.x, y: y + 1, width: content.width, height: list_h };
             let items: &[&str] = match pane {
@@ -220,9 +229,6 @@ pub fn draw_verb_menu(
                 VerbMenuPane::Preps => &vm.prep_scroll,
             };
             draw_list(items, scroll, active, list_area, buf, state, *pane, &mut hits.rows);
-            if active {
-                *vp_out = list_h as usize;
-            }
         }
         y += h;
     }
@@ -231,7 +237,7 @@ pub fn draw_verb_menu(
     if !state.input.is_empty() {
         let input_y = content.bottom() - 1;
         let input_text = format!("Input: {}_", state.input.as_str());
-        let input_style = Style::new().fg(Color::Yellow).patch(base);
+        let input_style = base.patch(state.colors.theme.get("dialog.input_preview").style);
         crate::render::draw_str_clipped(buf, content.x, input_y, &input_text, input_style, content);
     }
 }
@@ -306,7 +312,7 @@ fn draw_list(
         let is_selected = idx == selected;
 
         let style = if is_selected && active {
-            Style::new().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            state.colors.theme.get("dialog.list_selected").style
         } else if is_selected {
             Style::new().add_modifier(Modifier::BOLD).patch(base)
         } else {
@@ -346,6 +352,7 @@ fn draw_list(
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
     use ratatui::Terminal;
     use crate::state::{AppState, VerbMenuState};
 
@@ -471,6 +478,23 @@ mod tests {
 
         let has_cyan = buf.content().iter().any(|c| c.style().bg == Some(Color::Cyan));
         assert!(!has_cyan, "no row should be cyan-highlighted while the story is focused");
+    }
+
+    /// SQ-0639: `*vp_out` was only written inside the `list_h > 0` branch, so a
+    /// dock too short to give the active pane any list rows at all left
+    /// `*vp_out` holding a STALE count from a previous frame/overlay — it must
+    /// now be overwritten with 0.
+    #[test]
+    fn verb_menu_publishes_zero_viewport_when_active_pane_is_degenerate() {
+        let mut state = make_state_with_verb_menu();
+        // Preps is the LAST section (no remainder row bonus), so a short dock
+        // starves it of list rows first; make it the active pane.
+        state.overlays.verb_menu.as_mut().unwrap().pane = VerbMenuPane::Preps;
+        let area = Rect { x: 0, y: 0, width: 26, height: 7 };
+        let mut buf = Buffer::empty(area);
+        let mut vp = 42usize; // a stale count from a previous (larger) overlay
+        draw_verb_menu(&state, area, &mut buf, &mut vp, &mut VerbMenuHits::default());
+        assert_eq!(vp, 0, "a degenerate active pane must publish 0, not leave the stale viewport");
     }
 
     #[test]
