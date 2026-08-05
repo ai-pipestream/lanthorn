@@ -104,7 +104,7 @@ impl Blorb {
         }
         let end = bytes.len();
         // Walk top-level chunks (start at 12, after FORM+len+IFRS) to find RIdx.
-        let mut ridx: Option<(usize, usize)> = None; // (entries_start, count)
+        let mut ridx: Option<(usize, usize, usize)> = None; // (entries_start, count, chunk_len)
         let mut fspc: Option<u32> = None;
         let mut ifmd: Option<(usize, usize)> = None;
         let mut reso_std: Option<(u16, u16)> = None;
@@ -119,7 +119,7 @@ impl Blorb {
             }
             if &ctype == b"RIdx" {
                 let count = be_u32(&bytes, data_start)? as usize;
-                ridx = Some((data_start + 4, count));
+                ridx = Some((data_start + 4, count, clen));
             } else if &ctype == b"Fspc" && clen >= 4 {
                 fspc = be_u32(&bytes, data_start).ok();
             } else if &ctype == b"IFmd" {
@@ -149,7 +149,18 @@ impl Blorb {
             }
             pos = data_start + clen + (clen & 1);
         }
-        let (mut p, count) = ridx.ok_or(BlorbError::NoResourceIndex)?;
+        let (mut p, count, ridx_len) = ridx.ok_or(BlorbError::NoResourceIndex)?;
+        // The declared entry count is untrusted (a 0xFFFFFFFF count would ask
+        // `with_capacity` for ~170GB). Each entry is 12 bytes and must lie
+        // INSIDE the RIdx chunk itself — bounding reads only against EOF would
+        // let a malformed count walk into the chunks that follow (SQ-0629).
+        let need = count
+            .checked_mul(12)
+            .and_then(|n| n.checked_add(4))
+            .ok_or(BlorbError::Truncated)?;
+        if ridx_len < need {
+            return Err(BlorbError::Truncated);
+        }
         let mut index = Vec::with_capacity(count);
         for _ in 0..count {
             let u = bytes.get(p..p + 4).ok_or(BlorbError::Truncated)?;
@@ -782,6 +793,52 @@ mod tests {
         file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
         file.extend_from_slice(&inner);
         assert_eq!(Blorb::parse(file).unwrap_err(), BlorbError::BadOffset);
+    }
+
+    /// Build FORM/IFRS bytes with an arbitrary RIdx payload followed by `rest`.
+    fn blorb_with_ridx_payload(ridx_payload: &[u8], rest: &[u8]) -> Vec<u8> {
+        let mut inner = Vec::new();
+        inner.extend_from_slice(b"IFRS");
+        inner.extend_from_slice(&chunk(b"RIdx", ridx_payload));
+        inner.extend_from_slice(rest);
+        let mut file = Vec::new();
+        file.extend_from_slice(b"FORM");
+        file.extend_from_slice(&(inner.len() as u32).to_be_bytes());
+        file.extend_from_slice(&inner);
+        file
+    }
+
+    /// SQ-0629: an untrusted RIdx count (0xFFFFFFFF would ask `with_capacity`
+    /// for ~170GB) must be validated against the RIdx chunk length before any
+    /// allocation or entry parsing.
+    #[test]
+    fn parse_rejects_huge_ridx_count() {
+        let mut ridx = Vec::new();
+        ridx.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes()); // count, no entries
+        let file = blorb_with_ridx_payload(&ridx, &[]);
+        assert_eq!(Blorb::parse(file).unwrap_err(), BlorbError::Truncated);
+    }
+
+    /// SQ-0629: a count claiming more entries than the RIdx chunk holds must
+    /// error rather than walk into the chunks that follow — entry reads were
+    /// previously bounded only against EOF, so a trailing chunk's bytes parsed
+    /// as phantom index entries.
+    #[test]
+    fn parse_rejects_ridx_count_exceeding_its_chunk_length() {
+        // RIdx declares TWO entries but its chunk length only covers one
+        // (4 + 12 bytes). A well-formed Exec resource chunk follows, so under
+        // the old EOF-only bound the second "entry" read the next chunk's bytes.
+        let exec_off: u32 = 12 + 8 + 16 + 24; // FORM hdr + RIdx hdr + RIdx data + this Fake chunk
+        let mut ridx = Vec::new();
+        ridx.extend_from_slice(&2u32.to_be_bytes()); // count = 2 (lie)
+        ridx.extend_from_slice(b"Exec");
+        ridx.extend_from_slice(&0u32.to_be_bytes());
+        ridx.extend_from_slice(&exec_off.to_be_bytes());
+        let mut rest = Vec::new();
+        rest.extend_from_slice(&chunk(b"Fake", &[0u8; 16]));
+        rest.extend_from_slice(&chunk(b"ZCOD", b"abcd"));
+        let file = blorb_with_ridx_payload(&ridx, &rest);
+        assert_eq!(Blorb::parse(file).unwrap_err(), BlorbError::Truncated);
     }
 
     #[test]

@@ -5,6 +5,12 @@ pub enum LoadError {
     Truncated,
     BadInt(String),
     Unterminated,
+    /// A header count is negative or implausibly large — a hostile file can
+    /// otherwise request gigabytes of `Vec` capacity before a single body
+    /// token is read (SQ-0629).
+    BadCount(&'static str, i32),
+    /// A room exit points outside the room table (negative or > NumRooms).
+    BadExit(i32),
 }
 
 /// Tokenizer over a `.dat` source: whitespace-separated ints and `"`-delimited strings.
@@ -93,9 +99,22 @@ impl Database {
         let num_messages = lex.next_int()?;
         let treasure_room = lex.next_int()?;
 
-        if num_items < 0 || num_actions < 0 || num_words < 0 || num_rooms < 0 || num_messages < 0
-        {
-            return Err(LoadError::Truncated);
+        // Bound every count that sizes a pre-reserved Vec. Real Scott
+        // databases have counts in the low hundreds; `looks_like_scott` uses
+        // the same <10000 ceiling for its sniff. Without this, an unvalidated
+        // header int (num_actions = 2_000_000_000) asks `with_capacity` for
+        // tens of gigabytes before any body token is read (SQ-0629).
+        const MAX_COUNT: i32 = 10_000;
+        for (name, v) in [
+            ("NumItems", num_items),
+            ("NumActions", num_actions),
+            ("NumWords", num_words),
+            ("NumRooms", num_rooms),
+            ("NumMessages", num_messages),
+        ] {
+            if !(0..=MAX_COUNT).contains(&v) {
+                return Err(LoadError::BadCount(name, v));
+            }
         }
 
         let mut actions = Vec::with_capacity(num_actions as usize + 1);
@@ -138,7 +157,14 @@ impl Database {
         for _ in 0..=num_rooms {
             let mut exits = [0usize; 6];
             for e in exits.iter_mut() {
-                *e = lex.next_int()? as usize;
+                let v = lex.next_int()?;
+                // Exits index the room table at move time; a negative value
+                // would wrap to a huge usize and an over-large one soft-locks
+                // the player in a nonexistent room (SQ-0629). 0 = no exit.
+                if !(0..=num_rooms).contains(&v) {
+                    return Err(LoadError::BadExit(v));
+                }
+                *e = v as usize;
             }
             let mut desc = lex.next_str()?;
             let literal = if let Some(stripped) = desc.strip_prefix('*') {

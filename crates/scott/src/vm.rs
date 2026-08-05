@@ -494,7 +494,10 @@ impl Vm {
                 67 => self.flag_set(0, true),
                 68 => self.flag_set(0, false),
                 69 => {
+                    // ScottFree case 69 (refill lamp): reset the fuel, move the
+                    // light source (item 9) into the pack, clear the empty flag.
                     self.lamp = self.db.light_time;
+                    self.set_item_loc(LIGHT_SOURCE, CARRIED);
                     self.flag_set(LAMP_EMPTY_FLAG, false);
                 }
                 70 => self.out.clear(),
@@ -585,15 +588,37 @@ impl Vm {
         let mut w = cmd.split_whitespace();
         let w1 = w.next();
         let w2 = w.next();
-        let mut vb = w1.and_then(|s| self.db.match_verb(s)).unwrap_or(0);
-        let no = match w2 {
-            Some(s) => self.db.match_noun(s).unwrap_or(0),
-            None => w1.and_then(|s| self.db.match_noun(s)).unwrap_or(0),
+        // ScottFree's GetInput tries the FIRST word against the noun list
+        // before anything else: a direction noun (1..=6) is "the Scott Adams
+        // system['s] hack to avoid typing 'go'" — it becomes GO <dir> and the
+        // second word is never consulted. Only otherwise is the first word
+        // looked up as a verb. An unknown verb answers "You use word(s) I
+        // don't know!" and NO turn passes — ScottFree re-prompts inside
+        // GetInput, so no actions run, the lamp doesn't tick, and the
+        // occurrence pass doesn't fire (SQ-0628).
+        let first_as_noun = w1.and_then(|s| self.db.match_noun(s));
+        let (vb, no): (u16, i32) = if let Some(d) =
+            first_as_noun.filter(|d| (1..=6).contains(d))
+        {
+            (1, d as i32)
+        } else if let Some(vb) = w1.and_then(|s| self.db.match_verb(s)) {
+            // An absent or unrecognized second word is noun -1 (ScottFree's
+            // WhichWord miss), NOT 0: wildcard (noun-0) actions still match
+            // it, but GET/DROP answer "What?" instead of grabbing something,
+            // and GO without a direction asks for one before the action table.
+            let no = w2
+                .and_then(|s| self.db.match_noun(s))
+                .map(|n| n as i32)
+                .unwrap_or(-1);
+            (vb, no)
+        } else {
+            self.out.push_str("You use word(s) I don't know!\n");
+            self.needs_line = true;
+            return;
         };
-        if vb == 0 && (1..=6).contains(&no) {
-            vb = 1;
-        }
-        self.last_noun = w2.or(w1).unwrap_or("").to_uppercase();
+        // ScottFree keeps NounText = the second word only (empty for a
+        // one-word command), for the print-noun opcodes and the GET/DROP hack.
+        self.last_noun = w2.unwrap_or("").to_uppercase();
 
         // ScottFree resolves GO + a compass direction from the room's exit table
         // BEFORE consulting the action table, so a catch-all "GO <anything>"
@@ -611,11 +636,21 @@ impl Vm {
                 .get(self.player)
                 .map(|room| room.exits[dir])
                 .unwrap_or(0);
-            if dest != 0 {
+            // A destination outside the room table (a corrupt exit value in a
+            // hand-built Database; the loader rejects them in a .dat) is
+            // treated as no exit rather than soft-locking the player in a
+            // nonexistent room (SQ-0629).
+            if dest != 0 && dest < self.db.rooms.len() {
                 self.player = dest;
             } else {
                 self.out.push_str("I can't go in that direction.\n");
             }
+            handled = true;
+        } else if vb == 1 && no == -1 {
+            // ScottFree: GO with no (or an unknown) noun is answered "Give me
+            // a direction too." BEFORE the action table — a catch-all
+            // "GO ANY" action must not swallow a bare GO.
+            self.out.push_str("I need a direction.\n");
             handled = true;
         } else if vb != 0 {
             // Only a recognized verb consults the command actions. Verb 0 is
@@ -633,7 +668,9 @@ impl Vm {
             for i in 0..self.db.actions.len() {
                 let a = &self.db.actions[i];
                 let (av, an, conditions) = (a.verb, a.noun, a.conditions);
-                if av != vb || (an != no && an != 0) {
+                // ScottFree's vocab match: `nv==no || nv==0` — a noun-0
+                // wildcard also matches the unknown-noun sentinel (-1).
+                if av != vb || (an as i32 != no && an != 0) {
                     continue;
                 }
                 let mut first_fail = None;
@@ -667,30 +704,33 @@ impl Vm {
             } else if vb == 10 {
                 if self.last_noun == "ALL" {
                     self.get_all();
+                } else if no == -1 {
+                    // ScottFree: GET with an unknown noun is "What ?", never a grab.
+                    self.out.push_str("What?\n");
+                } else if self.carried_count() >= self.db.max_carry {
+                    // ScottFree checks the carry limit before matching the item.
+                    self.out.push_str("You are carrying too much.\n");
                 } else {
-                    match self.find_auto_noun_item() {
-                        Some(idx) if self.item_loc_of(idx) == Some(self.player as i32) => {
-                            if self.carried_count() < self.db.max_carry {
-                                self.set_item_loc(idx, CARRIED);
-                                self.out.push_str("OK.\n");
-                            } else {
-                                self.out.push_str("You are carrying too much.\n");
-                            }
+                    match self.match_up_item(false) {
+                        Some(idx) => {
+                            self.set_item_loc(idx, CARRIED);
+                            self.out.push_str("OK.\n");
                         }
-                        Some(_) => self.out.push_str("It's beyond my power to do that.\n"),
-                        None => self.out.push_str("I don't understand your command.\n"),
+                        None => self.out.push_str("It's beyond my power to do that.\n"),
                     }
                 }
             } else if vb == 18 {
                 if self.last_noun == "ALL" {
                     self.drop_all();
+                } else if no == -1 {
+                    self.out.push_str("What?\n");
                 } else {
-                    match self.find_auto_noun_item() {
-                        Some(idx) if self.item_carried(idx) => {
+                    match self.match_up_item(true) {
+                        Some(idx) => {
                             self.set_item_loc(idx, self.player as i32);
                             self.out.push_str("OK.\n");
                         }
-                        _ => self.out.push_str("I don't understand your command.\n"),
+                        None => self.out.push_str("It's beyond my power to do that.\n"),
                     }
                 }
             } else {
@@ -755,20 +795,43 @@ impl Vm {
         }
     }
 
-    /// Index of the item whose `auto_noun` matches the last typed noun, if any.
-    fn find_auto_noun_item(&self) -> Option<usize> {
+    /// ScottFree's `MatchUpItem(NounText, loc)`: the first item whose
+    /// `auto_noun` matches the last typed noun AND which is at the required
+    /// location — the player's room for GET (`want_carried == false`), carried
+    /// for DROP (`want_carried == true`). Without the location requirement a
+    /// duplicate auto-noun (Adventureland's two `/BOT/` bottles, lit/unlit
+    /// lamp pairs) resolves to the out-of-play twin first and GET/DROP fail
+    /// wrongly (SQ-0628).
+    fn match_up_item(&self, want_carried: bool) -> Option<usize> {
         // Scott matching is significant only to `word_length` characters, so the
         // typed noun and the item's auto-noun must be compared truncated — a full
         // typed word (e.g. "LAMP") still matches a shorter auto-noun ("LAM") when
-        // word_length is 3. `last_noun` and `auto_noun` are already uppercase.
+        // word_length is 3.
         let wl = self.db.word_length;
-        let trunc = |s: &str| s.chars().take(wl).collect::<String>();
-        let key = trunc(&self.last_noun);
+        let trunc = |s: &str| s.trim().to_uppercase().chars().take(wl).collect::<String>();
+        // ScottFree first maps the typed noun through the vocabulary
+        // (MapSynonym): a `*`-synonym resolves to its group's canonical word
+        // before being compared against the items' auto-get nouns. A word not
+        // in the vocabulary at all is compared as typed.
+        let key = match self.db.match_noun(&self.last_noun) {
+            Some(n) => trunc(self.db.nouns[n as usize].trim_start_matches('*')),
+            None => trunc(&self.last_noun),
+        };
         if key.is_empty() {
             return None;
         }
-        self.db.items.iter().position(|it| {
-            it.auto_noun.as_deref().map(|n| trunc(n) == key).unwrap_or(false)
+        (0..self.db.items.len()).find(|&i| {
+            let at_loc = if want_carried {
+                self.item_carried(i)
+            } else {
+                self.item_in_room(i)
+            };
+            at_loc
+                && self.db.items[i]
+                    .auto_noun
+                    .as_deref()
+                    .map(|n| trunc(n) == key)
+                    .unwrap_or(false)
         })
     }
 
@@ -1286,8 +1349,8 @@ mod tests {
         vm.step();
         assert!(!vm.has_quit(), "an unknown command must not fire a verb-0 occurrence");
         assert!(
-            vm.take_output().contains("don't understand"),
-            "an unknown command is reported as not understood"
+            vm.take_output().contains("You use word(s) I don't know!"),
+            "an unknown command gets ScottFree's unknown-words reply"
         );
     }
 
@@ -1508,13 +1571,17 @@ mod tests {
         verbs[1] = "GO".into();
         verbs[10] = "GET".into();
         verbs[18] = "DROP".into();
-        let mut nouns = vec![String::new(); 7];
+        let mut nouns = vec![String::new(); 8];
         nouns[1] = "NORTH".into();
         nouns[2] = "SOUTH".into();
         nouns[3] = "EAST".into();
         nouns[4] = "WEST".into();
         nouns[5] = "UP".into();
         nouns[6] = "DOWN".into();
+        // The lamp must be in the noun vocabulary: ScottFree answers "What ?"
+        // to a GET whose noun WhichWord doesn't know, so a gettable item's
+        // noun is always listed in a real game.
+        nouns[7] = "LAMP".into();
         let rooms = vec![
             Room {
                 exits: [0; 6],
@@ -1665,8 +1732,10 @@ mod tests {
 
     #[test]
     fn trace_fired_off_by_default_records_nothing() {
-        let mut verbs = vec![String::new(); 2];
-        verbs[1] = "PUSH".into();
+        // Verb index 1 is GO by Scott convention (a bare GO-verb asks for a
+        // direction before the action table), so PUSH lives at index 2.
+        let mut verbs = vec![String::new(); 3];
+        verbs[2] = "PUSH".into();
         let db = Database {
             max_carry: 6,
             start_room: 1,
@@ -1675,7 +1744,7 @@ mod tests {
             light_time: -1,
             treasure_room: 0,
             actions: vec![Action {
-                verb: 1,
+                verb: 2,
                 noun: 0,
                 conditions: [Condition { code: 0, value: 0 }; 5],
                 commands: [1, 0, 0, 0], // print message 1
@@ -1697,9 +1766,10 @@ mod tests {
 
     #[test]
     fn trace_fired_records_per_turn_and_cumulative_firings() {
-        let mut verbs = vec![String::new(); 3];
-        verbs[1] = "PUSH".into();
-        verbs[2] = "PULL".into();
+        // Verb index 1 is GO by Scott convention, so the test verbs start at 2.
+        let mut verbs = vec![String::new(); 4];
+        verbs[2] = "PUSH".into();
+        verbs[3] = "PULL".into();
         let db = Database {
             max_carry: 6,
             start_room: 1,
@@ -1709,13 +1779,13 @@ mod tests {
             treasure_room: 0,
             actions: vec![
                 Action {
-                    verb: 1,
+                    verb: 2,
                     noun: 0,
                     conditions: [Condition { code: 0, value: 0 }; 5],
                     commands: [1, 0, 0, 0], // idx 0: print message 1
                 },
                 Action {
-                    verb: 2,
+                    verb: 3,
                     noun: 0,
                     conditions: [Condition { code: 0, value: 0 }; 5],
                     commands: [2, 0, 0, 0], // idx 1: print message 2
@@ -1747,8 +1817,9 @@ mod tests {
 
     #[test]
     fn trace_fired_records_blocked_action_when_verb_noun_matches_but_condition_fails() {
-        let mut verbs = vec![String::new(); 2];
-        verbs[1] = "OPEN".into();
+        // Verb index 1 is GO by Scott convention, so OPEN lives at index 2.
+        let mut verbs = vec![String::new(); 3];
+        verbs[2] = "OPEN".into();
         let db = Database {
             max_carry: 6,
             start_room: 1,
@@ -1757,7 +1828,7 @@ mod tests {
             light_time: -1,
             treasure_room: 0,
             actions: vec![Action {
-                verb: 1,
+                verb: 2,
                 noun: 0,
                 conditions: [
                     Condition { code: 8, value: 5 }, // requires flag 5 set

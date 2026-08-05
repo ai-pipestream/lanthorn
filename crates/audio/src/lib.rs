@@ -82,6 +82,33 @@ fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
     let mut channels: u16 = 0;
     let mut sample_rate: u32 = 0;
     let mut sample_size: u16 = 0;
+    // Pass 1: locate COMM. AIFF-1.3 places "no restrictions on the ordering of
+    // local chunks within a FORM AIFF", so SSND may legally precede COMM — the
+    // sample format must be known before any sound data is decoded, or a
+    // 16-bit SSND-first file falls through the 8-bit branch as double-length
+    // static (SQ-0630).
+    let mut scan = pos;
+    while scan + 8 <= bytes.len() {
+        let id = [bytes[scan], bytes[scan + 1], bytes[scan + 2], bytes[scan + 3]];
+        let len = u32::from_be_bytes([bytes[scan + 4], bytes[scan + 5], bytes[scan + 6], bytes[scan + 7]]) as usize;
+        let data_start = scan + 8;
+        if data_start + len > bytes.len() {
+            break;
+        }
+        if &id == b"COMM" && len >= 18 {
+            channels = u16::from_be_bytes([bytes[data_start], bytes[data_start + 1]]);
+            sample_size = u16::from_be_bytes([bytes[data_start + 6], bytes[data_start + 7]]);
+            let mut ext = [0u8; 10];
+            ext.copy_from_slice(&bytes[data_start + 8..data_start + 18]);
+            sample_rate = extended80_to_u32(&ext);
+            break;
+        }
+        scan = data_start + len + (len & 1);
+    }
+    if channels == 0 || sample_rate == 0 {
+        return None;
+    }
+    // Pass 2: decode SSND with the format known.
     let mut pcm: Vec<i16> = Vec::new();
     while pos + 8 <= bytes.len() {
         let id = [bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]];
@@ -90,38 +117,37 @@ fn decode_aiff(bytes: &[u8]) -> Option<(u16, u32, Vec<i16>)> {
         if data_start + len > bytes.len() {
             break;
         }
-        match &id {
-            b"COMM" if len >= 18 => {
-                channels = u16::from_be_bytes([bytes[data_start], bytes[data_start + 1]]);
-                sample_size = u16::from_be_bytes([bytes[data_start + 6], bytes[data_start + 7]]);
-                let mut ext = [0u8; 10];
-                ext.copy_from_slice(&bytes[data_start + 8..data_start + 18]);
-                sample_rate = extended80_to_u32(&ext);
-            }
-            b"SSND" if len >= 8 => {
-                // Skip offset (u32) + blockSize (u32); the rest is big-endian PCM.
-                let pcm_start = data_start + 8;
-                let pcm_end = data_start + len;
-                let mut i = pcm_start;
-                if sample_size <= 8 {
-                    while i < pcm_end {
-                        let s = bytes[i] as i8;
-                        pcm.push((s as i16) << 8);
-                        i += 1;
-                    }
-                } else {
-                    let bps = (sample_size as usize).div_ceil(8).max(2);
-                    while i + 1 < pcm_end {
-                        pcm.push(i16::from_be_bytes([bytes[i], bytes[i + 1]]));
-                        i += bps;
-                    }
+        if &id == b"SSND" && len >= 8 {
+            // SSND layout (AIFF-1.3): offset u32, blockSize u32, soundData.
+            // `offset` is the byte position within soundData where the first
+            // sample frame starts (block-aligned writers use it) — honor it
+            // rather than assuming 0 (SQ-0630). blockSize only describes the
+            // writer's alignment and is not needed to read the frames.
+            let offset = u32::from_be_bytes([
+                bytes[data_start],
+                bytes[data_start + 1],
+                bytes[data_start + 2],
+                bytes[data_start + 3],
+            ]) as usize;
+            let pcm_end = data_start + len;
+            let mut i = (data_start + 8).saturating_add(offset);
+            if sample_size <= 8 {
+                while i < pcm_end {
+                    let s = bytes[i] as i8;
+                    pcm.push((s as i16) << 8);
+                    i += 1;
+                }
+            } else {
+                let bps = (sample_size as usize).div_ceil(8).max(2);
+                while i + 1 < pcm_end {
+                    pcm.push(i16::from_be_bytes([bytes[i], bytes[i + 1]]));
+                    i += bps;
                 }
             }
-            _ => {}
         }
         pos = data_start + len + (len & 1);
     }
-    if channels == 0 || sample_rate == 0 || pcm.is_empty() {
+    if pcm.is_empty() {
         return None;
     }
     Some((channels, sample_rate, pcm))
@@ -577,6 +603,86 @@ mod tests {
         assert_eq!(channels, 1);
         assert_eq!(rate, 44100);
         assert_eq!(pcm, vec![256i16, -256i16]);
+    }
+
+    /// SQ-0630: AIFF-1.3 places "no restrictions on the ordering of local
+    /// chunks", so SSND may legally precede COMM. The decoder must locate COMM
+    /// first — otherwise sample_size is still 0 when SSND is met and 16-bit
+    /// data decodes through the 8-bit branch as double-length static.
+    #[test]
+    fn decode_aiff_handles_ssnd_before_comm() {
+        fn be_chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(id);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 { v.push(0); }
+            v
+        }
+        let mut comm = Vec::new();
+        comm.extend_from_slice(&1u16.to_be_bytes());
+        comm.extend_from_slice(&2u32.to_be_bytes());
+        comm.extend_from_slice(&16u16.to_be_bytes());
+        comm.extend_from_slice(&[0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]); // 44100
+        let mut ssnd = Vec::new();
+        ssnd.extend_from_slice(&0u32.to_be_bytes());
+        ssnd.extend_from_slice(&0u32.to_be_bytes());
+        ssnd.extend_from_slice(&256i16.to_be_bytes());
+        ssnd.extend_from_slice(&(-256i16).to_be_bytes());
+
+        let mut body = Vec::new();
+        body.extend_from_slice(b"AIFF");
+        body.extend_from_slice(&be_chunk(b"SSND", &ssnd)); // SSND FIRST
+        body.extend_from_slice(&be_chunk(b"COMM", &comm));
+        let mut form = Vec::new();
+        form.extend_from_slice(b"FORM");
+        form.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        form.extend_from_slice(&body);
+
+        let (channels, rate, pcm) = decode_aiff(&form).expect("SSND-first AIFF is legal");
+        assert_eq!(channels, 1);
+        assert_eq!(rate, 44100);
+        assert_eq!(pcm, vec![256i16, -256i16], "16-bit data decoded as 16-bit");
+    }
+
+    /// SQ-0630: the SSND `offset` field is the byte position within soundData
+    /// where the first sample frame starts (AIFF-1.3 Sound Data Chunk) — a
+    /// block-aligning writer pads the front, and those pad bytes must be
+    /// skipped, not decoded as samples.
+    #[test]
+    fn decode_aiff_honors_nonzero_ssnd_offset() {
+        fn be_chunk(id: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut v = Vec::new();
+            v.extend_from_slice(id);
+            v.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            v.extend_from_slice(data);
+            if data.len() % 2 == 1 { v.push(0); }
+            v
+        }
+        let mut comm = Vec::new();
+        comm.extend_from_slice(&1u16.to_be_bytes());
+        comm.extend_from_slice(&2u32.to_be_bytes());
+        comm.extend_from_slice(&16u16.to_be_bytes());
+        comm.extend_from_slice(&[0x40, 0x0E, 0xAC, 0x44, 0, 0, 0, 0, 0, 0]); // 44100
+        // SSND: offset=2 -> two alignment-pad bytes precede the real frames.
+        let mut ssnd = Vec::new();
+        ssnd.extend_from_slice(&2u32.to_be_bytes());       // offset
+        ssnd.extend_from_slice(&0u32.to_be_bytes());       // blockSize
+        ssnd.extend_from_slice(&[0xEE, 0xEE]);             // pad bytes (not samples)
+        ssnd.extend_from_slice(&256i16.to_be_bytes());
+        ssnd.extend_from_slice(&(-256i16).to_be_bytes());
+
+        let mut body = Vec::new();
+        body.extend_from_slice(b"AIFF");
+        body.extend_from_slice(&be_chunk(b"COMM", &comm));
+        body.extend_from_slice(&be_chunk(b"SSND", &ssnd));
+        let mut form = Vec::new();
+        form.extend_from_slice(b"FORM");
+        form.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        form.extend_from_slice(&body);
+
+        let (_, _, pcm) = decode_aiff(&form).expect("valid AIFF with offset");
+        assert_eq!(pcm, vec![256i16, -256i16], "the offset pad bytes are skipped");
     }
 
     /// Build a blorb-shaped AIFF payload: the FORM chunk's PAYLOAD as `Blorb::sound`
