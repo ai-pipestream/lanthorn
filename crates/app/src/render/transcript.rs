@@ -303,6 +303,16 @@ pub(crate) fn wrap_line_ranges(line: &str, width: u16) -> Vec<(String, usize, us
 /// row that reaches into the unbuffered region — and every row after it —
 /// char-breaks. This matches the spec's model (buffering is a property of the
 /// moment the text was printed) without needing per-word state.
+///
+/// KNOWN GAP (SQ-0655): the fit is measured in CHARS, not display cells, so a
+/// double-width (CJK/emoji) row wraps at half its real width. The body's draw path
+/// makes the matching assumption — `draw_str_runs` puts char *i* in cell *i*, and
+/// the link map, the coloured-background fill and the selection highlight all read
+/// columns off that — so the two are self-consistent today and moving only one of
+/// them would put the transcript further out of joint. Fixing it means converting
+/// the whole body pipeline (this wrap, `wrap_line_ranges_var`, `wrap_para_ranges`,
+/// `draw_str_runs`, the link/background column math) to cells in one step, the way
+/// the input line already went via `draw_str_cells`.
 fn wrap_line_ranges_nw(line: &str, width: u16, nowrap_from: Option<usize>) -> Vec<(String, usize, usize)> {
     let width = width as usize;
     if width == 0 {
@@ -1127,6 +1137,62 @@ fn highlight_mask(text: &str, query_lower: &str) -> Vec<bool> {
     mask
 }
 
+/// Draw `s` at `(x, y)` advancing by each glyph's DISPLAY width rather than one
+/// cell per char, and writing whole grapheme clusters into a cell (so a combining
+/// mark or a ZWJ emoji stays with its base). The trailing cell of a double-width
+/// glyph is blanked in the same style — ratatui's own convention, and what keeps
+/// the terminal's wide-glyph cell skip from swallowing the next character.
+///
+/// Returns the cells consumed, so the caller can place what follows (the caret,
+/// the completion hint) at a real column. For pure ASCII this is cell-for-cell
+/// identical to [`draw_str_clipped`]. (SQ-0655)
+///
+/// Used by the input line, whose caret and click-to-caret mapping
+/// (`AppState::input_click_index`) are in cells. The transcript body still draws
+/// one char per cell — see the module note on `wrap_line_ranges_nw`.
+fn draw_str_cells(
+    buf: &mut ratatui::buffer::Buffer,
+    x: u16,
+    y: u16,
+    s: &str,
+    style: Style,
+    area: ratatui::layout::Rect,
+) -> u16 {
+    use unicode_segmentation::UnicodeSegmentation;
+    if y < area.y || y >= area.bottom() {
+        return 0;
+    }
+    let mut cx = x;
+    for g in s.graphemes(true) {
+        if cx >= area.right() {
+            break;
+        }
+        let w = crate::textwidth::str_cells(g).max(1) as u16;
+        if cx >= area.x {
+            if let Some(cell) = buf.cell_mut((cx, y)) {
+                // Control chars are blanked, as `draw_char_clipped` does: game and
+                // paste text is untrusted and ratatui's debug build asserts on them.
+                if g.chars().all(|c| c.is_control()) {
+                    cell.set_symbol(" ");
+                } else {
+                    cell.set_symbol(g);
+                }
+                cell.set_style(style);
+            }
+            for k in 1..w {
+                if cx + k >= area.right() {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut((cx + k, y)) {
+                    cell.set_symbol(" ").set_style(style);
+                }
+            }
+        }
+        cx = cx.saturating_add(w);
+    }
+    cx.saturating_sub(x)
+}
+
 /// Draw `text` at `(x, y)` applying per-char style: `base_style` plus the bits of
 /// the `StyleRun` covering that char, and its resolved fg/bg colours. When
 /// `search` is `Some((query_lower, highlight_style))`, characters inside a query
@@ -1655,8 +1721,11 @@ fn render_input_content(
     draw_str_clipped(buf, region.x, input_y, prefix_trunc, prompt_style, region);
     let text_x = region.x + prefix_trunc.chars().count() as u16;
     let text_w = w.saturating_sub(prefix_trunc.chars().count());
-    let input_trunc = truncate_line(state.input.as_str(), text_w);
-    draw_str_clipped(buf, text_x, input_y, input_trunc, text_style, region);
+    // The typed line is measured and drawn in CELLS (SQ-0655): a wide glyph the
+    // player typed or pasted takes two, and the caret — plus the click that places
+    // it (`input_click_index`) — has to land on the same columns the text does.
+    let input_trunc = crate::textwidth::truncate_to_cols(state.input.as_str(), text_w);
+    let input_cells = draw_str_cells(buf, text_x, input_y, input_trunc, text_style, region);
     // Where the text actually landed, so a click can be mapped back to a caret index (SQ-0354).
     state.input_text_origin.set(Some((text_x, input_y)));
 
@@ -1665,10 +1734,10 @@ fn render_input_content(
     // first glyph (the fish/zsh look) rather than blanking it.
     let ghost = ghost_completion(state);
     if let Some(g) = &ghost {
-        let gx = text_x + input_trunc.chars().count() as u16;
+        let gx = text_x + input_cells;
         let gw = region.right().saturating_sub(gx) as usize;
-        let g_trunc = truncate_line(g, gw);
-        draw_str_clipped(buf, gx, input_y, g_trunc, state.colors.theme.get("suggestion").style, region);
+        let g_trunc = crate::textwidth::truncate_to_cols(g, gw);
+        draw_str_cells(buf, gx, input_y, g_trunc, state.colors.theme.get("suggestion").style, region);
     }
 
     // Not focus-gated: the caret shows what you typed and where, which stays true
@@ -1678,7 +1747,8 @@ fn render_input_content(
         // the drawn text: a long line is truncated to fit, and the caret must not be painted past
         // what is on screen.
         let drawn = input_trunc.chars().count();
-        let cursor_x = text_x + state.input.cursor.min(drawn) as u16;
+        // Caret column = the display width of the text BEFORE it, not its char count.
+        let cursor_x = text_x + crate::textwidth::cols_of_chars(input_trunc, state.input.cursor.min(drawn)) as u16;
         if cursor_x < region.right() {
             if let Some(cell) = buf.cell_mut((cursor_x, input_y)) {
                 // Mid-line, underscore the char the caret sits ON rather than replacing it — the
@@ -2139,8 +2209,9 @@ fn render_middle(
             };
             let start_col = row_text_x + last.text.chars().count() as u16;
             let avail = body_area.right().saturating_sub(start_col) as usize;
-            let input_trunc = truncate_line(state.input.as_str(), avail);
-            draw_str_clipped(buf, start_col, row_y, input_trunc, text_style, body_area);
+            // Cells, not chars, for the typed line — see `draw_str_cells` (SQ-0655).
+            let input_trunc = crate::textwidth::truncate_to_cols(state.input.as_str(), avail);
+            let input_cells = draw_str_cells(buf, start_col, row_y, input_trunc, text_style, body_area);
             // Where the input text landed, so a click maps back to a caret index
             // (SQ-0354). The command-bar path sets this too; in inline mode this is
             // the only place it's set, so a click can find the line at all.
@@ -2153,14 +2224,16 @@ fn render_middle(
             let drawn = input_trunc.chars().count();
             let ghost = ghost_completion(state);
             if let Some(g) = &ghost {
-                let gx = start_col + drawn as u16;
+                let gx = start_col + input_cells;
                 let gw = body_area.right().saturating_sub(gx) as usize;
-                let g_trunc = truncate_line(g, gw);
-                draw_str_clipped(buf, gx, row_y, g_trunc, state.colors.theme.get("suggestion").style, body_area);
+                let g_trunc = crate::textwidth::truncate_to_cols(g, gw);
+                draw_str_cells(buf, gx, row_y, g_trunc, state.colors.theme.get("suggestion").style, body_area);
             }
             // Draw the caret where it actually IS, not always after the last char
-            // (SQ-0354). Clamped to the drawn (truncated) text.
-            let cursor_x = start_col + state.input.cursor.min(drawn) as u16;
+            // (SQ-0354). Clamped to the drawn (truncated) text; its column is the
+            // display width of the text before it, not that text's char count.
+            let cursor_x = start_col
+                + crate::textwidth::cols_of_chars(input_trunc, state.input.cursor.min(drawn)) as u16;
             if cursor_x < body_area.right() {
                 if let Some(cell) = buf.cell_mut((cursor_x, row_y)) {
                     let style = cursor_style(text_style, game_input);
@@ -3907,6 +3980,41 @@ mod tests {
         // The "> " prompt occupies cols 0-1; the typed 'x' is at col 2.
         assert_eq!(buf.cell((2, 0)).unwrap().style().fg, Some(Color::Cyan),
             "typed input uses the game colour");
+    }
+
+    #[test]
+    fn input_line_places_wide_glyphs_and_the_caret_by_cell() {
+        // SQ-0655: a typed/pasted double-width glyph owns TWO cells. Drawing one
+        // char per cell put every later glyph — and the caret — one column left per
+        // wide glyph before it, and disagreed with `input_click_index`, which reads
+        // the same line back in cells.
+        let mut state = AppState::default();
+        state.input.set("日本x", true); // 3 chars, 5 cells
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        render_input_content(&state, &mut buf, area, Style::new(), None);
+
+        // "> " prompt at cols 0-1, then 日 at 2 (3 blanked), 本 at 4 (5 blanked), x at 6.
+        assert_eq!(buf.cell((2, 0)).unwrap().symbol(), "日");
+        assert_eq!(buf.cell((3, 0)).unwrap().symbol(), " ", "the wide glyph's second cell is blanked");
+        assert_eq!(buf.cell((4, 0)).unwrap().symbol(), "本");
+        assert_eq!(buf.cell((6, 0)).unwrap().symbol(), "x");
+        // The caret sits after the text: 2 + 5 cells = col 7.
+        assert_eq!(state.input.cursor, 3);
+        assert!(buf.cell((7, 0)).unwrap().modifier.contains(Modifier::REVERSED),
+            "caret at the end of a wide-glyph line sits past its last CELL");
+        // …and a click on that same cell maps back to the caret index it was drawn from.
+        assert_eq!(state.input_click_index(7, 0), Some(3));
+        assert_eq!(state.input_click_index(4, 0), Some(1), "clicking 本 selects 本");
+
+        // Mid-line caret: before 本, i.e. two cells in from the text origin.
+        let mut mid = AppState::default();
+        mid.input.set("日本x", true);
+        mid.input.cursor = 1;
+        let mut buf2 = Buffer::empty(area);
+        render_input_content(&mid, &mut buf2, area, Style::new(), None);
+        assert!(buf2.cell((4, 0)).unwrap().modifier.contains(Modifier::REVERSED),
+            "mid-line caret lands on the glyph it precedes, in cells");
     }
 
     #[test]

@@ -3235,12 +3235,18 @@ impl AppState {
     ///
     /// A click past the last character clamps to the end, which is what every other text field
     /// does — clicking the empty space after a line puts the caret at its end.
+    ///
+    /// `col - x0` is a CELL offset, and a cell is not a char: a double-width glyph
+    /// earlier in the line pushes everything after it one column right, so the offset
+    /// has to be converted through the line's display widths or the caret lands short
+    /// of the click (SQ-0655). Either cell of a wide glyph puts the caret before it.
     pub fn input_click_index(&self, col: u16, row: u16) -> Option<usize> {
         let (x0, y0) = self.input_text_origin.get()?;
         if row != y0 || col < x0 {
             return None;
         }
-        Some(((col - x0) as usize).min(self.input.char_len()))
+        let cell = (col - x0) as usize;
+        Some(crate::textwidth::col_to_char_idx(self.input.as_str(), cell).min(self.input.char_len()))
     }
 
     /// Clear the current autocomplete suggestions.

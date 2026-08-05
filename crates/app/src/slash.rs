@@ -496,7 +496,13 @@ pub fn parse_in_context(body: &str, prefix: char, ctx: Context) -> SlashOutcome 
 
     // search-transcript: preserve internal whitespace in the query.
     if t0 == "search-transcript" {
-        let remainder = body[t0.len()..].trim_start_matches(' ').trim_end();
+        // Slice from where the token actually STARTS, not from byte 0: the body may
+        // carry leading whitespace (a custom prefix typed with a space after it, or a
+        // key bound to a command string with one). Measuring from 0 both mangled the
+        // query ("t twisty") and, with enough multi-byte leading space, sliced through
+        // the middle of a char and panicked. (SQ-0654)
+        let t0_at = body.len() - body.trim_start().len(); // the first token starts after the leading whitespace
+        let remainder = body[t0_at + t0.len()..].trim_start().trim_end();
         return if remainder.is_empty() { SlashOutcome::Search(None) }
                else { SlashOutcome::Search(Some(remainder.to_string())) };
     }
@@ -695,6 +701,27 @@ mod tests {
         assert!(matches!(parse("search", '/'), SlashOutcome::Error(_)));
         assert!(matches!(parse("filter", '/'), SlashOutcome::Error(_)));
         assert!(matches!(parse("export", '/'), SlashOutcome::Error(_)));
+    }
+
+    #[test]
+    fn search_transcript_slices_from_the_token_not_byte_zero() {
+        // SQ-0654: a body with LEADING whitespace (a prefix typed with a space after
+        // it, or a key bound to " search-transcript twisty") must still yield the
+        // query itself — not the tail of the command name shifted by the leading run.
+        assert!(matches!(parse(" search-transcript twisty", '/'),
+            SlashOutcome::Search(Some(q)) if q == "twisty"), "leading space must not shift the slice");
+        assert!(matches!(parse("   search-transcript twisty maze", '/'),
+            SlashOutcome::Search(Some(q)) if q == "twisty maze"));
+        assert!(matches!(parse("\tsearch-transcript a  b", '/'),
+            SlashOutcome::Search(Some(q)) if q == "a  b"), "internal whitespace still preserved");
+        assert!(matches!(parse("  search-transcript  ", '/'), SlashOutcome::Search(None)));
+        // Multi-byte leading whitespace: six U+3000 ideographic spaces are 18 bytes,
+        // so slicing from byte 0 by the token's LENGTH landed mid-char and panicked.
+        assert!(matches!(parse("\u{3000}\u{3000}\u{3000}\u{3000}\u{3000}\u{3000}search-transcript twisty", '/'),
+            SlashOutcome::Search(Some(q)) if q == "twisty"), "ideographic leading space must not panic or mangle");
+        // And with the query itself starting past a multi-byte separator.
+        assert!(matches!(parse("\u{3000}search-transcript\u{3000}twisty", '/'),
+            SlashOutcome::Search(Some(q)) if q == "twisty"));
     }
 
     #[test]

@@ -2153,7 +2153,15 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
         }
 
         Action::ExtendSelection(col, row) => {
-            if let Some(g) = state.transcript_geom.get() {
+            // A left-drag that never started a story selection extends nothing: any
+            // left-drag anywhere reaches this arm (the mouse router has no in-story
+            // guard on Drag), so press-and-hold on a map room and slide along the
+            // story pane's top/bottom boundary row used to autoscroll the transcript
+            // with no selection to show for it. No selection → no edge, no scroll.
+            // (SQ-0654)
+            if state.selection.is_none() {
+                state.selection_edge = 0;
+            } else if let Some(g) = state.transcript_geom.get() {
                 if let Some(sel) = &mut state.selection {
                     if let Some(p) = screen_to_point(g, col, row) { sel.head = p; }
                 }
@@ -2561,7 +2569,11 @@ pub(crate) fn screen_to_point(g: crate::clipboard::TranscriptGeom, col: u16, row
 /// advance the head in lockstep so the selection keeps growing. No-op at scroll
 /// limits or when not selecting. (SQ-0197)
 pub fn apply_selection_autoscroll(state: &mut AppState) {
-    if state.selection_edge == 0 { return; }
+    // "Not selecting" is a real state the drag path can reach (a drag that began
+    // outside the story pane), and scrolling the transcript for a drag that selects
+    // nothing is exactly the SQ-0654 symptom — so honour the doc comment here too,
+    // not only at the one call site that remembered to check.
+    if state.selection_edge == 0 || state.selection.is_none() { return; }
     let Some(g) = state.transcript_geom.get() else { return };
     let max_scroll = g.total_rows.saturating_sub(g.area.height as usize) as u16;
     let cur = state.transcript_scroll;
@@ -5216,6 +5228,35 @@ mod tests {
     }
 
     #[test]
+    fn extend_selection_without_a_selection_neither_tracks_nor_scrolls() {
+        // SQ-0654: press-and-hold on a map room, then drag along the story pane's
+        // shared boundary row. `mouse_to_action` maps ANY left-drag to
+        // ExtendSelection, so this arm runs with `state.selection == None` — and
+        // used to set an autoscroll edge and scroll the transcript anyway.
+        let mut s = AppState::default();
+        s.transcript_geom.set(Some(crate::clipboard::TranscriptGeom {
+            area: ratatui::layout::Rect::new(80, 0, 40, 20), first_abs_row: 30, total_rows: 100,
+        }));
+        s.transcript_scroll = 10;
+        assert!(s.selection.is_none(), "no selection was ever started");
+
+        // Bottom boundary row, then the top one.
+        apply_action(Action::ExtendSelection(90, 19), &mut s, &mut Mapper::default());
+        assert_eq!(s.selection_edge, 0, "no selection → no edge tracking");
+        assert_eq!(s.transcript_scroll, 10, "no selection → no autoscroll");
+        assert!(s.selection.is_none());
+
+        apply_action(Action::ExtendSelection(90, 0), &mut s, &mut Mapper::default());
+        assert_eq!(s.selection_edge, 0);
+        assert_eq!(s.transcript_scroll, 10);
+
+        // And the tick-driven step is inert too, even if an edge were left set.
+        s.selection_edge = 1;
+        apply_selection_autoscroll(&mut s);
+        assert_eq!(s.transcript_scroll, 10, "autoscroll no-ops without a selection");
+    }
+
+    #[test]
     fn apply_activate_pane_sets_focus_and_clears_panel() {
         use crate::state::{RoomPanel, RoomPanelMode};
         let mut s = AppState::default(); // starts Focus::Game
@@ -6982,6 +7023,30 @@ mod tests {
 
         apply_action(Action::CursorToClick(12, 5), &mut s, &mut m);
         assert_eq!(s.input.cursor, 2, "the click moved the caret");
+    }
+
+    #[test]
+    fn a_click_on_a_wide_glyph_input_line_places_the_caret_by_cell() {
+        // SQ-0655: the click offset is a CELL count. "日本語" is 3 chars but 6 cells,
+        // so treating the offset as a char index put the caret up to three chars short.
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        for c in "日本語x".chars() {
+            apply_action(Action::InputChar(c), &mut s, &mut m);
+        }
+        s.input_text_origin.set(Some((10, 5)));
+        // Cells: 日 = 10..11, 本 = 12..13, 語 = 14..15, x = 16.
+        assert_eq!(s.input_click_index(10, 5), Some(0));
+        assert_eq!(s.input_click_index(11, 5), Some(0), "right cell of 日 still selects 日");
+        assert_eq!(s.input_click_index(12, 5), Some(1), "the 2nd glyph starts two cells in");
+        assert_eq!(s.input_click_index(14, 5), Some(2));
+        assert_eq!(s.input_click_index(16, 5), Some(3), "the ASCII char after three wide ones");
+        assert_eq!(s.input_click_index(17, 5), Some(4), "past the end clamps to the end");
+
+        apply_action(Action::CursorToClick(12, 5), &mut s, &mut m);
+        assert_eq!(s.input.cursor, 1);
+        apply_action(Action::InputChar('!'), &mut s, &mut m);
+        assert_eq!(s.input.value, "日!本語x", "the caret landed where it was clicked");
     }
 
     #[test]

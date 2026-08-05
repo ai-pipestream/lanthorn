@@ -73,9 +73,11 @@ pub fn extract(rows: &[&str], width: u16, sel: Selection) -> String {
     let mut out: Vec<String> = Vec::new();
     for row in s.row..=e.row {
         if let Some((c0, c1)) = row_span(width, sel, row) {
-            let chars: Vec<char> = rows.get(row).copied().unwrap_or("").chars().collect();
-            let mut line = String::new();
-            for c in c0..=c1 { if let Some(ch) = chars.get(c as usize) { line.push(*ch); } }
+            // Columns are CELLS, not chars: a CJK ideograph or emoji covers two of
+            // them, so indexing the row by char number copied a different span than
+            // the one highlighted on screen (SQ-0655).
+            let text = rows.get(row).copied().unwrap_or("");
+            let line = crate::textwidth::slice_cols(text, c0 as usize, c1 as usize);
             out.push(line.trim_end().to_string());
         }
     }
@@ -206,6 +208,29 @@ mod tests {
         assert_eq!(lines[0], "aaaaaaa", "first row from col 3 to right edge");
         assert_eq!(lines[1], "bbbbbbbbbb", "middle row is full width");
         assert_eq!(lines[2], "ccccc", "last row from left edge to col 4");
+    }
+
+    #[test]
+    fn extract_is_measured_in_cells_not_chars() {
+        // SQ-0655: selection columns are screen CELLS. "日本語" is 3 chars but 6
+        // cells, so indexing the row by char number copied the wrong span — a
+        // selection over the first two glyphs came back as the whole line.
+        let rows = ["日本語です"]; // 5 glyphs, 10 cells
+        let refs: Vec<&str> = rows.to_vec();
+        // Cells 0..=3 cover 日本.
+        let sel = Selection { anchor: p(0, 0), head: p(0, 3) };
+        assert_eq!(extract(&refs, 10, sel), "日本");
+        // Cells 4..=7 cover 語で.
+        let sel2 = Selection { anchor: p(0, 4), head: p(0, 7) };
+        assert_eq!(extract(&refs, 10, sel2), "語で");
+        // A span that clips a glyph in half still copies it whole.
+        let sel3 = Selection { anchor: p(0, 1), head: p(0, 2) };
+        assert_eq!(extract(&refs, 10, sel3), "日本");
+        // Mixed widths: "a日b" is cells a=0, 日=1..2, b=3.
+        let mixed = ["a日b"];
+        let mrefs: Vec<&str> = mixed.to_vec();
+        let sel4 = Selection { anchor: p(0, 1), head: p(0, 3) };
+        assert_eq!(extract(&mrefs, 10, sel4), "日b");
     }
 
     #[test]

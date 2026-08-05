@@ -61,6 +61,7 @@ pub mod styles;
 pub mod symbols;
 pub mod term_colors;
 pub mod text_field;
+pub mod textwidth;
 pub mod theme;
 pub mod tidy;
 pub mod trace;

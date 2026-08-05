@@ -5,6 +5,17 @@
 //! movement, Home/End, mid-string insert, Backspace/Delete — as a small reusable
 //! widget core. All operations work on CHAR boundaries so multi-byte/UTF-8 input
 //! stays valid, and the cursor is always clamped to `0..=char_len`.
+//!
+//! The caret MOVES by grapheme cluster, though (SQ-0655). A Unicode scalar is not
+//! a character as anyone typing perceives it: "é" written as e + U+0301 is two,
+//! and a ZWJ emoji like 👩‍👩‍👧 is five. Stepping by scalar made Backspace peel a
+//! family emoji apart one component at a time — showing broken partial glyphs on
+//! the way — and let Left/Right park the caret *inside* a cluster, where the next
+//! insert would split it. Backspace/Delete/Left/Right therefore snap to cluster
+//! boundaries; the cursor stays a char index so everything downstream (click →
+//! caret mapping, truncation, the renderers) is unchanged.
+
+use unicode_segmentation::UnicodeSegmentation;
 
 /// A single-line editable buffer. `cursor` is a CHAR index in `0..=value.chars().count()`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -36,6 +47,30 @@ impl TextField {
             .unwrap_or(self.value.len())
     }
 
+    /// Char index of every grapheme-cluster start, plus an end sentinel
+    /// (`char_len`). Always non-empty and strictly increasing.
+    fn cluster_bounds(&self) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut at = 0usize;
+        for g in self.value.graphemes(true) {
+            out.push(at);
+            at += g.chars().count();
+        }
+        out.push(at);
+        out
+    }
+
+    /// The cluster boundary strictly before char index `idx` (0 at the start). A
+    /// caret sitting inside a cluster snaps back to that cluster's start.
+    fn prev_bound(&self, idx: usize) -> usize {
+        self.cluster_bounds().into_iter().rfind(|&b| b < idx).unwrap_or(0)
+    }
+
+    /// The cluster boundary strictly after char index `idx` (`char_len` at the end).
+    fn next_bound(&self, idx: usize) -> usize {
+        self.cluster_bounds().into_iter().find(|&b| b > idx).unwrap_or_else(|| self.char_len())
+    }
+
     /// Insert `c` at the caret and advance past it.
     pub fn insert(&mut self, c: char) {
         let at = self.byte_of(self.cursor);
@@ -43,36 +78,39 @@ impl TextField {
         self.cursor += 1;
     }
 
-    /// Delete the char before the caret (no-op at the start).
+    /// Delete the grapheme cluster before the caret (no-op at the start): one
+    /// Backspace removes one perceived character, mark and emoji joiners included.
     pub fn backspace(&mut self) {
         if self.cursor == 0 {
             return;
         }
-        let start = self.byte_of(self.cursor - 1);
+        let start_idx = self.prev_bound(self.cursor);
+        let start = self.byte_of(start_idx);
         let end = self.byte_of(self.cursor);
         self.value.replace_range(start..end, "");
-        self.cursor -= 1;
+        self.cursor = start_idx;
     }
 
-    /// Delete the char at the caret (no-op at the end).
+    /// Delete the grapheme cluster at the caret (no-op at the end).
     pub fn delete(&mut self) {
         if self.cursor >= self.char_len() {
             return;
         }
+        let end_idx = self.next_bound(self.cursor);
         let start = self.byte_of(self.cursor);
-        let end = self.byte_of(self.cursor + 1);
+        let end = self.byte_of(end_idx);
         self.value.replace_range(start..end, "");
     }
 
-    /// Move the caret one char left (clamped at 0).
+    /// Move the caret one grapheme cluster left (clamped at 0).
     pub fn left(&mut self) {
-        self.cursor = self.cursor.saturating_sub(1);
+        self.cursor = self.prev_bound(self.cursor);
     }
 
-    /// Move the caret one char right (clamped at end).
+    /// Move the caret one grapheme cluster right (clamped at end).
     pub fn right(&mut self) {
         if self.cursor < self.char_len() {
-            self.cursor += 1;
+            self.cursor = self.next_bound(self.cursor);
         }
     }
 
@@ -269,6 +307,69 @@ mod tests {
         g.home();
         g.delete(); // removes '日'
         assert_eq!(g.value, "X本");
+    }
+
+    #[test]
+    fn backspace_removes_a_whole_grapheme_cluster() {
+        // SQ-0655: a ZWJ family emoji is ONE perceived character built from five
+        // scalars. Per-scalar backspace needed five presses and drew broken partial
+        // glyphs in between.
+        let family = "\u{1f469}\u{200d}\u{1f469}\u{200d}\u{1f467}"; // 👩‍👩‍👧
+        let mut f = TextField::new(format!("hi {family}"));
+        assert_eq!(f.char_len(), 8);
+        f.backspace();
+        assert_eq!(f.value, "hi ", "one Backspace eats the whole emoji");
+        assert_eq!(f.cursor, 3);
+
+        // A combining sequence goes whole too (base + mark in one press).
+        let mut g = TextField::new("cafe\u{0301}"); // "café" decomposed
+        assert_eq!(g.char_len(), 5);
+        g.backspace();
+        assert_eq!(g.value, "caf", "base and its combining mark leave together");
+        assert_eq!(g.cursor, 3);
+
+        // A flag (two regional indicators) is also one cluster.
+        let mut h = TextField::new("\u{1f1ef}\u{1f1f5}x"); // 🇯🇵x
+        h.home();
+        h.right();
+        assert_eq!(h.cursor, 2, "Right steps over the whole flag");
+        h.backspace();
+        assert_eq!(h.value, "x");
+    }
+
+    #[test]
+    fn delete_and_arrows_snap_to_cluster_boundaries() {
+        let family = "\u{1f469}\u{200d}\u{1f469}\u{200d}\u{1f467}";
+        let mut f = TextField::new(format!("{family}!"));
+        f.home();
+        f.delete();
+        assert_eq!(f.value, "!", "Delete eats the whole cluster forward");
+
+        let mut g = TextField::new(format!("a{family}b"));
+        g.home();
+        g.right();
+        assert_eq!(g.cursor, 1);
+        g.right();
+        assert_eq!(g.cursor, 6, "Right never parks inside the cluster");
+        g.right();
+        assert_eq!(g.cursor, 7);
+        g.left();
+        assert_eq!(g.cursor, 6);
+        g.left();
+        assert_eq!(g.cursor, 1, "Left never parks inside the cluster");
+        g.left();
+        assert_eq!(g.cursor, 0);
+        g.left();
+        assert_eq!(g.cursor, 0, "clamped at the start");
+
+        // A caret dropped mid-cluster (set programmatically) snaps out, never splits it.
+        let mut h = TextField::new(family);
+        h.cursor = 2;
+        h.left();
+        assert_eq!(h.cursor, 0);
+        h.cursor = 2;
+        h.right();
+        assert_eq!(h.cursor, 5);
     }
 
     #[test]

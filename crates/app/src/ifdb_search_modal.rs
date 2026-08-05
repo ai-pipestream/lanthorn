@@ -675,7 +675,7 @@ fn render_hit_row(
     let content_w = content_right.saturating_sub(area.x);
 
     let tail = hit_rating(hit);
-    let tail_w = tail.as_ref().map(|t| t.chars().count() as u16).unwrap_or(0);
+    let tail_w = tail.as_ref().map(|t| crate::textwidth::str_cells(t) as u16).unwrap_or(0);
     // Need the tail's width plus a 1-space gap before it; otherwise the row's
     // too narrow for both — drop the tail (never overflow).
     let (title_w, tail) = if tail_w > 0 && tail_w + 1 < content_w {
@@ -766,23 +766,14 @@ fn render_option_row(
     }
 }
 
-/// Clip `s` to at most `width` characters, appending an ellipsis if it had to
-/// be shortened (the ellipsis itself counts against `width`).
+/// Clip `s` to at most `width` display CELLS, appending an ellipsis if it had to
+/// be shortened (the ellipsis itself costs one of those cells).
+///
+/// Cells, not chars (SQ-0655): a fullwidth IFDB title is two cells per char, so a
+/// char-counted clip drew twice its budget — over the right-aligned rating tail
+/// and on into the modal's border.
 fn clip_with_ellipsis(s: &str, width: u16) -> String {
-    let width = width as usize;
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= width {
-        return s.to_string();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    if width == 1 {
-        return "…".to_string();
-    }
-    let mut out: String = chars[..width - 1].iter().collect();
-    out.push('…');
-    out
+    crate::textwidth::clip_to_cols_ellipsis(s, width as usize)
 }
 
 /// "Title — Author" for a hit row.
@@ -813,13 +804,32 @@ fn window_start(offset: usize, len: usize, rows: usize) -> usize {
 }
 
 /// Write `s` (truncated to `width` cells) at `(x, y)` in `style`.
+///
+/// Advances by each glyph's DISPLAY width and blanks the second cell of a
+/// double-width one, so `width` really is a cell budget: pairing one char with one
+/// cell let a fullwidth string run past `x + width` on screen even after clipping
+/// (SQ-0655). Grapheme clusters are written whole, so a combining mark or a ZWJ
+/// emoji stays with its base.
 fn put_str(buf: &mut Buffer, x: u16, y: u16, width: u16, s: &str, style: Style) {
+    use unicode_segmentation::UnicodeSegmentation;
     let end = x.saturating_add(width);
-    for (cx, ch) in (x..end).zip(s.chars()) {
-        if let Some(cell) = buf.cell_mut((cx, y)) {
-            let mut tmp = [0u8; 4];
-            cell.set_symbol(ch.encode_utf8(&mut tmp)).set_style(style);
+    let mut cx = x;
+    for g in s.graphemes(true) {
+        let w = crate::textwidth::str_cells(g).max(1) as u16;
+        if cx.saturating_add(w) > end {
+            break;
         }
+        if let Some(cell) = buf.cell_mut((cx, y)) {
+            // IFDB text is untrusted; ratatui's cell API doesn't filter controls.
+            let sym = if g.chars().all(char::is_control) { " " } else { g };
+            cell.set_symbol(sym).set_style(style);
+        }
+        for k in 1..w {
+            if let Some(cell) = buf.cell_mut((cx + k, y)) {
+                cell.set_symbol(" ").set_style(style);
+            }
+        }
+        cx += w;
     }
 }
 
@@ -1292,6 +1302,57 @@ mod tests {
             buf2.cell((end_x, fr.y)).unwrap().style().add_modifier.contains(Modifier::REVERSED),
             "end-of-text caret cell should be reversed"
         );
+    }
+
+    #[test]
+    fn a_fullwidth_title_row_stays_inside_its_cell_budget() {
+        // SQ-0655: clipping and drawing counted CHARS. A fullwidth (CJK) IFDB title
+        // is two cells per char, so the "clipped" title drew twice its budget —
+        // over the right-aligned rating tail and into the dialog border.
+        // Distinct glyphs, so a dropped one is visible in the painted row.
+        const TITLE_HEAD: &str = "日本語です漢字";
+        let mut m = SearchModal::new();
+        m.open();
+        m.on_event(&SearchEvent::Results(vec![hit("aaa", &TITLE_HEAD.repeat(9))]));
+
+        let cs = ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, MODAL_W, MODAL_H);
+        let mut buf = Buffer::empty(area);
+        let rects = draw_search_modal(&mut m, area, &cs, &mut buf);
+        let content = rects.content;
+
+        let y = (0..area.height)
+            .find(|&y| (0..area.width).any(|x| buf.cell((x, y)).is_some_and(|c| c.symbol() == "日")))
+            .expect("the CJK title row rendered");
+
+        // What the terminal actually paints: a double-width symbol swallows the
+        // following cell (ratatui's flush skips it), so a row written one char per
+        // cell loses every second glyph on the way past its budget.
+        let mut painted = String::new();
+        let mut skip = 0usize;
+        for x in content.x..content.right() {
+            let sym = buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default();
+            if skip > 0 {
+                skip -= 1;
+                continue;
+            }
+            skip = crate::textwidth::str_cells(&sym).saturating_sub(1);
+            painted.push_str(&sym);
+        }
+        assert!(
+            painted.starts_with(TITLE_HEAD),
+            "the title paints its own glyphs in order, none swallowed: {painted:?}"
+        );
+        assert!(painted.contains('★'), "the rating tail survives the long title: {painted:?}");
+        assert!(painted.contains('…'), "the title is marked as clipped: {painted:?}");
+    }
+
+    #[test]
+    fn clip_with_ellipsis_budgets_cells_not_chars() {
+        assert_eq!(clip_with_ellipsis("abcdef", 4), "abc…");
+        assert_eq!(clip_with_ellipsis("日本語", 4), "日…", "two cells per glyph, plus the ellipsis");
+        assert_eq!(clip_with_ellipsis("日本語", 6), "日本語", "an exact fit is not clipped");
+        assert!(crate::textwidth::str_cells(&clip_with_ellipsis("日本語です", 7)) <= 7);
     }
 
     #[test]

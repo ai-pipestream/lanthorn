@@ -139,6 +139,7 @@ dependencies = [
  "signal-hook",
  "toml",
  "toml_edit 0.22.27",
+ "unicode-segmentation",
  "unicode-width 0.1.14",
  "ureq",
  "zip",
