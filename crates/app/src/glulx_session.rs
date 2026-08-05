@@ -77,6 +77,14 @@ pub struct GlulxSession {
     /// A game-initiated create_by_prompt awaiting a host filename, bubbled to the
     /// run loop. Set when a turn's drive stops on one; cleared by resume_filename.
     pending_filename: Option<FilenameReq>,
+    /// A story-pane size reported while a game `@save`/`@restore`/`create_by_prompt`
+    /// was suspended on the host's dialog, held until the dialog resolves. Applying
+    /// it there and then would have to DRIVE the VM to deliver the Arrange, and a
+    /// drive auto-fails the suspended op (see [`drive_settled`]) — a terminal
+    /// resize would silently fail the save the player is still naming. The host's
+    /// resize poller records the size as delivered and never retries it, so the
+    /// session has to carry it. (SQ-0656)
+    deferred_resize: Option<(u32, u32)>,
     /// The last screen snapshot (the backend's tree is only reachable mutably, so
     /// `screen()` returns this cache, refreshed after each turn).
     screen_cache: ScreenModel,
@@ -357,6 +365,7 @@ impl GlulxSession {
             quit,
             pending_io: None,
             pending_filename: None,
+            deferred_resize: None,
             screen_cache: blank_screen(),
             window_dump_cache: Vec::new(),
             disasm_cache: std::cell::RefCell::new(None),
@@ -425,12 +434,71 @@ impl GlulxSession {
         if self.quit {
             return;
         }
+        // Never drive the VM while a game `@save`/`@restore`/`create_by_prompt` is
+        // parked on the host's dialog: `drive_settled` auto-fails a suspended op
+        // (there is no UI to defer to from a non-interactive drive), so a terminal
+        // resize would record the player's in-flight save as FAILED while its name
+        // prompt is still open — and the later confirm would write the archive over
+        // a game that already saw a failure. Queue the size for the resume instead.
+        // (SQ-0656)
+        if self.game_io_pending() {
+            self.deferred_resize = Some((cols, rows));
+            return;
+        }
         self.set_screen_size(cols, rows);
         self.machine.rearrange();
         let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
         self.pending = pending;
         self.quit = quit;
         self.refresh_screen();
+    }
+
+    /// Is a game-initiated `@save`/`@restore` or `create_by_prompt` suspended,
+    /// waiting for the host's dialog to resolve? While this holds, the VM must not
+    /// be driven by anything but the matching `resume_*` — every other drive path
+    /// funnels through [`drive_settled`], which answers a suspended op with failure
+    /// rather than leaving the VM blocked. Reads the machine rather than the
+    /// session's own `pending_io`, which `finish_turn` takes on its way out.
+    /// (SQ-0656)
+    fn game_io_pending(&self) -> bool {
+        self.machine.is_saveload_pending() || self.pending_filename.is_some()
+    }
+
+    /// Apply a resize that arrived while a dialog held the VM (see
+    /// [`Self::resize`]). Called from each `resume_*` once the op has been
+    /// answered: a chained request keeps the size queued for the next resume, and
+    /// a quit drops it. (SQ-0656)
+    fn apply_deferred_resize(&mut self) {
+        let Some((cols, rows)) = self.deferred_resize else { return };
+        if self.quit {
+            self.deferred_resize = None;
+            return;
+        }
+        if self.game_io_pending() {
+            return;
+        }
+        self.deferred_resize = None;
+        self.set_screen_size(cols, rows);
+        self.machine.rearrange();
+        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
+        self.pending = pending;
+        self.quit = quit;
+    }
+
+    /// Drive to the next input request after a host-side event was delivered
+    /// (timer tick, sound/volume notify, mouse, hyperlink) — unless a game
+    /// save/restore/filename request is suspended on the host's dialog, in which
+    /// case the event stays QUEUED in the Glk model (that is what
+    /// `Machine::deliver_*` does when the VM is not parked at a `glk_select`) and
+    /// the game picks it up at its next select, after the dialog resolves.
+    /// Driving here instead would auto-fail the player's in-flight save. (SQ-0656)
+    fn settle_after_event(&mut self) {
+        if self.game_io_pending() {
+            return;
+        }
+        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
+        self.pending = pending;
+        self.quit = quit;
     }
 
     /// Toggle the per-game borderless-windows mode live and relayout so the
@@ -443,9 +511,11 @@ impl GlulxSession {
         }
         self.machine.set_borderless(on);
         self.machine.rearrange();
-        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
-        self.pending = pending;
-        self.quit = quit;
+        // Same rule as `resize`: no non-interactive drive while a dialog holds a
+        // suspended `@save`/`@restore` (SQ-0656). The mode is already set on the
+        // machine and the tree relaid out; the game hears about it at its next
+        // select. Nothing to queue.
+        self.settle_after_event();
         self.refresh_screen();
     }
 
@@ -738,9 +808,7 @@ impl GlulxSession {
     pub fn deliver_timer(&mut self) -> TurnResult {
         if !self.quit {
             self.machine.deliver_timer();
-            let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
-            self.pending = pending;
-            self.quit = quit;
+            self.settle_after_event();
         }
         self.finish_turn()
     }
@@ -752,9 +820,7 @@ impl GlulxSession {
     pub fn sound_notify(&mut self, sound: u32, notify: u32) -> TurnResult {
         if !self.quit {
             self.machine.deliver_sound_notify(sound, notify);
-            let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
-            self.pending = pending;
-            self.quit = quit;
+            self.settle_after_event();
         }
         self.finish_turn()
     }
@@ -765,9 +831,7 @@ impl GlulxSession {
     pub fn volume_notify(&mut self, notify: u32) -> TurnResult {
         if !self.quit {
             self.machine.deliver_volume_notify(notify);
-            let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
-            self.pending = pending;
-            self.quit = quit;
+            self.settle_after_event();
         }
         self.finish_turn()
     }
@@ -828,9 +892,7 @@ impl GlulxSession {
     pub fn deliver_mouse(&mut self, win: u32, x: u32, y: u32) -> TurnResult {
         if !self.quit {
             self.machine.deliver_mouse(win, x, y);
-            let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
-            self.pending = pending;
-            self.quit = quit;
+            self.settle_after_event();
         }
         self.finish_turn()
     }
@@ -843,9 +905,7 @@ impl GlulxSession {
     pub fn deliver_hyperlink(&mut self, win: u32, link: u32) -> TurnResult {
         if !self.quit {
             self.machine.deliver_hyperlink(win, link);
-            let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
-            self.pending = pending;
-            self.quit = quit;
+            self.settle_after_event();
         }
         self.finish_turn()
     }
@@ -1036,6 +1096,7 @@ impl Engine for GlulxSession {
         self.machine.complete_save(wrote_ok);
         self.pending_io = None;
         self.drive_turn();
+        self.apply_deferred_resize();
         self.finish_turn()
     }
 
@@ -1052,6 +1113,7 @@ impl Engine for GlulxSession {
         }
         self.pending_io = None;
         self.drive_turn();
+        self.apply_deferred_resize();
         self.finish_turn()
     }
 
@@ -1068,6 +1130,7 @@ impl Engine for GlulxSession {
         self.machine.supply_filename(name);
         self.pending_filename = None;
         self.drive_turn();
+        self.apply_deferred_resize();
         self.finish_turn()
     }
 
@@ -1094,9 +1157,63 @@ impl Engine for GlulxSession {
                 found: save.engine.clone(),
             });
         }
+        // Put the session back at a clean input prompt BEFORE the swap when a game
+        // `@save`/`@restore`/`create_by_prompt` is suspended on a dialog. The saves
+        // manager reaches here from exactly that state: the game asked to RESTORE,
+        // the player answered the dialog with a host Save State instead.
+        //
+        // This is not tidiness. A gvm snapshot's PC sits just PAST the `glk_select`
+        // it was taken at (unlike a Quetzal save, whose PC the Z-machine rewinds to
+        // the `read` itself), so the restored state only makes sense paired with a
+        // LIVE suspension for the host to resolve. Restored into a session with no
+        // suspension, the game resumes past the select and re-reads the `event_t`
+        // the snapshot left in RAM — replaying the snapshot's last command as a
+        // whole extra turn, moving the player or taking an object twice over.
+        // Answering the doomed op costs nothing (the state it belongs to is about to
+        // be discarded) and leaves the VM parked at a select. (SQ-0656)
+        //
+        // Deliberately ahead of the blob check, unlike `restore_game_save`: should
+        // the snapshot turn out to be unreadable, the run loop answers the request
+        // it thinks is still open with `resume_restore(None)`, which is now a no-op
+        // that re-arms the prompt — so a rejected blob still leaves a playable
+        // session at the game's own "Failed." rather than a suspended one.
+        if self.game_io_pending() {
+            if let Some(req) = self.machine.pending_saveload_request() {
+                if req.restore {
+                    self.machine.complete_restore_failure();
+                } else {
+                    self.machine.complete_save(false);
+                }
+            }
+            if self.pending_filename.take().is_some() {
+                self.machine.supply_filename(None);
+            }
+            let _ = drive_settled(&mut self.machine, &self.game_dir);
+            // The abandoned verb's tail ("Failed.") describes a run that is being
+            // replaced and would land above the archive's own restored scrollback.
+            let _ = self.take_transcript_elems();
+        }
         self.machine
             .restore_state(&save.bytes)
             .map_err(|e| EngineError::BadSave(format!("{e:?}")))?;
+        // Nothing the previous run was waiting on survives the swap.
+        // `Machine::restore_state` drops the VM-side suspensions (SQ-0656); these
+        // are the host-side halves of the same records, and leaving them set would
+        // have the run loop re-open a dialog for a call that no longer exists.
+        self.pending_io = None;
+        self.pending_filename = None;
+        // Re-derive the input mode and the quit flag from the state just installed,
+        // uniformly with `GameSession::restore_state` (session.rs): a snapshot taken
+        // at a "press any key" prompt may be restored while this session sits at a
+        // line prompt, and `pending` is what the app renders its input bar from.
+        // The machine is parked at its select (guaranteed by the block above), so
+        // this re-reports the restored suspension without executing anything.
+        let (pending, quit) = drive_settled(&mut self.machine, &self.game_dir);
+        self.pending = pending;
+        self.quit = quit;
+        // A size queued while the dialog was open would otherwise be stranded: the
+        // host's resize poller has already recorded it as delivered.
+        self.apply_deferred_resize();
         self.refresh_screen();
         Ok(())
     }
@@ -1141,6 +1258,7 @@ impl Engine for GlulxSession {
         // notice, and an `@save` archive is about to reinstate its own
         // transcript over the top of it — drain and discard.
         let _ = self.take_transcript_elems();
+        self.apply_deferred_resize(); // as in `restore_state`
         self.refresh_screen();
         Ok(())
     }

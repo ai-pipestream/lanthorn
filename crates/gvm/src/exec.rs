@@ -2362,6 +2362,36 @@ impl Machine {
             None => Model::new(),
         };
         self.glk.set_borderless(borderless);
+        // A snapshot never carries a suspended `@save`/`@restore`: §1.8.5 keeps
+        // the interpreter's own suspensions out of the file, and the host guards
+        // its snapshot trigger on `is_saveload_pending` precisely so an un-popped
+        // `@save` call stub is never serialized. So whatever is pending here
+        // belongs to the run we just REPLACED, and must not survive it (SQ-0656):
+        // left set, the next `step` re-reports a SaveRequest/RestoreRequest out of
+        // nowhere (the host's restore dialog reopens by itself), and completing it
+        // would store 0/1 through a `dest` record describing a stack that no
+        // longer exists — a push-type dest silently imbalances the restored stack.
+        // Cleared only once the restore has COMMITTED, so a blob that fails partway
+        // still leaves the game's own `@restore` answerable by the caller's
+        // `complete_restore_failure`.
+        self.pending_saveload = None;
+        // The snapshot carries the game's input REQUESTS (in the `Glk ` chunk) but
+        // not the interpreter's own `glk_select` suspension — §1.8.5 keeps that out
+        // of the file, and its `event_addr` belongs to the live run we are resuming
+        // into, so it is the one thing here we must keep. Re-point that suspension
+        // at the request the restored state actually holds (SQ-0656): a snapshot
+        // captured at a "press any key" prompt, restored while the session sits at
+        // a line prompt, otherwise stays in LINE mode — the host shows an input bar
+        // and the game gets a LineInput event it never asked for. With no request
+        // at all in the snapshot the live suspension is left untouched, so the host
+        // can still resolve it rather than being stranded.
+        if let Some(pi) = self.pending_input.as_mut() {
+            if let Some((win, unicode)) = self.glk.first_line_request() {
+                *pi = PendingInput { event_addr: pi.event_addr, win, line: true, unicode };
+            } else if let Some((win, unicode)) = self.glk.first_char_request() {
+                *pi = PendingInput { event_addr: pi.event_addr, win, line: false, unicode };
+            }
+        }
         Ok(())
     }
 
@@ -12310,6 +12340,71 @@ mod tests {
         let blob = m.save_state();
         m.restore_state(&blob).unwrap();
         assert!(m.glk.borderless(), "borderless survives restore_state/@restoreundo");
+    }
+
+    #[test]
+    fn restore_state_abandons_a_suspended_game_restore() {
+        // SQ-0656: a HOST Save State restore performed while the game's OWN
+        // @restore was suspended left `pending_saveload` set. The state it
+        // described was gone, but the next `step` re-reported RestoreRequest
+        // (the host's restore dialog reopening from nowhere) and cancelling it
+        // stored the failure code through the abandoned dest record into the
+        // freshly restored state.
+        let body = [
+            asm::ins(0x0124, &[asm::Op::Zero, asm::Op::Mem32(0x110)]), // @restore -> S1 = *0x110
+            asm::ins(0x120, &[]),                                      // quit
+        ]
+        .concat();
+        let mut m = machine_with_body(&[], body);
+        // A clean host snapshot, taken before the @restore opcode fires.
+        let blob = m.save_state();
+        assert_eq!(m.step(), StepResult::RestoreRequest);
+        assert!(m.is_saveload_pending(), "the game's own @restore is suspended");
+
+        m.restore_state(&blob).expect("our own snapshot restores");
+        assert!(
+            !m.is_saveload_pending(),
+            "a host restore must abandon the suspended @restore — the state it belonged to is gone",
+        );
+
+        // Cancelling the dialog that is no longer open must not write through the
+        // abandoned dest record into the state we just installed.
+        m.complete_restore_failure();
+        assert_eq!(
+            m.mem.read32(0x110),
+            Some(0),
+            "no stale store into the restored state (1 = the abandoned @restore's failure code)",
+        );
+    }
+
+    #[test]
+    fn restore_state_repoints_the_suspension_at_the_restored_request() {
+        // SQ-0656: the snapshot carries the game's input REQUESTS but not the
+        // interpreter's `glk_select` suspension. Restoring a snapshot captured at
+        // a "press any key" prompt while the live session sat at a LINE prompt
+        // left the suspension in line mode: the host showed an input bar and the
+        // game got a LineInput event it never asked for.
+        let mut m = machine_with_glk(&[]);
+        let win = m.glk_open_window(0, 0, 0, 3, 0); // wintype_TextBuffer
+        assert_ne!(win, 0);
+
+        // Park the game on a CHAR request and snapshot it there.
+        assert!(m.glk.request_char_event(win, false));
+        m.glk_select(0x140).expect("select suspends on the char request");
+        assert!(matches!(m.step(), StepResult::NeedChar { .. }), "snapshot taken at a char prompt");
+        let blob = m.save_state();
+
+        // Move the LIVE session to a line prompt instead.
+        m.supply_char('x' as u32);
+        assert!(m.glk.request_line_event(win, 0x180, 16, 0, false));
+        m.glk_select(0x140).expect("select suspends on the line request");
+        assert!(matches!(m.step(), StepResult::NeedLine { .. }), "live session is at a line prompt");
+
+        m.restore_state(&blob).expect("our own snapshot restores");
+        assert!(
+            matches!(m.step(), StepResult::NeedChar { .. }),
+            "the restored state wants a KEY, so the suspension must too (not the stale line mode)",
+        );
     }
 
     #[test]

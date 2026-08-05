@@ -123,9 +123,22 @@ impl RoomLock {
     /// learning — the caller then falls back to hashing the room name, exactly as
     /// before this existed.
     pub fn room_id(&self, ram: &[u32]) -> Option<u32> {
-        let addr = self.locked?;
-        let idx = ((addr - self.base) / 4) as usize;
+        let idx = self.word_index(self.locked?)?;
         ram.get(idx).copied().filter(|&v| v != 0)
+    }
+
+    /// The index into a scanned-RAM snapshot for `addr`, or `None` when the
+    /// address is not inside the scanned window.
+    ///
+    /// The locked address does not have to come from the learner: it is also read
+    /// back from the per-game `room-global` sidecar, a plain text file a user can
+    /// edit and a stale one can outlive a story rebuild. A value BELOW `base`
+    /// underflowed `addr - self.base` — a panic every turn in a debug build, and a
+    /// wild index in release. Out of range simply means "this lock tells us
+    /// nothing": the caller falls back to the name-derived id, and `verify` drops
+    /// the lock so the learner starts over. (SQ-0658)
+    fn word_index(&self, addr: u32) -> Option<usize> {
+        addr.checked_sub(self.base).map(|off| (off / 4) as usize)
     }
 
     /// Take the re-key table produced when a lock resolves: `(room name, real id)`
@@ -224,10 +237,17 @@ impl RoomLock {
     /// sure about was the wrong guess, so drop it and learn again from scratch. A
     /// wrong lock must never be sticky — it would mis-key every room after it.
     fn verify(&mut self, ram: &[u32], addr: u32, movement: Movement) {
+        // An address outside the scanned window can never be verified against a
+        // snapshot, so it can never be dropped by the check below either — it would
+        // be a permanently unfalsifiable lock. Drop it here instead and re-learn.
+        // (SQ-0658; see `word_index` for where such an address comes from.)
+        let Some(idx) = self.word_index(addr) else {
+            *self = RoomLock::new(self.base, ram.len());
+            return;
+        };
         let (Some(prev), Movement::Changed | Movement::Unchanged) = (&self.prev, movement) else {
             return;
         };
-        let idx = ((addr - self.base) / 4) as usize;
         let (Some(&a), Some(&b)) = (prev.ram.get(idx), ram.get(idx)) else { return };
         if (a != b) != (movement == Movement::Changed) {
             let words = ram.len();
@@ -259,6 +279,26 @@ mod tests {
     /// them, mirroring the real object-address check.
     fn base_region() -> (u32, usize) {
         (0x1000, 3)
+    }
+
+    #[test]
+    fn a_lock_below_the_scan_base_is_rejected_rather_than_underflowing() {
+        // SQ-0658: the locked address is not always something the learner chose —
+        // it is also read back from the per-game `room-global` sidecar, a plain
+        // text file that a user can edit and that can outlive a story rebuild. An
+        // address BELOW `base` underflowed `addr - self.base`: a debug panic on
+        // every single turn, and a wild index in release.
+        let (base, words) = base_region();
+        let mut l = RoomLock::locked_at(base, words, base - 0x400);
+        let ram = vec![0x1000, 1, 7];
+
+        assert_eq!(l.room_id(&ram), None, "an out-of-window lock identifies no room");
+
+        // And it must not be sticky: it can never be checked against a snapshot, so
+        // it could never be falsified by the usual `verify` either. Drop it and
+        // learn again from scratch.
+        l.observe(ram, Some("Hall".to_string()), Movement::Changed);
+        assert_eq!(l.locked(), None, "an unverifiable lock is dropped, not kept forever");
     }
 
     #[test]

@@ -279,8 +279,14 @@ impl Engine for ScottSession {
     }
 
     fn set_aux_data(&mut self, data: BTreeMap<String, Vec<u8>>) {
+        // Loading the archive's aux data back INTO the session is not the game
+        // writing anything — `aux_dirty` means "the game changed aux data since we
+        // last persisted it". Marking it here made every Scott archive restore pop
+        // the aux-persistence consent dialog under `aux_storage = Ask`, for a game
+        // that had written nothing. The Z-machine (`session.rs`) and Glulx
+        // (`glulx_session.rs`) setters leave the flag alone; this now matches them.
+        // (SQ-0658)
         self.aux = data;
-        self.aux_dirty = true;
     }
 
     fn aux_dirty(&self) -> bool {
@@ -330,6 +336,29 @@ mod tests {
 
     fn dat() -> Vec<u8> {
         include_bytes!("../../scott/tests/tiny_cave.dat").to_vec()
+    }
+
+    #[test]
+    fn loading_archived_aux_data_does_not_mark_it_dirty() {
+        // SQ-0658: `aux_dirty` means "the GAME changed aux data since we last
+        // persisted it" — it is what `aux_storage = Ask` consults before asking the
+        // player for consent to write. Scott's setter raised it, so every archive
+        // restore popped the consent dialog for a game that had written nothing.
+        // The Z-machine (session.rs) and Glulx (glulx_session.rs) setters leave the
+        // flag alone; persistence behaviour is required to be uniform across
+        // engines, and restoring is not writing.
+        let mut s = ScottSession::new(dat(), None).unwrap();
+        assert!(!s.aux_dirty(), "a fresh session has nothing to persist");
+
+        let mut data = BTreeMap::new();
+        data.insert("pcset".to_string(), vec![1u8, 2, 3]);
+        s.set_aux_data(data.clone());
+
+        assert_eq!(s.aux_data(), &data, "the archive's aux data really is installed");
+        assert!(
+            !s.aux_dirty(),
+            "restoring aux data is not the game dirtying it — this is what re-asks for consent",
+        );
     }
 
     #[test]

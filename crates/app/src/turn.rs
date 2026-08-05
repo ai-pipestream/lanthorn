@@ -686,6 +686,17 @@ pub(crate) fn apply_game_driven_result(
         open_ingame_saves(io, game_dir, state);
         return false;
     }
+    // Game `create_by_prompt`: open the filename modal and defer the rest, exactly
+    // as `finish_command_turn` and `finish_resumed_turn` do. A Glulx game can ask
+    // for a fileref from ANY turn — a transcript-on from a char-input menu
+    // keypress, a timer, a mouse/hyperlink click, a sound-notify routine — and
+    // without this the request had no resolver at all: the VM stayed suspended on
+    // NeedFilename, every later drive re-reported it, and keypresses were
+    // discarded against a machine that could never advance. (SQ-0657)
+    if let Some(req) = session.pending_filename() {
+        open_filename_modal(req, session, state);
+        return false;
+    }
     // Bump the graph generation ONLY when this game-driven turn actually changed
     // the routed geometry (a room/connection added). A char-input keypress —
     // menu navigation, a "press any key" prompt — changes nothing, so it must NOT
@@ -754,6 +765,9 @@ mod tests {
     struct TraceOnlyEngine {
         line: Option<String>,
         v6: Option<Vec<String>>,
+        /// A suspended `glk_fileref_create_by_prompt`, as a Glulx session reports
+        /// one after a turn's drive stopped on `NeedFilename` (SQ-0657).
+        filename_req: Option<app::session::FilenameReq>,
     }
 
     impl app::engine::Engine for TraceOnlyEngine {
@@ -777,6 +791,9 @@ mod tests {
         }
         fn resume_restore(&mut self, _data: Option<&[u8]>) -> app::session::TurnResult {
             unreachable!("not exercised by this test")
+        }
+        fn pending_filename(&self) -> Option<app::session::FilenameReq> {
+            self.filename_req
         }
         fn has_quit(&self) -> bool {
             false
@@ -824,7 +841,7 @@ mod tests {
     fn flush_screen_trace_writes_when_on_and_drains() {
         let dir = std::env::temp_dir().join(format!("bm-flush-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut eng = TraceOnlyEngine { line: Some("@split_window(1)".to_string()), v6: None };
+        let mut eng = TraceOnlyEngine { line: Some("@split_window(1)".to_string()), v6: None, filename_req: None };
 
         super::flush_screen_trace(&dir, &mut eng, true);
         let body = std::fs::read_to_string(dir.join("trace.log")).unwrap_or_default();
@@ -850,6 +867,7 @@ mod tests {
         let mut eng = TraceOnlyEngine {
             line: None,
             v6: Some(vec!["turn snapshot (current=7)".to_string()]),
+            filename_req: None,
         };
 
         // Off: nothing built, nothing written.
@@ -872,7 +890,7 @@ mod tests {
     fn flush_v6_trace_writes_nothing_for_an_engine_with_no_v6_model() {
         let dir = std::env::temp_dir().join(format!("bm-flush-v6-none-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut eng = TraceOnlyEngine { line: None, v6: None };
+        let mut eng = TraceOnlyEngine { line: None, v6: None, filename_req: None };
 
         super::flush_v6_trace(&dir, &mut eng, true);
         let body = std::fs::read_to_string(dir.join("trace.log")).unwrap_or_default();
@@ -1134,7 +1152,7 @@ mod tests {
         state.config.user_dir = tmp.clone();
         let mut m = mapper::mapper::Mapper::default();
         let rect = ratatui::layout::Rect::new(0, 0, 20, 20);
-        let eng = TraceOnlyEngine { line: None, v6: None };
+        let eng = TraceOnlyEngine { line: None, v6: None, filename_req: None };
 
         state.push_transcript("room description"); // pre-menu content
 
@@ -1170,7 +1188,7 @@ mod tests {
         state.config.user_dir = tmp.clone();
         let mut m = mapper::mapper::Mapper::default();
         let rect = ratatui::layout::Rect::new(0, 0, 20, 20);
-        let eng = TraceOnlyEngine { line: None, v6: None }; // pending_input() == Char
+        let eng = TraceOnlyEngine { line: None, v6: None, filename_req: None }; // pending_input() == Char
         state.last_transcript_total_rows = 12;
 
         super::apply_game_driven_result(
@@ -1219,7 +1237,7 @@ mod tests {
         m.observe(1, "Lab", None); // a known, placed room
         let gen0 = state.graph_gen;
         let rect = ratatui::layout::Rect::new(0, 0, 20, 20);
-        let eng = TraceOnlyEngine { line: None, v6: None };
+        let eng = TraceOnlyEngine { line: None, v6: None, filename_req: None };
 
         // Re-reporting the SAME room (a menu keystroke) must not re-route.
         let same = game_driven_result(Some(zvm::ObjectSnapshot { number: 1, parent: 0, name: "Lab".into() }));
@@ -1230,6 +1248,50 @@ mod tests {
         let moved = game_driven_result(Some(zvm::ObjectSnapshot { number: 2, parent: 0, name: "Hall".into() }));
         super::apply_game_driven_result(&mut state, &mut m, &moved, &tmp, rect, &eng, app::pager::Driver::PlayerInput);
         assert_ne!(state.graph_gen, gen0, "a new room on a game-driven turn must bump graph_gen");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn game_driven_turn_opens_the_filename_modal_for_a_create_by_prompt() {
+        // SQ-0657: a Glulx game can issue `glk_fileref_create_by_prompt` from ANY
+        // turn — TRANSCRIPT ON chosen from a char-input menu, a timer routine, a
+        // mouse/hyperlink click, a sound-notify routine. `finish_command_turn` and
+        // `finish_resumed_turn` both resolve that request; the game-driven path did
+        // not, so the VM stayed suspended on NeedFilename with NO modal open. Every
+        // later drive re-reported it and every keypress was discarded against a
+        // machine that could not advance — permanently wedged, with only a quit out.
+        let tmp = std::env::temp_dir().join(format!("babelmap-gdfn-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let mut state = app::state::AppState::default();
+        state.config.user_dir = tmp.clone();
+        let mut m = mapper::mapper::Mapper::default();
+        let rect = ratatui::layout::Rect::new(0, 0, 20, 20);
+        // fmode Write → a name-entry prompt (the TRANSCRIPT ON shape).
+        let eng = TraceOnlyEngine {
+            line: None,
+            v6: None,
+            filename_req: Some(app::session::FilenameReq { usage: 0x02, fmode: 0x01 }),
+        };
+
+        let quit = super::apply_game_driven_result(
+            &mut state, &mut m, &game_driven_result(None), &tmp, rect, &eng,
+            app::pager::Driver::PlayerInput,
+        );
+
+        assert!(!quit, "a filename request defers the turn, it does not end the app");
+        assert_eq!(
+            state.pending_filename,
+            Some(app::session::FilenameReq { usage: 0x02, fmode: 0x01 }),
+            "the request must be recorded so the run loop's resolver can answer it",
+        );
+        assert!(
+            matches!(
+                &state.overlays.text_entry,
+                Some(d) if d.kind == app::state::TextEntryKind::CreateFile
+            ),
+            "a create-file prompt must be open — without it nothing can ever call resume_filename",
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

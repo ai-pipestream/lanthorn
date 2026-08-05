@@ -646,16 +646,7 @@ impl GameSession {
         machine.trace_exec = trace_from_boot;
         machine.trace_screen = trace_from_boot;
 
-        let mut quit = false;
-        let pending = loop {
-            let stop = run_until_input(&mut machine);
-            match stop {
-                RunStop::Quit => { quit = true; break InputKind::Line; }
-                RunStop::Input(k) => break k,
-                RunStop::SavePending => machine.complete_save(false),
-                RunStop::RestorePending => machine.complete_restore_failure(),
-            }
-        };
+        let (pending, quit) = run_settled(&mut machine);
 
         Ok(GameSession {
             machine, quit, pending, strip_prompt: true,
@@ -1077,6 +1068,21 @@ impl GameSession {
             self.pictures_canvas.clear();
             self.story_pics.clear();
             self.last_content_pic.clear();
+            // The display list is the RECIPE for `pictures_canvas` — dropping the
+            // canvas and keeping the ops leaves a save/replay that cannot be
+            // recomputed from its inputs. Concretely (SQ-0658): the reboot's first
+            // draw into a window re-creates its canvas and APPENDS to the ops the
+            // pre-restart session left there, so the next palette change replays
+            // the old game's art onto the new one's screen; and a window marked
+            // `unreplayable` before the restart stays excluded from replay for the
+            // rest of the session even though its canvas is brand new. Nor do the
+            // pre-restart erase FILLS describe any region of the rebooted screen.
+            // An `erase_window` clears a window's ops on the way past, so an
+            // Infocom boot that erases before it draws heals itself — but only
+            // for the windows it happens to erase, and only in that order.
+            self.display_ops.clear();
+            self.unreplayable.clear();
+            self.window_fills.clear();
             self.v6_win0_chars_seen = 0;
         }
         let win0_base = self.v6_win0_chars_seen;
@@ -2075,6 +2081,27 @@ fn run_until_input(machine: &mut Machine) -> RunStop {
     }
 }
 
+/// Run to a player-facing stop — an input request or a quit — returning
+/// `(pending_kind, quit)`.
+///
+/// A game `@save`/`@restore` reached along the way is auto-FAILED and the drive
+/// continues, because the callers are the paths with no dialog to open: the boot
+/// drive, and the two host restores (Save State, an `@save` archive loaded from
+/// the saves manager). Leaving the VM suspended there would wedge the next turn,
+/// and the suspension itself belongs to a run that is being replaced or has not
+/// started. This is the Z-machine twin of the Glulx `drive_settled`, so the two
+/// engines behave identically at these three points (SQ-0656).
+fn run_settled(machine: &mut Machine) -> (InputKind, bool) {
+    loop {
+        match run_until_input(machine) {
+            RunStop::Input(k) => return (k, false),
+            RunStop::Quit => return (InputKind::Line, true),
+            RunStop::SavePending => machine.complete_save(false),
+            RunStop::RestorePending => machine.complete_restore_failure(),
+        }
+    }
+}
+
 /// Strip a trailing interactive read prompt from captured Z-machine output.
 ///
 /// Infocom-style games print a bare ">" (possibly preceded by whitespace or a
@@ -2739,14 +2766,17 @@ impl Engine for GameSession {
         // restored buffers. Without this the VM would be parked past the read
         // with a stale buffer, and the next line would replay the pre-save
         // command (mirrors `resume_restore` for the game `@restore` path).
-        let stop = run_until_input(&mut self.machine);
-        self.pending = match stop {
-            RunStop::Input(k) => k,
-            RunStop::Quit => InputKind::Line,
-            // A well-formed Save State resumes into a read; the save/restore
-            // arms are unreachable here (no @save/@restore mid-snapshot).
-            RunStop::SavePending | RunStop::RestorePending => self.pending,
-        };
+        //
+        // `run_settled`, not a bare `run_until_input`: a `Quit` here has to SET
+        // `self.quit` (the old code moved `pending` to Line and left the session
+        // claiming the game was still running, unlike its sibling
+        // `restore_game_save` below), and a `@save`/`@restore` reached on the way
+        // has to be ANSWERED rather than silently dropped — dropping it parks the
+        // VM on a suspension no dialog will ever open for. Uniform with the Glulx
+        // adapter, whose restore runs the same settling drive. (SQ-0656)
+        let (pending, quit) = run_settled(&mut self.machine);
+        self.pending = pending;
+        self.quit = quit;
         Ok(())
     }
 
@@ -2760,13 +2790,16 @@ impl Engine for GameSession {
         // resume_restore for the in-game @restore path). The save-verb tail
         // output (e.g. "Ok.") is redundant with the host's "[Game restored]"
         // message, so drain and discard it.
-        let stop = run_until_input(&mut self.machine);
+        //
+        // `run_settled`: the save-verb tail can chain straight into another
+        // `@save`/`@restore` (a game that re-saves after loading), and dropping
+        // that stop left the VM suspended with no dialog to answer it — every
+        // later turn would re-report it. It is auto-failed and the drive
+        // continues, as on the boot and Save State paths. (SQ-0656)
+        let (pending, quit) = run_settled(&mut self.machine);
         let _ = self.take_transcript();
-        match stop {
-            RunStop::Input(k) => self.pending = k,
-            RunStop::Quit => self.quit = true,
-            RunStop::SavePending | RunStop::RestorePending => {}
-        }
+        self.pending = pending;
+        self.quit = quit;
         Ok(())
     }
 
@@ -4543,6 +4576,52 @@ mod tests {
         buf
     }
 
+    /// A minimal v5 story whose initial PC is 0x0500, so a test can drop a few
+    /// opcodes there and step them.
+    fn minimal_v5_story(code: &[u8]) -> Vec<u8> {
+        let mut buf = vec![0u8; 0x1000];
+        buf[0x00] = 5;                       // version = 5
+        buf[0x04] = 0x04; buf[0x05] = 0x00; // high_mem_base = 0x0400
+        buf[0x06] = 0x05; buf[0x07] = 0x00; // initial PC = 0x0500
+        buf[0x08] = 0x02; buf[0x09] = 0x00; // dictionary = 0x0200
+        buf[0x0A] = 0x01; buf[0x0B] = 0x00; // object_table = 0x0100
+        buf[0x0C] = 0x03; buf[0x0D] = 0x00; // global_vars = 0x0300
+        buf[0x0E] = 0x04; buf[0x0F] = 0x00; // static_mem_base = 0x0400
+        buf[0x18] = 0x00; buf[0x19] = 0x60; // abbrev_table = 0x0060
+        buf[0x0500..0x0500 + code.len()].copy_from_slice(code);
+        buf
+    }
+
+    #[test]
+    fn run_settled_answers_a_game_save_instead_of_parking_on_it() {
+        // SQ-0656: `restore_state` and `restore_game_save` used to drop a
+        // `SavePending`/`RestorePending` stop on the floor — the VM stayed suspended
+        // with no dialog ever opening for it, and `restore_state` additionally left
+        // `quit` false on a `Quit` stop. Both now settle through this helper, the
+        // Z-machine twin of Glulx's `drive_settled`, so the two engines behave the
+        // same at a host restore.
+        //
+        // `@save -> G0` then `@quit`. A bare `run_until_input` stops AT the save;
+        // settling answers it (v4+ stores 0 = failed) and runs on to the quit.
+        let code = [
+            0xBE, 0x00, 0xFF, 0x10, // EXT:0 save (no operands) -> global 0
+            0xBA,                   // quit
+        ];
+        let mem = Memory::new(minimal_v5_story(&code)).expect("minimal v5 story");
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+        // A witness the save's failure result must overwrite (0 is its own default).
+        machine.mem.write_word(0x0300, 0xFFFF);
+
+        let (pending, quit) = run_settled(&mut machine);
+
+        assert_eq!(
+            machine.mem.read_word(0x0300), 0,
+            "the suspended @save is ANSWERED (v4+ stores 0 for failure), not left pending",
+        );
+        assert!(quit, "and the drive runs on to the game's quit, which must set the quit flag");
+        assert_eq!(pending, InputKind::Line, "a quit reports the neutral Line input mode");
+    }
+
     /// A valid 2x2 red PNG, encoded via the `image` crate (mirrors
     /// `graphics.rs`'s private test helper of the same shape).
     fn png_bytes_2x2_red() -> Vec<u8> {
@@ -4653,6 +4732,73 @@ mod tests {
         sess.apply_picture_event(&PictureEvent { number: 0, window: 7, x: 1, y: 1, erase: true, out_chars: 0, margin_after: None });
         sess.apply_picture_event(&draw);
         assert_eq!(sess.story_pics.len(), 2, "after a canvas clear a fresh draw anchors again");
+    }
+
+    #[test]
+    fn restart_drops_the_pre_restart_v6_display_list() {
+        use zvm::screen::{V6Windows, ZWindow};
+        // SQ-0658: `@restart` dropped `pictures_canvas` (the rasterized RESULT) but
+        // kept `display_ops` (the RECIPE that rebuilds it under a new palette). The
+        // reboot's first draw into a window re-creates the canvas and APPENDS to the
+        // ops the dead session left behind, so the next palette change replays the
+        // old game's art onto the new one's screen. `unreplayable` and the erase
+        // `window_fills` were stranded the same way.
+        let mem = Memory::new(minimal_v6_story()).expect("minimal v6 story");
+        let mut machine = Machine::with_output(mem, Box::new(CaptureSink::new()));
+        let mut windows: [ZWindow; 8] = Default::default();
+        windows[7] = ZWindow { x_size: 64, y_size: 48, ..Default::default() };
+        machine.screen.v6 = Some(V6Windows { windows, current: 7 });
+
+        // A 2×2 picture; every draw covers 4×4 unit pixels (V6_ART_SCALE).
+        let blorb = crate::graphics::test_blorb_with_pict(1, &png_bytes_2x2_red());
+        let mut sess = GameSession {
+            machine, quit: false, pending: InputKind::Line, strip_prompt: true,
+            disasm_cache: std::cell::RefCell::new(None),
+            last_confirmed_pc: std::cell::Cell::new(None),
+            pict_source: None,
+            pictures_canvas: std::collections::HashMap::new(),
+            window_fills: std::collections::HashMap::new(),
+            story_pics: Vec::new(),
+            v6_win0_chars_seen: 0,
+            last_content_pic: std::collections::HashMap::new(),
+            display_ops: std::collections::HashMap::new(),
+            unreplayable: std::collections::HashSet::new(),
+        };
+        sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
+
+        // The pre-restart session draws at the window's top-left corner…
+        sess.apply_picture_event(&PictureEvent {
+            number: 1, window: 7, x: 1, y: 1, erase: false, out_chars: 0, margin_after: None,
+        });
+        assert_eq!(sess.display_ops.get(&7).map_or(0, Vec::len), 1, "the draw is recorded for replay");
+        // …and something took window 7 out of replay (an op-cap overflow in a long
+        // session; forced here, since the count itself is not the point).
+        sess.unreplayable.insert(7);
+
+        // @restart: the VM re-boots in place and the session drains the turn.
+        sess.machine.just_restarted = true;
+        let _ = sess.drain_turn(false, None, false);
+        assert!(sess.pictures_canvas.is_empty(), "the rasterized canvas is dropped (pre-existing)");
+        assert!(sess.display_ops.is_empty(), "and so is the display list that rebuilds it");
+        assert!(sess.unreplayable.is_empty(), "a pre-restart replay veto must not outlive the reboot");
+        assert!(sess.window_fills.is_empty(), "nor the erase fills of a screen that no longer exists");
+
+        // The rebooted game draws the SAME picture somewhere else, then a base
+        // picture establishes a new palette and every window replays.
+        sess.apply_picture_event(&PictureEvent {
+            number: 1, window: 7, x: 33, y: 1, erase: false, out_chars: 0, margin_after: None,
+        });
+        sess.replay_under_current_palette();
+
+        let canvas = sess.pictures_canvas.get(&7).expect("the reboot's draw made a canvas");
+        assert_eq!(
+            canvas.img.get_pixel(32, 0).0, [0xFF, 0x00, 0x00, 0xFF],
+            "the rebooted game's own draw replays",
+        );
+        assert_eq!(
+            canvas.img.get_pixel(0, 0).0, [0, 0, 0, 0],
+            "the PRE-restart draw must not replay into the rebooted canvas",
+        );
     }
 
     #[test]
