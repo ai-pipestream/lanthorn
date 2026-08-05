@@ -1,0 +1,149 @@
+//! SQ-0668: the carried-items source, driven against real Infocom stories.
+//!
+//! The command band's *carried* column and the inventory dock read the same two
+//! things — `Introspect::player_object()` and `Introspect::contents(player)` —
+//! so both are empty forever whenever the avatar is misidentified. Zork 1 (r52)
+//! is the case that was wrong: it ships TWO objects with avatar names, and only
+//! one of them is the player.
+//!
+//! The unit-level pin lives in `zvm::location` (a synthetic story with the same
+//! topology); this file is the real-game check the original SQ-0212 fix lacked —
+//! its hand-built machine encoded the wrong Zork 1 topology, so it passed while
+//! the game stayed broken. Commercial stories are gitignored, so every test here
+//! skips vacuously when its fixture is absent.
+
+use std::path::PathBuf;
+
+use app::engine::Engine;
+use app::graphics::PictSource;
+use app::render::transcript::inventory_items;
+use app::session::GameSession;
+
+fn stories_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../stories")
+}
+
+/// Boot a plain Z-machine story from `stories/`, or `None` when the gitignored
+/// fixture is absent.
+fn boot(file: &str) -> Option<GameSession> {
+    let path = stories_dir().join(file);
+    let Ok(bytes) = std::fs::read(&path) else {
+        eprintln!("SKIP: gitignored story missing at {}", path.display());
+        return None;
+    };
+    let mut picts = PictSource::new(blorb::resolve_resource_blorb(&path).map(|(b, _)| b));
+    let dims = picts.all_pict_dims();
+    let std_window = picts.std_window();
+    let mut session =
+        GameSession::new_with_trace(bytes, true, false, None, false, dims, std_window, None)
+            .expect("story should load and boot");
+    session.set_pict_source(Some(picts));
+    session.flush_boot_pictures();
+    let _ = session.take_transcript();
+    Some(session)
+}
+
+fn lower(items: &[String]) -> String {
+    items.join(" | ").to_lowercase()
+}
+
+/// Zork 1 r52: taking something must show up in the carried source, and the
+/// player must never have to type "i" to get there.
+///
+/// The bug: Zork 1 has #21 "you" — the parser's stand-in for the player as a
+/// noun, parked in the "it" globals container — alongside #46 "cretin", the
+/// real avatar in the room. Both have a non-zero parent, so "prefer the
+/// lowest-numbered situated candidate" picked the noun, whose child chain is
+/// empty for the whole game.
+#[test]
+fn zork1_carried_items_are_live_without_ever_typing_inventory() {
+    let Some(mut session) = boot("zork1-invclues-r52-s871125.z5") else { return };
+
+    // The avatar is the object that is actually in the room, not merely one
+    // with an avatar-ish name.
+    let player = session
+        .introspect()
+        .and_then(|i| i.player_object())
+        .expect("Zork 1 has an identifiable player object");
+    let room = session.current_location().expect("Zork 1 opens in West of House");
+    assert_eq!(room.name, "West of House");
+    assert_eq!(
+        zvm::objects::short_name(&session.machine.mem, player),
+        "cretin",
+        "the avatar is #{player} — must be \"cretin\", never the globals-parked \"you\""
+    );
+    assert_eq!(
+        zvm::objects::get_parent(&session.machine.mem, player),
+        room.number,
+        "the avatar sits in the detected room"
+    );
+
+    // The *here* column source: the opening room really does hold the mailbox
+    // and the boarded door.
+    let here = session.introspect().unwrap().room_objects(room.number);
+    let here_l = lower(&here);
+    assert!(here_l.contains("mailbox"), "here-column lists the mailbox: {here:?}");
+    assert!(here_l.contains("door"), "here-column lists the front door: {here:?}");
+
+    // Nothing carried yet — and this is the honest empty, read from the tree.
+    assert!(
+        inventory_items(None, &[], session.introspect()).is_empty(),
+        "the player starts empty-handed"
+    );
+
+    // Take the leaflet. No "i", "inv" or "inventory" is ever submitted, so the
+    // transcript-scrape fallback stays empty on purpose: everything below comes
+    // from the live object tree.
+    session.submit("open mailbox");
+    session.submit("take leaflet");
+
+    let items = inventory_items(None, &[], session.introspect());
+    assert!(
+        lower(&items).contains("leaflet"),
+        "the taken leaflet must appear in the carried source: {items:?}"
+    );
+
+    // Same answer through the LOCKED path the turn loop uses (`state.player_obj`
+    // seeded from `player_object()`), so the dock and the band cannot disagree.
+    assert_eq!(
+        inventory_items(Some(player), &[], session.introspect()),
+        items,
+        "the locked avatar and the live lookup must be the same object"
+    );
+
+    // …and dropping it takes it back out: the column is the tree, not a log.
+    session.submit("drop leaflet");
+    assert!(
+        !lower(&inventory_items(None, &[], session.introspect())).contains("leaflet"),
+        "the dropped leaflet leaves the carried source"
+    );
+}
+
+/// Planetfall names its avatar plainly "player" and starts the game carrying
+/// four things, so a boot-time read is enough to catch a missed avatar. The
+/// same name family covers Deadline.
+#[test]
+fn planetfall_carried_items_are_live_at_boot() {
+    let Some(session) = boot("planetfall-invclues-r10-s880531.z5") else { return };
+    let items = inventory_items(None, &[], session.introspect());
+    let l = lower(&items);
+    assert!(
+        l.contains("diary") && l.contains("chronometer"),
+        "Planetfall opens carrying its diary and chronometer: {items:?}"
+    );
+}
+
+/// Mini-Zork keeps working: one avatar candidate, no room validation needed.
+/// Pins that the extra discrimination did not cost the single-candidate games
+/// anything.
+#[test]
+fn minizork_carried_items_still_track_the_object_tree() {
+    let Some(mut session) = boot("minizork-r34-s871124.z3") else { return };
+    assert!(inventory_items(None, &[], session.introspect()).is_empty());
+    session.submit("open mailbox");
+    session.submit("take leaflet");
+    assert!(
+        lower(&inventory_items(None, &[], session.introspect())).contains("leaflet"),
+        "minizork's carried source still follows the tree"
+    );
+}

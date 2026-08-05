@@ -1441,16 +1441,24 @@ pub(crate) fn ghost_completion(state: &AppState) -> Option<String> {
     (!hint.is_empty()).then_some(hint)
 }
 
-/// The current inventory item list: the engine's live object-tree contents
-/// when `player_obj` is locked and introspection is available, otherwise the
-/// last parsed `inventory_fallback` list. Used by the inventory dock panel
-/// (`render::inventory_dock`) and by the top-level render to size the dock.
+/// The current inventory item list: the engine's live object-tree contents for
+/// the player object, otherwise the last parsed `inventory_fallback` list. Used
+/// by the inventory dock panel (`render::inventory_dock`) and by the top-level
+/// render to size the dock.
+///
+/// `player_obj` is the per-turn LOCKED avatar (`turn.rs`), which is only set
+/// once a turn has run with a known location — so on its own it leaves the dock
+/// empty for the whole first turn, and empty forever in any game the lock never
+/// fires for. Ask the engine directly when it is unset, exactly as the command
+/// band's `refresh_objects` does; the two panels must never disagree about who
+/// the player is.
 pub fn inventory_items(
     player_obj: Option<u16>,
     inventory_fallback: &[String],
     introspect: Option<&dyn Introspect>,
 ) -> Vec<String> {
-    match (player_obj, introspect) {
+    let player = player_obj.or_else(|| introspect.and_then(|i| i.player_object()));
+    match (player, introspect) {
         (Some(obj), Some(intro)) => intro.contents(obj),
         _ => inventory_fallback.to_vec(),
     }

@@ -456,15 +456,39 @@ pub fn status_name_matches(candidate: &str, short: &str) -> bool {
 }
 
 /// The current player object: among all objects whose normalized short name is
-/// a plausible avatar name (see `PLAYER_NAMES`), prefer the lowest-numbered
-/// *situated* one — i.e. one with a non-zero parent, meaning it's actually
-/// placed inside a room. Some games (e.g. Zork 1) also have a parentless
-/// decorative "you" object (never placed anywhere, no children) that isn't the
-/// real avatar; a real avatar always sits inside a room. If no candidate is
-/// situated, fall back to the lowest-numbered candidate (preserves prior
-/// behavior for games without a decorative object). None if no candidate exists.
+/// a plausible avatar name (see `PLAYER_NAMES`), the one that is actually WHERE
+/// THE PLAYER IS — i.e. whose ancestor chain reaches the room `detect_location`
+/// reports. None if no candidate exists.
+///
+/// A name alone does not identify the avatar. Zork 1 (r52) ships two named
+/// candidates: #21 "you" — the parser's stand-in for the player as a *noun*,
+/// parked in the "it" pseudo-container with the other globals — and #46
+/// "cretin", the real avatar sitting in the room. Both are "situated" (non-zero
+/// parent), so preferring the lowest-numbered situated candidate (SQ-0212)
+/// picks the noun and reports an inventory that is empty forever (SQ-0668).
+/// Only "cretin" is ever inside a room, which is exactly the discrimination
+/// `detect_location` already performs to name the room in the first place — so
+/// reuse it rather than inventing a second, weaker rule.
+///
+/// Falls back to the old situated-then-lowest order when the room is unknown
+/// (title screen, menu, undetectable status line) or no candidate reaches it
+/// (e.g. an avatar not parented to its room, Shogun-style).
+///
+/// Not recursive: `detect_location` discriminates avatars with
+/// `player_candidates` + `nearest_matching_ancestor` directly and never calls
+/// back into this function. Keep it that way.
 pub fn find_player_object(machine: &Machine) -> Option<u16> {
     let cands = player_candidates(machine);
+    // One candidate needs no discrimination — and skipping `detect_location`
+    // keeps the common case (most Inform games, minizork) as cheap as it was.
+    if cands.len() < 2 {
+        return cands.first().copied();
+    }
+    if let Some(room) = detect_location(machine).and_then(|l| l.object().map(|o| o.number)) {
+        if let Some(&obj) = cands.iter().find(|&&obj| has_ancestor(machine, obj, room)) {
+            return Some(obj);
+        }
+    }
     cands
         .iter()
         .copied()
@@ -472,9 +496,30 @@ pub fn find_player_object(machine: &Machine) -> Option<u16> {
         .or_else(|| cands.first().copied())
 }
 
+/// True when `ancestor` is a strict ancestor of `start` in the object tree.
+/// Depth-bounded (32) to tolerate cycles, like `nearest_matching_ancestor`.
+/// Walks the chain rather than testing the parent alone so an avatar riding
+/// inside a vehicle (Zork's boat) still counts as being in the room.
+fn has_ancestor(machine: &Machine, start: u16, ancestor: u16) -> bool {
+    let mut cur = get_parent(&machine.mem, start);
+    for _ in 0..32 {
+        if cur == 0 {
+            return false;
+        }
+        if cur == ancestor {
+            return true;
+        }
+        cur = get_parent(&machine.mem, cur);
+    }
+    false
+}
+
 /// Object short-names that plausibly denote the player avatar, including ZIL's
-/// "cretin"/"adventurer".
-const PLAYER_NAMES: [&str; 7] = ["yourself", "you", "me", "myself", "self", "cretin", "adventurer"];
+/// "cretin"/"adventurer" and the bare "player" Planetfall and Deadline give
+/// theirs. The set may be generous: both consumers validate a candidate against
+/// the room before trusting it (`detect_location`, `find_player_object`), so a
+/// name that is not the avatar simply fails to validate and is skipped.
+const PLAYER_NAMES: [&str; 8] = ["yourself", "you", "me", "myself", "self", "cretin", "adventurer", "player"];
 
 /// All objects whose short name plausibly denotes the player avatar, in ascending
 /// object order. `detect_location` validates each against the status-line room.
@@ -996,19 +1041,29 @@ mod tests {
         (V5_ENTRIES + (obj as u32 - 1) * 14) as usize
     }
 
-    /// Build a v5 story with 5 objects reproducing the r52 topology:
+    /// Build a v5 story with 6 objects reproducing the r52 topology:
     ///   #1 "forest" scenery (top-level)   — what StatusName wrongly resolves to
-    ///   #2 "you"    decorative, parent 0  — what find_player_object picks
+    ///   #2 "you"    the parser's player NOUN, parent 0 by default
     ///   #3 "forest" a real forest ROOM
     ///   #4 "cretin" the true avatar, child of #3
     ///   #5 "forest" a second real forest ROOM
+    ///   #6 "it"     the globals pseudo-container (top-level, holds no rooms)
     /// Lowercase names avoid A1/A2 shift-encoding; the status line matches case-
     /// insensitively.
+    ///
+    /// Six is the ceiling: entry 7 would start where the first property table
+    /// does, and `max_object_number` (rightly) stops there.
     fn build_v5_forests() -> Vec<u8> {
         let mut buf = sample_story(5);
-        let props: [(u16, &str); 5] =
-            [(0x1D2, "forest"), (0x1DA, "you"), (0x1E2, "forest"), (0x1EA, "cretin"), (0x1F2, "forest")];
-        let parents: [u16; 5] = [0, 0, 0, 3, 0];
+        let props: [(u16, &str); 6] = [
+            (0x1D2, "forest"),
+            (0x1DA, "you"),
+            (0x1E2, "forest"),
+            (0x1EA, "cretin"),
+            (0x1F2, "forest"),
+            (0x280, "it"),
+        ];
+        let parents: [u16; 6] = [0, 0, 0, 3, 0, 0];
         for (i, (ptbl, name)) in props.iter().enumerate() {
             let obj = (i + 1) as u16;
             let e = v5_entry(obj);
@@ -1030,6 +1085,19 @@ mod tests {
     fn machine_in_forest(cretin_parent: u16) -> Machine {
         let mut buf = build_v5_forests();
         put_word(&mut buf, v5_entry(4) + 6, cretin_parent);
+        let mut m = make_machine(buf);
+        m.screen.upper = upper_with(&[" forest                              Score: 0    Moves: 0"]);
+        m.screen.upper_window_rows = 1;
+        m
+    }
+
+    /// The real Zork1-r52 topology (SQ-0668): "you" is NOT parentless — it is
+    /// parked in the "it" globals pseudo-container (#6), so it is just as
+    /// "situated" as the avatar. Only "cretin" (#4) is inside the room.
+    fn machine_zork1_r52() -> Machine {
+        let mut buf = build_v5_forests();
+        put_word(&mut buf, v5_entry(2) + 6, 6); // "you" lives in the globals object
+        put_word(&mut buf, v5_entry(4) + 6, 3); // "cretin" lives in forest ROOM #3
         let mut m = make_machine(buf);
         m.screen.upper = upper_with(&[" forest                              Score: 0    Moves: 0"]);
         m.screen.upper_window_rows = 1;
@@ -1069,6 +1137,43 @@ mod tests {
             Some(4),
             "must pick the situated avatar #4 (cretin), not the decorative #2 (you)"
         );
+    }
+
+    /// SQ-0668. The regression SQ-0212 *thought* it was fixing: in the real
+    /// Zork1 r52 story file the decorative "you" is not parentless at all — it
+    /// sits in the "it" globals container, which makes "prefer the lowest
+    /// situated candidate" pick it and report an empty inventory forever. The
+    /// avatar is the candidate that is actually inside the detected ROOM.
+    #[test]
+    fn find_player_object_rejects_a_you_parked_in_the_globals_container() {
+        let m = machine_zork1_r52();
+        assert_eq!(get_parent(&m.mem, 2), 6, "\"you\" #2 is situated — inside globals #6");
+        assert_eq!(get_parent(&m.mem, 6), 0, "…and #6 \"it\" is a top-level pseudo-container");
+        assert_eq!(get_parent(&m.mem, 4), 3, "avatar \"cretin\" #4 sits in room #3");
+        assert_eq!(
+            detect_location(&m).and_then(|l| l.object().map(|o| o.number)),
+            Some(3),
+            "the room is #3 — the same discrimination find_player_object must reuse"
+        );
+        assert_eq!(
+            find_player_object(&m),
+            Some(4),
+            "must pick the avatar in the room (#4 cretin), not the situated-but-global #2 (you)"
+        );
+    }
+
+    /// An avatar riding a vehicle is still in the room: validation walks the
+    /// whole ancestor chain, not just the parent.
+    #[test]
+    fn find_player_object_accepts_an_avatar_inside_a_vehicle_in_the_room() {
+        let mut buf = build_v5_forests();
+        put_word(&mut buf, v5_entry(2) + 6, 6); // "you" parked in globals
+        put_word(&mut buf, v5_entry(4) + 6, 5); // "cretin" inside object #5…
+        put_word(&mut buf, v5_entry(5) + 6, 3); // …which is itself inside room #3
+        let mut m = make_machine(buf);
+        m.screen.upper = upper_with(&[" forest                              Score: 0    Moves: 0"]);
+        m.screen.upper_window_rows = 1;
+        assert_eq!(find_player_object(&m), Some(4), "the chain reaches the room, so #4 still wins");
     }
 
     #[test]
