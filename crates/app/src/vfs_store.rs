@@ -19,9 +19,11 @@ pub fn read_vfs(game_dir: &Path) -> Vec<u8> {
 }
 
 /// Write the per-game VFS sidecar (creating `game_dir` if needed).
+///
+/// Atomic (SQ-0644): this is the game's whole Glk file store in one blob, so a
+/// half-written sidecar would cost every file the story has ever created.
 pub fn write_vfs(game_dir: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    std::fs::create_dir_all(game_dir)?;
-    std::fs::write(vfs_path(game_dir), bytes)
+    crate::storage::atomic_write(&vfs_path(game_dir), bytes)
 }
 
 #[cfg(test)]
@@ -44,6 +46,32 @@ mod tests {
         let blob = vec![0xDE, 0xAD, 0xBE, 0xEF];
         write_vfs(&dir, &blob).unwrap();
         assert_eq!(read_vfs(&dir), blob);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0644: the sidecar is the game's WHOLE Glk file store in one blob, so a
+    /// truncated write costs every file the story ever created. The write goes
+    /// temp-then-rename, which a directory that admits no new files proves: it fails
+    /// outright instead of half-happening (an in-place `fs::write` would have
+    /// succeeded and clobbered the blob).
+    #[test]
+    fn an_interrupted_vfs_write_keeps_the_previous_blob() {
+        let dir = std::env::temp_dir().join(format!("babelmap-vfs-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let blob = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        write_vfs(&dir, &blob).unwrap();
+
+        if !crate::storage::deny_new_files_in(&dir) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // platform can't enforce it (or we're root) — skip
+        }
+        let result = write_vfs(&dir, b"replacement");
+        crate::storage::allow_new_files_in(&dir);
+
+        assert!(result.is_err(), "a write that cannot complete must fail, not half-happen");
+        assert_eq!(read_vfs(&dir), blob, "the previous sidecar is still readable");
+        assert!(crate::storage::leftover_temps(&dir).is_empty(), "no temp left behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

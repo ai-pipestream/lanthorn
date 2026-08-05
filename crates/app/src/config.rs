@@ -730,19 +730,29 @@ pub struct Config {
     /// persisted, and not part of the file's schema.
     #[serde(skip, default = "default_config_file")]
     pub config_file: PathBuf,
-    /// Set when the config file exists but does not parse: the TOML error, carried so
-    /// startup can say which line broke instead of running on defaults in silence
-    /// (SQ-0580). A single typo costs the user the WHOLE file — TOML is parsed as one
+    /// Set when the config file exists but does not LOAD: the error, carried so
+    /// startup can say what broke instead of running on defaults in silence
+    /// (SQ-0580). One bad line costs the user the WHOLE file — TOML is parsed as one
     /// document, so there is no partial load to fall back to. Never persisted, and not
     /// part of the file's schema.
+    ///
+    /// Both failure modes land here (SQ-0645): a *syntax* error (`style = "neon`) and
+    /// a *type* error (`volume = 300`, `auto_load = "yes"`) are the same event as far
+    /// as this struct is concerned — every field is at its default and none of the
+    /// file's values are in memory. Only the syntax case is visible to `toml_edit`,
+    /// which is why [`write_config_at`] gates on this field rather than on re-parsing.
     #[serde(skip)]
     pub config_error: Option<String>,
-    /// True when `interpreter_number` came from `--interpreter-number` rather than
-    /// the config file. A one-run CLI override must not be baked into config.toml by
-    /// a later settings write, so [`write_config`] leaves the file's own value alone
-    /// when this is set. Never persisted itself.
+    /// The value `--interpreter-number` supplied THIS run, if any (SQ-0646).
+    ///
+    /// A one-run CLI override must not be baked into config.toml by a later settings
+    /// write, so [`write_config_at`] leaves the file's own value alone while
+    /// `interpreter_number` still holds this. An explicit settings-panel edit is not a
+    /// CLI override, though — it changes the value (or calls
+    /// [`Config::set_interpreter_number`], which clears this outright), and from then
+    /// on it persists like any other setting. Never persisted itself.
     #[serde(skip)]
-    pub interpreter_number_from_cli: bool,
+    pub interpreter_number_cli: Option<u8>,
     /// When true (default), play audio for `sound_effect` (bleeps + Blorb samples).
     #[serde(default = "default_enable_sound")]
     pub enable_sound: bool,
@@ -765,6 +775,25 @@ pub struct Config {
     /// Active debug-trace sections. Runtime-only (from --trace / /trace); not persisted.
     #[serde(skip)]
     pub trace: crate::trace::TraceSections,
+}
+
+impl Config {
+    /// True while `interpreter_number` is still the one-run `--interpreter-number`
+    /// value and nothing has changed it (SQ-0646). [`write_config_at`] uses this to
+    /// decide whether the key belongs in the file: a CLI override is for this run
+    /// only, but a settings-panel edit is a decision the user expects to keep.
+    pub fn interpreter_number_from_cli(&self) -> bool {
+        self.interpreter_number_cli.is_some() && self.interpreter_number_cli == self.interpreter_number
+    }
+
+    /// Set `interpreter_number` as a deliberate user edit (the settings panel), which
+    /// ends the CLI override's hold on the key — including the case where the user
+    /// picks the very number `--interpreter-number` supplied. `None` means "default"
+    /// (the per-version auto rule) and REMOVES the key on the next save.
+    pub fn set_interpreter_number(&mut self, n: Option<u8>) {
+        self.interpreter_number = n;
+        self.interpreter_number_cli = None;
+    }
 }
 
 impl Default for Config {
@@ -809,7 +838,7 @@ impl Default for Config {
             config_file: default_config_file(),
             config_error: None,
             interpreter_number: None,
-            interpreter_number_from_cli: false,
+            interpreter_number_cli: None,
             enable_sound: default_enable_sound(),
             volume: default_volume(),
             acceleration: default_acceleration(),
@@ -866,10 +895,17 @@ pub fn resolve(cli: &Cli) -> Config {
     // Layer in the config file if it exists.
     if let Ok(text) = std::fs::read_to_string(&config_path) {
         let parsed = toml::from_str::<Config>(&text);
-        // A file that exists but doesn't parse used to be dropped in silence, so one
+        // A file that exists but doesn't load used to be dropped in silence, so one
         // stray character reverted every setting to its default with nothing said —
         // and the next settings save then overwrote the user's file (SQ-0580). Keep
         // the error for startup to show; `write_config_at` refuses to clobber.
+        //
+        // This fires for a TYPE error (`volume = 300`, `auto_load = "yes"`) exactly as
+        // it does for a syntax error: `from_str` fails either way, so either way the
+        // whole file is lost to memory. That distinction used to matter, because the
+        // write side re-parsed with toml_edit — which accepts a type error happily —
+        // and then stamped in-memory defaults over every key the file already had
+        // (SQ-0645). The write side now gates on THIS field instead.
         if let Err(e) = &parsed {
             cfg.config_error = Some(e.to_string());
         }
@@ -941,7 +977,7 @@ pub fn resolve(cli: &Cli) -> Config {
     // file's value (or the auto rule, when it too is unset) stands.
     if let Some(n) = cli.interpreter_number {
         cfg.interpreter_number = Some(n);
-        cfg.interpreter_number_from_cli = true;
+        cfg.interpreter_number_cli = Some(n);
     }
 
     if let Some(list) = &cli.trace {
@@ -1011,6 +1047,24 @@ pub fn write_config(dir: &std::path::Path, cfg: &Config) -> std::io::Result<()> 
 /// save lands on the file `resolve` read (SQ-0574). `write_config(dir, …)` remains for
 /// callers that genuinely mean "this directory's config.toml", chiefly tests.
 pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::Result<()> {
+    // The file didn't LOAD, so `cfg` is all defaults with none of the user's values in
+    // it — writing it back would replace their settings with ours. The syntax half of
+    // that was closed by SQ-0580 below; this closes the type half (SQ-0645), which
+    // walked straight past it: `volume = 300` or `auto_load = "yes"` is valid TOML, so
+    // toml_edit parsed the doc happily and `put` then "updated" every key the file
+    // already had to the in-memory default. Same event, same refusal, same message
+    // path — startup already tells the user settings won't save until it's fixed.
+    if let Some(err) = &cfg.config_error {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "{} could not be loaded ({err}) — refusing to overwrite it. Fix the file, \
+                 or move it aside and babelmap will seed a fresh one.",
+                cfg.config_file.display(),
+            ),
+        ));
+    }
+
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1091,9 +1145,21 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     put(&mut doc, "undo_levels", (cfg.undo_levels as i64).into(), cfg.undo_levels == def.undo_levels);
     // A `--interpreter-number` override is for THIS run only: writing it here would
     // silently make it permanent the next time anything saves settings, so leave the
-    // file's own value (or its absence) untouched in that case.
-    if let Some(n) = cfg.interpreter_number.filter(|_| !cfg.interpreter_number_from_cli) {
-        doc["interpreter_number"] = toml_edit::value(n as i64);
+    // file's own value (or its absence) untouched in that case — but ONLY while the
+    // value is still the CLI's. Once the settings panel changes it, it is the user's
+    // choice and persists like anything else (SQ-0646); the old `!from_cli` flag made
+    // a `--interpreter-number` session ignore panel edits forever, reporting success
+    // and saving nothing.
+    //
+    // `None` means "default" (the per-version auto rule), which has to REMOVE the key:
+    // leaving it meant resetting to default in the panel silently reverted on the next
+    // launch, since an absent key and a present one are different states here — same
+    // rule as `virtual_screen_cols` below.
+    if !cfg.interpreter_number_from_cli() {
+        match cfg.interpreter_number {
+            Some(n) => { doc["interpreter_number"] = toml_edit::value(n as i64); }
+            None => { doc.remove("interpreter_number"); }
+        }
     }
     // Written only when the user pinned one: an absent key means "follow the
     // story pane" (ZMSD §8.4), and emitting the measured size would silently turn
@@ -1145,7 +1211,11 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
         put_in(tbl, "scroll_ms", (cfg.animation.scroll_ms as i64).into(), cfg.animation.scroll_ms == def.animation.scroll_ms);
     }
 
-    std::fs::write(config_path, doc.to_string())
+    // Atomic (SQ-0644): `fs::write` truncated config.toml before writing a byte, so a
+    // crash (or a full disk) mid-save left the user with an empty or half-written
+    // config — every setting AND every comment gone, which is precisely what SQ-0580
+    // went to such lengths to protect.
+    crate::storage::atomic_write(config_path, doc.to_string().as_bytes())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1226,6 +1296,24 @@ mod tests {
         assert_eq!(Config::default().command_prefix, '/');
     }
     use std::io::Write;
+
+    /// A `Cli` that reads (and therefore saves to) `path`, optionally carrying an
+    /// `--interpreter-number`. Everything else is off/default.
+    fn cli_with_config(path: &std::path::Path, interpreter_number: Option<u8>) -> Cli {
+        Cli {
+            story: Some(PathBuf::from("foo.z5")),
+            user_dir: None,
+            data_dir: None,
+            config: Some(path.to_path_buf()),
+            no_accel: false,
+            no_sound: false,
+            image_protocol: ImageProtocol::Auto,
+            no_images: false,
+            interpreter_number,
+            trace: None,
+            debug: false,
+        }
+    }
 
     /// Write a temp config file and return its path.  Uses a unique filename
     /// derived from the test function name to avoid collisions in parallel runs.
@@ -1574,7 +1662,7 @@ use_defaults = false
             config_file: default_config_file(),
             config_error: None,
             interpreter_number: None,
-            interpreter_number_from_cli: false,
+            interpreter_number_cli: None,
             enable_sound: true,
             volume: 100,
             search: SearchConfig::default(),
@@ -2162,12 +2250,12 @@ use_defaults = false
         // No flag: the file's Amiga (4) stands, and it is provenance-clean.
         let from_file = resolve(&base);
         assert_eq!(from_file.interpreter_number, Some(4), "the file's value loads");
-        assert!(!from_file.interpreter_number_from_cli);
+        assert!(!from_file.interpreter_number_from_cli());
 
         // Flag present: IBM PC (6) wins for this run, marked as CLI-sourced.
         let overridden = resolve(&Cli { interpreter_number: Some(6), ..base });
         assert_eq!(overridden.interpreter_number, Some(6), "the CLI beats the file");
-        assert!(overridden.interpreter_number_from_cli);
+        assert!(overridden.interpreter_number_from_cli());
 
         // Writing settings must leave the FILE on 4, not bake in the run's 6.
         write_config(&dir, &overridden).unwrap();
@@ -2183,6 +2271,150 @@ use_defaults = false
         write_config(&dir, &from_file).unwrap();
         let back = std::fs::read_to_string(&cfg_path).unwrap();
         assert_eq!(toml::from_str::<Config>(&back).unwrap().interpreter_number, Some(4));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0646: "default" in the settings panel is `None`, and `None` has to REMOVE
+    /// the key. Leaving it meant the reset held for exactly as long as the session —
+    /// the panel reported success, and the next launch read the old number back.
+    #[test]
+    fn resetting_interpreter_number_to_default_removes_the_key() {
+        let dir = std::env::temp_dir().join(format!("bm-interp-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "# mine\ninterpreter_number = 4\nvolume = 42\n").unwrap();
+
+        let cli = cli_with_config(&cfg_path, None);
+        let mut cfg = resolve(&cli);
+        assert_eq!(cfg.interpreter_number, Some(4));
+
+        // The panel cycles left from 1 to "default".
+        cfg.set_interpreter_number(None);
+        write_config_file(&cfg).unwrap();
+
+        let back = std::fs::read_to_string(&cfg_path).unwrap();
+        assert!(!back.contains("interpreter_number"), "the key is gone, not stale: {back}");
+        assert!(back.contains("volume = 42"), "the rest of the file is untouched: {back}");
+        assert_eq!(resolve(&cli).interpreter_number, None, "and the reset survives a relaunch");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0646: `--interpreter-number` is sticky for the run, not for the user. Once
+    /// the settings panel sets a value the CLI didn't, that value persists — the old
+    /// `!from_cli` flag made such a session drop every panel edit on the floor while
+    /// telling the user it had saved.
+    #[test]
+    fn a_panel_edit_beats_the_cli_stickiness() {
+        let dir = std::env::temp_dir().join(format!("bm-interp-edit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg_path = dir.join("config.toml");
+        std::fs::write(&cfg_path, "interpreter_number = 4\n").unwrap();
+
+        // Launched with --interpreter-number 6.
+        let cli = cli_with_config(&cfg_path, Some(6));
+        let mut cfg = resolve(&cli);
+        assert!(cfg.interpreter_number_from_cli(), "untouched, it is still the CLI's");
+
+        // The panel moves it to 3 — a decision, not a flag.
+        cfg.interpreter_number = Some(3);
+        assert!(!cfg.interpreter_number_from_cli(), "an edited value is no longer the CLI's");
+        write_config_file(&cfg).unwrap();
+        assert_eq!(resolve(&cli_with_config(&cfg_path, None)).interpreter_number, Some(3));
+
+        // …and so is picking the CLI's own number deliberately, via the setter.
+        let mut cfg = resolve(&cli);
+        cfg.set_interpreter_number(Some(6));
+        write_config_file(&cfg).unwrap();
+        assert_eq!(resolve(&cli_with_config(&cfg_path, None)).interpreter_number, Some(6));
+
+        // Clearing it to default from a CLI session still removes the key.
+        let mut cfg = resolve(&cli);
+        cfg.set_interpreter_number(None);
+        write_config_file(&cfg).unwrap();
+        assert_eq!(resolve(&cli_with_config(&cfg_path, None)).interpreter_number, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0645: a file that is valid TOML but invalid *config* (`volume = 300`,
+    /// `auto_load = "yes"`) loads as all-defaults with `config_error` set — exactly
+    /// like a syntax error — but the write side only ever re-parsed with toml_edit,
+    /// which is happy with both. So the next settings save (the aux-storage prompt is
+    /// enough) round-tripped the doc and `put` "updated" every key the file already
+    /// had to the in-memory DEFAULT: the user's whole config, rewritten to values
+    /// they never chose. Same event as SQ-0580, same refusal.
+    #[test]
+    fn a_save_refuses_to_clobber_a_type_error_config() {
+        let dir = std::env::temp_dir().join(format!("bm-typecfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        // Valid TOML throughout; `volume` is out of u8 range and `auto_load` is a
+        // string, so `Config` deserialization fails while toml_edit parses it fine.
+        let original = "# my carefully commented config\n\
+                        volume = 300\n\
+                        auto_load = \"yes\"\n\
+                        undo_levels = 32\n";
+        std::fs::write(&path, original).unwrap();
+
+        let cli = cli_with_config(&path, None);
+        let mut cfg = resolve(&cli);
+        assert!(cfg.config_error.is_some(), "a type error is a load failure too");
+        assert_eq!(cfg.volume, Config::default().volume, "nothing from the file is in memory");
+
+        // A settings save from that state must not write memory back over the file.
+        cfg.volume = 33;
+        let err = write_config_file(&cfg).expect_err("a config that didn't load is not overwritten");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("could not be loaded"), "and it says why: {err}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "the user's values and comments survive byte for byte",
+        );
+
+        // Once the types are right again, saving works normally.
+        std::fs::write(&path, "# my carefully commented config\nvolume = 30\nundo_levels = 32\n").unwrap();
+        let mut fixed = resolve(&cli);
+        fixed.volume = 33;
+        write_config_file(&fixed).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("# my carefully commented config"), "comments preserved: {after}");
+        assert!(after.contains("volume = 33"), "and the new value landed: {after}");
+        assert!(after.contains("undo_levels = 32"), "and the untouched key is kept: {after}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0644: `fs::write` truncates config.toml before it writes a byte, so a crash
+    /// (or a full disk) mid-save costs the user every setting AND every comment in it.
+    /// The write now builds a temp sibling and renames, which a directory that admits
+    /// no new files can prove: the save fails outright instead of half-succeeding.
+    #[test]
+    fn a_config_save_never_truncates_the_previous_file() {
+        let dir = std::env::temp_dir().join(format!("bm-cfg-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        let original = "# my carefully commented config\nvolume = 42\n";
+        std::fs::write(&path, original).unwrap();
+
+        let mut cfg = resolve(&cli_with_config(&path, None));
+        cfg.volume = 33;
+        if !crate::storage::deny_new_files_in(&dir) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // platform can't enforce it (or we're root) — skip
+        }
+        let result = write_config_file(&cfg);
+        crate::storage::allow_new_files_in(&dir);
+
+        assert!(result.is_err(), "a write that cannot complete must fail, not half-happen");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "the previous config survives intact",
+        );
+        assert!(crate::storage::leftover_temps(&dir).is_empty(), "no temp left behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -107,7 +107,7 @@ pub fn render_dot(graph: &MapGraph) -> String {
 
 /// Write `render_dot(graph)` to the file at `path`.
 pub fn export_dot(path: &Path, graph: &MapGraph) -> std::io::Result<()> {
-    std::fs::write(path, render_dot(graph))
+    crate::storage::atomic_write(path, render_dot(graph).as_bytes())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

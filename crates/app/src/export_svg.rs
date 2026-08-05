@@ -196,7 +196,7 @@ pub fn render_svg(rm: &RenderMap) -> String {
 
 /// Write `render_svg(rm)` to the file at `path`.
 pub fn export_svg(path: &Path, rm: &RenderMap) -> std::io::Result<()> {
-    std::fs::write(path, render_svg(rm))
+    crate::storage::atomic_write(path, render_svg(rm).as_bytes())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

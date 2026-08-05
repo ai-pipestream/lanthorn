@@ -341,8 +341,14 @@ pub fn load_map(path: &Path) -> Option<Mapper> {
     }
 }
 
+/// Write a bare Quetzal `.qzl` save.
+///
+/// Atomic (SQ-0644): a `.qzl` is the game's own save slot, and the fixed-name
+/// internal ones (`_undo`, `_startup`) are rewritten constantly — truncating the
+/// previous save before the new one is durable is how a crash costs the player
+/// both.
 pub fn save_game(path: &Path, machine: &zvm::cpu::exec::Machine) -> std::io::Result<()> {
-    std::fs::write(path, machine.save_quetzal())
+    crate::storage::atomic_write(path, &machine.save_quetzal())
 }
 
 /// Write a named in-game save: `<game_dir>/<slug>.qzl` (bare standard Quetzal).
@@ -706,6 +712,44 @@ mod tests {
     }
 
     // ── export round-trip (save_game / restore_game) ──────────────────────────
+
+    /// SQ-0644: `.qzl` writes went through `fs::write`, which truncates the target
+    /// before producing a byte — and the fixed-name internal saves (`_undo`,
+    /// `_startup`) are rewritten constantly, so a crash mid-write cost the player both
+    /// the new save and the old one. The write is temp-then-rename now: a directory
+    /// that admits no new files makes it fail outright, where the in-place write would
+    /// have truncated a perfectly good save first.
+    #[test]
+    fn an_interrupted_qzl_write_keeps_the_previous_save() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        let Ok(story) = std::fs::read(&fixture) else { return /* skip */ };
+        let mem = zvm::memory::Memory::new(story).unwrap();
+        let mut machine = zvm::cpu::exec::Machine::new(mem);
+        machine.init_caps();
+        for _ in 0..50 { let _ = machine.step(); }
+
+        let dir = std::env::temp_dir().join(format!("babelmap-qzl-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("quick.qzl");
+        save_game(&path, &machine).unwrap();
+        let first = std::fs::read(&path).unwrap();
+
+        // Move the machine on so the next save would differ.
+        for _ in 0..50 { let _ = machine.step(); }
+        if !crate::storage::deny_new_files_in(&dir) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // platform can't enforce it (or we're root) — skip
+        }
+        let result = save_game(&path, &machine);
+        crate::storage::allow_new_files_in(&dir);
+
+        assert!(result.is_err(), "a write that cannot complete must fail, not half-happen");
+        assert_eq!(std::fs::read(&path).unwrap(), first, "the previous save is byte-intact");
+        assert!(crate::storage::leftover_temps(&dir).is_empty(), "no temp left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn export_round_trip_bytes_match_save_quetzal() {

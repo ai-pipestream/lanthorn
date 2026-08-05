@@ -65,7 +65,10 @@ playing.
   e.g. `6` selects the IBM PC path, which draws Beyond Zork's map box and cursor
   arrows as CP437 character graphics instead of Font 3. The `--interpreter-number`
   flag applies to one run only and is never written back to your config, so probing
-  a game's behaviour can't quietly pin one machine for every story afterwards. The
+  a game's behaviour can't quietly pin one machine for every story afterwards —
+  unless you then set the value in the settings screen, which is a decision rather
+  than a flag and persists like any other setting. Setting that row back to
+  **default** removes the key, restoring the per-version rule on the next launch. The
   values are ZMSD §11.1.3's:
 
   | | | | |

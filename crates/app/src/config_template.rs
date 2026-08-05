@@ -395,10 +395,11 @@ pub fn auto_seed(config_file: &std::path::Path) {
     if config_file.exists() {
         return;
     }
-    if let Some(parent) = config_file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(config_file, commented_template());
+    // Atomic (SQ-0644), like every other file babelmap owns: a torn seed would leave
+    // a config.toml that exists (so it is never re-seeded) and may not parse (so every
+    // later settings save is refused by SQ-0580's guard) — a dead file the user has to
+    // find and delete by hand.
+    let _ = crate::storage::atomic_write(config_file, commented_template().as_bytes());
 }
 
 /// A `Config`'s Debug string with the schema stamp normalized. An absent `version`
@@ -577,6 +578,10 @@ mod tests {
         std::fs::write(&path, "volume = 40\n").unwrap();
         auto_seed(&dir.join("config.toml"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "volume = 40\n", "an existing config is untouched");
+        // SQ-0644: the seed lands atomically, so it leaves no temp for the next scan
+        // (or the user) to find, and never a half-written config.toml that exists —
+        // and is therefore never re-seeded — but doesn't parse.
+        assert!(crate::storage::leftover_temps(&dir).is_empty(), "no temp left behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

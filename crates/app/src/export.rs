@@ -36,7 +36,7 @@ pub fn export_transcript(
         std::fs::create_dir_all(parent)?;
     }
     let content = format!("{}\n", lines.join("\n"));
-    std::fs::write(&target, content)?;
+    crate::storage::atomic_write(&target, content.as_bytes())?;
     Ok(target)
 }
 

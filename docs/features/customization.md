@@ -267,11 +267,17 @@ re-seed the new template, or hand-write the new shape from
   your comments.
 - **A broken config file says so.** TOML is parsed as one document, so a single
   stray character — an unclosed quote, a stray bracket — costs you every setting
-  in the file, not just the line it's on. babelmap names the file and shows the
-  parse error at startup instead of quietly running on defaults, and it refuses
-  to save settings over a file it couldn't read, so the text you need in order
-  to find the typo is never overwritten. Fix the file (or move it aside and let
-  babelmap seed a fresh one) and saving resumes.
+  in the file, not just the line it's on. The same is true of a value babelmap
+  can't use (`volume = 300`, `auto_load = "yes"`): the file is valid TOML, but
+  the *config* isn't, and it is dropped just as wholesale. babelmap names the
+  file and shows the error at startup instead of quietly running on defaults,
+  and it refuses to save settings over a file it couldn't read, so the text you
+  need in order to find the mistake is never overwritten. Fix the file (or move
+  it aside and let babelmap seed a fresh one) and saving resumes.
+- **Settings are written atomically.** Every file babelmap owns — `config.toml`,
+  saves and archives, the aux/VFS sidecars — is built beside its target and moved
+  into place in one step, so a crash, a power cut, or a kill during a write leaves
+  the previous file intact rather than a truncated one.
 - **Default story directory** — `default_story_dir` is opened when babelmap is
   launched with no path argument. The first time you point babelmap at a
   directory on the command line without one set, it offers to remember that

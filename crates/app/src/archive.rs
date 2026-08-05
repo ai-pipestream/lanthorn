@@ -260,6 +260,36 @@ struct ScreenDto {
     current_bg: ZColourDto,
 }
 
+/// Upper bound on a restored grid's dimensions (SQ-0647). Well past any real
+/// terminal (ZMSD §11.1 gives the header only a BYTE each for screen height and
+/// width in characters), and low enough that a corrupt `65535 × 65535` cannot ask
+/// for a 4-billion-cell allocation on the way in. A restore reconciles the saved
+/// screen against the current pane anyway (`reconcile_restored_screen_size`), so
+/// clamping here costs a restore nothing it wasn't about to recompute.
+const MAX_GRID_COLS: u16 = 1024;
+const MAX_GRID_ROWS: u16 = 1024;
+
+/// Build an `UpperWindow` from archived dimensions + cells, enforcing the invariant
+/// every consumer assumes: `cells.len() == cols * rows`.
+///
+/// zvm's grid code (`resize_preserving`, and every `r * cols + c` read after it)
+/// indexes straight into `cells`, so a `screen.json` whose vector doesn't match its
+/// own dimensions is a panic waiting for the first repaint after the restore — and
+/// the archive is a file on the player's disk, not a value we produced this run.
+/// Repair rather than reject: the surrounding loader treats a bad `screen.json` as
+/// "no saved screen" (the story repaints), but a grid that is merely the wrong
+/// length still holds the text that was on screen, so pad or truncate it to fit and
+/// keep what's there.
+fn grid_from_dto(cols: u16, rows: u16, mut cells: Vec<zvm::screen::Cell>) -> zvm::screen::UpperWindow {
+    let cols = cols.min(MAX_GRID_COLS);
+    let rows = rows.min(MAX_GRID_ROWS);
+    let want = cols as usize * rows as usize;
+    if cells.len() != want {
+        cells.resize(want, zvm::screen::Cell::default());
+    }
+    zvm::screen::UpperWindow { cols, rows, cells }
+}
+
 impl ScreenDto {
     fn from_screen(s: &zvm::screen::ScreenState) -> Self {
         ScreenDto {
@@ -288,6 +318,12 @@ impl ScreenDto {
         }
     }
 
+    /// Rebuild the live screen from the DTO, REPAIRING anything the file cannot be
+    /// trusted to have got right (SQ-0647). See [`grid_from_dto`]: `screen.json` is a
+    /// file on the player's disk, and a truncated or hand-edited one used to hand zvm
+    /// a grid whose `cells` didn't match its own `cols × rows`, which
+    /// `UpperWindow::resize_preserving` indexes without checking — the first repaint
+    /// after the restore panicked the app.
     fn to_screen(&self) -> zvm::screen::ScreenState {
         zvm::screen::ScreenState {
             upper_window_rows: self.upper_window_rows,
@@ -297,15 +333,14 @@ impl ScreenDto {
             cursor_col: self.cursor_col,
             buffer_mode: self.buffer_mode,
             show_status_requested: self.show_status_requested,
-            upper: zvm::screen::UpperWindow {
-                cols: self.cols,
-                rows: self.rows,
-                cells: self
-                    .cells
+            upper: grid_from_dto(
+                self.cols,
+                self.rows,
+                self.cells
                     .iter()
                     .map(|&(ch, style)| zvm::screen::Cell { ch, style, fg: zvm::screen::ZColour::Default, bg: zvm::screen::ZColour::Default })
                     .collect(),
-            },
+            ),
             v6: self.v6.as_ref().map(V6WindowsDto::to_v6),
             current_fg: self.current_fg.to_z(),
             current_bg: self.current_bg.to_z(),
@@ -404,13 +439,15 @@ impl ZWindowDto {
         for (n, &v) in self.props.iter().enumerate() {
             w.put_prop(n as u16, v);
         }
-        w.grid = zvm::screen::UpperWindow {
-            cols: self.cols,
-            rows: self.rows,
-            cells: self.cells.iter().map(|c| zvm::screen::Cell {
+        // Same repair as the upper window (SQ-0647): a v6 window's grid is indexed by
+        // cols/rows too, so the archived cell count has to be made to match.
+        w.grid = grid_from_dto(
+            self.cols,
+            self.rows,
+            self.cells.iter().map(|c| zvm::screen::Cell {
                 ch: c.ch, style: c.style, fg: c.fg.to_z(), bg: c.bg.to_z(),
             }).collect(),
-        };
+        );
         w.fg = self.fg.to_z();
         w.bg = self.bg.to_z();
         w.texts = self.texts.iter().map(|t| zvm::screen::V6Text {
@@ -433,7 +470,13 @@ impl V6WindowsDto {
         for (i, wd) in self.windows.iter().take(8).enumerate() {
             v.windows[i] = wd.to_window();
         }
-        v.current = self.current;
+        // ZMSD §8.4 has exactly eight v6 windows, and `windows[current]` is a fixed
+        // array index every `Engine::screen()` call performs — an archived `current`
+        // of 9 panicked on the first frame after the restore, not on the load
+        // (SQ-0647). Clamp to the last window rather than refusing the archive: the
+        // window table it names is still good, and the story selects a window again
+        // the moment it draws.
+        v.current = self.current.min(7);
         v
     }
 }
@@ -600,12 +643,15 @@ pub fn save_archive_meta_pics(
     pictures: &[(u8, Vec<u8>)],
     display: Option<&DisplayListDto>,
 ) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let file = std::fs::File::create(path)?;
-    let mut zip = zip::ZipWriter::new(file);
+    // Build the whole ZIP in memory, then land it with ONE atomic write
+    // (SQ-0644). `File::create(path)` truncated the player's archive before a
+    // single byte of the replacement existed — and this is the auto-save path, so
+    // it ran every turn, and again on the way out where a 600 ms exit watchdog can
+    // kill the process mid-write. Nothing touches the disk until the archive is
+    // complete: a crash (or a failed encode) leaves the previous archive readable.
+    // Archives are a few MB at most, so holding one in memory costs nothing worth
+    // trading a save for.
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::<u8>::new()));
     let options =
         zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
@@ -759,8 +805,8 @@ pub fn save_archive_meta_pics(
         }
     }
 
-    zip.finish()?;
-    Ok(())
+    let bytes = zip.finish()?.into_inner();
+    crate::storage::atomic_write(path, &bytes)
 }
 
 /// Read a `.babelmap` archive.
@@ -2027,6 +2073,175 @@ mod tests {
         let ac = load_archive(&path).expect("load");
         let _ = std::fs::remove_file(&path);
         assert!(ac.pictures.is_empty(), "archive without pictures/ → empty pictures");
+    }
+
+    // ── SQ-0644: the archive is written atomically ───────────────────────────
+
+    /// The auto-save rewrites `default.babelmap` EVERY turn, and the quit path can be
+    /// cut short by the exit watchdog — and it used to open the player's archive with
+    /// `File::create`, truncating it before a byte of the replacement existed. A write
+    /// that cannot complete must now leave the previous archive fully readable, which
+    /// a directory that admits no new files proves: the temp sibling can't be created,
+    /// so the save fails outright where the in-place write would have destroyed the
+    /// old archive on its way to the new one.
+    #[test]
+    fn an_interrupted_archive_write_keeps_the_previous_archive() {
+        let dir = std::env::temp_dir().join(format!("babelmap-arch-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("default.babelmap");
+        let machine = dummy_machine();
+        let meta = |turns: u32| Meta {
+            format_version: CURRENT_FORMAT_VERSION, ifid: None, name: None, turns,
+            saved_at: String::new(), location: None, score: None, trigger: SaveTrigger::HostState,
+        };
+        save_archive_meta(&path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen),
+            &machine.aux_data, meta(1), &[], &[], &[], &[], &[], &[]).expect("first save");
+
+        if !crate::storage::deny_new_files_in(&dir) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // platform can't enforce it (or we're root) — skip
+        }
+        let result = save_archive_meta(&path, &small_mapper(), &zvm_es(&machine), Some(&machine.screen),
+            &machine.aux_data, meta(2), &[], &[], &[], &[], &[], &[]);
+        crate::storage::allow_new_files_in(&dir);
+
+        assert!(result.is_err(), "a save that cannot complete must fail, not half-happen");
+        let ac = load_archive(&path).expect("the previous archive is still a loadable archive");
+        assert_eq!(ac.meta.turns, 1, "and it is still the PREVIOUS save, not a stump of the new one");
+        assert_eq!(ac.save, machine.save_quetzal(), "its game bytes are intact");
+        assert!(crate::storage::leftover_temps(&dir).is_empty(), "no temp left behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── SQ-0647: a restored screen is validated, not trusted ─────────────────
+
+    /// `screen.json` is a file on the player's disk; nothing guarantees its `cells`
+    /// vector matches its own `cols × rows`. zvm indexes the grid by those dimensions
+    /// (`UpperWindow::resize_preserving`, and every read after it), so a short vector
+    /// panicked the app on the first repaint AFTER the restore — never on the load,
+    /// where it might have been diagnosed. Repair the grid on the way in instead.
+    #[test]
+    fn a_short_cell_vector_is_repaired_rather_than_left_to_panic() {
+        let mut dto = ScreenDto::from_screen(&zvm::screen::ScreenState::default());
+        dto.cols = 8;
+        dto.rows = 4;
+        dto.cells = vec![('x', 0); 3]; // truncated file: 3 cells for a 32-cell grid
+
+        let mut scr = dto.to_screen();
+        assert_eq!(
+            scr.upper.cells.len(),
+            scr.upper.cols as usize * scr.upper.rows as usize,
+            "the grid invariant every consumer assumes",
+        );
+        assert_eq!(scr.upper.cell(1, 1).ch, 'x', "what the file DID hold is kept");
+        // The first repaint after a restore: a resize to the live pane. Pre-fix this
+        // is the panic (`cells[r * cols + c]` past the end of a 3-cell vector).
+        scr.upper.resize_preserving(4, 6);
+        assert_eq!(scr.upper.cells.len(), 24);
+    }
+
+    /// A too-LONG vector is the same defect from the other side, and absurd dimensions
+    /// are a third: `65535 × 65535` would ask for a four-billion-cell allocation.
+    /// Both are clamped to something a screen could actually be — a restore reconciles
+    /// the saved screen against the current pane anyway.
+    #[test]
+    fn oversized_screen_dimensions_and_vectors_are_clamped() {
+        let mut dto = ScreenDto::from_screen(&zvm::screen::ScreenState::default());
+        dto.cols = 4;
+        dto.rows = 2;
+        dto.cells = vec![('y', 0); 500]; // far more cells than the grid claims
+        let scr = dto.to_screen();
+        assert_eq!(scr.upper.cells.len(), 8, "trimmed to cols × rows");
+
+        let mut dto = ScreenDto::from_screen(&zvm::screen::ScreenState::default());
+        dto.cols = u16::MAX;
+        dto.rows = u16::MAX;
+        dto.cells = Vec::new();
+        let scr = dto.to_screen();
+        assert!(scr.upper.cols <= MAX_GRID_COLS && scr.upper.rows <= MAX_GRID_ROWS, "clamped");
+        assert_eq!(scr.upper.cells.len(), scr.upper.cols as usize * scr.upper.rows as usize);
+    }
+
+    /// ZMSD §8.4 has eight v6 windows and `windows[current]` is a fixed-array index
+    /// that `Engine::screen()` performs on every frame — so an archived `current` of 9
+    /// panicked on the frame after the restore, not on the load. Clamp it.
+    #[test]
+    fn an_out_of_range_current_v6_window_is_clamped() {
+        let mut v6 = zvm::screen::V6Windows::default();
+        v6.current = 3;
+        let src = zvm::screen::ScreenState { v6: Some(v6), ..Default::default() };
+        let mut dto = ScreenDto::from_screen(&src);
+        dto.v6.as_mut().unwrap().current = 9; // hand-edited / corrupt archive
+
+        let rv = dto.to_screen().v6.expect("v6 table restored");
+        assert!((rv.current as usize) < rv.windows.len(), "current indexes a real window");
+        let _ = &rv.windows[rv.current as usize]; // pre-fix: index out of bounds
+    }
+
+    /// End to end: an archive whose `screen.json` carries both defects still loads,
+    /// and what it hands back is safe to drive. The loader's existing contract for a
+    /// bad `screen.json` is tolerance (a corrupt one restores as "no saved screen" and
+    /// the story repaints), so a merely INCONSISTENT one is repaired, not rejected —
+    /// the text it holds is still the text that was on screen.
+    #[test]
+    fn an_archive_with_an_inconsistent_screen_json_loads_and_is_safe() {
+        let machine = dummy_machine();
+        let path = temp_archive_path("screen-corrupt");
+        save_archive_m(&path, &small_mapper(), &machine, &[], &[], &[], &[], &[]).expect("save");
+
+        // Rewrite the archive with a screen.json whose grid and window table lie.
+        let mut v6 = zvm::screen::V6Windows::default();
+        v6.windows[1].grid.resize(2, 3);
+        let src = zvm::screen::ScreenState { v6: Some(v6), ..Default::default() };
+        let mut dto = ScreenDto::from_screen(&src);
+        dto.cols = 20;
+        dto.rows = 5;
+        dto.cells = vec![('q', 0); 2];
+        {
+            let v6d = dto.v6.as_mut().unwrap();
+            v6d.current = 200;
+            v6d.windows[1].cols = 30; // window grid claims 30×9, carries 6 cells
+            v6d.windows[1].rows = 9;
+        }
+        let bad_json = serde_json::to_string(&dto).unwrap();
+
+        let rewritten = temp_archive_path("screen-corrupt-out");
+        {
+            let src_file = std::fs::File::open(&path).unwrap();
+            let mut zin = zip::ZipArchive::new(src_file).unwrap();
+            let out = std::fs::File::create(&rewritten).unwrap();
+            let mut zout = zip::ZipWriter::new(out);
+            for i in 0..zin.len() {
+                let mut e = zin.by_index(i).unwrap();
+                let name = e.name().to_string();
+                let mut buf = Vec::new();
+                e.read_to_end(&mut buf).unwrap();
+                if name == ENTRY_SCREEN {
+                    buf = bad_json.as_bytes().to_vec();
+                }
+                zout.start_file(name, zip::write::SimpleFileOptions::default()).unwrap();
+                zout.write_all(&buf).unwrap();
+            }
+            zout.finish().unwrap();
+        }
+
+        let ac = load_archive(&rewritten).expect("an inconsistent screen.json still loads");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&rewritten);
+
+        let mut scr = ac.screen.expect("screen restored (repaired), not dropped");
+        assert_eq!(scr.upper.cells.len(), scr.upper.cols as usize * scr.upper.rows as usize);
+        let rv = scr.v6.as_ref().expect("v6 table");
+        assert!((rv.current as usize) < rv.windows.len());
+        for w in &rv.windows {
+            assert_eq!(w.grid.cells.len(), w.grid.cols as usize * w.grid.rows as usize, "every v6 grid is consistent");
+        }
+        // Perturb exactly as the next frame would: index the current window and resize
+        // the upper grid to the live pane. Pre-fix, either one panics.
+        let _ = &rv.windows[rv.current as usize];
+        scr.upper.resize_preserving(24, 80);
+        assert_eq!(scr.upper.cells.len(), 24 * 80);
     }
 
     #[test]

@@ -110,9 +110,12 @@ pub fn read_global_aux(game_dir: &Path) -> BTreeMap<String, Vec<u8>> {
 }
 
 /// Write the per-game global aux file (creating `game_dir` if needed).
+///
+/// Atomic (SQ-0644): the aux table is the game's singleton side data, rewritten
+/// whenever the story calls `save table`, so a crash mid-write must leave the
+/// previous table readable rather than a truncated one that decodes to garbage.
 pub fn write_global_aux(game_dir: &Path, table: &BTreeMap<String, Vec<u8>>) -> std::io::Result<()> {
-    std::fs::create_dir_all(game_dir)?;
-    std::fs::write(aux_path(game_dir), encode_aux(table))
+    crate::storage::atomic_write(&aux_path(game_dir), &encode_aux(table))
 }
 
 #[cfg(test)]
@@ -217,6 +220,33 @@ mod tests {
         assert!(read_global_aux(&dir).is_empty(), "absent file → empty");
         write_global_aux(&dir, &sample()).unwrap();
         assert_eq!(read_global_aux(&dir), sample());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0644: a write that cannot complete must leave the PREVIOUS aux table on
+    /// disk. `fs::write` truncated `default.aux` first, so a crash between truncate
+    /// and write cost the story every table it had ever saved. A directory that
+    /// admits no new files proves the temp-then-rename path: the write fails outright
+    /// rather than half-happening (an in-place `fs::write` would have succeeded).
+    #[test]
+    fn an_interrupted_aux_write_keeps_the_previous_table() {
+        let dir = std::env::temp_dir().join(format!("babelmap-aux-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_global_aux(&dir, &sample()).unwrap();
+
+        if !crate::storage::deny_new_files_in(&dir) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // platform can't enforce it (or we're root) — skip
+        }
+        let mut next = BTreeMap::new();
+        next.insert("XY".to_string(), vec![1, 2, 3]);
+        let result = write_global_aux(&dir, &next);
+        crate::storage::allow_new_files_in(&dir);
+
+        assert!(result.is_err(), "a write that cannot complete must fail, not half-happen");
+        assert_eq!(read_global_aux(&dir), sample(), "the previous table is still readable");
+        assert!(crate::storage::leftover_temps(&dir).is_empty(), "no temp left behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

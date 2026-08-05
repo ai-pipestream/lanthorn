@@ -71,9 +71,12 @@ pub fn read_pcs(game_dir: &Path) -> HashSet<u32> {
 }
 
 /// Write the per-game executed-PC sidecar (creating `game_dir` if needed).
+///
+/// Atomic (SQ-0644): temp-then-rename, so an interrupted write cannot leave a
+/// truncated `default.pcs` behind (the decoder would silently read it as partial
+/// coverage, quietly losing lines the inspector had already marked executed).
 pub fn write_pcs(game_dir: &Path, set: &HashSet<u32>) -> std::io::Result<()> {
-    std::fs::create_dir_all(game_dir)?;
-    std::fs::write(pcs_path(game_dir), encode(set))
+    crate::storage::atomic_write(&pcs_path(game_dir), &encode(set))
 }
 
 #[cfg(test)]
@@ -146,6 +149,30 @@ mod tests {
         assert!(read_pcs(&dir).is_empty(), "absent file → empty");
         write_pcs(&dir, &sample()).unwrap();
         assert_eq!(read_pcs(&dir), sample());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// SQ-0644: the decoder is deliberately tolerant of truncation, so a half-written
+    /// `default.pcs` reads back as PARTIAL coverage — silently losing lines the
+    /// inspector had already marked executed, with nothing to say it happened. The
+    /// write is temp-then-rename, so an interrupted one keeps the old set instead.
+    #[test]
+    fn an_interrupted_pcs_write_keeps_the_previous_set() {
+        let dir = std::env::temp_dir().join(format!("babelmap-pcs-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_pcs(&dir, &sample()).unwrap();
+
+        if !crate::storage::deny_new_files_in(&dir) {
+            let _ = std::fs::remove_dir_all(&dir);
+            return; // platform can't enforce it (or we're root) — skip
+        }
+        let result = write_pcs(&dir, &HashSet::from([0x99u32]));
+        crate::storage::allow_new_files_in(&dir);
+
+        assert!(result.is_err(), "a write that cannot complete must fail, not half-happen");
+        assert_eq!(read_pcs(&dir), sample(), "the previous coverage set is still readable");
+        assert!(crate::storage::leftover_temps(&dir).is_empty(), "no temp left behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
