@@ -184,6 +184,20 @@ pub fn draw_room_info(
 /// of the room object (or children of containers in the room). We list only the
 /// direct children here (one level deep), which covers visible items on the floor.
 pub(crate) fn list_room_objects(mem: &zvm::memory::Memory, room_id: RoomId) -> Vec<String> {
+    list_room_objects_excluding(mem, room_id, 0)
+}
+
+/// Same traversal as [`list_room_objects`], but skipping the child whose
+/// object id is `exclude` (0 excludes nothing — 0 is never a valid object
+/// id). Used to keep the player object out of the command band's "here"
+/// column (SQ-0667): filtering by id here, during the same walk that builds
+/// the names, is what makes the exclusion exact rather than a fragile
+/// name-match against whatever the player object happens to be called.
+pub(crate) fn list_room_objects_excluding(
+    mem: &zvm::memory::Memory,
+    room_id: RoomId,
+    exclude: u16,
+) -> Vec<String> {
     // Name-only rooms have no backing object; never read the object table by a
     // synthetic id (it would be outside the table).
     if crate::roomid::is_synthetic_room(room_id) {
@@ -193,9 +207,11 @@ pub(crate) fn list_room_objects(mem: &zvm::memory::Memory, room_id: RoomId) -> V
     let mut result = Vec::new();
     let mut child = get_child(mem, room_id);
     while child != 0 {
-        let name = short_name(mem, child);
-        if !name.is_empty() {
-            result.push(name);
+        if child != exclude {
+            let name = short_name(mem, child);
+            if !name.is_empty() {
+                result.push(name);
+            }
         }
         child = get_sibling(mem, child);
     }

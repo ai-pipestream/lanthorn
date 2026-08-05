@@ -893,7 +893,11 @@ fn draw_frame(
         let help_text = if state.overlays.config_screen.is_some() {
             "\u{2191}\u{2193} move  \u{2190}\u{2192}/Space change  s save  Esc cancel".to_string()
         } else if state.overlays.command_band.is_some() && !state.resize_mode {
-            "Command Band | \u{2190}\u{2192}: column | \u{2191}\u{2193}: row | type: filter | Enter: pick/send | Tab: story | Esc: back"
+            // SQ-0667 (2026-08-05): Enter only ever PICKS now — the band's own
+            // phrase line (and its "Enter sends when armed" branch) is retired;
+            // sending is the ordinary Enter on the real prompt after Tab. Quick
+            // words are the one exception, firing at once, no Enter.
+            "Command Band | \u{2190}\u{2192}: column | \u{2191}\u{2193}: row | type: filter | Enter: pick | quick row: sends at once | Tab: story, Enter to send | Esc: back"
                 .to_string()
         } else if state.overlays.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
             "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc: cancel".to_string()
@@ -1012,9 +1016,12 @@ fn draw_frame(
 /// the event does not belong to the band (it is outside its rect, or the band is
 /// closed) and must fall through to the game / map / story handling.
 ///
-/// Everything visible in the band is clickable: a row picks and advances, a
-/// header focuses its column, a quick word fills the phrase, and the phrase line
-/// sends when armed. The wheel scrolls whichever column is under the pointer.
+/// Everything visible in the band is clickable: a row picks and advances (and
+/// composes onto the real story input line — SQ-0667, 2026-08-05), a header
+/// focuses its column, and a quick word fires its command AT ONCE (the one
+/// exception to "picks compose, they don't submit"). The wheel scrolls
+/// whichever column is under the pointer. There is no more phrase line to
+/// click — sending is just the ordinary Enter on the real input line now.
 fn band_mouse_action(
     state: &AppState,
     panes: &PaneRects,
@@ -1051,9 +1058,6 @@ fn band_mouse_action(
             }
             if let Some((i, _)) = hits.quick.iter().find(|(_, r)| inside(r)).copied() {
                 return Some(Action::BandQuickPick(i));
-            }
-            if hits.phrase.as_ref().is_some_and(inside) {
-                return Some(app::input::band_enter_action(state));
             }
             if let Some((col, _)) = hits.headers.iter().find(|(_, r)| inside(r)).copied() {
                 return Some(Action::BandFocusCol(col));
@@ -2512,9 +2516,12 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             // straight through to the handling below, unchanged.
             Event::Mouse(m) if band_mouse_action(&state, &last_panes, m).is_some() => {
                 match band_mouse_action(&state, &last_panes, m) {
-                    // A click on an armed phrase line sends, through the same
-                    // path a typed command takes.
-                    Some(send @ Action::SubmitText(_)) => send,
+                    // A quick-row click fires AT ONCE (SQ-0667, 2026-08-05) —
+                    // routed to `action` so it reaches the shared submit arm
+                    // below, the same as `Action::SubmitCommand`; resolving
+                    // the word and touching the session is not something
+                    // `apply_action` can do.
+                    Some(pick @ Action::BandQuickPick(_)) => pick,
                     Some(other) => {
                         apply_action(other, &mut state, &mut mapper);
                         continue 'event_loop;
@@ -2815,7 +2822,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 continue;
             }
 
-            Action::SubmitCommand(_) | Action::SubmitText(_) => {
+            Action::SubmitCommand(_) | Action::BandQuickPick(_) => {
                 // A Glulx game waiting on a timer/mouse/hyperlink event only has no
                 // line request pending: Enter has nothing to submit. Swallow it
                 // (keeping the typed buffer intact for the real prompt) rather than
@@ -2827,18 +2834,21 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 // Normal game-focus command submission.
                 // Clear input line and echo command.
                 //
-                // `SubmitText` carries its own text — the command band's phrase,
-                // materialized to plain words — and deliberately does NOT consume
-                // the story input line, which may hold a half-typed command the
-                // player wrote after Tab-ing across (SQ-0664). From here on the
-                // two are indistinguishable: same history, same slash routing,
-                // same turn. The band clears its phrase and stays open.
+                // The command band composes directly onto `state.input` now
+                // (SQ-0667, 2026-08-05), so an ordinary `SubmitCommand` already
+                // carries whatever the band composed — `state.take_input()`
+                // below is the whole story for it, same as anything typed by
+                // hand. `BandQuickPick` is the one exception: a quick-row pick
+                // fires AT ONCE, composing nothing onto the input line (an
+                // interjection, not a composition step — `state.input` is left
+                // exactly as it was, even mid-phrase), so its word is resolved
+                // separately here instead.
                 let cmd = match &action {
-                    Action::SubmitText(t) => {
-                        if let Some(b) = &mut state.overlays.command_band {
-                            b.clear_phrase();
+                    Action::BandQuickPick(idx) => {
+                        match app::input::band_quick_pick_command(&state, *idx) {
+                            Some(w) => w,
+                            None => continue, // stale index — band closed/reconfigured mid-click
                         }
-                        t.clone()
                     }
                     _ => state.take_input(),
                 };

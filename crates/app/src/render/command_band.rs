@@ -12,30 +12,34 @@
 //! * It is **not a modal**. The story prompt stays live, paste keeps working,
 //!   graphical v6 stays on the pixel path, and only clicks inside the band's
 //!   own rect are taken from the game.
-//! * Nothing auto-submits. A grammatically complete phrase *arms* the phrase
-//!   line; Enter (or a click on it) is what sends it.
+//! * A column pick composes directly onto the REAL story input line
+//!   (`state.input`), not a band-local phrase row — retired 2026-08-05
+//!   (SQ-0667) along with the band's own frame and its VERB column header;
+//!   see the module doc in `crate::state` (`CommandBandState`) for how the
+//!   mirroring works and `docs/design/2026-08-05-verb-panel-redesign.md` for
+//!   why. Nothing auto-submits: composing still never fires a turn by
+//!   itself — Enter on the real prompt is the confirm, same as anything
+//!   typed by hand. The ONE exception is the quick row: a quick pick fires
+//!   at once, no Enter (the immediate-fire half of the same amendment).
 //!
 //! ```text
-//! ┌ Command ─────────────────────────────────────────────────────────────────┐
-//! │ > unlock iron door with _                                    Enter: send │
-//! │  VERB          WHAT — here        WHAT — carried       WITH…             │
-//! │   look          window             brass key           ▸brass key        │
-//! │  ▸unlock       ▸iron door          lantern              lantern          │
-//! │  n s e w · up down · in out · look inventory wait again       one-click  │
-//! └──────────────────────────────────────────────────────────────────────────┘
+//!                  WHAT — here        WHAT — carried       WITH…
+//!   look            window             brass key           ▸brass key
+//!  ▸unlock         ▸iron door          lantern              lantern
+//!  n s e w · up down · in out · look inventory wait again
 //! ```
 //!
-//! The caller (`main.rs`) sizes `area` from the animated `PanelSlide` fraction,
-//! so `area` may be shorter than the band's target height while a slide is in
-//! flight — everything here clips to `area`.
+//! (The `> unlock iron door with _` prompt line above this strip in the
+//! mockup is the ordinary story input, drawn elsewhere — not part of this
+//! module anymore.) The caller (`main.rs`) sizes `area` from the animated
+//! `PanelSlide` fraction, so `area` may be shorter than the band's target
+//! height while a slide is in flight — everything here clips to `area`.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use super::paneframe::{InsetSegment, PaneGlyphs};
-use crate::render::panel::{draw_panel, PanelSpec, PanelStrip};
-use crate::state::{AppState, BandFocus};
+use crate::state::AppState;
 
 // ── Grammar: the arity table ─────────────────────────────────────────────────
 
@@ -158,10 +162,15 @@ pub const COL_SECOND: usize = 3;
 
 // ── Geometry ─────────────────────────────────────────────────────────────────
 
-/// Rows the band occupies when fully open, including its frame: the configured
-/// `height`, clamped to [`MIN_BAND_ROWS`]..=[`MAX_BAND_ROWS`] and then to what
-/// the screen can actually spare (never more than half of it, and never so much
-/// that the story pane is left with nothing). 0 when the band isn't visible.
+/// Rows the band occupies when fully open: the configured `height`, clamped
+/// to [`MIN_BAND_ROWS`]..=[`MAX_BAND_ROWS`] and then to what the screen can
+/// actually spare (never more than half of it, and never so much that the
+/// story pane is left with nothing). 0 when the band isn't visible.
+///
+/// Post-SQ-0667 there is no frame and no phrase line, so every row here is
+/// content — unlike the pre-amendment band, which spent 3 of its 8 default
+/// rows on chrome (a 2-row border plus the phrase line) before a single verb
+/// was visible.
 pub fn band_target_height(visible: bool, full_height: u16, rows: u16) -> u16 {
     if !visible {
         return 0;
@@ -172,12 +181,14 @@ pub fn band_target_height(visible: bool, full_height: u16, rows: u16) -> u16 {
     want.min(hi)
 }
 
-/// Smallest useful band: frame + phrase + headers + one list row + quick row.
-pub const MIN_BAND_ROWS: u16 = 5;
+/// Smallest useful band: headers + one list row + quick row.
+pub const MIN_BAND_ROWS: u16 = 3;
 /// Largest band the config may ask for.
-pub const MAX_BAND_ROWS: u16 = 14;
-/// The shipped default band height, in rows (including the frame).
-pub const DEFAULT_BAND_ROWS: u16 = 8;
+pub const MAX_BAND_ROWS: u16 = 11;
+/// The shipped default band height, in rows. 5, not the pre-SQ-0667 8 — the
+/// band lost its 2-row frame and 1-row phrase line, and this is picked to
+/// show exactly as many list rows as the old default did (3).
+pub const DEFAULT_BAND_ROWS: u16 = 5;
 
 /// The reserved band height in rows: `target_h` scaled by the slide's current
 /// `fraction` (0.0 closed .. 1.0 fully open). Mirrors `inventory_dock_height`.
@@ -212,6 +223,13 @@ pub fn column_rects(content: Rect) -> Vec<Rect> {
 /// `here` to the transcript scrape, flagged `here_is_seen` so the column labels
 /// itself "seen" rather than passing a scrape off as the room's contents.
 ///
+/// `here` excludes the player object itself (SQ-0667) — it is structurally a
+/// child of whatever room the player is in, so without this it would show up
+/// in every room of every game (Zork 1 lists "cretin", the adventurer's own
+/// printed name). Excluded by id (`room_objects_excluding`), not by matching
+/// the name, which could coincidentally collide with a real scenery object.
+/// `examine me` still works by typing it; there is no dedicated row for it.
+///
 /// Returns `true` when the lists actually changed (→ repaint).
 pub fn refresh_objects(state: &mut AppState, session: &dyn crate::engine::Engine) -> bool {
     if state.overlays.command_band.is_none() {
@@ -224,7 +242,7 @@ pub fn refresh_objects(state: &mut AppState, session: &dyn crate::engine::Engine
 
     let (here, carried, seen) = match session.introspect() {
         Some(intro) => {
-            let here = if loc != 0 { intro.room_objects(loc) } else { Vec::new() };
+            let here = if loc != 0 { intro.room_objects_excluding(loc, player) } else { Vec::new() };
             let carried = match player {
                 Some(p) => intro.contents(p),
                 None => state.inventory_fallback.clone(),
@@ -252,8 +270,6 @@ pub struct CommandBandHits {
     /// The band's whole rect — clicks inside it belong to the band and must not
     /// reach the story pane / the v6 game.
     pub area: Rect,
-    /// The phrase line (sends when armed).
-    pub phrase: Option<Rect>,
     /// Column header rects, by column index (focuses that column).
     pub headers: Vec<(usize, Rect)>,
     /// Item rows, as `(column, index-within-the-filtered-list, rect)`.
@@ -283,12 +299,23 @@ pub fn draw_command_band(
     let Some(band) = &state.overlays.command_band else { return };
     hits.area = area;
 
-    if area.width < 8 || area.height < 3 {
+    if area.width < 8 || area.height == 0 {
         return;
     }
 
     let theme = &state.colors.theme;
-    let base = theme.get("dialog.background").style;
+    // Borderless strip (SQ-0667, 2026-08-05): the band's 2-row frame and its
+    // "Command" title are gone — the fill below is now the band's ONLY
+    // visual separation from the story pane above it. Resize mode still
+    // needs some affordance that the band is the live target; with no border
+    // left to accent, the whole fill picks up `panel.border:active` instead.
+    let resize_hl =
+        state.resize_mode && state.resize_target == crate::state::ResizeTarget::CommandBand;
+    let base = if resize_hl {
+        theme.get("panel.border:active").style
+    } else {
+        theme.get("dialog.background").style
+    };
 
     // Opaque fill first, so panes behind never show through mid-slide.
     for y in area.y..area.bottom() {
@@ -299,48 +326,10 @@ pub fn draw_command_band(
         }
     }
 
-    // The frame follows `panel.border`, picking up the `:active` accent while
-    // resize mode is targeting the band (SQ-0238's affordance, retargeted).
-    let resize_hl =
-        state.resize_mode && state.resize_target == crate::state::ResizeTarget::CommandBand;
-    let (border_selector, border_color) = if resize_hl {
-        ("panel.border:active", theme.get("panel.border:active").style)
-    } else {
-        ("panel.border", base)
-    };
-    let spec = PanelSpec {
-        area,
-        border_selector,
-        border_color: Some(border_color),
-        border_style: None,
-        glyphs: &PaneGlyphs::default(),
-        header_on: true,
-        strip: Some(PanelStrip {
-            segments: &[InsetSegment { text: "Command", active: false }],
-            base,
-            active: base,
-        }),
-        body_fill: None,
-    };
-    let frame = draw_panel(buf, &spec, theme);
-
-    let content = frame.content;
-    if content.height == 0 || content.width < 4 {
-        return;
-    }
-
-    // ── Phrase line (always the top content row) ──────────────────────────────
-    let phrase_area = Rect { x: content.x, y: content.y, width: content.width, height: 1 };
-    draw_phrase_line(state, band, phrase_area, buf, base);
-    hits.phrase = Some(phrase_area);
-
-    if content.height < 2 {
-        *vp_out = 0;
-        return;
-    }
+    let content = area;
 
     // ── Quick row (always the bottom content row, when there is one) ──────────
-    let has_quick = content.height >= 3 && !band.quick.is_empty();
+    let has_quick = content.height >= 2 && !band.quick.is_empty();
     if has_quick {
         let quick_area =
             Rect { x: content.x, y: content.bottom() - 1, width: content.width, height: 1 };
@@ -348,26 +337,17 @@ pub fn draw_command_band(
     }
 
     // ── Columns ──────────────────────────────────────────────────────────────
-    let cols_top = content.y + 1;
     let cols_bottom = if has_quick { content.bottom() - 1 } else { content.bottom() };
-    if cols_bottom <= cols_top {
+    if cols_bottom <= content.y {
         *vp_out = 0;
         return;
     }
-    let cols_area = Rect {
-        x: content.x,
-        y: cols_top,
-        width: content.width,
-        height: cols_bottom - cols_top,
-    };
+    let cols_area =
+        Rect { x: content.x, y: content.y, width: content.width, height: cols_bottom - content.y };
     let rects = column_rects(cols_area);
     if rects.is_empty() {
         // Too narrow for four columns: show only the active one, full width.
-        let active = match band.focus {
-            BandFocus::Column(c) => c,
-            BandFocus::Phrase => COL_VERB,
-        };
-        draw_column(state, band, active, cols_area, buf, base, vp_out, hits);
+        draw_column(state, band, band.focus, cols_area, buf, base, vp_out, hits);
         return;
     }
 
@@ -378,55 +358,9 @@ pub fn draw_command_band(
     }
 }
 
-/// The phrase under construction, plus the send affordance on the right.
-fn draw_phrase_line(
-    state: &AppState,
-    band: &crate::state::CommandBandState,
-    area: Rect,
-    buf: &mut Buffer,
-    base: Style,
-) {
-    let theme = &state.colors.theme;
-    let armed = band.complete();
-    let phrase_style = base.patch(
-        theme.get(if armed { "band.phrase:armed" } else { "band.phrase" }).style,
-    );
-
-    for x in area.x..area.right() {
-        if let Some(cell) = buf.cell_mut((x, area.y)) {
-            cell.set_symbol(" ").set_style(phrase_style);
-        }
-    }
-
-    let text = band.phrase_text();
-    // The caret shows where the next token lands; the filter (if any) is shown
-    // in place of it, so type-to-filter is visible on the phrase line too.
-    let tail = if !band.filter.is_empty() {
-        format!("{}_", band.filter)
-    } else {
-        "_".to_string()
-    };
-    let line = if text.is_empty() {
-        format!("> {tail}")
-    } else {
-        format!("> {text} {tail}")
-    };
-    crate::render::draw_str_clipped(buf, area.x, area.y, &line, phrase_style, area);
-
-    // Right-aligned send hint. Only meaningful once the phrase is complete, but
-    // the slot is always reserved so the line doesn't jump.
-    let hint = if armed { "Enter: send" } else { "" };
-    if !hint.is_empty() {
-        let w = hint.chars().count() as u16;
-        if area.width > w + 4 {
-            let x = area.right() - w;
-            crate::render::draw_str_clipped(buf, x, area.y, hint, phrase_style, area);
-        }
-    }
-}
-
-/// The one-click quick-action row. Per decision 2 these FILL the phrase; they
-/// never fire a turn on their own.
+/// The one-click quick-action row. SQ-0667 amendment (2026-08-05): unlike
+/// every other pick, these fire AT ONCE — no Enter, and they don't compose
+/// onto the input line either (see `input::band_quick_pick_command`).
 fn draw_quick_row(
     band: &crate::state::CommandBandState,
     area: Rect,
@@ -470,7 +404,7 @@ fn draw_column(
     }
     let theme = &state.colors.theme;
     let reachable = band.col_reachable(col);
-    let active = !band.story_focused && band.focus == BandFocus::Column(col);
+    let active = !band.story_focused && band.focus == col;
 
     let header_style = base.patch(
         theme.get(if active { "band.column_header:active" } else { "band.column_header" }).style,
@@ -481,7 +415,16 @@ fn draw_column(
             cell.set_symbol(" ").set_style(header_style);
         }
     }
-    let label = format!("{}{}", if active { "▸" } else { " " }, band.column_label(col));
+    // The VERB column carries no header text (SQ-0667): a bare column of
+    // verbs is self-evident, and WHAT/WITH keep theirs because they carry
+    // real information (here vs. carried, and the pair verb's preposition).
+    // The active marker survives on its own even for VERB, so the keyboard
+    // focus is still visible without a label to attach it to.
+    let label = if col == COL_VERB {
+        if active { "▸".to_string() } else { String::new() }
+    } else {
+        format!("{}{}", if active { "▸" } else { " " }, band.column_label(col))
+    };
     crate::render::draw_str_clipped(buf, header_area.x, header_area.y, &label, header_style, header_area);
     hits.headers.push((col, header_area));
 
@@ -503,14 +446,19 @@ fn draw_column(
     let items = band.filtered_items(col);
     let label_style = base.patch(theme.get("band.group_label").style);
     if items.is_empty() {
-        crate::render::draw_str_clipped(
-            buf,
-            list_area.x,
-            list_area.y,
-            "(nothing visible)",
-            label_style,
-            list_area,
-        );
+        // Column-specific wording (SQ-0667, following the SQ-0668 data fix
+        // that made an empty carried/here column a real possibility rather
+        // than blank space that reads as broken): "(nothing visible)" stays
+        // the fallback for VERB/SECOND, which are never truly this empty in
+        // practice (VERB always has the built-in table; SECOND only opens
+        // once a pair verb's first object is picked, from the union of the
+        // very lists this message would otherwise be reporting on for).
+        let msg = match col {
+            COL_HERE => "(nothing here)",
+            COL_CARRIED => "(nothing carried)",
+            _ => "(nothing visible)",
+        };
+        crate::render::draw_str_clipped(buf, list_area.x, list_area.y, msg, label_style, list_area);
         return;
     }
 
@@ -589,9 +537,10 @@ mod tests {
         let s = state_with_band();
         draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
         let out = dump(&buf);
-        assert!(out.contains("Command"), "title strip");
-        assert!(out.contains("look"), "a verb");
-        assert!(out.contains("VERB"), "the verb column header");
+        // `take`, not `look` — `look` is in the default quick row, so SQ-0667
+        // excludes it from the VERB column (see
+        // `verb_column_excludes_quick_words` in `state.rs`).
+        assert!(out.contains("take"), "a verb");
         assert!(out.contains("carried"), "the carried column header");
     }
 
@@ -623,8 +572,13 @@ mod tests {
         assert!(hits.rows.iter().any(|(c, _, _)| *c == COL_HERE));
     }
 
+    /// SQ-0667 (2026-08-05): the band no longer draws its own frame, title, or
+    /// phrase line — composing now happens on the real story input line
+    /// (`state.input`), drawn elsewhere. Falsifies against the pre-amendment
+    /// band, which drew "Command" in a title strip and "Enter: send" on a
+    /// dedicated phrase row.
     #[test]
-    fn phrase_line_arms_and_shows_the_send_hint() {
+    fn band_no_longer_draws_a_frame_or_phrase_line() {
         let mut s = state_with_band();
         {
             let b = s.overlays.command_band.as_mut().unwrap();
@@ -633,20 +587,23 @@ mod tests {
         let mut buf = Buffer::empty(BAND);
         draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
         let out = dump(&buf);
-        assert!(out.contains("> look"), "phrase line shows the picked verb");
-        assert!(out.contains("Enter: send"), "a complete phrase arms the line");
+        assert!(!out.contains("Command"), "the title strip is retired along with the frame");
+        assert!(!out.contains("Enter: send"), "the armed/send affordance moved to the real prompt");
+        assert!(!out.contains('┌') && !out.contains('└'), "no border corners — a borderless strip");
     }
 
+    /// SQ-0667: the VERB column shows no header text (it's self-evident); the
+    /// object columns keep theirs, since WHAT/WITH carry real information.
     #[test]
-    fn incomplete_phrase_has_no_send_hint() {
-        let mut s = state_with_band();
-        {
-            let b = s.overlays.command_band.as_mut().unwrap();
-            b.pick_word("unlock");
-        }
+    fn verb_column_header_carries_no_text() {
+        let s = state_with_band();
         let mut buf = Buffer::empty(BAND);
-        draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
-        assert!(!dump(&buf).contains("Enter: send"), "a pair verb alone is not armed");
+        let mut hits = CommandBandHits::default();
+        draw_command_band(&s, BAND, &mut buf, &mut 0, &mut hits);
+        assert!(!dump(&buf).contains("VERB"), "the VERB label is gone");
+        // The header ROW still exists (and is still clickable) for every
+        // column, VERB included — only its text was dropped.
+        assert_eq!(hits.headers.len(), BAND_COLS, "every column still has a clickable header row");
     }
 
     #[test]
@@ -669,7 +626,6 @@ mod tests {
         let mut hits = CommandBandHits::default();
         draw_command_band(&s, BAND, &mut buf, &mut 0, &mut hits);
         assert!(!hits.quick.is_empty(), "quick words emit hit rects");
-        assert!(hits.phrase.is_some(), "the phrase line emits a hit rect");
         assert_eq!(hits.headers.len(), BAND_COLS, "every column header is clickable");
     }
 
@@ -685,6 +641,39 @@ mod tests {
         draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
         let out = dump(&buf);
         assert!(out.contains("seen"), "the scraped fallback labels itself 'seen'");
+    }
+
+    /// A genuinely empty carried/here column must say so explicitly, not
+    /// render as blank space that reads as broken (SQ-0668 made an empty
+    /// column, with real data now behind it, an actual possibility — not
+    /// just a scrape-fallback artifact).
+    #[test]
+    fn empty_object_columns_say_so() {
+        let mut s = state_with_band();
+        {
+            let b = s.overlays.command_band.as_mut().unwrap();
+            b.here = Vec::new();
+            b.carried = Vec::new();
+            b.pick_word("take");
+        }
+        let mut buf = Buffer::empty(BAND);
+        draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
+        let out = dump(&buf);
+        assert!(out.contains("nothing here"), "the here column says it's empty: {out}");
+        assert!(out.contains("nothing carried"), "the carried column says it's empty: {out}");
+    }
+
+    /// …and the message is gone the moment either column actually has
+    /// something in it — falsifies against always showing the empty row.
+    #[test]
+    fn nonempty_object_columns_do_not_say_empty() {
+        let mut s = state_with_band(); // here/carried both non-empty by construction
+        s.overlays.command_band.as_mut().unwrap().pick_word("take");
+        let mut buf = Buffer::empty(BAND);
+        draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
+        let out = dump(&buf);
+        assert!(!out.contains("nothing here"), "the here column has objects: {out}");
+        assert!(!out.contains("nothing carried"), "the carried column has objects: {out}");
     }
 
     #[test]
@@ -726,11 +715,16 @@ mod tests {
         let mut buf = Buffer::empty(BAND);
         let mut hits = CommandBandHits::default();
         draw_command_band(&s, BAND, &mut buf, &mut 0, &mut hits);
-        assert!(hits.phrase.is_none());
+        assert!(hits.headers.is_empty());
     }
 
+    /// SQ-0667: the band no longer draws `panel.border` — there is no frame
+    /// left for it to style. Falsifies against the pre-amendment band, which
+    /// drew a real box in whatever `panel.border` configured (a custom
+    /// `style = "double"` used to paint a "╔" at the top-left corner; there
+    /// is no corner left to paint).
     #[test]
-    fn band_follows_panel_border_style() {
+    fn band_no_longer_draws_a_border() {
         let scheme = crate::colors::GhosttyScheme::default();
         let parsed =
             crate::theme::toml_schema::parse("[panel]\nborder = { style = \"double\" }\n").unwrap();
@@ -738,7 +732,29 @@ mod tests {
         s.colors.theme = crate::theme::resolve::resolve_theme(&scheme, &parsed);
         let mut buf = Buffer::empty(BAND);
         draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
-        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "╔", "double top-left corner");
+        assert_ne!(buf.cell((0, 0)).unwrap().symbol(), "╔", "no border corner is drawn anymore");
+    }
+
+    /// Resize mode still needs SOME affordance that the band is the live
+    /// target now that there's no border left to accent (SQ-0667) — the
+    /// whole fill tints with `panel.border:active` instead.
+    #[test]
+    fn resize_mode_tints_the_whole_fill_with_no_border_left_to_accent() {
+        let s_normal = state_with_band();
+        let mut buf_normal = Buffer::empty(BAND);
+        draw_command_band(&s_normal, BAND, &mut buf_normal, &mut 0, &mut CommandBandHits::default());
+
+        let mut s_resize = state_with_band();
+        s_resize.resize_mode = true;
+        s_resize.resize_target = crate::state::ResizeTarget::CommandBand;
+        let mut buf_resize = Buffer::empty(BAND);
+        draw_command_band(&s_resize, BAND, &mut buf_resize, &mut 0, &mut CommandBandHits::default());
+
+        assert_ne!(
+            buf_normal.cell((0, 0)).unwrap().style(),
+            buf_resize.cell((0, 0)).unwrap().style(),
+            "resize mode visibly tints the band's fill, with no border left to accent instead"
+        );
     }
 
     #[test]
@@ -775,5 +791,36 @@ mod tests {
                 assert!(v.prep.is_some(), "pair verb `{}` needs a preposition", v.word);
             }
         }
+    }
+
+    /// SQ-0667: the VERB column excludes anything already one click away on
+    /// the quick row — showing it twice is redundant. Falsifies against HEAD,
+    /// where `items(COL_VERB)` is just the raw verb table.
+    #[test]
+    fn verb_column_excludes_quick_words() {
+        let band = CommandBandState::new(default_verbs(), default_quick());
+        let items = band.items(COL_VERB);
+        assert!(!items.contains(&"look".to_string()), "`look` is in the default quick row");
+        assert!(!items.contains(&"wait".to_string()));
+        assert!(!items.contains(&"again".to_string()));
+        assert!(!items.contains(&"inventory".to_string()));
+        // The compass survives: the two rows spell it differently (quick says
+        // `n s e w`, the table says `north south east west`), so there is no
+        // literal duplicate to exclude.
+        assert!(items.contains(&"north".to_string()), "`north` survives — quick spells it `n`");
+        assert!(items.contains(&"take".to_string()), "an ordinary verb is unaffected");
+    }
+
+    /// The exclusion is config-aware: it follows the EFFECTIVE `quick` list
+    /// (the user's custom one when set), not the built-in row. Removing a
+    /// word from a custom `quick` puts it back in the VERB column.
+    #[test]
+    fn verb_column_exclusion_follows_a_custom_quick_list() {
+        let mut band = CommandBandState::new(default_verbs(), vec!["take".to_string()]);
+        assert!(!band.items(COL_VERB).contains(&"take".to_string()), "custom quick excludes `take`");
+        assert!(band.items(COL_VERB).contains(&"look".to_string()), "…and un-excludes `look`, no longer in quick");
+
+        band.quick.clear();
+        assert!(band.items(COL_VERB).contains(&"take".to_string()), "removed from quick -> back in VERB");
     }
 }

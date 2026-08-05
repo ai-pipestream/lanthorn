@@ -399,6 +399,13 @@ pub trait Introspect {
     fn contents(&self, container: u16) -> Vec<String>;
     /// The objects located directly in `room`, formatted for the inspector.
     fn room_objects(&self, room: u16) -> Vec<String>;
+    /// Same as [`Self::room_objects`], but omitting `exclude` (the command
+    /// band's "here" column passes the player object — SQ-0667). The player
+    /// object is structurally a child of whatever room they're in, so
+    /// without this it would show up in every room of every game; excluded
+    /// by id, deliberately not by name (a scenery object could coincidentally
+    /// share the player's printed name).
+    fn room_objects_excluding(&self, room: u16, exclude: Option<u16>) -> Vec<String>;
     /// The object handles whose parent is `parent` (drives inventory tracking).
     fn children_of(&self, parent: u16) -> std::collections::BTreeSet<u16>;
     /// The player object, if it can be identified.

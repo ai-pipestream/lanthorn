@@ -129,6 +129,36 @@ fn seed_player_obj(state: &mut AppState, session: &GameSession) {
     }
 }
 
+/// The player object is a child of whatever room they're in, so without an
+/// explicit id-based exclusion it would show up in every room's *here*
+/// column (Zork 1's player object prints as "cretin"). SQ-0667:
+/// `refresh_objects` excludes it by id via `Introspect::room_objects_excluding`
+/// — falsify by reverting the `refresh_objects` call site back to the plain
+/// `room_objects` it used before.
+#[test]
+fn the_player_object_is_excluded_from_here() {
+    let Some(mut session) = boot_zmachine("minizork-r34-s871124.z3") else { return };
+    let mut state = AppState::default();
+    open_band(&mut state);
+    session.submit("look");
+    seed_player_obj(&mut state, &session);
+    assert!(state.player_obj.is_some(), "a Z-machine story always finds the player object");
+
+    refresh_objects(&mut state, &session);
+    let here = state.overlays.command_band.as_ref().unwrap().here.clone();
+
+    let loc = session.current_location().unwrap().number;
+    let unfiltered = session.introspect().unwrap().room_objects(loc);
+    assert_eq!(
+        unfiltered.len(),
+        here.len() + 1,
+        "exactly the player object should be missing from the filtered list: \
+         unfiltered={unfiltered:?} filtered(here)={here:?}"
+    );
+    let extra: Vec<&String> = unfiltered.iter().filter(|o| !here.contains(o)).collect();
+    assert_eq!(extra.len(), 1, "one object — the player's own — is missing from `here`");
+}
+
 /// A closed band costs nothing: the refresh is a no-op that never touches the
 /// engine's object tree.
 #[test]
@@ -300,7 +330,6 @@ fn every_band_element_emits_a_hit_rect_inside_the_band() {
     draw_command_band(&state, area, &mut buf, &mut 0, &mut hits);
 
     assert_eq!(hits.area, area);
-    assert!(hits.phrase.is_some(), "the phrase line is clickable");
     assert!(!hits.headers.is_empty(), "column headers are clickable");
     assert!(!hits.quick.is_empty(), "quick words are clickable");
     assert!(!hits.rows.is_empty(), "rows are clickable");
@@ -309,7 +338,6 @@ fn every_band_element_emits_a_hit_rect_inside_the_band() {
     let inside = |r: &Rect| {
         r.x >= area.x && r.right() <= area.right() && r.y >= area.y && r.bottom() <= area.bottom()
     };
-    assert!(inside(&hits.phrase.unwrap()));
     for (_, r) in &hits.headers {
         assert!(inside(r), "header rect {r:?} escapes the band");
     }

@@ -324,7 +324,9 @@ fn default_verb_arity() -> String {
 /// story prompt).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct CommandBandConfig {
-    /// Band rows INCLUDING the frame. Clamped to 5..=14 at layout time.
+    /// Band rows. The band has no frame since SQ-0667 (2026-08-05) — every
+    /// row here is content. Clamped to `MIN_BAND_ROWS..=MAX_BAND_ROWS` (3..=11)
+    /// at layout time.
     #[serde(default = "default_band_height")]
     pub height: u16,
     /// Open the band as soon as the story starts.
@@ -1408,7 +1410,11 @@ mod tests {
         let cfg: Config = toml::from_str("verb_dock_pct = 40\nsplit_ratio = 70\n")
             .expect("a stale key does not break the file");
         assert_eq!(cfg.split_ratio, 70);
-        assert_eq!(cfg.command_band.height, 8, "the band's height is the successor knob");
+        assert_eq!(
+            cfg.command_band.height,
+            crate::render::command_band::DEFAULT_BAND_ROWS,
+            "the band's height is the successor knob"
+        );
     }
 
     // ── [command_band] ────────────────────────────────────────────────────────
@@ -1416,7 +1422,7 @@ mod tests {
     #[test]
     fn command_band_defaults_and_round_trips() {
         let d = Config::default();
-        assert_eq!(d.command_band.height, 8);
+        assert_eq!(d.command_band.height, crate::render::command_band::DEFAULT_BAND_ROWS);
         assert!(!d.command_band.auto_open);
         assert!(d.command_band.verbs.is_empty());
         assert!(d.command_band.quick.is_empty());

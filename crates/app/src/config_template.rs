@@ -283,11 +283,12 @@ const ANIMATION: &[Row] = &[
 const COMMAND_BAND: &[Row] = &[
     d(
         "height",
-        "8",
+        "5",
         &[
-            "Rows the band occupies, INCLUDING its frame. Clamped to 5-14, and to",
-            "whatever the screen can spare. Resize mode (the band is one of its",
-            "targets while open) writes this key.",
+            "Rows the band occupies. It has no frame (SQ-0667) - every row here",
+            "is content. Clamped to 3-11, and to whatever the screen can spare.",
+            "Resize mode (the band is one of its targets while open) writes this",
+            "key.",
         ],
     ),
     d("auto_open", "false", &["Open the command band as soon as the story starts."]),
@@ -321,8 +322,11 @@ const COMMAND_BAND: &[Row] = &[
         "[\"n\", \"s\", \"e\", \"w\", \"up\", \"down\", \"in\", \"out\", \"look\", \"inventory\", \"wait\", \"again\"]",
         &[
             "The one-click quick-action row along the bottom of the band. The value",
-            "shown is the built-in row; unset the key to keep it. Picking one FILLS",
-            "the phrase line - nothing in the band ever fires a turn without Enter.",
+            "shown is the built-in row; unset the key to keep it. Picking one SENDS",
+            "it AT ONCE - no Enter, unlike every other pick in the band (which",
+            "composes onto the story input line and waits for Enter, same as",
+            "typing). These words are also left out of the VERB column, since",
+            "showing them twice would be redundant.",
         ],
     ),
 ];

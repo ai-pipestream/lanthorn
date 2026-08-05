@@ -176,22 +176,6 @@ pub enum BandSlot {
     Second,
 }
 
-/// Where the band's keyboard cursor sits. `Phrase` is the last stop in the
-/// left-to-right ring: it is where a complete phrase is confirmed, which is what
-/// keeps "always confirm" true for a complete-alone verb like `look` (nothing
-/// ever fires on the pick itself).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BandFocus {
-    Column(usize),
-    Phrase,
-}
-
-impl Default for BandFocus {
-    fn default() -> Self {
-        BandFocus::Column(COL_VERB)
-    }
-}
-
 /// One token the player has picked, in pick order — so Backspace is a pop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BandPick {
@@ -202,10 +186,15 @@ pub struct BandPick {
 /// The command band's whole state. `None` in `OverlayState.command_band` means
 /// the band is closed.
 ///
-/// The phrase is band-LOCAL (these picks), never `state.input`: the story input
-/// line stays live underneath so Tab-to-story free typing and the band coexist
-/// without fighting over one buffer. That decoupling is what lets the band be a
-/// dock rather than a modal.
+/// `picks` is the grammar's bookkeeping — which slot has what, for arity and
+/// column reachability — but the composed phrase ITSELF lives on the real
+/// story input line (`state.input`), not a band-local phrase row (retired
+/// 2026-08-05, SQ-0667): every successful pick mirrors onto `state.input`'s
+/// tail (see `input::sync_band_phrase_to_input`, called from `apply_action`,
+/// which is why that mirroring isn't done here — this type has no sibling
+/// field access to `state.input`). That is also why "always confirm" no
+/// longer needs a dedicated armed/send affordance: Enter on the real prompt
+/// IS the confirm, exactly like typing a command by hand.
 #[derive(Debug, Clone, Default)]
 pub struct CommandBandState {
     /// The verb table in force (built-ins, or the config's replacement/extras).
@@ -214,8 +203,9 @@ pub struct CommandBandState {
     pub quick: Vec<String>,
     /// Tokens picked so far, in order.
     pub picks: Vec<BandPick>,
-    /// Keyboard cursor within the band.
-    pub focus: BandFocus,
+    /// The active column (always a valid index — there is no longer a
+    /// trailing "phrase line" ring stop to land on; see the struct doc).
+    pub focus: usize,
     /// Incremental type-to-filter for the active column.
     pub filter: String,
     /// Per-column selection + animated scroll.
@@ -287,8 +277,9 @@ impl CommandBandState {
         out.join(" ")
     }
 
-    /// Whether the phrase is grammatically complete — i.e. whether the phrase
-    /// line is ARMED and Enter would send it.
+    /// Whether the phrase is grammatically complete — i.e. whether the text
+    /// now sitting on the real story input line is a valid command on its
+    /// own (Enter there sends it, exactly like anything typed by hand).
     pub fn complete(&self) -> bool {
         match self.arity() {
             None => false,
@@ -358,9 +349,23 @@ impl CommandBandState {
     }
 
     /// The column's items before filtering.
+    ///
+    /// `COL_VERB` excludes any word that is also in the quick row (SQ-0667):
+    /// showing `look`/`wait`/`again`/etc. in both places is redundant, and the
+    /// quick row is one click away regardless. The exclusion follows
+    /// `self.quick` — the *effective* list (the user's configured `quick` when
+    /// set, else the built-in row) — so removing a word from a custom `quick`
+    /// puts it back here. The compass survives under the default config only
+    /// because the two rows spell it differently (`n s e w` vs. `north south
+    /// east west`), not because of any special-casing here.
     pub fn items(&self, col: usize) -> Vec<String> {
         match col {
-            COL_VERB => self.verbs.iter().map(|v| v.word.clone()).collect(),
+            COL_VERB => self
+                .verbs
+                .iter()
+                .filter(|v| !self.quick.iter().any(|q| q.eq_ignore_ascii_case(&v.word)))
+                .map(|v| v.word.clone())
+                .collect(),
             COL_HERE => self.here.clone(),
             COL_CARRIED => self.carried.clone(),
             COL_SECOND => {
@@ -382,7 +387,7 @@ impl CommandBandState {
     /// to the ACTIVE column only.
     pub fn filtered_items(&self, col: usize) -> Vec<String> {
         let items = self.items(col);
-        if self.filter.is_empty() || self.focus != BandFocus::Column(col) {
+        if self.filter.is_empty() || self.focus != col {
             return items;
         }
         let f = self.filter.to_lowercase();
@@ -391,13 +396,14 @@ impl CommandBandState {
 
     // ── Focus ────────────────────────────────────────────────────────────────
 
-    /// The left-to-right focus ring: every reachable column, then the phrase
-    /// line. `←`/`→` step through this; unreachable columns are skipped.
-    pub fn focus_stops(&self) -> Vec<BandFocus> {
-        let mut v: Vec<BandFocus> =
-            (0..BAND_COLS).filter(|&c| self.col_reachable(c)).map(BandFocus::Column).collect();
-        v.push(BandFocus::Phrase);
-        v
+    /// The left-to-right focus ring: every reachable column. (Before SQ-0667
+    /// this ring had a trailing "phrase line" stop; sending is now just
+    /// Enter on the real prompt, so there is nothing band-side left to land
+    /// on once nothing more is pickable — `advance` below clamps at the last
+    /// reachable column instead.) `←`/`→` step through this; unreachable
+    /// columns are skipped.
+    pub fn focus_stops(&self) -> Vec<usize> {
+        (0..BAND_COLS).filter(|&c| self.col_reachable(c)).collect()
     }
 
     /// Step the focus by `delta` stops along the ring (clamped, not wrapped —
@@ -405,25 +411,29 @@ impl CommandBandState {
     /// left-to-right narrowing).
     pub fn move_focus(&mut self, delta: i32) {
         let stops = self.focus_stops();
-        let cur = stops.iter().position(|s| *s == self.focus).unwrap_or(0) as i32;
+        let cur = stops.iter().position(|&s| s == self.focus).unwrap_or(0) as i32;
         let next = (cur + delta).clamp(0, stops.len() as i32 - 1) as usize;
-        if stops[next] != self.focus {
-            self.focus = stops[next];
-            self.filter.clear();
+        if let Some(&stop) = stops.get(next) {
+            if stop != self.focus {
+                self.focus = stop;
+                self.filter.clear();
+            }
         }
     }
 
-    /// Move focus to the next reachable UNFILLED column, or to the phrase line
-    /// when there is nothing left to pick.
+    /// Move focus to the next reachable UNFILLED column, or — when there is
+    /// nothing left to pick — the last reachable column, so the cursor never
+    /// parks somewhere `col_reachable` no longer agrees with (e.g. picking a
+    /// Solo verb collapses the ring back down to just VERB).
     pub fn advance(&mut self) {
         self.filter.clear();
         for c in 0..BAND_COLS {
             if self.col_reachable(c) && !self.col_filled(c) {
-                self.focus = BandFocus::Column(c);
+                self.focus = c;
                 return;
             }
         }
-        self.focus = BandFocus::Phrase;
+        self.focus = self.focus_stops().into_iter().next_back().unwrap_or(COL_VERB);
     }
 
     // ── Picking ──────────────────────────────────────────────────────────────
@@ -461,11 +471,11 @@ impl CommandBandState {
     pub fn unpick(&mut self) -> bool {
         let Some(p) = self.picks.pop() else { return false };
         self.filter.clear();
-        self.focus = BandFocus::Column(match p.slot {
+        self.focus = match p.slot {
             BandSlot::Verb => COL_VERB,
             BandSlot::Object => COL_HERE,
             BandSlot::Second => COL_SECOND,
-        });
+        };
         true
     }
 
@@ -473,15 +483,15 @@ impl CommandBandState {
     pub fn clear_phrase(&mut self) {
         self.picks.clear();
         self.filter.clear();
-        self.focus = BandFocus::Column(COL_VERB);
+        self.focus = COL_VERB;
     }
 
-    /// The active column index, if the cursor is on a column.
+    /// The active column index. Always `Some` post-SQ-0667 (there is no
+    /// longer a focus stop off the columns) — kept `Option`-shaped so the
+    /// handful of call sites written as `if let Some(col) = ...` don't need
+    /// to change.
     pub fn active_col(&self) -> Option<usize> {
-        match self.focus {
-            BandFocus::Column(c) => Some(c),
-            BandFocus::Phrase => None,
-        }
+        Some(self.focus)
     }
 
     /// Whether any of the band's per-column scrolls is animating.

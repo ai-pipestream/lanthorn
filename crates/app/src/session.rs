@@ -2928,6 +2928,10 @@ impl Introspect for GameSession {
         crate::render::room_info::list_room_objects(&self.machine.mem, room)
     }
 
+    fn room_objects_excluding(&self, room: u16, exclude: Option<u16>) -> Vec<String> {
+        crate::render::room_info::list_room_objects_excluding(&self.machine.mem, room, exclude.unwrap_or(0))
+    }
+
     fn children_of(&self, parent: u16) -> std::collections::BTreeSet<u16> {
         let max_obj = zvm::object_tree_view(&self.machine)
             .into_iter()

@@ -202,7 +202,11 @@ mod tests {
 
         assert_eq!(pl.command_band.width, 80, "full width");
         assert_eq!(pl.command_band.x, 0);
-        assert_eq!(pl.command_band.height, 8, "the default 8-row band");
+        assert_eq!(
+            pl.command_band.height,
+            crate::render::command_band::DEFAULT_BAND_ROWS,
+            "the default-height band"
+        );
         assert_eq!(pl.help_row, Rect::new(0, 23, 80, 1), "help row stays the bottom row");
         assert_eq!(pl.command_band.y + pl.command_band.height, pl.help_row.y);
         assert_eq!(pl.story.height + pl.command_band.height + pl.help_row.height, 24);
@@ -240,12 +244,16 @@ mod tests {
     fn band_height_follows_config_and_clamps() {
         let mut state = AppState::default();
         open_band(&mut state);
-        state.pane_sizes.band_height = 12;
-        assert_eq!(compute_pane_layout(area80x24(), &state, 0).command_band.height, 12);
+        state.pane_sizes.band_height = 10;
+        assert_eq!(compute_pane_layout(area80x24(), &state, 0).command_band.height, 10);
 
         state.pane_sizes.band_height = 99;
         let pl = compute_pane_layout(area80x24(), &state, 0);
-        assert_eq!(pl.command_band.height, 14, "clamped to MAX_BAND_ROWS");
+        assert_eq!(
+            pl.command_band.height,
+            crate::render::command_band::MAX_BAND_ROWS,
+            "clamped to MAX_BAND_ROWS"
+        );
         assert!(pl.story.height > 0, "the story pane always survives");
 
         // A tiny terminal wins over the configured height.

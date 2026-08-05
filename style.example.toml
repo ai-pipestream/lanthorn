@@ -95,8 +95,6 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # ifdb_attribution = { parent = "muted", italic = true }
 # saves_portable = { parent = "accent", glyph = "↗" }
 # saves_host_only = { parent = "muted" }
-# "band.phrase" = { parent = "text" }
-# "band.phrase:armed" = { parent = "accent", bold = true }
 # "band.column_header" = { parent = "muted" }
 # "band.column_header:active" = { parent = "accent", bold = true }
 # "band.quick" = { parent = "muted" }
