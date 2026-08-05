@@ -41,7 +41,7 @@ fn scott_walk_drives_the_automapper() {
         pictures: Vec::new(),
         transcript_elems: Vec::new(),
     };
-    apply_turn(&mut mapper, "", &seed_result);
+    apply_turn(&mut mapper, "", &seed_result, &mut Default::default());
 
     assert_eq!(mapper.graph.rooms().count(), 1, "seed observes only the starting room");
     assert_eq!(mapper.graph.current(), Some(1));
@@ -50,7 +50,7 @@ fn scott_walk_drives_the_automapper() {
     // crates/scott/tests/golden.rs); "up" returns to room 1.
     for cmd in ["down", "up"] {
         let result = session.submit(cmd);
-        apply_turn(&mut mapper, cmd, &result);
+        apply_turn(&mut mapper, cmd, &result, &mut Default::default());
     }
 
     // The walk visited two distinct rooms.

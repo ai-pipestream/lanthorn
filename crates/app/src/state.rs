@@ -1693,14 +1693,12 @@ pub struct AppState {
     /// [`MAP_TRAIL_LEN`]; used only on maze-flagged layers, where "how did I get here" is the
     /// question a drawn map would have answered by itself.
     pub map_trail: std::collections::VecDeque<RoomId>,
-    /// The `tried` record the last directional command left behind — `(room typed in, direction)`
-    /// — kept only while the player is still standing in that room (SQ-0671).
-    ///
-    /// A fatal move's death is not always admitted on the turn that made it: Adventure asks
-    /// whether to reincarnate you first, so the `*** You have died ***` banner arrives on the turn
-    /// that ANSWERS. Without this the rollback would either fire a turn late (undoing the wrong
-    /// direction) or not at all. Session state; nothing about it is worth persisting.
-    pub pending_tried: Option<(RoomId, mapper::direction::Direction)>,
+    /// What the mapper still owes a death the game has not finished with (SQ-0671, SQ-0673): the
+    /// `tried` record a fatal move may have to take back, and whether a reported death is still
+    /// waiting to be resolved by a resurrection. See [`crate::session::DeathWatch`] for the
+    /// lifetime of each. Session state; nothing about it is worth persisting, and a restart or
+    /// restore replaces it wholesale.
+    pub death_watch: crate::session::DeathWatch,
     pub transcript: Vec<String>,
     /// Parallel kind tag for each entry in `transcript` (always same length).
     pub transcript_kinds: Vec<TranscriptKind>,
@@ -2216,7 +2214,7 @@ impl Default for AppState {
             matrix_scroll: (0, 0),
             tangle_suggested: std::collections::BTreeSet::new(),
             map_trail: std::collections::VecDeque::new(),
-            pending_tried: None,
+            death_watch: crate::session::DeathWatch::default(),
             transcript: Vec::new(),
             transcript_kinds: Vec::new(),
             transcript_styles: Vec::new(),

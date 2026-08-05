@@ -123,7 +123,7 @@ fn maze_positions_are_byte_stable_across_turns_while_the_other_layer_tidies() {
     // Four turns of walking the maze, each one the loop the run loop runs: observe, then
     // schedule background maintenance for the layer the player is standing in.
     for (cmd, id) in [("north", 2u16), ("north", 3), ("west", 4), ("east", 2)] {
-        apply_turn(&mut m, cmd, &turn(id, "Maze"));
+        apply_turn(&mut m, cmd, &turn(id, "Maze"), &mut Default::default());
         if should_schedule_tidy(&m.graph, maze, true) {
             tidy_layer_silent(&mut m.graph, maze);
         }
@@ -150,7 +150,7 @@ fn a_new_room_on_a_frozen_layer_is_still_placed_and_moves_nothing_else() {
     let (mut m, maze) = maze_and_corridor();
     let before = positions(&m.graph, maze);
 
-    apply_turn(&mut m, "down", &turn(5, "Maze"));
+    apply_turn(&mut m, "down", &turn(5, "Maze"), &mut Default::default());
     if should_schedule_tidy(&m.graph, maze, true) {
         tidy_layer_silent(&mut m.graph, maze);
     }

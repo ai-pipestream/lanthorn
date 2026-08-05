@@ -79,15 +79,15 @@ fn headless_e2e_smoke() {
 
     // Room 1: starting room (no command/direction).
     let r1 = turn(1, "Entrance Hall");
-    apply_turn(&mut mapper, "", &r1);
+    apply_turn(&mut mapper, "", &r1, &mut Default::default());
 
     // Room 2: move East.
     let r2 = turn(2, "East Corridor");
-    apply_turn(&mut mapper, "east", &r2);
+    apply_turn(&mut mapper, "east", &r2, &mut Default::default());
 
     // Room 3: move North.
     let r3 = turn(3, "North Gallery");
-    apply_turn(&mut mapper, "north", &r3);
+    apply_turn(&mut mapper, "north", &r3, &mut Default::default());
 
     // Room 3 is now current.
     assert_eq!(mapper.graph.current(), Some(3));

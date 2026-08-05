@@ -717,7 +717,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
-        apply_turn(&mut mapper, "", &seed_result);
+        apply_turn(&mut mapper, "", &seed_result, &mut state.death_watch);
         crate::turn::flush_screen_trace(&state.config.user_dir, &mut *session, state.config.trace.screen);
         crate::turn::flush_v6_trace(&state.config.user_dir, &mut *session, state.config.trace.v6);
         if state.config.trace.any() {

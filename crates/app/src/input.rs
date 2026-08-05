@@ -5956,7 +5956,7 @@ mod tests {
                 pictures: Vec::new(),
                 transcript_elems: Vec::new(),
             };
-            apply_turn(&mut mapper, "", &seed_result);
+            apply_turn(&mut mapper, "", &seed_result, &mut Default::default());
             state.select_room(Some(snap_number as mapper::graph::RoomId));
         }
         let banner = session.take_transcript();
@@ -6003,7 +6003,7 @@ mod tests {
                 pictures: Vec::new(),
                 transcript_elems: Vec::new(),
             };
-            apply_turn(&mut mapper, "", &seed_result);
+            apply_turn(&mut mapper, "", &seed_result, &mut Default::default());
             state.select_room(Some(snap_number as mapper::graph::RoomId));
         }
 

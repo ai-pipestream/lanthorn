@@ -254,7 +254,7 @@ fn zork0_compass_click_maps_a_directional_edge() {
             _ => session.submit("look"),
         };
         if r.transcript.contains("Great Hall") {
-            apply_turn(&mut mapper, "look", &r);
+            apply_turn(&mut mapper, "look", &r, &mut Default::default());
             seeded = true;
             break;
         }
@@ -270,7 +270,7 @@ fn zork0_compass_click_maps_a_directional_edge() {
 
     let echoed = echoed_direction_command(&result.transcript);
     assert_eq!(echoed, Some("north"), "the game echoes the synthesized command: {:?}", result.transcript);
-    apply_turn(&mut mapper, echoed.unwrap(), &result);
+    apply_turn(&mut mapper, echoed.unwrap(), &result, &mut Default::default());
 
     let there = mapper.graph.current().expect("moved somewhere");
     assert_ne!(here, there, "the click moved the player");

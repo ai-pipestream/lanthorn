@@ -3245,6 +3245,9 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                 state.turns = plan.turn;
                                 state.unsaved_progress = false; // resumed a past (saved) turn
                                 state.graph_gen = state.graph_gen.wrapping_add(1);
+                                // Resuming a past turn is a restore: the watch describes a death
+                                // in a timeline this one has replaced (SQ-0671, SQ-0673).
+                                state.death_watch = Default::default();
                                 // Re-observe current location (mirror the restore path).
                                 if let Some(snap) = session.current_location() {
                                     let rid = snap.number as mapper::graph::RoomId;
@@ -3265,7 +3268,12 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                         pictures: Vec::new(),
                                         transcript_elems: Vec::new(),
                                     };
-                                    apply_turn(&mut mapper, "", &restore_result);
+                                    apply_turn(
+                                        &mut mapper,
+                                        "",
+                                        &restore_result,
+                                        &mut state.death_watch,
+                                    );
                                     state.set_viewed_layer(None);
                                     state.select_room(Some(rid));
                                 }
@@ -3514,6 +3522,11 @@ fn reobserve_location(
     // this frame instead of the pre-restore one. Unconditional so even the
     // no-current-location early-return below still invalidates. (SQ-0305)
     state.bump_graph_gen();
+    // The restored game is not the one the death watch was watching: a death outstanding in the
+    // live session says nothing about the saved one, and the re-observation below is itself a room
+    // change with no passage behind it. Cleared before the early return, so a restore into a game
+    // that reports no location does not carry the old one's death either. (SQ-0671, SQ-0673)
+    state.death_watch = Default::default();
     let Some(snap) = session.current_location() else { return };
     let rid = snap.number as mapper::graph::RoomId;
     let restore_result = TurnResult {
@@ -3533,7 +3546,7 @@ fn reobserve_location(
         pictures: Vec::new(),
         transcript_elems: Vec::new(),
     };
-    apply_turn(mapper, "", &restore_result);
+    apply_turn(mapper, "", &restore_result, &mut state.death_watch);
     state.set_viewed_layer(None);
     state.select_room(Some(rid));
     if let Some(room) = mapper.graph.room(rid) {

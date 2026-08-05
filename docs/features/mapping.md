@@ -217,6 +217,16 @@ the passage is open, so the attempt is taken back and the cell stays `·`, still
 the frontier — including when the game asks whether to reincarnate you before it
 admits the death, in which case the move that caused it is the one rolled back.
 
+Nor does *getting up again* leave an edge. A death stays outstanding until the game
+says how it ends, however many turns of "Please answer yes or no." that takes, and
+the next room change on that side of it is read as the resurrection: the map follows
+you to wherever you woke up and mints no passage, because wherever a game drops a
+resurrected player is not a way out of the room you died in. Adventure's `yes` →
+*"--- POOF!! ---"* → the well house is the case that named it. Exactly one such
+relocation is swallowed: play resuming — a room description reprinted where you
+stand, or the arrival itself — settles the death, and the next passage you walk maps
+like any other.
+
 **Reading it.** `▸` marks the room you are standing in. `⇲` marks a room a passage
 from *outside* the layer leads into — a doorway into the maze, listed in a footnote
 (`⇲ in:  <origin room> —<direction>→ <target>`) alongside where `⇱out` cells lead.

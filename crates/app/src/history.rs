@@ -194,7 +194,7 @@ mod tests {
             let rooms_before = mapper.graph.rooms().count();
             let conns_before = mapper.graph.connections().len();
             let result = session.submit(cmd);
-            apply_turn(&mut mapper, cmd, &result);
+            apply_turn(&mut mapper, cmd, &result, &mut Default::default());
             let map_changed = mapper.graph.rooms().count() != rooms_before
                 || mapper.graph.connections().len() != conns_before;
             record_turn(

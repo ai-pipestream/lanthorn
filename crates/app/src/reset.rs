@@ -151,6 +151,11 @@ pub(crate) fn reset_game(
             session.set_strip_prompt(state.config.command_bar);
             let start_loc = session.current_location();
             state.reset_sound_sidecars();
+            // A restart is a new game: the death the old one left unresolved died with it, and so
+            // did the `tried` record a fatal move there might still owe. Carried across, an
+            // outstanding death would swallow the first room change of the fresh game — which is
+            // the seed below, or the first passage the player walks. (SQ-0671, SQ-0673)
+            state.death_watch = app::session::DeathWatch::default();
             state.turns = 0;
             state.unsaved_progress = false; // restart: fresh game, nothing to save
             state.vm_halted = false;
@@ -195,7 +200,7 @@ pub(crate) fn reset_game(
                     pictures: Vec::new(),
                     transcript_elems: Vec::new(),
                 };
-                apply_turn(mapper, "", &seed_result);
+                apply_turn(mapper, "", &seed_result, &mut state.death_watch);
                 let rid = snap_number as mapper::graph::RoomId;
                 state.select_room(Some(rid));
             }
@@ -289,6 +294,43 @@ mod tests {
         assert!(
             painted(&model.root),
             "the restarted boot re-drew its graphics (Pict source attached + boot flush)"
+        );
+    }
+
+    /// SQ-0673: a restart is a new game, so the death watch goes with the old one.
+    ///
+    /// It carries two things across turns — the `tried` record a fatal move may still have to
+    /// take back, and an unresolved death waiting for a resurrection — and both are claims about
+    /// a game that no longer exists. Left set, the outstanding death would swallow the first
+    /// passage the fresh game walked, which is exactly the move that seeds the new map.
+    #[test]
+    fn reset_game_clears_the_death_watch() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../zvm/tests/fixtures/czech.z5");
+        let Ok(bytes) = std::fs::read(&fixture) else { return };
+        let session = app::session::GameSession::new(bytes.clone(), true, false, None)
+            .expect("zcode session");
+        let mut engine: Box<dyn app::engine::Engine> = Box::new(session);
+        let mut mapper = mapper::mapper::Mapper::default();
+        let mut state = app::state::AppState::default();
+        state.death_watch = app::session::DeathWatch {
+            pending_tried: Some((7, mapper::direction::Direction::N)),
+            unresolved: true,
+        };
+        super::reset_game(
+            &mut *engine,
+            &mut mapper,
+            &mut state,
+            &bytes,
+            &fixture,
+            std::path::Path::new(""),
+            false,
+            false,
+        );
+        assert_eq!(
+            state.death_watch,
+            app::session::DeathWatch::default(),
+            "the restarted game inherits no outstanding death"
         );
     }
 

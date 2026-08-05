@@ -1974,7 +1974,18 @@ pub fn echoed_direction_command(transcript: &str) -> Option<&str> {
 /// In Auto mode, runs a light overlap cleanup (radius 2, max 20 passes) after each
 /// observation so the live map never shows an illegal connector overlap.
 /// No-op when `result.location` is `None`.
-pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
+///
+/// `death` is the caller's [`DeathWatch`], read and written here: this is where a death is
+/// noticed, and where the resurrection that ends it is recognised — by the outstanding death
+/// rather than by anything the turn says. It has to be the SAME watch every turn of a session
+/// (the app keeps one on `AppState`); a fresh one per call is only correct for a seed or a
+/// restore, where there is no previous turn to carry anything from.
+pub fn apply_turn(
+    mapper: &mut Mapper,
+    command: &str,
+    result: &TurnResult,
+    death: &mut DeathWatch,
+) {
     // A direction typed in this room has been TRIED, whatever else the turn did, so the
     // untried-exits overlay must stop offering it (SQ-0391). `Mapper::observe` records this for
     // the ordinary path, but three turns never reach it: one where no location was detected at
@@ -1984,6 +1995,13 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
     // nothing.
     if let (Some(here), Some(d)) = (mapper.graph.current(), parse_direction(command)) {
         mapper.graph.mark_tried(here, d);
+    }
+    // Arm the death watch before anything reads it, so a turn that both reports a death and
+    // relocates the player (the ordinary banner shape) still leaves the death unresolved: the
+    // resurrection the game is about to offer has not happened yet. (SQ-0673)
+    let fatal = turn_reports_death(&result.transcript);
+    if fatal {
+        death.unresolved = true;
     }
     if let Some(snap) = &result.location {
         // Suppress an unvalidated NameOnly location until the map holds a real,
@@ -1999,7 +2017,8 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
             return;
         }
         let arrived = reprinted_room_heading(&result.transcript, &snap.name);
-        if turn_reports_death(&result.transcript) {
+        let moved_room = mapper.graph.current() != Some(snap.number);
+        if fatal {
             // The game said the player died this turn and moved them somewhere that is NOT
             // reachable by the command they typed (e.g. a grue kills you in the dark and drops
             // you in the Forest). Record it as an involuntary relocation so no false directional
@@ -2010,13 +2029,34 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
             // in the dark was minting a west-passage from the room you died in to the bottom of
             // the pit — verified against `advent.blb`.
             mapper.observe_relocation(snap.number, &snap.name);
+        } else if death.unresolved && moved_room {
+            // The death is still unresolved and the player has just changed rooms without dying
+            // again: this is the resurrection, arriving on a turn that says nothing about death
+            // at all. Adventure's is `yes` → *"--- POOF!! ---"* and the well house, several turns
+            // after the pit that killed you, and it reprints the room heading like any walked
+            // move — so without the watch it minted a `?` passage from the corpse's room to the
+            // well house. Wherever a resurrection drops you is not a passage out of where you
+            // died. (SQ-0673)
+            mapper.observe_relocation(snap.number, &snap.name);
+            death.unresolved = false;
         } else if arrived {
             // The game printed this room's heading again, so the player MOVED — even if they
             // came out where they went in. That is the only evidence a maze self-loop ever
             // leaves, and without it "west leads back here" is indistinguishable from walking
             // into a wall and thrown away (SQ-0666).
             mapper.observe_moved(snap.number, &snap.name, parse_direction(command));
+            // A heading reprinted in the room the player is already standing in — a `look`, a
+            // maze self-loop, a move the game refused with a re-description — is ordinary play
+            // resuming, so whatever death was outstanding has been settled without a
+            // resurrection: games that kill you in place and let you walk on look exactly like
+            // this. The watch must not outlive it, or it would eat the player's next real
+            // passage. (SQ-0673)
+            death.unresolved = false;
         } else {
+            // The conservative path: mint only if the location changed. With a death outstanding
+            // this is reached only when it did NOT — "Please answer yes or no." is exactly this
+            // shape — which is why the watch has to survive an unbounded number of turns rather
+            // than just the one after the death. (SQ-0673)
             mapper.observe(snap.number, &snap.name, parse_direction(command));
         }
         // SQ-0527: remember how the mapper knew where the player was, the first
@@ -2031,6 +2071,38 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
         // background cleanup (or full tidy) job — see `finish_command_turn` and
         // `cleanup_overlaps_layer_silent`. (SQ-0379)
     }
+}
+
+/// What the mapper still owes a death the game has not finished with (SQ-0671, SQ-0673).
+///
+/// A death is not one turn's event. Adventure kills you, offers to reincarnate you, insists
+/// ("Please answer yes or no.") for as many turns as it takes, and only then either prints the
+/// banner (you declined) or teleports you to the well house (you accepted). Everything the mapper
+/// must not conclude in that window lives here, because none of it is recoverable from the graph
+/// once the window has closed.
+///
+/// The two fields have deliberately different lifetimes — see each one. Session state only:
+/// nothing here is worth persisting, and a restart or restore replaces it wholesale
+/// ([`DeathWatch::default`]) because the game it described is gone.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DeathWatch {
+    /// The `tried` record the last directional command left behind — `(room typed in, direction)`
+    /// — held only while the player is still standing in that room (SQ-0671).
+    ///
+    /// Short-lived on purpose: it exists so a death admitted a turn or two late still rolls back
+    /// the move that CAUSED it, and a player who has walked out of that room has settled the
+    /// question themselves. See [`rollback_tried_on_death`].
+    pub pending_tried: Option<(mapper::graph::RoomId, mapper::direction::Direction)>,
+    /// A death has been reported and the game has not yet said how it ends (SQ-0673).
+    ///
+    /// Longer-lived than `pending_tried` by necessity: the yes/no exchange is unbounded, and the
+    /// resurrection turn — the one that actually moves the player — carries no death vocabulary
+    /// at all, so it is only recognisable as the first room change on this side of the flag. Set
+    /// by any turn [`turn_reports_death`] recognises; cleared by the first turn that resolves it
+    /// (see [`apply_turn`]) — a room change (the resurrection: relocation, no edge) or a heading
+    /// reprinted in place (ordinary play resuming). It suppresses exactly one relocation, never a
+    /// second.
+    pub unresolved: bool,
 }
 
 /// The `tried` record this turn's command is about to create: `(the room the player is standing
@@ -2065,10 +2137,10 @@ pub fn tried_record_for(
 /// It gates both things a death turn must not do: mint a passage to wherever the player was
 /// dumped ([`apply_turn`], SQ-0259) and record the direction as tried ([`rollback_tried_on_death`]).
 ///
-/// Known gap: the turn that ACCEPTS the offer ("yes" → *"--- POOF!! ---"*, and the player wakes
-/// up in the well house) carries no death word at all, so it still reads as an ordinary arrival
-/// and mints an `?` edge from wherever the corpse was. Carrying the death across that turn is a
-/// separate change to the SQ-0259 machinery.
+/// It is also what arms [`DeathWatch::unresolved`], which covers the turns AFTER this one: the
+/// turn that accepts the offer ("yes" → *"--- POOF!! ---"*, and the player wakes up in the well
+/// house) carries no death word at all, and is recognised by the outstanding death rather than by
+/// anything it says (SQ-0673).
 pub fn turn_reports_death(transcript: &str) -> bool {
     is_death_relocation(transcript) || offers_revival(transcript)
 }
@@ -2089,33 +2161,36 @@ fn offers_revival(transcript: &str) -> bool {
 /// the map nobody made. Dying tells you nothing about whether the way is open, so the record goes
 /// back to `·` (untried) and the direction stays on the exploration frontier.
 ///
-/// `attempted` is this turn's record from [`tried_record_for`]; `pending` carries the previous
-/// turn's across the gap, because the death is not always admitted on the turn that caused it —
-/// Adventure asks whether to reincarnate you first, and the banner arrives on the turn that
-/// answers. It is only held while the player is still standing where they typed the direction: a
-/// player who has moved on has settled the question themselves.
+/// `attempted` is this turn's record from [`tried_record_for`]; [`DeathWatch::pending_tried`]
+/// carries the previous turn's across the gap, because the death is not always admitted on the
+/// turn that caused it — Adventure asks whether to reincarnate you first, and the banner arrives
+/// on the turn that answers. It is only held while the player is still standing where they typed
+/// the direction: a player who has moved on has settled the question themselves. (That is a
+/// shorter life than [`DeathWatch::unresolved`], which has to survive the whole yes/no exchange
+/// and the resurrection that ends it — the two answer different questions about the same death.)
 ///
 /// Only the typed record is dropped. `MapGraph::unmark_tried` cannot unmint an edge, so a
 /// direction that DID lead somewhere before the kill stays tried on the strength of that edge.
 pub fn rollback_tried_on_death(
     mapper: &mut Mapper,
-    pending: &mut Option<(mapper::graph::RoomId, mapper::direction::Direction)>,
+    death: &mut DeathWatch,
     attempted: Option<(mapper::graph::RoomId, mapper::direction::Direction)>,
     fatal: bool,
 ) {
     if fatal {
         // This turn's move when it named a direction, else the one held over — the turn that
         // CONTAINED the fatal move, which is the one whose record is a lie.
-        if let Some((room, dir)) = attempted.or(*pending) {
+        if let Some((room, dir)) = attempted.or(death.pending_tried) {
             mapper.graph.unmark_tried(room, dir);
         }
-        *pending = None;
+        death.pending_tried = None;
         return;
     }
     if attempted.is_some() {
-        *pending = attempted;
-    } else if pending.is_some_and(|(room, _)| Some(room) != mapper.graph.current()) {
-        *pending = None; // the player left that room: whatever it recorded is now settled fact
+        death.pending_tried = attempted;
+    } else if death.pending_tried.is_some_and(|(room, _)| Some(room) != mapper.graph.current()) {
+        // The player left that room: whatever it recorded is now settled fact.
+        death.pending_tried = None;
     }
 }
 
@@ -3654,7 +3729,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
-        apply_turn(&mut m, "look", &first);
+        apply_turn(&mut m, "look", &first, &mut Default::default());
         assert_eq!(m.graph.current(), Some(1));
         assert!(m.graph.room(1).is_some());
         assert_eq!(m.graph.connections().len(), 0, "first observe must not create edge");
@@ -3677,7 +3752,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
-        apply_turn(&mut m, "north", &second);
+        apply_turn(&mut m, "north", &second, &mut Default::default());
         assert!(m.graph.room(2).is_some());
         assert_eq!(m.graph.current(), Some(2));
 
@@ -3729,7 +3804,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
-        apply_turn(&mut m, "look", &result);
+        apply_turn(&mut m, "look", &result, &mut Default::default());
         assert_eq!(m.graph.current(), None);
     }
 
@@ -3773,11 +3848,21 @@ mod tests {
             transcript_elems: Vec::new(),
         };
         let mut m = Mapper::default();
-        apply_turn(&mut m, "", &mk(1, "Living Room", "Living Room\n"));
-        apply_turn(&mut m, "down", &mk(2, "Cellar", "You have moved into a dark place.\n"));
+        apply_turn(&mut m, "", &mk(1, "Living Room", "Living Room\n"), &mut Default::default());
+        apply_turn(
+            &mut m,
+            "down",
+            &mk(2, "Cellar", "You have moved into a dark place.\n"),
+            &mut Default::default(),
+        );
         let edges_before = m.graph.connections().len();
         // The fatal move: resurrection room arrives on the same turn as the banner.
-        apply_turn(&mut m, "north", &mk(3, "Forest", "   ****  You have died  **** \n\nForest\n"));
+        apply_turn(
+            &mut m,
+            "north",
+            &mk(3, "Forest", "   ****  You have died  **** \n\nForest\n"),
+            &mut Default::default(),
+        );
         assert_eq!(m.graph.current(), Some(3), "player is now in the resurrection room");
         assert_eq!(
             m.graph.connections().len(),
@@ -3816,17 +3901,32 @@ mod tests {
         let mut m = Mapper::default();
 
         // 1. Pre-game NameOnly on an empty map → suppressed.
-        apply_turn(&mut m, "", &mk(Some(LocationMethod::NameOnly), 111, "Frank Booth"));
+        apply_turn(
+            &mut m,
+            "",
+            &mk(Some(LocationMethod::NameOnly), 111, "Frank Booth"),
+            &mut Default::default(),
+        );
         assert_eq!(m.graph.rooms().count(), 0, "NameOnly must not seed an empty map");
         assert_eq!(m.graph.current(), None);
 
         // 2. Real play: an object-backed room is observed.
-        apply_turn(&mut m, "", &mk(Some(LocationMethod::PlayerParent), 48, "Hilltop"));
+        apply_turn(
+            &mut m,
+            "",
+            &mk(Some(LocationMethod::PlayerParent), 48, "Hilltop"),
+            &mut Default::default(),
+        );
         assert_eq!(m.graph.current(), Some(48));
         assert_eq!(m.graph.rooms().count(), 1);
 
         // 3. NameOnly is now trusted as a mid-game fallback (map non-empty).
-        apply_turn(&mut m, "north", &mk(Some(LocationMethod::NameOnly), 222, "Foggy Place"));
+        apply_turn(
+            &mut m,
+            "north",
+            &mk(Some(LocationMethod::NameOnly), 222, "Foggy Place"),
+            &mut Default::default(),
+        );
         assert_eq!(m.graph.current(), Some(222));
         assert_eq!(m.graph.rooms().count(), 2);
     }
@@ -3854,7 +3954,7 @@ mod tests {
             pictures: Vec::new(),
             transcript_elems: Vec::new(),
         };
-        apply_turn(&mut m, "", &result);
+        apply_turn(&mut m, "", &result, &mut Default::default());
         assert_eq!(m.graph.current(), Some(333));
         assert_eq!(m.graph.rooms().count(), 1);
     }
@@ -3915,11 +4015,16 @@ mod tests {
         // cleanup the run loop schedules must leave zero illegal overlaps.
         let mut m = Mapper::default(); // Auto mode by default
 
-        apply_turn(&mut m, "look",  &turn(1, "Start"));
-        apply_turn(&mut m, "east",  &turn(2, "East Room"));
-        apply_turn(&mut m, "north", &turn(3, "North East Room"));
-        apply_turn(&mut m, "west",  &turn(4, "North Room"));
-        apply_turn(&mut m, "south", &turn(1, "Start")); // back to start — closes the loop
+        apply_turn(&mut m, "look", &turn(1, "Start"), &mut Default::default());
+        apply_turn(&mut m, "east", &turn(2, "East Room"), &mut Default::default());
+        apply_turn(&mut m, "north", &turn(3, "North East Room"), &mut Default::default());
+        apply_turn(&mut m, "west", &turn(4, "North Room"), &mut Default::default());
+        apply_turn(
+            &mut m,
+            "south",
+            &turn(1, "Start"),
+            &mut Default::default(),
+        ); // back to start — closes the loop
 
         crate::tidy::cleanup_overlaps_layer_silent(&mut m.graph, mapper::layer::MAIN_LAYER);
 
@@ -5951,19 +6056,29 @@ mod untried_turn_tests {
     #[test]
     fn every_typed_direction_counts_as_tried_however_the_turn_ends() {
         let mut m = Mapper::default();
-        apply_turn(&mut m, "", &turn(Some((1, "Hall")), ""));
+        apply_turn(&mut m, "", &turn(Some((1, "Hall")), ""), &mut Default::default());
 
         // 1. A move that simply fails: the same room comes back.
-        apply_turn(&mut m, "north", &turn(Some((1, "Hall")), "You can't go that way."));
+        apply_turn(
+            &mut m,
+            "north",
+            &turn(Some((1, "Hall")), "You can't go that way."),
+            &mut Default::default(),
+        );
         assert!(!m.graph.untried(1).contains(&Direction::N), "a foiled move is still a try");
 
         // 2. A turn that detected no location at all — the mapper is otherwise skipped.
-        apply_turn(&mut m, "west", &turn(None, "It is pitch black."));
+        apply_turn(&mut m, "west", &turn(None, "It is pitch black."), &mut Default::default());
         assert!(!m.graph.untried(1).contains(&Direction::W), "no location detected is still a try");
 
         // 3. A death that teleported the player elsewhere. `observe_relocation` mints no edge, by
         //    design — but the direction that killed you has emphatically been tried.
-        apply_turn(&mut m, "east", &turn(Some((2, "Forest")), "*** You have died ***"));
+        apply_turn(
+            &mut m,
+            "east",
+            &turn(Some((2, "Forest")), "*** You have died ***"),
+            &mut Default::default(),
+        );
         assert!(!m.graph.untried(1).contains(&Direction::E), "the move that killed you is a try");
         assert_eq!(m.graph.connections().len(), 0, "and still mints no false edge (SQ-0259)");
 

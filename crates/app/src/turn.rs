@@ -124,7 +124,7 @@ pub(crate) fn finish_command_turn(
     // the current one — the rollback below needs to know which record is this turn's (SQ-0671).
     let attempted = app::session::tried_record_for(mapper, cmd);
 
-    apply_turn(mapper, cmd, &result);
+    apply_turn(mapper, cmd, &result, &mut state.death_watch);
 
     // A move that killed the player proved nothing about the passage, so its `tried` record is
     // taken back and the direction stays untried (`·`, not `_`). Fires for the turn that
@@ -132,7 +132,7 @@ pub(crate) fn finish_command_turn(
     // player answers a resurrection prompt. (SQ-0671)
     app::session::rollback_tried_on_death(
         mapper,
-        &mut state.pending_tried,
+        &mut state.death_watch,
         attempted,
         app::session::turn_reports_death(&result.transcript),
     );
@@ -486,12 +486,12 @@ pub(crate) fn finish_resumed_turn(
     // Capture graph sizes before apply_turn so bookkeeping can detect a change.
     let rooms_before = mapper.graph.rooms().count();
     let conns_before = mapper.graph.connections().len();
-    apply_turn(mapper, "", &result);
+    apply_turn(mapper, "", &result, &mut state.death_watch);
     // The resumed half of a turn can be where the death lands; it names no direction of its own,
     // so only the move still held from the submit path can be rolled back. (SQ-0671)
     app::session::rollback_tried_on_death(
         mapper,
-        &mut state.pending_tried,
+        &mut state.death_watch,
         None,
         app::session::turn_reports_death(&result.transcript),
     );
@@ -714,13 +714,13 @@ pub(crate) fn apply_game_driven_result(
     // parse), but we still observe any location change so the map stays in sync.
     let rooms_before = mapper.graph.rooms().count();
     let conns_before = mapper.graph.connections().len();
-    apply_turn(mapper, "", result);
+    apply_turn(mapper, "", result, &mut state.death_watch);
     // A keypress can be the turn a death is finally admitted on ("press any key" after the
     // banner). It names no direction of its own, so the rollback can only be for the move the
     // player is still standing on the wrong side of. (SQ-0671)
     app::session::rollback_tried_on_death(
         mapper,
-        &mut state.pending_tried,
+        &mut state.death_watch,
         None,
         app::session::turn_reports_death(&result.transcript),
     );
