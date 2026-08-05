@@ -809,11 +809,23 @@ mod tests {
         assert!(!items.contains(&"wait".to_string()));
         assert!(!items.contains(&"again".to_string()));
         assert!(!items.contains(&"inventory".to_string()));
-        // The compass survives: the two rows spell it differently (quick says
-        // `n s e w`, the table says `north south east west`), so there is no
-        // literal duplicate to exclude.
-        assert!(items.contains(&"north".to_string()), "`north` survives — quick spells it `n`");
+        // Direction words compare by the direction they name, not by spelling:
+        // the quick row says `n s e w` while the table spells them out, and the
+        // compass must still be excluded (it appeared in both places).
+        for dir in ["north", "south", "east", "west", "up", "down", "in", "out"] {
+            assert!(!items.contains(&dir.to_string()), "`{dir}` is one click away on the quick row");
+        }
         assert!(items.contains(&"take".to_string()), "an ordinary verb is unaffected");
+    }
+
+    /// Direction equivalence follows the EFFECTIVE quick list too: a custom
+    /// quick row without `n` puts `north` back in the VERB column.
+    #[test]
+    fn a_direction_dropped_from_quick_returns_to_the_verb_column() {
+        let band = CommandBandState::new(default_verbs(), vec!["look".to_string()]);
+        let items = band.items(COL_VERB);
+        assert!(items.contains(&"north".to_string()), "`n` no longer in quick -> `north` returns");
+        assert!(!items.contains(&"look".to_string()));
     }
 
     /// The exclusion is config-aware: it follows the EFFECTIVE `quick` list

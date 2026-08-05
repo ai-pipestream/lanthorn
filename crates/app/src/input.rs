@@ -1411,8 +1411,37 @@ fn strip_band_tail(input: &mut crate::text_field::TextField, old_text: &str) {
 /// this to resolve the word, then submits it exactly like a typed command.
 /// `None` when the band is closed or `idx` is stale (e.g. the band was
 /// reconfigured between the click landing and this running).
+///
+/// Direction abbreviations SUBMIT as their full word: the quick row displays
+/// `n s e w` for compactness, but Scott Adams vocabularies hold only the
+/// spelled-out `NORTH`/`SOUTH`/…, so sending the abbreviation fails there
+/// while the full word works in every engine.
 pub fn band_quick_pick_command(state: &AppState, idx: usize) -> Option<String> {
-    state.overlays.command_band.as_ref()?.quick.get(idx).cloned()
+    let word = state.overlays.command_band.as_ref()?.quick.get(idx)?;
+    Some(match mapper::direction::parse_direction(word) {
+        Some(d) => full_direction_word(d).unwrap_or(word).to_string(),
+        None => word.clone(),
+    })
+}
+
+/// The spelled-out command word for a direction, understood by every engine.
+fn full_direction_word(d: mapper::direction::Direction) -> Option<&'static str> {
+    use mapper::direction::Direction::*;
+    Some(match d {
+        N => "north",
+        S => "south",
+        E => "east",
+        W => "west",
+        NE => "northeast",
+        NW => "northwest",
+        SE => "southeast",
+        SW => "southwest",
+        Up => "up",
+        Down => "down",
+        In => "in",
+        Out => "out",
+        Unknown => return None,
+    })
 }
 
 // ── Internal: resize-mode key routing ────────────────────────────────────────
@@ -6062,10 +6091,20 @@ mod tests {
         assert!(!band(&s).col_reachable(COL_SECOND));
 
         // solo: still nothing else, and the phrase is already complete.
-        // (`north`, not `look` — `look` is in the default quick row, so
-        // SQ-0667 excludes it from the VERB column; see
-        // `verb_column_excludes_quick_words`.)
-        pick_text(&mut s, &mut mapper, COL_VERB, "north");
+        // Every default solo verb lives on the quick row and is therefore
+        // excluded from the VERB column (SQ-0667, direction-aware), so give
+        // the table a synthetic solo verb to exercise the arity.
+        s.overlays
+            .command_band
+            .as_mut()
+            .unwrap()
+            .verbs
+            .push(crate::render::command_band::VerbEntry::new(
+                "pray",
+                crate::render::command_band::Arity::Solo,
+                None,
+            ));
+        pick_text(&mut s, &mut mapper, COL_VERB, "pray");
         assert!(!band(&s).col_reachable(COL_HERE), "a solo verb offers no object");
         assert!(band(&s).complete());
         assert_eq!(
@@ -6145,10 +6184,20 @@ mod tests {
         assert_eq!(command_band_intercept(key(KeyCode::Enter), &s), Some(Action::BandEnter));
 
         // Picking a complete-alone verb still leaves Enter meaning "pick" —
-        // there is no armed/send state to resolve to anymore.
-        // (`north`, not `look` — `look` is excluded from the VERB column by
-        // SQ-0667, since it's already on the quick row.)
-        pick_text(&mut s, &mut mapper, COL_VERB, "north");
+        // there is no armed/send state to resolve to anymore. (A synthetic
+        // solo verb: every default one is on the quick row, and SQ-0667's
+        // direction-aware exclusion keeps them all out of the VERB column.)
+        s.overlays
+            .command_band
+            .as_mut()
+            .unwrap()
+            .verbs
+            .push(crate::render::command_band::VerbEntry::new(
+                "pray",
+                crate::render::command_band::Arity::Solo,
+                None,
+            ));
+        pick_text(&mut s, &mut mapper, COL_VERB, "pray");
         assert!(band(&s).complete());
         assert_eq!(
             command_band_intercept(key(KeyCode::Enter), &s),
@@ -6190,8 +6239,12 @@ mod tests {
         let mut s = AppState::default();
         open_band(&mut s);
         let n = band(&s).quick.iter().position(|q| q == "n").expect("n in the quick row");
+        let look = band(&s).quick.iter().position(|q| q == "look").expect("look in the quick row");
 
-        assert_eq!(band_quick_pick_command(&s, n), Some("n".to_string()));
+        // Direction abbreviations submit spelled out: Scott Adams vocabularies
+        // hold only NORTH/SOUTH/…, so sending the displayed `n` fails there.
+        assert_eq!(band_quick_pick_command(&s, n), Some("north".to_string()));
+        assert_eq!(band_quick_pick_command(&s, look), Some("look".to_string()), "non-directions pass through");
         assert_eq!(band_quick_pick_command(&s, 9999), None, "a stale index is a no-op, not a panic");
 
         s.overlays.command_band = None;
@@ -6212,7 +6265,11 @@ mod tests {
         assert_eq!(band(&s).phrase_text(), "unlock iron door");
 
         let n = band(&s).quick.iter().position(|q| q == "n").expect("n in the quick row");
-        assert_eq!(band_quick_pick_command(&s, n), Some("n".to_string()), "…while still resolving its own word");
+        assert_eq!(
+            band_quick_pick_command(&s, n),
+            Some("north".to_string()),
+            "…while still resolving its own word (spelled out for Scott vocabularies)"
+        );
         apply_action(Action::BandQuickPick(n), &mut s, &mut mapper);
         assert_eq!(
             band(&s).phrase_text(),

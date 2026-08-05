@@ -355,15 +355,23 @@ impl CommandBandState {
     /// quick row is one click away regardless. The exclusion follows
     /// `self.quick` — the *effective* list (the user's configured `quick` when
     /// set, else the built-in row) — so removing a word from a custom `quick`
-    /// puts it back here. The compass survives under the default config only
-    /// because the two rows spell it differently (`n s e w` vs. `north south
-    /// east west`), not because of any special-casing here.
+    /// puts it back here. Direction words compare by the direction they name,
+    /// not by spelling, so the quick row's `n` excludes the table's `north`
+    /// (the compass otherwise appeared in both places).
     pub fn items(&self, col: usize) -> Vec<String> {
+        use mapper::direction::parse_direction;
+        let same_word = |q: &str, w: &str| {
+            q.eq_ignore_ascii_case(w)
+                || matches!(
+                    (parse_direction(q), parse_direction(w)),
+                    (Some(a), Some(b)) if a == b
+                )
+        };
         match col {
             COL_VERB => self
                 .verbs
                 .iter()
-                .filter(|v| !self.quick.iter().any(|q| q.eq_ignore_ascii_case(&v.word)))
+                .filter(|v| !self.quick.iter().any(|q| same_word(q, &v.word)))
                 .map(|v| v.word.clone())
                 .collect(),
             COL_HERE => self.here.clone(),
