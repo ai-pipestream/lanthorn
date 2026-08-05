@@ -620,9 +620,13 @@ fn draw_frame(
         } else {
             match &state.tidy_anim {
                 Some(anim) => FrameRenderMap::Owned(render_layer(&anim.current().graph, layer)),
-                None => {
-                    FrameRenderMap::Cached(state.cached_map_render(layer, &mapper.graph))
-                }
+                None => match state.live_map_render(layer, &mapper.graph) {
+                    Some(cached) => FrameRenderMap::Cached(cached),
+                    // The matrix draws from the graph (see `render_map_layered`), so no model is
+                    // routed for it at all — not even a stale one kept warm. That is what keeps a
+                    // background layout job off the matrix pane entirely. (SQ-0671)
+                    None => FrameRenderMap::Owned(mapper::render::render(&mapper::graph::MapGraph::new())),
+                },
             }
         };
 
@@ -641,7 +645,7 @@ fn draw_frame(
         // async re-route worker (SQ-0379) — the map pane border pulses between red
         // and green, overriding the normal (focused/unfocused) border color.
         let map_border_override: Option<ratatui::style::Color> =
-            state.map_job_pulse_elapsed().map(pulse_border_color);
+            state.map_job_pulse_elapsed(&mapper.graph).map(pulse_border_color);
 
         // Resolve the story-border color: a live sound pulse overrides the fg.
         let story_border_style = {

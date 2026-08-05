@@ -145,6 +145,16 @@ grows. How eagerly is up to you (`background_tidy`): after every new room (the
 default), only when a new room overlaps an old one (`on_overlap`), debounced every
 few rooms (`debounced`), or off entirely. Force a pass any time with `tidy-map`.
 
+**Maze layers are left alone.** A layer flagged as a maze (below) is *frozen*: it
+schedules no tidy, `tidy-map` on it answers "maze layer: geometry is frozen — the
+matrix is the view", and its rooms keep the positions they were first given. There
+is no compass arrangement of a maze to converge on — the layout engine would keep
+producing a different wrong one every turn, and the pane would keep repainting for a
+grid nobody is reading. Only the *optimization* stops: rooms, passages and tried
+directions go on being recorded exactly as before, and a newly discovered room is
+still placed where the move you walked says it should go, so unflagging the layer
+(or switching it back to `view-map drawn`) shows a real map again.
+
 Curious how a layout got built? `animate-tidy` steps through the whole assembly
 stage by stage — a **Build** stop that lists every connection, then
 **room-by-room placement** as each box drops onto the grid, then the
@@ -195,6 +205,11 @@ hidden however empty the column looks.
 | `⇱out` | leaves the layer; the destination is footnoted below the table |
 | `_`    | tried, and there is no path that way |
 | `·`    | untried — the exploration frontier |
+
+A move that got you *killed* leaves no `_` behind. Dying says nothing about whether
+the passage is open, so the attempt is taken back and the cell stays `·`, still on
+the frontier — including when the game asks whether to reincarnate you before it
+admits the death, in which case the move that caused it is the one rolled back.
 
 **Reading it.** `▸` marks the room you are standing in. `⇲` marks a room a passage
 from *outside* the layer leads into — a doorway into the maze, listed in a footnote

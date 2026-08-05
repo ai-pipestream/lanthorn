@@ -1999,12 +1999,16 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
             return;
         }
         let arrived = reprinted_room_heading(&result.transcript, &snap.name);
-        if is_death_relocation(&result.transcript) {
-            // The game printed a death banner this turn and resurrected the player
-            // into a room that is NOT reachable by the command they typed (e.g. a
-            // grue kills you in the dark and drops you in the Forest). Record it as
-            // an involuntary relocation so no false directional edge is minted from
-            // the room you died in to the resurrection room. (SQ-0259)
+        if turn_reports_death(&result.transcript) {
+            // The game said the player died this turn and moved them somewhere that is NOT
+            // reachable by the command they typed (e.g. a grue kills you in the dark and drops
+            // you in the Forest). Record it as an involuntary relocation so no false directional
+            // edge is minted from the room you died in to the resurrection room. (SQ-0259)
+            //
+            // Widened from the banner alone to whatever [`turn_reports_death`] recognises
+            // (SQ-0671): Adventure prints no banner on the turn that kills you, so a fatal move
+            // in the dark was minting a west-passage from the room you died in to the bottom of
+            // the pit — verified against `advent.blb`.
             mapper.observe_relocation(snap.number, &snap.name);
         } else if arrived {
             // The game printed this room's heading again, so the player MOVED — even if they
@@ -2026,6 +2030,92 @@ pub fn apply_turn(mapper: &mut Mapper, command: &str, result: &TurnResult) {
         // on the interpreter thread. On a geometry change the run loop schedules a
         // background cleanup (or full tidy) job — see `finish_command_turn` and
         // `cleanup_overlaps_layer_silent`. (SQ-0379)
+    }
+}
+
+/// The `tried` record this turn's command is about to create: `(the room the player is standing
+/// in, the direction they typed)` — the pair [`apply_turn`] marks (SQ-0671).
+///
+/// `None` when the command names no direction, when there is no current room, or when the
+/// direction was ALREADY on the record before this turn — in that last case the turn creates
+/// nothing, so there is nothing it could roll back, and a rollback would erase an older, honest
+/// fact. Call it BEFORE `apply_turn`, which is when "the room typed in" is still the current one.
+pub fn tried_record_for(
+    mapper: &Mapper,
+    command: &str,
+) -> Option<(mapper::graph::RoomId, mapper::direction::Direction)> {
+    let here = mapper.graph.current()?;
+    let dir = parse_direction(command)?;
+    (!mapper.graph.is_tried(here, dir)).then_some((here, dir))
+}
+
+/// True when this turn's output says the player DIED (SQ-0671).
+///
+/// Two forms, because games admit a death in two ways:
+///
+/// * The `*** … ***` banner [`is_death_relocation`] reads — the Inform library default and the
+///   Infocom convention, printed on the fatal turn itself in nearly every game.
+/// * An offer to bring the player back: a death word AND a revival word in one turn. Adventure —
+///   the game this whole maze feature is built around — prints no banner on the turn that kills
+///   you at all. It prints *"You fell into a pit and broke every bone in your body! … you seem to
+///   have gotten yourself killed … Do you want me to try to reincarnate you?"*, and the banner
+///   only arrives later, IF the player declines. Requiring both words keeps it off a turn that
+///   merely mentions raising the dead.
+///
+/// It gates both things a death turn must not do: mint a passage to wherever the player was
+/// dumped ([`apply_turn`], SQ-0259) and record the direction as tried ([`rollback_tried_on_death`]).
+///
+/// Known gap: the turn that ACCEPTS the offer ("yes" → *"--- POOF!! ---"*, and the player wakes
+/// up in the well house) carries no death word at all, so it still reads as an ordinary arrival
+/// and mints an `?` edge from wherever the corpse was. Carrying the death across that turn is a
+/// separate change to the SQ-0259 machinery.
+pub fn turn_reports_death(transcript: &str) -> bool {
+    is_death_relocation(transcript) || offers_revival(transcript)
+}
+
+/// True when this turn's output both reports a death and offers to undo it.
+fn offers_revival(transcript: &str) -> bool {
+    let lower = transcript.to_ascii_lowercase();
+    let died = ["killed", "died", "dead", "your body"].iter().any(|w| lower.contains(w));
+    let revive = ["reincarnate", "resurrect"].iter().any(|w| lower.contains(w));
+    died && revive
+}
+
+/// Take back the `tried` record a fatal move left behind (SQ-0671).
+///
+/// A move that kills the player finds no passage: the game prints its death text, no room heading
+/// is reprinted, no edge is minted — and yet the direction landed in the room's `tried` list,
+/// where the matrix draws it as `_`, "tried, and there is no path that way". That is a claim about
+/// the map nobody made. Dying tells you nothing about whether the way is open, so the record goes
+/// back to `·` (untried) and the direction stays on the exploration frontier.
+///
+/// `attempted` is this turn's record from [`tried_record_for`]; `pending` carries the previous
+/// turn's across the gap, because the death is not always admitted on the turn that caused it —
+/// Adventure asks whether to reincarnate you first, and the banner arrives on the turn that
+/// answers. It is only held while the player is still standing where they typed the direction: a
+/// player who has moved on has settled the question themselves.
+///
+/// Only the typed record is dropped. `MapGraph::unmark_tried` cannot unmint an edge, so a
+/// direction that DID lead somewhere before the kill stays tried on the strength of that edge.
+pub fn rollback_tried_on_death(
+    mapper: &mut Mapper,
+    pending: &mut Option<(mapper::graph::RoomId, mapper::direction::Direction)>,
+    attempted: Option<(mapper::graph::RoomId, mapper::direction::Direction)>,
+    fatal: bool,
+) {
+    if fatal {
+        // This turn's move when it named a direction, else the one held over — the turn that
+        // CONTAINED the fatal move, which is the one whose record is a lie.
+        if let Some((room, dir)) = attempted.or(*pending) {
+            mapper.graph.unmark_tried(room, dir);
+        }
+        *pending = None;
+        return;
+    }
+    if attempted.is_some() {
+        *pending = attempted;
+    } else if pending.is_some_and(|(room, _)| Some(room) != mapper.graph.current()) {
+        *pending = None; // the player left that room: whatever it recorded is now settled fact
     }
 }
 

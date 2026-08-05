@@ -214,25 +214,29 @@ pub(crate) fn poll_tidy_jobs(
                     ApplyTidyOutcome::Stale => {
                         // Graph changed mid-tidy: re-trigger the SAME kind of job
                         // (full relayout vs. cleanup-only) for the current state.
+                        // …but never onto a maze layer, whose geometry is frozen: re-triggering
+                        // there is exactly the churn loop the freeze exists to end (SQ-0671).
                         let active_layer2 = state.active_layer(&mapper.graph);
-                        let kind = job.kind;
-                        let graph_clone = mapper.graph.clone();
-                        let gen2 = state.graph_gen;
-                        let handle2 = std::thread::spawn(move || {
-                            let mut g = graph_clone;
-                            match kind {
-                                TidyKind::Full => tidy_layer_silent(&mut g, active_layer2),
-                                TidyKind::Cleanup => cleanup_overlaps_layer_silent(&mut g, active_layer2),
-                            }
-                            g
-                        });
-                        state.tidy_job = Some(TidyJob {
-                            handle: handle2,
-                            layer: active_layer2,
-                            gen: gen2,
-                            started: std::time::Instant::now(),
-                            kind,
-                        });
+                        if !app::tidy::layer_is_frozen(&mapper.graph, active_layer2) {
+                            let kind = job.kind;
+                            let graph_clone = mapper.graph.clone();
+                            let gen2 = state.graph_gen;
+                            let handle2 = std::thread::spawn(move || {
+                                let mut g = graph_clone;
+                                match kind {
+                                    TidyKind::Full => tidy_layer_silent(&mut g, active_layer2),
+                                    TidyKind::Cleanup => cleanup_overlaps_layer_silent(&mut g, active_layer2),
+                                }
+                                g
+                            });
+                            state.tidy_job = Some(TidyJob {
+                                handle: handle2,
+                                layer: active_layer2,
+                                gen: gen2,
+                                started: std::time::Instant::now(),
+                                kind,
+                            });
+                        }
                     }
                 }
             }

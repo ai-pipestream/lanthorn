@@ -349,6 +349,21 @@ impl MapGraph {
         }
     }
 
+    /// Undo a [`MapGraph::mark_tried`] — `dir` was never really tried from `id` after all
+    /// (SQ-0671). The one caller is the fatal move: the player typed a direction, the game killed
+    /// them for it, and no passage was found either way. Recording it as tried would draw a `_`
+    /// ("tried, and there is no path that way") over a direction nobody has any knowledge about,
+    /// which is the map asserting something false.
+    ///
+    /// Only the TYPED record is dropped. A direction that also carries an edge out of `id` stays
+    /// tried by [`MapGraph::is_tried`], because the edge is the stronger evidence and this cannot
+    /// (and must not) unmint it.
+    pub fn unmark_tried(&mut self, id: RoomId, dir: Direction) {
+        if let Some(r) = self.rooms.get_mut(&id) {
+            r.tried.retain(|d| *d != dir);
+        }
+    }
+
     /// The compass directions never typed in this room — what a player has left to explore
     /// (SQ-0391). Directions that LED somewhere are tried by definition, so an edge out counts
     /// even on a map loaded from before this was recorded.
@@ -594,6 +609,32 @@ mod tests {
 
         assert!(!g.add_self_loop(1, Direction::Unknown), "`?` is a bucket, not a passage");
         assert!(!g.add_self_loop(404, Direction::N), "an unknown room records nothing");
+    }
+
+    /// SQ-0671: a fatal move's `tried` record is taken back — but only the typed one. An edge is
+    /// evidence this cannot unmint, and must go on answering for the direction.
+    #[test]
+    fn unmarking_a_tried_direction_drops_the_typed_record_but_never_a_passage() {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Cellar".into());
+        g.upsert_room(2, "Forest".into());
+        g.mark_tried(1, Direction::N);
+        g.mark_tried(1, Direction::E);
+        assert!(g.is_tried(1, Direction::N));
+
+        g.unmark_tried(1, Direction::N);
+        assert!(!g.is_tried(1, Direction::N), "the typed record is gone");
+        assert!(g.untried(1).contains(&Direction::N), "so the direction is a frontier again");
+        assert!(g.is_tried(1, Direction::E), "and the room's other attempts are untouched");
+
+        // A direction carrying a passage stays tried whatever the record says.
+        g.add_edge(1, Direction::W, 2);
+        g.mark_tried(1, Direction::W);
+        g.unmark_tried(1, Direction::W);
+        assert!(g.is_tried(1, Direction::W), "the edge still proves west was walked");
+
+        g.unmark_tried(404, Direction::N); // an unknown room does not panic
+        g.unmark_tried(1, Direction::S); // nor does a direction that was never tried
     }
 
     #[test]

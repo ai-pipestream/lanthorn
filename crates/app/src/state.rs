@@ -1693,6 +1693,14 @@ pub struct AppState {
     /// [`MAP_TRAIL_LEN`]; used only on maze-flagged layers, where "how did I get here" is the
     /// question a drawn map would have answered by itself.
     pub map_trail: std::collections::VecDeque<RoomId>,
+    /// The `tried` record the last directional command left behind — `(room typed in, direction)`
+    /// — kept only while the player is still standing in that room (SQ-0671).
+    ///
+    /// A fatal move's death is not always admitted on the turn that made it: Adventure asks
+    /// whether to reincarnate you first, so the `*** You have died ***` banner arrives on the turn
+    /// that ANSWERS. Without this the rollback would either fire a turn late (undoing the wrong
+    /// direction) or not at all. Session state; nothing about it is worth persisting.
+    pub pending_tried: Option<(RoomId, mapper::direction::Direction)>,
     pub transcript: Vec<String>,
     /// Parallel kind tag for each entry in `transcript` (always same length).
     pub transcript_kinds: Vec<TranscriptKind>,
@@ -2208,6 +2216,7 @@ impl Default for AppState {
             matrix_scroll: (0, 0),
             tangle_suggested: std::collections::BTreeSet::new(),
             map_trail: std::collections::VecDeque::new(),
+            pending_tried: None,
             transcript: Vec::new(),
             transcript_kinds: Vec::new(),
             transcript_styles: Vec::new(),
@@ -2783,6 +2792,34 @@ impl AppState {
         })
     }
 
+    /// True when the map pane draws the MATRIX for the layer it is showing (SQ-0666).
+    ///
+    /// The matrix is built from the graph at draw time — rooms, edges, `tried` — and owes nothing
+    /// to the routed layout model or to the background jobs that produce it.
+    pub fn map_shows_matrix(&self, graph: &mapper::graph::MapGraph) -> bool {
+        graph.layer_view(self.active_layer(graph)) == mapper::layer::MapView::Matrix
+    }
+
+    /// The routed model for the LIVE map this frame, or `None` when the pane is showing the
+    /// matrix and there is no map to route (SQ-0671).
+    ///
+    /// This is the churn the player saw as a cycling map pane: [`AppState::cached_map_render`]
+    /// re-routes whenever `graph_gen` moves, and every arriving tidy result bumps that generation,
+    /// so a background job for ANY layer spawned a render worker whose in-flight pulse restyled
+    /// the border of a pane drawing a table it never touched. Asking for no model at all is what
+    /// makes the matrix independent of the layout pipeline, rather than merely ignoring its
+    /// output.
+    pub fn live_map_render(
+        &self,
+        layer: LayerId,
+        graph: &mapper::graph::MapGraph,
+    ) -> Option<std::cell::Ref<'_, mapper::render::RenderMap>> {
+        if self.map_shows_matrix(graph) {
+            return None;
+        }
+        Some(self.cached_map_render(layer, graph))
+    }
+
     /// Spawn the background map-render worker for `(gen, layer)` unless one is
     /// already in flight (coalesced — like the tidy worker). The worker routes a
     /// clone of the graph and reports each phase into `render_steps`. (SQ-0379)
@@ -2863,7 +2900,18 @@ impl AppState {
 
     /// How long the in-flight background map job (tidy relayout or render worker)
     /// has been running, for the border-pulse phase — `None` when neither runs.
-    pub fn map_job_pulse_elapsed(&self) -> Option<std::time::Duration> {
+    ///
+    /// Also `None` while the pane is showing the matrix (SQ-0671). The pulse announces "the
+    /// layout you are looking at is being rebuilt"; over a table read straight from the graph it
+    /// announces nothing, and a job for some other layer finishing mid-turn made the map pane's
+    /// border cycle red/green while the player walked a maze.
+    pub fn map_job_pulse_elapsed(
+        &self,
+        graph: &mapper::graph::MapGraph,
+    ) -> Option<std::time::Duration> {
+        if self.map_shows_matrix(graph) {
+            return None;
+        }
         self.tidy_job
             .as_ref()
             .map(|j| j.started.elapsed())

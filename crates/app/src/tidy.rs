@@ -1,5 +1,37 @@
 // ── Tidy pipeline ─────────────────────────────────────────────────────────────
 
+/// True when `layer`'s geometry is FROZEN: nothing may move its rooms after they are first
+/// placed (SQ-0671).
+///
+/// A maze layer is the case. Tidy optimizes a compass layout towards an objective a maze cannot
+/// satisfy — in the reference save 29 of 47 passages are unsatisfiable at once — so the pass never
+/// converges, every turn produces a different arrangement, and the pane repaints (and pulses) for
+/// a layout nobody is looking at: the matrix reads the graph, not the grid. Freezing costs the
+/// player nothing they can see and takes the churn out of the loop.
+///
+/// This freezes only the OPTIMIZATION. A newly discovered room is still dead-reckoned into place
+/// by `place_incremental` on the turn it is found, edges and `tried` records still accrue, and
+/// switching the layer back to the drawn view still shows every room somewhere sensible — the
+/// positions simply stop being re-derived behind the player's back.
+pub fn layer_is_frozen(graph: &mapper::graph::MapGraph, layer: mapper::layer::LayerId) -> bool {
+    graph.layer_is_maze(layer)
+}
+
+/// Whether a turn schedules background map maintenance for `layer` at all (SQ-0671).
+///
+/// `changed` is the existing signal — a turn that added no room and no connection has nothing to
+/// re-derive. The freeze is the second half: on a maze layer NO job is spawned, rather than one
+/// spawned and its result thrown away, so the worker, the border pulse and the generation bump
+/// its completion causes all stay out of the loop. `should_bg_tidy` still chooses FULL vs.
+/// cleanup-only for the layers that do get one.
+pub fn should_schedule_tidy(
+    graph: &mapper::graph::MapGraph,
+    layer: mapper::layer::LayerId,
+    changed: bool,
+) -> bool {
+    changed && !layer_is_frozen(graph, layer)
+}
+
 /// Rebuild the layer from scratch by replaying discovery order (the subgraph's
 /// connection insertion order), emitting one "Build" frame (with the connection
 /// manifest) followed by one "Placement" frame per room. Returns the fully-placed
@@ -307,6 +339,9 @@ pub fn tidy_layer_silent(
     layer: mapper::layer::LayerId,
 ) {
     use crate::render::map::{cleanup_overlaps, compact_empty_lines, repair_directional_hints};
+    if layer_is_frozen(graph, layer) {
+        return; // maze layer: the positions stand as dead-reckoned (SQ-0671)
+    }
     run_layer_ops_silent(graph, layer, |sub| {
         mapper::layout::relayout_auto(sub);
         cleanup_overlaps(sub, 3, 40);
@@ -326,6 +361,9 @@ pub fn cleanup_overlaps_layer_silent(
     layer: mapper::layer::LayerId,
 ) {
     use crate::render::map::cleanup_overlaps;
+    if layer_is_frozen(graph, layer) {
+        return; // maze layer: overlaps are a drawn-view problem and the matrix is the view
+    }
     run_layer_ops_silent(graph, layer, |sub| {
         cleanup_overlaps(sub, 2, 20);
     });
@@ -389,6 +427,12 @@ pub fn apply_tidy_result(
 ) -> ApplyTidyOutcome {
     if job_gen != current_gen {
         return ApplyTidyOutcome::Stale;
+    }
+    if layer_is_frozen(real_graph, layer) {
+        // The layer was flagged a maze while this job was in flight (`/mark-maze-layer` during a
+        // tidy is exactly the moment a player does it). Its result is a layout for a layer whose
+        // geometry is now frozen: drop it, and report Applied so nothing re-triggers. (SQ-0671)
+        return ApplyTidyOutcome::Applied;
     }
 
     // Copy final positions from the tidied clone back into the real graph.

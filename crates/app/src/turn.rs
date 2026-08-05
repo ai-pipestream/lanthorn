@@ -120,7 +120,23 @@ pub(crate) fn finish_command_turn(
         }
     }
 
+    // What `apply_turn` is about to record as tried, captured while the room typed in is still
+    // the current one — the rollback below needs to know which record is this turn's (SQ-0671).
+    let attempted = app::session::tried_record_for(mapper, cmd);
+
     apply_turn(mapper, cmd, &result);
+
+    // A move that killed the player proved nothing about the passage, so its `tried` record is
+    // taken back and the direction stays untried (`·`, not `_`). Fires for the turn that
+    // CONTAINED the fatal move even when the death is only admitted a turn later, after the
+    // player answers a resurrection prompt. (SQ-0671)
+    app::session::rollback_tried_on_death(
+        mapper,
+        &mut state.pending_tried,
+        attempted,
+        app::session::turn_reports_death(&result.transcript),
+    );
+
     // Breadcrumb for the maze view (SQ-0666): where the player has just been. Recorded from the
     // room the mapper settled on, after `apply_turn`, so a suppressed or relocated location does
     // not leave a step the map never took.
@@ -186,7 +202,11 @@ pub(crate) fn finish_command_turn(
     let new_room = mapper.graph.rooms().count() > rooms_before;
     let new_conn = mapper.graph.connections().len() > conns_before;
     let changed = new_room || new_conn;
-    if changed {
+    // A maze layer's geometry is frozen (SQ-0671): no job is scheduled for it at all, rather
+    // than one spawned and thrown away. The layer keeps growing — the new room this turn was
+    // already dead-reckoned into place by `apply_turn` above — but nothing re-derives where the
+    // rooms already there sit. See `tidy::layer_is_frozen`.
+    if app::tidy::should_schedule_tidy(&mapper.graph, state.active_layer(&mapper.graph), changed) {
         let active_layer = state.active_layer(&mapper.graph);
         // Overlap/distortion signal → decides FULL relayout vs. cleanup-only.
         let cells = mapper::layout::occupied_cells_in_layer(&mapper.graph, active_layer);
@@ -467,6 +487,14 @@ pub(crate) fn finish_resumed_turn(
     let rooms_before = mapper.graph.rooms().count();
     let conns_before = mapper.graph.connections().len();
     apply_turn(mapper, "", &result);
+    // The resumed half of a turn can be where the death lands; it names no direction of its own,
+    // so only the move still held from the submit path can be rolled back. (SQ-0671)
+    app::session::rollback_tried_on_death(
+        mapper,
+        &mut state.pending_tried,
+        None,
+        app::session::turn_reports_death(&result.transcript),
+    );
     state.graph_gen = state.graph_gen.wrapping_add(1);
     state.set_viewed_layer(None);
     if let Some(snap) = &result.location {
@@ -687,6 +715,15 @@ pub(crate) fn apply_game_driven_result(
     let rooms_before = mapper.graph.rooms().count();
     let conns_before = mapper.graph.connections().len();
     apply_turn(mapper, "", result);
+    // A keypress can be the turn a death is finally admitted on ("press any key" after the
+    // banner). It names no direction of its own, so the rollback can only be for the move the
+    // player is still standing on the wrong side of. (SQ-0671)
+    app::session::rollback_tried_on_death(
+        mapper,
+        &mut state.pending_tried,
+        None,
+        app::session::turn_reports_death(&result.transcript),
+    );
     // Game-initiated (v4+) save/restore: open the saves dialog in in-game mode
     // and defer the rest of the turn.
     if let Some(io) = result.pending_io {

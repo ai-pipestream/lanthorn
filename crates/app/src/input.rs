@@ -1833,6 +1833,13 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             // flight or an animation is showing. (SQ-0261)
             if state.anim_build_job.is_none() && state.tidy_anim.is_none() {
                 let layer = state.active_layer(&mapper.graph);
+                // A maze layer's geometry is frozen (SQ-0671), and a tidy the player asked for by
+                // hand is no exception: there is no compass arrangement of a maze to find, and
+                // the table they are reading would not change if there were.
+                if crate::tidy::layer_is_frozen(&mapper.graph, layer) {
+                    state.set_status("maze layer: geometry is frozen — the matrix is the view");
+                    return;
+                }
                 let mut g = mapper.graph.clone();
                 let gen = state.graph_gen;
                 let total = mapper.graph.rooms_in_layer(layer).len() + 8;
