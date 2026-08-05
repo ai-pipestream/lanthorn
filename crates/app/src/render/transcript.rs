@@ -7,6 +7,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
+// Only test code refers to `Color` bare; production code always spells the
+// fully-qualified `ratatui::style::Color` (SQ-0643 removed the last bare
+// production usage — the hardcoded search-highlight style).
+#[cfg(test)]
 use ratatui::style::Color;
 
 use crate::engine::{Introspect, StatusField, StatusModel};
@@ -513,6 +517,10 @@ pub(crate) const META_GUTTER: u16 = 2;
 /// carried onto **every** wrapped row it produces, so a line's style is decided
 /// once (on the whole logical line) and never re-derived from a wrapped
 /// fragment. A missing/short `styles` entry defaults to `Style::default()`.
+///
+/// Test-facing convenience over [`wrap_lines_kinded_indexed`]; the render paths
+/// take the indexed form, whose line index the clear anchor rides on (SQ-0640).
+#[cfg(test)]
 pub(crate) fn wrap_lines_kinded(
     transcript: &[String],
     kinds: &[TranscriptKind],
@@ -525,7 +533,33 @@ pub(crate) fn wrap_lines_kinded(
     left_float: bool,
     width: u16,
 ) -> Vec<WrappedRow> {
+    wrap_lines_kinded_indexed(transcript, kinds, styles, runs, para, images, char_px, images_enabled, left_float, width).0
+}
+
+/// [`wrap_lines_kinded`], plus the display row each source line's output STARTS at
+/// (`starts[i]`, always `≤ rows.len()`).
+///
+/// The index exists because the wrap carries state ACROSS lines — a margin float's
+/// picture strips ride beside later lines — so "how many rows do lines `[..a]`
+/// occupy" cannot be answered by wrapping that prefix on its own: the prefix wrap
+/// flushes the float's leftover strips as extra rows, while in the full wrap those
+/// same strips are shared with the lines after `a` and add nothing before it. Only
+/// the full wrap knows where a line really begins. (SQ-0640)
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn wrap_lines_kinded_indexed(
+    transcript: &[String],
+    kinds: &[TranscriptKind],
+    styles: &[Style],
+    runs: &[Vec<StyleRun>],
+    para: &[ParaFmt],
+    images: &[Option<crate::inline_image::InlineImage>],
+    char_px: (u16, u16),
+    images_enabled: bool,
+    left_float: bool,
+    width: u16,
+) -> (Vec<WrappedRow>, Vec<usize>) {
     let mut out: Vec<WrappedRow> = Vec::new();
+    let mut starts: Vec<usize> = Vec::with_capacity(transcript.len());
     // The currently-active left-margin float (Zork Zero's drop-cap idiom): its
     // picture occupies the left `indent` columns and the following Story/Input
     // rows wrap beside it. Only ONE float is active at a time; a new image or a
@@ -534,6 +568,7 @@ pub(crate) fn wrap_lines_kinded(
     let mut float: Option<FloatState> = None;
 
     for (i, line) in transcript.iter().enumerate() {
+        starts.push(out.len());
         // An image unit either starts a left-margin float or expands into an
         // N-row band (or zero rows when images are disabled). `images.get(i)`
         // yields `None` for a plain text line (and for a short `images` slice).
@@ -652,7 +687,7 @@ pub(crate) fn wrap_lines_kinded(
     }
     // Finish any float whose picture outran (or had no) text beside it.
     flush_float(&mut out, &mut float);
-    out
+    (out, starts)
 }
 
 /// The minimum prose column (cells) worth floating a picture beside; a narrower
@@ -832,10 +867,18 @@ fn wrap_line_ranges_var(line: &str, nowrap_from: Option<usize>, width_for: impl 
 
 /// Wrapped-row count before the screen-clear anchor `clear_anchor` (a source-line
 /// index into the given slices), or `None` when the anchor is unset or out of
-/// range. This is the number of display rows the pre-clear lines `[..a]` occupy,
-/// used to top-anchor post-clear content. Defensively clamps each parallel slice
-/// (`runs` and, in principle, the others, may be shorter than `transcript`).
-/// (SQ-0305)
+/// range. This is the number of display rows that precede the post-clear content,
+/// used to top-anchor it. (SQ-0305)
+///
+/// Derived from the FULL wrap, not from a standalone wrap of `[..a]` (SQ-0640):
+/// a margin float's picture strips ride beside the lines that follow it, so a
+/// prefix wrap flushes strips as extra rows that the full wrap never spends there.
+/// The over-count then pushed the anchor past the post-clear content's real first
+/// row — at worst to `rows.len()`, which top-anchored an EMPTY viewport at scroll 0.
+///
+/// The render paths wrap once and call [`anchor_row_at`] on that wrap's line index
+/// instead of paying for a second wrap here.
+#[cfg(test)]
 pub(crate) fn anchor_wrapped_rows(
     transcript: &[String],
     kinds: &[TranscriptKind],
@@ -849,30 +892,26 @@ pub(crate) fn anchor_wrapped_rows(
     width: u16,
     clear_anchor: Option<usize>,
 ) -> Option<usize> {
+    clear_anchor?;
+    let (rows, starts) = wrap_lines_kinded_indexed(
+        transcript, kinds, styles, runs, para, images, char_px, images_enabled, left_float, width,
+    );
+    anchor_row_at(&starts, rows.len(), clear_anchor)
+}
+
+/// The display row the post-clear content starts at: the row source line
+/// `clear_anchor` begins on in the full wrap (`starts`, from
+/// [`wrap_lines_kinded_indexed`]). `None` when the anchor is unset or past the end
+/// of the transcript. Clamped to `total` so it can never index past the rows.
+/// (SQ-0640)
+pub(crate) fn anchor_row_at(starts: &[usize], total: usize, clear_anchor: Option<usize>) -> Option<usize> {
     let a = clear_anchor?;
-    if a >= transcript.len() {
-        return None;
-    }
-    Some(
-        wrap_lines_kinded(
-            &transcript[..a],
-            &kinds[..a.min(kinds.len())],
-            &styles[..a.min(styles.len())],
-            &runs[..a.min(runs.len())],
-            &para[..a.min(para.len())],
-            &images[..a.min(images.len())],
-            char_px,
-            images_enabled,
-            left_float,
-            width,
-        )
-        .len(),
-    )
+    starts.get(a).map(|&r| r.min(total))
 }
 
 /// Window the fully wrapped `display_rows` down to the `rows` rows visible at
 /// `scroll` (0 = newest at bottom; higher = further back). `anchor_row` is the
-/// pre-computed [`anchor_wrapped_rows`] value; when present and the view is at the
+/// pre-computed [`anchor_row_at`] value; when present and the view is at the
 /// bottom (`scroll == 0`) and the post-clear content still fits, those lines are
 /// pinned to the TOP (returning fewer than `rows` rows → the caller leaves the
 /// rest blank) instead of bottom-sticking, which would pull pre-clear history
@@ -893,7 +932,9 @@ pub(crate) fn window_wrapped_rows(
     }
     let n = display_rows.len();
     if scroll == 0 {
-        if let Some(anchor_row) = anchor_row {
+        // Clamped: the anchor indexes THESE rows, and an anchor past their end would
+        // slice out of range rather than merely mis-anchor (SQ-0640).
+        if let Some(anchor_row) = anchor_row.map(|a| a.min(n)) {
             if n.saturating_sub(anchor_row) <= rows {
                 return (display_rows[anchor_row..n].to_vec(), n, anchor_row);
             }
@@ -939,11 +980,12 @@ pub(crate) fn visible_wrapped_lines_kinded(
     // Secondary buffer windows (the only caller besides tests) keep the legacy
     // band rendering for margin images — left-margin floats are a main-transcript
     // affordance (SQ-0454), so `left_float` is off here.
-    let display_rows = wrap_lines_kinded(transcript, kinds, styles, runs, para, images, char_px, images_enabled, false, width);
-    // Only the bottom (scroll == 0) view can top-anchor, so skip the extra wrap
-    // of `[..a]` while scrolled back.
+    let (display_rows, starts) =
+        wrap_lines_kinded_indexed(transcript, kinds, styles, runs, para, images, char_px, images_enabled, false, width);
+    // Only the bottom (scroll == 0) view can top-anchor. The anchor comes out of
+    // THIS wrap's line index (SQ-0640) — no second wrap, and no float-carry skew.
     let anchor_row = if scroll == 0 {
-        anchor_wrapped_rows(transcript, kinds, styles, runs, para, images, char_px, images_enabled, false, width, clear_anchor)
+        anchor_row_at(&starts, display_rows.len(), clear_anchor)
     } else {
         None
     };
@@ -1888,7 +1930,7 @@ fn render_middle(
             .flatten()
             .map(|img| std::sync::Arc::as_ptr(&img.pixels) as usize)
             .collect();
-        let rows = wrap_lines_kinded(
+        let (rows, line_starts) = wrap_lines_kinded_indexed(
             &filtered_lines,
             &filtered_kinds,
             &filtered_styles,
@@ -1905,19 +1947,9 @@ fn render_middle(
         let clear_anchor_filtered = state
             .clear_anchor
             .map(|a| visible_indices.iter().filter(|&&i| i < a).count());
-        let anchor_row = anchor_wrapped_rows(
-            &filtered_lines,
-            &filtered_kinds,
-            &filtered_styles,
-            &filtered_runs,
-            &filtered_para,
-            &filtered_images,
-            char_px,
-            images_enabled,
-            true,
-            body_area.width,
-            clear_anchor_filtered,
-        );
+        // The anchor is where that line STARTS in the wrap just built (SQ-0640) — a
+        // separate wrap of the prefix would count a margin float's strips twice over.
+        let anchor_row = anchor_row_at(&line_starts, rows.len(), clear_anchor_filtered);
         *state.transcript_wrap.borrow_mut() = Some(crate::state::TranscriptWrapCache {
             key: crate::state::TranscriptWrapKey {
                 gen: state.transcript_gen,
@@ -1944,8 +1976,9 @@ fn render_middle(
     // top-anchor only applies at the bottom, handled inside `window_wrapped_rows`.
     let (lines, total_rows, first_abs_row) =
         window_wrapped_rows(&entry.rows, entry.anchor_row, transcript_rows, effective_scroll);
-    // Search highlight style: black text on yellow background.
-    let search_highlight_style = Style::new().fg(Color::Black).bg(Color::Yellow);
+    // Search highlight style, themed via the `transcript_search_highlight`
+    // selector (SQ-0643; default reproduces the old hardcoded black-on-yellow).
+    let search_highlight_style = state.colors.theme.get("transcript_search_highlight").style;
     let query_lower = state.search_query.as_deref().map(|q| q.to_lowercase()).unwrap_or_default();
 
     // Per-frame map from rendered cell (col, row) → Glk hyperlink value, so a
@@ -2660,6 +2693,79 @@ mod tests {
         }
         assert!(rows[3].float.is_none() && rows[3].band.is_none());
         assert_eq!(rows[3].kind, TranscriptKind::Meta);
+    }
+
+    // ── Clear anchor vs. margin floats (SQ-0640) ─────────────────────────────
+
+    #[test]
+    fn anchor_row_is_where_post_clear_content_really_starts_beside_a_float() {
+        // SQ-0640: the last PRE-clear unit is a left-margin float whose picture (5
+        // strips) outruns the prose beside it, and the POST-clear prose wraps beside
+        // the remaining strips. Counting the anchor from a standalone wrap of the
+        // pre-clear prefix flushed all 5 strips as pre-clear rows — the whole wrap is
+        // 5 rows, so the anchor landed at the END and top-anchoring returned an EMPTY
+        // viewport at scroll 0. The strips are shared with the post-clear lines, so
+        // NOTHING precedes them: the anchor is row 0.
+        let transcript = vec![String::new(), "hi".to_string(), "there".to_string()];
+        let images = vec![Some(left_img(8, 40, None)), None, None]; // 1 col × 5 rows
+        let kinds = vec![TranscriptKind::Story; 3];
+        let styles = vec![Style::default(); 3];
+        let runs = vec![Vec::new(); 3];
+        let rows = wrap_lines_kinded(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, true, 40);
+        assert_eq!(rows.len(), 5, "picture strips, two of them carrying the prose");
+        let anchor = anchor_wrapped_rows(
+            &transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, true, 40, Some(1),
+        );
+        assert_eq!(anchor, Some(0), "the float's strips ride BESIDE the post-clear prose");
+        let (visible, total, first) = window_wrapped_rows(&rows, anchor, 10, 0);
+        assert_eq!((visible.len(), total, first), (5, 5, 0), "the post-clear screen is on screen");
+        assert!(
+            visible.iter().any(|r| r.text.trim() == "hi") && visible.iter().any(|r| r.text.trim() == "there"),
+            "post-clear prose is visible, not scrolled off the top: {:?}",
+            visible.iter().map(|r| r.text.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn anchor_row_still_counts_plain_pre_clear_rows() {
+        // The float-free case is unchanged: three pre-clear prose lines (one row
+        // each) anchor the post-clear content at row 3.
+        let transcript = vec!["a".into(), "b".into(), "c".into(), "post".to_string()];
+        let kinds = vec![TranscriptKind::Story; 4];
+        let styles = vec![Style::default(); 4];
+        let runs = vec![Vec::new(); 4];
+        let anchor = anchor_wrapped_rows(
+            &transcript, &kinds, &styles, &runs, &[], &[], (8, 8), false, true, 40, Some(3),
+        );
+        assert_eq!(anchor, Some(3));
+        // Out-of-range and unset anchors still yield None.
+        assert_eq!(
+            anchor_wrapped_rows(&transcript, &kinds, &styles, &runs, &[], &[], (8, 8), false, true, 40, Some(9)),
+            None
+        );
+        assert_eq!(
+            anchor_wrapped_rows(&transcript, &kinds, &styles, &runs, &[], &[], (8, 8), false, true, 40, None),
+            None
+        );
+    }
+
+    #[test]
+    fn wrapped_line_starts_index_every_source_line() {
+        // The index the anchor rides on: one entry per source line, each the row its
+        // output begins at. A wrapped line advances by its row count; a floated image
+        // emits none of its own.
+        let transcript = vec![String::new(), "word ".repeat(20).trim_end().to_string(), "tail".to_string()];
+        let images = vec![Some(left_img(8, 40, None)), None, None];
+        let kinds = vec![TranscriptKind::Story; 3];
+        let styles = vec![Style::default(); 3];
+        let runs = vec![Vec::new(); 3];
+        let (rows, starts) =
+            wrap_lines_kinded_indexed(&transcript, &kinds, &styles, &runs, &[], &images, (8, 8), true, true, 40);
+        assert_eq!(starts.len(), 3, "one start per source line");
+        assert_eq!(starts[0], 0);
+        assert_eq!(starts[1], 0, "the floated picture emits no rows of its own");
+        assert!(starts[2] > 0 && starts[2] <= rows.len(), "the tail starts after the wrapped paragraph");
+        assert!(starts.windows(2).all(|w| w[0] <= w[1]), "starts are monotonic");
     }
 
     #[test]

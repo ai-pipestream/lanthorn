@@ -307,6 +307,18 @@ pub struct GraphicsRender {
     kitty_wins: std::collections::HashMap<u32, KittyWindowImage>,
     /// Monotonic id source for `kitty_wins` (offset into a private id range).
     next_kitty_id: u32,
+    /// Kitty `a=d` delete escapes for uploads abandoned WHOLESALE — a window that
+    /// closed ([`GraphicsRender::retain_live`]) or a window whose area changed, which
+    /// restarts its cache (SQ-0637). Dropping the [`KittyWindowImage`] only forgets
+    /// the ids on OUR side; the terminal keeps every transmitted generation (up to
+    /// [`KITTY_CACHE`] per window) until it is told to free them, so a closed window
+    /// or a sequence of resizes leaked terminal image memory until the terminal's own
+    /// quota forced an eviction. The escapes are queued rather than written here
+    /// because they must ride the SAME output batch as the rest of our kitty traffic
+    /// (buffer cell symbols, not a direct stdout write that would interleave with
+    /// ratatui's diff): they are flushed by the next placement, or by
+    /// [`GraphicsRender::flush_kitty_deletes`] when no window places again.
+    pending_deletes: String,
     /// Machine-readable record of the protocol traffic this frame produced
     /// (SQ-0590) — see [`GraphicsOp`]. `band_log` above is the human dump for
     /// `/dump-windows`; this is the same events in a form a test can assert on,
@@ -469,9 +481,65 @@ impl GraphicsRender {
     }
 
     /// Drop cache entries for windows no longer live (evicts on close; bounds growth).
+    ///
+    /// A dropped kitty entry's uploads are DELETED in the terminal, not merely
+    /// forgotten (SQ-0637) — see [`GraphicsRender::queue_kitty_deletes`].
     pub fn retain_live(&mut self, live: &std::collections::HashSet<u32>) {
         self.cache.retain(|win, _| live.contains(win));
-        self.kitty_wins.retain(|win, _| live.contains(win));
+        let dead: Vec<u32> = self.kitty_wins.keys().copied().filter(|w| !live.contains(w)).collect();
+        for win in dead {
+            if let Some(entry) = self.kitty_wins.remove(&win) {
+                self.queue_kitty_deletes(&entry, win);
+            }
+        }
+    }
+
+    /// Queue `a=d,d=I` deletes for every id an abandoned [`KittyWindowImage`] still
+    /// holds in the terminal, and record one [`GraphicsOp::Drop`] per id (SQ-0637).
+    /// `d=I` frees the image data AND its placements, so nothing deleted here can be
+    /// re-placed — which is correct: the entry that knew these ids is gone.
+    fn queue_kitty_deletes(&mut self, entry: &KittyWindowImage, win: u32) {
+        use std::fmt::Write as _;
+        for &(_, id) in &entry.sent {
+            write!(self.pending_deletes, "\x1b_Gq=2,a=d,d=I,i={id}\x1b\\").expect("write to String");
+            self.note_op(GraphicsOp::Drop { target: GraphicsTarget::Window(win) });
+        }
+    }
+
+    /// Flush any queued kitty deletes into `buf` when no graphics window will place
+    /// this frame (SQ-0637) — closing the LAST graphics window is exactly the case
+    /// that leaks, and it leaves no placement to piggyback on.
+    ///
+    /// The escapes are prepended to a cell's existing symbol (keeping its glyph, with
+    /// the width forced to 1 so the escape's own "width" never shifts the row) — the
+    /// same trick `kitty_place_rows` uses for a transmit, so the bytes ride the normal
+    /// ratatui diff instead of a racing stdout write. Only a plain single-column ASCII
+    /// cell is used: one already carrying an escape (a kitty placeholder row), one
+    /// marked `Skip`, or a wide glyph belongs to something whose width/placement must
+    /// not be disturbed. If no such cell exists the deletes stay queued for a later
+    /// frame — a delete is never dropped, only deferred.
+    pub fn flush_kitty_deletes(&mut self, area: Rect, buf: &mut Buffer) {
+        use ratatui::buffer::CellDiffOption;
+        if self.pending_deletes.is_empty() || area.width == 0 || area.height == 0 {
+            return;
+        }
+        for y in area.top()..area.bottom() {
+            for x in area.left()..area.right() {
+                let Some(cell) = buf.cell_mut((x, y)) else { continue };
+                let plain = cell.diff_option == CellDiffOption::None
+                    && cell.symbol().len() == 1
+                    && cell.symbol().is_ascii()
+                    && !cell.symbol().starts_with(char::is_control);
+                if !plain {
+                    continue;
+                }
+                let symbol = format!("{}{}", self.pending_deletes, cell.symbol());
+                cell.set_symbol(&symbol)
+                    .set_diff_option(CellDiffOption::ForcedWidth(std::num::NonZeroU16::new(1).unwrap()));
+                self.pending_deletes.clear();
+                return;
+            }
+        }
     }
 
     /// Render a graphics window's canvas through kitty unicode placeholders
@@ -496,17 +564,25 @@ impl GraphicsRender {
         use std::fmt::Write as _;
         // A resize invalidates every upload for this window: the placement's r×c
         // grid is baked into the transmission, so nothing cached at the old size
-        // can be re-placed. Start the window's cache over.
-        let mut entry = match self.kitty_wins.remove(&gw.win) {
+        // can be re-placed. Start the window's cache over — and DELETE the uploads
+        // being abandoned, or every resize would strand a whole cache generation in
+        // the terminal (SQ-0637).
+        let previous = self.kitty_wins.remove(&gw.win);
+        let mut entry = match previous {
             Some(e) if e.w == area.width && e.h == area.height => e,
-            _ => KittyWindowImage {
-                version: 0,
-                w: area.width,
-                h: area.height,
-                id: 0,
-                pending_transmit: None,
-                sent: Vec::new(),
-            },
+            stale => {
+                if let Some(stale) = stale {
+                    self.queue_kitty_deletes(&stale, gw.win);
+                }
+                KittyWindowImage {
+                    version: 0,
+                    w: area.width,
+                    h: area.height,
+                    id: 0,
+                    pending_transmit: None,
+                    sent: Vec::new(),
+                }
+            }
         };
         if entry.id == 0 || entry.version != gw.version {
             entry.version = gw.version;
@@ -551,7 +627,13 @@ impl GraphicsRender {
                 }
             }
         }
-        let transmit = entry.pending_transmit.take();
+        // Queued deletes (a closed window, or this window's pre-resize generation)
+        // ride ahead of this frame's transmit, in the same batch (SQ-0637). They only
+        // ever name ids no entry can place any more, so freeing them before the
+        // placement below cannot blank anything still on screen.
+        let mut batch = std::mem::take(&mut self.pending_deletes);
+        batch.push_str(entry.pending_transmit.take().as_deref().unwrap_or(""));
+        let transmit = (!batch.is_empty()).then_some(batch);
         kitty_place_rows(entry.id, transmit.as_deref(), area, buf);
         self.note_op(GraphicsOp::Place {
             target: GraphicsTarget::Window(gw.win),
@@ -565,6 +647,12 @@ impl GraphicsRender {
     #[cfg(test)]
     fn kitty_uploads(&self, win: u32) -> Option<(usize, u32)> {
         self.kitty_wins.get(&win).map(|e| (e.sent.len(), e.id))
+    }
+
+    /// The kitty delete escapes waiting to be written to the terminal (SQ-0637).
+    #[cfg(test)]
+    fn queued_deletes(&self) -> &str {
+        &self.pending_deletes
     }
 
     /// Resize + encode a native v6 canvas into a terminal image protocol,
@@ -1801,5 +1889,120 @@ mod tests {
 
         gr.retain_live(&std::collections::HashSet::new());
         assert_eq!(gr.cache.len(), 0);
+    }
+
+    // ── Kitty upload lifetime (SQ-0637) ──────────────────────────────────────
+
+    /// Render `win` at `area` through the kitty path with `n` DISTINCT canvases,
+    /// returning the ids the terminal was told to keep.
+    fn upload_generations(gr: &mut GraphicsRender, picker: &Picker, win: u32, area: Rect, n: u8) -> Vec<u32> {
+        let mut ids = Vec::new();
+        for i in 0..n {
+            let mut img = image::RgbaImage::from_pixel(64, 32, image::Rgba([9, 9, 9, 255]));
+            img.put_pixel(0, 0, image::Rgba([i, 0, 0, 255]));
+            let gw = GraphicsWindow { win, canvas: std::sync::Arc::new(img), version: i as u64 + 1, upscale: false };
+            let mut buf = Buffer::empty(area);
+            gr.render(picker, &gw, area, Style::default(), &mut buf);
+            let sym = buf.cell((area.x, area.y)).unwrap().symbol().to_string();
+            assert!(sym.contains("a=T"), "generation {i} is a new picture → uploaded");
+            ids.push(id_of(&sym));
+        }
+        ids
+    }
+
+    #[test]
+    fn closing_a_kitty_window_deletes_its_uploads() {
+        // SQ-0637: `retain_live` used to forget a closed window's `KittyWindowImage`
+        // silently. The terminal keeps every transmitted generation until told to
+        // free it, so a Glulx game that closes its graphics window (or reopens one
+        // under a new id) leaked all of them.
+        let picker = kitty_picker(8, 18);
+        let area = Rect::new(0, 0, 8, 2);
+        let mut gr = GraphicsRender::default();
+        let ids = upload_generations(&mut gr, &picker, 2, area, 3);
+
+        gr.begin_band_log(); // frame boundary: only the close's ops below
+        gr.retain_live(&std::collections::HashSet::new());
+        let queued = gr.queued_deletes().to_string();
+        for id in &ids {
+            assert!(
+                queued.contains(&format!("a=d,d=I,i={id}")),
+                "every upload of the closed window is freed (missing i={id}): {queued:?}"
+            );
+        }
+        assert_eq!(
+            gr.ops().iter().filter(|o| matches!(o, GraphicsOp::Drop { .. })).count(),
+            ids.len(),
+            "one Drop op per freed upload"
+        );
+
+        // The escapes reach the terminal through the buffer, like every other bit of
+        // our kitty traffic — and the cell they ride on keeps its glyph and width.
+        let mut buf = Buffer::empty(area);
+        buf.cell_mut((0, 0)).unwrap().set_symbol("X");
+        gr.flush_kitty_deletes(area, &mut buf);
+        let sym = buf.cell((0, 0)).unwrap().symbol().to_string();
+        assert!(sym.starts_with('\x1b') && sym.ends_with('X'), "deletes prepended, glyph kept: {sym:?}");
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().diff_option,
+            ratatui::buffer::CellDiffOption::ForcedWidth(std::num::NonZeroU16::new(1).unwrap()),
+            "the escape must not be measured as visible width"
+        );
+        assert!(gr.queued_deletes().is_empty(), "flushed once, not re-emitted every frame");
+    }
+
+    #[test]
+    fn resizing_a_kitty_window_deletes_the_uploads_it_abandons() {
+        // A size change restarts the window's cache (the r×c grid is baked into the
+        // transmission), so the old generations can never be re-placed — they must be
+        // freed, in the SAME batch as the new upload (SQ-0637).
+        let picker = kitty_picker(8, 18);
+        let mut gr = GraphicsRender::default();
+        let old_ids = upload_generations(&mut gr, &picker, 2, Rect::new(0, 0, 8, 2), 2);
+
+        let bigger = Rect::new(0, 0, 12, 3);
+        let mut buf = Buffer::empty(bigger);
+        let gw = GraphicsWindow {
+            win: 2,
+            canvas: std::sync::Arc::new(image::RgbaImage::from_pixel(64, 32, image::Rgba([9, 9, 9, 255]))),
+            version: 9,
+            upscale: false,
+        };
+        gr.render(&picker, &gw, bigger, Style::default(), &mut buf);
+        let sym = buf.cell((0, 0)).unwrap().symbol().to_string();
+        for id in &old_ids {
+            assert!(sym.contains(&format!("a=d,d=I,i={id}")), "pre-resize upload i={id} freed: {sym:?}");
+        }
+        assert!(sym.contains("a=T"), "and the new size is transmitted in the same batch");
+        let delete_at = sym.find("a=d").expect("a delete");
+        let transmit_at = sym.find("a=T").expect("a transmit");
+        assert!(delete_at < transmit_at, "frees precede the transmit they make room for");
+        assert!(gr.queued_deletes().is_empty(), "the placement carried them; nothing left queued");
+    }
+
+    #[test]
+    fn queued_deletes_wait_for_a_safe_cell_and_are_never_dropped() {
+        // The flush never disturbs a cell that belongs to a live placement (an
+        // escape-carrying placeholder, or one marked Skip): the deletes stay queued
+        // for a later frame instead (SQ-0637).
+        let picker = kitty_picker(8, 18);
+        let area = Rect::new(0, 0, 2, 1);
+        let mut gr = GraphicsRender::default();
+        upload_generations(&mut gr, &picker, 5, area, 1);
+        gr.retain_live(&std::collections::HashSet::new());
+        assert!(!gr.queued_deletes().is_empty(), "the close queued a delete");
+
+        let mut buf = Buffer::empty(area);
+        buf.cell_mut((0, 0)).unwrap().set_symbol("\x1b_Gplaceholder\x1b\\");
+        buf.cell_mut((1, 0)).unwrap().set_diff_option(ratatui::buffer::CellDiffOption::Skip);
+        let queued = gr.queued_deletes().to_string();
+        gr.flush_kitty_deletes(area, &mut buf);
+        assert_eq!(gr.queued_deletes(), queued, "no safe cell this frame → deferred, not lost");
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\x1b_Gplaceholder\x1b\\", "placement untouched");
+
+        // A later frame with an ordinary cell carries them.
+        let mut buf2 = Buffer::empty(area);
+        gr.flush_kitty_deletes(area, &mut buf2);
+        assert!(gr.queued_deletes().is_empty(), "flushed on the next frame that has room");
     }
 }

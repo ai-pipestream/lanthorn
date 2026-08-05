@@ -198,6 +198,30 @@ pub fn put_char(buf: &mut Buffer, x: i32, y: i32, ch: char, style: Style, area: 
     }
 }
 
+/// Blank the control characters in untrusted GAME text, the same way
+/// `draw_char_clipped`/`put_char`/`draw_grid` blank theirs — for the sites that
+/// hand a whole string to `Buffer::set_stringn` instead of stamping char by char
+/// (SQ-0639).
+///
+/// A control char is not merely unprintable here, it MOVES the rest of the run:
+/// ratatui's `set_stringn` silently DROPS zero-width/control graphemes, so every
+/// glyph after one shifts a column left — and v6 runs are pixel-positioned text
+/// whose columns are the whole point. Blanking to a space keeps the run's
+/// alignment, and keeps us clear of the low-level cell API's debug assert on
+/// control chars.
+///
+/// A game reaches this: `print_unicode` (ZMSD EXT:0x0B) prints any codepoint the
+/// story asks for, including U+0001–U+001F, and a story-supplied Unicode
+/// translation table can map ZSCII 155+ to one just as freely. Borrowed and
+/// allocation-free for the overwhelmingly common clean string.
+pub fn blank_control_chars(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.contains(char::is_control) {
+        std::borrow::Cow::Owned(s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect())
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
 /// Like `draw_str_clipped` but accepts a signed start coordinate (see `put_char`).
 pub fn put_str(buf: &mut Buffer, x: i32, y: i32, s: &str, style: Style, area: Rect) {
     if y < area.y as i32 || y >= area.bottom() as i32 {

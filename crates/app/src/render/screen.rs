@@ -240,7 +240,13 @@ pub fn render_story_pane(
     // reopened window reusing the same id (SQ-0174).
     let mut live = std::collections::HashSet::new();
     collect_graphics_ids(&model.root, &mut live);
-    state.graphics_render.borrow_mut().retain_live(&live);
+    {
+        let mut gr = state.graphics_render.borrow_mut();
+        gr.retain_live(&live);
+        // Closing the last graphics window leaves no placement to carry the deletes
+        // its uploads need, so hand them a cell of this frame instead (SQ-0637).
+        gr.flush_kitty_deletes(area, buf);
+    }
 
     let mut m = metrics.unwrap_or(StoryPaneMetrics {
         scrollbar: false,
@@ -1175,7 +1181,9 @@ fn render_node(
                                     let style = v6_run_style(base, t.fg, t.bg, t.style, state.config.honor_game_colours, &state.colors);
                                     let max_w = viewport.right() as usize - col as usize;
                                     if max_w > 0 {
-                                        buf.set_stringn(col as u16, row as u16, &t.text, max_w, style);
+                                        // Untrusted game text (SQ-0639).
+                                        let text = crate::render::blank_control_chars(&t.text);
+                                        buf.set_stringn(col as u16, row as u16, text.as_ref(), max_w, style);
                                     }
                                 }
                             }
@@ -1200,6 +1208,23 @@ fn render_node(
                         .flatten()
                         .collect();
                     if runs.iter().any(|t| !t.text.trim().is_empty()) {
+                        {
+                            // Stamp this path like every other exit (SQ-0637): the
+                            // painted menu drops the ring, so the next ring frame is a
+                            // RESUME and must re-upload the chrome bands (the SQ-0587
+                            // gate reads the last path). Leaving "hybrid-ring" standing
+                            // here skipped that re-upload and Zork Zero came back from
+                            // its InvisiClues menu with the frame art missing — and
+                            // `/dump-windows` reported a ring frame that never ran.
+                            let mut map = state.v6_cell_map.borrow_mut();
+                            map.clear();
+                            state.note_v6_path("painted (hint/menu takeover)");
+                            map.push(crate::state::V6CellRect {
+                                label: "path:painted (hint/menu takeover)".into(),
+                                native: (0, 0, 0, 0),
+                                cells: (area.x, area.y, area.width, area.height),
+                            });
+                        }
                         draw_painted_screen(&runs, 0..u16::MAX, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native.0);
                         return None;
                     }
@@ -1489,6 +1514,19 @@ fn render_node(
                 // z-ordered cell composite, which renders the native geometry as
                 // an unreadable postage stamp (SQ-0478).
                 if runs.iter().any(|t| !t.text.trim().is_empty()) {
+                    {
+                        // Same stamp rule as the story-window arm above (SQ-0637):
+                        // this frame did NOT use the pixel path, so the next ring
+                        // frame must be treated as a resume.
+                        let mut map = state.v6_cell_map.borrow_mut();
+                        map.clear();
+                        state.note_v6_path("painted (no story window)");
+                        map.push(crate::state::V6CellRect {
+                            label: "path:painted (no story window)".into(),
+                            native: (0, 0, 0, 0),
+                            cells: (area.x, area.y, area.width, area.height),
+                        });
+                    }
                     draw_painted_screen(&runs, 0..u16::MAX, 0, area, buf, status_style, state.config.honor_game_colours, &state.colors, &layout.chrome, native_w);
                     return None;
                 }
@@ -1613,6 +1651,14 @@ fn collect_graphics_rects(node: &WinNode, area: Rect, out: &mut Vec<Rect>) {
 }
 
 /// Collect the window ids of all live graphics windows in the tree.
+///
+/// Walks `Layered` too, exactly as [`collect_graphics_rects`] does (SQ-0637). A v6
+/// composite IS a `Layered` root, and its graphics leaves reach the protocol path
+/// whenever the cell path renders one (a chrome column beside the story, or any
+/// frame drawn while a modal overlay is open). Omitting them told
+/// [`GraphicsRender::retain_live`] that no window was live, so every such frame
+/// cleared the whole cache: a full re-encode each frame, and under kitty a full
+/// re-transmit under a NEW id whose predecessors were never deleted.
 fn collect_graphics_ids(node: &WinNode, out: &mut std::collections::HashSet<u32>) {
     match node {
         WinNode::Graphics(gw) => {
@@ -1622,7 +1668,12 @@ fn collect_graphics_ids(node: &WinNode, out: &mut std::collections::HashSet<u32>
             collect_graphics_ids(first, out);
             collect_graphics_ids(second, out);
         }
-        _ => {}
+        WinNode::Layered(items) => {
+            for item in items {
+                collect_graphics_ids(&item.node, out);
+            }
+        }
+        WinNode::Grid(_) | WinNode::Buffer(_) | WinNode::Blank => {}
     }
 }
 
@@ -2658,7 +2709,10 @@ fn draw_painted_screen(
         // base per channel; inherited/Default channels keep it (SQ-0488).
         let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
         let max_w = (area.right() - (area.x + col)) as usize;
-        buf.set_stringn(area.x + col, y, &t.text, max_w, style);
+        // Untrusted game text (SQ-0639): a control char would shift the rest of
+        // the run a column left, and these runs are pixel-placed.
+        let text = crate::render::blank_control_chars(&t.text);
+        buf.set_stringn(area.x + col, y, text.as_ref(), max_w, style);
     }
 }
 
@@ -3368,7 +3422,9 @@ fn draw_chrome_text_strip(
             let style = v6_run_style(base, t.fg, t.bg, t.style, honor, colors);
             let max_w = rect.right() as usize - col as usize;
             if max_w > 0 {
-                buf.set_stringn(col as u16, *row as u16, &t.text, max_w, style);
+                // Untrusted game text (SQ-0639).
+                let text = crate::render::blank_control_chars(&t.text);
+                buf.set_stringn(col as u16, *row as u16, text.as_ref(), max_w, style);
             }
         }
     }
@@ -3526,6 +3582,15 @@ fn place_anchored_row(
     if w == 0 {
         return false;
     }
+    // Untrusted game text (SQ-0639): blank control chars before any of it reaches
+    // the buffer. Blanking is char-for-char, so every width/anchor computation
+    // below is unchanged.
+    let (left_txt, center_txt, right_txt) = (
+        crate::render::blank_control_chars(left),
+        crate::render::blank_control_chars(center),
+        crate::render::blank_control_chars(right),
+    );
+    let (left, center, right) = (left_txt.as_ref(), center_txt.as_ref(), right_txt.as_ref());
     let mut painted = false;
 
     // Fill the WHOLE band row with the status style's background first, so the
@@ -5275,6 +5340,79 @@ mod tests {
         let mut ids = std::collections::HashSet::new();
         collect_graphics_ids(&tree, &mut ids);
         assert_eq!(ids, std::collections::HashSet::from([1, 7]));
+    }
+
+    /// SQ-0639: v6 painted text is UNTRUSTED game text and it can carry control
+    /// characters — `print_unicode` (ZMSD EXT:0x0B) prints any codepoint a story
+    /// asks for, and a story-supplied Unicode translation table can map ZSCII 155+
+    /// to one. Handing such a run straight to `Buffer::set_stringn` does not draw a
+    /// control char, it DROPS it — and every glyph after it shifts a column left,
+    /// which for pixel-positioned v6 runs is exactly the alignment the path exists
+    /// to preserve. Blanking to a space keeps the columns. Pinned in both
+    /// `honor_game_colours` modes.
+    #[test]
+    fn painted_game_text_blanks_control_chars_instead_of_shifting_the_run() {
+        let colors = crate::colors::ColorScheme::terminal_default();
+        let area = Rect::new(0, 0, 20, 3);
+        let read = |buf: &Buffer, y: u16, n: u16| -> String {
+            (0..n).map(|x| buf.cell((x, y)).unwrap().symbol().chars().next().unwrap_or(' ')).collect()
+        };
+        for honor in [true, false] {
+            // A painted run with a BEL in the middle, at native (row 0, col 0).
+            let t = crate::engine::PxText { y: 1, x: 1, text: "AB\u{7}CD".into(), style: 0, fg: 0, bg: 0 };
+            let runs: Vec<&crate::engine::PxText> = vec![&t];
+            let mut buf = Buffer::empty(area);
+            draw_painted_screen(
+                &runs, 0..u16::MAX, 0, area, &mut buf, ratatui::style::Style::default(), honor, &colors, &[], 640,
+            );
+            assert_eq!(read(&buf, 0, 5), "AB CD", "honor={honor}: the control char blanks, D stays in column 4");
+
+            // The anchored status band takes its groups from the same runs.
+            let mut band = Buffer::empty(area);
+            assert!(place_anchored_row(
+                &mut band, area, 0, "L\u{1}T", "", "R\u{2}T", ratatui::style::Style::default()
+            ));
+            assert_eq!(read(&band, 0, 3), "L T", "honor={honor}: LEFT group keeps its width");
+            assert_eq!(read(&band, 0, area.width), format!("{:<17}R T", "L T"), "honor={honor}: RIGHT stays flush right");
+        }
+    }
+
+    #[test]
+    fn collect_graphics_ids_walks_layered_like_collect_graphics_rects() {
+        // SQ-0637: a v6 composite is a `Layered` root. Missing that arm reported NO
+        // live windows for such a frame, so `retain_live` cleared the whole protocol
+        // cache every frame — a full re-encode, and under kitty a fresh id per frame
+        // with the previous ones never deleted. The id walk must cover exactly what
+        // the rect walk covers.
+        let pane = Rect::new(0, 0, 40, 20);
+        let pw = |win: u32, x: u16, y: u16| PositionedWindow {
+            x,
+            y,
+            w: 6,
+            h: 4,
+            x_px: x * 8,
+            y_px: y * 16,
+            w_px: 48,
+            h_px: 64,
+            left_margin: 0,
+            right_margin: 0,
+            node: WinNode::Graphics(crate::engine::GraphicsWindow {
+                win,
+                canvas: std::sync::Arc::new(image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]))),
+                version: 1,
+                upscale: false,
+            }),
+        };
+        let text = PositionedWindow { node: WinNode::Buffer(inline_buffer("STORY")), ..pw(9, 0, 8) };
+        let tree = WinNode::Layered(vec![pw(3, 0, 0), text, pw(5, 10, 2)]);
+
+        let mut ids = std::collections::HashSet::new();
+        collect_graphics_ids(&tree, &mut ids);
+        assert_eq!(ids, std::collections::HashSet::from([3, 5]), "every layered graphics leaf is live");
+
+        let mut rects = Vec::new();
+        collect_graphics_rects(&tree, pane, &mut rects);
+        assert_eq!(rects.len(), ids.len(), "the id walk and the rect walk see the same windows");
     }
 
     /// v6 layered composite (Phase 1b): a full-area solid graphics window

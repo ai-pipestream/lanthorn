@@ -181,3 +181,91 @@ fn zork0_hybrid_hint_header_floods_full_width_reverse_bar() {
     assert_eq!(f_rev, area.width, "frameless: the title row floods edge to edge too: {f_title:?}");
 }
 
+
+/// SQ-0637: the hybrid PAINTED-screen branch (the InvisiClues menu, SQ-0477) drops
+/// the pixel chrome ring for that frame — but it used to stamp no render path at
+/// all, so `state.v6_path_log` still said `hybrid-ring` from the frame before.
+///
+/// That log is what the resume gate reads (`render/screen.rs`): a ring frame that
+/// follows a NON-ring frame must invalidate the chrome-band cache, because the
+/// terminal no longer holds our placements and every band would otherwise be a
+/// cache hit that sends nothing (the SQ-0587 model). With the stale `hybrid-ring`
+/// stamp standing, leaving the hint menu resumed the ring with the frame art
+/// missing — and `/dump-windows` reported a ring frame that never ran.
+///
+/// Pinned in BOTH `honor_game_colours` modes: the path taken must not depend on
+/// whether the game's colours are honoured. Skip-if-missing (gitignored story).
+#[test]
+fn zork0_hint_menu_stamps_a_non_ring_path_so_the_ring_re_uploads_on_resume() {
+    for honor in [true, false] {
+        let story_path = stories_dir().join("zork0-r393-s890714.z6");
+        let Ok(story_bytes) = std::fs::read(&story_path) else {
+            eprintln!("SKIP: gitignored story missing at {}", story_path.display());
+            return;
+        };
+        let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
+        let picture_dims = picts.all_pict_dims();
+        let mut session =
+            GameSession::new_with_trace(story_bytes, honor, false, None, false, picture_dims, picts.std_window(), None)
+                .expect("Zork0 (v6) should load and boot");
+        session.set_pict_source(Some(picts));
+        session.flush_boot_pictures();
+        let _ = session.take_transcript();
+
+        let mut state = app::state::AppState::default();
+        state.colors = app::colors::ColorScheme::terminal_default();
+        // A real kitty cell size: the band cache and its uploads only exist on the
+        // pixel path, and that is what the resume gate protects.
+        state.game_picker = Some(app::render::graphics::kitty_picker(14, 28));
+        state.config.v6_render = app::config::V6RenderMode::Hybrid;
+        state.config.honor_game_colours = honor;
+        let area = Rect::new(0, 0, 100, 40);
+        let frame = |session: &GameSession, state: &app::state::AppState| {
+            let model = session.screen();
+            let mut buf = Buffer::empty(area);
+            app::render::screen::render_story_pane(&model, false, None, state, area, &mut buf);
+        };
+        let last_path = |state: &app::state::AppState| -> String {
+            state.v6_path_log.borrow().last().map(|(l, _)| l.clone()).unwrap_or_default()
+        };
+        let band_uploads = |state: &app::state::AppState| -> usize {
+            state
+                .graphics_render
+                .borrow()
+                .uploaded_targets()
+                .iter()
+                .filter(|t| matches!(t, app::render::graphics::GraphicsTarget::Band(..)))
+                .count()
+        };
+
+        // Gameplay: the pixel ring runs and fills the band cache.
+        frame(&session, &state);
+        assert_eq!(last_path(&state), "hybrid-ring", "honor={honor}: gameplay draws the ring");
+        assert!(band_uploads(&state) > 0, "honor={honor}: the ring uploaded its bands");
+
+        // Into the hint menu: the painted-screen branch, which drops the ring.
+        session.submit("hint");
+        let entered = session.submit_char(b'y');
+        assert!(entered.fault.is_none(), "entering the hint menu faulted: {:?}", entered.fault);
+        frame(&session, &state);
+        let painted = last_path(&state);
+        assert!(
+            painted.starts_with("painted"),
+            "honor={honor}: the painted hint menu must stamp its own path, not leave the \
+             previous frame's — got {painted:?}"
+        );
+        assert_ne!(painted, "hybrid-ring", "honor={honor}: this frame did NOT draw the ring");
+
+        // Out again: the ring RESUMES, and every band must be sent to the terminal
+        // afresh — the placements did not survive the frames the ring sat out.
+        let quit = session.submit_char(b'q');
+        assert!(quit.fault.is_none(), "leaving the hint menu faulted: {:?}", quit.fault);
+        frame(&session, &state);
+        assert_eq!(last_path(&state), "hybrid-ring", "honor={honor}: the ring resumes");
+        assert!(
+            band_uploads(&state) > 0,
+            "honor={honor}: resuming the ring after a painted menu must RE-UPLOAD the chrome \
+             bands — cache hits send nothing and the frame art stays missing"
+        );
+    }
+}
