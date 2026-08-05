@@ -54,6 +54,46 @@ identifies which beta it is without reading its git hash.
   previously ignored them — a mistyped `--no-statu` did nothing and exited 0 —
   and `zvm-cli` took an unknown single-dash argument such as `-x` for the story
   path. A missing option value and a second positional argument are errors too.
+- **A full-workspace code review closed forty-odd defects** (SQ-0619–SQ-0661), the
+  themes being:
+  - *Hostile files can no longer crash or hang the host.* Illegal Z-machine
+    instructions latch a fault instead of panicking; crafted stories, saves,
+    blorbs and dictionaries that used to trigger unbounded recursion, multi-GB
+    allocations, out-of-bounds indexing or infinite sibling walks are rejected
+    or clamped in all three VMs; restored Glulx save data — stack frames, the
+    Glk window tree, the heap block list — is structurally validated.
+  - *Nothing overwrites a good file with a bad one.* Every persistence write
+    (archive, config, saves, sidecar stores, downloads, exports) goes through
+    one atomic temp-and-rename helper; a config that is valid TOML but has a
+    wrongly-typed value no longer loads as defaults and then rewrites the
+    user's file to defaults on the next save; the exit watchdog waits for an
+    in-progress save.
+  - *Save/restore honesty across engines.* A host restore over a suspended
+    in-game `@save`/`@restore` abandons the old suspension in every engine
+    (Glulx replayed the snapshot's last command as a free turn; the Z-machine
+    recorded a discarded PC into the next save); a resize or a finishing sound
+    no longer silently fails the save dialog the player is sitting in; v6
+    `@restart` no longer replays pre-restart art on the next palette change;
+    Quetzal v6 saves drop the dummy stack frame per §4.11.
+  - *The terminal is treated like the shared resource it is.* Worker-thread
+    panics no longer tear down a live session's terminal; kitty image ids are
+    deleted when their windows close or resize instead of leaking; layered v6
+    chrome art is cached instead of re-uploaded every frame; the CLIs accept
+    only key presses (Windows doubled everything), reset the scroll region on
+    every exit path, and enable VT processing on Windows.
+  - *Text is unicode, everywhere it wasn't.* Typed non-ASCII input reaches the
+    Z-machine as ZSCII instead of raw UTF-8 bytes; room notes, save
+    timestamps, IFDB titles, selections, caret placement and field editing are
+    char-, width- or grapheme-aware instead of byte- or column-indexed.
+  - *The map's layers behave.* Peeling cuts only the true reciprocal edge,
+    merging survives a deleted parent layer, a room can hold more than one
+    non-compass passage, and Scott Adams noun resolution matches ScottFree
+    (location-aware auto-get, the two-bottles problem).
+  - *Styling is honest.* A whole family of parsed-but-dead style.toml keys
+    (border sides, glyphs, dialog shadow/placement) now resolves; choosing a
+    colour scheme no longer flips border structure; the modal selection,
+    footer, inspector and search-highlight styles are themeable selectors
+    instead of hard-coded colours.
 
 ---
 
