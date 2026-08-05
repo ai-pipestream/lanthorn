@@ -1,7 +1,12 @@
 # Verb panel redesign: the command band
 
-**Status:** implemented (SQ-0664), then amended (SQ-0667, 2026-08-05 — see
-"Amendments" below) after the first real play session. Shipped as the
+**Status:** implemented (SQ-0664), amended (SQ-0667, 2026-08-05 — see
+"Amendments" below) after the first real play session, then amended again
+(SQ-0675, 2026-08-05 — see "Amendments (SQ-0675 — layout follow-up)" further
+down) for two user-requested layout tweaks once the band had been played a
+bit longer: the VERB column's header row was pure blank space, and the flat
+quick row wasted the band's whole width on one row when a spatial compass
+block would read faster and cost less height. Shipped as the
 **command band** — the feature was renamed from "verb menu"/"verb panel"
 throughout during implementation, so read every "verb menu" below as the
 command band: the slash command is `open-command-band`, the config section
@@ -90,6 +95,15 @@ the band), no VERB header text:
   take            leaflet
  n s e w · up down · in out · look inventory wait again
 ```
+
+**Superseded again by SQ-0675 (2026-08-05, same day, later in the session):**
+this mockup still shows the VERB column's header row blank and the quick
+words as a single flat bottom strip — both retired by the "Amendments
+(SQ-0675 — layout follow-up)" section further down. VERB's list now starts
+on what was this blank row (one more visible verb, no separate header for
+it), and the bottom strip becomes a left-anchored compass-rose block
+whenever the band is wide enough; the flat strip shown here survives only as
+the narrow-band fallback.
 
 ### Decisions (user-approved 2026-08-05)
 
@@ -193,6 +207,99 @@ scan the whole batch); 3–7 don't have a numbered decision of their own.
    the printed name — a real scenery object could coincidentally be called
    the same thing the game calls the player. `examine me` still works by
    typing it; there is no dedicated row for it.
+
+### Amendments (2026-08-05, SQ-0675 — user-requested layout follow-up)
+
+Two more layout tweaks, requested after playing with the SQ-0667 band for a
+while — smaller than the SQ-0667 batch above, but landed the same day, so
+they get their own dated subsection rather than being folded into it.
+
+1. **The VERB column's header row is reclaimed as an extra list row.**
+   Amendment 5 above dropped the "VERB" label but left the header ROW itself
+   drawn — a blank, unclickable strip in a band that is deliberately compact.
+   `render/command_band.rs::draw_column` now special-cases `COL_VERB`: no
+   header row is drawn or hit-tested for it at all, and its list starts at
+   the column's very first row instead of the second. Concretely, at the
+   same column height, the VERB column shows exactly **one more visible
+   verb** than an object column shows items (an object column still spends a
+   row on a real header — WHAT — here / WHAT — carried / WITH… all carry
+   information worth a label). The per-row selection marker (`▸`) already shown on the
+   highlighted item is what now carries the "this column has keyboard focus"
+   signal for VERB, since there is no header left to show it separately.
+   `hits.headers` therefore has `BAND_COLS - 1` entries, not `BAND_COLS` —
+   VERB contributes none; clicking its reclaimed top row picks the first
+   verb there, exactly like clicking any other row.
+
+2. **The flat quick row becomes a compass-rose block when there's room.**
+   The one-click quick row (`n s e w up down in out look inventory wait
+   again` by default) used to be a single strip spanning the band's full
+   width along the bottom, costing the columns one row of height. It is
+   replaced by a spatial block anchored to the band's LEFT edge whenever the
+   band is wide enough:
+
+   ```text
+    NW  N  NE      up down in out
+     W  ·  E       look inventory
+    SW  S  SE      wait again
+   ```
+
+   (This is the actual layout the shipped algorithm produces for the
+   built-in `quick` list — not the same word grouping as an earlier
+   illustrative sketch, but the same idea: a 3×3 compass rose with an inert
+   centre, plus everything else in the effective quick list packed beside it
+   into the same 3 rows via a greedy row-major wrap, tightest column first.)
+
+   - **What lands in the rose.** A quick word is routed into one of the 8
+     outer rose cells by the DIRECTION it names (`mapper::direction::parse_
+     direction`), not its spelling — the same "match by meaning" rule
+     Amendment 5 above already uses for the VERB-column exclusion, so a
+     custom `quick` spelling `"north"` still lands in the rose's N cell. Only
+     the 8 compass POINTS (N/S/E/W/NE/NW/SE/SW) are rose cells; `up`/`down`/
+     `in`/`out` are directions too but not compass points, so they flow as
+     ordinary words instead — this is deliberate, not an oversight (see
+     `split_quick_rose`'s doc). The centre cell is always inert decoration,
+     styled with the map matrix's own frontier/dim style
+     (`map.matrix.cell:frontier`) rather than a new selector.
+   - **What lands in the words.** Every effective quick word that isn't a
+     rose cell — under the default `quick`, that's `up down in out look
+     inventory wait again` — flows left-to-right, wrapping to a new row only
+     when it would overflow, packed into a width computed to be the
+     NARROWEST one that still fits everything in the rose's fixed 3 rows
+     (`word_flow_width`). No magic constant: the width is derived from the
+     actual word lengths, same spirit as the fallback threshold below.
+   - **A `quick` list with no compass words draws no rose at all** — just the
+     flowing word list, starting where the rose's margin would otherwise
+     have been, so nothing is wasted on an empty diagram.
+   - **Width policy, no config knob.** `draw_command_band` computes the
+     block's exact width (`quick_block_layout`) and compares it against the
+     band's actual content width plus the same "6 cells per column" minimum
+     `column_rects` already enforces; below that, it falls back to the
+     original SQ-0667 flat row along the bottom (unchanged in every other
+     respect — same immediate-submit semantics, same `hits.quick` shape).
+     There is no `[command_band]` setting for this threshold — it is derived
+     from real geometry (rose width + word-flow width + minimum column
+     width), per CLAUDE.md's "compute the threshold from actual widths"
+     guidance for exactly this kind of layout decision.
+   - **Height budget: the block sits BESIDE the columns, not above them.**
+     Unlike the flat row, the block does not cost the columns any height at
+     all — it is always exactly 3 rows tall regardless of the band's
+     configured height, occupying the band's top-left corner, while the
+     columns render at the band's FULL height to its right. A band taller
+     than 3 rows leaves the block's own strip blank below row 3; the
+     alternative (stretching a compass rose to fill an arbitrarily tall
+     band) has no sensible layout of its own, so this was chosen as the
+     simplest option that never shrinks the columns.
+   - **Every cell is still a `hits.quick` entry** — `(index into
+     `band.quick`, rect)` — identical in shape to the flat row's own hit
+     rects, so `input::band_quick_pick_command` and `main::band_mouse_action`
+     needed NO changes: this is a different LAYOUT of the same one-click
+     submit contract, not a new one. Directions still spell out in full on
+     submission (`nw` sends `northwest`); the rose only abbreviates the
+     DISPLAY, as the pre-existing quick-row behavior already did.
+   - **Keyboard reachability is unchanged.** The block (rose or flat row,
+     whichever is showing) was never part of the `←`/`→` column ring and
+     still isn't — it is a mouse/one-click surface only, exactly as the flat
+     row always was.
 
 ## Grammar: the arity table
 
@@ -339,6 +446,13 @@ simple" note). The panel frame's `panel.border[:active]` reuse is also gone
 applied to the band's whole fill as its resize-mode affordance (not reused
 as a *selector* the band exposes, just borrowed for one color).
 
+**No new selectors for SQ-0675 (2026-08-05):** the compass-rose block reuses
+`band.quick` for the rose's outer cells and the flowing words (same selector
+the flat row it can replace already used) and `map.matrix.cell:frontier` for
+the inert centre dot — that selector already existed for exactly this
+"unexplored/inert, dimmed out of the way" role on the map's own matrix view.
+Nothing new was added to the theme registry or template.
+
 ## Testing
 
 - Unit: arity table → column reachability; filter; backspace un-pick ladder;
@@ -368,6 +482,20 @@ as a *selector* the band exposes, just borrowed for one color).
   pin was revert-verified per CLAUDE.md: temporarily undoing the
   corresponding source change and confirming the pin fails with the
   originally reported symptom before trusting it.
+- **Added 2026-08-05 (SQ-0675, the layout follow-up above):** the VERB
+  column's reclaimed header row shows exactly one more visible verb than an
+  object column shows items, at the same column height, and contributes no
+  `hits.headers` entry (`BAND_COLS - 1`, not `BAND_COLS`); the compass rose
+  renders all 8 outer cells with real hit rects when a custom `quick` list
+  supplies all 8, each resolving through the same submission lookup the flat
+  row always used (directions spell out in full); the word flow holds
+  exactly the effective quick words that are NOT one of the 8 compass points
+  (`up`/`down`/`in`/`out` stay words, not rose cells); a `quick` list with no
+  compass words draws no rose at all, just the word list; and a band too
+  narrow for the block falls back to the original flat row unchanged. Every
+  pin was revert-verified the same way as the SQ-0667 batch: temporarily
+  undoing the corresponding source change and confirming the pin fails
+  first.
 
 ## Out of scope (this redesign)
 

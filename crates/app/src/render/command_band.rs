@@ -333,22 +333,49 @@ pub fn draw_command_band(
 
     let content = area;
 
-    // ── Quick row (always the bottom content row, when there is one) ──────────
-    let has_quick = content.height >= 2 && !band.quick.is_empty();
-    if has_quick {
+    // ── Quick actions: a compass-rose block on the left edge when there is
+    // room (SQ-0675), else the flat one-click row along the bottom (the
+    // original SQ-0667 layout, kept as the narrow fallback). Unlike the flat
+    // row, the block does NOT cost the columns any height — see
+    // `draw_quick_block`'s doc for why — so `use_block` only ever narrows the
+    // columns, never shortens them. ──────────────────────────────────────────
+    let quick_layout = if band.quick.is_empty() { None } else { Some(quick_block_layout(&band.quick)) };
+    // Mirrors `column_rects`' own narrow threshold (6 cells/column minimum) —
+    // the block must leave the columns at least that usable, or it isn't
+    // worth showing over the flat row.
+    let min_cols_width = BAND_COLS as u16 * 6;
+    let use_block =
+        quick_layout.as_ref().is_some_and(|l| content.width >= l.width.saturating_add(min_cols_width));
+
+    let mut cols_area = content;
+    if use_block {
+        let layout = quick_layout.as_ref().expect("use_block implies quick_layout is Some");
+        let block_area = Rect {
+            x: content.x,
+            y: content.y,
+            width: layout.width,
+            height: content.height.min(QUICK_BLOCK_ROWS),
+        };
+        draw_quick_block(band, layout, block_area, buf, base, theme, &mut hits.quick);
+        cols_area = Rect {
+            x: content.x + layout.width,
+            y: content.y,
+            width: content.width - layout.width,
+            height: content.height,
+        };
+    } else if content.height >= 2 && !band.quick.is_empty() {
         let quick_area =
             Rect { x: content.x, y: content.bottom() - 1, width: content.width, height: 1 };
         draw_quick_row(band, quick_area, buf, base, theme, &mut hits.quick);
+        cols_area =
+            Rect { x: content.x, y: content.y, width: content.width, height: content.height - 1 };
     }
 
     // ── Columns ──────────────────────────────────────────────────────────────
-    let cols_bottom = if has_quick { content.bottom() - 1 } else { content.bottom() };
-    if cols_bottom <= content.y {
+    if cols_area.height == 0 || cols_area.width == 0 {
         *vp_out = 0;
         return;
     }
-    let cols_area =
-        Rect { x: content.x, y: content.y, width: content.width, height: cols_bottom - content.y };
     let rects = column_rects(cols_area);
     if rects.is_empty() {
         // Too narrow for four columns: show only the active one, full width.
@@ -360,6 +387,249 @@ pub fn draw_command_band(
     for (col, rect) in rects.iter().enumerate() {
         hits.columns.push((col, *rect));
         draw_column(state, band, col, *rect, buf, base, vp_out, hits);
+    }
+}
+
+// ── Compass-rose quick block (SQ-0675) ──────────────────────────────────────
+//
+// The flat quick row (below) is the narrow-band fallback; when there is
+// room, the quick actions instead draw as a spatial block on the band's
+// left edge:
+//
+// ```text
+//  NW  N  NE      up down in out
+//   W  ·  E       look inventory
+//  SW  S  SE      wait again
+// ```
+//
+// The 8 compass points (matched by MEANING via `parse_direction`, not
+// spelling — same rule the VERB column's quick exclusion uses) form a 3×3
+// rose with an always-inert centre; everything else in the effective quick
+// list (up/down/in/out are directions too, but not compass POINTS, so they
+// stay in the word list, not the rose) flows left-to-right then wraps,
+// packed into the same 3 rows the rose occupies. Every cell — rose point or
+// word — is a `hits.quick` entry keyed by its index into `band.quick`,
+// exactly like the flat row's words: this is a different LAYOUT of the same
+// one-click-submit contract (`input::band_quick_pick_command`,
+// `main::band_mouse_action`), not a new one, so neither needed to change.
+
+/// Rows the compass-rose block occupies — fixed, regardless of the band's
+/// configured height. See `draw_quick_block`'s doc for why a taller band
+/// does not grow the block.
+const QUICK_BLOCK_ROWS: u16 = 3;
+/// Width of one rose cell: enough for the two-letter intercardinal labels
+/// (`NW`/`NE`/`SW`/`SE`); the one-letter `N`/`S`/`E`/`W` and the centre `·`
+/// are right-justified into the same width.
+const ROSE_CELL_W: u16 = 2;
+/// Columns between adjacent rose cells.
+const ROSE_GAP: u16 = 1;
+/// Total width of the 3×3 rose grid: three cells plus the two gaps between them.
+const ROSE_WIDTH: u16 = ROSE_CELL_W * 3 + ROSE_GAP * 2;
+/// Columns between the rose and the word flow beside it (only spent when both
+/// are present).
+const BLOCK_GAP: u16 = 2;
+/// Left margin before the block, and the gap separating it from the columns
+/// that follow — matches the flat quick row's own one-column left margin.
+const BLOCK_MARGIN: u16 = 1;
+
+/// The rose's 8 outer grid slots, reading order (row-major, matching the
+/// sketch above): NW N NE / W · E / SW S SE, with the centre omitted (it is
+/// never a pick target).
+const ROSE_LABELS: [&str; 8] = ["NW", "N", "NE", "W", "E", "SW", "S", "SE"];
+const ROSE_ORDER: [mapper::direction::Direction; 8] = {
+    use mapper::direction::Direction::*;
+    [NW, N, NE, W, E, SW, S, SE]
+};
+
+/// A resolved compass-rose quick block: which `band.quick` index (if any)
+/// fills each of the 8 rose slots, whether the rose draws at all, the word
+/// flow's row assignment, and the total width the whole block needs — computed
+/// once so the width-vs-fallback decision in `draw_command_band` and the
+/// actual drawing in `draw_quick_block` always agree exactly.
+struct QuickBlockLayout {
+    /// `band.quick` index for each of the 8 rose slots (`ROSE_LABELS` order).
+    rose: [Option<usize>; 8],
+    has_rose: bool,
+    /// Up to `QUICK_BLOCK_ROWS` rows, each a list of `(index into band.quick,
+    /// x-offset within the word-flow area)`.
+    word_rows: Vec<Vec<(usize, u16)>>,
+    /// x-offset (from the block's left edge) where the rose starts.
+    rose_x: u16,
+    /// x-offset (from the block's left edge) where the word flow starts.
+    words_x: u16,
+    /// Total width the block needs, margins included.
+    width: u16,
+}
+
+/// Split the effective quick list into the 8 compass-rose slots (by index, so
+/// a click can resolve through the same `band.quick.get(idx)` every other
+/// pick does) and everything else, in original list order. A word is routed
+/// to the rose by the DIRECTION it names (`parse_direction`), not its
+/// spelling, so a custom quick row spelling out `"north"` still lands in the
+/// rose's N slot rather than the word flow — the same rule
+/// `CommandBandState::items`'s VERB exclusion already uses. `up`/`down`/`in`/
+/// `out` are directions too but not compass POINTS, so `ROSE_ORDER` excludes
+/// them on purpose — they flow as ordinary words instead, per the design.
+fn split_quick_rose(quick: &[String]) -> ([Option<usize>; 8], Vec<usize>) {
+    use mapper::direction::parse_direction;
+    let mut rose: [Option<usize>; 8] = [None; 8];
+    let mut words = Vec::new();
+    for (i, w) in quick.iter().enumerate() {
+        let slot = parse_direction(w).and_then(|d| ROSE_ORDER.iter().position(|&r| r == d));
+        match slot {
+            Some(s) => rose[s] = Some(i),
+            None => words.push(i),
+        }
+    }
+    (rose, words)
+}
+
+/// Rows a greedy, row-major left-to-right wrap of `words` needs at `width`: a
+/// word starts a new row only when appending it (with a one-column separator)
+/// would overflow the current row.
+fn rows_needed(words: &[&str], width: u16) -> u16 {
+    let mut rows = 1u16;
+    let mut cur = 0u16;
+    for word in words {
+        let wl = word.chars().count() as u16;
+        let extended = if cur == 0 { wl } else { cur + 1 + wl };
+        if extended > width && cur > 0 {
+            rows += 1;
+            cur = wl;
+        } else {
+            cur = extended;
+        }
+    }
+    rows
+}
+
+/// The narrowest width that packs `words` into `QUICK_BLOCK_ROWS` rows under
+/// `rows_needed`'s wrap — grown one column at a time from the longest single
+/// word (the floor: nothing narrower could ever place that word). Small `n`
+/// (the quick list is a handful of words at most) makes the linear search
+/// cheap enough to redo on every draw rather than cache.
+fn word_flow_width(words: &[&str]) -> u16 {
+    let Some(mut w) = words.iter().map(|s| s.chars().count() as u16).max() else { return 0 };
+    while rows_needed(words, w) > QUICK_BLOCK_ROWS {
+        w += 1;
+    }
+    w
+}
+
+/// Assign each word (given as `band.quick` indices) to a row and an x-offset
+/// within the word-flow area, using the exact wrap `word_flow_width` sized
+/// the area for — so this never produces more than `QUICK_BLOCK_ROWS` rows.
+fn flow_words(quick: &[String], idxs: &[usize], width: u16) -> Vec<Vec<(usize, u16)>> {
+    let mut rows: Vec<Vec<(usize, u16)>> = vec![Vec::new()];
+    let mut cur = 0u16;
+    for &i in idxs {
+        let wl = quick[i].chars().count() as u16;
+        let extended = if cur == 0 { wl } else { cur + 1 + wl };
+        if extended > width && cur > 0 {
+            rows.push(Vec::new());
+            cur = 0;
+        }
+        let x = if cur == 0 { 0 } else { cur + 1 };
+        rows.last_mut().expect("just pushed if empty").push((i, x));
+        cur = x + wl;
+    }
+    rows
+}
+
+/// Resolve `quick` into a [`QuickBlockLayout`]. Pure and cheap (see
+/// `word_flow_width`'s doc) — called from `draw_command_band` purely to
+/// answer the width-vs-fallback question, then again (necessarily the same
+/// answer) to actually draw.
+fn quick_block_layout(quick: &[String]) -> QuickBlockLayout {
+    let (rose, word_idxs) = split_quick_rose(quick);
+    let has_rose = rose.iter().any(Option::is_some);
+    let word_strs: Vec<&str> = word_idxs.iter().map(|&i| quick[i].as_str()).collect();
+    let words_width = word_flow_width(&word_strs);
+    let word_rows = flow_words(quick, &word_idxs, words_width);
+
+    let rose_w = if has_rose { ROSE_WIDTH } else { 0 };
+    let gap = if has_rose && !word_idxs.is_empty() { BLOCK_GAP } else { 0 };
+    let rose_x = BLOCK_MARGIN;
+    let words_x = BLOCK_MARGIN + rose_w + gap;
+    let width = BLOCK_MARGIN + rose_w + gap + words_width + BLOCK_MARGIN;
+    QuickBlockLayout { rose, has_rose, word_rows, rose_x, words_x, width }
+}
+
+/// Draw the compass-rose quick block into `area` (the band's left strip,
+/// sized to `layout.width` and clipped to the band's actual height).
+///
+/// The block is always exactly [`QUICK_BLOCK_ROWS`] (3) rows tall, no matter
+/// how tall the band is configured — it sits BESIDE the columns (their left
+/// edge, for the band's top 3 rows), not stacked above them the way the old
+/// flat row sat below the columns. That means, unlike the flat row, it costs
+/// the columns no height at all: `draw_command_band` gives the columns the
+/// band's FULL height, narrowed only by the width the block claims. A band
+/// taller than 3 rows simply leaves the block's own strip blank below row 3
+/// — a small, deliberate cost, since stretching a compass rose to fill an
+/// arbitrarily tall band has no sensible layout of its own.
+///
+/// Every rose point and every word registers the exact same `hits` entry
+/// shape the flat row's words did (`(index into band.quick, rect)`), so
+/// `input::band_quick_pick_command` and `main::band_mouse_action` need no
+/// changes — a click resolves identically regardless of which layout drew it.
+fn draw_quick_block(
+    band: &crate::state::CommandBandState,
+    layout: &QuickBlockLayout,
+    area: Rect,
+    buf: &mut Buffer,
+    base: Style,
+    theme: &crate::theme::resolve::Theme,
+    hits: &mut Vec<(usize, Rect)>,
+) {
+    let style = base.patch(theme.get("band.quick").style);
+    // The centre is always inert decoration — never a pick target — styled
+    // like the map matrix's own frontier dot rather than a new selector.
+    let dim = base.patch(theme.get("map.matrix.cell:frontier").style);
+
+    if layout.has_rose {
+        for (cell, label) in ROSE_LABELS.iter().enumerate() {
+            // Reading order is row-major over the 3×3 grid with the centre
+            // (grid index 4) skipped, so cells 0..4 map to grid cells 0..4
+            // and cells 4..8 map to grid cells 5..9.
+            let grid = if cell < 4 { cell } else { cell + 1 };
+            let (row, gcol) = ((grid / 3) as u16, (grid % 3) as u16);
+            let y = area.y + row;
+            if y >= area.bottom() {
+                continue;
+            }
+            let x = area.x + layout.rose_x + gcol * (ROSE_CELL_W + ROSE_GAP);
+            let cell_area = Rect { x, y, width: ROSE_CELL_W, height: 1 };
+            let Some(qi) = layout.rose[cell] else { continue };
+            let lx = x + ROSE_CELL_W.saturating_sub(label.chars().count() as u16);
+            crate::render::draw_str_clipped(buf, lx, y, label, style, cell_area);
+            hits.push((qi, cell_area));
+        }
+        // The centre dot, row 1 / col 1 of the grid.
+        let cy = area.y + 1;
+        if cy < area.bottom() {
+            let cx = area.x + layout.rose_x + (ROSE_CELL_W + ROSE_GAP) + ROSE_CELL_W - 1;
+            if let Some(c) = buf.cell_mut((cx, cy)) {
+                c.set_symbol("\u{b7}").set_style(dim);
+            }
+        }
+    }
+
+    for (row_i, row) in layout.word_rows.iter().enumerate() {
+        let y = area.y + row_i as u16;
+        if y >= area.bottom() {
+            break;
+        }
+        for &(qi, x_off) in row {
+            let word = &band.quick[qi];
+            let x = area.x + layout.words_x + x_off;
+            if x >= area.right() {
+                continue;
+            }
+            let w = (word.chars().count() as u16).min(area.right() - x);
+            let r = Rect { x, y, width: w, height: 1 };
+            crate::render::draw_str_clipped(buf, x, y, word, style, area);
+            hits.push((qi, r));
+        }
     }
 }
 
@@ -411,36 +681,45 @@ fn draw_column(
     let reachable = band.col_reachable(col);
     let active = !band.story_focused && band.focus == col;
 
-    let header_style = base.patch(
-        theme.get(if active { "band.column_header:active" } else { "band.column_header" }).style,
-    );
-    let header_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
-    for x in header_area.x..header_area.right() {
-        if let Some(cell) = buf.cell_mut((x, header_area.y)) {
-            cell.set_symbol(" ").set_style(header_style);
+    // SQ-0675: the VERB column's header row carried no text at all (SQ-0667
+    // dropped the "VERB" label, leaving the row visually blank) — pure
+    // wasted space in a deliberately compact band. It is reclaimed here as
+    // the column's first LIST row instead of being drawn separately, so the
+    // VERB column shows exactly ONE MORE visible verb than the object/prep
+    // columns show items, at the same overall column height. Every other
+    // column still gets a real header row: WHAT — here / WHAT — carried /
+    // WITH… all carry real information (here vs. carried, and the pair
+    // verb's preposition), so their row stays worth spending on a label.
+    // VERB also contributes no `hits.headers` entry — there is no separate
+    // header region left to focus; clicking its reclaimed top row just picks
+    // the first verb there, exactly like clicking any other row. The active
+    // marker (`▸`) that used to sit alone in VERB's header now shows on
+    // whichever row is selected instead (the ordinary per-row marker below),
+    // so focus is still visible without a header to attach it to.
+    let header_h: u16 = if col == COL_VERB { 0 } else { 1 };
+    if header_h > 0 {
+        let header_style = base.patch(
+            theme.get(if active { "band.column_header:active" } else { "band.column_header" }).style,
+        );
+        let header_area = Rect { x: area.x, y: area.y, width: area.width, height: 1 };
+        for x in header_area.x..header_area.right() {
+            if let Some(cell) = buf.cell_mut((x, header_area.y)) {
+                cell.set_symbol(" ").set_style(header_style);
+            }
         }
+        let label = format!("{}{}", if active { "▸" } else { " " }, band.column_label(col));
+        crate::render::draw_str_clipped(buf, header_area.x, header_area.y, &label, header_style, header_area);
+        hits.headers.push((col, header_area));
     }
-    // The VERB column carries no header text (SQ-0667): a bare column of
-    // verbs is self-evident, and WHAT/WITH keep theirs because they carry
-    // real information (here vs. carried, and the pair verb's preposition).
-    // The active marker survives on its own even for VERB, so the keyboard
-    // focus is still visible without a label to attach it to.
-    let label = if col == COL_VERB {
-        if active { "▸".to_string() } else { String::new() }
-    } else {
-        format!("{}{}", if active { "▸" } else { " " }, band.column_label(col))
-    };
-    crate::render::draw_str_clipped(buf, header_area.x, header_area.y, &label, header_style, header_area);
-    hits.headers.push((col, header_area));
 
-    let list_h = area.height.saturating_sub(1);
+    let list_h = area.height.saturating_sub(header_h);
     if active {
         *vp_out = list_h as usize;
     }
     if list_h == 0 {
         return;
     }
-    let list_area = Rect { x: area.x, y: area.y + 1, width: area.width, height: list_h };
+    let list_area = Rect { x: area.x, y: area.y + header_h, width: area.width, height: list_h };
 
     // A column that is not reachable yet renders dimmed and empty — the grammar
     // is the point, so showing pickable-looking rows there would lie.
@@ -520,7 +799,13 @@ mod tests {
     use super::*;
     use crate::state::{AppState, CommandBandState};
 
-    const BAND: Rect = Rect { x: 0, y: 0, width: 78, height: 8 };
+    // Wide enough that the default quick list's compass-rose block (SQ-0675)
+    // fits alongside four columns with real breathing room (so header/list
+    // text like "(nothing carried)" never clips) — most of this module's
+    // tests care about column content, not the quick block's own layout;
+    // `narrow_band_falls_back_to_the_flat_quick_row` below covers the
+    // narrower case on purpose.
+    const BAND: Rect = Rect { x: 0, y: 0, width: 120, height: 8 };
 
     fn state_with_band() -> AppState {
         let mut s = AppState::default();
@@ -606,9 +891,46 @@ mod tests {
         let mut hits = CommandBandHits::default();
         draw_command_band(&s, BAND, &mut buf, &mut 0, &mut hits);
         assert!(!dump(&buf).contains("VERB"), "the VERB label is gone");
-        // The header ROW still exists (and is still clickable) for every
-        // column, VERB included — only its text was dropped.
-        assert_eq!(hits.headers.len(), BAND_COLS, "every column still has a clickable header row");
+        // SQ-0675: the header ROW itself is gone for VERB too now — reclaimed
+        // as an extra list row (see `verb_column_shows_one_more_row...`
+        // below) — so only the other three columns still contribute a
+        // `hits.headers` entry.
+        assert_eq!(
+            hits.headers.len(),
+            BAND_COLS - 1,
+            "every column but VERB still has a clickable header row"
+        );
+    }
+
+    /// SQ-0675: the VERB column's blank header row is reclaimed as its FIRST
+    /// list row, so at the SAME column height it shows exactly one more
+    /// visible item than a column that still spends a row on a real header
+    /// (WHAT — here). Both columns are seeded with far more items than the
+    /// area can show, so each is "full" and its row count is governed purely
+    /// by how many rows `draw_column` gives its list. Falsifies against
+    /// reverting the `header_h` special-case in `draw_column` back to an
+    /// unconditional 1, which would make the two counts equal.
+    #[test]
+    fn verb_column_shows_one_more_row_than_an_object_column_at_the_same_height() {
+        let mut s = state_with_band();
+        {
+            let b = s.overlays.command_band.as_mut().unwrap();
+            b.pick_word("take"); // opens HERE/CARRIED
+            b.here = (0..10).map(|i| format!("thing{i}")).collect();
+        }
+        let area = Rect { x: 0, y: 0, width: 120, height: 6 };
+        let mut buf = Buffer::empty(area);
+        let mut hits = CommandBandHits::default();
+        draw_command_band(&s, area, &mut buf, &mut 0, &mut hits);
+
+        let verb_rows = hits.rows.iter().filter(|(c, _, _)| *c == COL_VERB).count();
+        let here_rows = hits.rows.iter().filter(|(c, _, _)| *c == COL_HERE).count();
+        assert!(verb_rows > 0 && here_rows > 0, "both lists are long enough to fill every row");
+        assert_eq!(
+            verb_rows,
+            here_rows + 1,
+            "VERB's reclaimed header row is one extra visible verb: verb={verb_rows} here={here_rows}"
+        );
     }
 
     #[test]
@@ -624,6 +946,11 @@ mod tests {
         assert!(dump(&buf).contains("WITH"), "the second-object column names its preposition");
     }
 
+    /// The quick actions are hit-testable regardless of which layout drew
+    /// them — the compass-rose block (SQ-0675, `BAND` is wide enough to fit
+    /// it) or the flat row it falls back to (see
+    /// `narrow_band_falls_back_to_the_flat_quick_row` for that path
+    /// specifically).
     #[test]
     fn quick_row_is_hit_testable() {
         let mut buf = Buffer::empty(BAND);
@@ -631,7 +958,121 @@ mod tests {
         let mut hits = CommandBandHits::default();
         draw_command_band(&s, BAND, &mut buf, &mut 0, &mut hits);
         assert!(!hits.quick.is_empty(), "quick words emit hit rects");
-        assert_eq!(hits.headers.len(), BAND_COLS, "every column header is clickable");
+        assert_eq!(hits.headers.len(), BAND_COLS - 1, "every column but VERB has a clickable header row");
+    }
+
+    /// SQ-0675: too narrow for the rose+words block (plus a usable four
+    /// columns), the quick actions fall back to the original flat one-click
+    /// row along the bottom — the pre-SQ-0675 layout, still exercised here.
+    /// Falsifies against a `use_block` that ignores width entirely (which
+    /// would draw the rose even into a sliver this narrow, clipping it).
+    #[test]
+    fn narrow_band_falls_back_to_the_flat_quick_row() {
+        let s = state_with_band(); // default quick: n s e w up down in out look inventory wait again
+        let area = Rect { x: 0, y: 0, width: 40, height: 8 };
+        let mut buf = Buffer::empty(area);
+        let mut hits = CommandBandHits::default();
+        draw_command_band(&s, area, &mut buf, &mut 0, &mut hits);
+
+        assert!(!hits.quick.is_empty(), "quick words still emit hit rects");
+        let out = dump(&buf);
+        assert!(!out.contains("NW") && !out.contains("SE"), "too narrow for the rose diagram: {out}");
+        // Early quick words only — width=40 isn't enough for the whole flat
+        // row (the flat row breaks off once it runs out of space, same as it
+        // always has), so don't assert on the tail end of the list.
+        assert!(out.contains("down"), "the flat row still spells out the quick words: {out}");
+        assert!(
+            hits.quick.iter().all(|(_, r)| r.y == area.bottom() - 1),
+            "the flat row is a single strip along the very bottom: {:?}",
+            hits.quick
+        );
+    }
+
+    /// SQ-0675: with room, the quick actions draw as a compass rose (8 outer
+    /// cells, matched by MEANING via `parse_direction`) plus a word block —
+    /// every cell is its own click target, resolving through the same
+    /// `band_quick_pick_command` lookup the flat row always used (directions
+    /// spell out in full on submission; the rose only abbreviates the
+    /// DISPLAY). Falsifies against `draw_quick_block` not registering a hit
+    /// for a rose cell (would leave `hits.quick.len()` short of `quick.len()`).
+    #[test]
+    fn rose_cells_are_present_and_clickable_when_width_allows() {
+        let quick: Vec<String> =
+            ["nw", "n", "ne", "w", "e", "sw", "s", "se", "look"].iter().map(|s| s.to_string()).collect();
+        let mut s = AppState::default();
+        s.overlays.command_band = Some(CommandBandState::new(default_verbs(), quick.clone()));
+        let area = Rect { x: 0, y: 0, width: 120, height: 6 };
+        let mut buf = Buffer::empty(area);
+        let mut hits = CommandBandHits::default();
+        draw_command_band(&s, area, &mut buf, &mut 0, &mut hits);
+
+        assert_eq!(hits.quick.len(), quick.len(), "every rose cell and word is clickable: {:?}", hits.quick);
+
+        // No two quick hit rects overlap.
+        for (i, (_, a)) in hits.quick.iter().enumerate() {
+            for (_, b) in hits.quick.iter().skip(i + 1) {
+                let overlap = a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom();
+                assert!(!overlap, "quick hit rects must not overlap: {a:?} vs {b:?}");
+            }
+        }
+
+        // Each hit resolves through the real submission lookup to the right
+        // command — directions spell out in full, "look" passes through.
+        let mut resolved: Vec<String> = hits
+            .quick
+            .iter()
+            .map(|(idx, _)| crate::input::band_quick_pick_command(&s, *idx).expect("valid index"))
+            .collect();
+        resolved.sort();
+        let mut want = vec![
+            "north", "south", "east", "west", "northeast", "northwest", "southeast", "southwest", "look",
+        ];
+        want.sort();
+        assert_eq!(resolved, want);
+    }
+
+    /// The word flow holds exactly the effective quick words that are NOT one
+    /// of the 8 compass points — `up`/`down`/`in`/`out` are directions too,
+    /// but not compass POINTS, so they stay in the word flow rather than the
+    /// rose (see `split_quick_rose`'s doc). Falsifies against a rose that
+    /// (wrongly) also swallows up/down/in/out, which would shrink this list.
+    #[test]
+    fn word_block_holds_exactly_the_non_compass_quick_words() {
+        let quick = default_quick();
+        let layout = quick_block_layout(&quick);
+        assert!(layout.has_rose, "n/s/e/w are compass words — the rose shows");
+
+        let mut got: Vec<&str> =
+            layout.word_rows.iter().flatten().map(|&(i, _)| quick[i].as_str()).collect();
+        got.sort_unstable();
+        let mut want = vec!["up", "down", "in", "out", "look", "inventory", "wait", "again"];
+        want.sort_unstable();
+        assert_eq!(got, want, "the word flow holds exactly the non-compass quick words");
+    }
+
+    /// A custom quick list with no compass words at all draws no rose —
+    /// just the flowing word list, starting where the rose's margin would
+    /// otherwise have been. Falsifies against a rose that always draws (even
+    /// empty), which would waste the rose's width for nothing.
+    #[test]
+    fn quick_list_without_compass_words_shows_no_rose() {
+        let quick: Vec<String> = ["look", "wait", "again"].iter().map(|s| s.to_string()).collect();
+        let layout = quick_block_layout(&quick);
+        assert!(!layout.has_rose, "no compass word in quick -> no rose");
+        assert_eq!(layout.rose_x, layout.words_x, "no width spent on an absent rose");
+
+        let s = {
+            let mut s = AppState::default();
+            s.overlays.command_band = Some(CommandBandState::new(default_verbs(), quick));
+            s
+        };
+        let area = Rect { x: 0, y: 0, width: 120, height: 6 };
+        let mut buf = Buffer::empty(area);
+        let mut hits = CommandBandHits::default();
+        draw_command_band(&s, area, &mut buf, &mut 0, &mut hits);
+        let out = dump(&buf);
+        assert!(!out.contains('·'), "no rose -> no inert centre dot either: {out}");
+        assert_eq!(hits.quick.len(), 3, "just the three words: {:?}", hits.quick);
     }
 
     #[test]
