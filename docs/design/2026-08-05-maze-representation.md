@@ -1,124 +1,128 @@
-# Maze representation: making tangles legible
+# Maze representation: the matrix view
 
-**Status:** approved direction, grounded in real data; not yet implemented.
+**Status:** settled design (iterated against real data with the user,
+2026-08-05); not yet implemented. Example renders in this doc come from a
+player's actual partial mapping of Colossal Cave's "all alike" maze
+(`advent.blb`, save `default`, 12 rooms / 47 edges).
 
 ## The evidence
 
-From a player's partial mapping of Colossal Cave's "all alike" maze
-(`advent.blb`, save `default`, rooms hand-peeled onto a "Maze" layer —
-deliberately an *incomplete* maze, which the design must serve):
-
-- 12 rooms, 47 internal edges, 2 border edges.
 - **2 of 47 edges are reciprocal.** 18 return by a *different* direction,
   27 have no known return at all.
-- **29 of 47 edges are marked distorted** — the compass layout is wrong about
+- **29 of 47 edges are marked distorted** — compass layout is wrong about
   ~62% of what it draws, because compass geometry is not what a maze is.
 - **11 of 12 rooms are named "Maze"** — indistinguishable on screen.
-- Every room carries a `tried` direction list; comparing it to recorded edges
-  exposes information the map cannot show: a direction that was tried and
-  minted no edge is (almost always) a **self-loop**, which
-  `Mapper::observe` structurally refuses to record (`location != prev_id`
-  guard) — so the classic "W leads back here" maze fact is thrown away.
+- Every room records a `tried` direction list; a tried direction with no
+  minted edge is usually a **self-loop**, which `Mapper::observe`
+  structurally refuses (`location != prev_id`) — the classic "W leads back
+  here" fact is currently thrown away.
 
-Conclusion: inside a maze, drawn compass edges are the wrong medium. The
-knowledge a maze player accumulates is a **direction table per room**, plus
-asymmetry, self-loops, and which directions remain untried.
+Conclusion: inside a maze the player's knowledge is a **direction table per
+room**. The map should show that table, not draw geometry that is 62% wrong.
 
-## Components
+## Core decision: the matrix is a view mode, not a maze feature
 
-### 1. Maze layers, detected and manual
+Every layer gets a **map view mode**: `drawn` (today's map) or `matrix`.
+`/view-map` cycles it; the mode is per-layer and persists with the map.
+A layer flagged `maze = true` (LayerMeta, persisted) merely *defaults* to
+matrix. Tangle detection — a connected cluster whose non-reciprocal share
+crosses a threshold — offers to peel the cluster to a new maze-flagged
+layer; `/mark-maze-layer` flags an existing layer in place (the user's
+hand-peeled "Maze" layer converts with one command). Detection is a
+convenience that flips a default; nothing else depends on it.
 
-The layer/peel machinery is the container. Add tangle detection: a connected
-room cluster whose non-reciprocal-edge share crosses a threshold (the data
-says even 50% is generous; real mazes sit near 95%) triggers a one-time
-suggestion to move the cluster to a new layer flagged `maze = true`
-(LayerMeta gains the flag; persisted). Manual: `/mark-maze-layer` toggles the
-flag on the active layer, so an existing hand-peeled layer (like this save's)
-converts in place. The main map shows a maze layer's rooms as today (layers
-already do that); the flag changes how the layer *renders when active*.
+The matrix is also inherently screen-reader-friendly (a table linearises
+where a drawn map cannot) — relevant to the SQ-0609 accessibility thread.
 
-### 2. Tangle view: exit tables, not edges
+## The matrix view (settled form)
 
-When the active layer is flagged maze, the map pane renders **room cards in a
-stable grid** (sorted by first-visit order, which numbers them naturally) and
-draws no geometric edges at all:
+One row per room (first-visit order), one column per direction — **always
+all twelve** (N S E W NE NW SE SW U D In Out): an untried cell in any
+direction may be exactly what full exploration needs, so none are hidden.
 
 ```
-┌ Maze #1 ──────────┐  ┌ Maze #2 ──────────┐  ┌ Maze #3 (here) ───┐
-│ N → #2            │  │ N → #2 ↩          │  │ N → #1            │
-│ E → #5            │  │ S → Dead End      │  │ E → ?             │
-│ W → #1 ↩          │  │ W → #4   ⇠ none   │  │ SW · untried      │
-│ S ⇢ #4 (one-way)  │  │ U → Pit ⇱ border  │  └───────────────────┘
-└───────────────────┘  └───────────────────┘
+               N     S     E     W    NE    NW    SE    SW     U     D     I     O
+──────────────────────────────────────────────────────────────────────────────────
+ Maze 1     →5⇠w    ⇢9    ⇢2    ⇢3     ·     ·     ·     ·     ·     ·     ·     ·
+ Maze 2       ⇢3   ⇢10  →7⇠n    ⇢9     ·     ·     ·     ·     · →11⇠w     ·     ·
+▸Maze 3    →11⇠u    ⇢5  →9⇠e →10⇠s     ·     ·     ·     ·    ⇢4     ·     ·     ·
+ DeadEnd¹     ⇄4     ·     ?     ·     ·     ·     ·     ·     ·     ·     ·     ·
+ Maze 4       ⇢1   ⇄DE  →5⇠s  →6⇠w     ·     ·     ·     ·    ⇢8    ⇢2     ·     ·
+ ...
+──────────────────────────────────────────────────────────────────────────────────
+¹ Dead End, near Vending Machine    ⇱out: D from 11 → At West End of Long Hall
 ```
 
-Card rows, per direction: destination (numbered), `↩` self-loop, `⇢`
-one-way (no known return), `⇠ none` (asymmetric — the return comes from a
-different direction, shown on the destination's card), `?` tried-but-unknown,
-`· untried` (from `tried` complement against the room's known exits), and
-border exits out of the maze. The selected card's destinations highlight in
-place — navigation is card-to-card, not spatial. Clicking a destination
-jumps selection to that card.
+**Cell vocabulary** (one glyph + destination number, ≤6 cells wide):
 
-This is the partial-maze answer: `?` and `· untried` rows make the frontier
-explicit, so an in-progress maze reads as a checklist of what remains.
+| Cell        | Meaning |
+|-------------|---------|
+| `⇄4`        | reciprocal — the compass inverse returns |
+| `→5⇠w`      | goes to 5; the return is via W (self-contained row) |
+| `⇢9`        | one-way — no return known |
+| `↩`         | self-loop — this direction leads back here |
+| `⇱out`      | leaves the maze/layer; destination footnoted |
+| `?`         | tried, nowhere new (probable self-loop/refusal, not yet proven) |
+| `·`         | untried — the exploration frontier |
 
-### 3. Self-loops become recordable
+**Row furniture:** `▸` marks the room you are standing in; rooms sharing a
+display name are numbered by first-visit order ("Maze 1…11", display-only —
+identity is already stable via object address); long or out-of-layer names
+are footnoted below the table (`DeadEnd¹`, `⇱out` destinations).
 
-Lift the `location != prev_id` refusal into a first-class self-loop edge
-(`origin == dest`, keyed like Unknown edges by the full triple). Rendering:
-never a drawn loop — a `↩` marker on the direction row (tangle view) or a
-compact badge on the room box (`↩N,W`) on normal layers. Retroactively, the
-`tried`-minus-edges heuristic can OFFER conversion ("3 tried directions led
-nowhere new — record as self-loops?") but must not assume: a failed/refused
-move also leaves a tried entry, and only a same-room arrival proves a loop,
-so the automatic path records only genuinely observed self-arrivals from now
-on.
+**Selection cross-highlight:** selecting a row restyles — **bold via a
+style selector, not a glyph** — every cell elsewhere that *arrives* at the
+selected room: its known entrances, i.e. the answer to "how do I get back
+here". Selection moves with ↑/↓ or by clicking a row; clicking a
+destination cell jumps selection to that room's row.
 
-### 4. Honest asymmetric edges on normal layers
+**Geometry:** the full table is ~82 cells wide; inside a narrower map pane
+the matrix scrolls horizontally (the label column stays pinned), reusing
+the pane-scroll conventions. Vertical scrolling as any list.
 
-Outside tangle view (and for the few mazes not worth a layer): arrowheads on
-one-way edges; when a pair's directions disagree, label both ends
-(`E→ … →SW`); the existing distorted styling stays. New selectors:
-`map.edge:oneway`, `map.edge:asym` (+ glyph config), defaults matching the
-current edge style so nothing changes visually until styled.
+**Style selectors** (all new elements styleable per CLAUDE.md):
+`map.matrix.header`, `map.matrix.row:here`, `map.matrix.row:selected`,
+`map.matrix.cell:entrance` (the bold cross-highlight), `map.matrix.cell:frontier`
+(`·`/`?` cells), `map.matrix.footnote`. Defaults reproduce the mockup
+(bold for entrances, dim for frontier).
 
-### 5. Same-name numbering and notes
+## Supporting changes (unchanged from the first draft)
 
-Within a layer, rooms sharing a display name get stable ordinal suffixes
-("Maze #3") derived from first-visit order — display-only, identity is
-untouched (Glulx object address via room-lock already keeps them distinct).
-The existing per-room notes field carries the classic dropped-item
-annotations and shows on the card's second line when set.
-
-### 6. Walked-trail breadcrumb
-
-While the active layer is a maze layer, highlight the last N traversed
-edges/cards (N ~ 8, config) with a fading trail style (`map.trail`
-selector). Orientation while mapping is half the maze problem.
+1. **Self-loops become recordable** — lift the `observe` refusal into a
+   first-class `origin == dest` edge (triple-keyed like Unknown edges),
+   rendered as `↩` in the matrix and a badge on drawn-view room boxes.
+   A `tried`-minus-edges heuristic may OFFER retroactive conversion but
+   never assumes: only an observed same-room arrival proves a loop.
+2. **Honest asymmetric edges in the drawn view** — arrowheads on one-way
+   edges, both-end labels when directions disagree, selectors
+   `map.edge:oneway` / `map.edge:asym`.
+3. **Room card in the room-info panel** — the per-room exit table (the
+   card form from the earlier draft) becomes the selected room's detail in
+   room-info, complementing the matrix rather than competing with it.
+4. **Walked-trail breadcrumb** — on maze-flagged layers, the last N
+   traversed edges/rows highlight with a fading `map.trail` style (N ~ 8).
 
 ## Persistence
 
-LayerMeta gains `maze: bool`; self-loop edges join the connection list
-(format may break old files freely, pre-release). Card numbering derives
-from room insertion order already present in the save; nothing new persists
-for it. `tried` is already persisted per room.
+LayerMeta: `maze: bool` and the per-layer view mode. Self-loop edges join
+the connection list. Numbering derives from existing insertion order;
+`tried` is already persisted. Formats may break freely, pre-release.
 
 ## Out of scope
 
-- Force-directed geometric layout for maze layers — considered and dropped:
-  with 96% asymmetry the resulting hairball communicates less than cards do.
-- Auto-solving/pathfinding through mazes (route hints).
-- Item-drop detection (auto-annotating cards from inventory changes) —
-  attractive, separate quest if wanted.
+- Force-directed layout for maze layers (dropped: with ~96% asymmetry a
+  drawn graph communicates less than the table).
+- Auto-solving/route hints through mazes.
+- Item-drop auto-annotation (separate quest if wanted).
 
 ## Testing
 
-Unit: tangle detection thresholds on synthetic graphs; card row derivation
-(self-loop/one-way/asym/untried classification) against a fixture graph built
-to this save's exact statistics; numbering stability across save/load.
-Integration: load a copy of the advent.blb map.json fixture (sanitized into
-unit_tests/ — it is player data, not game data, so redistributable), flag the
-layer, assert the tangle view rows for known rooms (#864's E → `?`/untried,
-the Dead End border edge, the 2 reciprocal pairs). Falsification per
-CLAUDE.md throughout.
+Unit: cell classification (reciprocal/asym/one-way/self-loop/probe/untried)
+against a fixture graph replicating the save's statistics; numbering
+stability across save/load; entrance cross-highlight set; footnote
+assignment; view-mode persistence per layer. Integration: a sanitized copy
+of the advent.blb map.json in unit_tests/ (player data, redistributable):
+flag the layer, render the matrix, assert known cells (`DeadEnd¹` row `E`
+is `?`, Maze 11 `D` is `⇱out`, the two reciprocal pairs, ▸ on the current
+room, bold entrances for a selected room in both honor_game_colours
+modes). Falsification per CLAUDE.md throughout.
