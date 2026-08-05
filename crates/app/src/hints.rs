@@ -668,7 +668,19 @@ pub fn extract_story(bytes: Vec<u8>) -> io::Result<LoadedStory> {
     match b.executable() {
         Ok((blorb::ExecKind::ZCode, data)) => Ok(LoadedStory::ZCode(data.to_vec())),
         Ok((blorb::ExecKind::Glulx, data)) => Ok(LoadedStory::Glulx(data.to_vec())),
-        Ok((blorb::ExecKind::Scott, data)) => Ok(LoadedStory::Scott(data.to_vec())),
+        Ok((blorb::ExecKind::Scott, data)) => {
+            // SQ-0629: gate the SAAI payload behind the same content sniff the
+            // raw-`.dat` path above uses — a hostile blorb must not reach
+            // scott's loader with arbitrary bytes just by claiming an SAAI
+            // exec chunk.
+            if !std::str::from_utf8(data).is_ok_and(scott::looks_like_scott) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Blorb SAAI executable does not look like a Scott Adams database",
+                ));
+            }
+            Ok(LoadedStory::Scott(data.to_vec()))
+        }
         Err(e) => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("Blorb has no executable: {e:?}"),
@@ -676,10 +688,16 @@ pub fn extract_story(bytes: Vec<u8>) -> io::Result<LoadedStory> {
     }
 }
 
+/// Cap on one extracted ZIP entry (SQ-0660). Story files here are Z-code
+/// images, whose format tops out at 512 KiB; 4 MiB is generous headroom while
+/// still stopping a hostile zip from inflating a multi-GB entry into memory.
+const MAX_ZIP_ENTRY: u64 = 4 * 1024 * 1024;
+
 /// Return the bytes of the first ZIP entry whose name satisfies `pred`.
 ///
 /// Returns `Ok(None)` if no entry matches.  Returns `Err` if the file cannot
-/// be opened or is not a valid ZIP.
+/// be opened, is not a valid ZIP, or the matched entry inflates beyond
+/// [`MAX_ZIP_ENTRY`].
 pub fn read_zip_entry(
     zip_path: &Path,
     pred: impl Fn(&str) -> bool,
@@ -695,8 +713,18 @@ pub fn read_zip_entry(
             .by_index(i)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         if pred(entry.name()) {
+            let name = entry.name().to_string();
+            // Capped read (one byte past the cap detects overflow without ever
+            // buffering the excess): the entry's declared size is attacker
+            // data, so the *inflated* stream itself is what gets bounded.
             let mut buf = Vec::new();
-            entry.read_to_end(&mut buf)?;
+            (&mut entry).take(MAX_ZIP_ENTRY + 1).read_to_end(&mut buf)?;
+            if buf.len() as u64 > MAX_ZIP_ENTRY {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("zip entry '{name}' inflates beyond {MAX_ZIP_ENTRY} bytes"),
+                ));
+            }
             return Ok(Some(buf));
         }
     }
@@ -941,6 +969,76 @@ mod tests {
         assert_eq!(out, zcode);
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// SQ-0660: a zip entry that inflates beyond the cap must error instead of
+    /// allocating unbounded memory; a small entry still extracts.
+    #[test]
+    fn read_zip_entry_caps_a_huge_inflated_entry() {
+        use std::io::Write as _;
+
+        let base = std::env::temp_dir().join(format!("bm-zipcap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        // A deflated entry of MAX_ZIP_ENTRY + 128 KiB of zeros: tiny on disk,
+        // huge inflated — exactly the zip-bomb shape the cap exists for.
+        let zip_path = base.join("bomb.zip");
+        {
+            let file = std::fs::File::create(&zip_path).unwrap();
+            let mut zw = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zw.start_file("huge.z5", opts).unwrap();
+            let chunk = vec![0u8; 64 * 1024];
+            for _ in 0..(MAX_ZIP_ENTRY / chunk.len() as u64 + 2) {
+                zw.write_all(&chunk).unwrap();
+            }
+            zw.finish().unwrap();
+        }
+        let err = read_zip_entry(&zip_path, |n| n.ends_with(".z5"))
+            .expect_err("an over-cap entry must error");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("huge.z5"), "error names the entry: {err}");
+
+        // A normal-sized entry is unaffected.
+        let ok_path = base.join("ok.zip");
+        {
+            let file = std::fs::File::create(&ok_path).unwrap();
+            let mut zw = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zw.start_file("small.z5", opts).unwrap();
+            zw.write_all(&[5u8; 128]).unwrap();
+            zw.finish().unwrap();
+        }
+        let bytes = read_zip_entry(&ok_path, |n| n.ends_with(".z5")).unwrap().unwrap();
+        assert_eq!(bytes, vec![5u8; 128]);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// SQ-0629: a blorb claiming a Scott Adams (`SAAI`) executable only loads
+    /// when its payload passes the same `looks_like_scott` sniff the raw-`.dat`
+    /// path uses — arbitrary bytes must never reach scott's loader.
+    #[test]
+    fn extract_story_gates_a_blorb_saai_payload_behind_the_scott_sniff() {
+        // Binary junk behind an SAAI exec chunk: rejected.
+        let hostile = make_blorb(b"SAAI", &[0xFF, 0x00, 0xC3, 0x28, 0x9A, 0x01]);
+        let err = extract_story(hostile).expect_err("non-Scott SAAI payload must be rejected");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        // Text that fails the header sniff behind SAAI: also rejected.
+        let not_scott = make_blorb(b"SAAI", b"just some readme text, not a database");
+        assert!(extract_story(not_scott).is_err());
+
+        // A genuine Scott header (12 sane ints) still loads.
+        const MINI: &str = "\n32767 1 0 1 2 6 1 0 3 125 0 1\n150 1 0 0 0 0 0 0\n";
+        let genuine = make_blorb(b"SAAI", MINI.as_bytes());
+        assert_eq!(
+            extract_story(genuine).unwrap(),
+            LoadedStory::Scott(MINI.as_bytes().to_vec())
+        );
     }
 
     #[test]

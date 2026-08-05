@@ -234,6 +234,10 @@ pub enum SearchError {
     TooLarge,
     /// The URL yielded no usable, accepted-extension filename.
     NoFilename,
+    /// The downloaded bytes don't look like a story of the type the filename
+    /// claims (SQ-0659) — e.g. a 200 HTML landing page served for a dead link.
+    /// Nothing is written to disk.
+    NotAStory,
     /// A local filesystem error writing the download.
     Io(String),
 }
@@ -247,6 +251,7 @@ impl std::fmt::Display for SearchError {
                 write!(f, "file exceeds {} MiB cap", MAX_DOWNLOAD / (1024 * 1024))
             }
             SearchError::NoFilename => write!(f, "no downloadable story file"),
+            SearchError::NotAStory => write!(f, "downloaded file is not a valid story file"),
             SearchError::Io(m) => write!(f, "could not save file: {m}"),
         }
     }
@@ -340,18 +345,21 @@ impl SearchSource for IfdbSearchClient {
         }
 
         // Derive the filename from Content-Disposition if the host offers one,
-        // else the URL basename. Never trusted blindly — see `sanitize_filename`.
+        // else the URL basename. Never trusted blindly — see `download_filename`.
         let disposition = resp
             .headers()
             .get("content-disposition")
-            .and_then(|v| v.to_str().ok())
-            .and_then(filename_from_disposition);
-        let name = disposition
-            .or_else(|| basename_from_url(url))
-            .and_then(|n| sanitize_filename(&n))
-            .ok_or(SearchError::NoFilename)?;
+            .and_then(|v| v.to_str().ok());
+        let name = download_filename(disposition, url).ok_or(SearchError::NoFilename)?;
 
         let bytes = read_capped(resp.body_mut().as_reader(), MAX_DOWNLOAD)?;
+
+        // SQ-0659: never write bytes that aren't plausibly a story of the type
+        // the filename claims — a 200 HTML landing page must not land on disk
+        // as `game.z5` (the picker's rescan would then drop it silently).
+        if !looks_like_story_file(&name, &bytes) {
+            return Err(SearchError::NotAStory);
+        }
 
         std::fs::create_dir_all(dest_dir).map_err(|e| SearchError::Io(e.to_string()))?;
         let dest = unique_dest(dest_dir, &name);
@@ -536,6 +544,42 @@ fn filename_from_disposition(value: &str) -> Option<String> {
         after.split(';').next().unwrap_or(after).trim()
     };
     (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The filename a download is saved under (SQ-0659): the Content-Disposition
+/// name when it sanitizes to an openable story filename, otherwise the URL
+/// basename. The fallback must apply on a *bad* disposition too, not only an
+/// absent one — hosts really do send `filename=fetch.php` on links whose URL
+/// basename [`is_playable_download`] already vetted, and that must not abort
+/// the download.
+fn download_filename(disposition: Option<&str>, url: &str) -> Option<String> {
+    disposition
+        .and_then(filename_from_disposition)
+        .and_then(|n| sanitize_filename(&n))
+        .or_else(|| basename_from_url(url).and_then(|n| sanitize_filename(&n)))
+}
+
+/// Content sniff (SQ-0659): do `bytes` plausibly hold a story of the type
+/// `filename`'s extension claims? Mirrors the detection the picker's loader
+/// already applies (`hints::extract_story` / `blorb::is_blorb` /
+/// `scott::looks_like_scott`): a Z-code image starts with its version byte
+/// (1..=8) and carries a full 64-byte header, Glulx starts with `Glul`, a
+/// blorb container with `FORM`…`IFRS`; a `.dat` may be either a Scott Adams
+/// text database or a Z-code image (some Infocom releases shipped as `.dat`).
+pub fn looks_like_story_file(filename: &str, bytes: &[u8]) -> bool {
+    let ext = Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+    let zcode = bytes.len() >= 64 && matches!(bytes[0], 1..=8);
+    match ext.as_str() {
+        "z3" | "z4" | "z5" | "z6" | "z7" | "z8" => zcode,
+        "ulx" => bytes.starts_with(b"Glul"),
+        "gblorb" | "zblorb" | "blorb" | "blb" | "zlb" => blorb::Blorb::is_blorb(bytes),
+        "dat" => zcode || std::str::from_utf8(bytes).is_ok_and(scott::looks_like_scott),
+        _ => false,
+    }
 }
 
 /// Reduce an untrusted filename to a safe basename: take only the final path
@@ -954,6 +998,65 @@ mod tests {
         assert_eq!(basename_from_url("https://x/").as_deref(), None);
     }
 
+    /// SQ-0659: the disposition name is preferred only when it sanitizes; a
+    /// disposition like `filename=fetch.php` must fall back to the URL
+    /// basename (which `is_playable_download` already vetted), in that order.
+    #[test]
+    fn download_filename_tries_disposition_then_falls_back_to_url_basename() {
+        // A sane disposition wins over the URL basename.
+        assert_eq!(
+            download_filename(Some(r#"attachment; filename="renamed.z8""#), "https://x/orig.z5")
+                .as_deref(),
+            Some("renamed.z8")
+        );
+        // A disposition that fails to sanitize falls back to the URL basename
+        // instead of aborting the download.
+        assert_eq!(
+            download_filename(Some("attachment; filename=fetch.php"), "https://x/orig.z5")
+                .as_deref(),
+            Some("orig.z5")
+        );
+        // No disposition at all: URL basename.
+        assert_eq!(download_filename(None, "https://x/orig.z5").as_deref(), Some("orig.z5"));
+        // Neither source usable: give up.
+        assert_eq!(download_filename(Some("attachment; filename=fetch.php"), "https://x/fetch.php"), None);
+        assert_eq!(download_filename(None, "https://x/"), None);
+    }
+
+    /// SQ-0659: a 200 HTML landing page must never be written as a story file,
+    /// while real magic for each accepted extension passes.
+    #[test]
+    fn looks_like_story_file_rejects_html_and_accepts_real_magic() {
+        let mut html = b"<!DOCTYPE html><html><body>file not found</body></html>".to_vec();
+        html.resize(1024, b' '); // plenty long — length alone must not pass it
+
+        // Z-code: version byte + full header.
+        let mut z = vec![0u8; 64];
+        z[0] = 5;
+        assert!(looks_like_story_file("game.z5", &z));
+        assert!(!looks_like_story_file("game.z5", &html));
+        assert!(!looks_like_story_file("game.z5", &z[..32]), "truncated header");
+
+        // Glulx: `Glul` magic.
+        assert!(looks_like_story_file("game.ulx", b"Glul\x00\x03\x01\x02"));
+        assert!(!looks_like_story_file("game.ulx", &html));
+
+        // Blorbs: FORM…IFRS.
+        let mut blorb_bytes = b"FORM".to_vec();
+        blorb_bytes.extend_from_slice(&4u32.to_be_bytes());
+        blorb_bytes.extend_from_slice(b"IFRS");
+        for ext in ["gblorb", "zblorb", "blorb", "blb", "zlb"] {
+            assert!(looks_like_story_file(&format!("g.{ext}"), &blorb_bytes), ".{ext}");
+            assert!(!looks_like_story_file(&format!("g.{ext}"), &html), ".{ext} html");
+        }
+
+        // .dat: a Scott Adams text database (12 sane header ints) or Z-code.
+        let scott = "32767 1 0 1 2 6 1 0 3 125 0 1\n";
+        assert!(looks_like_story_file("adv01.dat", scott.as_bytes()));
+        assert!(looks_like_story_file("zork.dat", &z), "Infocom .dat releases are Z-code");
+        assert!(!looks_like_story_file("adv01.dat", &html));
+    }
+
     #[test]
     fn filename_from_disposition_quoted_and_bare() {
         assert_eq!(
@@ -1064,7 +1167,14 @@ mod tests {
 
     impl FakeCovers {
         fn new() -> Self {
-            FakeCovers { calls: Arc::new(Mutex::new(Vec::new())), bytes: vec![9, 9, 9, 9] }
+            // A real (decodable) PNG: `maybe_fetch_cover` validates the bytes
+            // decode before writing (SQ-0660), so raw junk would be dropped.
+            let img = image::RgbImage::from_pixel(2, 2, image::Rgb([9, 9, 9]));
+            let mut bytes = Vec::new();
+            image::DynamicImage::ImageRgb8(img)
+                .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .unwrap();
+            FakeCovers { calls: Arc::new(Mutex::new(Vec::new())), bytes }
         }
     }
 

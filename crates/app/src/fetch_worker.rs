@@ -286,8 +286,19 @@ pub(crate) fn maybe_fetch_cover(
         return None; // the story already carries its own frontispiece
     }
     let bytes = source.fetch_cover(&url).ok()?;
+    // SQ-0660: only bytes that actually decode as an image are recorded — an
+    // HTML error page written as cover.png would be pinned by the sidecar's
+    // FETCH_VERSION (no refetch ever), permanently showing no cover. Written
+    // temp-then-rename in the same dir so a crash mid-write can't leave a
+    // truncated cover.png either.
+    crate::cover::decode(&bytes)?;
     std::fs::create_dir_all(game_dir).ok()?;
-    std::fs::write(game_dir.join("cover.png"), &bytes).ok()?;
+    let tmp = game_dir.join(format!(".cover.png.part-{}", std::process::id()));
+    std::fs::write(&tmp, &bytes).ok()?;
+    if std::fs::rename(&tmp, game_dir.join("cover.png")).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return None;
+    }
     Some("cover.png".to_string())
 }
 
@@ -397,7 +408,9 @@ mod tests {
                 responses,
                 calls: Arc::new(Mutex::new(Vec::new())),
                 cover_calls: Arc::new(Mutex::new(Vec::new())),
-                cover_bytes: vec![1, 2, 3, 4],
+                // A real decodable PNG: `maybe_fetch_cover` validates the
+                // bytes decode before writing (SQ-0660).
+                cover_bytes: real_png_bytes(),
                 fetch_sleep: Duration::ZERO,
             }
         }
@@ -760,10 +773,65 @@ mod tests {
 
         assert_eq!(cover_calls.lock().unwrap().len(), 1, "the cover must be fetched exactly once");
         let cover_bytes = std::fs::read(game_dir.join("cover.png")).expect("cover.png must be written");
-        assert_eq!(cover_bytes, vec![1, 2, 3, 4]);
+        assert_eq!(cover_bytes, real_png_bytes());
+        // The temp-then-rename write leaves no .part file behind.
+        assert!(
+            std::fs::read_dir(&game_dir).unwrap().all(|e| {
+                !e.unwrap().file_name().to_string_lossy().contains(".part")
+            }),
+            "no temp leftovers in the game dir"
+        );
 
         let reloaded = story_info::load(&game_dir, &ifid).unwrap();
         assert_eq!(reloaded.fetched.unwrap().cover.as_deref(), Some("cover.png"));
+
+        let _ = std::fs::remove_dir_all(&data_base);
+    }
+
+    /// SQ-0660: cover bytes that don't decode as an image (an HTML error page
+    /// served with 200) must be written NOWHERE, and the sidecar — which pins
+    /// this answer at FETCH_VERSION — must not record a cover.
+    #[test]
+    fn cover_bytes_that_do_not_decode_are_never_written_or_recorded() {
+        let data_base = tmp();
+        let path = data_base.join("game.z5");
+        std::fs::write(&path, b"not a blorb").unwrap();
+        let ifid = "ZCODE-1-400003".to_string();
+        let game_dir = crate::storage::game_dir(&data_base, &crate::storage::story_key(&path));
+
+        let iff = IFiction {
+            title: Some("Broken Cover".into()),
+            ifdb: Some(crate::ifiction::IfdbExt {
+                tuid: "brk".into(),
+                link: None,
+                cover_url: Some("https://ifdb.org/coverart?id=brk&version=1".into()),
+                average_rating: None,
+                rating_count: None,
+            }),
+            ..Default::default()
+        };
+        let mut responses = HashMap::new();
+        responses.insert(ifid.clone(), FakeResp::Found(Box::new(iff)));
+        let mut fake = Fake::new(responses);
+        fake.cover_bytes = b"<html><body>503 Service Unavailable</body></html>".to_vec();
+        let fetcher = Fetcher::new(Box::new(fake), data_base.clone(), Duration::ZERO);
+        fetcher.request(FetchOrder { stories: vec![(path, ifid.clone())], forced: true, id_override: None });
+        wait_for(&fetcher, 1);
+
+        assert!(!game_dir.join("cover.png").exists(), "junk must never become cover.png");
+        let reloaded = story_info::load(&game_dir, &ifid).unwrap();
+        assert!(
+            reloaded.fetched.unwrap().cover.is_none(),
+            "the sidecar must not record a cover it doesn't have"
+        );
+        if game_dir.exists() {
+            assert!(
+                std::fs::read_dir(&game_dir).unwrap().all(|e| {
+                    !e.unwrap().file_name().to_string_lossy().contains(".part")
+                }),
+                "no temp leftovers"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&data_base);
     }

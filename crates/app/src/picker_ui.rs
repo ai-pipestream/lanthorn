@@ -740,9 +740,14 @@ pub(crate) fn run_story_picker(
             requested.remove(&path);
             cover_arrived = true;
         }
-        if slide.open {
+        // `.get`, not indexing (SQ-0659): `stories` can be empty — e.g. a
+        // post-download rescan of a directory whose files all vanished.
+        if let Some(sel) = slide
+            .open
+            .then(|| stories.get(list.selected).map(|e| e.path.clone()))
+            .flatten()
+        {
             ensure_aux(&mut aux_cache, &stories, list.selected, data_base, &hint_index);
-            let sel = stories[list.selected].path.clone();
             if list.selected != last_sel {
                 last_sel = list.selected;
                 sel_changed_at = Instant::now();
@@ -875,6 +880,7 @@ pub(crate) fn run_story_picker(
                     .and_then(|n| n.to_str())
                     .unwrap_or("story")
                     .to_string();
+                let prev_path = stories.get(list.selected).map(|e| e.path.clone());
                 stories = app::picker::scan_stories(dir, data_base);
                 app::picker::resort_preserving_selection(&mut stories, 0, sort);
                 row_badges = stories
@@ -883,9 +889,14 @@ pub(crate) fn run_story_picker(
                     .collect();
                 aux_cache = (0..stories.len()).map(|_| None).collect();
                 list.len(stories.len());
-                let idx = stories.iter().position(|e| &e.path == new_path).unwrap_or(0);
+                let (idx, line) = ifdb_download_landing(
+                    stories.iter().position(|e| &e.path == new_path),
+                    prev_path.and_then(|p| stories.iter().position(|e| e.path == p)),
+                    stories.len(),
+                    &name,
+                );
                 list.select(idx, viewport, anim);
-                progress_line = Some(format!("Downloaded {name}"));
+                progress_line = Some(line);
                 search_modal = None;
                 continue;
             }
@@ -1108,7 +1119,14 @@ pub(crate) fn run_story_picker(
                                 list.end(stories.len(), viewport, anim);
                             }
                         }
-                        Enter => break Some(stories[list.selected].path.clone()),
+                        // `.get`, not indexing (SQ-0659): Enter on an empty
+                        // list (all stories vanished externally) is a no-op,
+                        // not a panic.
+                        Enter => {
+                            if let Some(entry) = stories.get(list.selected) {
+                                break Some(entry.path.clone());
+                            }
+                        }
                         Char('q') => break None,
                         // Esc cancels a running sweep first; only quits when
                         // nothing is in flight.
@@ -2455,9 +2473,53 @@ fn feature_words(f: &app::picker::Features, aux: Option<&app::picker::StoryAux>)
     v
 }
 
+/// Selection + status line after an IFDB download's rescan (SQ-0659).
+///
+/// `found` is the downloaded file's position in the rescanned list; `previous`
+/// is the pre-download selection's position in that same rescanned list. A
+/// miss — the file was downloaded but didn't survive the rescan as a
+/// launchable story — must NOT silently land the cursor on row 0 under a
+/// success toast: keep the user's previous selection and say what happened.
+fn ifdb_download_landing(
+    found: Option<usize>,
+    previous: Option<usize>,
+    len: usize,
+    name: &str,
+) -> (usize, String) {
+    match found {
+        Some(idx) => (idx, format!("Downloaded {name}")),
+        None => (
+            previous.unwrap_or(0).min(len.saturating_sub(1)),
+            format!("Downloaded {name}, but it did not scan as a playable story"),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // ── Story-picker row badges (type + present artifacts) ─────────────────────
+
+    /// SQ-0659: where the cursor lands after an IFDB download's rescan.
+    #[test]
+    fn ifdb_download_landing_selects_the_new_story_or_keeps_the_previous_one() {
+        // Hit: select the downloaded story, toast success.
+        let (idx, line) = super::ifdb_download_landing(Some(3), Some(7), 10, "game.z5");
+        assert_eq!(idx, 3);
+        assert_eq!(line, "Downloaded game.z5");
+
+        // Miss: keep the previous selection — never a silent jump to row 0 —
+        // and the status line must NOT read as a plain success.
+        let (idx, line) = super::ifdb_download_landing(None, Some(7), 10, "game.z5");
+        assert_eq!(idx, 7, "previous selection is kept on a miss");
+        assert_ne!(line, "Downloaded game.z5", "a miss must not toast plain success");
+        assert!(line.contains("but"), "the miss is called out: {line}");
+
+        // Miss with the previous selection gone too: clamp into the new list.
+        assert_eq!(super::ifdb_download_landing(None, None, 4, "x").0, 0);
+        assert_eq!(super::ifdb_download_landing(None, Some(9), 3, "x").0, 2);
+        // Empty list: index 0 without panicking (rendering guards handle len 0).
+        assert_eq!(super::ifdb_download_landing(None, None, 0, "x").0, 0);
+    }
 
     #[test]
     fn interp_label_formats_type_version_and_blorb() {
