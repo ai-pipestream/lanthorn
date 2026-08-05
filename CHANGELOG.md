@@ -16,6 +16,17 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
+- **The command band** replaces the verb menu (which was a left-edge token
+  palette nobody could drive). Modeled on Journey's clickable menu system: a
+  bottom band (`F2`, or `open-command-band`) whose columns fill in
+  left-to-right as a phrase narrows — verb, then the objects actually here
+  and carried (live from the engine, refreshed every turn), then the
+  preposition column when the verb wants one. Everything is clickable, letters
+  filter the active column, nothing sends without Enter, and the band is a
+  dock rather than a modal: the prompt stays visible, paste works, and
+  graphical v6 keeps its pixel path. Verbs and their grammar are configurable
+  via `[command_band]`.
+
 - **Screen-reader mode** — all three CLIs take `--screen-reader` (alias
   `--plain`), and select it automatically under `TERM=dumb`. It emits no
   escape sequences at all, hands line editing and echo back to the terminal, and

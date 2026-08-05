@@ -34,7 +34,7 @@ pub mod scroll;
 pub mod tidy_panel;
 pub mod transcript;
 pub mod v6_layout;
-pub mod verbmenu;
+pub mod command_band;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;

@@ -295,6 +295,119 @@ pub struct HotkeysConfig {
     pub group: Vec<HotkeyGroupConfig>,
 }
 
+// ── [command_band] ────────────────────────────────────────────────────────────
+
+/// One verb entry in `[command_band] verbs` / `extra_verbs`:
+/// `{ word = "unlock", arity = "pair", prep = "with" }`.
+///
+/// `arity` is one of `solo`, `object`, `object_opt` (`object?` is accepted too)
+/// and `pair`; an unrecognised value is reported as a warning and the entry is
+/// skipped rather than silently reinterpreted.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct VerbConfig {
+    pub word: String,
+    #[serde(default = "default_verb_arity")]
+    pub arity: String,
+    #[serde(default)]
+    pub prep: Option<String>,
+}
+
+fn default_verb_arity() -> String {
+    "object".to_string()
+}
+
+/// The `[command_band]` section: the bottom command band's size, whether it
+/// opens with the story, and its grammar.
+///
+/// Not to be confused with the top-level `command_bar` boolean, which is an
+/// unrelated setting (type into a persistent command bar instead of the inline
+/// story prompt).
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CommandBandConfig {
+    /// Band rows INCLUDING the frame. Clamped to 5..=14 at layout time.
+    #[serde(default = "default_band_height")]
+    pub height: u16,
+    /// Open the band as soon as the story starts.
+    #[serde(default)]
+    pub auto_open: bool,
+    /// REPLACES the built-in verb table when set (non-empty).
+    #[serde(default)]
+    pub verbs: Vec<VerbConfig>,
+    /// ADDITIVE form: appended to whichever table is in force. A word already
+    /// present is overridden, so this can also re-shape one built-in verb.
+    #[serde(default)]
+    pub extra_verbs: Vec<VerbConfig>,
+    /// The one-click quick-action row. Empty means the built-in row.
+    #[serde(default)]
+    pub quick: Vec<String>,
+}
+
+impl Default for CommandBandConfig {
+    fn default() -> Self {
+        CommandBandConfig {
+            height: default_band_height(),
+            auto_open: false,
+            verbs: Vec::new(),
+            extra_verbs: Vec::new(),
+            quick: Vec::new(),
+        }
+    }
+}
+
+impl CommandBandConfig {
+    /// Resolve the configured grammar into the runtime verb table:
+    /// `verbs` replaces the built-ins when non-empty, then `extra_verbs` is
+    /// layered on top (overriding an existing word, else appending).
+    ///
+    /// Returns the table plus any warnings (bad `arity` spellings), which
+    /// startup surfaces the same way it surfaces keymap warnings.
+    pub fn resolve_verbs(&self) -> (Vec<crate::render::command_band::VerbEntry>, Vec<String>) {
+        use crate::render::command_band::{default_verbs, Arity, VerbEntry};
+        let mut warnings = Vec::new();
+        let mut lower = |v: &VerbConfig| -> Option<VerbEntry> {
+            match Arity::parse(&v.arity) {
+                Some(a) => Some(VerbEntry {
+                    word: v.word.clone(),
+                    arity: a,
+                    prep: v.prep.clone(),
+                }),
+                None => {
+                    warnings.push(format!(
+                        "command_band: verb '{}' has unknown arity '{}' \
+                         (expected solo, object, object_opt or pair); skipped",
+                        v.word, v.arity
+                    ));
+                    None
+                }
+            }
+        };
+
+        let mut table: Vec<VerbEntry> = if self.verbs.is_empty() {
+            default_verbs()
+        } else {
+            self.verbs.iter().filter_map(&mut lower).collect()
+        };
+        for extra in &self.extra_verbs {
+            if let Some(e) = lower(extra) {
+                match table.iter_mut().find(|t| t.word == e.word) {
+                    Some(slot) => *slot = e,
+                    None => table.push(e),
+                }
+            }
+        }
+        (table, warnings)
+    }
+
+    /// The quick row in force: the configured one, else the built-in.
+    pub fn resolve_quick(&self) -> Vec<String> {
+        if self.quick.is_empty() {
+            crate::render::command_band::default_quick()
+        } else {
+            self.quick.clone()
+        }
+    }
+}
+
 // ── Config ────────────────────────────────────────────────────────────────────
 
 fn default_command_prefix() -> char { '/' }
@@ -307,8 +420,10 @@ fn default_undo_levels() -> usize { 16 }
 pub const FALLBACK_SCREEN_COLS: u16 = 80;
 pub const FALLBACK_SCREEN_ROWS: u16 = 24;
 pub(crate) fn default_split_ratio() -> u16 { 50 }
-pub(crate) fn default_verb_dock_pct() -> u16 { 32 }
 pub(crate) fn default_inv_dock_pct() -> u16 { 33 }
+pub(crate) fn default_band_height() -> u16 {
+    crate::render::command_band::DEFAULT_BAND_ROWS
+}
 fn default_honor_game_colours() -> bool { true }
 fn default_acceleration() -> bool { true }
 fn default_honor_timed_input() -> bool { true }
@@ -691,10 +806,11 @@ pub struct Config {
     /// Story pane's share of the story/map Split, as a percentage (default 50).
     #[serde(default = "default_split_ratio")]
     pub split_ratio: u16,
-    /// Verb dock width as a percentage of screen width (default 32, ≈ the old
-    /// fixed 26-of-80 columns).
-    #[serde(default = "default_verb_dock_pct")]
-    pub verb_dock_pct: u16,
+    /// The `[command_band]` section: the bottom command band's height, whether
+    /// it auto-opens, and its verb grammar / quick row. (SQ-0664 retired the
+    /// old `verb_dock_pct` key along with the left dock it sized.)
+    #[serde(default)]
+    pub command_band: CommandBandConfig,
     /// Inventory dock height cap as a percentage of screen height (default 33,
     /// ≈ the old fixed 1/3 cap).
     #[serde(default = "default_inv_dock_pct")]
@@ -828,7 +944,7 @@ impl Default for Config {
             virtual_screen_cols: None,
             virtual_screen_rows: None,
             split_ratio: default_split_ratio(),
-            verb_dock_pct: default_verb_dock_pct(),
+            command_band: CommandBandConfig::default(),
             inv_dock_pct: default_inv_dock_pct(),
             text_margin_x: 0,
             text_margin_y: 0,
@@ -949,7 +1065,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.virtual_screen_cols = from_file.virtual_screen_cols;
             cfg.virtual_screen_rows = from_file.virtual_screen_rows;
             cfg.split_ratio = from_file.split_ratio;
-            cfg.verb_dock_pct = from_file.verb_dock_pct;
+            cfg.command_band = from_file.command_band;
             cfg.inv_dock_pct = from_file.inv_dock_pct;
             cfg.text_margin_x = from_file.text_margin_x;
             cfg.text_margin_y = from_file.text_margin_y;
@@ -1173,7 +1289,6 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
         None => { doc.remove("virtual_screen_rows"); }
     }
     put(&mut doc, "split_ratio", i64::from(cfg.split_ratio).into(), cfg.split_ratio == def.split_ratio);
-    put(&mut doc, "verb_dock_pct", i64::from(cfg.verb_dock_pct).into(), cfg.verb_dock_pct == def.verb_dock_pct);
     put(&mut doc, "inv_dock_pct", i64::from(cfg.inv_dock_pct).into(), cfg.inv_dock_pct == def.inv_dock_pct);
     put(&mut doc, "text_margin_x", i64::from(cfg.text_margin_x).into(), cfg.text_margin_x == def.text_margin_x);
     put(&mut doc, "text_margin_y", i64::from(cfg.text_margin_y).into(), cfg.text_margin_y == def.text_margin_y);
@@ -1209,6 +1324,19 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
         put_in(tbl, "enabled", cfg.animation.enabled.into(), cfg.animation.enabled == def.animation.enabled);
         put_in(tbl, "easing", crate::anim::easing_token(cfg.animation.easing).into(), cfg.animation.easing == def.animation.easing);
         put_in(tbl, "scroll_ms", (cfg.animation.scroll_ms as i64).into(), cfg.animation.scroll_ms == def.animation.scroll_ms);
+    }
+
+    // [command_band] table — same rule as [search]. The verb/quick LISTS are
+    // hand-authored grammar, never written back by the app: resize mode edits
+    // `height` and nothing else touches this section, so re-emitting a list here
+    // could only ever damage what the user wrote.
+    if doc.contains_key("command_band")
+        || cfg.command_band.height != def.command_band.height
+        || cfg.command_band.auto_open != def.command_band.auto_open
+    {
+        let tbl = doc["command_band"].or_insert(toml_edit::table());
+        put_in(tbl, "height", i64::from(cfg.command_band.height).into(), cfg.command_band.height == def.command_band.height);
+        put_in(tbl, "auto_open", cfg.command_band.auto_open.into(), cfg.command_band.auto_open == def.command_band.auto_open);
     }
 
     // Atomic (SQ-0644): `fs::write` truncated config.toml before writing a byte, so a
@@ -1265,13 +1393,125 @@ mod tests {
     fn pane_size_pcts_default_and_parse() {
         let d = Config::default();
         assert_eq!(d.split_ratio, 50);
-        assert_eq!(d.verb_dock_pct, 32);
         assert_eq!(d.inv_dock_pct, 33);
 
-        let cfg: Config = toml::from_str("split_ratio = 70\nverb_dock_pct = 40\ninv_dock_pct = 25\n").unwrap();
+        let cfg: Config = toml::from_str("split_ratio = 70\ninv_dock_pct = 25\n").unwrap();
         assert_eq!(cfg.split_ratio, 70);
-        assert_eq!(cfg.verb_dock_pct, 40);
         assert_eq!(cfg.inv_dock_pct, 25);
+    }
+
+    /// SQ-0664: `verb_dock_pct` sized the left verb dock, which no longer
+    /// exists. Pre-release, retired keys are dropped outright (no back-compat
+    /// shims) — a file still carrying it must load, with the key ignored.
+    #[test]
+    fn retired_verb_dock_pct_is_no_longer_a_key() {
+        let cfg: Config = toml::from_str("verb_dock_pct = 40\nsplit_ratio = 70\n")
+            .expect("a stale key does not break the file");
+        assert_eq!(cfg.split_ratio, 70);
+        assert_eq!(cfg.command_band.height, 8, "the band's height is the successor knob");
+    }
+
+    // ── [command_band] ────────────────────────────────────────────────────────
+
+    #[test]
+    fn command_band_defaults_and_round_trips() {
+        let d = Config::default();
+        assert_eq!(d.command_band.height, 8);
+        assert!(!d.command_band.auto_open);
+        assert!(d.command_band.verbs.is_empty());
+        assert!(d.command_band.quick.is_empty());
+
+        let cfg: Config = toml::from_str(
+            "[command_band]\nheight = 10\nauto_open = true\nquick = [\"n\", \"s\"]\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.command_band.height, 10);
+        assert!(cfg.command_band.auto_open);
+        assert_eq!(cfg.command_band.resolve_quick(), vec!["n".to_string(), "s".to_string()]);
+    }
+
+    /// `verbs` REPLACES the built-in table; `extra_verbs` is additive.
+    #[test]
+    fn command_band_verbs_replace_and_extra_verbs_add() {
+        use crate::render::command_band::Arity;
+
+        // Replace: only what the file lists survives.
+        let cfg: Config = toml::from_str(
+            "[command_band]\nverbs = [{ word = \"polish\", arity = \"object\" }]\n",
+        )
+        .unwrap();
+        let (table, warn) = cfg.command_band.resolve_verbs();
+        assert!(warn.is_empty(), "{warn:?}");
+        assert_eq!(table.len(), 1);
+        assert_eq!(table[0].word, "polish");
+        assert!(!table.iter().any(|v| v.word == "look"), "the built-ins are replaced");
+
+        // Additive: the built-ins stay and the extra joins them.
+        let cfg: Config = toml::from_str(
+            "[command_band]\nextra_verbs = [{ word = \"xyzzy\", arity = \"solo\" }]\n",
+        )
+        .unwrap();
+        let (table, warn) = cfg.command_band.resolve_verbs();
+        assert!(warn.is_empty(), "{warn:?}");
+        assert!(table.iter().any(|v| v.word == "look"), "the built-ins survive");
+        let x = table.iter().find(|v| v.word == "xyzzy").expect("extra verb added");
+        assert_eq!(x.arity, Arity::Solo);
+
+        // Additive over a word that already exists RE-SHAPES it.
+        let cfg: Config = toml::from_str(
+            "[command_band]\nextra_verbs = [{ word = \"take\", arity = \"pair\", prep = \"from\" }]\n",
+        )
+        .unwrap();
+        let (table, _) = cfg.command_band.resolve_verbs();
+        let take: Vec<_> = table.iter().filter(|v| v.word == "take").collect();
+        assert_eq!(take.len(), 1, "no duplicate entry");
+        assert_eq!(take[0].arity, Arity::Pair);
+        assert_eq!(take[0].prep.as_deref(), Some("from"));
+    }
+
+    /// A bad `arity` is reported and skipped — never silently reinterpreted as
+    /// some other grammar, which would send the wrong command shape to the game.
+    #[test]
+    fn command_band_bad_arity_warns_and_skips() {
+        let cfg: Config = toml::from_str(
+            "[command_band]\nextra_verbs = [{ word = \"frob\", arity = \"triple\" }]\n",
+        )
+        .unwrap();
+        let (table, warn) = cfg.command_band.resolve_verbs();
+        assert!(!table.iter().any(|v| v.word == "frob"), "the bad entry is skipped");
+        assert_eq!(warn.len(), 1);
+        assert!(warn[0].contains("frob") && warn[0].contains("triple"), "{warn:?}");
+    }
+
+    /// The height knob resize mode writes must survive a save/reload cycle.
+    #[test]
+    fn command_band_height_persists_through_write_config() {
+        let dir = std::env::temp_dir().join(format!("bm-band-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut cfg = Config::default();
+        cfg.command_band.height = 11;
+        write_config(&dir, &cfg).unwrap();
+
+        let text = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        let back: Config = toml::from_str(&text).unwrap();
+        assert_eq!(back.command_band.height, 11);
+
+        // A hand-authored verb list is NOT rewritten by a settings save.
+        std::fs::write(
+            dir.join("config.toml"),
+            "[command_band]\nheight = 11\nverbs = [{ word = \"polish\", arity = \"object\" }]\n",
+        )
+        .unwrap();
+        let mut cfg2 = Config::default();
+        cfg2.command_band.height = 9;
+        write_config(&dir, &cfg2).unwrap();
+        let after = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(after.contains("polish"), "the user's grammar survives a save: {after}");
+        let back2: Config = toml::from_str(&after).unwrap();
+        assert_eq!(back2.command_band.height, 9);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1669,7 +1909,7 @@ use_defaults = false
             virtual_screen_cols: None,
             virtual_screen_rows: None,
             split_ratio: 70,
-            verb_dock_pct: 40,
+            command_band: CommandBandConfig::default(),
             inv_dock_pct: 25,
             text_margin_x: 0,
             text_margin_y: 0,
@@ -1689,7 +1929,6 @@ use_defaults = false
         assert_eq!(doc["auto_save"].as_bool(), Some(true));
         assert_eq!(doc["background_tidy"].as_str(), Some("on_overlap"));
         assert_eq!(doc["split_ratio"].as_integer(), Some(70));
-        assert_eq!(doc["verb_dock_pct"].as_integer(), Some(40));
         assert_eq!(doc["inv_dock_pct"].as_integer(), Some(25));
         // SQ-0573: `mouse` is at its DEFAULT and the pre-existing file did not carry
         // it, so it is deliberately not written — a default belongs in the commented

@@ -38,26 +38,27 @@ use crate::complete::{room_words_from_text, suggest};
 use crate::keymap::{Context, KeySpec};
 use crate::state::{AppState, Focus, TextEntryDialog, TextEntryKind};
 
-// ── VerbMenuNavKind ───────────────────────────────────────────────────────────
+// ── BandNavKind ───────────────────────────────────────────────────────────────
 
-/// Navigation kind for `Action::VerbMenuNav`.
+/// Navigation kind for `Action::BandNav`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VerbMenuNavKind {
-    /// Move the selection up by one in the current pane.
+pub enum BandNavKind {
+    /// Move the selection up by one in the active column.
     Up,
-    /// Move the selection down by one in the current pane.
+    /// Move the selection down by one in the active column.
     Down,
-    /// Switch to the next pane (Tab / Right).
-    NextPane,
-    /// Switch to the previous pane (Shift+Tab / Left).
-    PrevPane,
-    /// Page the current pane's selection up by one viewport (PageUp).
+    /// Move to the next stop in the focus ring (`→`) — the next REACHABLE
+    /// column, or the phrase line at the right-hand end.
+    NextCol,
+    /// Move to the previous stop in the focus ring (`←`).
+    PrevCol,
+    /// Page the active column's selection up by one viewport (PageUp).
     PageUp,
-    /// Page the current pane's selection down by one viewport (PageDown).
+    /// Page the active column's selection down by one viewport (PageDown).
     PageDown,
-    /// Jump to the first item in the current pane (Home).
+    /// Jump to the first item in the active column (Home).
     Home,
-    /// Jump to the last item in the current pane (End).
+    /// Jump to the last item in the active column (End).
     End,
 }
 
@@ -86,6 +87,12 @@ pub enum ResizeNavKind {
 pub enum Action {
     /// Caller: submit the contained command string to the Z-machine.
     SubmitCommand(String),
+    /// Caller: submit the contained text WITHOUT consuming the story input line
+    /// — everything else (history, slash routing, the turn) is identical.
+    ///
+    /// The command band's phrase is band-local text, so it must not eat a
+    /// half-typed line the player left at the prompt (SQ-0664).
+    SubmitText(String),
     /// Append a character to `state.input`.
     InputChar(char),
     /// Delete the last character from `state.input`.
@@ -273,19 +280,42 @@ pub enum Action {
     ToggleInventory,
     /// Open a confirmation prompt to reset the game to its opening state (keeps map).
     ResetGame,
-    /// Open the verb/item token-palette modal, building the noun list from the current room and inventory.
-    OpenVerbMenu,
-    /// Navigate within the verb menu: `Tab`/`Left`/`Right` switches pane; `Up`/`Down` moves selection.
-    VerbMenuNav(VerbMenuNavKind),
-    /// Pick the currently-selected token: append it (+ a space) to `state.input`.
-    VerbMenuPick,
-    /// Insert the token at the given pane/index directly (mouse click), keeping
-    /// the dock open and story focus unchanged; also moves that pane's highlight.
-    VerbMenuClickToken(crate::state::VerbMenuPane, usize),
-    /// Focus the given dock pane (mouse click on its header): sets `story_focused=false`.
-    VerbMenuFocusPane(crate::state::VerbMenuPane),
-    /// Close the verb menu, leaving `state.input` intact.
-    VerbMenuClose,
+    /// Open the bottom command band (its object columns fill from the engine's
+    /// live object tree on the next tick).
+    OpenCommandBand,
+    /// Navigate within the band: `←`/`→` across reachable columns and the phrase
+    /// line, `↑`/`↓`/PgUp/PgDn/Home/End within the active column.
+    BandNav(BandNavKind),
+    /// Enter: pick the highlighted row and advance, or — on the phrase line —
+    /// send the phrase. Never both, and never a send without a confirm.
+    BandEnter,
+    /// Pick the row at `(column, index)` directly (mouse click on a row).
+    BandClickRow(usize, usize),
+    /// Focus the given column (mouse click on its header).
+    BandFocusCol(usize),
+    /// Give the band the keyboard without changing anything else (a click on
+    /// band chrome that is not a row/header/quick word).
+    BandFocusBand,
+    /// Wheel over a column: scroll it by `delta` rows.
+    BandWheel(usize, i32),
+    /// Fill the phrase from the quick row's word at this index (one click to
+    /// fill; Enter still sends).
+    BandQuickPick(usize),
+    /// Send the phrase if it is armed (Enter on the phrase line, or a click on
+    /// it). Materializes to plain text and goes through `SubmitCommand`.
+    BandSend,
+    /// A printable character typed while the band owns the keyboard: filters the
+    /// active column incrementally.
+    BandFilterChar(char),
+    /// Backspace: clear a filter character first, then un-pick the last token.
+    BandBackspace,
+    /// Move keyboard focus between the band and the story input (Tab). The band
+    /// stays visible either way.
+    BandToggleStoryFocus,
+    /// Esc, one level per press: clear the filter → clear the phrase → close.
+    BandEscape,
+    /// Close the band, leaving `state.input` intact.
+    BandClose,
     /// Enter interactive pane-resize mode, selecting the first visible pane.
     ResizePanes,
     /// Exit resize mode without resetting sizes.
@@ -471,8 +501,8 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
     if state.resize_mode {
         return KeyResolve::Action(resize_mode_key_to_action(key));
     }
-    if state.overlays.verb_menu.is_some() {
-        if let Some(a) = verb_menu_intercept(key, state) {
+    if state.overlays.command_band.is_some() {
+        if let Some(a) = command_band_intercept(key, state) {
             return KeyResolve::Action(a);
         }
         // else: fall through — the story input is live, so the key is handled normally.
@@ -908,13 +938,6 @@ pub fn mouse_to_action(
         if state.overlays.file_browser.is_some() {
             return if up { Action::FbNav(-1) } else { Action::FbNav(1) };
         }
-        if state.overlays.verb_menu.is_some() {
-            return if up {
-                Action::VerbMenuNav(VerbMenuNavKind::Up)
-            } else {
-                Action::VerbMenuNav(VerbMenuNavKind::Down)
-            };
-        }
     }
 
     // ── Dialog chrome hit-testing (checked FIRST) ─────────────────────────────
@@ -1236,49 +1259,81 @@ fn filebrowser_key_to_action(key: KeyEvent) -> Action {
     }
 }
 
-// ── Internal: verb-menu key routing ──────────────────────────────────────────
+// ── Internal: command-band key routing ───────────────────────────────────────
 
-/// Focus-aware key intercept for the verb dock. Returns `Some(action)` ONLY for
-/// keys the dock consumes given the current focus, else `None` (the key falls
-/// through and is handled by the always-live story input).
-fn verb_menu_intercept(key: KeyEvent, state: &AppState) -> Option<Action> {
-    // The hotkey-dialog leader prefix is never swallowed by the dock: it must
-    // fall through so the player can open the leader palette (and reach the
-    // '/' command palette, home of resize-panes and the rest of the long tail)
-    // while the verb menu is open (SQ-0238). This guard is
-    // first so it wins even if the prefix is bound to a key the dock would
-    // otherwise consume (Tab/Esc/an arrow).
+/// Focus-aware key intercept for the command band. Returns `Some(action)` ONLY
+/// for keys the band consumes given the current focus, else `None` (the key
+/// falls through and is handled by the always-live story input).
+///
+/// Decision 4 of the redesign: the band OWNS the keyboard while it is focused —
+/// letters type-to-filter the active column rather than falling through — and
+/// `Tab` hands the keyboard back to the story input for free typing, with the
+/// band still on screen.
+fn command_band_intercept(key: KeyEvent, state: &AppState) -> Option<Action> {
+    // The hotkey-dialog leader prefix is never swallowed: it must fall through
+    // so the player can open the leader palette (and the '/' command palette,
+    // home of resize-panes and the rest of the long tail) while the band is up
+    // (SQ-0238). First, so it wins even if the prefix is bound to a key the band
+    // would otherwise consume.
     if KeySpec::from_key_event(key) == state.hotkeys.prefix {
         return None;
     }
 
-    // Tab / Shift-Tab cycle focus through the ring (incl. story) and Esc closes
-    // the dock regardless of which element is focused.
+    // Tab / Shift-Tab swap the keyboard between the band and the story input,
+    // whichever currently holds it.
     match key.code {
-        KeyCode::Tab => return Some(Action::VerbMenuNav(VerbMenuNavKind::NextPane)),
-        KeyCode::BackTab => return Some(Action::VerbMenuNav(VerbMenuNavKind::PrevPane)),
-        KeyCode::Esc => return Some(Action::VerbMenuClose),
+        KeyCode::Tab | KeyCode::BackTab => return Some(Action::BandToggleStoryFocus),
         _ => {}
     }
 
-    // The remaining keys are only consumed when a dock pane is focused; while the
-    // story is focused they belong to the game input (letters, Enter, ↑/↓ history).
-    let story_focused = state.overlays.verb_menu.as_ref().map(|vm| vm.story_focused).unwrap_or(true);
+    // While the story input holds the keyboard the band consumes nothing else:
+    // letters, Enter and ↑/↓ history belong to the game input.
+    let story_focused =
+        state.overlays.command_band.as_ref().map(|b| b.story_focused).unwrap_or(true);
     if story_focused {
         return None;
     }
 
     match key.code {
-        KeyCode::Up => Some(Action::VerbMenuNav(VerbMenuNavKind::Up)),
-        KeyCode::Down => Some(Action::VerbMenuNav(VerbMenuNavKind::Down)),
-        KeyCode::PageUp => Some(Action::VerbMenuNav(VerbMenuNavKind::PageUp)),
-        KeyCode::PageDown => Some(Action::VerbMenuNav(VerbMenuNavKind::PageDown)),
-        KeyCode::Home => Some(Action::VerbMenuNav(VerbMenuNavKind::Home)),
-        KeyCode::End => Some(Action::VerbMenuNav(VerbMenuNavKind::End)),
-        KeyCode::Left => Some(Action::VerbMenuNav(VerbMenuNavKind::PrevPane)),
-        KeyCode::Right => Some(Action::VerbMenuNav(VerbMenuNavKind::NextPane)),
-        KeyCode::Enter | KeyCode::Char(' ') => Some(Action::VerbMenuPick),
+        KeyCode::Esc => Some(Action::BandEscape),
+        KeyCode::Up => Some(Action::BandNav(BandNavKind::Up)),
+        KeyCode::Down => Some(Action::BandNav(BandNavKind::Down)),
+        KeyCode::PageUp => Some(Action::BandNav(BandNavKind::PageUp)),
+        KeyCode::PageDown => Some(Action::BandNav(BandNavKind::PageDown)),
+        KeyCode::Home => Some(Action::BandNav(BandNavKind::Home)),
+        KeyCode::End => Some(Action::BandNav(BandNavKind::End)),
+        KeyCode::Left => Some(Action::BandNav(BandNavKind::PrevCol)),
+        KeyCode::Right => Some(Action::BandNav(BandNavKind::NextCol)),
+        KeyCode::Enter => Some(band_enter_action(state)),
+        KeyCode::Backspace => Some(Action::BandBackspace),
+        // Printable characters filter the active column. Ctrl/Alt combos are
+        // left alone so app chords (Ctrl+S, …) keep working with the band up.
+        KeyCode::Char(c)
+            if !key.modifiers.contains(KeyModifiers::CONTROL)
+                && !key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            Some(Action::BandFilterChar(c))
+        }
         _ => None,
+    }
+}
+
+/// What Enter (or a click on the phrase line) means right now.
+///
+/// On the phrase line with an ARMED phrase it is a send, materialized to the
+/// plain text the game parses — `unlock iron door with brass key` goes in
+/// exactly as a player would type it, multi-word names and all, with nothing
+/// quoted or escaped. Anywhere else it is a pick.
+///
+/// Nothing else in the band can produce a send: that is what "always confirm"
+/// means, and why a complete-alone verb like `look` still costs a confirming
+/// Enter rather than firing a surprise turn on the pick.
+pub fn band_enter_action(state: &AppState) -> Action {
+    let Some(b) = &state.overlays.command_band else { return Action::None };
+    match b.focus {
+        crate::state::BandFocus::Phrase if b.complete() => Action::SubmitText(b.phrase_text()),
+        crate::state::BandFocus::Phrase => Action::None,
+        crate::state::BandFocus::Column(_) => Action::BandEnter,
     }
 }
 
@@ -2197,120 +2252,176 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
             state.inv_dock.arm(&state.config.animation);
         }
 
-        Action::OpenVerbMenu => {
+        Action::OpenCommandBand => {
             state.overlays.hotkey_dialog = false;
-            let nouns = build_verb_menu_nouns(state, mapper);
-            state.overlays.verb_menu = Some(crate::state::VerbMenuState {
-                pane: crate::state::VerbMenuPane::Verbs,
-                verb_scroll: Default::default(),
-                noun_scroll: Default::default(),
-                prep_scroll: Default::default(),
-                nouns,
-                story_focused: true,
-            });
-            state.verb_dock.toggle_to(true, false);
-            state.verb_dock.arm(&state.config.animation);
+            if state.overlays.command_band.is_none() {
+                let (verbs, warnings) = state.config.command_band.resolve_verbs();
+                for w in warnings {
+                    state.push_transcript_kind(&w, crate::state::TranscriptKind::Warning);
+                }
+                let mut band = crate::state::CommandBandState::new(
+                    verbs,
+                    state.config.command_band.resolve_quick(),
+                );
+                // Opens FOCUSED (unlike the old dock, which opened passive with
+                // its focus state invisible — decision 4). The object columns
+                // fill from the engine on the next tick.
+                band.story_focused = false;
+                state.overlays.command_band = Some(band);
+            }
+            state.band_dock.toggle_to(true, false);
+            state.band_dock.arm(&state.config.animation);
         }
 
-        Action::VerbMenuNav(kind) => {
-            use crate::state::VerbMenuPane;
-            use crate::render::verbmenu::{VERB_MENU_VERBS, VERB_MENU_PREPS};
+        Action::BandNav(kind) => {
             let vp = state.modal_list_viewport;
             let anim = state.config.animation.clone();
-            if let Some(vm) = &mut state.overlays.verb_menu {
+            if let Some(b) = &mut state.overlays.command_band {
+                b.story_focused = false;
                 match kind {
-                    // Focus ring INCLUDING the story pane: Story → Verbs → Nouns
-                    // → Preps → Story.
-                    VerbMenuNavKind::NextPane => {
-                        if vm.story_focused {
-                            vm.story_focused = false;
-                            vm.pane = VerbMenuPane::Verbs;
-                        } else {
-                            match vm.pane {
-                                VerbMenuPane::Verbs => vm.pane = VerbMenuPane::Nouns,
-                                VerbMenuPane::Nouns => vm.pane = VerbMenuPane::Preps,
-                                VerbMenuPane::Preps => vm.story_focused = true,
-                            }
-                        }
-                    }
-                    VerbMenuNavKind::PrevPane => {
-                        if vm.story_focused {
-                            vm.story_focused = false;
-                            vm.pane = VerbMenuPane::Preps;
-                        } else {
-                            match vm.pane {
-                                VerbMenuPane::Preps => vm.pane = VerbMenuPane::Nouns,
-                                VerbMenuPane::Nouns => vm.pane = VerbMenuPane::Verbs,
-                                VerbMenuPane::Verbs => vm.story_focused = true,
-                            }
-                        }
-                    }
-                    // List movement within `vm.pane` (clamped). Reached from the
-                    // keyboard only when a pane is focused (the ↑/↓ intercept is
-                    // gated on `!story_focused`), but ALSO from the mouse wheel
-                    // regardless of focus — so it must scroll unconditionally.
+                    BandNavKind::NextCol => b.move_focus(1),
+                    BandNavKind::PrevCol => b.move_focus(-1),
                     _ => {
-                        let (scroll, len) = match vm.pane {
-                            VerbMenuPane::Verbs => (&mut vm.verb_scroll, VERB_MENU_VERBS.len()),
-                            VerbMenuPane::Nouns => (&mut vm.noun_scroll, vm.nouns.len()),
-                            VerbMenuPane::Preps => (&mut vm.prep_scroll, VERB_MENU_PREPS.len()),
-                        };
+                        let Some(col) = b.active_col() else { return };
+                        let len = b.filtered_items(col).len();
+                        let scroll = &mut b.scroll[col];
                         scroll.len(len);
                         match kind {
-                            VerbMenuNavKind::Up => scroll.move_by(-1, vp, &anim),
-                            VerbMenuNavKind::Down => scroll.move_by(1, vp, &anim),
-                            VerbMenuNavKind::PageUp => scroll.page(-1, vp, &anim),
-                            VerbMenuNavKind::PageDown => scroll.page(1, vp, &anim),
-                            VerbMenuNavKind::Home => scroll.home(vp, &anim),
-                            VerbMenuNavKind::End => scroll.end(len, vp, &anim),
-                            VerbMenuNavKind::NextPane | VerbMenuNavKind::PrevPane => {}
+                            BandNavKind::Up => scroll.move_by(-1, vp, &anim),
+                            BandNavKind::Down => scroll.move_by(1, vp, &anim),
+                            BandNavKind::PageUp => scroll.page(-1, vp, &anim),
+                            BandNavKind::PageDown => scroll.page(1, vp, &anim),
+                            BandNavKind::Home => scroll.home(vp, &anim),
+                            BandNavKind::End => scroll.end(len, vp, &anim),
+                            BandNavKind::NextCol | BandNavKind::PrevCol => {}
                         }
                     }
                 }
             }
         }
 
-        Action::VerbMenuClickToken(pane, idx) => {
-            use crate::state::VerbMenuPane;
-            use crate::render::verbmenu::{VERB_MENU_VERBS, VERB_MENU_PREPS};
-            let vp = state.modal_list_viewport;
-            let anim = state.config.animation.clone();
-            if let Some(vm) = &mut state.overlays.verb_menu {
-                let (token, scroll, len) = match pane {
-                    VerbMenuPane::Verbs => (VERB_MENU_VERBS.get(idx).copied().map(str::to_string), &mut vm.verb_scroll, VERB_MENU_VERBS.len()),
-                    VerbMenuPane::Nouns => (vm.nouns.get(idx).cloned(), &mut vm.noun_scroll, vm.nouns.len()),
-                    VerbMenuPane::Preps => (VERB_MENU_PREPS.get(idx).copied().map(str::to_string), &mut vm.prep_scroll, VERB_MENU_PREPS.len()),
-                };
-                scroll.len(len);
-                scroll.select(idx, vp, &anim);
-                if let Some(t) = token { if !t.is_empty() { state.input.insert_str(&t); state.input.insert(' '); } }
-            }
-        }
-
-        Action::VerbMenuFocusPane(pane) => {
-            if let Some(vm) = &mut state.overlays.verb_menu {
-                vm.story_focused = false;
-                vm.pane = pane;
-            }
-        }
-
-        Action::VerbMenuPick => {
-            use crate::render::verbmenu::{VERB_MENU_VERBS, VERB_MENU_PREPS};
-            if let Some(vm) = &state.overlays.verb_menu {
-                let token = vm.selected_token(VERB_MENU_VERBS, VERB_MENU_PREPS).to_owned();
-                if !token.is_empty() {
-                    state.input.insert_str(&token);
-                    state.input.insert(' ');
+        Action::BandEnter => {
+            // Enter on a COLUMN picks the highlighted row and advances. Enter on
+            // the phrase line is a send, and is resolved to `SubmitText` up in
+            // `band_enter_action` — nothing here ever fires a turn.
+            if let Some(b) = &mut state.overlays.command_band {
+                if let Some(col) = b.active_col() {
+                    let idx = b.scroll[col].selected;
+                    b.pick(col, idx);
                 }
             }
         }
 
-        Action::VerbMenuClose => {
-            // Drawer pattern: keep `verb_menu` (content) alive so the panel
-            // visibly slides out; `settle_verb_dock` clears it once the
-            // slide-out animation finishes.
-            state.verb_dock.toggle_to(false, false);
-            state.verb_dock.arm(&state.config.animation);
+        Action::BandClickRow(col, idx) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(b) = &mut state.overlays.command_band {
+                b.story_focused = false;
+                b.focus = crate::state::BandFocus::Column(col);
+                let len = b.filtered_items(col).len();
+                b.scroll[col].len(len);
+                b.scroll[col].select(idx, vp, &anim);
+                b.pick(col, idx);
+            }
+        }
+
+        Action::BandFocusCol(col) => {
+            if let Some(b) = &mut state.overlays.command_band {
+                if b.col_reachable(col) {
+                    b.story_focused = false;
+                    b.focus = crate::state::BandFocus::Column(col);
+                    b.filter.clear();
+                }
+            }
+        }
+
+        Action::BandFocusBand => {
+            if let Some(b) = &mut state.overlays.command_band {
+                b.story_focused = false;
+            }
+        }
+
+        Action::BandWheel(col, delta) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(b) = &mut state.overlays.command_band {
+                // The wheel scrolls the HOVERED column, which need not be the
+                // focused one — so this must move a list without stealing focus.
+                let len = b.filtered_items(col).len();
+                b.scroll[col].len(len);
+                b.scroll[col].move_by(delta as isize, vp, &anim);
+            }
+        }
+
+        Action::BandQuickPick(idx) => {
+            // Decision 2: a quick pick FILLS the phrase line. It never fires a
+            // turn on its own — the whole row is one click to fill, Enter to
+            // send, exactly like every other pick.
+            if let Some(b) = &mut state.overlays.command_band {
+                b.story_focused = false;
+                if let Some(word) = b.quick.get(idx).cloned() {
+                    b.pick_word(&word);
+                }
+            }
+        }
+
+        Action::BandSend => {
+            // Caller-handled: the run loop materializes the phrase and submits
+            // it through the ordinary command path (see `band_enter_action`).
+        }
+
+        Action::BandFilterChar(c) => {
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(b) = &mut state.overlays.command_band {
+                if let Some(col) = b.active_col() {
+                    b.filter.push(c);
+                    // A narrowed list snaps the selection back to the top,
+                    // mirroring the command palette's re-rank behaviour.
+                    let len = b.filtered_items(col).len();
+                    b.scroll[col].len(len);
+                    b.scroll[col].select(0, vp, &anim);
+                }
+            }
+        }
+
+        Action::BandBackspace => {
+            // The ladder: a filter character first, then the last picked token.
+            if let Some(b) = &mut state.overlays.command_band {
+                if b.filter.pop().is_none() {
+                    b.unpick();
+                }
+            }
+        }
+
+        Action::BandToggleStoryFocus => {
+            if let Some(b) = &mut state.overlays.command_band {
+                b.story_focused = !b.story_focused;
+            }
+        }
+
+        Action::BandEscape => {
+            // One level per press: clear the filter → clear the phrase → close.
+            let mut close = false;
+            if let Some(b) = &mut state.overlays.command_band {
+                if !b.filter.is_empty() {
+                    b.filter.clear();
+                } else if !b.picks.is_empty() {
+                    b.clear_phrase();
+                } else {
+                    close = true;
+                }
+            }
+            if close {
+                apply_action(Action::BandClose, state, mapper);
+            }
+        }
+
+        Action::BandClose => {
+            // Drawer pattern: keep the content alive so the band visibly slides
+            // out; `settle_command_band` clears it once the slide finishes.
+            state.band_dock.toggle_to(false, false);
+            state.band_dock.arm(&state.config.animation);
         }
 
         // ── Resize mode actions ───────────────────────────────────────────────
@@ -2351,17 +2462,27 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
                     Down => state.pane_sizes.inv_dock_pct = state.pane_sizes.inv_dock_pct.saturating_sub(STEP).max(10),
                     _ => {}
                 },
-                // Verb dock is a left-docked column: Right grows its width, Left
-                // shrinks it. Bounds mirror the split-ratio clamp; the column
-                // clamp in `verb_dock_target_width` still applies at layout time.
-                crate::state::ResizeTarget::VerbDock => match dir {
-                    Left => state.pane_sizes.verb_dock_pct = state.pane_sizes.verb_dock_pct.saturating_sub(STEP).max(10),
-                    Right => state.pane_sizes.verb_dock_pct = (state.pane_sizes.verb_dock_pct + STEP).min(80),
-                    _ => {}
-                },
+                // The command band is a bottom band now (SQ-0664), so it resizes
+                // by ROWS like the inventory dock: Up grows, Down shrinks. The
+                // value is rows, not a percentage — `band_target_height` still
+                // clamps it against the screen at layout time.
+                crate::state::ResizeTarget::CommandBand => {
+                    use crate::render::command_band::{MAX_BAND_ROWS, MIN_BAND_ROWS};
+                    match dir {
+                        Up => {
+                            state.pane_sizes.band_height =
+                                (state.pane_sizes.band_height + 1).min(MAX_BAND_ROWS)
+                        }
+                        Down => {
+                            state.pane_sizes.band_height =
+                                state.pane_sizes.band_height.saturating_sub(1).max(MIN_BAND_ROWS)
+                        }
+                        _ => {}
+                    }
+                }
             }
             state.config.split_ratio = state.pane_sizes.split_ratio;
-            state.config.verb_dock_pct = state.pane_sizes.verb_dock_pct;
+            state.config.command_band.height = state.pane_sizes.band_height;
             state.config.inv_dock_pct = state.pane_sizes.inv_dock_pct;
         }
 
@@ -2492,6 +2613,7 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
 
         // Caller-handled: silently ignored.
         Action::SubmitCommand(_)
+        | Action::SubmitText(_)
         | Action::SaveGame
         | Action::RestoreGame
         | Action::ExportSvg(_)
@@ -2591,14 +2713,16 @@ pub fn apply_selection_autoscroll(state: &mut AppState) {
 
 // ── Suggestion recompute ──────────────────────────────────────────────────────
 
-/// Build the noun list for the verb menu: dedup(room nouns ∪ inventory names),
-/// sorted alphabetically.  Room nouns come from the last 20 transcript lines (same
-/// source as autocomplete); inventory names come from `list_inventory` when
-/// `state.player_obj` is known, or from `state.inventory_fallback` otherwise.
-fn build_verb_menu_nouns(state: &AppState, _mapper: &Mapper) -> Vec<String> {
+/// Nouns scraped from the last 20 transcript lines, deduped and sorted.
+///
+/// This was the old verb menu's ONLY noun source, which is exactly what was
+/// wrong with it. It survives as the degraded fallback for engines with no
+/// `Introspect` (Glulx, Scott): the band shows it as a "WHAT — seen" group so
+/// its lower quality is visible rather than mixed in with real objects. A
+/// Z-machine story never reaches this — it has a live object tree.
+pub fn scraped_seen_nouns(state: &AppState) -> Vec<String> {
     use std::collections::HashSet;
 
-    // Room words from recent transcript.
     let room_text: String = state
         .transcript
         .iter()
@@ -2610,35 +2734,14 @@ fn build_verb_menu_nouns(state: &AppState, _mapper: &Mapper) -> Vec<String> {
         .rev()
         .collect::<Vec<_>>()
         .join(" ");
-    let room_words = room_words_from_text(&room_text);
 
     let mut seen: HashSet<String> = HashSet::new();
     let mut nouns: Vec<String> = Vec::new();
-
-    for w in room_words {
+    for w in room_words_from_text(&room_text) {
         if seen.insert(w.clone()) {
             nouns.push(w);
         }
     }
-
-    // Inventory items — prefer list_inventory when player_obj is known.
-    let inv_names: Vec<String> = if let Some(p) = state.player_obj {
-        // We need access to the Z-machine memory here but apply_action only takes Mapper.
-        // The mapper does not hold machine memory, so we fall back to inventory_fallback
-        // (which is populated each turn). This is the same graceful path as player_obj=None.
-        let _ = p;
-        state.inventory_fallback.clone()
-    } else {
-        state.inventory_fallback.clone()
-    };
-
-    for name in inv_names {
-        let lower = name.to_lowercase();
-        if seen.insert(lower.clone()) {
-            nouns.push(lower);
-        }
-    }
-
     nouns.sort_unstable();
     nouns
 }
@@ -2851,8 +2954,22 @@ pub fn apply_paste(state: &mut AppState, text: &str) -> bool {
         p.scroll.select(0, vp, &anim);
         return true;
     }
-    // Any other MODAL overlay (saves manager, file browser, config screen, verb
-    // menu, replay, hotkey dialog, resize mode…) owns the keyboard but has no text
+    // The command band owns the keyboard while it is focused, and its one text
+    // field is the active column's filter — so a paste lands there. It is NOT a
+    // modal, so the story input keeps the paste when the band is up but the
+    // story holds the keyboard (SQ-0664: the old dock swallowed pastes outright,
+    // purely because it counted as a modal).
+    if let Some(b) = state.overlays.command_band.as_mut() {
+        if !b.story_focused {
+            if b.active_col().is_some() {
+                b.filter.push_str(&text);
+                return true;
+            }
+            return false;
+        }
+    }
+    // Any other MODAL overlay (saves manager, file browser, config screen,
+    // replay, hotkey dialog, resize mode…) owns the keyboard but has no text
     // field: swallow, rather than typing behind the modal. The corner overlays the
     // modal test excludes (room panel, tidy animation) leave the story input line
     // live, so a paste still reaches it there — same rule typing follows.
@@ -3381,7 +3498,7 @@ mod tests {
         // commands fire via their authored leader letters instead (SQ-0446 layout).
         s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::CloseHotkeyDialog));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::OpenVerbMenu));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('v'))), Action::OpenCommandBand));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('l'))), Action::TogglePortalLabels));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::ToggleInventory));
         // 'u' now fires SQ-0391's untried-exits overlay; it was one of this test's examples of
@@ -4902,26 +5019,19 @@ mod tests {
         ));
     }
 
+    /// The band takes the wheel by HIT RECT (in `main::band_mouse_action`), not
+    /// by "an overlay is open" — it is a dock, so a wheel event outside its rect
+    /// resolves exactly as it does with the band closed (SQ-0664). Every other
+    /// list modal short-circuits `mouse_to_action` the moment it is open; the
+    /// band deliberately does not appear there at all.
     #[test]
-    fn wheel_drives_verb_menu_selection() {
-        use crate::state::{VerbMenuPane, VerbMenuState};
+    fn wheel_outside_the_band_resolves_as_if_it_were_closed() {
         let mut s = AppState::default();
-        s.overlays.verb_menu = Some(VerbMenuState {
-            pane: VerbMenuPane::Verbs,
-            verb_scroll: Default::default(),
-            noun_scroll: Default::default(),
-            prep_scroll: Default::default(),
-            nouns: Vec::new(),
-            story_focused: false,
-        });
-        assert!(matches!(
-            mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None),
-            Action::VerbMenuNav(VerbMenuNavKind::Up)
-        ));
-        assert!(matches!(
-            mouse_to_action(&s, wheel_down(), map_rect(), story_rect(), &[], &None),
-            Action::VerbMenuNav(VerbMenuNavKind::Down)
-        ));
+        let closed = mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None);
+        open_band(&mut s);
+        let open = mouse_to_action(&s, wheel_up(), map_rect(), story_rect(), &[], &None);
+        assert_eq!(open, closed, "the band does not intercept wheels outside its rect");
+        assert_ne!(closed, Action::None, "sanity: the wheel does something out there");
     }
 
     #[test]
@@ -5620,120 +5730,439 @@ mod tests {
 
     // ── Verb menu tests ───────────────────────────────────────────────────────
 
-    /// Helper: open the verb menu with a specific noun list.
-    fn open_verb_menu_with_nouns(state: &mut AppState, nouns: Vec<String>) {
-        state.overlays.verb_menu = Some(crate::state::VerbMenuState {
-            pane: crate::state::VerbMenuPane::Verbs,
-            verb_scroll: Default::default(),
-            noun_scroll: Default::default(),
-            prep_scroll: Default::default(),
-            nouns,
-            // Helper opens with a pane focused so legacy nav/pick tests keep
-            // exercising the dock; ring/focus tests flip `story_focused` as needed.
-            story_focused: false,
-        });
+    // ── SQ-0664: the command band ─────────────────────────────────────────────
+
+    /// Open the band with a known object model, band-focused.
+    fn open_band(state: &mut AppState) {
+        let mut band = crate::state::CommandBandState::new(
+            crate::render::command_band::default_verbs(),
+            crate::render::command_band::default_quick(),
+        );
+        band.here = vec!["iron door".to_string(), "mailbox".to_string()];
+        band.carried = vec!["brass key".to_string(), "lantern".to_string()];
+        band.story_focused = false;
+        state.overlays.command_band = Some(band);
+        state.band_dock.toggle_to(true, true);
     }
 
-    #[test]
-    fn verb_menu_pick_appends_token_and_space() {
-        let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
-
-        // Select "unlock" (index 6 in VERB_MENU_VERBS).
-        // Pick from Verbs pane (default on open) at verb_idx=0 → "look".
-        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input.value, "look ");
-
-        // Pick again → "look look ".
-        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input.value, "look look ");
+    fn band(state: &AppState) -> &crate::state::CommandBandState {
+        state.overlays.command_band.as_ref().expect("band open")
     }
 
-    #[test]
-    fn verb_menu_pick_builds_unlock_door_with_key() {
-        use crate::render::verbmenu::VERB_MENU_VERBS;
-        let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        let nouns = vec!["door".to_string(), "key".to_string()];
-        open_verb_menu_with_nouns(&mut s, nouns);
-
-        // Find indices.
-        let unlock_idx = VERB_MENU_VERBS.iter().position(|&v| v == "unlock").expect("unlock in verbs");
-        let with_idx = crate::render::verbmenu::VERB_MENU_PREPS.iter().position(|&p| p == "with").expect("with in preps");
-
-        // 1. Pick "unlock" from Verbs pane.
-        s.overlays.verb_menu.as_mut().unwrap().verb_scroll.selected = unlock_idx;
-        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input.value, "unlock ");
-
-        // 2. Switch to Nouns pane and pick "door" (noun_idx=0).
-        s.overlays.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
-        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input.value, "unlock door ");
-
-        // 3. Switch to Preps pane and pick "with".
-        s.overlays.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Preps;
-        s.overlays.verb_menu.as_mut().unwrap().prep_scroll.selected = with_idx;
-        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input.value, "unlock door with ");
-
-        // 4. Switch back to Nouns and pick "key" (noun_idx=1).
-        s.overlays.verb_menu.as_mut().unwrap().pane = crate::state::VerbMenuPane::Nouns;
-        s.overlays.verb_menu.as_mut().unwrap().noun_scroll.selected = 1;
-        apply_action(Action::VerbMenuPick, &mut s, &mut mapper);
-        assert_eq!(s.input.value, "unlock door with key ");
+    /// Pick the row whose text is `text` in `col`, the way a click does.
+    fn pick_text(state: &mut AppState, mapper: &mut Mapper, col: usize, text: &str) {
+        let idx = band(state)
+            .filtered_items(col)
+            .iter()
+            .position(|i| i == text)
+            .unwrap_or_else(|| panic!("`{text}` not in column {col}"));
+        apply_action(Action::BandClickRow(col, idx), state, mapper);
     }
 
+    /// The whole point of the arity table: which columns open, and when.
     #[test]
-    fn verb_menu_close_leaves_input_intact() {
+    fn arity_drives_column_reachability() {
+        use crate::render::command_band::{COL_CARRIED, COL_HERE, COL_SECOND, COL_VERB};
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
-        s.input.set("unlock door ", true);
-        open_verb_menu_with_nouns(&mut s, vec![]);
-        apply_action(Action::VerbMenuClose, &mut s, &mut mapper);
-        assert_eq!(s.input.value, "unlock door ", "input must be preserved");
+        open_band(&mut s);
+
+        // Nothing picked: only VERB.
+        assert!(band(&s).col_reachable(COL_VERB));
+        assert!(!band(&s).col_reachable(COL_HERE));
+        assert!(!band(&s).col_reachable(COL_SECOND));
+
+        // solo: still nothing else, and the phrase is already complete.
+        pick_text(&mut s, &mut mapper, COL_VERB, "look");
+        assert!(!band(&s).col_reachable(COL_HERE), "a solo verb offers no object");
+        assert!(band(&s).complete());
+        assert_eq!(band(&s).focus, crate::state::BandFocus::Phrase, "nothing left to pick");
+
+        // object: both object columns open; not complete until one is picked.
+        band_reset(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "take");
+        assert!(band(&s).col_reachable(COL_HERE) && band(&s).col_reachable(COL_CARRIED));
+        assert!(!band(&s).col_reachable(COL_SECOND), "no second slot for an object verb");
+        assert!(!band(&s).complete(), "`take` alone is not a command");
+        pick_text(&mut s, &mut mapper, COL_HERE, "iron door");
+        assert!(band(&s).complete());
+
+        // object_opt: complete with the verb alone, object column still offered.
+        band_reset(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "search");
+        assert!(band(&s).complete(), "`search` alone is valid");
+        assert!(band(&s).col_reachable(COL_HERE), "…but an object may still be added");
+
+        // pair: the second column stays shut until the first object is picked.
+        band_reset(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "unlock");
+        assert!(!band(&s).col_reachable(COL_SECOND), "WITH… is unreachable before WHAT");
+        assert!(!band(&s).complete());
+        pick_text(&mut s, &mut mapper, COL_HERE, "iron door");
+        assert!(band(&s).col_reachable(COL_SECOND), "WITH… opens once WHAT is filled");
+        assert!(!band(&s).complete(), "a pair verb needs both objects");
+        pick_text(&mut s, &mut mapper, COL_SECOND, "brass key");
+        assert!(band(&s).complete());
     }
 
-    #[test]
-    fn verb_menu_close_arms_dock_toward_closed_without_nulling_content() {
-        // Drawer pattern: VerbMenuClose must NOT immediately clear verb_menu —
-        // content persists so the panel visibly slides out. It arms verb_dock
-        // toward closed instead; settle_verb_dock (called once the slide
-        // finishes) is what actually clears verb_menu.
-        let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        open_verb_menu_with_nouns(&mut s, vec![]);
-        apply_action(Action::VerbMenuClose, &mut s, &mut mapper);
-        assert!(s.overlays.verb_menu.is_some(), "verb_menu content should persist during slide-out");
-        assert!(!s.verb_dock.open, "verb_dock should be armed toward closed");
+    fn band_reset(state: &mut AppState) {
+        state.overlays.command_band.as_mut().unwrap().clear_phrase();
     }
 
+    /// Materialization is plain words — multi-word object names go in exactly as
+    /// a player would type them, with nothing quoted or escaped.
     #[test]
-    fn open_verb_menu_arms_dock_toward_open() {
+    fn phrase_materializes_as_plain_text() {
+        use crate::render::command_band::{COL_HERE, COL_SECOND, COL_VERB};
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
-        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
-        assert!(s.verb_dock.open, "verb_dock should be armed toward open");
+        open_band(&mut s);
+
+        pick_text(&mut s, &mut mapper, COL_VERB, "unlock");
+        pick_text(&mut s, &mut mapper, COL_HERE, "iron door");
+        pick_text(&mut s, &mut mapper, COL_SECOND, "brass key");
+        assert_eq!(band(&s).phrase_text(), "unlock iron door with brass key");
+
+        band_reset(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "put");
+        pick_text(&mut s, &mut mapper, COL_HERE, "mailbox");
+        pick_text(&mut s, &mut mapper, COL_SECOND, "lantern");
+        assert_eq!(band(&s).phrase_text(), "put mailbox in lantern", "the verb's own preposition");
     }
 
+    /// Enter never fires a turn from a column — only from an armed phrase line.
     #[test]
-    fn settle_verb_dock_clears_content_once_slide_out_settles() {
+    fn enter_confirms_rather_than_auto_firing() {
+        use crate::render::command_band::COL_VERB;
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
-        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
-        assert!(s.overlays.verb_menu.is_some());
+        open_band(&mut s);
 
-        // Mid-slide-out: still armed/active, content must persist.
-        apply_action(Action::VerbMenuClose, &mut s, &mut mapper);
-        s.settle_verb_dock();
-        assert!(s.overlays.verb_menu.is_some(), "content should persist while the slide is (potentially) active");
+        // Picking a complete-alone verb arms the line but does NOT send.
+        pick_text(&mut s, &mut mapper, COL_VERB, "look");
+        assert!(band(&s).complete());
+        assert_eq!(band_enter_action(&s), Action::SubmitText("look".to_string()));
 
-        // Force-settle the tween (as if the animation had completed), then
-        // settle_verb_dock should clear the content.
-        s.verb_dock.toggle_to(false, true);
-        s.settle_verb_dock();
-        assert!(s.overlays.verb_menu.is_none(), "content should be cleared once the slide-out has settled");
+        // While a column holds the cursor, Enter is a pick, never a send.
+        band_reset(&mut s);
+        assert_eq!(band_enter_action(&s), Action::BandEnter);
+
+        // An incomplete phrase on the phrase line does nothing at all.
+        pick_text(&mut s, &mut mapper, COL_VERB, "unlock");
+        s.overlays.command_band.as_mut().unwrap().focus = crate::state::BandFocus::Phrase;
+        assert_eq!(band_enter_action(&s), Action::None, "an unarmed line cannot send");
+    }
+
+    /// A quick-row pick FILLS the phrase; it never submits (decision 2).
+    #[test]
+    fn quick_pick_fills_the_phrase_and_does_not_send() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        let n = band(&s).quick.iter().position(|q| q == "n").expect("n in the quick row");
+
+        apply_action(Action::BandQuickPick(n), &mut s, &mut mapper);
+        assert_eq!(band(&s).phrase_text(), "n");
+        assert_eq!(s.input.value, "", "the story input line is untouched");
+        assert_eq!(
+            band_enter_action(&s),
+            Action::SubmitText("n".to_string()),
+            "armed, but only Enter sends it"
+        );
+    }
+
+    /// Type-to-filter narrows the ACTIVE column, and snaps its selection back.
+    #[test]
+    fn typing_filters_the_active_column() {
+        use crate::render::command_band::COL_VERB;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+
+        let all = band(&s).filtered_items(COL_VERB).len();
+        for c in "unl".chars() {
+            apply_action(Action::BandFilterChar(c), &mut s, &mut mapper);
+        }
+        let shown = band(&s).filtered_items(COL_VERB);
+        assert!(shown.len() < all, "the list narrowed");
+        assert!(shown.iter().all(|v| v.contains("unl")), "only matches survive: {shown:?}");
+        assert_eq!(band(&s).scroll[COL_VERB].selected, 0, "selection snaps to the top");
+    }
+
+    /// Backspace is a ladder: filter characters first, then picked tokens.
+    #[test]
+    fn backspace_clears_the_filter_then_unpicks() {
+        use crate::render::command_band::{COL_HERE, COL_VERB};
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "unlock");
+        pick_text(&mut s, &mut mapper, COL_HERE, "iron door");
+        assert_eq!(band(&s).phrase_text(), "unlock iron door");
+
+        apply_action(Action::BandFilterChar('b'), &mut s, &mut mapper);
+        assert_eq!(band(&s).filter, "b");
+
+        // First press eats the filter character, NOT the token.
+        apply_action(Action::BandBackspace, &mut s, &mut mapper);
+        assert!(band(&s).filter.is_empty());
+        assert_eq!(band(&s).phrase_text(), "unlock iron door", "the phrase is untouched");
+
+        // Then the tokens come off, most recent first.
+        apply_action(Action::BandBackspace, &mut s, &mut mapper);
+        assert_eq!(band(&s).phrase_text(), "unlock");
+        apply_action(Action::BandBackspace, &mut s, &mut mapper);
+        assert_eq!(band(&s).phrase_text(), "");
+        apply_action(Action::BandBackspace, &mut s, &mut mapper);
+        assert_eq!(band(&s).phrase_text(), "", "and it stops there");
+    }
+
+    /// Esc is the same ladder one level up: filter → phrase → close.
+    #[test]
+    fn escape_ladder_filter_then_phrase_then_close() {
+        use crate::render::command_band::COL_VERB;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "take");
+        apply_action(Action::BandFilterChar('k'), &mut s, &mut mapper);
+
+        apply_action(Action::BandEscape, &mut s, &mut mapper);
+        assert!(band(&s).filter.is_empty(), "level 1: the filter");
+        assert_eq!(band(&s).phrase_text(), "take", "…and only the filter");
+
+        apply_action(Action::BandEscape, &mut s, &mut mapper);
+        assert_eq!(band(&s).phrase_text(), "", "level 2: the phrase");
+        assert!(s.band_dock.open, "…and the band is still open");
+
+        apply_action(Action::BandEscape, &mut s, &mut mapper);
+        assert!(!s.band_dock.open, "level 3: close");
+    }
+
+    /// Re-picking an earlier slot invalidates everything downstream of it —
+    /// otherwise the old verb's object is stranded in the new phrase.
+    #[test]
+    fn repicking_the_verb_drops_the_stale_object() {
+        use crate::render::command_band::{COL_HERE, COL_VERB};
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "take");
+        pick_text(&mut s, &mut mapper, COL_HERE, "mailbox");
+        assert_eq!(band(&s).phrase_text(), "take mailbox");
+
+        pick_text(&mut s, &mut mapper, COL_VERB, "look");
+        assert_eq!(band(&s).phrase_text(), "look", "the object went with the old verb");
+    }
+
+    /// The phrase is band-local: the story input line is never touched, so
+    /// Tab-to-story free typing and the band coexist (the old dock mutated
+    /// `state.input` directly, which is what forced its modal status).
+    #[test]
+    fn the_band_never_touches_the_story_input_line() {
+        use crate::render::command_band::{COL_HERE, COL_VERB};
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        s.input.set("half a command", true);
+        open_band(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "take");
+        pick_text(&mut s, &mut mapper, COL_HERE, "mailbox");
+        apply_action(Action::BandClose, &mut s, &mut mapper);
+        assert_eq!(s.input.value, "half a command");
+    }
+
+    /// Tab hands the keyboard to the story input and back; the band stays up.
+    #[test]
+    fn tab_swaps_focus_without_closing_the_band() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        assert!(!band(&s).story_focused, "the band opens focused");
+
+        let a = command_band_intercept(key(KeyCode::Tab), &s).expect("Tab is consumed");
+        assert_eq!(a, Action::BandToggleStoryFocus);
+        apply_action(a, &mut s, &mut mapper);
+        assert!(band(&s).story_focused);
+        assert!(s.overlays.command_band.is_some(), "the band stays visible");
+
+        // With the story focused, letters and Enter belong to the game again.
+        assert!(command_band_intercept(key(KeyCode::Char('x')), &s).is_none());
+        assert!(command_band_intercept(key(KeyCode::Enter), &s).is_none());
+
+        apply_action(Action::BandToggleStoryFocus, &mut s, &mut mapper);
+        assert!(!band(&s).story_focused);
+        // …and back band-side, a letter filters rather than falling through.
+        assert_eq!(
+            command_band_intercept(key(KeyCode::Char('x')), &s),
+            Some(Action::BandFilterChar('x'))
+        );
+    }
+
+    /// `←`/`→` skip unreachable columns and end on the phrase line.
+    #[test]
+    fn focus_ring_skips_unreachable_columns() {
+        use crate::render::command_band::{COL_CARRIED, COL_HERE, COL_VERB};
+        use crate::state::BandFocus;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+
+        // Nothing picked: VERB → phrase, with no object stops in between.
+        assert_eq!(band(&s).focus, BandFocus::Column(COL_VERB));
+        apply_action(Action::BandNav(BandNavKind::NextCol), &mut s, &mut mapper);
+        assert_eq!(band(&s).focus, BandFocus::Phrase, "the object columns are skipped");
+        apply_action(Action::BandNav(BandNavKind::NextCol), &mut s, &mut mapper);
+        assert_eq!(band(&s).focus, BandFocus::Phrase, "the ring clamps, it does not wrap");
+
+        // After an object verb the two object columns join the ring.
+        band_reset(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "take");
+        assert_eq!(band(&s).focus, BandFocus::Column(COL_HERE), "advance lands on the next slot");
+        apply_action(Action::BandNav(BandNavKind::NextCol), &mut s, &mut mapper);
+        assert_eq!(band(&s).focus, BandFocus::Column(COL_CARRIED));
+        apply_action(Action::BandNav(BandNavKind::PrevCol), &mut s, &mut mapper);
+        assert_eq!(band(&s).focus, BandFocus::Column(COL_HERE));
+    }
+
+    /// Moving between columns drops the filter — it belongs to one column.
+    #[test]
+    fn changing_column_clears_the_filter() {
+        use crate::render::command_band::COL_VERB;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "take");
+        apply_action(Action::BandFilterChar('d'), &mut s, &mut mapper);
+        assert_eq!(band(&s).filter, "d");
+        apply_action(Action::BandNav(BandNavKind::NextCol), &mut s, &mut mapper);
+        assert!(band(&s).filter.is_empty());
+    }
+
+    /// `↑`/`↓` move within the active column, clamped.
+    #[test]
+    fn up_down_move_the_active_column_selection() {
+        use crate::render::command_band::COL_VERB;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        assert_eq!(band(&s).scroll[COL_VERB].selected, 0);
+        apply_action(Action::BandNav(BandNavKind::Down), &mut s, &mut mapper);
+        assert_eq!(band(&s).scroll[COL_VERB].selected, 1);
+        apply_action(Action::BandNav(BandNavKind::Up), &mut s, &mut mapper);
+        assert_eq!(band(&s).scroll[COL_VERB].selected, 0);
+        apply_action(Action::BandNav(BandNavKind::Up), &mut s, &mut mapper);
+        assert_eq!(band(&s).scroll[COL_VERB].selected, 0, "clamped at the top");
+    }
+
+    /// The wheel scrolls a column without stealing the keyboard from another.
+    #[test]
+    fn wheel_scrolls_a_column_without_taking_focus() {
+        use crate::render::command_band::{COL_HERE, COL_VERB};
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "take");
+        // Cursor is on the HERE column; scroll CARRIED via the wheel.
+        assert_eq!(band(&s).focus, crate::state::BandFocus::Column(COL_HERE));
+        apply_action(Action::BandWheel(COL_HERE, 1), &mut s, &mut mapper);
+        assert_eq!(band(&s).scroll[COL_HERE].selected, 1);
+        assert_eq!(band(&s).focus, crate::state::BandFocus::Column(COL_HERE), "focus unchanged");
+    }
+
+    /// Opening/closing follows the drawer pattern the inventory dock uses.
+    #[test]
+    fn open_and_close_arm_the_slide_and_settle_clears_the_content() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::OpenCommandBand, &mut s, &mut mapper);
+        assert!(s.band_dock.open, "armed toward open");
+        assert!(s.overlays.command_band.is_some());
+        assert!(!band(&s).story_focused, "the band opens FOCUSED, unlike the old passive dock");
+
+        apply_action(Action::BandClose, &mut s, &mut mapper);
+        assert!(!s.band_dock.open, "armed toward closed");
+        assert!(s.overlays.command_band.is_some(), "content persists during the slide-out");
+        s.settle_command_band();
+        assert!(s.overlays.command_band.is_some(), "…including while the slide may still run");
+
+        s.band_dock.toggle_to(false, true);
+        s.settle_command_band();
+        assert!(s.overlays.command_band.is_none(), "cleared once the slide-out settles");
+    }
+
+    /// Re-opening an already-open band keeps the phrase in progress.
+    #[test]
+    fn reopening_does_not_reset_the_phrase() {
+        use crate::render::command_band::COL_VERB;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        pick_text(&mut s, &mut mapper, COL_VERB, "take");
+        apply_action(Action::OpenCommandBand, &mut s, &mut mapper);
+        assert_eq!(band(&s).phrase_text(), "take");
+    }
+
+    /// The verb table comes from config, so a replaced grammar reaches the band.
+    #[test]
+    fn open_uses_the_configured_verb_table() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        s.config.command_band.verbs = vec![crate::config::VerbConfig {
+            word: "polish".to_string(),
+            arity: "object".to_string(),
+            prep: None,
+        }];
+        s.config.command_band.quick = vec!["xyzzy".to_string()];
+        apply_action(Action::OpenCommandBand, &mut s, &mut mapper);
+        assert_eq!(band(&s).verbs.len(), 1);
+        assert_eq!(band(&s).verbs[0].word, "polish");
+        assert_eq!(band(&s).quick, vec!["xyzzy".to_string()]);
+    }
+
+    /// A bad arity in config is reported in the transcript, not swallowed.
+    #[test]
+    fn open_reports_a_bad_arity_from_config() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        s.config.command_band.extra_verbs = vec![crate::config::VerbConfig {
+            word: "frob".to_string(),
+            arity: "triple".to_string(),
+            prep: None,
+        }];
+        apply_action(Action::OpenCommandBand, &mut s, &mut mapper);
+        assert!(
+            s.transcript.iter().any(|l| l.contains("frob")),
+            "the warning reaches the player: {:?}",
+            s.transcript
+        );
+    }
+
+    /// The band is NOT a modal. This is the property the whole redesign turns
+    /// on: the story prompt line stays live, paste keeps working, and the v6
+    /// pixel path (gated on `any_modal_overlay_open`) is not dropped.
+    #[test]
+    fn the_band_is_not_a_modal_overlay() {
+        let mut s = AppState::default();
+        open_band(&mut s);
+        assert!(!s.any_modal_overlay_open(), "not a modal");
+        assert!(!s.any_overlay_open(), "not an overlay at all");
+        assert!(!s.open_modal_overlays().contains(&"command_band"));
+    }
+
+    /// Paste: it lands in the active column's filter while the band has the
+    /// keyboard, and in the story input line when the story does — never
+    /// swallowed, which is what the old dock did purely by being a modal.
+    #[test]
+    fn paste_reaches_the_filter_or_the_story_line_but_is_never_swallowed() {
+        let mut s = AppState::default();
+        open_band(&mut s);
+        assert!(apply_paste(&mut s, "lan"), "consumed");
+        assert_eq!(band(&s).filter, "lan", "the active column's filter takes it");
+        assert_eq!(s.input.value, "");
+
+        s.overlays.command_band.as_mut().unwrap().story_focused = true;
+        assert!(apply_paste(&mut s, "open door"));
+        assert_eq!(s.input.value, "open door", "the story input line takes it");
     }
 
     // ── SQ-0237: interactive pane resize mode ─────────────────────────────────
@@ -5804,10 +6233,10 @@ mod tests {
 
         apply_action(Action::ResizeReset, &mut s, &mut mapper);
         assert_eq!(s.pane_sizes.split_ratio, 50);
-        assert_eq!(s.pane_sizes.verb_dock_pct, 32);
+        assert_eq!(s.pane_sizes.band_height, 8);
         assert_eq!(s.pane_sizes.inv_dock_pct, 33);
         assert_eq!(s.config.split_ratio, 50);
-        assert_eq!(s.config.verb_dock_pct, 32);
+        assert_eq!(s.config.command_band.height, 8);
         assert_eq!(s.config.inv_dock_pct, 33);
     }
 
@@ -5872,15 +6301,15 @@ mod tests {
     }
 
     #[test]
-    fn resize_targets_visible_includes_verb_dock_when_menu_open() {
-        // SQ-0238: resize mode now preempts the verb-menu key intercept, so the
-        // two coexist and the verb dock becomes a resize target while the menu
-        // is open (appended after StoryMap/InvDock in the Tab-cycle order).
+    fn resize_targets_visible_includes_the_band_when_open() {
+        // SQ-0238: resize mode preempts the band's key intercept, so the two
+        // coexist and the band becomes a resize target while it is open
+        // (appended after StoryMap/InvDock in the Tab-cycle order).
         let mut s = AppState::default();
-        open_verb_menu_with_nouns(&mut s, vec![]);
+        open_band(&mut s);
         assert_eq!(
             s.resize_targets_visible(),
-            vec![crate::state::ResizeTarget::StoryMap, crate::state::ResizeTarget::VerbDock]
+            vec![crate::state::ResizeTarget::StoryMap, crate::state::ResizeTarget::CommandBand]
         );
 
         s.show_inventory = true;
@@ -5889,9 +6318,37 @@ mod tests {
             vec![
                 crate::state::ResizeTarget::StoryMap,
                 crate::state::ResizeTarget::InvDock,
-                crate::state::ResizeTarget::VerbDock,
+                crate::state::ResizeTarget::CommandBand,
             ]
         );
+    }
+
+    /// SQ-0664: the band resizes by ROWS (up grows, down shrinks), replacing
+    /// the retired `verb_dock_pct` percentage-width knob.
+    #[test]
+    fn resize_nav_adjusts_the_band_height_in_rows() {
+        use crate::render::command_band::{MAX_BAND_ROWS, MIN_BAND_ROWS};
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        s.resize_mode = true;
+        s.resize_target = crate::state::ResizeTarget::CommandBand;
+
+        assert_eq!(s.pane_sizes.band_height, 8);
+        apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);
+        assert_eq!(s.pane_sizes.band_height, 9);
+        assert_eq!(s.config.command_band.height, 9, "config mirrors pane_sizes");
+        apply_action(Action::ResizeNav(ResizeNavKind::Down), &mut s, &mut mapper);
+        assert_eq!(s.pane_sizes.band_height, 8);
+
+        for _ in 0..30 {
+            apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);
+        }
+        assert_eq!(s.pane_sizes.band_height, MAX_BAND_ROWS, "clamped at the top");
+        for _ in 0..30 {
+            apply_action(Action::ResizeNav(ResizeNavKind::Down), &mut s, &mut mapper);
+        }
+        assert_eq!(s.pane_sizes.band_height, MIN_BAND_ROWS, "clamped at the bottom");
     }
 
     #[test]
@@ -5915,221 +6372,84 @@ mod tests {
         assert_eq!(s.resize_target, crate::state::ResizeTarget::StoryMap);
     }
 
+    /// Arrow keys resolve to band navigation while the band holds the keyboard.
     #[test]
-    fn verb_menu_nav_tab_and_arrows_switch_pane() {
-        use crate::state::VerbMenuPane;
+    fn arrows_resolve_to_band_navigation() {
         let mut s = AppState::default();
-        open_verb_menu_with_nouns(&mut s, vec![]);
-        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Verbs);
-
-        // Tab → Nouns.
-        let a = key_to_action(&s, key(KeyCode::Tab));
-        assert!(matches!(a, Action::VerbMenuNav(VerbMenuNavKind::NextPane)));
-
-        // Right → same.
-        let a2 = key_to_action(&s, key(KeyCode::Right));
-        assert!(matches!(a2, Action::VerbMenuNav(VerbMenuNavKind::NextPane)));
-
-        // Left → PrevPane.
-        let a3 = key_to_action(&s, key(KeyCode::Left));
-        assert!(matches!(a3, Action::VerbMenuNav(VerbMenuNavKind::PrevPane)));
-
-        // Up/Down → move within pane.
-        let a4 = key_to_action(&s, key(KeyCode::Up));
-        assert!(matches!(a4, Action::VerbMenuNav(VerbMenuNavKind::Up)));
-        let a5 = key_to_action(&s, key(KeyCode::Down));
-        assert!(matches!(a5, Action::VerbMenuNav(VerbMenuNavKind::Down)));
+        open_band(&mut s);
+        assert!(matches!(
+            key_to_action(&s, key(KeyCode::Right)),
+            Action::BandNav(BandNavKind::NextCol)
+        ));
+        assert!(matches!(
+            key_to_action(&s, key(KeyCode::Left)),
+            Action::BandNav(BandNavKind::PrevCol)
+        ));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Up)), Action::BandNav(BandNavKind::Up)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Down)), Action::BandNav(BandNavKind::Down)));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::BandEscape));
     }
 
+    /// Decision 4: the band OWNS the keyboard while focused — a letter filters
+    /// rather than typing at the prompt behind it. With the story focused it is
+    /// the other way round.
     #[test]
-    fn open_verb_menu_focuses_story() {
-        // (a) The dock opens with the story input live.
+    fn letters_filter_when_the_band_is_focused_and_type_when_it_is_not() {
         let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
-        assert!(s.overlays.verb_menu.as_ref().unwrap().story_focused, "dock opens story-focused");
+        open_band(&mut s);
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::BandFilterChar('q')));
+
+        s.overlays.command_band.as_mut().unwrap().story_focused = true;
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::InputChar('q')));
     }
 
+    /// Ctrl/Alt chords are never eaten by the filter — app commands keep working
+    /// with the band up.
     #[test]
-    fn verb_menu_tab_ring_includes_story() {
-        use crate::state::VerbMenuPane;
+    fn ctrl_chords_are_not_swallowed_by_the_filter() {
         let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
-        // Start on the story.
-        s.overlays.verb_menu.as_mut().unwrap().story_focused = true;
-
-        // (b) Tab from Story focuses Verbs.
-        apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
-        {
-            let vm = s.overlays.verb_menu.as_ref().unwrap();
-            assert!(!vm.story_focused && vm.pane == VerbMenuPane::Verbs, "Story → Verbs");
-        }
-
-        // (c) Verbs → Nouns → Preps → Story (three more NextPane).
-        apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
-        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Nouns);
-        apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
-        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().pane, VerbMenuPane::Preps);
-        apply_action(Action::VerbMenuNav(VerbMenuNavKind::NextPane), &mut s, &mut mapper);
-        assert!(s.overlays.verb_menu.as_ref().unwrap().story_focused, "Preps → Story (ring wraps)");
+        open_band(&mut s);
+        assert!(command_band_intercept(ctrl(KeyCode::Char('s')), &s).is_none());
     }
 
+    /// F2 is the direct default binding (leader-only is why nobody found the
+    /// old verb menu).
     #[test]
-    fn verb_menu_intercept_respects_story_focus() {
-        // (d) When the story is focused, letters/Enter fall through (None); when
-        // a pane is focused, Enter picks.
-        let mut s = AppState::default();
-        open_verb_menu_with_nouns(&mut s, vec![]);
-
-        s.overlays.verb_menu.as_mut().unwrap().story_focused = true;
-        assert!(verb_menu_intercept(key(KeyCode::Char('x')), &s).is_none(), "letter falls through");
-        assert!(verb_menu_intercept(key(KeyCode::Enter), &s).is_none(), "Enter falls through to game");
-
-        s.overlays.verb_menu.as_mut().unwrap().story_focused = false;
-        assert!(
-            matches!(verb_menu_intercept(key(KeyCode::Enter), &s), Some(Action::VerbMenuPick)),
-            "Enter picks when a pane is focused"
-        );
-    }
-
-    #[test]
-    fn verb_menu_click_token_inserts_and_keeps_focus() {
-        // (e) Clicking a token appends it + a space and leaves story_focused as-is.
-        use crate::render::verbmenu::VERB_MENU_VERBS;
-        use crate::state::VerbMenuPane;
-        let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        open_verb_menu_with_nouns(&mut s, vec![]);
-        s.overlays.verb_menu.as_mut().unwrap().story_focused = true;
-
-        apply_action(Action::VerbMenuClickToken(VerbMenuPane::Verbs, 2), &mut s, &mut mapper);
-        assert_eq!(s.input.value, format!("{} ", VERB_MENU_VERBS[2]));
-        assert!(s.overlays.verb_menu.as_ref().unwrap().story_focused, "click leaves story focus unchanged");
-        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 2, "click moves highlight");
-    }
-
-    #[test]
-    fn verb_menu_focus_pane_action_sets_pane() {
-        // (f) Clicking a header focuses that pane.
-        use crate::state::VerbMenuPane;
-        let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
-        s.overlays.verb_menu.as_mut().unwrap().story_focused = true;
-
-        apply_action(Action::VerbMenuFocusPane(VerbMenuPane::Nouns), &mut s, &mut mapper);
-        let vm = s.overlays.verb_menu.as_ref().unwrap();
-        assert!(!vm.story_focused && vm.pane == VerbMenuPane::Nouns, "header click focuses Nouns");
-    }
-
-    #[test]
-    fn verb_menu_nav_up_down_moves_index() {
-        use crate::state::VerbMenuPane;
-        let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        open_verb_menu_with_nouns(&mut s, vec!["door".to_string(), "mailbox".to_string()]);
-        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
-
-        apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
-        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 1);
-
-        apply_action(Action::VerbMenuNav(VerbMenuNavKind::Up), &mut s, &mut mapper);
-        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
-
-        // Up at 0 stays at 0 (saturating).
-        apply_action(Action::VerbMenuNav(VerbMenuNavKind::Up), &mut s, &mut mapper);
-        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
-
-        // Switch to Nouns, move down.
-        s.overlays.verb_menu.as_mut().unwrap().pane = VerbMenuPane::Nouns;
-        apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
-        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().noun_scroll.selected, 1);
-    }
-
-    #[test]
-    fn verb_menu_wheel_scrolls_while_story_focused() {
-        // Regression (SQ-0255): the dock opens story-focused, and the mouse wheel
-        // produces VerbMenuNav(Up/Down) regardless of focus. List movement must
-        // therefore scroll the active pane even while the story input is focused;
-        // gating it behind !story_focused leaves wheel-scroll dead until Tab.
-        let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
-        assert!(s.overlays.verb_menu.as_ref().unwrap().story_focused, "dock opens story-focused");
-        assert_eq!(s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 0);
-
-        apply_action(Action::VerbMenuNav(VerbMenuNavKind::Down), &mut s, &mut mapper);
-        assert_eq!(
-            s.overlays.verb_menu.as_ref().unwrap().verb_scroll.selected, 1,
-            "wheel/Down must scroll the active pane even while story-focused"
-        );
-    }
-
-    #[test]
-    fn verb_menu_esc_closes() {
-        let mut s = AppState::default();
-        open_verb_menu_with_nouns(&mut s, vec![]);
-
-        let a = key_to_action(&s, key(KeyCode::Esc));
-        assert!(matches!(a, Action::VerbMenuClose), "Esc closes the menu");
-    }
-
-    #[test]
-    fn verb_menu_q_no_longer_closes() {
-        // "Story always live": with the dock open, an ordinary letter is not
-        // swallowed — it falls through to the game input line instead of closing.
-        let mut s = AppState::default();
-        open_verb_menu_with_nouns(&mut s, vec![]);
-        let a = key_to_action(&s, key(KeyCode::Char('q')));
-        assert!(matches!(a, Action::InputChar('q')), "q types into the live story input, not close");
-    }
-
-    #[test]
-    fn open_verb_menu_key_m_is_unbound_by_default() {
-        // open-verb-menu is leader-only now (SQ-0202); 'm' has no default binding.
+    fn f2_opens_the_command_band_by_default() {
         use crate::keymap::{KeyMap, KeySpec};
-        use crossterm::event::KeyCode;
         let km = KeyMap::default();
-        let spec = KeySpec { code: KeyCode::Char('m'), ctrl: false, shift: false, alt: false };
-        let cmd = km.lookup(&spec, crate::keymap::Context::Global);
-        assert_eq!(cmd, None, "m should not be bound to open-verb-menu by default");
+        let spec = KeySpec { code: KeyCode::F(2), ctrl: false, shift: false, alt: false };
+        assert_eq!(
+            km.lookup(&spec, crate::keymap::Context::Global),
+            Some("open-command-band")
+        );
     }
 
     #[test]
-    fn open_verb_menu_in_view_dialog_group() {
+    fn open_command_band_is_in_the_view_leader_group() {
         use crate::keymap::HotkeyLayout;
         let layout = HotkeyLayout::default();
-        let view_group = layout.groups.iter().find(|(title, _)| title == "View");
-        assert!(view_group.is_some(), "View group should exist");
-        let (_, cmds) = view_group.unwrap();
-        assert!(cmds.iter().any(|c| c.1 == "open-verb-menu"), "open-verb-menu should be in View group");
+        let (_, cmds) = layout
+            .groups
+            .iter()
+            .find(|(title, _)| title == "View")
+            .expect("View group should exist");
+        assert!(cmds.iter().any(|c| c.1 == "open-command-band"));
     }
 
+    /// Glulx/Scott have no object tree, so the scrape survives — but only as
+    /// the demoted "seen" source, never as the Z-machine path.
     #[test]
-    fn open_verb_menu_action_opens_modal() {
+    fn scraped_seen_nouns_come_from_the_transcript() {
         let mut s = AppState::default();
-        let mut mapper = Mapper::default();
-        assert!(s.overlays.verb_menu.is_none());
-        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
-        assert!(s.overlays.verb_menu.is_some(), "verb_menu should be Some after OpenVerbMenu");
-        assert!(matches!(s.overlays.verb_menu.as_ref().unwrap().pane, crate::state::VerbMenuPane::Verbs));
-    }
-
-    #[test]
-    fn noun_list_deduplicates_room_and_inventory() {
-        // A noun that appears in both room transcript and inventory_fallback
-        // should appear exactly once.
-        let mut s = AppState::default();
-        // Push transcript text with "mailbox" as a room word.
         s.push_transcript("There is a small mailbox here.");
-        // Also have "mailbox" in inventory fallback.
-        s.inventory_fallback = vec!["mailbox".to_string()];
-        let mut mapper = Mapper::default();
-        apply_action(Action::OpenVerbMenu, &mut s, &mut mapper);
-        let nouns = &s.overlays.verb_menu.as_ref().unwrap().nouns;
-        let mailbox_count = nouns.iter().filter(|n| n.as_str() == "mailbox").count();
-        assert_eq!(mailbox_count, 1, "mailbox should appear exactly once in nouns (dedup)");
+        let nouns = scraped_seen_nouns(&s);
+        assert!(nouns.contains(&"mailbox".to_string()));
+        assert_eq!(
+            nouns.iter().filter(|n| n.as_str() == "mailbox").count(),
+            1,
+            "deduped"
+        );
     }
 
     // ── File-browser sub-mode key tests ───────────────────────────────────────
@@ -6402,22 +6722,13 @@ mod tests {
     }
 
     #[test]
-    fn verb_menu_dock_does_not_swallow_map_clicks() {
-        // The verb menu is now a persistent left dock (no [X]/[Done] chrome, no
-        // DialogRects), not a centered modal — a click in the map pane must
-        // route normally instead of being swallowed as "centered modal" chrome.
+    fn command_band_does_not_swallow_map_clicks() {
+        // The band is a dock, not a centered modal — a click in the map pane
+        // must route normally instead of being swallowed as modal chrome.
         use ratatui::layout::Rect;
-        use crate::state::VerbMenuState;
 
         let mut state = AppState::default();
-        state.overlays.verb_menu = Some(VerbMenuState {
-            pane: crate::state::VerbMenuPane::Verbs,
-            verb_scroll: Default::default(),
-            noun_scroll: Default::default(),
-            prep_scroll: Default::default(),
-            nouns: vec![],
-            story_focused: false,
-        });
+        open_band(&mut state);
 
         let map   = Rect::new(30, 0, 50, 24);
         let story = Rect::default();
@@ -6425,7 +6736,7 @@ mod tests {
         let dialog = None;
 
         let a = mouse_to_action(&state, mouse_left_click(40, 5), map, story, room_rects, &dialog);
-        assert!(!matches!(a, Action::None), "click in map should route normally with the verb dock open, got {:?}", a);
+        assert!(!matches!(a, Action::None), "click in map should route normally with the band open, got {:?}", a);
     }
 
     #[test]
@@ -6518,9 +6829,9 @@ mod tests {
                 "file browser [X] click should produce FbClose, got {:?}", x_action);
         }
 
-        // 4. Verb menu is now a left dock, not a centered modal with [X]/[Done]
-        // chrome, so it's out of scope for this ESC == [X]-click sweep. Its
-        // ESC → VerbMenuClose mapping is covered by `verb_menu_esc_closes`.
+        // 4. The command band is a dock, not a centered modal with [X]/[Done]
+        // chrome, so it's out of scope for this ESC == [X]-click sweep. Its Esc
+        // ladder is covered by `escape_ladder_filter_then_phrase_then_close`.
 
         // 5. Config screen: ESC → ConfigCancel, [X] → ConfigCancel
         {
@@ -6553,7 +6864,7 @@ mod tests {
     /// Assert no modal key handler still binds q to a close action.
     #[test]
     fn no_modal_binds_q_to_close() {
-        use crate::state::{SavesState, VerbMenuState};
+        use crate::state::SavesState;
         use crate::persist_files::SaveInfo;
         use std::path::PathBuf;
 
@@ -6579,16 +6890,13 @@ mod tests {
                 "q must not close the file browser");
         }
 
-        // Verb menu: q → not VerbMenuClose
+        // Command band: q → not BandClose (it filters instead)
         {
             let mut s = AppState::default();
-            s.overlays.verb_menu = Some(VerbMenuState {
-                pane: crate::state::VerbMenuPane::Verbs,
-                verb_scroll: Default::default(), noun_scroll: Default::default(), prep_scroll: Default::default(), nouns: vec![], story_focused: false,
-            });
+            open_band(&mut s);
             let a = key_to_action(&s, key(KeyCode::Char('q')));
-            assert!(!matches!(a, Action::VerbMenuClose),
-                "q must not close the verb menu");
+            assert!(!matches!(a, Action::BandClose | Action::BandEscape),
+                "q must not close the command band");
         }
 
         // Config screen: q → not ConfigCancel
@@ -7279,11 +7587,11 @@ mod tests {
     // ── Task 6: navigation panels — regression guard ──────────────────────────
 
     #[test]
-    fn verb_menu_tab_still_navigates_panes() {
+    fn command_band_tab_still_swaps_focus() {
         let mut s = AppState::default();
-        open_verb_menu_with_nouns(&mut s, vec![]);
-        let a = verb_menu_intercept(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &s);
-        assert!(matches!(a, Some(Action::VerbMenuNav(VerbMenuNavKind::NextPane))));
+        open_band(&mut s);
+        let a = command_band_intercept(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &s);
+        assert!(matches!(a, Some(Action::BandToggleStoryFocus)));
     }
 
     // ── SQ-0237: resize-mode key routing ──────────────────────────────────────
@@ -7323,11 +7631,11 @@ mod tests {
         assert!(matches!(a, Action::ResizeNav(ResizeNavKind::NextTarget)));
     }
 
-    // ── SQ-0238: verb dock ⇄ resize mode coexistence ──────────────────────────
+    // ── SQ-0238: command band ⇄ resize mode coexistence ───────────────────────
 
     /// Build a KeyEvent equal to the current hotkey-dialog leader prefix,
     /// regardless of what it is bound to (default ctrl+k, but another lane may
-    /// move it) — the prefix must always pass through the verb-menu intercept.
+    /// move it) — the prefix must always pass through the band's intercept.
     fn prefix_key(s: &AppState) -> KeyEvent {
         let p = s.hotkeys.prefix;
         let mut m = KeyModifiers::NONE;
@@ -7338,65 +7646,63 @@ mod tests {
     }
 
     #[test]
-    fn resize_mode_preempts_verb_menu_intercept() {
-        // (a) With the verb menu open AND resize mode on, arrows/Tab resolve to
-        // ResizeNav (resize owns them), not the verb-menu navigation actions.
+    fn resize_mode_preempts_the_band_intercept() {
+        // (a) With the band open AND resize mode on, arrows/Tab resolve to
+        // ResizeNav (resize owns them), not the band's navigation actions.
         let mut s = AppState::default();
-        open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
+        open_band(&mut s);
         s.resize_mode = true;
 
         assert!(matches!(
             key_to_action(&s, key(KeyCode::Down)),
             Action::ResizeNav(ResizeNavKind::Down)
-        ), "Down resizes, not VerbMenuNav");
+        ), "Down resizes, not BandNav");
         assert!(matches!(
             key_to_action(&s, key(KeyCode::Tab)),
             Action::ResizeNav(ResizeNavKind::NextTarget)
-        ), "Tab cycles resize target, not verb-menu pane");
+        ), "Tab cycles resize target, not band focus");
         assert!(matches!(
             key_to_action(&s, key(KeyCode::Esc)),
             Action::ResizeExit
-        ), "Esc exits resize mode (back to the still-open menu), not VerbMenuClose");
+        ), "Esc exits resize mode (back to the still-open band), not BandEscape");
     }
 
     #[test]
-    fn verb_menu_intercept_passes_through_leader_prefix() {
-        // (b) With the verb menu open, the leader prefix is NOT swallowed by the
-        // verb-menu intercept, so it can open the leader palette (→ 'z' → resize).
+    fn band_intercept_passes_through_the_leader_prefix() {
+        // (b) With the band open, the leader prefix is NOT swallowed, so it can
+        // still open the leader palette (→ the '/' palette → resize-panes).
         let mut s = AppState::default();
-        open_verb_menu_with_nouns(&mut s, vec![]);
+        open_band(&mut s);
         // Both focus states: the prefix must fall through either way.
-        s.overlays.verb_menu.as_mut().unwrap().story_focused = true;
-        assert!(verb_menu_intercept(prefix_key(&s), &s).is_none(), "prefix falls through (story focus)");
-        s.overlays.verb_menu.as_mut().unwrap().story_focused = false;
-        assert!(verb_menu_intercept(prefix_key(&s), &s).is_none(), "prefix falls through (pane focus)");
+        s.overlays.command_band.as_mut().unwrap().story_focused = true;
+        assert!(command_band_intercept(prefix_key(&s), &s).is_none(), "prefix falls through (story focus)");
+        s.overlays.command_band.as_mut().unwrap().story_focused = false;
+        assert!(command_band_intercept(prefix_key(&s), &s).is_none(), "prefix falls through (band focus)");
 
-        // End-to-end: the prefix resolves to OpenHotkeyDialog while the menu is open.
         assert!(matches!(
             key_to_command(&s, prefix_key(&s)),
             KeyResolve::Action(Action::OpenHotkeyDialog)
-        ), "prefix opens the hotkey dialog with the verb menu open");
+        ), "prefix opens the hotkey dialog with the band open");
     }
 
     #[test]
-    fn verb_dock_is_a_resize_target_only_while_menu_open() {
-        // The verb dock joins the resize Tab-cycle exactly when the menu is open.
+    fn the_band_is_a_resize_target_only_while_open() {
         let mut s = AppState::default();
-        assert!(!s.resize_targets_visible().contains(&crate::state::ResizeTarget::VerbDock));
-        open_verb_menu_with_nouns(&mut s, vec![]);
-        assert!(s.resize_targets_visible().contains(&crate::state::ResizeTarget::VerbDock));
+        assert!(!s.resize_targets_visible().contains(&crate::state::ResizeTarget::CommandBand));
+        open_band(&mut s);
+        assert!(s.resize_targets_visible().contains(&crate::state::ResizeTarget::CommandBand));
     }
 
     #[test]
-    fn verb_menu_nav_still_resolves_when_resize_mode_off() {
-        // (c) With resize mode OFF, verb-menu navigation resolves normally.
+    fn band_nav_still_resolves_when_resize_mode_off() {
+        // (c) With resize mode OFF, band navigation resolves normally.
         let mut s = AppState::default();
-        open_verb_menu_with_nouns(&mut s, vec!["door".to_string()]);
+        open_band(&mut s);
         assert!(!s.resize_mode);
         assert!(matches!(
-            key_to_action(&s, key(KeyCode::Tab)),
-            Action::VerbMenuNav(VerbMenuNavKind::NextPane)
-        ), "Tab cycles verb-menu pane when not resizing");
+            key_to_action(&s, key(KeyCode::Right)),
+            Action::BandNav(BandNavKind::NextCol)
+        ), "→ moves across band columns when not resizing");
     }
 
     #[test]

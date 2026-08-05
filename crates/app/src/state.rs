@@ -162,43 +162,331 @@ pub struct DragState {
     pub acc_y: i32,
 }
 
-// ── Verb menu state ───────────────────────────────────────────────────────────
+// ── Command band state ────────────────────────────────────────────────────────
 
-/// Which pane is active in the verb menu modal.
+use crate::render::command_band::{
+    Arity, VerbEntry, BAND_COLS, COL_CARRIED, COL_HERE, COL_SECOND, COL_VERB,
+};
+
+/// Which grammatical slot a picked token fills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum VerbMenuPane {
-    Verbs,
-    Nouns,
-    Preps,
+pub enum BandSlot {
+    Verb,
+    Object,
+    Second,
 }
 
-/// Transient state for the verb/item token-palette modal.
-/// `None` in `AppState.verb_menu` = modal closed.
-#[derive(Debug, Clone)]
-pub struct VerbMenuState {
-    /// Which column is currently active.
-    pub pane: VerbMenuPane,
-    /// Selection + animated scroll for the Verbs pane.
-    pub verb_scroll: crate::list_scroll::ListScroll,
-    /// Selection + animated scroll for the Nouns pane.
-    pub noun_scroll: crate::list_scroll::ListScroll,
-    /// Selection + animated scroll for the Preps pane.
-    pub prep_scroll: crate::list_scroll::ListScroll,
-    /// Noun list built from room words ∪ inventory at menu-open time.
-    pub nouns: Vec<String>,
-    /// true = keyboard focus is on the story input (dock is passive); false =
-    /// `pane` is the focused dock pane.
+/// Where the band's keyboard cursor sits. `Phrase` is the last stop in the
+/// left-to-right ring: it is where a complete phrase is confirmed, which is what
+/// keeps "always confirm" true for a complete-alone verb like `look` (nothing
+/// ever fires on the pick itself).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BandFocus {
+    Column(usize),
+    Phrase,
+}
+
+impl Default for BandFocus {
+    fn default() -> Self {
+        BandFocus::Column(COL_VERB)
+    }
+}
+
+/// One token the player has picked, in pick order — so Backspace is a pop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BandPick {
+    pub slot: BandSlot,
+    pub text: String,
+}
+
+/// The command band's whole state. `None` in `OverlayState.command_band` means
+/// the band is closed.
+///
+/// The phrase is band-LOCAL (these picks), never `state.input`: the story input
+/// line stays live underneath so Tab-to-story free typing and the band coexist
+/// without fighting over one buffer. That decoupling is what lets the band be a
+/// dock rather than a modal.
+#[derive(Debug, Clone, Default)]
+pub struct CommandBandState {
+    /// The verb table in force (built-ins, or the config's replacement/extras).
+    pub verbs: Vec<VerbEntry>,
+    /// The one-click quick-action row.
+    pub quick: Vec<String>,
+    /// Tokens picked so far, in order.
+    pub picks: Vec<BandPick>,
+    /// Keyboard cursor within the band.
+    pub focus: BandFocus,
+    /// Incremental type-to-filter for the active column.
+    pub filter: String,
+    /// Per-column selection + animated scroll.
+    pub scroll: [crate::list_scroll::ListScroll; BAND_COLS],
+    /// true = the keyboard belongs to the story input; the band stays visible
+    /// but dimmed (Tab toggles).
     pub story_focused: bool,
+    /// Objects in the current room, refreshed every frame from the engine.
+    pub here: Vec<String>,
+    /// Objects the player carries, refreshed every frame from the engine.
+    pub carried: Vec<String>,
+    /// true when `here` came from the transcript scrape rather than the object
+    /// tree (Glulx / Scott, which have no `Introspect`). The column relabels
+    /// itself "seen" so the lower quality is visible instead of mixed in.
+    pub here_is_seen: bool,
 }
 
-impl VerbMenuState {
-    /// Return the token that is currently selected (token to append on Pick).
-    pub fn selected_token<'a>(&'a self, verbs: &'a [&'static str], preps: &'a [&'static str]) -> &'a str {
-        match self.pane {
-            VerbMenuPane::Verbs => verbs.get(self.verb_scroll.selected).copied().unwrap_or(""),
-            VerbMenuPane::Nouns => self.nouns.get(self.noun_scroll.selected).map(|s| s.as_str()).unwrap_or(""),
-            VerbMenuPane::Preps => preps.get(self.prep_scroll.selected).copied().unwrap_or(""),
+impl CommandBandState {
+    pub fn new(verbs: Vec<VerbEntry>, quick: Vec<String>) -> Self {
+        CommandBandState { verbs, quick, ..Default::default() }
+    }
+
+    // ── Phrase ───────────────────────────────────────────────────────────────
+
+    fn slot_text(&self, slot: BandSlot) -> Option<&str> {
+        self.picks.iter().find(|p| p.slot == slot).map(|p| p.text.as_str())
+    }
+
+    /// The picked verb's table entry (grammar for everything downstream).
+    pub fn verb_entry(&self) -> Option<&VerbEntry> {
+        let w = self.slot_text(BandSlot::Verb)?;
+        self.verbs.iter().find(|v| v.word == w)
+    }
+
+    /// The picked verb's arity, if a verb is picked.
+    ///
+    /// A picked word that is not in the table is [`Arity::Solo`]. That can only
+    /// come from the quick row — every column pick is drawn from the table —
+    /// and a quick action IS the whole command (`n`, `again`), so it is complete
+    /// as it stands. Without this, a quick row holding `n` (not a table verb,
+    /// which spells it `north`) could never arm.
+    pub fn arity(&self) -> Option<Arity> {
+        let word = self.slot_text(BandSlot::Verb)?;
+        Some(self.verbs.iter().find(|v| v.word == word).map_or(Arity::Solo, |v| v.arity))
+    }
+
+    /// The preposition joining the two objects of the picked pair verb.
+    pub fn prep(&self) -> Option<&str> {
+        self.verb_entry().and_then(|v| v.prep.as_deref())
+    }
+
+    /// Materialize the phrase as the plain text the game will parse. Multi-word
+    /// object names go in as-is: `unlock iron door with brass key` is exactly
+    /// what a player would type, so nothing is quoted or escaped.
+    pub fn phrase_text(&self) -> String {
+        let mut out: Vec<&str> = Vec::new();
+        if let Some(v) = self.slot_text(BandSlot::Verb) {
+            out.push(v);
         }
+        if let Some(o) = self.slot_text(BandSlot::Object) {
+            out.push(o);
+        }
+        if let Some(s) = self.slot_text(BandSlot::Second) {
+            if let Some(p) = self.prep() {
+                out.push(p);
+            }
+            out.push(s);
+        }
+        out.join(" ")
+    }
+
+    /// Whether the phrase is grammatically complete — i.e. whether the phrase
+    /// line is ARMED and Enter would send it.
+    pub fn complete(&self) -> bool {
+        match self.arity() {
+            None => false,
+            Some(Arity::Solo) | Some(Arity::ObjectOpt) => true,
+            Some(Arity::Object) => self.slot_text(BandSlot::Object).is_some(),
+            Some(Arity::Pair) => {
+                self.slot_text(BandSlot::Object).is_some()
+                    && self.slot_text(BandSlot::Second).is_some()
+            }
+        }
+    }
+
+    // ── Columns ──────────────────────────────────────────────────────────────
+
+    /// Whether `col` can be picked from yet, given what the phrase already has.
+    /// Columns to the right of the active one stay unreachable until the
+    /// grammar opens them.
+    pub fn col_reachable(&self, col: usize) -> bool {
+        match col {
+            COL_VERB => true,
+            COL_HERE | COL_CARRIED => !matches!(self.arity(), None | Some(Arity::Solo)),
+            COL_SECOND => {
+                matches!(self.arity(), Some(Arity::Pair))
+                    && self.slot_text(BandSlot::Object).is_some()
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `col`'s grammatical slot is already filled.
+    pub fn col_filled(&self, col: usize) -> bool {
+        match col {
+            COL_VERB => self.slot_text(BandSlot::Verb).is_some(),
+            COL_HERE | COL_CARRIED => self.slot_text(BandSlot::Object).is_some(),
+            COL_SECOND => self.slot_text(BandSlot::Second).is_some(),
+            _ => false,
+        }
+    }
+
+    /// Which slot a pick in `col` fills.
+    pub fn col_slot(col: usize) -> BandSlot {
+        match col {
+            COL_VERB => BandSlot::Verb,
+            COL_SECOND => BandSlot::Second,
+            _ => BandSlot::Object,
+        }
+    }
+
+    /// The column's header text.
+    pub fn column_label(&self, col: usize) -> String {
+        match col {
+            COL_VERB => "VERB".to_string(),
+            COL_HERE => {
+                if self.here_is_seen {
+                    "WHAT — seen".to_string()
+                } else {
+                    "WHAT — here".to_string()
+                }
+            }
+            COL_CARRIED => "WHAT — carried".to_string(),
+            COL_SECOND => match self.prep() {
+                Some(p) => format!("{}…", p.to_uppercase()),
+                None => "WITH…".to_string(),
+            },
+            _ => String::new(),
+        }
+    }
+
+    /// The column's items before filtering.
+    pub fn items(&self, col: usize) -> Vec<String> {
+        match col {
+            COL_VERB => self.verbs.iter().map(|v| v.word.clone()).collect(),
+            COL_HERE => self.here.clone(),
+            COL_CARRIED => self.carried.clone(),
+            COL_SECOND => {
+                // Carried first (the usual instrument), then anything here that
+                // isn't already listed.
+                let mut out = self.carried.clone();
+                for h in &self.here {
+                    if !out.iter().any(|c| c.eq_ignore_ascii_case(h)) {
+                        out.push(h.clone());
+                    }
+                }
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The column's items as displayed: the incremental type-to-filter applies
+    /// to the ACTIVE column only.
+    pub fn filtered_items(&self, col: usize) -> Vec<String> {
+        let items = self.items(col);
+        if self.filter.is_empty() || self.focus != BandFocus::Column(col) {
+            return items;
+        }
+        let f = self.filter.to_lowercase();
+        items.into_iter().filter(|i| i.to_lowercase().contains(&f)).collect()
+    }
+
+    // ── Focus ────────────────────────────────────────────────────────────────
+
+    /// The left-to-right focus ring: every reachable column, then the phrase
+    /// line. `←`/`→` step through this; unreachable columns are skipped.
+    pub fn focus_stops(&self) -> Vec<BandFocus> {
+        let mut v: Vec<BandFocus> =
+            (0..BAND_COLS).filter(|&c| self.col_reachable(c)).map(BandFocus::Column).collect();
+        v.push(BandFocus::Phrase);
+        v
+    }
+
+    /// Step the focus by `delta` stops along the ring (clamped, not wrapped —
+    /// the ring has a real left and right end, which is the point of a
+    /// left-to-right narrowing).
+    pub fn move_focus(&mut self, delta: i32) {
+        let stops = self.focus_stops();
+        let cur = stops.iter().position(|s| *s == self.focus).unwrap_or(0) as i32;
+        let next = (cur + delta).clamp(0, stops.len() as i32 - 1) as usize;
+        if stops[next] != self.focus {
+            self.focus = stops[next];
+            self.filter.clear();
+        }
+    }
+
+    /// Move focus to the next reachable UNFILLED column, or to the phrase line
+    /// when there is nothing left to pick.
+    pub fn advance(&mut self) {
+        self.filter.clear();
+        for c in 0..BAND_COLS {
+            if self.col_reachable(c) && !self.col_filled(c) {
+                self.focus = BandFocus::Column(c);
+                return;
+            }
+        }
+        self.focus = BandFocus::Phrase;
+    }
+
+    // ── Picking ──────────────────────────────────────────────────────────────
+
+    fn set_slot(&mut self, slot: BandSlot, text: String) {
+        // Filling a slot invalidates everything picked after it: choosing a new
+        // verb must not leave the old verb's object stranded in the phrase.
+        if let Some(pos) = self.picks.iter().position(|p| p.slot == slot) {
+            self.picks.truncate(pos);
+        }
+        self.picks.push(BandPick { slot, text });
+    }
+
+    /// Pick row `idx` of the (filtered) column `col`. No-op when the column is
+    /// unreachable or the index is out of range.
+    pub fn pick(&mut self, col: usize, idx: usize) {
+        if !self.col_reachable(col) {
+            return;
+        }
+        let Some(text) = self.filtered_items(col).get(idx).cloned() else { return };
+        self.set_slot(Self::col_slot(col), text);
+        self.advance();
+    }
+
+    /// Pick a verb by word (the quick row, and tests). Replaces the phrase
+    /// wholesale: a quick action is a fresh command, not an addition.
+    pub fn pick_word(&mut self, word: &str) {
+        self.picks.clear();
+        self.set_slot(BandSlot::Verb, word.to_string());
+        self.advance();
+    }
+
+    /// Un-pick the most recent token and step the cursor back to its column.
+    /// Returns false when there was nothing to un-pick.
+    pub fn unpick(&mut self) -> bool {
+        let Some(p) = self.picks.pop() else { return false };
+        self.filter.clear();
+        self.focus = BandFocus::Column(match p.slot {
+            BandSlot::Verb => COL_VERB,
+            BandSlot::Object => COL_HERE,
+            BandSlot::Second => COL_SECOND,
+        });
+        true
+    }
+
+    /// Drop the whole phrase and return to the verb column.
+    pub fn clear_phrase(&mut self) {
+        self.picks.clear();
+        self.filter.clear();
+        self.focus = BandFocus::Column(COL_VERB);
+    }
+
+    /// The active column index, if the cursor is on a column.
+    pub fn active_col(&self) -> Option<usize> {
+        match self.focus {
+            BandFocus::Column(c) => Some(c),
+            BandFocus::Phrase => None,
+        }
+    }
+
+    /// Whether any of the band's per-column scrolls is animating.
+    pub fn has_active_animation(&self) -> bool {
+        self.scroll.iter().any(|s| s.has_active_animation())
     }
 }
 
@@ -1121,8 +1409,8 @@ pub enum ResizeTarget {
     StoryMap,
     /// The inventory dock height.
     InvDock,
-    /// The verb dock width (only while the verb menu is open; SQ-0238).
-    VerbDock,
+    /// The command band's height (only while the band is open; SQ-0238).
+    CommandBand,
 }
 
 /// Where the event loop should go when the current story ends. `Exit` leaves
@@ -1144,8 +1432,8 @@ pub enum ExitTarget {
 pub struct PaneSizes {
     /// Story's % of the story/map Split (default 50).
     pub split_ratio: u16,
-    /// Verb dock width as % of screen width (default 32).
-    pub verb_dock_pct: u16,
+    /// Command band height in rows, including its frame (default 8).
+    pub band_height: u16,
     /// Inventory dock height cap as % of screen height (default 33).
     pub inv_dock_pct: u16,
 }
@@ -1299,8 +1587,9 @@ pub struct OverlayState {
     /// Active VFS file-picker modal state (read-mode `create_by_prompt`).
     /// `None` means the picker is closed.
     pub file_picker: Option<FilePickerState>,
-    /// Active verb/item token-palette modal state. `None` means the modal is closed.
-    pub verb_menu: Option<VerbMenuState>,
+    /// Active command-band dock state. `None` means the band is closed.
+    /// Deliberately NOT a modal — see [`AppState::any_modal_overlay_open`].
+    pub command_band: Option<CommandBandState>,
     /// Active command-palette popup state (fuzzy slash-command search). `None`
     /// means the palette is closed. (SQ-0419)
     pub palette: Option<PaletteState>,
@@ -1868,8 +2157,8 @@ pub struct AppState {
 
     /// Slide-in inventory dock (bottom). Session-only; starts closed.
     pub inv_dock: crate::anim::PanelSlide,
-    /// Slide-in verb menu dock (left). Session-only; starts closed.
-    pub verb_dock: crate::anim::PanelSlide,
+    /// Slide-in command band (bottom). Session-only; starts closed.
+    pub band_dock: crate::anim::PanelSlide,
 }
 
 impl Default for AppState {
@@ -1949,7 +2238,11 @@ impl Default for AppState {
             ingame_io: None,
             ingame_resume_save: None,
             config: crate::config::Config::default(),
-            pane_sizes: PaneSizes { split_ratio: 50, verb_dock_pct: 32, inv_dock_pct: 33 },
+            pane_sizes: PaneSizes {
+                split_ratio: 50,
+                band_height: crate::render::command_band::DEFAULT_BAND_ROWS,
+                inv_dock_pct: 33,
+            },
             pending_config_write: false,
             resize_mode: false,
             resize_target: ResizeTarget::StoryMap,
@@ -1995,7 +2288,7 @@ impl Default for AppState {
             inline_image_render: std::cell::RefCell::new(Default::default()),
             vm_halted: false,
             inv_dock: crate::anim::PanelSlide::closed(),
-            verb_dock: crate::anim::PanelSlide::closed(),
+            band_dock: crate::anim::PanelSlide::closed(),
         }
     }
 }
@@ -2013,26 +2306,28 @@ impl AppState {
             || self.overlays.saves.as_ref().is_some_and(|s| s.scroll.has_active_animation())
             || self.overlays.file_browser.as_ref().is_some_and(|fb| fb.scroll.has_active_animation())
             || self.overlays.config_screen.as_ref().is_some_and(|cs| cs.scroll.has_active_animation())
-            || self.overlays.verb_menu.as_ref().is_some_and(|vm| {
-                vm.verb_scroll.has_active_animation()
-                    || vm.noun_scroll.has_active_animation()
-                    || vm.prep_scroll.has_active_animation()
-            })
+            || self.overlays.command_band.as_ref().is_some_and(|b| b.has_active_animation())
             || self.overlays.replay.as_ref().is_some_and(|r| r.scroll.has_active_animation())
             || self.overlays.hints.as_ref().is_some_and(|h| h.has_active_animation())
             || self.inv_dock.active()
-            || self.verb_dock.active()
+            || self.band_dock.active()
             || self.notifications.needs_tick()
     }
 
-    /// Clear `verb_menu` once its slide-out has fully settled. The verb dock
-    /// is a "drawer": content persists while `verb_dock` animates closed (so
-    /// the panel visibly slides out instead of vanishing instantly), and is
-    /// only dropped once the slide is done and it's logically closed.
-    pub fn settle_verb_dock(&mut self) {
-        if self.overlays.verb_menu.is_some() && !self.verb_dock.open && !self.verb_dock.active() {
-            self.overlays.verb_menu = None;
+    /// Clear `command_band` once its slide-out has fully settled. The band is a
+    /// "drawer": content persists while `band_dock` animates closed (so the
+    /// panel visibly slides out instead of vanishing instantly), and is only
+    /// dropped once the slide is done and it's logically closed.
+    pub fn settle_command_band(&mut self) {
+        if self.overlays.command_band.is_some() && !self.band_dock.open && !self.band_dock.active()
+        {
+            self.overlays.command_band = None;
         }
+    }
+
+    /// True while the command band is on screen (open, or still sliding).
+    pub fn command_band_visible(&self) -> bool {
+        self.overlays.command_band.is_some() || self.band_dock.active()
     }
 
     /// Play the turn's sound events through the backend (gated on config +
@@ -2286,7 +2581,11 @@ impl AppState {
             || self.overlays.file_browser.is_some()
             || self.overlays.file_picker.is_some()
             || self.overlays.config_screen.is_some()
-            || self.overlays.verb_menu.is_some()
+            // NOT the command band (SQ-0664): it is a dock, not dialog chrome.
+            // Counting it here is what made the old verb menu degrade the
+            // session — it hid the story prompt line, swallowed paste, blocked
+            // v6/Glk click delivery, and dropped graphical v6 off the pixel
+            // path for as long as it was open.
             || self.overlays.palette.is_some()
             || self.overlays.hotkey_dialog
             || self.overlays.text_entry.is_some()
@@ -2346,7 +2645,6 @@ impl AppState {
         if self.overlays.file_browser.is_some() { v.push("file_browser"); }
         if self.overlays.file_picker.is_some() { v.push("file_picker"); }
         if self.overlays.config_screen.is_some() { v.push("config_screen"); }
-        if self.overlays.verb_menu.is_some() { v.push("verb_menu"); }
         if self.overlays.palette.is_some() { v.push("palette"); }
         if self.overlays.hotkey_dialog { v.push("hotkey_dialog"); }
         if self.overlays.text_entry.is_some() { v.push("text_entry"); }
@@ -2603,12 +2901,12 @@ impl AppState {
 
     /// Which panes are currently visible and eligible for resize mode, in
     /// Tab-cycle order: StoryMap (Split layout only), InvDock (inventory
-    /// shown), VerbDock (verb menu open).
+    /// shown), CommandBand (band open).
     ///
-    /// The verb dock is only a resize target while the verb menu is open —
-    /// resize mode now preempts the verb-menu key intercept, so the two can be
-    /// active at once (SQ-0238). Its width (`verb_dock_pct`) is also a
-    /// persisted, resettable config value.
+    /// The band is only a resize target while it is open — resize mode preempts
+    /// the band's key intercept, so the two can be active at once (SQ-0238). Its
+    /// height (`command_band.height`) is also a persisted, resettable config
+    /// value.
     pub fn resize_targets_visible(&self) -> Vec<ResizeTarget> {
         let mut targets = Vec::new();
         if self.layout == Layout::Split {
@@ -2617,8 +2915,8 @@ impl AppState {
         if self.show_inventory {
             targets.push(ResizeTarget::InvDock);
         }
-        if self.overlays.verb_menu.is_some() {
-            targets.push(ResizeTarget::VerbDock);
+        if self.overlays.command_band.is_some() {
+            targets.push(ResizeTarget::CommandBand);
         }
         targets
     }
@@ -2643,11 +2941,11 @@ impl AppState {
     pub fn reset_pane_sizes(&mut self) {
         self.pane_sizes = PaneSizes {
             split_ratio: crate::config::default_split_ratio(),
-            verb_dock_pct: crate::config::default_verb_dock_pct(),
+            band_height: crate::config::default_band_height(),
             inv_dock_pct: crate::config::default_inv_dock_pct(),
         };
         self.config.split_ratio = self.pane_sizes.split_ratio;
-        self.config.verb_dock_pct = self.pane_sizes.verb_dock_pct;
+        self.config.command_band.height = self.pane_sizes.band_height;
         self.config.inv_dock_pct = self.pane_sizes.inv_dock_pct;
     }
 
@@ -4351,17 +4649,12 @@ mod tests {
         assert!(s.any_overlay_open(), "config_screen open => any_overlay_open true");
         s.overlays.config_screen = None;
 
-        // verb_menu
-        s.overlays.verb_menu = Some(VerbMenuState {
-            pane: VerbMenuPane::Verbs,
-            verb_scroll: Default::default(),
-            noun_scroll: Default::default(),
-            prep_scroll: Default::default(),
-            nouns: vec![],
-            story_focused: false,
-        });
-        assert!(s.any_overlay_open(), "verb_menu open => any_overlay_open true");
-        s.overlays.verb_menu = None;
+        // The command band is deliberately absent from this list: it is a dock,
+        // not a modal, and must NOT register as an overlay at all (SQ-0664).
+        s.overlays.command_band = Some(CommandBandState::default());
+        assert!(!s.any_overlay_open(), "the command band is not an overlay");
+        assert!(!s.any_modal_overlay_open(), "…and certainly not a modal one");
+        s.overlays.command_band = None;
 
         // hotkey_dialog
         s.overlays.hotkey_dialog = true;

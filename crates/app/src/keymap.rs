@@ -287,6 +287,11 @@ impl Default for KeyMap {
         // this entry lets the keymap advertise it for hints/help).
         bind!(plain(Tab), "toggle-focus", Context::Global);
 
+        // F2 opens the command band directly (SQ-0664). The leader binding
+        // (Ctrl+P v) and the slash command stay, but leader-only is precisely
+        // why nobody found the old verb menu.
+        bind!(plain(F(2)), "open-command-band", Context::Global);
+
         bind!(ctrl(Char('s')), "save-state", Context::Global);
         bind!(ctrl(Char('r')), "restore-state", Context::Global);
 
@@ -449,7 +454,7 @@ const DEFAULT_GROUPS: &[DefaultGroup] = &[
     ("Layout", &[('t', "tidy-map", "tidy the layout"), ('a', "animate-tidy", "animate a tidy pass")]),
     ("Layers", &[('p', "peel-layer", "peel region into a new layer"), ('m', "merge-layer", "merge layer down"), ('c', "cycle-layer next", "next map layer")]),
     ("Edit", &[('r', "rename-room", "rename room"), ('n', "edit-notes", "edit room notes"), ('d', "delete-connection", "delete connection"), ('e', "relabel-edge", "relabel edge")]),
-    ("View", &[('i', "toggle-inventory", "inventory strip"), ('l', "toggle-portal-labels", "portal labels"), ('v', "open-verb-menu", "verb/item palette"), ('u', "toggle-untried-exits", "mark untried exits")]),
+    ("View", &[('i', "toggle-inventory", "inventory strip"), ('l', "toggle-portal-labels", "portal labels"), ('v', "open-command-band", "command band"), ('u', "toggle-untried-exits", "mark untried exits")]),
     // SQ-0599: zoom and centring used to be plain +/- and c while the map held
     // the keyboard. With that focus mode gone they would otherwise be
     // mouse-only, so they live here — on the keys they always used, which keeps
@@ -1081,7 +1086,7 @@ mod tests {
         assert_eq!(layout.leader_command('n'), Some("edit-notes"));
         assert_eq!(layout.leader_command('i'), Some("toggle-inventory"));
         assert_eq!(layout.leader_command('l'), Some("toggle-portal-labels"));
-        assert_eq!(layout.leader_command('v'), Some("open-verb-menu"));
+        assert_eq!(layout.leader_command('v'), Some("open-command-band"));
         assert_eq!(layout.leader_command('s'), Some("open-config"));
         assert_eq!(layout.leader_command('g'), Some("reset-game"));
         // 'q' is deliberately unassigned (bare q closes the dialog):

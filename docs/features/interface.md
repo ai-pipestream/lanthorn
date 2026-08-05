@@ -152,9 +152,37 @@ know which side you're on).
   own output (`/help` and friends) never pages; and a game that asks for
   `[MORE]` suppression (Zork Zero's demo mode) gets it. The bar is themeable
   via `more_prompt`.
-- **Verb/noun menu** — a two-pane token palette of common verbs and in-scope
-  nouns; pick tokens to assemble a command (multi-noun sentences via
-  prepositions), never typing a word.
+- **The command band** (**F2**, or `/open-command-band`) — a Journey-style
+  bottom dock that builds a command by pointing, never typing a word. Columns
+  fill in left to right as the phrase narrows: **VERB**, then **WHAT — here**
+  and **WHAT — carried**, then a **WITH…/IN…/TO…** column for verbs that take
+  two objects. Each verb declares its shape, so only the columns that can come
+  next are offered; the rest stay dimmed until they are reachable.
+
+  The object columns are **live**: they read the running story's object tree and
+  refresh every turn, so taking something moves it from *here* to *carried* as
+  you watch. (Glulx and Scott have no object tree yet, so *here* degrades to a
+  clearly-labelled **WHAT — seen** list scraped from recent output.)
+
+  Nothing ever fires a turn by itself. A grammatically complete phrase *arms*
+  the phrase line (`Enter: send` lights up) and waits for **Enter** or a click
+  on the line — including the one-click quick-action row along the bottom
+  (`n s e w · up down · in out · look inventory wait again`), whose picks also
+  just fill the phrase.
+
+  It is a dock, not a modal: the story prompt stays live underneath, paste keeps
+  working, and graphical v6 keeps its artwork. **Tab** hands the keyboard to the
+  story input for free typing with the band still on screen, and back. While the
+  band has the keyboard, **←/→** move between columns, **↑/↓** within one,
+  typing filters the active column, **Backspace** clears a filter character and
+  then un-picks the last token, and **Esc** steps back one level per press
+  (filter → phrase → close). Everything visible is clickable and the wheel
+  scrolls whichever column is under the pointer. While it is open it subsumes
+  the inventory dock — the *carried* column IS your inventory — which returns
+  when you close it.
+
+  Its height, its verb grammar and its quick row are all configurable under
+  `[command_band]` in `config.toml`; resize mode targets its height.
 - **Tab autocomplete** from the story's own dictionary plus the nouns mentioned
   in the current room, shown the way your shell shows it: the rest of the word
   appears in dim ghost text right under the caret as you type. **Tab** cycles

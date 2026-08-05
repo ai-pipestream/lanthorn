@@ -371,8 +371,24 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("dialog.list_header", Section::Dialog, Kind::Style, Some("text"), mods(false, false, true, false)),
     // The hints panel's dim "this game has its own hints" suggestion line.
     row("dialog.hint_suggestion", Section::Dialog, Kind::Style, Some("alert"), Delta { dim: true, ..Delta::EMPTY }),
-    // The verb dock's composed-input preview line ("Input: <text>_").
+    // The composed-input preview line shown by list dialogs ("Input: <text>_").
     row("dialog.input_preview", Section::Dialog, Kind::Style, Some("alert"), Delta::EMPTY),
+    // ── SQ-0664: the command band (bottom dock). Its rows reuse
+    // `dialog.list_selected` and its frame reuses `panel.border[:active]`; these
+    // are the parts that are its own. ────────────────────────────────────────
+    // The phrase under construction. Plain text while incomplete; the `:armed`
+    // variant is what "Enter: send" looks like — a complete phrase, accented and
+    // bold, so the one state that can start a turn is unmistakable.
+    row("band.phrase", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("band.phrase:armed", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
+    // Column headers (VERB / WHAT — here / WHAT — carried / WITH…): muted until
+    // the column holds the cursor.
+    row("band.column_header", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    row("band.column_header:active", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
+    // The one-click quick-action row along the bottom of the band.
+    row("band.quick", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    // In-column group labels and the "(nothing visible)" placeholder.
+    row("band.group_label", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
     // The file browser's current-directory row and unselected directory entries.
     row("file_browser_cwd", Section::Elements, Kind::Style, Some("alert"), Delta::EMPTY),
     row("file_browser_dir", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
@@ -542,6 +558,13 @@ mod tests {
         "dialog.list_header",
         "dialog.hint_suggestion",
         "dialog.input_preview",
+        // SQ-0664: the command band
+        "band.phrase",
+        "band.phrase:armed",
+        "band.column_header",
+        "band.column_header:active",
+        "band.quick",
+        "band.group_label",
         "file_browser_cwd",
         "file_browser_dir",
         "inspector_edge_ok",

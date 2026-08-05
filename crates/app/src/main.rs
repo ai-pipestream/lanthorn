@@ -26,7 +26,7 @@ use app::tidy::should_bg_tidy;
 use app::persist_files::{list_saves, restore_game};
 use app::render::dialog::{DialogRects, DialogStyle};
 use app::render::hints_panel::{hint_input_action, hint_key_routes, HintInputAct, HintKeyKind, HintsPanelRects};
-use app::render::verbmenu::draw_verb_menu;
+use app::render::command_band::draw_command_band;
 use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
 use app::render::paneframe::{build_layer_segments, InsetSegment};
@@ -496,8 +496,9 @@ struct PaneRects {
     pub launch_dialog: Option<app::render::launch_dialog::LaunchDialogRects>,
     /// Hit-rects for the hints panel (when open).
     pub hints_panel: Option<HintsPanelRects>,
-    /// Hit-rects for the verb dock's token rows and section headers (when open).
-    pub verb_menu: app::render::verbmenu::VerbMenuHits,
+    /// Hit-rects for the command band (when open): its own rect, the phrase
+    /// line, column headers, item rows and the quick row.
+    pub command_band: app::render::command_band::CommandBandHits,
     /// Hit-rects for the command palette's candidate rows, as `(cmd_index, rect)`;
     /// the mouse handler hit-tests these to execute a command on click. (SQ-0419)
     pub palette: Vec<(usize, Rect)>,
@@ -568,7 +569,7 @@ fn draw_frame(
     let mut debug_tabs_out: Vec<(usize, usize, Rect)> = Vec::new();
     let mut dialog_rects_out: Option<DialogRects> = None;
     let mut overlay_rects: Option<overlays::OverlayRects> = None;
-    let mut verb_hits = app::render::verbmenu::VerbMenuHits::default();
+    let mut band_hits = app::render::command_band::CommandBandHits::default();
     let mut palette_hits: Vec<(usize, Rect)> = Vec::new();
     let mut modal_list_viewport: usize = 0;
     let mut transcript_max_scroll: u16 = 0;
@@ -882,17 +883,18 @@ fn draw_frame(
             app::render::inventory_dock::draw_inventory_dock(&inv_items, pane_layout.inv_dock, &state.colors, inv_resize_hl, buf);
         }
 
-        // ── Verb dock panel ────────────────────────────────────────────────────
-        if pane_layout.verb_dock.width > 0 {
-            draw_verb_menu(state, pane_layout.verb_dock, buf, &mut modal_list_viewport, &mut verb_hits);
+        // ── Command band ───────────────────────────────────────────────────────
+        if pane_layout.command_band.height > 0 {
+            draw_command_band(state, pane_layout.command_band, buf, &mut modal_list_viewport, &mut band_hits);
         }
 
         // ── Change 2: draw help bar in bottom row ─────────────────────────────
         let help_style = state.colors.theme.get("help_bar").style;
         let help_text = if state.overlays.config_screen.is_some() {
             "\u{2191}\u{2193} move  \u{2190}\u{2192}/Space change  s save  Esc cancel".to_string()
-        } else if state.overlays.verb_menu.is_some() {
-            "Verb Menu | Tab/\u{2190}\u{2192}: pane | \u{2191}\u{2193}: move | Enter/Space: pick | Esc: close".to_string()
+        } else if state.overlays.command_band.is_some() && !state.resize_mode {
+            "Command Band | \u{2190}\u{2192}: column | \u{2191}\u{2193}: row | type: filter | Enter: pick/send | Tab: story | Esc: back"
+                .to_string()
         } else if state.overlays.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
             "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc: cancel".to_string()
         } else if state.overlays.saves.is_some() {
@@ -915,7 +917,7 @@ fn draw_frame(
             let t = match state.resize_target {
                 ResizeTarget::StoryMap => "story/map",
                 ResizeTarget::InvDock => "inventory",
-                ResizeTarget::VerbDock => "verb dock",
+                ResizeTarget::CommandBand => "command band",
             };
             format!("Resize [{t}] | Tab: pane | arrows: adjust | 0: reset | Esc: done")
         } else {
@@ -1001,7 +1003,67 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, verb_menu: verb_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, room_rects: room_rects_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
+}
+
+// ── Command-band mouse routing ───────────────────────────────────────────────
+
+/// Resolve a mouse event against the command band's hit rects, or `None` when
+/// the event does not belong to the band (it is outside its rect, or the band is
+/// closed) and must fall through to the game / map / story handling.
+///
+/// Everything visible in the band is clickable: a row picks and advances, a
+/// header focuses its column, a quick word fills the phrase, and the phrase line
+/// sends when armed. The wheel scrolls whichever column is under the pointer.
+fn band_mouse_action(
+    state: &AppState,
+    panes: &PaneRects,
+    m: crossterm::event::MouseEvent,
+) -> Option<Action> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+
+    state.overlays.command_band.as_ref()?;
+    let hits = &panes.command_band;
+    let inside = |r: &Rect| {
+        r.width > 0 && r.height > 0 && m.column >= r.x && m.column < r.right() && m.row >= r.y
+            && m.row < r.bottom()
+    };
+    if !inside(&hits.area) {
+        return None;
+    }
+
+    match m.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let d = app::input::wheel_delta(m.kind, state.config.mouse_wheel_invert)?;
+            // Scroll the column under the pointer, focusing it first so the
+            // scroll lands where the user is looking.
+            let col = hits.columns.iter().find(|(_, r)| inside(r)).map(|(c, _)| *c);
+            match col {
+                Some(c) if state.overlays.command_band.as_ref().is_some_and(|b| b.col_reachable(c)) => {
+                    Some(Action::BandWheel(c, d as i32))
+                }
+                _ => Some(Action::None),
+            }
+        }
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some((col, idx, _)) = hits.rows.iter().find(|(_, _, r)| inside(r)).copied() {
+                return Some(Action::BandClickRow(col, idx));
+            }
+            if let Some((i, _)) = hits.quick.iter().find(|(_, r)| inside(r)).copied() {
+                return Some(Action::BandQuickPick(i));
+            }
+            if hits.phrase.as_ref().is_some_and(inside) {
+                return Some(app::input::band_enter_action(state));
+            }
+            if let Some((col, _)) = hits.headers.iter().find(|(_, r)| inside(r)).copied() {
+                return Some(Action::BandFocusCol(col));
+            }
+            // Anywhere else inside the band: take the keyboard, do nothing else.
+            Some(Action::BandFocusBand)
+        }
+        // Drag/Up inside the band must not start a story-pane text selection.
+        _ => Some(Action::None),
+    }
 }
 
 // ── File-browser entry action helper ─────────────────────────────────────────
@@ -1341,7 +1403,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
 
     // Track the last-known pane rects for accurate recenter_on calls and mouse routing.
     // Initialized to a zero-sized default; updated by every draw_frame call.
-    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, confirm_overwrite: None, quit_dialog: None, launch_dialog: None, hints_panel: None, verb_menu: Default::default(), palette: Vec::new(), transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_surface: false, transcript_total_rows: 0, modal_list_viewport: 0 };
+    let mut last_panes = PaneRects { map: Rect::default(), story: Rect::default(), room_rects: Vec::new(), layer_tabs: Vec::new(), debug_tabs: Vec::new(), dialog: None, aux_dialog: None, reset_dialog: None, game_over: None, save_name_dialog: None, text_entry: None, confirm_delete: None, confirm_overwrite: None, quit_dialog: None, launch_dialog: None, hints_panel: None, command_band: Default::default(), palette: Vec::new(), transcript_links: Vec::new(), transcript_max_scroll: 0, transcript_viewport_rows: 0, transcript_surface: false, transcript_total_rows: 0, modal_list_viewport: 0 };
 
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
@@ -1445,6 +1507,10 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         needs_redraw |= state.poll_render_job();
         needs_redraw |= state.poll_v6_encode_job();
         needs_redraw |= loop_tick::refresh_engine_input(&mut state, &mut *session);
+        // The command band's object columns are LIVE: refilled from the engine
+        // every tick, so a take/drop moves an object between *here* and
+        // *carried* on the very next frame (SQ-0664).
+        needs_redraw |= loop_tick::refresh_command_band_objects(&mut state, &*session);
         needs_redraw |= loop_tick::expire_sound_and_settle_dock(&mut state);
 
         // Draw — unless we're mid-drain of an input burst (skip_draw), in which
@@ -1610,20 +1676,20 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             if let Some(s) = &mut state.overlays.saves { needs_redraw |= s.scroll.finalize_if_done(); }
             if let Some(fb) = &mut state.overlays.file_browser { needs_redraw |= fb.scroll.finalize_if_done(); }
             if let Some(cs) = &mut state.overlays.config_screen { needs_redraw |= cs.scroll.finalize_if_done(); }
-            if let Some(vm) = &mut state.overlays.verb_menu {
-                needs_redraw |= vm.verb_scroll.finalize_if_done();
-                needs_redraw |= vm.noun_scroll.finalize_if_done();
-                needs_redraw |= vm.prep_scroll.finalize_if_done();
+            if let Some(b) = &mut state.overlays.command_band {
+                for s in b.scroll.iter_mut() {
+                    needs_redraw |= s.finalize_if_done();
+                }
             }
             if let Some(r) = &mut state.overlays.replay { needs_redraw |= r.scroll.finalize_if_done(); }
             if let Some(h) = &mut state.overlays.hints { needs_redraw |= h.finalize_scroll_if_done(); }
             // Docks slide via a Tween that goes inactive (not dropped) at done();
             // finalize drops the finished tween and forces the settle frame so a
             // just-opened dock paints fully and a closing inv_dock loses its last
-            // sliver. (verb_dock CLOSE is separately covered by settle_verb_dock
+            // sliver. (the band's CLOSE is separately covered by settle_command_band
             // dropping the drawer content next iteration.) (SQ-0305)
             needs_redraw |= state.inv_dock.finalize_if_done();
-            needs_redraw |= state.verb_dock.finalize_if_done();
+            needs_redraw |= state.band_dock.finalize_if_done();
             continue;
         }
 
@@ -2437,6 +2503,25 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     KeyResolve::None => Action::None,
                 }
             }
+            // ── Command band (SQ-0664) ────────────────────────────────────────
+            // The band is NOT a modal, so unlike the old verb dock it cannot
+            // lean on `any_overlay_open()` to keep clicks away from the game. It
+            // claims exactly its own rect instead — matched FIRST, so a click on
+            // a band row can never also reach a mouse-watching Glulx window or a
+            // v6 story's compass — and every click outside that rect falls
+            // straight through to the handling below, unchanged.
+            Event::Mouse(m) if band_mouse_action(&state, &last_panes, m).is_some() => {
+                match band_mouse_action(&state, &last_panes, m) {
+                    // A click on an armed phrase line sends, through the same
+                    // path a typed command takes.
+                    Some(send @ Action::SubmitText(_)) => send,
+                    Some(other) => {
+                        apply_action(other, &mut state, &mut mapper);
+                        continue 'event_loop;
+                    }
+                    None => unreachable!("guarded by the match arm"),
+                }
+            }
             Event::Mouse(m) => {
                 // Glk mouse input: a left-Down inside a mouse-watching Glulx window
                 // is delivered to the game as an Evtype_MouseInput, not a UI action.
@@ -2568,27 +2653,6 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         if let Some(&(layer, _)) = hit {
                             apply_action(Action::SetViewedLayer(layer), &mut state, &mut mapper);
                             continue 'event_loop;
-                        }
-                    }
-                }
-                // Verb dock: click a token to insert it; click a header to focus that section; click the
-                // story pane to return keyboard focus there (then fall through to normal story handling).
-                if state.overlays.verb_menu.is_some() {
-                    if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = m.kind {
-                        let inside = |r: &ratatui::layout::Rect| {
-                            r.width > 0 && r.height > 0 && m.column >= r.x && m.column < r.right() && m.row >= r.y && m.row < r.bottom()
-                        };
-                        if let Some((pane, idx, _)) = last_panes.verb_menu.rows.iter().find(|(_, _, r)| inside(r)).copied() {
-                            apply_action(Action::VerbMenuClickToken(pane, idx), &mut state, &mut mapper);
-                            continue 'event_loop;
-                        }
-                        if let Some((pane, _)) = last_panes.verb_menu.headers.iter().find(|(_, r)| inside(r)).copied() {
-                            apply_action(Action::VerbMenuFocusPane(pane), &mut state, &mut mapper);
-                            continue 'event_loop;
-                        }
-                        if inside(&last_panes.story) {
-                            if let Some(vm) = &mut state.overlays.verb_menu { vm.story_focused = true; }
-                            // fall through: normal story-pane click handling (selection) still runs below.
                         }
                     }
                 }
@@ -2751,7 +2815,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 continue;
             }
 
-            Action::SubmitCommand(_) => {
+            Action::SubmitCommand(_) | Action::SubmitText(_) => {
                 // A Glulx game waiting on a timer/mouse/hyperlink event only has no
                 // line request pending: Enter has nothing to submit. Swallow it
                 // (keeping the typed buffer intact for the real prompt) rather than
@@ -2762,7 +2826,22 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
 
                 // Normal game-focus command submission.
                 // Clear input line and echo command.
-                let cmd = state.take_input();
+                //
+                // `SubmitText` carries its own text — the command band's phrase,
+                // materialized to plain words — and deliberately does NOT consume
+                // the story input line, which may hold a half-typed command the
+                // player wrote after Tab-ing across (SQ-0664). From here on the
+                // two are indistinguishable: same history, same slash routing,
+                // same turn. The band clears its phrase and stays open.
+                let cmd = match &action {
+                    Action::SubmitText(t) => {
+                        if let Some(b) = &mut state.overlays.command_band {
+                            b.clear_phrase();
+                        }
+                        t.clone()
+                    }
+                    _ => state.take_input(),
+                };
 
                 // An empty cmd (Enter on a blank line) is still submitted to the
                 // game, which decides what a blank line means (re-prompt / "I beg

@@ -371,8 +371,16 @@ pub(crate) fn refresh_engine_input(
     redraw
 }
 
-/// Expire a finished sound pulse and settle the verb dock's slide-out. Returns
-/// `true` if the border reset or the drawer content dropped (→ repaint once).
+/// Refill the command band's object columns from the engine, once per loop tick.
+/// Thin wrapper over [`app::render::command_band::refresh_objects`], which lives
+/// in the lib so the integration tests can drive it against a real story.
+pub(crate) fn refresh_command_band_objects(state: &mut AppState, session: &dyn Engine) -> bool {
+    app::render::command_band::refresh_objects(state, session)
+}
+
+/// Expire a finished sound pulse and settle the command band's slide-out.
+/// Returns `true` if the border reset or the drawer content dropped
+/// (→ repaint once).
 pub(crate) fn expire_sound_and_settle_dock(state: &mut AppState) -> bool {
     let mut redraw = false;
 
@@ -389,11 +397,11 @@ pub(crate) fn expire_sound_and_settle_dock(state: &mut AppState) -> bool {
         redraw = true;
     }
 
-    // Clear the verb-menu content once its slide-out has fully settled
+    // Clear the command band's content once its slide-out has fully settled
     // (drawer pattern: content persists during the close animation).
-    let had_verb_menu = state.overlays.verb_menu.is_some();
-    state.settle_verb_dock();
-    if had_verb_menu && state.overlays.verb_menu.is_none() {
+    let had_band = state.overlays.command_band.is_some();
+    state.settle_command_band();
+    if had_band && state.overlays.command_band.is_none() {
         redraw = true; // drawer content dropped → repaint the cleared pane
     }
 

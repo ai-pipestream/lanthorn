@@ -25,7 +25,7 @@ still reach in and override any single selector by name.
   plus an optional delta (fg/bg/bold/italic/underline/dim/reversed) — so a
   minimal theme that only touches `[roles]` still looks fully coherent.
 - **Panels vs. windows.** *Panels* are the frames babelmap itself draws — the
-  story pane, map, verb menu, debug inspector, and every dialog/overlay.
+  story pane, map, command band, debug inspector, and every dialog/overlay.
   *Windows* are the surfaces the story/VM generates (Glk buffer/grid/graphics
   windows, the v4+ upper window). Panels are host chrome and never honor game
   colors; windows do, subject to the resolution chain below. Every panel shares
@@ -34,8 +34,8 @@ still reach in and override any single selector by name.
   today's cyan+bold focus highlight), `panel.background` for the body fill, and
   `panel.title` / `panel.tab` / `panel.tab:active` / `panel.tab_divider` /
   `panel.terminator_left` / `panel.terminator_right` for the title/tab strip
-  inset in the top border (every framed pane — story, map, dialogs, the verb
-  and inventory docks, the debug inspector's window tabs, the story-list info
+  inset in the top border (every framed pane — story, map, dialogs, the command
+  band and inventory dock, the debug inspector's window tabs, the story-list info
   panel — renders through this one shared panel component and these same
   selectors). The strip's bracket caps and divider track the pane's border
   style by default (`┤ … ├` on single, `┫ … ┣` on thick, `╡ … ╞` on double);
@@ -171,6 +171,13 @@ switches that make babelmap feel like yours without opening the whole registry.
   command name), `palette_match` (the fuzzy-matched characters, accent + bold by
   default), `palette_desc` (the one-line help), and `palette_selected` (the
   highlighted row). Its frame reuses the shared `[dialog]` chrome.
+- **Command band** — the band's own parts theme via six `[elements]` selectors:
+  `band.phrase` and `band.phrase:armed` (the phrase line, plain while
+  incomplete and accented + bold once it can be sent), `band.column_header` /
+  `band.column_header:active`, `band.quick` (the one-click row) and
+  `band.group_label` (in-column labels and the `(nothing visible)` placeholder).
+  Its rows reuse `dialog.list_selected` and its frame the shared
+  `panel.border` / `panel.border:active`.
 - **Decorated panes** — configurable per-pane borders (`none`/`single`/`double`/
   `thick`/`rounded`) via the shared `[panel]` chrome above: unfocused panels use
   `panel.border`, the focused one uses `panel.border:active`. The map's top
@@ -178,14 +185,14 @@ switches that make babelmap feel like yours without opening the whole registry.
   `panel.tab:active`); the story's top border shows the **adventure title**
   (taken from an override, the game's opening banner, or the filename). The
   status line and input prompt can be boxed too — all via `style.toml`.
-- **Unified dialogs** — every modal (saves, file browser, config screen, verb
-  menu, hotkey dialog, room/diagnostics panels) shares one themeable chrome:
+- **Unified dialogs** — every modal (saves, file browser, config screen,
+  hotkey dialog, room/diagnostics panels) shares one themeable chrome:
   a bordered, titled, opaque frame with a clickable **✕**, mouse-clickable
   buttons, and an optional **drop-shadow**. The confirm button (OK / Save) is
   **underlined** and starts focused, so **Enter** triggers it; **Tab** / **Shift-Tab**
   (and **←** / **→** on the confirm dialogs) cycle focus through the other buttons
   (the focused one is highlighted) and Enter then fires whichever is focused. `Esc` and **✕** always close. Text-entry modals
-  keep **Enter** = submit the field; the navigation panels (verb menu, file browser)
+  keep **Enter** = submit the field; the navigation panels (file browser, saves)
   keep their own keys and just show the default button underlined. Colors are
   configurable under the `[dialog]` surface section — `background`, `border` (the
   dialog's own frame), `title`, `button` / `button:active`, and `shadow` — and a
@@ -295,6 +302,22 @@ re-seed the new template, or hand-write the new shape from
   fixed pixel screen, which babelmap scales into whatever pane it has.
 - `undo_levels` (default 16) — how many in-memory undo states the Z-machine
   keeps for the game's own UNDO command (0 disables undo).
+- **Command band** — the `[command_band]` section configures the point-and-click
+  phrase builder (see [Interface](interface.md#playing-aids); not to be confused
+  with the unrelated top-level `command_bar` boolean, which moves the *typed*
+  prompt into a persistent bar). `height` (default 8) is the band's rows
+  including its frame, clamped to 5–14 and to whatever the screen can spare;
+  resize mode writes this key. `auto_open` (default false) opens the band with
+  the story. `verbs` REPLACES the built-in verb table and `extra_verbs` adds to
+  whichever table is in force — same entry shape either way,
+  `{ word = "unlock", arity = "pair", prep = "with" }`, where `arity` is one of
+  `solo` (complete on its own), `object` (one object, required), `object_opt`
+  (one object, optional) or `pair` (two objects joined by `prep`, which also
+  names that column). An `extra_verbs` entry whose word already exists re-shapes
+  it rather than duplicating it, so that is how you fix one built-in verb's
+  grammar. `quick` replaces the one-click quick-action row. An unrecognised
+  `arity` is reported in the transcript and that entry is skipped, never
+  silently reinterpreted.
 - **v6 story rendering** — `v6_render` selects how graphical v6 titles (*Zork Zero*,
   *Shogun*, …) draw their story pane on an image-capable terminal: `hybrid`
   (the default) keeps the story text as real terminal text inside an image

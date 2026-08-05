@@ -1,6 +1,24 @@
 # Verb panel redesign: the command band
 
-**Status:** approved design, not yet implemented. Supersedes
+**Status:** implemented (SQ-0664). Shipped as the **command band** — the feature
+was renamed from "verb menu"/"verb panel" throughout during implementation, so
+read every "verb menu" below as the command band: the slash command is
+`open-command-band`, the config section `[command_band]`, the style selectors
+`band.*` (not `verbband.*`), the code lives in `render/command_band.rs` +
+`CommandBandState`, and the resize target is `ResizeTarget::CommandBand`.
+
+Two refinements the implementation settled that the design left open:
+
+* **The phrase line is the last stop in the focus ring**, to the right of the
+  reachable columns. `Enter` on a column picks and advances; `Enter` on the
+  phrase line sends when armed. That is what keeps "always confirm" honest for
+  an `object?` verb like `search`, which is complete the moment it is picked but
+  can still take an object — `→ Enter` sends it alone, `↓ Enter` adds the object.
+* **A quick-row word that is not in the verb table counts as `solo`.** The
+  shipped quick row spells the compass `n`/`s`/`e`/`w` while the verb table
+  spells them out, and a quick action IS the whole command.
+
+Supersedes
 `docs/superpowers/specs/2026-06-23-verb-menu-design.md` (the shipped left-dock
 token palette) — that spec's "out of scope" list deferred everything that made
 the panel usable.

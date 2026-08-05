@@ -141,12 +141,19 @@ const INTERFACE: &[Row] = &[
         ],
     ),
     d("mouse_wheel_invert", "false", &["Invert wheel direction, for terminals reporting \"natural\" scrolling."]),
-    d("command_bar", "false", &["Type into a persistent command bar instead of the inline story prompt."]),
+    d(
+        "command_bar",
+        "false",
+        &[
+            "Type into a persistent command bar instead of the inline story prompt.",
+            "(Unrelated to the [command_band] section further down, which is the",
+            "point-and-click phrase builder.)",
+        ],
+    ),
     d("command_prefix", "\"/\"", &["The character that routes a line to a slash command."]),
     d("show_status_bar", "true", &["Show the status/score bar across the top of the story pane."]),
     d("show_room_numbers", "false", &["Show room numbers (#id) inside Boxes-zoom room boxes."]),
     d("split_ratio", "50", &["The story pane's share of the story/map split, as a percentage."]),
-    d("verb_dock_pct", "32", &["Verb dock width, as a percentage of screen width."]),
     d("inv_dock_pct", "33", &["Inventory dock height cap, as a percentage of screen height."]),
     d(
         "text_margin_x",
@@ -273,6 +280,53 @@ const ANIMATION: &[Row] = &[
     d("scroll_ms", "120", &["Smooth-scroll duration in milliseconds. 0 is instant."]),
 ];
 
+const COMMAND_BAND: &[Row] = &[
+    d(
+        "height",
+        "8",
+        &[
+            "Rows the band occupies, INCLUDING its frame. Clamped to 5-14, and to",
+            "whatever the screen can spare. Resize mode (the band is one of its",
+            "targets while open) writes this key.",
+        ],
+    ),
+    d("auto_open", "false", &["Open the command band as soon as the story starts."]),
+    ex(
+        "verbs",
+        "[ { word = \"unlock\", arity = \"pair\", prep = \"with\" }, { word = \"polish\", arity = \"object\" } ]",
+        &[
+            "REPLACE the built-in verb table. Each entry declares the verb's shape,",
+            "which is what decides the columns the band offers after it is picked:",
+            "",
+            "   arity = \"solo\"        look, wait, n/s/e/w - complete on its own",
+            "   arity = \"object\"      take, open, read    - one object, required",
+            "   arity = \"object_opt\"  search, push        - one object, optional",
+            "   arity = \"pair\"        unlock ... with ... - two, joined by `prep`",
+            "",
+            "`prep` is the preposition a pair verb joins its objects with, and is",
+            "shown as that column's header. Unset the whole key to keep the built-ins.",
+        ],
+    ),
+    ex(
+        "extra_verbs",
+        "[ { word = \"xyzzy\", arity = \"solo\" } ]",
+        &[
+            "ADDITIVE form of the same shape: layered on whichever table is in force.",
+            "An entry whose word is already there re-shapes it instead of duplicating,",
+            "so this is also how you fix one built-in verb's grammar.",
+        ],
+    ),
+    ex(
+        "quick",
+        "[\"n\", \"s\", \"e\", \"w\", \"up\", \"down\", \"in\", \"out\", \"look\", \"inventory\", \"wait\", \"again\"]",
+        &[
+            "The one-click quick-action row along the bottom of the band. The value",
+            "shown is the built-in row; unset the key to keep it. Picking one FILLS",
+            "the phrase line - nothing in the band ever fires a turn without Enter.",
+        ],
+    ),
+];
+
 const KEYMAP: &[Row] = &[d(
     "use_defaults",
     "true",
@@ -290,6 +344,7 @@ const GROUPS: &[Group] = &[
     Group { banner: "Sound", table: None, rows: SOUND },
     Group { banner: "Transcript search", table: Some("search"), rows: SEARCH },
     Group { banner: "Animation", table: Some("animation"), rows: ANIMATION },
+    Group { banner: "Command band", table: Some("command_band"), rows: COMMAND_BAND },
     Group { banner: "Key bindings", table: Some("keymap"), rows: KEYMAP },
 ];
 
@@ -431,8 +486,12 @@ mod tests {
         // every actual setting is commented out.
         let mut live: Vec<&str> = parsed.keys().map(String::as_str).collect();
         live.sort_unstable();
-        assert_eq!(live, ["animation", "keymap", "search", "version"], "live keys: {parsed:?}");
-        for t in ["animation", "keymap", "search"] {
+        assert_eq!(
+            live,
+            ["animation", "command_band", "keymap", "search", "version"],
+            "live keys: {parsed:?}"
+        );
+        for t in ["animation", "command_band", "keymap", "search"] {
             assert!(
                 parsed[t].as_table().is_some_and(|x| x.is_empty()),
                 "section [{t}] is a bare header with every setting commented: {:?}",
@@ -551,10 +610,10 @@ mod tests {
         live.sort_unstable();
         assert_eq!(
             live,
-            ["animation", "default_story_dir", "keymap", "search", "version"],
+            ["animation", "command_band", "default_story_dir", "keymap", "search", "version"],
             "only the changed setting joins the stamp and the section headers: {after}"
         );
-        for t in ["animation", "keymap", "search"] {
+        for t in ["animation", "command_band", "keymap", "search"] {
             assert!(parsed[t].as_table().is_some_and(|x| x.is_empty()), "[{t}] stays a bare header");
         }
 

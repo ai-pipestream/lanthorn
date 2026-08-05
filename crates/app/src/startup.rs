@@ -567,9 +567,12 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     state.term_default_colors = term_default_colors;
     state.pane_sizes = app::state::PaneSizes {
         split_ratio: cfg.split_ratio,
-        verb_dock_pct: cfg.verb_dock_pct,
+        band_height: cfg.command_band.height,
         inv_dock_pct: cfg.inv_dock_pct,
     };
+    // `[command_band] auto_open` — open the band with the story, for players who
+    // want it as their default input surface rather than a thing to summon.
+    let band_auto_open = cfg.command_band.auto_open;
     // SQ-0318: remember the global honor base so reload_style can recompute the
     // per-game > garglk > global precedence (and `auto` can fall back here).
     state.honor_game_colours_base = honor_game_colours_base;
@@ -608,6 +611,18 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
 
     // Seed autocomplete with the story's parser vocabulary (room nouns are added live).
     state.dict_words = session.introspect().map(|i| i.vocabulary()).unwrap_or_default();
+
+    // `[command_band] auto_open`: open the band with the story. Instant (no
+    // slide) so the first frame is already the settled layout.
+    if band_auto_open {
+        let mut mapper_noop = mapper::mapper::Mapper::default();
+        app::input::apply_action(
+            app::input::Action::OpenCommandBand,
+            &mut state,
+            &mut mapper_noop,
+        );
+        state.band_dock.toggle_to(true, true);
+    }
 
     // Push the game's opening banner and capture the title from it. Glulx returns
     // ordered elements (text + any startup/cover images); the Z-machine returns
