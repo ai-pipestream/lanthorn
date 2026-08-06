@@ -60,7 +60,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Style;
 
 use crate::state::AppState;
 
@@ -402,6 +402,7 @@ pub fn draw_command_band(
 
     let content = area;
     let divider_style = base.patch(theme.get("panel.border").style);
+    let divider_active = base.patch(theme.get("panel.border:active").style);
 
     // ── Quick actions: a stacked rose+words block on the left edge when
     // there is room (SQ-0675, restacked under SQ-0677), else the flat
@@ -426,7 +427,10 @@ pub fn draw_command_band(
         };
         draw_quick_block(band, layout, block_area, buf, base, theme, &mut hits.quick);
         let divider_x = content.x + layout.width;
-        draw_divider(buf, divider_x, content, divider_style);
+        // The block/VERB divider is VERB's left flank: it carries the
+        // current-column accent when VERB is current (see the column loop).
+        let style = if band.focus == 0 { divider_active } else { divider_style };
+        draw_divider(buf, divider_x, content, style);
         let claimed = layout.width + DIVIDER_W;
         cols_area = Rect {
             x: content.x + claimed,
@@ -472,8 +476,13 @@ pub fn draw_command_band(
     // Dividers between adjacent columns — drawn last so they sit on top of
     // any column fill, full band height (not just the columns' own rect, in
     // case a shorter mid-slide `cols_area` ever diverges from `content`).
-    for pair in rects.windows(2) {
-        draw_divider(buf, pair[0].right(), content, divider_style);
+    // The CURRENT column's flanking dividers take the active accent — the
+    // uniform current-column hint for all four columns (chrome, never list
+    // rows; supersedes VERB's top-row underline, retired on user feedback).
+    for (i, pair) in rects.windows(2).enumerate() {
+        let flanks_current = band.focus == i || band.focus == i + 1;
+        let style = if flanks_current { divider_active } else { divider_style };
+        draw_divider(buf, pair[0].right(), content, style);
     }
 }
 
@@ -853,15 +862,12 @@ fn draw_column(
     // header region left to focus; clicking its reclaimed top row just picks
     // the first verb there, exactly like clicking any other row.
     //
-    // SQ-0677: with a current-COLUMN concept now (not just a grammar-active
-    // one), VERB still needs SOME visible "this is where Tab/Shift-Tab point"
-    // hint despite having no header row to carry `band.column_header:active`
-    // on. Of the two options on the table (a border-radius-style top-row
-    // gutter mark, or underlining the top row), underline was picked: a
-    // gutter mark would collide with the `▸` selected-row marker that already
-    // lives in that column, while an underline composes cleanly on top of
-    // ANY row style (selected or not) as a pure modifier add — see the
-    // `verb_current_hint` row-loop tweak below.
+    // The current-column hint decorates CHROME, not list rows: the dividers
+    // flanking the current column take `panel.border:active` (see the divider
+    // loop in `draw_command_band`), uniformly for all four columns. VERB
+    // therefore needs nothing special here despite having no header row —
+    // its earlier top-row underline read as "this entry is underlined for
+    // some reason" and was retired on user feedback (2026-08-05).
     let header_h: u16 = if col == COL_VERB { 0 } else { 1 };
     if header_h > 0 {
         let header_style = base.patch(
@@ -877,8 +883,6 @@ fn draw_column(
         crate::render::draw_str_clipped(buf, header_area.x, header_area.y, &label, header_style, header_area);
         hits.headers.push((col, header_area));
     }
-    let verb_current_hint = is_current && col == COL_VERB;
-
     let list_h = area.height.saturating_sub(header_h);
     if is_current {
         *vp_out = list_h as usize;
@@ -932,14 +936,7 @@ fn draw_column(
             break;
         }
         let is_selected = idx == selected;
-        let mut style = if is_selected { theme.get("dialog.list_selected").style } else { base };
-        // The current-column hint VERB has no header row to carry (see the
-        // doc above `verb_current_hint`): underline its very top row instead,
-        // composing on top of whatever that row's style already is —
-        // selected or not — rather than replacing it.
-        if verb_current_hint && row == 0 {
-            style = style.add_modifier(Modifier::UNDERLINED);
-        }
+        let style = if is_selected { theme.get("dialog.list_selected").style } else { base };
         let marker = if is_selected { "▸" } else { " " };
         let line = format!("{}{}", marker, items[idx]);
         let row_area = Rect::new(list_area.x, y, row_w, 1);
@@ -1727,40 +1724,63 @@ mod tests {
         );
     }
 
-    /// VERB has no header row to carry `band.column_header:active` on (its
-    /// row was reclaimed as a list row — SQ-0675). Its current-column hint is
-    /// an underline on the top list row instead (SQ-0677): present when VERB
-    /// is current, absent otherwise. Falsifies against a VERB column that
-    /// never shows any current-column hint at all.
+    /// The current-column hint decorates chrome, not list rows (user
+    /// feedback 2026-08-05, retiring VERB's top-row underline which read as
+    /// a mysteriously decorated entry): the dividers flanking the current
+    /// column take the `panel.border:active` accent, uniformly for every
+    /// column, and NO list row anywhere gains a text decoration from column
+    /// focus. Falsifies against the underline scheme and against unstyled
+    /// dividers alike.
     #[test]
-    fn verb_shows_an_underline_hint_when_current_and_none_otherwise() {
+    fn the_current_columns_flanking_dividers_carry_the_accent_not_any_row() {
         use ratatui::style::Modifier;
 
-        // VERB current (the band's default focus).
-        let s_current = state_with_band();
-        assert_eq!(s_current.overlays.command_band.as_ref().unwrap().focus, COL_VERB);
-        let mut buf_current = Buffer::empty(BAND);
-        let mut hits_current = CommandBandHits::default();
-        draw_command_band(&s_current, BAND, &mut buf_current, &mut 0, &mut hits_current);
-        let (_, verb_rect) =
-            hits_current.columns.iter().find(|(c, _)| *c == COL_VERB).expect("VERB column drew");
-        assert!(
-            buf_current.cell((verb_rect.x, verb_rect.y)).unwrap().style().add_modifier.contains(Modifier::UNDERLINED),
-            "VERB's top row is underlined while it is the current column"
-        );
+        let style_at = |buf: &Buffer, x: u16, y: u16| buf.cell((x, y)).unwrap().style();
 
-        // Move focus off VERB (pick a verb, which advances focus to HERE).
-        let mut s_other = state_with_band();
-        s_other.overlays.command_band.as_mut().unwrap().pick_word("take");
-        assert_ne!(s_other.overlays.command_band.as_ref().unwrap().focus, COL_VERB);
-        let mut buf_other = Buffer::empty(BAND);
-        let mut hits_other = CommandBandHits::default();
-        draw_command_band(&s_other, BAND, &mut buf_other, &mut 0, &mut hits_other);
-        let (_, verb_rect2) =
-            hits_other.columns.iter().find(|(c, _)| *c == COL_VERB).expect("VERB column drew");
-        assert!(
-            !buf_other.cell((verb_rect2.x, verb_rect2.y)).unwrap().style().add_modifier.contains(Modifier::UNDERLINED),
-            "VERB's underline is gone once focus moves off it"
+        // VERB current (the band's default focus): the divider on VERB's
+        // right flank is styled DIFFERENTLY from the far divider between
+        // CARRIED and WITH… (which flanks neither side of the current
+        // column) — the accent is a visible difference, whatever the theme
+        // resolves it to.
+        let s = state_with_band();
+        assert_eq!(s.overlays.command_band.as_ref().unwrap().focus, COL_VERB);
+        let mut buf = Buffer::empty(BAND);
+        let mut hits = CommandBandHits::default();
+        draw_command_band(&s, BAND, &mut buf, &mut 0, &mut hits);
+        let rect_of = |hits: &CommandBandHits, col: usize| {
+            hits.columns.iter().find(|(c, _)| *c == col).expect("column drew").1
+        };
+        let verb = rect_of(&hits, COL_VERB);
+        let carried = rect_of(&hits, COL_CARRIED);
+        assert_ne!(
+            style_at(&buf, verb.right(), verb.y),
+            style_at(&buf, carried.right(), carried.y),
+            "the divider flanking the current column differs from a far divider"
+        );
+        // And no list row anywhere is underlined by column focus.
+        for x in verb.x..carried.right() {
+            for y in BAND.y..BAND.bottom() {
+                assert!(
+                    !buf.cell((x, y)).unwrap().style().add_modifier.contains(Modifier::UNDERLINED),
+                    "no row wears an underline from column focus (cell {x},{y})"
+                );
+            }
+        }
+
+        // Move focus: the accent follows — the VERB-flank divider goes plain
+        // and the divider beside the new current column takes the accent.
+        let mut s2 = state_with_band();
+        s2.overlays.command_band.as_mut().unwrap().pick_word("take");
+        let focus = s2.overlays.command_band.as_ref().unwrap().focus;
+        assert_ne!(focus, COL_VERB);
+        let mut buf2 = Buffer::empty(BAND);
+        let mut hits2 = CommandBandHits::default();
+        draw_command_band(&s2, BAND, &mut buf2, &mut 0, &mut hits2);
+        let cur = rect_of(&hits2, focus);
+        assert_ne!(
+            style_at(&buf2, cur.x.saturating_sub(1), cur.y),
+            style_at(&buf2, carried.right(), cur.y),
+            "the accent moved with the current column"
         );
     }
 }
