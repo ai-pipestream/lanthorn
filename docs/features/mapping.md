@@ -78,7 +78,14 @@ The map is a place you can move through, not just a picture.
   step into the maze, peel, and the maze goes to its own layer — which works even
   when the entrance is one-way or the way back is some other direction entirely.
   `peel-layer <direction>` names the seam yourself; with neither, it falls back to
-  hunting for a stairway or other portal to cut at.
+  hunting for a stairway or other portal to cut at. A bare `merge-layer` folds the
+  active layer into the one it was peeled from; `merge-layer <name>` folds it into
+  **any** layer (`merge-layer main`). That second form is how a stranded room gets
+  home: a room discovered while exploring a maze layer is minted *onto* the maze
+  layer even when it is really outside — a back door to the surface, say — so stand
+  in it, `peel-layer <direction>` to cut it off the maze, then `merge-layer main`.
+  Rooms keep their positions where free; a room whose cell is taken lands on the
+  nearest free one.
 - **Switching layers recenters the view** — cycling, clicking a tab, peeling, merging,
   or loading a map all land the viewport somewhere with a room in it, never on empty
   scroll space: on the room you're standing in if it's on the layer you switched to,

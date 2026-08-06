@@ -14,6 +14,17 @@ identifies which beta it is without reading its git hash.
 
 ## Unreleased
 
+### Added
+
+- **`merge-layer` takes a target** — `merge-layer <name>` folds the active layer
+  into any named layer, not just the one it was peeled from (`merge-layer main`).
+  This closes a real trap: a room discovered while exploring a maze layer is
+  minted onto the maze layer even when it belongs to the surface, and the bare
+  merge could only round-trip it back into the maze. Peel the stranded region,
+  then merge it home in one step. Merged rooms keep their map positions where
+  free and take the nearest free cell where not; an unknown or ambiguous layer
+  name refuses with a message and moves nothing.
+
 ### Changed
 
 - The matrix view's tried-but-pathless cell is `×` rather than `_` — a mark

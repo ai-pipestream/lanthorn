@@ -228,6 +228,18 @@ pub fn is_interlayer(graph: &MapGraph, conn: &Connection) -> bool {
     graph.layer_of(conn.origin) != graph.layer_of(conn.dest)
 }
 
+/// Why a targeted merge could not happen. Like [`PeelRefusal`], each variant is a distinct
+/// thing to tell the player (SQ-0687).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeRefusal {
+    /// `MAIN_LAYER` is the floor everything else folds into; it cannot itself be merged away.
+    MainSource,
+    /// The target is the layer being merged. There is nothing to do.
+    SelfMerge,
+    /// The named target layer does not exist (or was itself merged away).
+    NoSuchLayer,
+}
+
 /// Fold every room in `layer` into its parent (or `MAIN_LAYER` if it has none) and drop
 /// the layer's metadata. Returns the target layer. No-op (returns `MAIN_LAYER`) for `MAIN_LAYER`.
 pub fn merge_layer(graph: &mut MapGraph, layer: LayerId) -> LayerId {
@@ -243,13 +255,46 @@ pub fn merge_layer(graph: &mut MapGraph, layer: LayerId) -> LayerId {
         .get(&layer)
         .and_then(|m| m.parent)
         .filter(|p| graph.layers().contains_key(p))
-        
         .unwrap_or(MAIN_LAYER);
+    // Cannot refuse: `layer` is not MAIN_LAYER, and `target` is a live layer (or MAIN_LAYER,
+    // which always exists) that is never `layer` itself — a layer is not its own parent.
+    let _ = merge_layer_into(graph, layer, target);
+    target
+}
+
+/// Fold every room in `layer` into `target` — ANY live layer, not just the parent — and drop
+/// the source layer's metadata (SQ-0687). This is how a region that was peeled off the wrong
+/// layer gets home: a room discovered while exploring a maze inherits the maze layer even when
+/// it belongs to the surface, so the player peels the stranded region and merges it into `Main`.
+///
+/// Rooms keep their cells where those are free in `target`; a room whose cell is already
+/// occupied lands on the nearest free cell instead — two layers laid out independently have no
+/// reason to interleave cleanly, and two rooms on one cell would draw as one.
+pub fn merge_layer_into(graph: &mut MapGraph, layer: LayerId, target: LayerId) -> Result<(), MergeRefusal> {
+    if layer == MAIN_LAYER {
+        return Err(MergeRefusal::MainSource);
+    }
+    if target == layer {
+        return Err(MergeRefusal::SelfMerge);
+    }
+    if !graph.layers().contains_key(&target) {
+        return Err(MergeRefusal::NoSuchLayer);
+    }
+    let mut occupied = crate::layout::occupied_cells_in_layer(graph, target);
     for id in graph.rooms_in_layer(layer) {
+        if let Some(pos) = graph.room(id).and_then(|r| r.pos) {
+            if occupied.contains(&pos) {
+                let cell = crate::layout::nearest_free_cell(&occupied, pos);
+                graph.set_pos(id, cell);
+                occupied.insert(cell);
+            } else {
+                occupied.insert(pos);
+            }
+        }
         graph.set_room_layer(id, target);
     }
     graph.remove_layer(layer);
-    target
+    Ok(())
 }
 
 /// One portal badge per connection that LEAVES `layer` — i.e. whose ORIGIN is in
@@ -611,5 +656,55 @@ mod tests {
         let mut g = two_floors();
         assert_eq!(merge_layer(&mut g, MAIN_LAYER), MAIN_LAYER);
         assert!(g.layers().contains_key(&MAIN_LAYER));
+    }
+
+    /// SQ-0687: the stranded-room story, end to end. A room discovered while exploring a maze
+    /// layer inherits the maze layer even when it belongs to the surface; the player peels the
+    /// stranded region off the maze, then merges it into a NAMED target — not the peel's parent,
+    /// which would round-trip it straight back into the maze.
+    #[test]
+    fn a_peeled_region_merges_into_a_named_target_not_its_parent() {
+        let mut g = two_floors();
+        let maze = peel_region(&mut g, 3).expect("peel the cellar off Main"); // {3, 4}
+        // Room 4 is the "back door to the surface" discovered from the maze: peel it off.
+        let stranded = peel_at_edge(&mut g, 4, Direction::W).expect("peel the stranded room");
+        assert_eq!(g.layers()[&stranded].parent, Some(maze), "the peel parents onto the maze");
+
+        merge_layer_into(&mut g, stranded, MAIN_LAYER).expect("merge into Main by name");
+        assert_eq!(g.layer_of(4), MAIN_LAYER, "the stranded room lands on Main, not back in the maze");
+        assert_eq!(g.layer_of(3), maze, "the maze keeps its own rooms");
+        assert!(!g.layers().contains_key(&stranded), "the peeled layer's metadata is removed");
+    }
+
+    #[test]
+    fn merge_into_refuses_main_source_self_and_dead_targets() {
+        let mut g = two_floors();
+        let l = peel_region(&mut g, 3).unwrap();
+        assert_eq!(merge_layer_into(&mut g, MAIN_LAYER, l), Err(MergeRefusal::MainSource));
+        assert_eq!(merge_layer_into(&mut g, l, l), Err(MergeRefusal::SelfMerge));
+        let dead = g.next_layer_id(); // never created
+        assert_eq!(merge_layer_into(&mut g, l, dead), Err(MergeRefusal::NoSuchLayer));
+        assert_eq!(g.layer_of(3), l, "a refused merge moves nothing");
+    }
+
+    /// Two layers laid out independently have no reason to interleave cleanly: a merged room
+    /// whose cell is already taken in the target must land on the nearest free cell, never on
+    /// top of an existing room — two rooms on one cell draw as one.
+    #[test]
+    fn merge_into_resolves_cell_collisions_instead_of_stacking() {
+        let mut g = two_floors();
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        let l = peel_region(&mut g, 3).unwrap();
+        g.set_pos(3, (0, 0)); // same cell as room 1 on Main
+        g.set_pos(4, (5, 5)); // free on Main
+        merge_layer_into(&mut g, l, MAIN_LAYER).expect("merge");
+        let pos = |id| g.room(id).and_then(|r| r.pos).unwrap();
+        assert_eq!(pos(4), (5, 5), "a free cell is kept as-is");
+        assert_ne!(pos(3), (0, 0), "the colliding room moved off the occupied cell");
+        let mut cells: Vec<_> = [1, 2, 3, 4].iter().map(|&id| pos(id)).collect();
+        cells.sort();
+        cells.dedup();
+        assert_eq!(cells.len(), 4, "no two rooms share a cell after the merge");
     }
 }

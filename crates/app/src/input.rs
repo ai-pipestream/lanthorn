@@ -193,8 +193,9 @@ pub enum Action {
     /// Peel a layer. `Some(dir)` cuts at that passage out of the selected room; `None` looks for a
     /// portal seam already dividing the layer (SQ-0360).
     PeelLayer(Option<Direction>),
-    /// Merge the active layer into its parent layer.
-    MergeLayer,
+    /// Merge the active layer down. `None` folds it into its parent; `Some(name)` folds it into
+    /// the layer of that name — how a region peeled off the wrong layer gets home (SQ-0687).
+    MergeLayer(Option<String>),
     /// Set the active layer's map view (SQ-0666). `None` cycles drawn ⇄ matrix.
     ViewMap(Option<mapper::layer::MapView>),
     /// Toggle the maze flag on the active layer (SQ-0666).
@@ -1899,9 +1900,57 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             });
         }
 
-        Action::MergeLayer => {
+        Action::MergeLayer(target_name) => {
+            use mapper::layer::MergeRefusal;
             let active = state.active_layer(&mapper.graph);
-            let target = mapper::layer::merge_layer(&mut mapper.graph, active); // into its parent
+            let target = if let Some(name) = target_name.as_deref() {
+                // Resolve the name against the LIVE layer list, case-insensitively. Names are not
+                // unique (a peel names the new layer after a room label), so an ambiguous name is
+                // an error naming the fix, not a coin toss between identically-labelled layers.
+                let ids: Vec<mapper::layer::LayerId> = mapper
+                    .graph
+                    .layers()
+                    .iter()
+                    .filter(|(_, m)| m.name.eq_ignore_ascii_case(name))
+                    .map(|(id, _)| *id)
+                    .collect();
+                let t = match ids.as_slice() {
+                    [] => {
+                        state.set_status(format!("merge-layer: no layer named '{name}'"));
+                        return;
+                    }
+                    [one] => *one,
+                    many => {
+                        state.set_status(format!(
+                            "merge-layer: {} layers are named '{name}' — rename one first",
+                            many.len()
+                        ));
+                        return;
+                    }
+                };
+                let src = mapper.graph.layer_name(active).to_string();
+                match mapper::layer::merge_layer_into(&mut mapper.graph, active, t) {
+                    Ok(()) => {
+                        state.set_status(format!("{src} merged into {}", mapper.graph.layer_name(t)));
+                        t
+                    }
+                    Err(MergeRefusal::MainSource) => {
+                        state.set_status("merge-layer: the Main layer cannot be merged away");
+                        return;
+                    }
+                    Err(MergeRefusal::SelfMerge) => {
+                        state.set_status(format!("merge-layer: '{src}' is already the active layer"));
+                        return;
+                    }
+                    Err(MergeRefusal::NoSuchLayer) => {
+                        // Unreachable: `t` was just resolved from the live layer list.
+                        state.set_status(format!("merge-layer: no layer named '{name}'"));
+                        return;
+                    }
+                }
+            } else {
+                mapper::layer::merge_layer(&mut mapper.graph, active) // into its parent
+            };
             state.bump_graph_gen(); // layer merged into parent → invalidate memo (SQ-0305)
             // Follow the rooms to where they landed. Clearing the view instead sent it to whatever
             // layer the PLAYER happens to stand in — usually the top one — so a merge looked like
@@ -4470,7 +4519,7 @@ mod tests {
         // (Shift+P/Shift+M are no longer authored leader letters).
         s.overlays.hotkey_dialog = true;
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::PeelLayer(None)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('m'))), Action::MergeLayer));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('m'))), Action::MergeLayer(None)));
     }
 
     // ── Autocomplete / Tab precedence tests ───────────────────────────────────
@@ -4797,7 +4846,7 @@ mod tests {
         // Dialog-only commands now fire via their authored leader letters (SQ-0446).
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::EditNotes));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('p'))), Action::PeelLayer(None)));
-        assert!(matches!(key_to_action(&s, key(KeyCode::Char('m'))), Action::MergeLayer));
+        assert!(matches!(key_to_action(&s, key(KeyCode::Char('m'))), Action::MergeLayer(None)));
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('t'))), Action::Retidy));
         // Unauthored keys (shift-modified letters, brackets, dropped letters)
         // close the dialog instead of firing.
@@ -7878,7 +7927,7 @@ mod tests {
         assert_eq!(m.graph.layer_of(1), mapper::layer::MAIN_LAYER);
 
         s.set_viewed_layer(Some(vault_layer));
-        apply_action(Action::MergeLayer, &mut s, &mut m);
+        apply_action(Action::MergeLayer(None), &mut s, &mut m);
 
         assert_eq!(m.graph.layer_of(3), 1, "the Vault merges into its parent, the Cellar");
         assert_eq!(
@@ -7886,6 +7935,63 @@ mod tests {
             1,
             "and the map shows the Cellar, where the rooms went — not the player's own top layer"
         );
+    }
+
+    /// SQ-0687: the stranded-room story. A room discovered while exploring a maze layer inherits
+    /// the maze layer even when it belongs to the surface. A bare merge would fold the peeled
+    /// room straight back into the maze (the peel's parent); naming the target sends it home.
+    #[test]
+    fn merge_layer_with_a_name_sends_a_peeled_room_home_not_back_to_its_parent() {
+        let mut m = Mapper::default();
+        m.observe(1, "West of House", None);
+        m.observe(2, "Maze", Some(Direction::Down));
+        let mut s = AppState::default();
+        m.observe_relocation(2, "Maze");
+        apply_action(Action::PeelLayer(None), &mut s, &mut m); // Maze -> L1
+        let maze = m.graph.layer_of(2);
+        // The back door: a surface room discovered FROM the maze inherits the maze layer.
+        m.observe(3, "Clearing", Some(Direction::E));
+        assert_eq!(m.graph.layer_of(3), maze, "the premise: the new room is stranded on the maze");
+        m.observe(2, "Maze", Some(Direction::W)); // walk back so the Clearing has a seam to cut
+
+        s.select_room(Some(3));
+        apply_action(Action::PeelLayer(Some(Direction::W)), &mut s, &mut m); // Clearing -> L2
+        let peeled = m.graph.layer_of(3);
+        assert_eq!(m.graph.layers()[&peeled].parent, Some(maze), "a bare merge would round-trip");
+
+        s.set_viewed_layer(Some(peeled));
+        apply_action(Action::MergeLayer(Some("main".into())), &mut s, &mut m); // case-insensitive
+
+        assert_eq!(m.graph.layer_of(3), mapper::layer::MAIN_LAYER, "the Clearing lands on Main");
+        assert_eq!(m.graph.layer_of(2), maze, "the maze keeps its own rooms");
+        assert!(!m.graph.layers().contains_key(&peeled), "the peeled layer is gone");
+        assert_eq!(s.active_layer(&m.graph), mapper::layer::MAIN_LAYER, "the view follows the rooms");
+    }
+
+    /// A merge aimed at a name that resolves to nothing (or to several layers) must refuse with a
+    /// message and move nothing — not guess.
+    #[test]
+    fn merge_layer_refuses_unknown_and_ambiguous_names_without_moving_anything() {
+        let mut m = Mapper::default();
+        m.observe(1, "Hall", None);
+        m.observe(2, "Cellar", Some(Direction::Down));
+        let mut s = AppState::default();
+        m.observe_relocation(2, "Cellar");
+        apply_action(Action::PeelLayer(None), &mut s, &mut m); // Cellar -> L1
+        let cellar = m.graph.layer_of(2);
+        s.set_viewed_layer(Some(cellar));
+
+        apply_action(Action::MergeLayer(Some("Attic".into())), &mut s, &mut m);
+        assert_eq!(m.graph.layer_of(2), cellar, "an unknown name moves nothing");
+        let msg = s.notifications.latest_text().expect("the refusal must not be silent").to_string();
+        assert!(msg.contains("no layer named 'Attic'"), "says what was wrong: {msg:?}");
+
+        // Two layers named "Cellar": the peel named L1 after room 2's label, so rename Main too.
+        m.graph.set_layer_name(mapper::layer::MAIN_LAYER, "Cellar".into());
+        apply_action(Action::MergeLayer(Some("Cellar".into())), &mut s, &mut m);
+        assert_eq!(m.graph.layer_of(2), cellar, "an ambiguous name moves nothing");
+        let msg = s.notifications.latest_text().expect("the refusal must not be silent").to_string();
+        assert!(msg.contains("rename one first"), "says how to fix it: {msg:?}");
     }
 
     // ── SQ-0360: peel at a named seam, and say why a peel refused ────────────

@@ -306,8 +306,16 @@ pub static COMMANDS: &[CommandSpec] = &[
             }
         } },
     CommandSpec { name: "merge-layer", category: Category::Map, context: Context::Map,
-        usage: "merge-layer", description: "merge the selected layer down",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::MergeLayer) },
+        usage: "merge-layer [layer]", description: "merge the selected layer into its parent, or into the named layer",
+        dispatch: |a| {
+            use crate::input::Action;
+            // A layer name may contain spaces ("Dead End") — the whole remainder is the name.
+            if a.is_empty() {
+                SlashOutcome::Action(Action::MergeLayer(None))
+            } else {
+                SlashOutcome::Action(Action::MergeLayer(Some(a.join(" "))))
+            }
+        } },
     CommandSpec { name: "toggle-inspector", category: Category::Map, context: Context::Map,
         usage: "toggle-inspector", description: "toggle the room-inspector overlay",
         dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleInspector) },
@@ -597,6 +605,21 @@ mod tests {
             SlashOutcome::Action(Action::PeelLayer(Some(Direction::NW)))
         ));
         assert!(matches!(parse("peel-layer sideways", '/'), SlashOutcome::Error(_)));
+    }
+
+    /// SQ-0687: `merge-layer` takes an optional target-layer name; the whole remainder is the
+    /// name, since layer names may contain spaces.
+    #[test]
+    fn merge_layer_takes_an_optional_target_name() {
+        assert!(matches!(parse("merge-layer", '/'), SlashOutcome::Action(Action::MergeLayer(None))));
+        assert!(matches!(
+            parse("merge-layer main", '/'),
+            SlashOutcome::Action(Action::MergeLayer(Some(ref s))) if s == "main"
+        ));
+        assert!(matches!(
+            parse("merge-layer Dead End", '/'),
+            SlashOutcome::Action(Action::MergeLayer(Some(ref s))) if s == "Dead End"
+        ));
     }
 
     #[test]
