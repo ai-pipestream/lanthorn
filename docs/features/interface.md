@@ -7,15 +7,15 @@ mouse-driven, copy-anything, keyboard-fast terminal cockpit for reading the map,
 inspecting the machine, and firing commands — without ever leaving the story.
 
 ## Map navigation & inspection
-- **Mouse support** — left-click a room to pop its info panel (name, notes,
-  exits, objects); right-click a room for layout diagnostics; middle-drag
-  anywhere to pan the whole map around. Neither panel interrupts the game: they
-  are corner overlays, so the keyboard stays on the story prompt and you can keep
-  typing and pressing Enter with one open — handy for watching a room's exit card
-  fill in as you walk. Close one with **Esc**, its **✕**, or a click on empty
-  map space. On a layer showing the [matrix view](mapping.md#mazes-the-matrix-view)
-  the same click selects a row — and a click on a destination cell jumps the
-  selection to the room it names.
+- **Mouse support** — left-click a room to point the [room dock](#the-room-dock)
+  at it; right-click a room for its layout diagnostics; middle-drag anywhere to
+  pan the whole map around. The dock never interrupts the game: it reserves rows
+  at the bottom of the map pane rather than covering anything, so the keyboard
+  stays on the story prompt and you can keep typing and pressing Enter with it
+  up — handy for watching a room's exit card fill in as you walk. On a layer
+  showing the [matrix view](mapping.md#mazes-the-matrix-view) the same click
+  selects a row — and a click on a destination cell jumps the selection to the
+  room it names.
 - **Mouse wheel** pans the map (hold Shift for horizontal, Ctrl to zoom) and
   scrolls every other scrollable surface too — the transcript and the lists
   inside modals (saves, file browser, gallery, hotkey dialog, …).
@@ -25,7 +25,8 @@ inspecting the machine, and firing commands — without ever leaving the story.
   over SSH, with no clipboard library in the loop. Each row is clamped to the
   story pane's columns, so a drag never scoops up the map beside the text.
 - **Drag a pane boundary to resize it** — grab the divider between the story and
-  map panes, or the top edge of the inventory dock or the command band, and drag.
+  map panes, or the top edge of the inventory dock, the command band or the room
+  dock, and drag.
   The boundary lights up as the pointer crosses it, the panes follow the pointer
   live, and the new size is written to `config.toml` when you let go. What you
   press the button on decides what the drag means: a drag that starts on a
@@ -33,9 +34,25 @@ inspecting the machine, and firing commands — without ever leaving the story.
   selecting even when it crosses one. For the keyboard, **F3** (or
   `/resize-panes`) enters resize mode — **Tab** cycles which boundary is live,
   the arrows move it, `0` resets, **Esc** leaves.
-- **Room inspector overlay** — id, name, layer, position, and the per-edge
-  dropped-constraint flags, so you can see *why* the layout engine placed a room
-  where it did. The panel stays open while you keep playing.
+- **The room dock** — one panel at the bottom of the map pane describing one
+  room, opened with `k` from the leader panel or `/toggle-room-dock`. It has two
+  bodies:
+  - **Room** — the room's notes, its [exit card](mapping.md#room-card) in the
+    matrix vocabulary, and the objects the engine can see there.
+  - **Diagnostics** — id, layer, grid position, and the per-edge
+    dropped-constraint flags, so you can see *why* the layout engine placed a
+    room where it did. `/toggle-inspector` opens straight onto this body, and
+    flips back to Room when the dock is already up; clicking either name in the
+    dock's title strip switches too.
+
+  **It follows you by default.** With nothing selected the dock describes the
+  room you are standing in and updates every move — the header says `⌖ following`.
+  Click a room to **pin** it (`⊙ pinned`); the dock then holds that room while
+  you walk on. Pinning is just selecting, so the map highlight and the matrix
+  cross-highlight always agree with the dock. **Unpin** — back to following — by
+  clicking the pinned room again, clicking empty map space, or pressing **Esc**;
+  a second **Esc** closes the dock. It is not a modal, so it costs you nothing to
+  leave up: it never takes the keyboard and it never hides the prompt.
 - **The map never takes the keyboard.** Every keystroke goes to the story, so a
   key always means the same thing — you never have to look at which pane is
   "active" before pressing an arrow. The map is driven alongside your typing

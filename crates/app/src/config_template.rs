@@ -156,6 +156,15 @@ const INTERFACE: &[Row] = &[
     d("split_ratio", "50", &["The story pane's share of the story/map split, as a percentage."]),
     d("inv_dock_pct", "33", &["Inventory dock height cap, as a percentage of screen height."]),
     d(
+        "room_dock_pct",
+        "40",
+        &[
+            "Room dock height, as a percentage of screen height. The dock docks at",
+            "the bottom of the map pane and describes the room you are in (or the",
+            "one you clicked).",
+        ],
+    ),
+    d(
         "text_margin_x",
         "0",
         &["Blank columns reserved inside each side of the transcript window."],

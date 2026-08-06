@@ -423,6 +423,13 @@ pub const FALLBACK_SCREEN_COLS: u16 = 80;
 pub const FALLBACK_SCREEN_ROWS: u16 = 24;
 pub(crate) fn default_split_ratio() -> u16 { 50 }
 pub(crate) fn default_inv_dock_pct() -> u16 { 33 }
+/// The room dock's height as a percentage of the frame (SQ-0692).
+///
+/// Higher than `inv_dock_pct`'s 33 because the dock's content is not a list that
+/// shrinks to fit: the exit card is a fixed twelve rows, and with the header and
+/// two section labels the Info body wants ~16. On the 40-row terminal this is
+/// sized for, 40% is exactly that.
+pub(crate) fn default_room_dock_pct() -> u16 { 40 }
 pub(crate) fn default_band_height() -> u16 {
     crate::render::command_band::DEFAULT_BAND_ROWS
 }
@@ -817,6 +824,11 @@ pub struct Config {
     /// ≈ the old fixed 1/3 cap).
     #[serde(default = "default_inv_dock_pct")]
     pub inv_dock_pct: u16,
+    /// Room dock height as a percentage of screen height (default 33). The dock
+    /// is carved out of the MAP pane's bottom, but its size is measured against
+    /// the frame so both docks share one unit (SQ-0692).
+    #[serde(default = "default_room_dock_pct")]
+    pub room_dock_pct: u16,
     /// Inner margin reserved inside the text-buffer (transcript) window, in
     /// character cells: `text_margin_x` blank columns on each side,
     /// `text_margin_y` blank rows top and bottom. Default 0. Populated from
@@ -948,6 +960,7 @@ impl Default for Config {
             split_ratio: default_split_ratio(),
             command_band: CommandBandConfig::default(),
             inv_dock_pct: default_inv_dock_pct(),
+            room_dock_pct: default_room_dock_pct(),
             text_margin_x: 0,
             text_margin_y: 0,
             animation: AnimationConfig::default(),
@@ -1069,6 +1082,7 @@ pub fn resolve(cli: &Cli) -> Config {
             cfg.split_ratio = from_file.split_ratio;
             cfg.command_band = from_file.command_band;
             cfg.inv_dock_pct = from_file.inv_dock_pct;
+            cfg.room_dock_pct = from_file.room_dock_pct;
             cfg.text_margin_x = from_file.text_margin_x;
             cfg.text_margin_y = from_file.text_margin_y;
             cfg.animation = from_file.animation;
@@ -1292,6 +1306,7 @@ pub fn write_config_at(config_path: &std::path::Path, cfg: &Config) -> std::io::
     }
     put(&mut doc, "split_ratio", i64::from(cfg.split_ratio).into(), cfg.split_ratio == def.split_ratio);
     put(&mut doc, "inv_dock_pct", i64::from(cfg.inv_dock_pct).into(), cfg.inv_dock_pct == def.inv_dock_pct);
+    put(&mut doc, "room_dock_pct", i64::from(cfg.room_dock_pct).into(), cfg.room_dock_pct == def.room_dock_pct);
     put(&mut doc, "text_margin_x", i64::from(cfg.text_margin_x).into(), cfg.text_margin_x == def.text_margin_x);
     put(&mut doc, "text_margin_y", i64::from(cfg.text_margin_y).into(), cfg.text_margin_y == def.text_margin_y);
 
@@ -1917,6 +1932,7 @@ use_defaults = false
             split_ratio: 70,
             command_band: CommandBandConfig::default(),
             inv_dock_pct: 25,
+            room_dock_pct: 25,
             text_margin_x: 0,
             text_margin_y: 0,
             animation: AnimationConfig::default(),
@@ -1936,6 +1952,7 @@ use_defaults = false
         assert_eq!(doc["background_tidy"].as_str(), Some("on_overlap"));
         assert_eq!(doc["split_ratio"].as_integer(), Some(70));
         assert_eq!(doc["inv_dock_pct"].as_integer(), Some(25));
+        assert_eq!(doc["room_dock_pct"].as_integer(), Some(25), "the room dock's height persists too");
         // SQ-0573: `mouse` is at its DEFAULT and the pre-existing file did not carry
         // it, so it is deliberately not written — a default belongs in the commented
         // template, not as a live key. `user_dir` here is the test's temp dir, so it

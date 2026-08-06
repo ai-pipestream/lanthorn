@@ -154,6 +154,15 @@ fn anchor(boundary: Boundary, pl: &PaneLayout, col: u16, row: u16) -> PaneDrag {
             start_cells: pl.command_band.height,
             area: pl.frame,
         },
+        // The room dock lives inside the map pane but is SIZED against the frame
+        // (see `PaneSizes::room_dock_pct`), so the inversion area is the frame —
+        // the same one `dock_pct_for_rows` is asked about at layout time.
+        Boundary::RoomDockTop => PaneDrag {
+            boundary,
+            origin: row,
+            start_cells: pl.room_dock.height,
+            area: pl.frame,
+        },
     }
 }
 
@@ -179,6 +188,11 @@ fn track(state: &mut AppState, col: u16, row: u16) {
             let want = (d.start_cells as i32 + (d.origin as i32 - row as i32))
                 .clamp(MIN_BAND_ROWS as i32, MAX_BAND_ROWS as i32) as u16;
             state.pane_sizes.band_height = want;
+        }
+        Boundary::RoomDockTop => {
+            let want = (d.start_cells as i32 + (d.origin as i32 - row as i32))
+                .clamp(0, d.area.height as i32) as u16;
+            state.pane_sizes.room_dock_pct = dock_pct_for_rows(d.area.height, want);
         }
     }
     state.sync_pane_sizes_to_config();
@@ -567,6 +581,81 @@ mod tests {
         on_mouse(&mut s, &drag(10, y - 3), &pl, &zones);
         on_mouse(&mut s, &up(10, y - 3), &pl, &zones);
         assert_eq!(s.config.inv_dock_pct, s.pane_sizes.inv_dock_pct);
+        assert!(s.pending_config_write);
+    }
+
+    // ── Room dock (SQ-0692) ──────────────────────────────────────────────────
+
+    fn open_room_dock(state: &mut AppState) {
+        state.room_dock.toggle_to(true, true);
+    }
+
+    /// Dragging the room dock's top edge upward grows the dock by that many
+    /// rows out of the map pane — the same direct-manipulation contract the
+    /// inventory dock has, on the boundary inside the map.
+    #[test]
+    fn dragging_the_room_dock_edge_up_grows_it_by_that_many_rows() {
+        let mut s = AppState::default();
+        open_room_dock(&mut s);
+        let a = area(80, 40);
+        let (pl0, _) = frame(&s, a, 0);
+        let start = pl0.room_dock.height;
+        let y = pl0.room_dock.y;
+        let x = pl0.room_dock.x + 5;
+
+        for step in [1u16, 2, 4] {
+            let (pl, zones) = frame(&s, a, 0);
+            let start = pl.room_dock.height;
+            let y = pl.room_dock.y;
+            on_mouse(&mut s, &down(x, y), &pl, &zones);
+            on_mouse(&mut s, &drag(x, y - step), &pl, &zones);
+            assert_eq!(
+                compute_pane_layout(a, &s, 0).room_dock.height,
+                start + step,
+                "up {step}"
+            );
+            on_mouse(&mut s, &up(x, y - step), &pl, &zones);
+        }
+
+        // …and a drag that goes nowhere leaves it exactly where it was.
+        let (pl, zones) = frame(&s, a, 0);
+        let held = pl.room_dock.height;
+        on_mouse(&mut s, &down(x, pl.room_dock.y), &pl, &zones);
+        on_mouse(&mut s, &drag(x, pl.room_dock.y), &pl, &zones);
+        on_mouse(&mut s, &up(x, pl.room_dock.y), &pl, &zones);
+        assert_eq!(compute_pane_layout(a, &s, 0).room_dock.height, held);
+        let _ = (start, y, zones);
+    }
+
+    /// The drag clamps to the same percentage limits resize mode's arrows use,
+    /// and the map pane survives even at the maximum.
+    #[test]
+    fn room_dock_drag_clamps_and_leaves_the_map_alive() {
+        let mut s = AppState::default();
+        open_room_dock(&mut s);
+        // A SHORT frame, so the map's own floor is what stops the drag rather than
+        // the percentage ceiling — on a tall frame the two never disagree and the
+        // floor assertion below would be vacuous.
+        let a = area(80, 12);
+        let (pl, zones) = frame(&s, a, 0);
+        let y = pl.room_dock.y;
+        let x = pl.room_dock.x + 5;
+        assert_eq!(
+            (crate::layout::MIN_ROOM_DOCK_PCT, crate::layout::MAX_ROOM_DOCK_PCT),
+            (10, 80)
+        );
+        on_mouse(&mut s, &down(x, y), &pl, &zones);
+        on_mouse(&mut s, &drag(x, 0), &pl, &zones);
+        assert_eq!(s.pane_sizes.room_dock_pct, 80);
+        assert_eq!(
+            compute_pane_layout(a, &s, 0).map.height,
+            crate::render::room_dock::MIN_MAP_ROWS,
+            "the map pane keeps its floor even at the maximum dock"
+        );
+        on_mouse(&mut s, &drag(x, 11), &pl, &zones);
+        assert_eq!(s.pane_sizes.room_dock_pct, 10);
+        on_mouse(&mut s, &up(x, 11), &pl, &zones);
+        assert_eq!(s.config.room_dock_pct, s.pane_sizes.room_dock_pct, "mirrored to config");
         assert!(s.pending_config_write);
     }
 

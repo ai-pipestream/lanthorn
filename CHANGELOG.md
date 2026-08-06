@@ -16,6 +16,21 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
+- **The room dock — one panel that describes where you are.** The floating Room
+  Info popup (left-click) and the diagnostics Inspector (right-click,
+  `/toggle-inspector`) are retired: both are now BODIES of a single dock that
+  slides in at the bottom of the map pane. It covers nothing, counts as no
+  overlay, and stays up while you play — the keyboard never leaves the story
+  prompt. With nothing selected it **follows** you, describing the room you are
+  standing in and updating every move; clicking a room **pins** it there, and the
+  header says which regime it is in. Unpin by clicking the pinned room again,
+  clicking empty map space, or pressing `Esc`; a second `Esc` closes the dock.
+  `/toggle-room-dock` (leader `k`) opens and closes it; `/toggle-inspector` keeps
+  its name and now opens — or flips to — the Diagnostics body, no longer needing
+  a room to be selected first. Its top edge drags like every other pane boundary
+  (height persisted as `room_dock_pct`, default 40%), it joins the `F3` resize-mode Tab cycle,
+  it docks below the matrix view as happily as below the drawn map, and it is
+  styleable through `room_dock`, `room_dock.header` and `room_dock.header:pinned`.
 - **Double-click submits, in the command band** — a second click on the same
   word row within the double-click window fires the composed prompt, so the
   last word of a phrase goes straight into the game: click `open`, double-click

@@ -56,6 +56,9 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # tidy_progress = { parent = "accent" }
 # meta_marker = { parent = "muted" }
 # inventory_dock = { parent = "accent" }
+# room_dock = { parent = "text" }
+# "room_dock.header" = { parent = "heading" }
+# "room_dock.header:pinned" = { parent = "accent", reversed = true }
 # story_info_title = { parent = "heading" }
 # story_info_value = { parent = "text" }
 # story_info_blurb = { parent = "muted", italic = true }

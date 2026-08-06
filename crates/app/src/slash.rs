@@ -316,9 +316,12 @@ pub static COMMANDS: &[CommandSpec] = &[
                 SlashOutcome::Action(Action::MergeLayer(Some(a.join(" "))))
             }
         } },
+    CommandSpec { name: "toggle-room-dock", category: Category::Map, context: Context::Map,
+        usage: "toggle-room-dock", description: "open or close the room dock under the map",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleRoomDock) },
     CommandSpec { name: "toggle-inspector", category: Category::Map, context: Context::Map,
-        usage: "toggle-inspector", description: "toggle the room-inspector overlay",
-        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleInspector) },
+        usage: "toggle-inspector", description: "show the room dock's diagnostics view (flips back to info when open)",
+        dispatch: |_| SlashOutcome::Action(crate::input::Action::ToggleRoomDiagnostics) },
     CommandSpec { name: "load-map", category: Category::Map, context: Context::Global,
         usage: "load-map <path>", description: "load a standalone map file into the current session",
         dispatch: |a| match a.first() {
@@ -821,7 +824,9 @@ mod tests {
         // `nudge-room` was removed with Manual layout mode (SQ-0600).
         // `toggle-untried-exits` was retired with the overlay it drove (SQ-0666); `view-map`
         // and `mark-maze-layer` arrived with the matrix view.
-        assert_eq!(COMMANDS.len(), 60, "registry must match the spec's Full command table");
+        // SQ-0692 added `toggle-room-dock`; `toggle-inspector` kept its name and
+        // now flips the SAME dock to its diagnostics body.
+        assert_eq!(COMMANDS.len(), 61, "registry must match the spec's Full command table");
     }
 
     #[test]

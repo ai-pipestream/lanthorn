@@ -1,0 +1,393 @@
+//! The room dock: one panel, docked at the bottom of the map pane, describing
+//! one room (SQ-0692).
+//!
+//! It replaced two floating corner dialogs — Room Info (left-click) and the
+//! diagnostics Inspector (right-click / `/toggle-inspector`) — which each
+//! obscured the map they described, counted as a modal overlay, and never
+//! followed the player. The dock reserves its own rows out of the map pane
+//! instead, so it covers nothing, and it has two BODIES rather than two panels:
+//!
+//! - **Info** — the room's notes, its exit card in the matrix vocabulary, and
+//!   (for the current room only) the objects the engine can see there.
+//! - **Diagnostics** — id, layer, grid position, edges with distortion flags,
+//!   discovery method.
+//!
+//! **Follow by default, pin on click.** With no room selected the dock describes
+//! `graph.current()` and updates every move; a selected room pins it. Pin state
+//! IS the selection (`state.selected_room`), so the map highlight, the matrix
+//! cross-highlight and the dock header always agree.
+//!
+//! Like the inventory dock, the caller sizes `area` from the animated
+//! `PanelSlide` fraction, so `area` may be shorter than the target height while
+//! a slide is in flight — everything here clips to `area`.
+
+use mapper::graph::{MapGraph, RoomId};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+
+use super::draw_str_clipped;
+use super::paneframe::{InsetSegment, PaneGlyphs};
+use crate::colors::ColorScheme;
+use crate::render::panel::{draw_panel, PanelSpec, PanelStrip};
+use crate::state::RoomDockView;
+
+/// Rows the dock refuses to shrink below: 2 border rows, the header line and two
+/// body lines. Below that it says nothing a glance can use.
+pub const MIN_ROOM_DOCK_ROWS: u16 = 5;
+
+/// Rows the MAP pane keeps no matter how tall the dock is asked to be: its two
+/// border rows plus one row of map. A dock that can starve the pane it lives in
+/// is a dock you cannot drag back.
+pub const MIN_MAP_ROWS: u16 = 3;
+
+/// The marker the header uses while the dock FOLLOWS the player.
+pub const FOLLOWING_MARKER: &str = "\u{2316} following";
+/// The marker the header uses while the dock is PINNED to a selected room.
+///
+/// A BMP glyph, not the design sketch's 📌: an emoji is double-width in a cell
+/// grid, and the header is drawn cell-by-cell like every other line here.
+pub const PINNED_MARKER: &str = "\u{2299} pinned";
+
+/// The dock's fully-open target height in rows: `pct`% of the frame, floored at
+/// [`MIN_ROOM_DOCK_ROWS`] and capped so the map pane keeps [`MIN_MAP_ROWS`].
+///
+/// A map pane too short to host both is left to the map entirely — the dock
+/// reports zero rather than squeezing into a sliver.
+pub fn room_dock_target_height(map_height: u16, frame_height: u16, pct: u16) -> u16 {
+    if map_height <= MIN_MAP_ROWS + MIN_ROOM_DOCK_ROWS {
+        return 0;
+    }
+    let want = ((frame_height as u32 * pct as u32) / 100) as u16;
+    want.max(MIN_ROOM_DOCK_ROWS)
+        .min(map_height.saturating_sub(MIN_MAP_ROWS))
+}
+
+/// The reserved dock band height: `target_h` scaled by the slide's current
+/// `fraction` (0.0 closed .. 1.0 fully open), rounded to the nearest row.
+pub fn room_dock_height(target_h: u16, fraction: f64) -> u16 {
+    (target_h as f64 * fraction).round() as u16
+}
+
+/// Which room the dock describes: the selected (pinned) room, else the room the
+/// player is standing in. `None` when neither exists — the map has not placed
+/// the player anywhere yet.
+pub fn dock_room(selected: Option<RoomId>, graph: &MapGraph) -> Option<RoomId> {
+    selected.or_else(|| graph.current())
+}
+
+/// The header line for `room`: its display name, its layer, and which regime the
+/// dock is in. The name is the matrix-NUMBERED form ("Maze 4") whenever the
+/// layer numbers it, so the dock, the matrix table and the exit card all call
+/// the same room the same thing.
+pub fn header_line(graph: &MapGraph, room: Option<RoomId>, pinned: bool) -> String {
+    let marker = if pinned { PINNED_MARKER } else { FOLLOWING_MARKER };
+    match room.and_then(|id| graph.room(id).map(|_| id)) {
+        Some(id) => {
+            let layer = graph.layer_of(id);
+            format!(
+                "{} \u{b7} {}  {}",
+                crate::render::room_info::display_name(graph, id),
+                graph.layer_name(layer),
+                marker,
+            )
+        }
+        // No current room and nothing pinned: say so rather than draw a blank
+        // dock the player has to guess at.
+        None => format!("nowhere yet  {marker}"),
+    }
+}
+
+/// Draw the room dock into `area`.
+///
+/// - `room` is the resolved room ([`dock_room`]); `pinned` is `selected_room.is_some()`.
+/// - `room_objects` are the engine's live objects for the CURRENT room (empty
+///   when introspection is unavailable); `current_room` gates their display.
+/// - `highlighted` is true when resize mode targets this dock or the pointer is
+///   on its top edge — the same accent every other pane boundary uses.
+///
+/// Returns the title-strip hit-rects, so a click on "Room"/"Diagnostics" switches
+/// the view the same way a click on a layer tab switches layers.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_room_dock(
+    graph: &MapGraph,
+    room: Option<RoomId>,
+    pinned: bool,
+    view: RoomDockView,
+    room_objects: &[String],
+    current_room: Option<RoomId>,
+    area: Rect,
+    colors: &ColorScheme,
+    highlighted: bool,
+    buf: &mut Buffer,
+) -> Vec<(RoomDockView, Rect)> {
+    if area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+    let style = colors.theme.get("room_dock").style;
+    let header_style = colors
+        .theme
+        .get(if pinned { "room_dock.header:pinned" } else { "room_dock.header" })
+        .style;
+    // Section headings inside the body always use the unpinned header selector:
+    // the pinned variant marks ONE line — the header — and a body that changed
+    // colour on pin would say nothing extra while shouting twice as loud.
+    let heading_style = colors.theme.get("room_dock.header").style;
+    let border_selector = if highlighted { "panel.border:active" } else { "panel.border" };
+    let border_color =
+        if highlighted { colors.theme.get("panel.border:active").style } else { style };
+
+    // Fill first so the map never shows through a mid-slide (short) dock.
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_symbol(" ").set_style(style);
+            }
+        }
+    }
+
+    // The two views are named in the title strip, active one accented — the same
+    // vocabulary the map pane's layer tabs use, so "this panel has two of these"
+    // reads the same way in both places.
+    let segments = [
+        InsetSegment { text: "Room", active: view == RoomDockView::Info },
+        InsetSegment { text: "Diagnostics", active: view == RoomDockView::Diagnostics },
+    ];
+    let spec = PanelSpec {
+        area,
+        border_selector,
+        border_color: Some(border_color),
+        border_style: None,
+        glyphs: &PaneGlyphs::default(),
+        header_on: true,
+        strip: Some(PanelStrip {
+            segments: &segments,
+            base: colors.theme.get("panel.tab").style,
+            active: colors.theme.get("panel.tab:active").style,
+        }),
+        body_fill: None,
+    };
+    let frame = draw_panel(buf, &spec, &colors.theme);
+    let tabs: Vec<(RoomDockView, Rect)> = [RoomDockView::Info, RoomDockView::Diagnostics]
+        .into_iter()
+        .zip(frame.tab_rects)
+        .collect();
+
+    let content = frame.content;
+    if content.height == 0 || content.width == 0 {
+        return tabs;
+    }
+
+    draw_str_clipped(
+        buf,
+        content.x,
+        content.y,
+        &header_line(graph, room, pinned),
+        header_style,
+        content,
+    );
+
+    let body = Rect::new(
+        content.x,
+        content.y + 1,
+        content.width,
+        content.height.saturating_sub(1),
+    );
+    if body.height == 0 {
+        return tabs;
+    }
+
+    let Some(id) = room.filter(|id| graph.room(*id).is_some()) else {
+        draw_str_clipped(
+            buf,
+            body.x,
+            body.y,
+            "The map has not placed you in a room yet.",
+            style,
+            body,
+        );
+        return tabs;
+    };
+
+    match view {
+        RoomDockView::Info => super::room_info::draw_room_info_body(
+            graph,
+            room_objects,
+            id,
+            current_room,
+            body,
+            buf,
+            &colors.theme,
+            style,
+            heading_style,
+        ),
+        RoomDockView::Diagnostics => {
+            if let Some(diag) = super::inspector::room_diagnostics(graph, id) {
+                super::inspector::draw_diagnostics_body(
+                    &diag,
+                    body,
+                    buf,
+                    &colors.theme,
+                    style,
+                    heading_style,
+                );
+            }
+        }
+    }
+
+    tabs
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mapper::direction::Direction;
+    use ratatui::style::Color;
+
+    fn buf_text(buf: &Buffer) -> String {
+        buf.content().iter().map(|c| c.symbol().to_owned()).collect()
+    }
+
+    fn graph_with_current() -> MapGraph {
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "West of House".into());
+        g.upsert_room(2, "Forest Path".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+        g.set_current(1);
+        g
+    }
+
+    #[test]
+    fn target_height_floors_at_min_rows_and_caps_so_the_map_survives() {
+        // 33% of a 40-row frame is 13, and a 30-row map pane can spare it.
+        assert_eq!(room_dock_target_height(30, 40, 33), 13);
+        // A tiny percentage still gets the readable minimum.
+        assert_eq!(room_dock_target_height(30, 40, 1), MIN_ROOM_DOCK_ROWS);
+        // A greedy percentage is capped so the map keeps MIN_MAP_ROWS.
+        assert_eq!(room_dock_target_height(20, 40, 80), 20 - MIN_MAP_ROWS);
+        // A map pane with no room for both keeps every row.
+        assert_eq!(room_dock_target_height(MIN_MAP_ROWS + MIN_ROOM_DOCK_ROWS, 40, 33), 0);
+        assert_eq!(room_dock_target_height(0, 40, 33), 0);
+    }
+
+    #[test]
+    fn height_scales_with_the_slide_fraction() {
+        assert_eq!(room_dock_height(10, 0.0), 0);
+        assert_eq!(room_dock_height(10, 0.5), 5);
+        assert_eq!(room_dock_height(10, 1.0), 10);
+    }
+
+    #[test]
+    fn dock_room_follows_current_until_a_selection_pins_it() {
+        let g = graph_with_current();
+        assert_eq!(dock_room(None, &g), Some(1), "no selection: follow the current room");
+        assert_eq!(dock_room(Some(2), &g), Some(2), "a selection pins the dock to it");
+        let empty = MapGraph::new();
+        assert_eq!(dock_room(None, &empty), None, "nothing current, nothing pinned");
+    }
+
+    #[test]
+    fn header_states_the_room_its_layer_and_the_regime() {
+        let g = graph_with_current();
+        let following = header_line(&g, Some(1), false);
+        assert!(following.contains("West of House"), "{following}");
+        assert!(following.contains("Main"), "the layer is named: {following}");
+        assert!(following.contains("following"), "{following}");
+        assert!(!following.contains("pinned"), "{following}");
+
+        let pinned = header_line(&g, Some(2), true);
+        assert!(pinned.contains("Forest Path") && pinned.contains("pinned"), "{pinned}");
+        assert!(!pinned.contains("following"), "{pinned}");
+
+        let nowhere = header_line(&MapGraph::new(), None, false);
+        assert!(nowhere.contains("nowhere yet"), "{nowhere}");
+    }
+
+    #[test]
+    fn info_body_draws_the_exit_card_diagnostics_body_draws_the_edges() {
+        let g = graph_with_current();
+        let area = Rect::new(0, 0, 50, 20);
+        let colors = ColorScheme::default();
+
+        let mut buf = Buffer::empty(area);
+        draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area, &colors, false, &mut buf);
+        let info = buf_text(&buf);
+        assert!(info.contains("West of House"), "the header names the room: {info}");
+        assert!(info.contains("Exits:"), "the Info body draws the exit card");
+        assert!(info.contains("Forest Path"), "…naming where east goes");
+
+        let mut buf = Buffer::empty(area);
+        draw_room_dock(&g, Some(1), true, RoomDockView::Diagnostics, &[], Some(1), area, &colors, false, &mut buf);
+        let diag = buf_text(&buf);
+        assert!(diag.contains("Pos"), "the Diagnostics body draws the grid position: {diag}");
+        assert!(diag.contains("edge"), "…and the edge summary");
+        assert!(!diag.contains("Exits:"), "…and NOT the Info body");
+    }
+
+    #[test]
+    fn an_empty_graph_says_nowhere_rather_than_drawing_a_blank_dock() {
+        let g = MapGraph::new();
+        let area = Rect::new(0, 0, 50, 10);
+        let mut buf = Buffer::empty(area);
+        draw_room_dock(&g, None, false, RoomDockView::Info, &[], None, area, &ColorScheme::default(), false, &mut buf);
+        let text = buf_text(&buf);
+        assert!(text.contains("nowhere yet"), "{text}");
+        assert!(text.contains("not placed you in a room yet"), "{text}");
+    }
+
+    #[test]
+    fn zero_area_does_not_panic() {
+        let g = graph_with_current();
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1),
+            Rect::new(0, 0, 0, 0), &ColorScheme::default(), false, &mut buf);
+    }
+
+    /// Every new visual element is styleable: `room_dock` paints the body and
+    /// `room_dock.header` / `room_dock.header:pinned` the header line, and an
+    /// override must actually reach the buffer.
+    ///
+    /// (The `honor_game_colours` pairing for this dock lives in
+    /// `tests/room_dock_render.rs`, which drives it from a real `AppState`: the
+    /// game's palette must not reach app chrome in EITHER mode, and only a state
+    /// carrying that flag can show it.)
+    #[test]
+    fn the_dock_style_selectors_reach_the_buffer() {
+        let g = graph_with_current();
+        let area = Rect::new(0, 0, 50, 12);
+        let parsed = crate::theme::toml_schema::parse(
+            "[elements]\nroom_dock = { fg = \"magenta\" }\n\
+             \"room_dock.header\" = { fg = \"blue\" }\n\
+             \"room_dock.header:pinned\" = { fg = \"green\" }\n",
+        )
+        .unwrap();
+        let scheme = crate::colors::GhosttyScheme::default();
+        let mut colors = ColorScheme::default();
+        colors.theme = crate::theme::resolve::resolve_theme(&scheme, &parsed);
+
+        let fgs_of = |buf: &Buffer| -> Vec<Option<Color>> {
+            (0..area.width)
+                .flat_map(|x| (0..area.height).map(move |y| (x, y)))
+                .map(|(x, y)| buf.cell((x, y)).and_then(|c| c.style().fg))
+                .collect()
+        };
+
+        let mut buf = Buffer::empty(area);
+        draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area, &colors, false, &mut buf);
+        let fgs = fgs_of(&buf);
+        assert!(fgs.contains(&Some(Color::Blue)), "the following header uses room_dock.header");
+        assert!(fgs.contains(&Some(Color::Magenta)), "the body uses room_dock");
+        assert!(!fgs.contains(&Some(Color::Green)), "…and not the pinned variant");
+
+        let mut buf = Buffer::empty(area);
+        draw_room_dock(&g, Some(1), true, RoomDockView::Info, &[], Some(1), area, &colors, false, &mut buf);
+        assert!(
+            fgs_of(&buf).contains(&Some(Color::Green)),
+            "a pinned header uses room_dock.header:pinned"
+        );
+    }
+}

@@ -131,22 +131,30 @@ impl std::fmt::Debug for HintSession {
     }
 }
 
-// ── Room panel ────────────────────────────────────────────────────────────────
+// ── Room dock ─────────────────────────────────────────────────────────────────
 
-/// Which display mode the room panel is in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RoomPanelMode {
-    /// Story/game info view (name, notes, exits, objects for current room).
+/// Which body the room dock is showing (SQ-0692). One dock, two views — the
+/// story-facing Info body and the layout Diagnostics body, for the SAME room.
+///
+/// Replaces `RoomPanelMode`, which chose between two floating corner dialogs;
+/// the dock is not a dialog, so the mode is now just which body it draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RoomDockView {
+    /// Story/game info body (notes, the exit card, objects for the current room).
+    #[default]
     Info,
-    /// Layout diagnostics view (reuses draw_inspector).
+    /// Layout diagnostics body (id, layer, grid pos, edges, discovery method).
     Diagnostics,
 }
 
-/// The currently-open room info/diagnostics panel, if any.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RoomPanel {
-    pub id: mapper::graph::RoomId,
-    pub mode: RoomPanelMode,
+impl RoomDockView {
+    /// The other view — what `/toggle-inspector` flips an open dock to.
+    pub fn flipped(self) -> Self {
+        match self {
+            RoomDockView::Info => RoomDockView::Diagnostics,
+            RoomDockView::Diagnostics => RoomDockView::Info,
+        }
+    }
 }
 
 // ── Drag-pan state ────────────────────────────────────────────────────────────
@@ -1679,6 +1687,9 @@ pub enum ResizeTarget {
     InvDock,
     /// The command band's height (only while the band is open; SQ-0238).
     CommandBand,
+    /// The room dock's height, carved from the map pane's bottom (only while the
+    /// dock is open; SQ-0692).
+    RoomDock,
 }
 
 /// Where the event loop should go when the current story ends. `Exit` leaves
@@ -1704,6 +1715,10 @@ pub struct PaneSizes {
     pub band_height: u16,
     /// Inventory dock height cap as % of screen height (default 33).
     pub inv_dock_pct: u16,
+    /// Room dock height as % of screen height (default 40). Measured against the
+    /// FRAME, like `inv_dock_pct`, even though the dock is carved out of the map
+    /// pane — one unit for both docks, so `dock_pct_for_rows` inverts either.
+    pub room_dock_pct: u16,
 }
 
 /// Zoom levels for the map pane. `Boxes` is the closest/most-detailed view;
@@ -2120,13 +2135,10 @@ pub struct AppState {
     pub graph_gen: u64,
     /// Explicit layer override for the map view. `None` means follow the current room's layer.
     pub viewed_layer: Option<LayerId>,
-    /// When true, draw the per-room diagnostics inspector overlay over the map pane.
-    /// Toggled by the `i` key in map focus.
-    /// Deprecated: use `room_panel` for new code. Kept for keyboard-toggle compat.
-    pub show_inspector: bool,
-    /// Currently-open room panel (info or diagnostics), if any.
-    /// Set by mouse clicks and the keyboard inspector toggle; drives `draw_frame`.
-    pub room_panel: Option<RoomPanel>,
+    /// Which body the room dock draws (SQ-0692). Meaningful only while
+    /// `room_dock` is open; kept across a close so reopening returns to the view
+    /// you left — except an explicit open, which names the view it wants.
+    pub room_dock_view: RoomDockView,
     /// Middle-button drag-pan state. `Some` while a drag gesture is in progress.
     pub drag: Option<DragState>,
     /// Story-pane text selection (left-drag). `Some` while selecting; the
@@ -2452,6 +2464,10 @@ pub struct AppState {
     pub inv_dock: crate::anim::PanelSlide,
     /// Slide-in command band (bottom). Session-only; starts closed.
     pub band_dock: crate::anim::PanelSlide,
+    /// Slide-in room dock, at the bottom of the MAP pane (SQ-0692).
+    /// Session-only; starts closed. Deliberately NOT an overlay: the map above
+    /// it stays fully interactive and the story prompt keeps the keyboard.
+    pub room_dock: crate::anim::PanelSlide,
 }
 
 impl Default for AppState {
@@ -2512,8 +2528,7 @@ impl Default for AppState {
             scroll_anim: None,
             graph_gen: 0,
             viewed_layer: None,
-            show_inspector: false,
-            room_panel: None,
+            room_dock_view: RoomDockView::Info,
             drag: None,
             selection: None,
             selection_edge: 0,
@@ -2539,6 +2554,7 @@ impl Default for AppState {
                 split_ratio: 50,
                 band_height: crate::render::command_band::DEFAULT_BAND_ROWS,
                 inv_dock_pct: 33,
+                room_dock_pct: 40,
             },
             pending_config_write: false,
             resize_mode: false,
@@ -2587,6 +2603,7 @@ impl Default for AppState {
             vm_halted: false,
             inv_dock: crate::anim::PanelSlide::closed(),
             band_dock: crate::anim::PanelSlide::closed(),
+            room_dock: crate::anim::PanelSlide::closed(),
         }
     }
 }
@@ -2609,6 +2626,7 @@ impl AppState {
             || self.overlays.hints.as_ref().is_some_and(|h| h.has_active_animation())
             || self.inv_dock.active()
             || self.band_dock.active()
+            || self.room_dock.active()
             || self.notifications.needs_tick()
     }
 
@@ -2626,6 +2644,38 @@ impl AppState {
     /// True while the command band is on screen (open, or still sliding).
     pub fn command_band_visible(&self) -> bool {
         self.overlays.command_band.is_some() || self.band_dock.active()
+    }
+
+    /// True while the room dock is on screen — open, or still sliding out
+    /// (SQ-0692). The layout reserves rows for it in both cases, so a close
+    /// animates instead of snapping.
+    pub fn room_dock_visible(&self) -> bool {
+        self.room_dock.open || self.room_dock.active()
+    }
+
+    /// True when the room dock is PINNED — which is exactly "a room is
+    /// selected". Pin state is the room selection (SQ-0692): one fact, so the
+    /// map highlight, the matrix cross-highlight and the dock header can never
+    /// disagree about which room is being described.
+    pub fn room_dock_pinned(&self) -> bool {
+        self.selected_room.is_some()
+    }
+
+    /// Open (or re-point) the room dock in `view`, animating the slide.
+    pub fn open_room_dock(&mut self, view: RoomDockView) {
+        self.room_dock_view = view;
+        if !self.room_dock.open {
+            self.room_dock.toggle_to(true, false);
+            self.room_dock.arm(&self.config.animation);
+        }
+    }
+
+    /// Close the room dock, animating the slide. The view is remembered.
+    pub fn close_room_dock(&mut self) {
+        if self.room_dock.open {
+            self.room_dock.toggle_to(false, false);
+            self.room_dock.arm(&self.config.animation);
+        }
     }
 
     /// Play the turn's sound events through the backend (gated on config +
@@ -2857,23 +2907,29 @@ impl AppState {
     }
 
     /// Return true if any modal, dialog, or overlay is currently open — including
-    /// the CORNER overlays (room panel, tidy animation) that let you keep playing
-    /// underneath them.
+    /// the CORNER overlay (the tidy animation) that lets you keep playing
+    /// underneath it.
+    ///
+    /// The room dock is deliberately NOT here (SQ-0692). It replaced two floating
+    /// corner dialogs with a docked panel that reserves its own rows out of the
+    /// map pane: it covers nothing, swallows nothing, and stays up while you
+    /// play, so counting it as an overlay would suppress the story prompt for as
+    /// long as it is open.
     ///
     /// For anything about the story pane's live input — the line, its caret, its
     /// suggestions — use [`any_modal_overlay_open`](Self::any_modal_overlay_open)
     /// instead: a modal genuinely means you are not typing at the prompt, but a
     /// corner panel does not.
     pub fn any_overlay_open(&self) -> bool {
-        self.any_modal_overlay_open() || self.room_panel.is_some() || self.tidy_anim.is_some()
+        self.any_modal_overlay_open() || self.tidy_anim.is_some()
     }
 
     /// [`any_overlay_open`](Self::any_overlay_open) minus the corner overlays.
     ///
-    /// The room panel and the tidy animation live in the MAP pane and deliberately
-    /// do not swallow input, so they must not suppress the story pane's live input
-    /// line or caret — doing so hid a half-typed command with no sign it was still
-    /// buffered, and Enter would then run something the player could not see.
+    /// The tidy animation lives in the MAP pane and deliberately does not swallow
+    /// input, so it must not suppress the story pane's live input line or caret —
+    /// doing so hid a half-typed command with no sign it was still buffered, and
+    /// Enter would then run something the player could not see.
     pub fn any_modal_overlay_open(&self) -> bool {
         self.overlays.saves.is_some()
             || self.overlays.file_browser.is_some()
@@ -3247,6 +3303,11 @@ impl AppState {
         if self.overlays.command_band.is_some() {
             targets.push(ResizeTarget::CommandBand);
         }
+        // The room dock is carved out of the map pane, so it is only a target
+        // when the map is on screen AND the dock is open (SQ-0692).
+        if self.room_dock.open && self.layout == Layout::Split && self.debug.is_none() {
+            targets.push(ResizeTarget::RoomDock);
+        }
         targets
     }
 
@@ -3275,6 +3336,7 @@ impl AppState {
         self.config.split_ratio = self.pane_sizes.split_ratio;
         self.config.command_band.height = self.pane_sizes.band_height;
         self.config.inv_dock_pct = self.pane_sizes.inv_dock_pct;
+        self.config.room_dock_pct = self.pane_sizes.room_dock_pct;
     }
 
     /// Reset all pane sizes to their config defaults and mirror into `config`.
@@ -3283,6 +3345,7 @@ impl AppState {
             split_ratio: crate::config::default_split_ratio(),
             band_height: crate::config::default_band_height(),
             inv_dock_pct: crate::config::default_inv_dock_pct(),
+            room_dock_pct: crate::config::default_room_dock_pct(),
         };
         self.sync_pane_sizes_to_config();
     }
@@ -5029,10 +5092,16 @@ mod tests {
         assert!(s.any_overlay_open(), "hotkey_dialog true => any_overlay_open true");
         s.overlays.hotkey_dialog = false;
 
-        // room_panel
-        s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
-        assert!(s.any_overlay_open(), "room_panel open => any_overlay_open true");
-        s.room_panel = None;
+        // room dock — deliberately NOT an overlay (SQ-0692). It reserves rows out
+        // of the map pane instead of covering it, so the story prompt and caret
+        // must survive it; the room panel it replaced counted here and blanked
+        // both.
+        s.room_dock.toggle_to(true, true);
+        s.selected_room = Some(1);
+        assert!(!s.any_overlay_open(), "the room dock is not an overlay, pinned or not");
+        s.selected_room = None;
+        assert!(!s.any_overlay_open());
+        s.room_dock.toggle_to(false, true);
 
         // tidy_anim
         s.tidy_anim = Some(TidyAnim::new(vec![TidyFrame {

@@ -1,7 +1,7 @@
 //! Single source of truth for pane geometry: the vertical split that carves
-//! out the command band, the inventory dock and the help row, and the
-//! per-`Layout` split of the remaining panes area between the story and map
-//! panes.
+//! out the command band, the inventory dock and the help row, the per-`Layout`
+//! split of the remaining panes area between the story and map panes, and the
+//! room dock carved off the map pane's own bottom (SQ-0692).
 //!
 //! Extracted from the inline `.constraints(...)` splits that used to live in
 //! `main.rs`'s `terminal.draw` closure so the geometry is testable without a
@@ -16,7 +16,7 @@ use crate::state::{AppState, Layout};
 /// The resolved pane rects for one frame. `story`/`map` are the OUTER
 /// (pre-frame) rects passed to `draw_framed`; they are `Rect::default()`
 /// (zero area) when that pane is hidden for the current `Layout`.
-/// `command_band`/`inv_dock` are zero-area when closed.
+/// `command_band`/`inv_dock`/`room_dock` are zero-area when closed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PaneLayout {
     /// The whole frame this layout was computed from. Kept because the
@@ -28,6 +28,11 @@ pub struct PaneLayout {
     pub map: Rect,
     pub command_band: Rect,
     pub inv_dock: Rect,
+    /// The room dock, carved out of the MAP pane's bottom (SQ-0692). Zero-area
+    /// when closed, when the layout hides the map, or while the debug inspector
+    /// owns the map slot. `map` is already the SHRUNK pane rect when this has
+    /// rows, so nothing downstream has to subtract it again.
+    pub room_dock: Rect,
     pub help_row: Rect,
 }
 
@@ -41,6 +46,13 @@ pub const MAX_SPLIT_PCT: u16 = 80;
 /// Smallest / largest inventory-dock cap, in percent of the frame height.
 pub const MIN_INV_DOCK_PCT: u16 = 10;
 pub const MAX_INV_DOCK_PCT: u16 = 80;
+/// Smallest / largest room-dock height, in percent of the frame height. The same
+/// range as the inventory dock's, deliberately: both are bottom docks sized as a
+/// share of the frame, and [`dock_pct_for_rows`] inverts either one. The map's
+/// own floor (`MIN_MAP_ROWS`) is what actually stops a tall dock from eating the
+/// pane — a percentage cannot know how many rows the map pane has.
+pub const MIN_ROOM_DOCK_PCT: u16 = MIN_INV_DOCK_PCT;
+pub const MAX_ROOM_DOCK_PCT: u16 = MAX_INV_DOCK_PCT;
 
 /// A pane boundary the mouse can grab and drag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +64,9 @@ pub enum Boundary {
     InvDockTop,
     /// The command band's top edge (moves `command_band.height`).
     CommandBandTop,
+    /// The room dock's top edge (moves `room_dock_pct`). Spans the MAP pane's
+    /// columns only — the dock sits inside that pane, not across the frame.
+    RoomDockTop,
 }
 
 /// One boundary plus the screen rect that grabs it.
@@ -120,6 +135,7 @@ impl PaneLayout {
         for (boundary, band) in [
             (Boundary::CommandBandTop, self.command_band),
             (Boundary::InvDockTop, self.inv_dock),
+            (Boundary::RoomDockTop, self.room_dock),
         ] {
             if band.width == 0 || band.height == 0 {
                 continue;
@@ -128,7 +144,7 @@ impl PaneLayout {
             // The band's own top row joins the zone only when it draws a border
             // there; the borderless command band contributes nothing.
             let bottom = match boundary {
-                Boundary::InvDockTop => band.y,
+                Boundary::InvDockTop | Boundary::RoomDockTop => band.y,
                 _ => top,
             };
             zones.push(BoundaryZone {
@@ -252,12 +268,41 @@ pub fn compute_pane_layout(area: Rect, state: &AppState, inv_item_count: usize) 
         Layout::Split => split_story_map(panes_area, state.pane_sizes.split_ratio),
     };
 
+    // ── Room dock: carved off the MAP pane's bottom (SQ-0692), so it docks
+    // under whatever the layer draws as — the drawn map or the matrix table —
+    // and the map pane above it keeps its own frame. Never while the debug
+    // inspector owns that slot (it is not a map), and never when the layout has
+    // no map pane to dock inside.
+    let dock_visible = state.room_dock_visible() && state.debug.is_none();
+    let room_dock_target = if dock_visible {
+        crate::render::room_dock::room_dock_target_height(
+            map.height,
+            area.height,
+            state.pane_sizes.room_dock_pct,
+        )
+    } else {
+        0
+    };
+    let room_dock_h = crate::render::room_dock::room_dock_height(
+        room_dock_target,
+        state.room_dock.fraction(),
+    );
+    let (map, room_dock_area) = if room_dock_h > 0 {
+        (
+            Rect::new(map.x, map.y, map.width, map.height - room_dock_h),
+            Rect::new(map.x, map.bottom() - room_dock_h, map.width, room_dock_h),
+        )
+    } else {
+        (map, Rect::default())
+    };
+
     PaneLayout {
         frame: area,
         story,
         map,
         command_band: band_area,
         inv_dock: inv_dock_area,
+        room_dock: room_dock_area,
         help_row,
     }
 }
@@ -441,6 +486,110 @@ mod tests {
 
         assert_eq!(pl.story, chunks[0]);
         assert_eq!(pl.map, chunks[1]);
+    }
+
+    // ── Room dock (SQ-0692) ───────────────────────────────────────────────────
+
+    fn open_room_dock(state: &mut AppState) {
+        state.room_dock.toggle_to(true, true); // instant open → fraction() == 1.0
+    }
+
+    /// The dock is carved out of the MAP pane's bottom, not the frame's: the story
+    /// pane keeps every row it had, and the map above the dock shrinks by exactly
+    /// the dock's height.
+    #[test]
+    fn room_dock_carves_the_map_pane_not_the_frame() {
+        let mut state = AppState::default();
+        let before = compute_pane_layout(area80x24(), &state, 0);
+        assert_eq!(before.room_dock, Rect::default(), "closed → zero area");
+
+        open_room_dock(&mut state);
+        let after = compute_pane_layout(area80x24(), &state, 0);
+        assert!(after.room_dock.height > 0, "open → rows reserved");
+        assert_eq!(after.story, before.story, "the story pane is untouched");
+        assert_eq!(after.map.x, before.map.x);
+        assert_eq!(after.map.width, before.map.width, "and the map keeps its columns");
+        assert_eq!(
+            after.map.height + after.room_dock.height,
+            before.map.height,
+            "the dock's rows come straight out of the map pane"
+        );
+        assert_eq!(after.room_dock.y, after.map.bottom(), "…off its bottom");
+        assert_eq!(after.room_dock.x, after.map.x, "spanning the map's columns only");
+        assert_eq!(after.room_dock.width, after.map.width);
+    }
+
+    /// A layout with no map pane has nowhere to dock, and the debug inspector owns
+    /// that slot when it is up — neither may sprout a room dock.
+    #[test]
+    fn room_dock_needs_a_map_pane_to_dock_in() {
+        let mut state = AppState::default();
+        open_room_dock(&mut state);
+        state.layout = Layout::TranscriptFull;
+        assert_eq!(
+            compute_pane_layout(area80x24(), &state, 0).room_dock,
+            Rect::default(),
+            "no map pane, no dock"
+        );
+    }
+
+    /// The dock's height follows `room_dock_pct`, is floored at a readable
+    /// minimum, and is capped so the map pane always survives.
+    #[test]
+    fn room_dock_height_follows_config_and_clamps() {
+        let mut state = AppState::default();
+        open_room_dock(&mut state);
+        let tall = Rect::new(0, 0, 80, 40);
+
+        state.pane_sizes.room_dock_pct = 25;
+        assert_eq!(compute_pane_layout(tall, &state, 0).room_dock.height, 10, "25% of 40 rows");
+
+        state.pane_sizes.room_dock_pct = MIN_ROOM_DOCK_PCT;
+        let pl = compute_pane_layout(tall, &state, 0);
+        assert_eq!(
+            pl.room_dock.height,
+            crate::render::room_dock::MIN_ROOM_DOCK_ROWS,
+            "a tiny percentage still gets the readable minimum"
+        );
+
+        // On a SHORT frame the percentage would swallow the pane, so the map's own
+        // floor binds instead — the assertion is only meaningful where the two
+        // limits actually disagree (80% of 12 rows = 9, but an 11-row map pane can
+        // only spare 8).
+        state.pane_sizes.room_dock_pct = MAX_ROOM_DOCK_PCT;
+        let short = Rect::new(0, 0, 80, 12);
+        let pl = compute_pane_layout(short, &state, 0);
+        assert_eq!(
+            pl.room_dock.height,
+            11 - crate::render::room_dock::MIN_MAP_ROWS,
+            "the map's floor binds before the percentage does"
+        );
+        assert_eq!(pl.map.height, crate::render::room_dock::MIN_MAP_ROWS, "the map pane survives");
+        assert_eq!(pl.map.height + pl.room_dock.height, 11, "and the two still tile the pane");
+    }
+
+    /// The dock's top edge is a draggable boundary — the pane border above it plus
+    /// its own top border, spanning the MAP pane's columns only.
+    #[test]
+    fn room_dock_top_is_a_grab_zone_over_the_map_columns() {
+        let mut state = AppState::default();
+        open_room_dock(&mut state);
+        let pl = compute_pane_layout(area80x24(), &state, 0);
+        let zones = pl.boundary_zones();
+
+        let z = zones
+            .iter()
+            .find(|z| z.boundary == Boundary::RoomDockTop)
+            .expect("room dock top zone");
+        assert_eq!(z.rect.y, pl.room_dock.y - 1, "the map pane's bottom border row");
+        assert_eq!(z.rect.height, 2, "plus the dock's own top border");
+        assert_eq!(z.rect.x, pl.map.x, "the map's columns, not the frame's");
+        assert_eq!(z.rect.width, pl.map.width);
+        // Inside the map's columns the edge grabs the dock; the splitter still wins
+        // its own two columns (it is pushed first).
+        let mid = pl.map.x + pl.map.width / 2;
+        assert_eq!(boundary_at(&zones, mid, pl.room_dock.y), Some(Boundary::RoomDockTop));
+        assert_eq!(boundary_at(&zones, mid, pl.room_dock.y + 1), None, "inside the dock");
     }
 
     #[test]

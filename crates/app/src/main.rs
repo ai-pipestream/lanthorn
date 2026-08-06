@@ -27,14 +27,12 @@ use app::persist_files::{list_saves, restore_game};
 use app::render::dialog::{DialogRects, DialogStyle};
 use app::render::hints_panel::{hint_input_action, hint_key_routes, HintInputAct, HintKeyKind, HintsPanelRects};
 use app::render::command_band::draw_command_band;
-use app::render::inspector::{draw_inspector, room_diagnostics};
 use app::render::map::{pulse_border_color, render_map_layered, room_screen_rects, sound_pulse_color};
 use app::render::paneframe::{build_layer_segments, InsetSegment};
 use app::render::panel::{draw_panel, PanelSpec, PanelStrip};
 use app::render::tidy_panel::draw_tidy_panel;
 use mapper::graph::RoomId;
 use mapper::layer::LayerId;
-use app::render::room_info::draw_room_info;
 use app::render::screen::render_story_pane;
 use app::render::draw_str_clipped;
 use app::engine::Engine;
@@ -43,7 +41,7 @@ use app::hints;
 use app::keymap::Context;
 use app::render::hintbar::{hint_bar, ANIM_HINTS, GAME_HINTS};
 use app::slash;
-use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, RoomPanelMode, SavesState};
+use app::state::{AppState, FbMode, FileBrowserState, Focus, Layout, SavesState};
 
 mod engine_helpers;
 mod ingame_io;
@@ -474,6 +472,14 @@ struct PaneRects {
     /// The draggable pane boundaries of this frame, with their grab zones.
     boundaries: Vec<app::layout::BoundaryZone>,
     room_rects: Vec<(RoomId, Rect)>,
+    /// The room dock's rect this frame (SQ-0692), zero-area when it is closed.
+    /// Mouse routing needs it as its own rect: the dock is carved OUT of the map
+    /// pane, so a click inside it is neither a map click nor a story click, and
+    /// must not fall through to either (nor to v6 mouse delivery).
+    room_dock: Rect,
+    /// Hit-rects for the dock's two view tabs. A click switches the body, the way
+    /// a click on a layer tab switches layers.
+    room_dock_tabs: Vec<(app::state::RoomDockView, Rect)>,
     /// Hit-rects for each layer tab, paired with the layer id; the mouse
     /// handler hit-tests these to switch the viewed layer on click.
     layer_tabs: Vec<(LayerId, Rect)>,
@@ -576,6 +582,7 @@ fn draw_frame(
     // the way `room_screen_rects` recomputes the drawn view's (SQ-0666).
     let mut map_hits: Option<Vec<(RoomId, Rect)>> = None;
     let mut layer_tabs_out: Vec<(LayerId, Rect)> = Vec::new();
+    let mut room_dock_tabs_out: Vec<(app::state::RoomDockView, Rect)> = Vec::new();
     let mut debug_tabs_out: Vec<(usize, usize, Rect)> = Vec::new();
     let mut dialog_rects_out: Option<DialogRects> = None;
     let mut overlay_rects: Option<overlays::OverlayRects> = None;
@@ -864,42 +871,46 @@ fn draw_frame(
             Vec::new()
         };
 
-        // ── Room panel overlay (map-only; skipped while the debug inspector is
-        // tiled into the map slot) ──────────────────────────────────────────────
-        if map_area.height > 0 && state.debug.is_none() {
-            if let Some(panel) = state.room_panel {
-                let graph = if let Some(g) = &replay_graph {
-                    g
-                } else {
-                    match &state.tidy_anim {
-                        Some(anim) => &anim.current().graph,
-                        None => &mapper.graph,
-                    }
-                };
-                let panel_ds = make_dialog_style(state);
-                match panel.mode {
-                    RoomPanelMode::Info => {
-                        let current_room = graph.current();
-                        // Objects in the room come from the engine's introspection
-                        // (unavailable during tidy-anim playback → empty).
-                        let room_objects: Vec<String> = if state.tidy_anim.is_none() {
-                            engine.introspect().map(|i| i.room_objects(panel.id)).unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
-                        if let Some(dr) = draw_room_info(graph, &room_objects, panel.id, current_room, map_area, buf, &panel_ds) {
-                            dialog_rects_out = Some(dr);
-                        }
-                    }
-                    RoomPanelMode::Diagnostics => {
-                        if let Some(diag) = room_diagnostics(graph, panel.id) {
-                            if let Some(dr) = draw_inspector(&diag, map_area, buf, &panel_ds) {
-                                dialog_rects_out = Some(dr);
-                            }
-                        }
-                    }
+        // ── Room dock (SQ-0692) ───────────────────────────────────────────────
+        // Not an overlay: the layout already reserved these rows out of the map
+        // pane, so nothing is covered and the map above stays interactive. It
+        // describes the SELECTED room when one is pinned, else the room the player
+        // is standing in — which is why it updates every move without being told.
+        if pane_layout.room_dock.height > 0 {
+            let graph = if let Some(g) = &replay_graph {
+                g
+            } else {
+                match &state.tidy_anim {
+                    Some(anim) => &anim.current().graph,
+                    None => &mapper.graph,
                 }
-            }
+            };
+            let room = app::render::room_dock::dock_room(state.selected_room, graph);
+            let current_room = graph.current();
+            // Objects in the room come from the engine's introspection
+            // (unavailable during tidy-anim playback → empty), and only ever for
+            // the room the player is actually in.
+            let room_objects: Vec<String> = match (room, state.tidy_anim.is_none()) {
+                (Some(id), true) if Some(id) == current_room => {
+                    engine.introspect().map(|i| i.room_objects(id)).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            let dock_resize_hl = (state.resize_mode
+                && state.resize_target == app::state::ResizeTarget::RoomDock)
+                || state.boundary_active(app::layout::Boundary::RoomDockTop);
+            room_dock_tabs_out = app::render::room_dock::draw_room_dock(
+                graph,
+                room,
+                state.room_dock_pinned(),
+                state.room_dock_view,
+                &room_objects,
+                current_room,
+                pane_layout.room_dock,
+                &state.colors,
+                dock_resize_hl,
+                buf,
+            );
         }
 
         // ── Inventory dock panel ──────────────────────────────────────────────
@@ -949,6 +960,7 @@ fn draw_frame(
                 ResizeTarget::StoryMap => "story/map",
                 ResizeTarget::InvDock => "inventory",
                 ResizeTarget::CommandBand => "command band",
+                ResizeTarget::RoomDock => "room dock",
             };
             format!("Resize [{t}] | Tab: pane | arrows: adjust | 0: reset | Esc: done")
         } else {
@@ -1034,7 +1046,7 @@ fn draw_frame(
 
     // The draw closure runs exactly once, so the overlay ladder always ran.
     let overlay_rects = overlay_rects.expect("draw_frame closure runs exactly once");
-    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
+    Ok(PaneRects { map: map_area, story: story_area, boundaries: pane_layout_out.boundary_zones(), pane_layout: pane_layout_out, room_rects: room_rects_out, room_dock: pane_layout_out.room_dock, room_dock_tabs: room_dock_tabs_out, layer_tabs: layer_tabs_out, debug_tabs: debug_tabs_out, dialog: overlay_rects.dialog, aux_dialog: overlay_rects.aux_dialog, reset_dialog: overlay_rects.reset_dialog, game_over: overlay_rects.game_over, save_name_dialog: overlay_rects.save_name_dialog, text_entry: overlay_rects.text_entry, confirm_delete: overlay_rects.confirm_delete, confirm_overwrite: overlay_rects.confirm_overwrite, quit_dialog: overlay_rects.quit_dialog, launch_dialog: overlay_rects.launch_dialog, hints_panel: overlay_rects.hints_panel, command_band: band_hits, palette: palette_hits, transcript_links: transcript_links_out, transcript_max_scroll, transcript_viewport_rows, transcript_total_rows, transcript_surface, modal_list_viewport })
 }
 
 // ── Command-band mouse routing ───────────────────────────────────────────────
@@ -1770,6 +1782,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
             // dropping the drawer content next iteration.) (SQ-0305)
             needs_redraw |= state.inv_dock.finalize_if_done();
             needs_redraw |= state.band_dock.finalize_if_done();
+            needs_redraw |= state.room_dock.finalize_if_done();
             continue;
         }
 
@@ -2770,6 +2783,32 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                             continue 'event_loop;
                         }
                         _ => continue 'event_loop,
+                    }
+                }
+                // Room dock (SQ-0692): the dock owns every mouse event inside its
+                // rect. A left-click on one of its two view tabs switches the body;
+                // anything else inside it is simply swallowed, because the dock is
+                // carved out of the map pane and a click there is neither a map
+                // click nor a story selection — and must never reach the v6 mouse
+                // delivery path below.
+                {
+                    let d = last_panes.room_dock;
+                    let inside = d.width > 0 && d.height > 0
+                        && m.column >= d.x && m.column < d.right()
+                        && m.row >= d.y && m.row < d.bottom();
+                    if inside && !state.any_modal_overlay_open() {
+                        if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = m.kind {
+                            let hit = last_panes.room_dock_tabs.iter().find(|(_, r)| {
+                                r.width > 0 && r.height > 0
+                                    && m.column >= r.x && m.column < r.right()
+                                    && m.row >= r.y && m.row < r.bottom()
+                            });
+                            // (`needs_redraw` was already set for this event above.)
+                            if let Some(&(view, _)) = hit {
+                                state.room_dock_view = view;
+                            }
+                        }
+                        continue 'event_loop;
                     }
                 }
                 // Map layer tab: a left-click on a layer tab selects that layer as the

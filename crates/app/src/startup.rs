@@ -187,6 +187,7 @@ fn pre_boot_host_screen(
         split_ratio: cfg.split_ratio,
         band_height: cfg.command_band.height,
         inv_dock_pct: cfg.inv_dock_pct,
+        room_dock_pct: cfg.room_dock_pct,
     };
     let pane_layout = app::layout::compute_pane_layout(frame, &boot_state, 0);
     app::render::screen::story_screen_dims(pane_layout.story, &boot_state)
@@ -625,6 +626,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
         split_ratio: cfg.split_ratio,
         band_height: cfg.command_band.height,
         inv_dock_pct: cfg.inv_dock_pct,
+        room_dock_pct: cfg.room_dock_pct,
     };
     // `[command_band] auto_open` — open the band with the story, for players who
     // want it as their default input surface rather than a thing to summon.

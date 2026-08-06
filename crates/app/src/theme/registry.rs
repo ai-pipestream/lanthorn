@@ -321,6 +321,13 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("tidy_progress", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
     row("meta_marker", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
     row("inventory_dock", Section::Elements, Kind::Style, Some("accent"), Delta::EMPTY),
+    // ── The room dock (SQ-0692): the docked panel describing one room. `room_dock`
+    // is its body text; the header line naming the room, its layer and the
+    // follow/pin regime gets its own selector, reversed while PINNED so the one
+    // line that changes meaning is the one that changes look.
+    row("room_dock", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
+    row("room_dock.header", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
+    row("room_dock.header:pinned", Section::Elements, Kind::Style, Some("accent"), mods(false, false, false, true)),
     row("story_info_title", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
     row("story_info_value", Section::Elements, Kind::Style, Some("text"), Delta::EMPTY),
     row("story_info_blurb", Section::Elements, Kind::Style, Some("muted"), mods(false, true, false, false)),
@@ -539,6 +546,9 @@ mod tests {
         "tidy_progress",
         "meta_marker",
         "inventory_dock",
+        "room_dock",
+        "room_dock.header",
+        "room_dock.header:pinned",
         "story_info_title",
         "story_info_value",
         "story_info_blurb",

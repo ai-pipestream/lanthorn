@@ -1,14 +1,18 @@
-//! Room-info panel: story-facing view of a clicked room.
+//! Room-info body: the story-facing view of one room, drawn by the room dock.
 //!
-//! Shows the room's name, notes, and its EXIT CARD — one line per direction, in the matrix view's
+//! Shows the room's notes and its EXIT CARD — one line per direction, in the matrix view's
 //! vocabulary, with destination names spelled out (SQ-0666). When the displayed room is the
 //! player's current room, also lists the objects in that room queried live from the Z-machine
-//! object tree.
+//! object tree. (The room's NAME and layer are the dock header's job — see
+//! [`crate::render::room_dock`] — so the body does not repeat them.)
 //!
 //! The card is the per-room form of the matrix: same seven cells, same meanings, one room at a
 //! time and no numbering to decode. It replaced a plain `dir -> name` list that could not say
 //! whether a direction had been tried, and — with the matrix — the room inspector's compass rose
 //! and the map's untried-exits overlay, which each said less.
+//!
+//! SQ-0692 retired the floating-dialog wrapper this used to live in: the body draws into a plain
+//! `Rect` now, so the dock owns the chrome and there is exactly one panel describing a room.
 
 use mapper::direction::Direction;
 use mapper::graph::{MapGraph, RoomId};
@@ -16,8 +20,8 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
-use super::dialog::{DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use super::draw_str_clipped;
+use crate::theme::resolve::Theme;
 
 /// A destination's display name, agreeing with whatever the matrix table itself would print for
 /// it (SQ-0685): the NUMBERED row label ("Maze 4") when the destination shares `labels`' layer —
@@ -86,28 +90,48 @@ fn dir_label(dir: Direction) -> &'static str {
     }
 }
 
-/// Render the room-info panel into the top-left corner of `map_area`.
+/// A room's display name as every surface that names it agrees to spell it: the matrix's NUMBERED
+/// row label ("Maze 4") when its layer numbers it, the bare room name otherwise (SQ-0685).
 ///
-/// - `graph`: the mapper graph for name/notes/exits.
+/// The dock header and the exit card both call this, so they cannot disagree.
+pub fn display_name(graph: &MapGraph, room_id: RoomId) -> String {
+    let layer = graph.layer_of(room_id);
+    let labels = mapper::matrix::labels(graph, layer);
+    let row = labels.row_of(room_id);
+    if !row.is_empty() {
+        return row.to_string();
+    }
+    graph.room(room_id).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{room_id}"))
+}
+
+/// Draw the room-info body into `area` — no chrome, no borders: the caller (the room dock) owns
+/// those.
+///
+/// - `graph`: the mapper graph for notes/exits.
 /// - `room_objects`: the objects located in this room, already queried from the
 ///   engine's introspection (empty when introspection is unavailable, e.g. the
 ///   map is in tidy-anim mode). Shown only when this is the current room.
 /// - `room_id`: the room to display.
 /// - `current_room`: the player's actual current room (used to gate object listing).
-/// - `dialog_style`: dialog chrome colors from state.colors.
-///
-/// Returns `Some(DialogRects)` when the panel was drawn (for mouse hit-testing).
-pub fn draw_room_info(
+/// - `theme`: for the shared `map.matrix.cell:frontier` dimming, so the card and the matrix agree.
+/// - `body` / `heading`: the styles for ordinary lines and for section labels.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_room_info_body(
     graph: &MapGraph,
     room_objects: &[String],
     room_id: RoomId,
     current_room: Option<RoomId>,
-    map_area: Rect,
+    area: Rect,
     buf: &mut Buffer,
-    dialog_style: &DialogStyle,
-) -> Option<DialogRects> {
-    let room = graph.room(room_id)?;
-    // Computed once and threaded through every name in this panel, so the card can never disagree
+    theme: &Theme,
+    body: Style,
+    heading: Style,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let Some(room) = graph.room(room_id) else { return };
+    // Computed once and threaded through every name in this body, so the card can never disagree
     // with the matrix table or its `⇲`/`⇱out` footnotes about what a room is numbered (SQ-0685):
     // both ultimately read the same `labels`.
     let layer = graph.layer_of(room_id);
@@ -142,72 +166,14 @@ pub fn draw_room_info(
         Vec::new()
     };
 
-    // Panel sizing.
-    // Wider than the old `dir -> name` list needed: a card line carries a glyph, a room name and
-    // sometimes a return direction.
-    const WIDTH: u16 = 44;
-    const FIXED_ROWS: u16 = 7; // border-top + name + exits-header + border-bot + OK button row + 2 spare
-    let notes_lines = if room.notes.is_empty() { 0u16 } else {
-        // Wrap notes to panel inner width, char/width-aware (SQ-0638): a
-        // byte-offset estimate panics the caller below on a multibyte note
-        // (e.g. one full of '€') long before it ever gets here, but a byte
-        // COUNT here would just under/over-estimate the row count instead —
-        // reuse the same wrapper the draw loop below uses so they agree.
-        let inner_w = WIDTH.saturating_sub(2);
-        crate::render::transcript::wrap_line(&room.notes, inner_w).len() as u16
-    };
-    let exit_rows = card.len() as u16 + odd.len() as u16;
-    let obj_rows = if objects.is_empty() { 0u16 } else { objects.len() as u16 + 1 }; // +1 for header
-    let needed_h = FIXED_ROWS + notes_lines + exit_rows + obj_rows;
-    let panel_h = needed_h.min(map_area.height);
-    let panel_w = WIDTH.min(map_area.width);
+    let value_style = body;
+    let section_style = heading;
 
-    if panel_w < 4 || panel_h < 4 {
-        return None;
-    }
-
-    // Top-left corner.
-    let panel = Rect::new(map_area.x, map_area.y, panel_w, panel_h);
-
-    // Render via shared dialog chrome (positioned at the computed rect).
-    // No buttons: this is a corner overlay you read while you keep playing, not a
-    // modal to dismiss, and an OK button implied otherwise. Closing is the ✕, Esc,
-    // or a click on empty map space.
-    let spec = DialogSpec {
-        title: " Room Info ",
-        placement: Placement::Positioned(panel),
-        buttons: &[],
-        show_close: true,
-        default: None,
-        focus: None,
-        field: None,
-    };
-    let bounds = *buf.area();
-    let dr = draw_dialog(buf, bounds, &spec, dialog_style);
-
-    let content = dr.content;
-    if content.height == 0 || content.width == 0 {
-        return Some(dr);
-    }
-
-    let value_style = Style::default();
-    let section_style = dialog_style.frame;
-    let label_style = dialog_style.title;
-
-    let inner_x = content.x;
-    let inner_w = content.width;
-    let clip = content;
-    let mut row = content.y;
-    let max_y = content.bottom().saturating_sub(1);
-
-    // Room name — the numbered form ("Maze 4") when this room shares its name with others on the
-    // layer, agreeing with the row the matrix table draws it on (SQ-0685).
-    if row <= max_y {
-        let title = labels.row_of(room_id);
-        let title = if title.is_empty() { room.label() } else { title };
-        draw_str_clipped(buf, inner_x, row, title, label_style, clip);
-        row += 1;
-    }
+    let inner_x = area.x;
+    let inner_w = area.width;
+    let clip = area;
+    let mut row = area.y;
+    let max_y = area.bottom().saturating_sub(1);
 
     // Notes (if any), word-wrapped char/width-aware (SQ-0638): a raw byte-offset
     // slice panics on a multibyte note (e.g. one full of '€') since a slice
@@ -220,9 +186,25 @@ pub fn draw_room_info(
         }
     }
 
+    // Objects (only for the current room) come BEFORE the card (SQ-0692). The card is a fixed
+    // thirteen-line block, so in a dock shortened past its natural height it is the section that
+    // runs off the bottom — and it degrades gracefully, because every one of its rows is the same
+    // shape and the ones that fit are still readable. A short "Here:" list buried underneath it
+    // was simply invisible at any dock height a normal terminal can spare.
+    if !objects.is_empty() && row <= max_y {
+        draw_str_clipped(buf, inner_x, row, "Here:", section_style, clip);
+        row += 1;
+        for name in &objects {
+            if row > max_y { break; }
+            let line = format!("  {}", name);
+            draw_str_clipped(buf, inner_x, row, &line, value_style, clip);
+            row += 1;
+        }
+    }
+
     // Exits — the card. Untried and dead-end directions are dimmed with the same selector the
     // matrix dims its frontier cells with, so the two surfaces read alike.
-    let frontier_style = dialog_style.theme.get("map.matrix.cell:frontier").style;
+    let frontier_style = theme.get("map.matrix.cell:frontier").style;
     if row <= max_y {
         draw_str_clipped(buf, inner_x, row, "Exits:", section_style, clip);
         row += 1;
@@ -239,20 +221,6 @@ pub fn draw_room_info(
         draw_str_clipped(buf, inner_x, row, &format!("  ?   ⇢ {dest}"), value_style, clip);
         row += 1;
     }
-
-    // Objects (only for current room).
-    if !objects.is_empty() && row <= max_y {
-        draw_str_clipped(buf, inner_x, row, "Here:", section_style, clip);
-        row += 1;
-        for name in &objects {
-            if row > max_y { break; }
-            let line = format!("  {}", name);
-            draw_str_clipped(buf, inner_x, row, &line, value_style, clip);
-            row += 1;
-        }
-    }
-
-    Some(dr)
 }
 
 /// List the display names of everything the player can see in room `room_id`.
@@ -311,11 +279,7 @@ pub(crate) fn list_room_objects_excluding(
 mod tests {
     use super::*;
     use mapper::graph::MapGraph;
-    use ratatui::backend::TestBackend;
-    use ratatui::Terminal;
     use ratatui::style::{Color, Style};
-    use crate::render::dialog::{DialogPlacement, DialogStyle};
-    use crate::render::paneframe::BorderStyle;
 
     #[test]
     fn list_room_objects_empty_for_synthetic_id() {
@@ -337,28 +301,34 @@ mod tests {
         assert!(list_room_objects(&model, &mem, synth).is_empty());
     }
 
-    fn make_dialog_style() -> DialogStyle<'static> {
-        use crate::render::paneframe::PaneGlyphs;
-        static TEST_THEME: std::sync::LazyLock<crate::theme::resolve::Theme> =
-            std::sync::LazyLock::new(|| crate::colors::ColorScheme::terminal_default().theme);
-        DialogStyle {
-            theme: &TEST_THEME,
-            frame: Style::default().bg(Color::Black),
-            border: Style::default(), box_style: BorderStyle::Single,
-            glyphs: PaneGlyphs::default(),
-            title: Style::default().fg(Color::Cyan),
-            button: Style::default(),
-            button_active: Style::default(),
-            shadow: Style::default(),
-            shadow_on: false,
-            placement: DialogPlacement::Center,
-            margin: 0,
-        }
+
+    fn test_theme() -> crate::theme::resolve::Theme {
+        crate::colors::ColorScheme::terminal_default().theme
     }
 
-    fn buf_contains(buf: &ratatui::buffer::Buffer, s: &str) -> bool {
-        let all: String = buf.content().iter().map(|c| c.symbol().to_owned()).collect();
-        all.contains(s)
+    /// Draw the body into a plain rect the way the room dock does, and return the
+    /// whole buffer as text.
+    fn render_body(
+        g: &MapGraph,
+        objects: &[String],
+        room: RoomId,
+        current: Option<RoomId>,
+        w: u16,
+        h: u16,
+    ) -> String {
+        let area = Rect::new(0, 0, w, h);
+        let mut buf = Buffer::empty(area);
+        let theme = test_theme();
+        draw_room_info_body(
+            g, objects, room, current, area, &mut buf, &theme,
+            Style::default(), Style::default().fg(Color::Cyan),
+        );
+        (0..h)
+            .map(|y| {
+                (0..w).map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" ")).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn make_graph_with_rooms() -> (MapGraph, RoomId, RoomId) {
@@ -388,24 +358,7 @@ mod tests {
         g.relabel_connection(3, Direction::N, Direction::NE); // …no: comes back by NE
         g.mark_tried(room1, Direction::W); // typed west, hit a wall
 
-        let backend = TestBackend::new(70, 30);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let ds = make_dialog_style();
-        terminal.draw(|f| {
-            let area = f.area();
-            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
-        })
-        .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        let text: String = (0..buf.area().height)
-            .map(|y| {
-                (0..buf.area().width)
-                    .map(|x| buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "))
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
+        let text = render_body(&g, &[], room1, None, 70, 30);
         assert!(text.contains("⇄ Forest Path"), "east is reciprocal, and names where it goes:\n{text}");
         assert!(text.contains("→ Cellar"), "south reaches the Cellar:\n{text}");
         assert!(text.contains("back: NE"), "…and the way back is spelled out, not left as `⇠ne`");
@@ -433,25 +386,18 @@ mod tests {
         g.add_edge(2, Direction::W, 1);
 
         // Independently computed, exactly as the matrix view itself would compute it.
-        let expect_room1 = mapper::matrix::labels(&g, mapper::layer::MAIN_LAYER).row_of(1).to_string();
         let expect_room2 = mapper::matrix::labels(&g, mapper::layer::MAIN_LAYER).row_of(2).to_string();
-        assert_eq!(expect_room1, "Maze 1");
         assert_eq!(expect_room2, "Maze 2");
 
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let ds = make_dialog_style();
-        terminal.draw(|f| {
-            let area = f.area();
-            draw_room_info(&g, &[], 1, None, area, f.buffer_mut(), &ds);
-        })
-        .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        assert!(buf_contains(&buf, &expect_room1), "the panel's own title is numbered too");
+        let text = render_body(&g, &[], 1, None, 60, 20);
         assert!(
-            buf_contains(&buf, &expect_room2),
-            "the exit card names its destination the way the matrix would"
+            text.contains(&expect_room2),
+            "the exit card names its destination the way the matrix would:\n{text}"
         );
+        // SQ-0692: the room's OWN numbered name moved to the dock header, which reads it from
+        // the same place — so `display_name` must agree with the matrix too.
+        assert_eq!(display_name(&g, 1), "Maze 1");
+        assert_eq!(display_name(&g, 2), "Maze 2");
     }
 
     /// SQ-0685: a destination that LEAVES the layer has no row in this room's `labels` to number
@@ -469,203 +415,70 @@ mod tests {
         g.set_room_layer(2, other);
         g.add_edge(1, Direction::Down, 2);
 
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let ds = make_dialog_style();
-        terminal.draw(|f| {
-            let area = f.area();
-            draw_room_info(&g, &[], 1, None, area, f.buffer_mut(), &ds);
-        })
-        .unwrap();
-        let buf = terminal.backend().buffer().clone();
-        // Room 1 is alone on Main, so it keeps its own bare name (no siblings to number against).
-        assert!(buf_contains(&buf, "Maze"), "room 1's own title");
-        assert!(!buf_contains(&buf, "Maze 1"), "room 1 has no same-named sibling on its OWN layer");
-        assert!(!buf_contains(&buf, "Maze 2"), "the cross-layer dest must not borrow a number that means nothing here");
-        assert!(buf_contains(&buf, "Elsewhere"), "the crossing still names the destination layer");
+        let text = render_body(&g, &[], 1, None, 60, 20);
+        assert!(text.contains("Maze"), "the destination is still named");
+        assert!(!text.contains("Maze 2"), "…but must not borrow a number that means nothing here:\n{text}");
+        assert!(text.contains("Elsewhere"), "the crossing still names the destination layer:\n{text}");
+        // Room 1 is alone on Main, so its own display name has no number either.
+        assert_eq!(display_name(&g, 1), "Maze");
     }
 
     /// SQ-0638: a room note packed with multibyte chars (each '€' is 3 bytes)
     /// used to panic — the wrap loop sliced `&notes[offset..end]` at a fixed
-    /// BYTE offset that could land mid-character. Twelve '€' at panel inner
-    /// width 34 chars is comfortably past any single-byte boundary trap.
+    /// BYTE offset that could land mid-character.
     #[test]
     fn room_info_notes_with_multibyte_chars_does_not_panic() {
         let (mut g, room1, _) = make_graph_with_rooms();
         g.set_notes(room1, "€".repeat(12));
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let ds = make_dialog_style();
-        terminal.draw(|f| {
-            let area = f.area();
-            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
-        }).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        assert!(buf_contains(&buf, "€"), "the multibyte note text should still render");
+        let text = render_body(&g, &[], room1, None, 60, 20);
+        assert!(text.contains("€"), "the multibyte note text should still render");
     }
 
     #[test]
-    fn room_info_shows_name_and_exit() {
+    fn room_info_body_shows_exits_but_not_the_room_name() {
+        // SQ-0692: the name (and layer) belong to the dock header now, so the body
+        // starts at the notes / exit card. Repeating the name inside the panel that
+        // already titles itself with it was the first thing to go when the two
+        // floating dialogs became one dock.
         let (g, room1, _room2) = make_graph_with_rooms();
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let ds = make_dialog_style();
-        terminal.draw(|f| {
-            let area = f.area();
-            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
-        }).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        assert!(buf_contains(&buf, "West of House"), "should show room name");
-        assert!(buf_contains(&buf, "E"), "should show exit direction");
-        assert!(buf_contains(&buf, "Forest Path"), "should show destination");
+        let text = render_body(&g, &[], room1, None, 60, 20);
+        assert!(!text.contains("West of House"), "the body does not repeat the header's name:\n{text}");
+        assert!(text.contains("Exits:"), "it starts at the exit card:\n{text}");
+        assert!(text.contains("Forest Path"), "…which names the destination");
     }
 
     #[test]
     fn room_info_no_objects_for_non_current_room() {
         let (g, room1, room2) = make_graph_with_rooms();
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let ds = make_dialog_style();
-        // room2 is not the current room (current_room = Some(room1)), so no objects section.
-        terminal.draw(|f| {
-            let area = f.area();
-            draw_room_info(&g, &[], room2, Some(room1), area, f.buffer_mut(), &ds);
-        }).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        // "Here:" section should not appear for non-current rooms.
-        assert!(!buf_contains(&buf, "Here:"), "objects section should not appear for non-current room");
+        // room2 is not the current room, so no objects section — even with objects passed in.
+        let text = render_body(&g, &["lamp".to_string()], room2, Some(room1), 60, 20);
+        assert!(!text.contains("Here:"), "objects section should not appear for a non-current room");
+        assert!(!text.contains("lamp"), "nor the objects themselves");
     }
 
     #[test]
-    fn room_info_shows_nothing_for_missing_room() {
+    fn room_info_lists_objects_for_the_current_room() {
+        let (g, room1, _) = make_graph_with_rooms();
+        let text = render_body(&g, &["brass lantern".to_string()], room1, Some(room1), 60, 24);
+        assert!(text.contains("Here:"), "the current room's objects get a section:\n{text}");
+        assert!(text.contains("brass lantern"), "{text}");
+    }
+
+    #[test]
+    fn room_info_body_is_silent_for_a_missing_room() {
         let g = MapGraph::new();
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let ds = make_dialog_style();
-        terminal.draw(|f| {
-            let area = f.area();
-            // Room 99 does not exist; should not panic.
-            draw_room_info(&g, &[], 99, None, area, f.buffer_mut(), &ds);
-        }).unwrap();
-        // No assertion — just must not panic.
+        let text = render_body(&g, &[], 99, None, 60, 20);
+        assert!(text.trim().is_empty(), "a room that is not in the graph draws nothing:\n{text}");
     }
 
     #[test]
-    fn room_info_shows_objects_section_header_for_current_room_when_no_zvm() {
-        // Even without machine_mem, the "Here:" section should not appear
-        // (no objects to show means no header either).
+    fn room_info_body_zero_area_does_not_panic() {
         let (g, room1, _) = make_graph_with_rooms();
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let ds = make_dialog_style();
-        terminal.draw(|f| {
-            let area = f.area();
-            draw_room_info(&g, &[], room1, Some(room1), area, f.buffer_mut(), &ds);
-        }).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        // Without machine_mem, objects list is empty, so "Here:" should not appear.
-        assert!(!buf_contains(&buf, "Here:"), "Here: should not appear without machine_mem");
-    }
-
-    #[test]
-    fn room_info_panel_clears_reversed_modifier_and_fg() {
-        // Pre-fill the buffer with REVERSED + fg(Cyan) to simulate map connector bleed.
-        // After rendering, cells inside the panel must have no REVERSED modifier
-        // and must have bg(Black).
-        use ratatui::style::Modifier;
-        let (g, room1, _) = make_graph_with_rooms();
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let ds = make_dialog_style();
-        terminal.draw(|f| {
-            let area = f.area();
-            let bleed_style = Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::REVERSED);
-            // Pre-fill every cell with the bleed style.
-            for y in 0..area.height {
-                for x in 0..area.width {
-                    if let Some(cell) = f.buffer_mut().cell_mut((x, y)) {
-                        cell.set_symbol(" ").set_style(bleed_style);
-                    }
-                }
-            }
-            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
-        }).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        for y in 0..4u16 {
-            for x in 0..36u16 {
-                if let Some(cell) = buf.cell((x, y)) {
-                    assert!(
-                        !cell.style().add_modifier.contains(ratatui::style::Modifier::REVERSED),
-                        "cell ({x},{y}) must not have REVERSED modifier inside panel"
-                    );
-                    assert_eq!(
-                        cell.style().bg,
-                        Some(Color::Black),
-                        "cell ({x},{y}) must have bg(Black) inside panel"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn room_info_panel_has_solid_black_background() {
-        // All cells within the panel rect must have bg(Color::Black) to prevent
-        // the map from showing through.
-        let (g, room1, _) = make_graph_with_rooms();
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let ds = make_dialog_style();
-        terminal.draw(|f| {
-            let area = f.area();
-            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
-        }).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        // Panel is at (0,0) with width=36 (or area width if smaller).
-        // Check a sample of cells inside the panel top-left region.
-        for y in 0..4u16 {
-            for x in 0..36u16 {
-                if let Some(cell) = buf.cell((x, y)) {
-                    assert_eq!(
-                        cell.style().bg,
-                        Some(Color::Black),
-                        "cell ({x},{y}) should have bg(Black) inside panel"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn room_info_panel_has_close_button_and_border() {
-        // The panel must show a border (single-line box) and a close [X] via draw_dialog.
-        let (g, room1, _) = make_graph_with_rooms();
-        let backend = TestBackend::new(60, 20);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let ds = make_dialog_style();
-        terminal.draw(|f| {
-            let area = f.area();
-            draw_room_info(&g, &[], room1, None, area, f.buffer_mut(), &ds);
-        }).unwrap();
-        let buf = terminal.backend().buffer().clone();
-        // The dialog chrome shows the close symbol.
-        assert!(buf_contains(&buf, "\u{2715}"), "panel must show close symbol [X]");
-        // Border: top-left corner of single-line box
-        assert!(buf_contains(&buf, "\u{250c}"), "panel must show top-left border corner");
-    }
-
-    #[test]
-    fn room_info_dialog_returns_close_rect() {
-        // draw_room_info must return Some(DialogRects) with close.is_some() when drawn.
-        let (g, room1, _) = make_graph_with_rooms();
-        let area = ratatui::layout::Rect::new(0, 0, 60, 20);
-        let mut buf = ratatui::buffer::Buffer::empty(area);
-        let ds = make_dialog_style();
-        let result = draw_room_info(&g, &[], room1, None, area, &mut buf, &ds);
-        assert!(result.is_some(), "draw_room_info must return Some(DialogRects)");
-        let dr = result.unwrap();
-        assert!(dr.close.is_some(), "DialogRects.close must be Some (show_close=true)");
+        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
+        let theme = test_theme();
+        draw_room_info_body(
+            &g, &[], room1, None, Rect::new(0, 0, 0, 0), &mut buf, &theme,
+            Style::default(), Style::default(),
+        );
     }
 }

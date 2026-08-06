@@ -179,10 +179,11 @@ pub enum Action {
     ToggleSound,
     /// Set the master audio volume 0..=100 (config.volume).
     SetVolume(u8),
-    /// Toggle the room-detection-method indicator in the map corner.
-    /// Toggle the per-room diagnostics inspector overlay (palette-only since
-    /// SQ-0446 gave `i` to toggle-inventory).
-    ToggleInspector,
+    /// Show the room dock's DIAGNOSTICS body: opens the dock there when it is
+    /// closed, and flips Info ↔ Diagnostics when it is already open (SQ-0692).
+    /// Still spelled `/toggle-inspector` — the command kept its name when the
+    /// floating inspector became the dock's second view.
+    ToggleRoomDiagnostics,
     /// Caller: exit the application.
     Quit,
     /// Cycle the viewed layer by `delta` steps over the sorted non-empty layer list (clamped at ends).
@@ -368,12 +369,16 @@ pub enum Action {
     // ── Mouse actions ─────────────────────────────────────────────────────────
     /// Activate a specific pane (left-click on pane background).
     ActivatePane(crate::state::Focus),
-    /// Show the story-info panel for `RoomId` (left-click on a room).
-    ShowRoomInfo(mapper::graph::RoomId),
-    /// Show the diagnostics panel for `RoomId` (right-click on a room).
-    ShowRoomDiagnostics(mapper::graph::RoomId),
-    /// Close the open room panel (click on map gutter).
-    CloseRoomPanel,
+    /// Pin the room dock to `RoomId` in the given view, opening it if closed
+    /// (SQ-0692). Pinning IS selecting: `selected_room` is the pin.
+    PinRoomDock(mapper::graph::RoomId, crate::state::RoomDockView),
+    /// Unpin the room dock — clear the selection so it follows the player again.
+    /// The dock itself stays up.
+    UnpinRoomDock,
+    /// Close the room dock (Esc's second rung; the toggle command's off state).
+    CloseRoomDock,
+    /// Open the room dock in the Info view, or close it if already open.
+    ToggleRoomDock,
     /// Begin a middle-button drag-pan gesture at terminal cell (col, row).
     BeginDragPan(u16, u16),
     /// Continue a middle-button drag-pan gesture at terminal cell (col, row).
@@ -519,19 +524,25 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
         return hotkey_dialog_key_to_action(state, key);
     }
 
-    // 6.5. Room panel close: Esc while a panel is open.
+    // 6.5. Room dock Esc ladder (SQ-0692): unpin first, close on the next press.
     // Comes after steps 2-6 (prompt/anim/saves/hotkey_dialog checks) so those
     // modes still take priority, but before the prefix key and normal dispatch.
     //
-    // Enter is deliberately NOT a close key. These are corner overlays, not
-    // modals — typing already reaches the story prompt underneath one (a letter
-    // resolves to `InputChar`), so stealing Enter meant you could compose a
-    // command with the inspector open but never submit it. Now Enter submits and
-    // the panel stays put, so the compass rose updates as you walk. Close it with
-    // Esc, the ✕, or a click on empty map space (`ActivatePane` clears it).
-    if state.room_panel.is_some() && key.modifiers == KeyModifiers::NONE
+    // Two rungs because the dock has two states worth leaving: pinned to a room
+    // you clicked, and simply up. Esc walks out of them in the order you entered
+    // them, so one habit ("Esc backs out") covers both, and neither needs a
+    // second key.
+    //
+    // Enter is deliberately NOT a close key. The dock is not a modal — typing
+    // reaches the story prompt with it open (a letter resolves to `InputChar`),
+    // so stealing Enter would let you compose a command and never submit it.
+    if state.room_dock.open && key.modifiers == KeyModifiers::NONE
         && matches!(key.code, KeyCode::Esc) {
-            return KeyResolve::Action(Action::CloseRoomPanel);
+            return KeyResolve::Action(if state.room_dock_pinned() {
+                Action::UnpinRoomDock
+            } else {
+                Action::CloseRoomDock
+            });
         }
 
     // [more] pager (SQ-0404): while it's showing, keypresses page the transcript
@@ -800,47 +811,6 @@ fn filebrowser_dialog_action(
     None
 }
 
-/// Per-modal action mapping for the room-info panel ([X] → CloseRoomPanel).
-fn roominfo_dialog_action(
-    rects: &crate::render::dialog::DialogRects,
-    col: u16,
-    row: u16,
-) -> Option<Action> {
-    use crate::render::dialog::ButtonId;
-
-    if let Some(close_rect) = rects.close {
-        if hit(close_rect, col, row) {
-            return Some(Action::CloseRoomPanel);
-        }
-    }
-
-    // Check buttons: Ok → CloseRoomPanel
-    for (id, rect) in &rects.buttons {
-        if hit(*rect, col, row) {
-            return Some(match id {
-                ButtonId::Ok => Action::CloseRoomPanel,
-                _            => Action::None,
-            });
-        }
-    }
-
-    None
-}
-
-/// Per-modal action mapping for the inspector panel ([X] → CloseRoomPanel).
-fn inspector_dialog_action(
-    rects: &crate::render::dialog::DialogRects,
-    col: u16,
-    row: u16,
-) -> Option<Action> {
-    if let Some(close_rect) = rects.close {
-        if hit(close_rect, col, row) {
-            return Some(Action::CloseRoomPanel);
-        }
-    }
-    None
-}
-
 /// Per-modal action mapping for the tidy panel ([X] → AnimExit).
 fn tidy_dialog_action(
     rects: &crate::render::dialog::DialogRects,
@@ -980,8 +950,7 @@ pub fn mouse_to_action(
             let centered_open = state.overlays.config_screen.is_some()
                 || state.overlays.saves.is_some() || state.overlays.file_browser.is_some()
                 || state.overlays.hotkey_dialog;
-            let is_corner_overlay = !centered_open
-                && (state.room_panel.is_some() || state.tidy_anim.is_some());
+            let is_corner_overlay = !centered_open && state.tidy_anim.is_some();
 
             if state.overlays.config_screen.is_some() {
                 if let Some(action) = config_dialog_action(rects, col, row) {
@@ -997,14 +966,6 @@ pub fn mouse_to_action(
                 }
             } else if state.overlays.hotkey_dialog {
                 if let Some(action) = hotkeys_dialog_action(rects, col, row) {
-                    return action;
-                }
-            } else if state.room_panel.as_ref().map(|p| matches!(p.mode, crate::state::RoomPanelMode::Info)).unwrap_or(false) {
-                if let Some(action) = roominfo_dialog_action(rects, col, row) {
-                    return action;
-                }
-            } else if state.room_panel.as_ref().map(|p| matches!(p.mode, crate::state::RoomPanelMode::Diagnostics)).unwrap_or(false) {
-                if let Some(action) = inspector_dialog_action(rects, col, row) {
                     return action;
                 }
             } else if state.tidy_anim.is_some() {
@@ -1026,8 +987,7 @@ pub fn mouse_to_action(
             let centered_open = state.overlays.config_screen.is_some()
                 || state.overlays.saves.is_some() || state.overlays.file_browser.is_some()
                 || state.overlays.hotkey_dialog;
-            let is_corner_overlay = !centered_open
-                && (state.room_panel.is_some() || state.tidy_anim.is_some());
+            let is_corner_overlay = !centered_open && state.tidy_anim.is_some();
             if !is_corner_overlay {
                 return Action::None;
             }
@@ -1065,24 +1025,39 @@ pub fn mouse_to_action(
             Action::EndSelection
         }
         // ── Left-click in map ─────────────────────────────────────────────────
+        // Pin, unpin, follow (SQ-0692). A click on a room points the dock at it
+        // (opening the dock if it was closed); a second click on the SAME pinned
+        // room, or a click on empty map space, unpins and the dock goes back to
+        // following the player. Focus deliberately stays on the story pane so you
+        // can keep typing.
         MouseEventKind::Down(MouseButton::Left) if in_map => {
             match room_at_screen(room_rects, col, row) {
-                // Room hit: show its info panel. Focus deliberately stays on the
-                // story pane so you can keep typing (see `ShowRoomInfo`).
-                Some(id) => Action::ShowRoomInfo(id),
-                // Empty map gutter: just dismiss any open panel. This used to
-                // hand the keyboard to the map, which is exactly the invisible
-                // mode SQ-0599 removed — a stray click in the gutter would
-                // silently redirect every subsequent keystroke away from the
-                // story.
-                None => Action::CloseRoomPanel,
+                Some(id) if state.room_dock.open && state.selected_room == Some(id) => {
+                    Action::UnpinRoomDock
+                }
+                Some(id) => Action::PinRoomDock(id, crate::state::RoomDockView::Info),
+                // Empty map gutter: unpin only. This used to hand the keyboard to
+                // the map, which is exactly the invisible mode SQ-0599 removed — a
+                // stray click in the gutter would silently redirect every
+                // subsequent keystroke away from the story.
+                None => Action::UnpinRoomDock,
             }
         }
         // ── Right-click in map ────────────────────────────────────────────────
+        // Same gestures, but pointed at the DIAGNOSTICS body. Only a click on a
+        // room already pinned AND already showing diagnostics unpins — otherwise
+        // the click has somewhere to take you.
         MouseEventKind::Down(MouseButton::Right) if in_map => {
             match room_at_screen(room_rects, col, row) {
-                Some(id) => Action::ShowRoomDiagnostics(id),
-                None => Action::CloseRoomPanel,
+                Some(id)
+                    if state.room_dock.open
+                        && state.selected_room == Some(id)
+                        && state.room_dock_view == crate::state::RoomDockView::Diagnostics =>
+                {
+                    Action::UnpinRoomDock
+                }
+                Some(id) => Action::PinRoomDock(id, crate::state::RoomDockView::Diagnostics),
+                None => Action::UnpinRoomDock,
             }
         }
         // ── Middle-button: drag-pan ───────────────────────────────────────────
@@ -2160,26 +2135,17 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             state.set_status(format!("volume {v}"));
             if let Some(b) = state.audio.as_mut() { b.set_volume(v); }
         }
-        Action::ToggleInspector => {
-            // Toggle: if a Diagnostics panel is already open for the selected room, close it;
-            // otherwise open Diagnostics for the selected room. Keyboard path shares room_panel.
-            use crate::state::{RoomPanel, RoomPanelMode};
-            if let Some(id) = state.selected_room {
-                let already_open = matches!(
-                    state.room_panel,
-                    Some(RoomPanel { id: pid, mode: RoomPanelMode::Diagnostics }) if pid == id
-                );
-                if already_open {
-                    state.room_panel = None;
-                    state.show_inspector = false;
-                } else {
-                    state.room_panel = Some(RoomPanel { id, mode: RoomPanelMode::Diagnostics });
-                    state.show_inspector = true;
-                }
+        Action::ToggleRoomDiagnostics => {
+            // Closed dock: open it straight onto the diagnostics body. Open dock:
+            // flip which body it draws (SQ-0692). It no longer needs a SELECTED
+            // room — an unpinned dock diagnoses whatever room you are standing in,
+            // which is the reading you want most of the time and the one the old
+            // `/toggle-inspector` could not give you at all.
+            use crate::state::RoomDockView;
+            if state.room_dock.open {
+                state.room_dock_view = state.room_dock_view.flipped();
             } else {
-                // No selected room: toggle off.
-                state.room_panel = None;
-                state.show_inspector = false;
+                state.open_room_dock(RoomDockView::Diagnostics);
             }
         }
 
@@ -2476,41 +2442,43 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             state.overlays.file_browser = None;
         }
 
-        // ── Mouse room-panel actions ──────────────────────────────────────────
+        // ── Room dock actions (SQ-0692) ───────────────────────────────────────
 
         Action::ActivatePane(focus) => {
+            // Pane focus only. The room dock is not an overlay and deliberately
+            // survives a pane switch — it is a readout you keep up while you play,
+            // and the two floating dialogs it replaced closing on every pane change
+            // was one of the reasons they were never up when you wanted them.
             state.focus = focus;
-            // Activating the map with no specific room selected clears the panel;
-            // activating the game pane also clears any open room panel so the
-            // story view is unobstructed.
-            state.room_panel = None;
-            state.show_inspector = false;
         }
 
-        Action::ShowRoomInfo(id) => {
-            use crate::state::{RoomPanel, RoomPanelMode};
-            state.room_panel = Some(RoomPanel { id, mode: RoomPanelMode::Info });
+        Action::PinRoomDock(id, view) => {
+            // Pinning IS selecting (SQ-0692): one fact drives the map highlight,
+            // the matrix cross-highlight and the dock header, so they cannot drift
+            // apart.
             state.selected_room = Some(id);
-            state.show_inspector = false;
-            // Focus deliberately STAYS on the story pane. These are corner overlays
-            // you read while you keep playing: taking map focus made every letter a
-            // map command (so typing reached nothing) and dimmed the story pane on
-            // top of that. The selected-room highlight does not need focus —
-            // `render/map.rs` reads only `selected_room` — so the clicked room still
-            // draws as selected. Tab to the map when you want to nudge or step rooms.
+            state.open_room_dock(view);
+            // Focus deliberately STAYS on the story pane. Taking map focus made
+            // every letter a map command (so typing reached nothing) and dimmed the
+            // story pane on top of that. The selected-room highlight does not need
+            // focus — `render/map.rs` reads only `selected_room`.
         }
 
-        Action::ShowRoomDiagnostics(id) => {
-            use crate::state::{RoomPanel, RoomPanelMode};
-            state.room_panel = Some(RoomPanel { id, mode: RoomPanelMode::Diagnostics });
-            state.selected_room = Some(id);
-            state.show_inspector = true;
-            // Focus stays on the story pane — see `ShowRoomInfo` above.
+        Action::UnpinRoomDock => {
+            state.selected_room = None;
         }
 
-        Action::CloseRoomPanel => {
-            state.room_panel = None;
-            state.show_inspector = false;
+        Action::CloseRoomDock => {
+            state.close_room_dock();
+        }
+
+        Action::ToggleRoomDock => {
+            use crate::state::RoomDockView;
+            if state.room_dock.open {
+                state.close_room_dock();
+            } else {
+                state.open_room_dock(RoomDockView::Info);
+            }
         }
 
         // ── Mouse drag-pan actions ────────────────────────────────────────────
@@ -2803,7 +2771,10 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
             const STEP: u16 = 3;
             // The limits are shared with the mouse drag (SQ-0669) so the two
             // ways of moving a boundary agree about its range.
-            use crate::layout::{MAX_INV_DOCK_PCT, MAX_SPLIT_PCT, MIN_INV_DOCK_PCT, MIN_SPLIT_PCT};
+            use crate::layout::{
+                MAX_INV_DOCK_PCT, MAX_ROOM_DOCK_PCT, MAX_SPLIT_PCT, MIN_INV_DOCK_PCT,
+                MIN_ROOM_DOCK_PCT, MIN_SPLIT_PCT,
+            };
             use ResizeNavKind::*;
             match state.resize_target {
                 crate::state::ResizeTarget::StoryMap => match dir {
@@ -2814,6 +2785,15 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
                 crate::state::ResizeTarget::InvDock => match dir {
                     Up => state.pane_sizes.inv_dock_pct = (state.pane_sizes.inv_dock_pct + STEP).min(MAX_INV_DOCK_PCT),
                     Down => state.pane_sizes.inv_dock_pct = state.pane_sizes.inv_dock_pct.saturating_sub(STEP).max(MIN_INV_DOCK_PCT),
+                    _ => {}
+                },
+                // The room dock grows upward out of the map pane, sized as a
+                // percentage of the frame exactly like the inventory dock — the
+                // map's own floor is enforced at layout time, where the pane's
+                // real height is known (SQ-0692).
+                crate::state::ResizeTarget::RoomDock => match dir {
+                    Up => state.pane_sizes.room_dock_pct = (state.pane_sizes.room_dock_pct + STEP).min(MAX_ROOM_DOCK_PCT),
+                    Down => state.pane_sizes.room_dock_pct = state.pane_sizes.room_dock_pct.saturating_sub(STEP).max(MIN_ROOM_DOCK_PCT),
                     _ => {}
                 },
                 // The command band is a bottom band now (SQ-0664), so it resizes
@@ -4040,21 +4020,46 @@ mod tests {
         assert_eq!(s.history.len(), 3, "close leaves history intact");
     }
 
+    /// SQ-0692: the old single-rung "Esc closes the room panel" became a LADDER,
+    /// because the dock has two states worth leaving. Esc unpins first (the dock
+    /// stays up, following the player again) and closes it on the next press; with
+    /// the dock down it is not Esc's business at all.
     #[test]
-    fn esc_closes_room_panel_when_open() {
-        use crate::state::{RoomPanel, RoomPanelMode};
-        // With a room panel open, Esc produces CloseRoomPanel (q-close removed).
+    fn esc_unpins_the_room_dock_then_closes_it() {
         let mut s = AppState::default();
-        s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
-        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomPanel),
-            "Esc with room panel open must produce CloseRoomPanel");
-        // q no longer closes the room panel.
-        assert!(!matches!(key_to_action(&s, key(KeyCode::Char('q'))), Action::CloseRoomPanel),
-            "q must no longer close the room panel");
-        // With no room panel, Esc does NOT produce CloseRoomPanel.
-        s.room_panel = None;
-        assert!(!matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomPanel),
-            "Esc with no room panel must not produce CloseRoomPanel");
+        s.room_dock.toggle_to(true, true);
+        s.selected_room = Some(1);
+        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::UnpinRoomDock),
+            "Esc with a pinned dock unpins first");
+        // q is not a close key (and never was, since the panels stopped being modals).
+        assert!(!matches!(key_to_action(&s, key(KeyCode::Char('q'))),
+            Action::UnpinRoomDock | Action::CloseRoomDock),
+            "q must not touch the dock");
+
+        s.selected_room = None;
+        assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomDock),
+            "Esc with an unpinned dock closes it");
+
+        s.room_dock.toggle_to(false, true);
+        assert!(!matches!(key_to_action(&s, key(KeyCode::Esc)),
+            Action::UnpinRoomDock | Action::CloseRoomDock),
+            "Esc with no dock open must not produce a dock action");
+    }
+
+    /// The ladder's rungs actually do what they say when applied.
+    #[test]
+    fn the_esc_ladder_leaves_the_dock_up_until_the_second_press() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.open_room_dock(crate::state::RoomDockView::Info);
+        s.selected_room = Some(7);
+
+        apply_action(Action::UnpinRoomDock, &mut s, &mut m);
+        assert_eq!(s.selected_room, None, "first Esc unpins");
+        assert!(s.room_dock.open, "…and leaves the dock up");
+
+        apply_action(Action::CloseRoomDock, &mut s, &mut m);
+        assert!(!s.room_dock.open, "the second Esc closes it");
     }
 
     #[test]
@@ -4779,30 +4784,88 @@ mod tests {
         assert!(matches!(key_to_action(&s, key(KeyCode::Char('i'))), Action::InputChar('i')));
     }
 
+    /// SQ-0692: `/toggle-inspector` no longer opens a second floating panel for a
+    /// SELECTED room — it opens the one dock onto its diagnostics body, and flips
+    /// back to Info when the dock is already up. Needing a selection first was the
+    /// old command's worst property: the reading you usually want is of the room
+    /// you are standing in, which it could never give you.
     #[test]
-    fn toggle_inspector_opens_diagnostics_for_selected_room() {
-        use crate::state::{RoomPanel, RoomPanelMode};
+    fn toggle_inspector_opens_the_dock_in_diagnostics_then_flips_views() {
+        use crate::state::RoomDockView;
         let mut s = AppState::default();
         let mut m = Mapper::default();
-        // Without a selected room, ToggleInspector is a no-op (room_panel stays None).
-        apply_action(Action::ToggleInspector, &mut s, &mut m);
-        assert!(s.room_panel.is_none(), "no room selected: panel should stay None");
-        assert!(!s.show_inspector, "no room selected: show_inspector stays false");
+        assert!(!s.room_dock.open, "the dock starts closed");
 
-        // With a selected room, ToggleInspector opens a Diagnostics panel.
-        s.select_room(Some(42));
-        apply_action(Action::ToggleInspector, &mut s, &mut m);
-        assert_eq!(
-            s.room_panel,
-            Some(RoomPanel { id: 42, mode: RoomPanelMode::Diagnostics }),
-            "should open Diagnostics panel for selected room"
-        );
-        assert!(s.show_inspector, "show_inspector should be true when panel opens");
+        // No selection needed: it opens on the followed room.
+        apply_action(Action::ToggleRoomDiagnostics, &mut s, &mut m);
+        assert!(s.room_dock.open, "a closed dock opens");
+        assert_eq!(s.room_dock_view, RoomDockView::Diagnostics, "…onto the diagnostics body");
+        assert_eq!(s.selected_room, None, "and does not pin anything");
 
-        // Second toggle closes it.
-        apply_action(Action::ToggleInspector, &mut s, &mut m);
-        assert!(s.room_panel.is_none(), "second toggle should close the panel");
-        assert!(!s.show_inspector, "show_inspector should be false after closing");
+        // Again with the dock open: flip to Info…
+        apply_action(Action::ToggleRoomDiagnostics, &mut s, &mut m);
+        assert!(s.room_dock.open, "the dock stays up — this flips views, it does not close");
+        assert_eq!(s.room_dock_view, RoomDockView::Info);
+
+        // …and back.
+        apply_action(Action::ToggleRoomDiagnostics, &mut s, &mut m);
+        assert_eq!(s.room_dock_view, RoomDockView::Diagnostics);
+    }
+
+    /// `toggle-room-dock` is the primary open/close command, and it opens on Info.
+    #[test]
+    fn toggle_room_dock_opens_on_info_and_closes() {
+        use crate::state::RoomDockView;
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        s.room_dock_view = RoomDockView::Diagnostics; // a stale view from last time
+
+        apply_action(Action::ToggleRoomDock, &mut s, &mut m);
+        assert!(s.room_dock.open);
+        assert_eq!(s.room_dock_view, RoomDockView::Info, "the primary toggle opens on Info");
+
+        apply_action(Action::ToggleRoomDock, &mut s, &mut m);
+        assert!(!s.room_dock.open, "and the same command closes it");
+    }
+
+    /// The dock is NOT an overlay (SQ-0692). It reserves its own rows instead of
+    /// covering the map, so it must not suppress the story prompt, the caret, or
+    /// anything else gated on `any_overlay_open` — which counting the old room
+    /// panel there did.
+    #[test]
+    fn the_open_room_dock_is_not_an_overlay() {
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+        apply_action(Action::ToggleRoomDock, &mut s, &mut m);
+        assert!(s.room_dock.open);
+        assert!(!s.any_overlay_open(), "an open room dock is not an overlay");
+        assert!(!s.any_modal_overlay_open(), "…and certainly not a modal one");
+
+        apply_action(Action::PinRoomDock(3, crate::state::RoomDockView::Diagnostics), &mut s, &mut m);
+        assert!(!s.any_overlay_open(), "nor is a PINNED dock");
+    }
+
+    /// Pin, re-pin, unpin — the click contract, at the action level.
+    #[test]
+    fn pinning_the_dock_selects_the_room_and_unpinning_clears_it() {
+        use crate::state::RoomDockView;
+        let mut s = AppState::default();
+        let mut m = Mapper::default();
+
+        apply_action(Action::PinRoomDock(5, RoomDockView::Info), &mut s, &mut m);
+        assert!(s.room_dock.open, "pinning opens a closed dock");
+        assert_eq!(s.selected_room, Some(5), "pin state IS the selection");
+        assert!(s.room_dock_pinned());
+        assert_eq!(s.room_dock_view, RoomDockView::Info);
+
+        apply_action(Action::PinRoomDock(5, RoomDockView::Diagnostics), &mut s, &mut m);
+        assert_eq!(s.selected_room, Some(5));
+        assert_eq!(s.room_dock_view, RoomDockView::Diagnostics, "a right-click re-points the view");
+
+        apply_action(Action::UnpinRoomDock, &mut s, &mut m);
+        assert_eq!(s.selected_room, None, "unpinned: the dock follows the player again");
+        assert!(!s.room_dock_pinned());
+        assert!(s.room_dock.open, "…but stays up");
     }
 
     // ── Equivalence guard for the KeyMap refactor ──────────────────────────────
@@ -5516,14 +5579,18 @@ mod tests {
         ));
     }
 
+    /// SQ-0692: a left-click on a room used to open a floating Room Info popup.
+    /// It now PINS the room dock to that room — opening the dock if it was closed
+    /// — which is the same gesture with a panel that does not cover the map.
     #[test]
-    fn left_down_on_room_cell_produces_show_room_info() {
+    fn left_down_on_room_cell_pins_the_dock_in_info_view() {
         use crossterm::event::MouseEventKind;
-        use crate::state::Zoom;
+        use crate::state::{RoomDockView, Zoom};
 
         let mut s = AppState::default();
         s.zoom = Zoom::Compact; // step = (12, 5)
         s.scroll = (0, 0);
+        assert!(!s.room_dock.open, "the dock starts closed");
 
         // Room 1 at cell (0,0). Build room_rects using render pipeline.
         let rects = room_rects_for_compact(1, (0, 0), map_rect());
@@ -5532,15 +5599,27 @@ mod tests {
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0, KeyModifiers::NONE);
         let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None);
         assert!(
-            matches!(action, Action::ShowRoomInfo(1)),
-            "left-down on room cell should produce ShowRoomInfo(1), got {:?}", action
+            matches!(action, Action::PinRoomDock(1, RoomDockView::Info)),
+            "left-down on a room with the dock CLOSED opens it pinned in Info, got {:?}", action
+        );
+
+        // Applying it opens the dock, pinned.
+        apply_action(action, &mut s, &mut Mapper::default());
+        assert!(s.room_dock.open);
+        assert_eq!(s.selected_room, Some(1));
+
+        // With the dock already open, the same click on the SAME room unpins.
+        let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0, KeyModifiers::NONE);
+        assert!(
+            matches!(mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None), Action::UnpinRoomDock),
+            "a click on the already-pinned room unpins"
         );
     }
 
     #[test]
-    fn right_down_on_room_cell_produces_show_room_diagnostics() {
+    fn right_down_on_room_cell_pins_the_dock_in_diagnostics_view() {
         use crossterm::event::MouseEventKind;
-        use crate::state::Zoom;
+        use crate::state::{RoomDockView, Zoom};
 
         let mut s = AppState::default();
         s.zoom = Zoom::Compact;
@@ -5551,8 +5630,25 @@ mod tests {
         let m = mouse_event(MouseEventKind::Down(MouseButton::Right), 0, 0, KeyModifiers::NONE);
         let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None);
         assert!(
-            matches!(action, Action::ShowRoomDiagnostics(2)),
-            "right-down on room cell should produce ShowRoomDiagnostics(2), got {:?}", action
+            matches!(action, Action::PinRoomDock(2, RoomDockView::Diagnostics)),
+            "right-down on a room pins the dock in Diagnostics, got {:?}", action
+        );
+        apply_action(action, &mut s, &mut Mapper::default());
+        assert_eq!(s.room_dock_view, RoomDockView::Diagnostics);
+
+        // Right-clicking the same room again — pinned AND already diagnostics — unpins.
+        let m = mouse_event(MouseEventKind::Down(MouseButton::Right), 0, 0, KeyModifiers::NONE);
+        assert!(
+            matches!(mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None), Action::UnpinRoomDock),
+            "a right-click on the pinned room already showing diagnostics unpins"
+        );
+
+        // …but a LEFT click there re-points it to Info rather than unpinning: the
+        // gesture still has somewhere to take you.
+        let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 0, 0, KeyModifiers::NONE);
+        assert!(
+            matches!(mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None), Action::UnpinRoomDock),
+            "left-click on the pinned room unpins regardless of view"
         );
     }
 
@@ -5634,8 +5730,11 @@ mod tests {
         assert!(matches!(dn, Action::TranscriptScrollPage(-1)));
     }
 
+    /// SQ-0692: an empty-space click used to close the popup. It now UNPINS — the
+    /// dock stays up and goes back to following the player, which is the state you
+    /// wanted when you clicked away from a room in the first place.
     #[test]
-    fn left_down_on_gutter_closes_the_panel_without_taking_focus() {
+    fn left_down_on_gutter_unpins_without_taking_focus() {
         use crossterm::event::MouseEventKind;
         use crate::state::Zoom;
 
@@ -5649,8 +5748,8 @@ mod tests {
         let m = mouse_event(MouseEventKind::Down(MouseButton::Left), 50, 0, KeyModifiers::NONE);
         let action = mouse_to_action(&s, m, map_rect(), story_rect(), &rects, &None);
         assert!(
-            matches!(action, Action::CloseRoomPanel),
-            "left-down on the map gutter must not hand the keyboard to the map (SQ-0599), got {:?}", action
+            matches!(action, Action::UnpinRoomDock),
+            "left-down on the map gutter unpins, and must not hand the keyboard to the map (SQ-0599), got {:?}", action
         );
     }
 
@@ -5807,21 +5906,24 @@ mod tests {
         assert_eq!(s.transcript_scroll, 10, "autoscroll no-ops without a selection");
     }
 
+    /// SQ-0692 flipped the second half of this test. `ActivatePane` used to CLOSE
+    /// the room panel — a floating dialog that had to get out of the way — and
+    /// must now leave the dock alone: the dock covers nothing, so a pane switch
+    /// closing it just means it is never up when you want it.
     #[test]
-    fn apply_activate_pane_sets_focus_and_clears_panel() {
-        use crate::state::{RoomPanel, RoomPanelMode};
+    fn apply_activate_pane_sets_focus_and_leaves_the_room_dock_alone() {
         let mut s = AppState::default(); // starts Focus::Game
         let mut m = Mapper::default();
 
-        // Pre-open a room panel.
-        s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
-        s.show_inspector = true;
+        s.open_room_dock(crate::state::RoomDockView::Diagnostics);
+        s.selected_room = Some(1);
 
-        // ActivatePane(Game) sets game focus and clears the panel.
+        // ActivatePane(Game) sets game focus and leaves the dock exactly as it was.
         apply_action(Action::ActivatePane(Focus::Game), &mut s, &mut m);
         assert_eq!(s.focus, Focus::Game, "ActivatePane(Game) must set focus to Game");
-        assert!(s.room_panel.is_none(), "ActivatePane must clear room_panel");
-        assert!(!s.show_inspector, "ActivatePane must clear show_inspector");
+        assert!(s.room_dock.open, "ActivatePane must NOT close the room dock");
+        assert_eq!(s.selected_room, Some(1), "…nor unpin it");
+        assert_eq!(s.room_dock_view, crate::state::RoomDockView::Diagnostics, "…nor change its view");
 
         // ActivatePane(Map) sets map focus.
         apply_action(Action::ActivatePane(Focus::Map), &mut s, &mut m);
@@ -5967,29 +6069,31 @@ mod tests {
     }
 
     #[test]
-    fn show_room_info_keeps_story_focus_so_you_can_keep_typing() {
+    fn pinning_the_dock_keeps_story_focus_so_you_can_keep_typing() {
         // Opening a room panel used to hand the keyboard to the map, which made
         // every letter a map command and dimmed the story pane — so you could not
-        // type while reading the panel. The room still selects; focus does not move.
+        // type while reading it. The room still selects; focus does not move.
+        use crate::state::RoomDockView;
         let mut s = AppState::default(); // starts as Focus::Game
         assert_eq!(s.focus, Focus::Game);
         let mut m = Mapper::default();
-        apply_action(Action::ShowRoomInfo(1), &mut s, &mut m);
-        assert_eq!(s.focus, Focus::Game, "ShowRoomInfo must NOT steal keyboard focus");
+        apply_action(Action::PinRoomDock(1, RoomDockView::Info), &mut s, &mut m);
+        assert_eq!(s.focus, Focus::Game, "pinning the dock must NOT steal keyboard focus");
         assert_eq!(s.selected_room, Some(1), "the room is still selected for rendering");
-        // And a letter now reaches the story prompt rather than the map.
+        // And a letter reaches the story prompt rather than the map.
         assert!(
             matches!(key_to_action(&s, key(KeyCode::Char('n'))), Action::InputChar('n')),
-            "with the panel open a letter must type, not drive the map"
+            "with the dock open a letter must type, not drive the map"
         );
     }
 
     #[test]
-    fn show_room_diagnostics_keeps_story_focus() {
+    fn pinning_the_diagnostics_view_keeps_story_focus() {
+        use crate::state::RoomDockView;
         let mut s = AppState::default(); // starts as Focus::Game
         let mut m = Mapper::default();
-        apply_action(Action::ShowRoomDiagnostics(2), &mut s, &mut m);
-        assert_eq!(s.focus, Focus::Game, "ShowRoomDiagnostics must NOT steal keyboard focus");
+        apply_action(Action::PinRoomDock(2, RoomDockView::Diagnostics), &mut s, &mut m);
+        assert_eq!(s.focus, Focus::Game, "a right-click pin must NOT steal keyboard focus");
         assert_eq!(s.selected_room, Some(2), "the room is still selected for rendering");
     }
 
@@ -7263,6 +7367,73 @@ mod tests {
         );
     }
 
+    /// SQ-0692: an open room dock joins the Tab cycle — but only where it can
+    /// actually be drawn. It is carved out of the map pane, so a layout with no
+    /// map has no dock edge to move.
+    #[test]
+    fn resize_targets_visible_includes_the_room_dock_only_with_a_map_pane() {
+        use crate::state::ResizeTarget;
+        let mut s = AppState::default();
+        s.room_dock.toggle_to(true, true);
+        assert_eq!(
+            s.resize_targets_visible(),
+            vec![ResizeTarget::StoryMap, ResizeTarget::RoomDock],
+            "an open dock is the last target in the cycle"
+        );
+
+        // Tab cycles into it and wraps back out.
+        s.resize_target = ResizeTarget::StoryMap;
+        s.cycle_resize_target(true);
+        assert_eq!(s.resize_target, ResizeTarget::RoomDock);
+        s.cycle_resize_target(true);
+        assert_eq!(s.resize_target, ResizeTarget::StoryMap, "…and wraps");
+
+        s.layout = crate::state::Layout::TranscriptFull;
+        assert!(
+            !s.resize_targets_visible().contains(&ResizeTarget::RoomDock),
+            "no map pane, no dock edge to drag"
+        );
+
+        s.layout = crate::state::Layout::Split;
+        s.room_dock.toggle_to(false, true);
+        assert!(
+            !s.resize_targets_visible().contains(&ResizeTarget::RoomDock),
+            "a closed dock is not a target"
+        );
+    }
+
+    /// The room dock resizes by percentage of the frame, like the inventory
+    /// dock, and clamps to the shared limits at both ends.
+    #[test]
+    fn resize_nav_adjusts_the_room_dock_pct_and_clamps() {
+        use crate::layout::{MAX_ROOM_DOCK_PCT, MIN_ROOM_DOCK_PCT};
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        s.room_dock.toggle_to(true, true);
+        s.resize_mode = true;
+        s.resize_target = crate::state::ResizeTarget::RoomDock;
+
+        assert_eq!(s.pane_sizes.room_dock_pct, crate::config::default_room_dock_pct());
+        apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);
+        assert_eq!(s.pane_sizes.room_dock_pct, 43);
+        assert_eq!(s.config.room_dock_pct, 43, "config mirrors pane_sizes");
+        apply_action(Action::ResizeNav(ResizeNavKind::Down), &mut s, &mut mapper);
+        assert_eq!(s.pane_sizes.room_dock_pct, 40);
+
+        for _ in 0..40 {
+            apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);
+        }
+        assert_eq!(s.pane_sizes.room_dock_pct, MAX_ROOM_DOCK_PCT, "clamped at the top");
+        for _ in 0..40 {
+            apply_action(Action::ResizeNav(ResizeNavKind::Down), &mut s, &mut mapper);
+        }
+        assert_eq!(s.pane_sizes.room_dock_pct, MIN_ROOM_DOCK_PCT, "clamped at the bottom");
+
+        // And `0` (reset) puts it back to the seeded default.
+        apply_action(Action::ResizeReset, &mut s, &mut mapper);
+        assert_eq!(s.pane_sizes.room_dock_pct, crate::config::default_room_dock_pct());
+    }
+
     /// SQ-0664: the band resizes by ROWS (up grows, down shrinks), replacing
     /// the retired `verb_dock_pct` percentage-width knob.
     #[test]
@@ -7881,30 +8052,34 @@ mod tests {
                 "q must not cancel the config screen");
         }
 
-        // Room panel: q → not CloseRoomPanel
+        // Room dock: q → not a dock action
         {
-            use crate::state::{RoomPanel, RoomPanelMode};
             let mut s = AppState::default();
-            s.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+            s.room_dock.toggle_to(true, true);
             let a = key_to_action(&s, key(KeyCode::Char('q')));
-            assert!(!matches!(a, Action::CloseRoomPanel),
-                "q must not close the room panel");
+            assert!(!matches!(a, Action::CloseRoomDock | Action::UnpinRoomDock),
+                "q must not close or unpin the room dock");
         }
     }
 
-    /// Regression: a centered modal (config screen) stacked on top of an open
-    /// corner overlay (room_panel) must swallow all outside-dialog clicks. Without
-    /// the fix, is_corner_overlay was true even when a centered modal was open, so
-    /// the outside click fell through to ShowRoomInfo / ActivatePane.
+    /// Regression: a centered modal (config screen) stacked over the map must
+    /// swallow all outside-dialog clicks. Without the fix, `is_corner_overlay` was
+    /// true even when a centered modal was open, so the outside click fell through
+    /// to the room-click / ActivatePane path.
+    ///
+    /// SQ-0692: the corner overlay in the original scenario was the room panel,
+    /// which is gone. The open ROOM DOCK stands in for it — the point of the test
+    /// is that a click outside a centered modal reaches nothing, whatever else is
+    /// on screen underneath.
     #[test]
-    fn centered_modal_swallows_outside_clicks_even_with_room_panel_open() {
+    fn centered_modal_swallows_outside_clicks_even_with_the_room_dock_open() {
         use ratatui::layout::Rect;
         use crate::render::dialog::{ButtonId, DialogRects};
-        use crate::state::{ConfigScreenState, RoomPanel, RoomPanelMode};
+        use crate::state::ConfigScreenState;
         use crate::state::Zoom;
 
         // Build a real map rect and room_rects so a click at (0,0) would normally
-        // produce ShowRoomInfo if the dialog were not open.
+        // pin the dock if the dialog were not open.
         let map_r = map_rect();   // Rect::new(0,0,80,40)
         let story_r = story_rect();
         let live_room_rects = room_rects_for_compact(1, (0, 0), map_r);
@@ -7914,15 +8089,15 @@ mod tests {
             let s = AppState::default();
             let a = mouse_to_action(&s, mouse_left_click(0, 0), map_r, story_r, &live_room_rects, &None);
             assert!(
-                matches!(a, Action::ShowRoomInfo(1)),
-                "sanity: without dialog, click on room should be ShowRoomInfo(1), got {:?}", a
+                matches!(a, Action::PinRoomDock(1, crate::state::RoomDockView::Info)),
+                "sanity: without dialog, a click on a room pins the dock to it, got {:?}", a
             );
         }
 
-        // Now open BOTH room_panel (corner overlay) AND config screen (centered modal).
+        // Now open BOTH the room dock AND the config screen (centered modal).
         let mut state = AppState::default();
         state.zoom = Zoom::Compact;
-        state.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+        state.room_dock.toggle_to(true, true);
         let working = clone_config(&state.config);
         state.overlays.config_screen = Some(ConfigScreenState { working, scroll: Default::default() });
 
@@ -7940,7 +8115,7 @@ mod tests {
         let a = mouse_to_action(&state, mouse_left_click(0, 0), map_r, story_r, &live_room_rects, &dialog);
         assert!(
             matches!(a, Action::None),
-            "outside-config-screen click with room_panel also open must be swallowed (None), got {:?}", a
+            "outside-config-screen click with the room dock also open must be swallowed (None), got {:?}", a
         );
     }
 
@@ -8710,25 +8885,25 @@ mod tests {
 
     // ── Task 5: read-only / single-button panels ──────────────────────────────
 
+    /// Enter belongs to the story prompt, in BOTH dock views. It once closed the
+    /// room panel, on the since-expired assumption that a read-only panel meant no
+    /// text input underneath it; the dock makes that even plainer, since it never
+    /// covers the prompt at all. Esc is the keyboard way out (see the ladder test).
     #[test]
-    fn room_panel_enter_submits_and_leaves_the_panel_open() {
-        use crate::state::{RoomPanel, RoomPanelMode};
-        // Enter used to close the panel, on the since-expired assumption that a
-        // read-only panel meant no text input underneath it. It submits now, so the
-        // rose keeps updating as you walk. Esc, the ✕, or a click on empty map space
-        // are the ways out.
-        for mode in [RoomPanelMode::Info, RoomPanelMode::Diagnostics] {
+    fn room_dock_enter_submits_and_leaves_the_dock_open() {
+        use crate::state::RoomDockView;
+        for view in [RoomDockView::Info, RoomDockView::Diagnostics] {
             let mut s = AppState::default();
-            s.room_panel = Some(RoomPanel { id: 1, mode });
+            s.room_dock.toggle_to(true, true);
+            s.room_dock_view = view;
             let a = key_to_action(&s, key(KeyCode::Enter));
             assert!(
                 matches!(a, Action::SubmitCommand(_)),
-                "Enter must submit the story command, not close the panel (got {a:?})"
+                "Enter must submit the story command, not touch the dock (got {a:?})"
             );
-            // Esc remains the keyboard close.
             assert!(
-                matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomPanel),
-                "Esc must still close the panel"
+                matches!(key_to_action(&s, key(KeyCode::Esc)), Action::CloseRoomDock),
+                "Esc remains the keyboard way out"
             );
         }
     }
@@ -8873,33 +9048,26 @@ mod tests {
         );
     }
 
+    /// SQ-0692 deleted this test's subject. `roominfo_ok_button_click_closes_panel`
+    /// pinned the ✕/[OK] chrome of the floating Room Info dialog; the dock has no
+    /// dialog chrome to click, so the fact worth keeping is the inverse — with the
+    /// dock open, a click that hits no dialog and no room is inert rather than
+    /// closing anything.
     #[test]
-    fn roominfo_ok_button_click_closes_panel() {
+    fn a_click_on_nothing_does_not_close_the_room_dock() {
         use ratatui::layout::Rect;
-        use crate::render::dialog::{ButtonId, DialogRects};
-        use crate::state::{RoomPanel, RoomPanelMode};
-
-        let rects = DialogRects {
-            area:    Rect::new(0, 0, 40, 15),
-            content: Rect::new(1, 1, 38, 12),
-            close:   Some(Rect::new(38, 0, 1, 1)),
-            buttons: vec![(ButtonId::Ok, Rect::new(30, 14, 6, 1))],
-            field: None,
-        };
 
         let mut state = AppState::default();
-        state.room_panel = Some(RoomPanel { id: 1, mode: RoomPanelMode::Info });
+        state.room_dock.toggle_to(true, true);
 
-        let map   = Rect::default();
+        let map = Rect::default();
         let story = Rect::default();
         let room_rects: &[(mapper::graph::RoomId, Rect)] = &[];
-        let dialog = Some(rects);
 
-        // OK button click → CloseRoomPanel
-        let a = mouse_to_action(&state, mouse_left_click(32, 14), map, story, room_rects, &dialog);
+        let a = mouse_to_action(&state, mouse_left_click(32, 14), map, story, room_rects, &None);
         assert!(
-            matches!(a, Action::CloseRoomPanel),
-            "room-info [OK] click should produce CloseRoomPanel, got {:?}", a
+            matches!(a, Action::None),
+            "a click outside every pane is inert; nothing closes the dock but Esc or its command, got {:?}", a
         );
     }
 

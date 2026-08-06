@@ -465,7 +465,7 @@ const DEFAULT_GROUPS: &[DefaultGroup] = &[
     ("Layout", &[('t', "tidy-map", "tidy the layout"), ('a', "animate-tidy", "animate a tidy pass")]),
     ("Layers", &[('p', "peel-layer", "peel region into a new layer"), ('m', "merge-layer", "merge layer down"), ('c', "cycle-layer next", "next map layer"), ('z', "mark-maze-layer", "flag layer as a maze")]),
     ("Edit", &[('r', "rename-room", "rename room"), ('n', "edit-notes", "edit room notes"), ('d', "delete-connection", "delete connection"), ('e', "relabel-edge", "relabel edge")]),
-    ("View", &[('i', "toggle-inventory", "inventory strip"), ('l', "toggle-portal-labels", "portal labels"), ('v', "open-command-band", "command band"), ('u', "view-map", "drawn / matrix view")]),
+    ("View", &[('i', "toggle-inventory", "inventory strip"), ('l', "toggle-portal-labels", "portal labels"), ('v', "open-command-band", "command band"), ('u', "view-map", "drawn / matrix view"), ('k', "toggle-room-dock", "room dock")]),
     // SQ-0599: zoom and centring used to be plain +/- and c while the map held
     // the keyboard. With that focus mode gone they would otherwise be
     // mouse-only, so they live here — on the keys they always used, which keeps
@@ -905,6 +905,9 @@ mod tests {
         assert!(view_group.is_some(), "View group should exist");
         let (_, cmds) = view_group.unwrap();
         assert!(cmds.iter().any(|c| c.1 == "toggle-inventory"), "toggle-inventory should be in View group");
+        // SQ-0692: the room dock is a View-group toggle too — the popups it replaced
+        // were mouse-only, which is why nobody found the diagnostics view.
+        assert!(cmds.iter().any(|c| c.1 == "toggle-room-dock"), "toggle-room-dock should be in View group");
     }
 
     #[test]
@@ -1082,10 +1085,10 @@ mod tests {
         assert_eq!(letters.len(), unique.len(), "leader letters must be unique");
         assert_eq!(
             letters.len(),
-            20,
-            "expected 20 authored leader letters (SQ-0446 Proposal B, SQ-0599's Map group — \
-             +/- zoom and 0 centre — and SQ-0666's view-map on the letter toggle-untried-exits \
-             gave back, plus mark-maze-layer)"
+            21,
+            "expected 21 authored leader letters (SQ-0446 Proposal B, SQ-0599's Map group — \
+             +/- zoom and 0 centre — SQ-0666's view-map on the letter toggle-untried-exits \
+             gave back, mark-maze-layer, and SQ-0692's room dock on `k`)"
         );
     }
 
@@ -1106,7 +1109,8 @@ mod tests {
         // moved to the '/' palette — no longer leader letters:
         // ('z' was resize-panes' letter; SQ-0666 reclaimed the free slot for maZe.)
         assert_eq!(layout.leader_command('z'), Some("mark-maze-layer"));
-        assert_eq!(layout.leader_command('k'), None); // reset-pane-size
+        // 'k' was free after reset-pane-size left; SQ-0692 gave it the room dock.
+        assert_eq!(layout.leader_command('k'), Some("toggle-room-dock"));
         assert_eq!(layout.leader_command('x'), None); // reset-game moved to 'g'
         assert_eq!(layout.leader_command('1'), None);
     }

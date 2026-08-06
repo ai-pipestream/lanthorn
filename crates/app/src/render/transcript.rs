@@ -4490,20 +4490,22 @@ mod tests {
     }
 
     #[test]
-    fn a_room_panel_does_not_suppress_the_story_caret() {
+    fn the_room_dock_does_not_suppress_the_story_caret() {
         // The regression the user hit playing advent.blb: `any_overlay_open()`
         // counted the room panel, so opening Room Info or the inspector blanked the
-        // live input line AND its caret. Corner overlays let you keep playing, so
-        // only MODAL overlays may suppress the prompt.
-        use crate::state::{RoomPanel, RoomPanelMode};
+        // live input line AND its caret. SQ-0692 settled it at the root — the dock
+        // that replaced both is not an overlay at all — but the SYMPTOM is what this
+        // test guards, so it keeps checking the prompt itself, in both dock views.
+        use crate::state::RoomDockView;
         let machine = minimal_machine();
-        for mode in [RoomPanelMode::Info, RoomPanelMode::Diagnostics] {
+        for mode in [RoomDockView::Info, RoomDockView::Diagnostics] {
             let mut state = AppState::default();
             state.config.command_bar = true;
             state.input.set("hi", true);
-            state.room_panel = Some(RoomPanel { id: 1, mode });
-            assert!(state.any_overlay_open(), "a room panel is still an overlay…");
-            assert!(!state.any_modal_overlay_open(), "…but not a MODAL one");
+            state.room_dock.toggle_to(true, true);
+            state.room_dock_view = mode;
+            assert!(!state.any_overlay_open(), "the room dock is not an overlay at all…");
+            assert!(!state.any_modal_overlay_open(), "…and certainly not a MODAL one");
 
             let area = Rect::new(0, 0, 40, 5);
             let mut buf = Buffer::empty(area);
@@ -4512,10 +4514,10 @@ mod tests {
             let row: String = (0..40u16)
                 .map(|x| buf.cell((x, 4)).unwrap().symbol().chars().next().unwrap_or(' '))
                 .collect();
-            assert!(row.contains("hi"), "the typed text must be visible with a {mode:?} panel open: {row:?}");
+            assert!(row.contains("hi"), "the typed text must be visible with the {mode:?} dock open: {row:?}");
             assert!(
                 buf.cell((4, 4)).unwrap().modifier.contains(Modifier::REVERSED),
-                "and so must the caret, with a {mode:?} panel open"
+                "and so must the caret, with the {mode:?} dock open"
             );
         }
     }
