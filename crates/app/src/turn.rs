@@ -565,7 +565,7 @@ pub(crate) fn apply_launch_resume(
             // Reinstate the saved screen too (mirrors the auto-load path, zvm-only),
             // so a once-split game's upper window/status line shows after resuming.
             if let Some(scr) = screen {
-                if let Some(z) = zvm_session_opt_mut(&mut *session) { app::session::restore_screen(&mut z.machine, scr); }
+                if let Some(z) = zvm_session_opt_mut(&mut *session) { app::session::restore_screen(z, scr); }
             }
             state.transcript = lines;
             state.clear_anchor = None;

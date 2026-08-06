@@ -3061,7 +3061,7 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                         match restore_err {
                             Ok(()) => {
                                 if let Some(scr) = ac.screen.clone() {
-                                    if let Some(z) = zvm_session_opt_mut(&mut *session) { app::session::restore_screen(&mut z.machine, scr); }
+                                    if let Some(z) = zvm_session_opt_mut(&mut *session) { app::session::restore_screen(z, scr); }
                                 }
                                 // v6 graphics canvases (Lane P): no-op for non-v6 archives.
                                 crate::engine_helpers::apply_v6_pictures(&mut *session, &ac);
@@ -3205,6 +3205,14 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                                     Ok(ac) => apply_archive_state(ac, &mut *session, &mut mapper, &mut state),
                                     Err(e) => state.push_notice(&format!("[Save State sidecars unreadable: {}]", e)),
                                 }
+                            } else {
+                                // A bare .qzl carries no screen, so the restored
+                                // game's layout width has to be assumed
+                                // (`note_bare_quetzal_width`, SQ-0681). Raised on
+                                // the attempt: `resume_restore` reports a refused
+                                // save only as the game's own "Failed.", and the
+                                // guard only ever widens the declared screen.
+                                engine_helpers::note_bare_quetzal_width(&mut *session);
                             }
                             state.push_notice(&format!("[Game restored from {}]", entry_name));
                             session.resume_restore(Some(&bytes))

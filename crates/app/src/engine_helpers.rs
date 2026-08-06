@@ -186,6 +186,7 @@ pub(crate) fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine
     if app::persist_files::is_game_save(path) {
         let bytes = app::archive::read_quetzal_from_file(path).map_err(|e| e.to_string())?;
         session.restore_game_save(&bytes).map_err(restore_error_msg)?;
+        note_bare_quetzal_width(session);
         return Ok(RestoreOutcome::DescriptorCompleted(None));
     }
     let tag = engine_tag(&*session);
@@ -199,6 +200,38 @@ pub(crate) fn restore_from_file(path: &std::path::Path, session: &mut dyn Engine
     } else {
         session.restore_state(&ac.engine_save()).map_err(restore_error_msg)?;
         Ok(RestoreOutcome::Resumed(Box::new(ac)))
+    }
+}
+
+/// Floor the declared-width guard for a restore that brought game memory in
+/// WITHOUT any screen state: a bare Quetzal (`.qzl`/`.sav`), from another
+/// interpreter or an older babelmap (SQ-0681).
+///
+/// [`app::session::restore_screen`] can raise the floor to the restored game's
+/// own frame of reference because a `.babelmap` archives the screen the game was
+/// laid out on. A bare Quetzal, by design, archives none: ZMSD/Quetzal treat the
+/// header's screen dimensions as the interpreter's, to be re-stamped on restore,
+/// so the width whose columns the restored status routine baked in is genuinely
+/// unknowable here.
+///
+/// The conservative choice is [`zvm::screen::DEFAULT_SCREEN_COLS`] (80), not the
+/// current session's floor. 80 is the Z-machine's conventional screen width, the
+/// width zvm falls back to, and the width every babelmap session booted at before
+/// SQ-0680 seeded the real pane — so it is what a foreign or older `.qzl` was
+/// overwhelmingly laid out for. Getting it wrong in this direction costs at most
+/// a bar clipped at the right of a narrower pane (what any interpreter shows for
+/// an 80-column game in a 60-column window); not flooring at all re-manifests the
+/// SQ-0679 garble — digits printed over the room name — on every turn after the
+/// restore. It only ever grows the floor, so a session already wider than 80 is
+/// untouched, and it is a no-op for the versions the floor exempts (v1–3, v6).
+///
+/// Not applied to an in-game `@save` `.babelmap`, which travels the same
+/// descriptor-completion path but DOES carry its screen: there
+/// [`apply_archive_state`] hands `restore_screen` the real width, and guessing 80
+/// first would pin a genuinely 60-column save to 80.
+pub(crate) fn note_bare_quetzal_width(session: &mut dyn Engine) {
+    if let Some(z) = zvm_session_opt_mut(session) {
+        z.note_restored_screen_cols(zvm::screen::DEFAULT_SCREEN_COLS as u16);
     }
 }
 
@@ -218,7 +251,7 @@ pub(crate) fn apply_archive_state(
 ) {
     if let Some(scr) = ac.screen.clone() {
         if let Some(z) = zvm_session_opt_mut(session) {
-            app::session::restore_screen(&mut z.machine, scr);
+            app::session::restore_screen(z, scr);
         }
     }
     // The v6 screen: rebuilt from the archived display list under the archived
@@ -290,6 +323,64 @@ mod tests {
     // descriptor instead of past it.
 
     use crate::tests::read_char_then_save_v4_story;
+
+    /// SQ-0681. A bare Quetzal carries game memory but no screen, so the width
+    /// its status layout was baked at is unknowable — `note_bare_quetzal_width`
+    /// floors the declared width at the conventional 80 rather than leaving a
+    /// narrow session's own boot width to make every baked field column illegal.
+    ///
+    /// The contrast in the second half is the reason the guess is scoped to this
+    /// one branch: a `.babelmap` restore must NOT take the guess, because an
+    /// archive knows the real width (`restore_screen`) and pinning a genuinely
+    /// 60-column session to 80 would undo SQ-0680's pre-boot seed.
+    #[test]
+    fn a_bare_qzl_restore_floors_the_declared_width_at_the_default_sq0681() {
+        use app::engine::Engine;
+        use app::session::{GameSession, PendingIo};
+
+        // A narrow session: booted with the real 60-column pane seeded (SQ-0680).
+        let narrow = || {
+            GameSession::new_with_trace(
+                read_char_then_save_v4_story(), true, false, None, false, Vec::new(), None, None,
+                Some((24, 60)),
+            )
+            .expect("new")
+        };
+
+        // Bare .qzl bytes, captured while the @save descriptor is still pending.
+        let mut donor = GameSession::new(read_char_then_save_v4_story(), true, false, None).expect("new");
+        assert_eq!(donor.submit_char(b'x').pending_io, Some(PendingIo::Save));
+        let qzl_bytes = donor.machine.save_quetzal();
+        let qzl_path = std::env::temp_dir().join(format!("bm-sq0681-{}.qzl", std::process::id()));
+        std::fs::write(&qzl_path, &qzl_bytes).unwrap();
+
+        let mut sess = narrow();
+        assert_eq!(sess.boot_screen_cols, 60, "the session booted at its real narrow pane");
+        let outcome = super::restore_from_file(&qzl_path, &mut sess).expect("restore .qzl game save");
+        assert!(matches!(outcome, super::RestoreOutcome::DescriptorCompleted(None)));
+        assert_eq!(
+            sess.boot_screen_cols,
+            zvm::screen::DEFAULT_SCREEN_COLS as u16,
+            "a screenless restore floors the declared width at the conventional 80"
+        );
+        let _ = std::fs::remove_file(&qzl_path);
+
+        // Contrast: a Save State .babelmap. Its width comes from the archived
+        // screen (here: none archived), never from the bare-Quetzal guess.
+        let save = Engine::save_state(&narrow());
+        let babelmap_path = std::env::temp_dir().join(format!("bm-sq0681-{}.babelmap", std::process::id()));
+        app::archive::save_archive(&babelmap_path, &mapper::mapper::Mapper::default(), &save, None,
+            &std::collections::BTreeMap::new(), &[], &[], &[], &[], &[], &[]).expect("write .babelmap");
+
+        let mut sess2 = narrow();
+        let outcome2 = super::restore_from_file(&babelmap_path, &mut sess2).expect("restore .babelmap");
+        assert!(matches!(outcome2, super::RestoreOutcome::Resumed(_)));
+        assert_eq!(
+            sess2.boot_screen_cols, 60,
+            "an archive restore never takes the bare-Quetzal guess — SQ-0680's narrow seed stands"
+        );
+        let _ = std::fs::remove_file(&babelmap_path);
+    }
 
     #[test]
     fn restore_from_file_completes_qzl_descriptor_and_resumes_babelmap_sq0163() {

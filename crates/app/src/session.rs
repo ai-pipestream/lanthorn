@@ -576,8 +576,11 @@ pub struct GameSession {
     /// that never existed. They keep the pre-SQ-0567 behaviour: stale palette, right
     /// layering.
     unreplayable: std::collections::HashSet<u8>,
-    /// The width (in columns) actually declared to this story at boot — the
-    /// `host_screen` column seeded into `new_with_trace` (SQ-0680), or
+    /// The width (in columns) the story image now in memory was laid out for —
+    /// the boot width of the session that produced it.
+    ///
+    /// At construction that is THIS session's boot: the `host_screen` column
+    /// count seeded into `new_with_trace` (SQ-0680), or
     /// [`zvm::screen::DEFAULT_SCREEN_COLS`] when boot was unseeded (`None`, or
     /// a construction path that bypasses `new_with_trace` entirely).
     ///
@@ -587,6 +590,13 @@ pub struct GameSession {
     /// actually booted at instead, or a pane narrower than 80 would have its
     /// correct pre-boot seed silently overwritten back to 80 on the very next
     /// poll (`loop_tick::poll_zvm_screen_dims`).
+    ///
+    /// A RESTORE swaps that image out for one some other session booted, and
+    /// with it the baked-in status-bar columns — so every restore raises this
+    /// through [`note_restored_screen_cols`](Self::note_restored_screen_cols)
+    /// to the restored game's own frame of reference (SQ-0681). It only ever
+    /// grows: a session whose own boot was wider keeps its width, because the
+    /// header it booted with is still the wider one.
     ///
     /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
     pub boot_screen_cols: u16,
@@ -1069,6 +1079,37 @@ impl GameSession {
         }
         let stop = run_until_input(&mut self.machine);
         self.finish_turn(stop)
+    }
+
+    /// Raise [`boot_screen_cols`](Self::boot_screen_cols) to the width the game
+    /// memory a restore just installed was laid out for (SQ-0681).
+    ///
+    /// The SQ-0679 floor keeps a v4/v5 story's one-shot status layout inside the
+    /// window it was computed for, and SQ-0680 keyed that floor to THIS session's
+    /// boot width. A restore breaks the assumption behind both: the memory image
+    /// now running is one another session booted, at ITS width, and the field
+    /// columns baked into it answer to that width alone. Restoring an 80-column
+    /// Save State into a 60-column session left the floor at 60, so the app
+    /// declared 60, the game's `set_cursor` to column 73 became illegal
+    /// (ZMSD §8.7.2.3), the interpreter dropped it and the score digits printed
+    /// at column 1 over the room name — the SQ-0679 garble, re-manifested every
+    /// turn by a save file.
+    ///
+    /// Only ever grows (`max`): a session that booted WIDER than the save keeps
+    /// its own width, since its header — which the restored game reads next —
+    /// still reports the wider screen, and the restored layout fits inside it.
+    ///
+    /// Exempt: v1–3 and v6, the versions [`declared_story_screen_dims`] does not
+    /// floor at all (no §8.4 header fields / a native pixel screen), so the field
+    /// keeps reporting the boot width for them.
+    ///
+    /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
+    pub fn note_restored_screen_cols(&mut self, cols: u16) {
+        let version = self.machine.mem.version();
+        if version < 4 || version == 6 {
+            return;
+        }
+        self.boot_screen_cols = self.boot_screen_cols.max(cols);
     }
 
     /// Build the `TurnResult` from a `RunStop` and drain the VM's per-turn
@@ -2385,14 +2426,27 @@ fn sink_mut(machine: &mut Machine) -> &mut CaptureSink {
         .expect("GameSession machine must have a CaptureSink output")
 }
 
-/// Install a `ScreenState` restored from a host archive on `machine`, re-syncing
+/// Install a `ScreenState` restored from a host archive on `session`, re-syncing
 /// the output sink's `buffer_mode` from it (ZMSD §7.2.1). The flag lives in two
 /// places — the screen model and the sink that tags captured runs — and only the
 /// former is archived, so a restore must hand it back to the sink or unbuffered
 /// output would silently start word-wrapping again. (`@restart` re-syncs via
 /// `init_caps`.)
-pub fn restore_screen(machine: &mut Machine, screen: zvm::screen::ScreenState) {
+///
+/// Takes the whole `GameSession`, not just its `Machine`, because a restored
+/// screen also carries the width its game was laid out for
+/// ([`GameSession::note_restored_screen_cols`], SQ-0681) — routing every restore
+/// through one function is what keeps that from being missed on a path.
+pub fn restore_screen(session: &mut GameSession, screen: zvm::screen::ScreenState) {
+    // The upper window's grid width IS the restored game's frame of reference:
+    // it was last sized from header byte $21 as the SAVING session declared it
+    // (`split_window` / `refit_upper_window_width`), which is the width that
+    // session's status routine computed its field columns from. Zero when the
+    // game had never split — then there is no baked layout to protect and the
+    // `max` below is a no-op. (SQ-0681)
+    let restored_cols = screen.upper.cols;
     let buffering = screen.buffer_mode;
+    let machine = &mut session.machine;
     machine.screen = screen;
     machine.out.set_buffer_mode(buffering);
     // SQ-0551: same class of fix as the `buffer_mode` re-sync above — state that
@@ -2426,7 +2480,8 @@ pub fn restore_screen(machine: &mut Machine, screen: zvm::screen::ScreenState) {
         machine.screen.current_fg = fg;
         machine.screen.current_bg = bg;
     }
-    reconcile_restored_screen_size(machine);
+    session.note_restored_screen_cols(restored_cols);
+    reconcile_restored_screen_size(&mut session.machine, session.boot_screen_cols);
 }
 
 /// Make a restored screen follow the terminal it is being restored ON, not the
@@ -2458,11 +2513,30 @@ pub fn restore_screen(machine: &mut Machine, screen: zvm::screen::ScreenState) {
 /// geometry to reconcile. Feeding a pane size in would resize the game's
 /// coordinate system underneath its own hardcoded art placement — and would
 /// clobber the window-0/1 sizes just restored from the archive.
-fn reconcile_restored_screen_size(machine: &mut Machine) {
+///
+/// `floor_cols` is the caller's [`GameSession::boot_screen_cols`] AFTER
+/// [`GameSession::note_restored_screen_cols`] has taken the restored game's own
+/// width into account (SQ-0681), so the width reconciled here is the same one
+/// `loop_tick::poll_zvm_screen_dims` will declare on the next pass. Without it
+/// the reconcile would first narrow the restored grid to this pane and the poll
+/// would widen it back a frame later — a needless truncate/re-pad of the very
+/// row the restore was carrying. v1–3 are exempt (§8.4's fields start at v4, and
+/// their status line is recomputed from the globals every turn), matching
+/// [`declared_story_screen_dims`]'s own exemptions; a user-pinned
+/// `virtual_screen_cols` is not visible from here, so an explicit pin narrower
+/// than the floor is re-applied by that poll rather than here.
+///
+/// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
+fn reconcile_restored_screen_size(machine: &mut Machine, floor_cols: u16) {
     if machine.mem.version() == 6 {
         return;
     }
     let (rows, cols) = (machine.mem.read_byte(0x20), machine.mem.read_byte(0x21));
+    let cols = if machine.mem.version() >= 4 {
+        cols.max(floor_cols.clamp(1, 255) as u8)
+    } else {
+        cols
+    };
     if rows > 0 && cols > 0 {
         machine.set_screen_dims(rows, cols);
     }
@@ -4335,15 +4409,28 @@ mod tests {
         (1..=m.screen.upper.cols).map(|c| m.screen.upper.cell(row, c).ch).collect()
     }
 
-    /// A screen saved on one terminal, restored on another (SQ-0589).
+    /// A screen saved on one terminal, restored on another (SQ-0589, amended by
+    /// SQ-0681).
     ///
     /// `restore_screen` installs the saved `ScreenState` wholesale, so without
     /// reconciliation the upper window keeps the SAVED terminal's width while
     /// the header (already re-stamped by `post_restore_fixups`) reports this
     /// one — the mismatch that leaves a short status bar in a wide pane.
+    ///
+    /// The width GROWS to the host pane and never shrinks below the restored
+    /// game's own layout width: the same asymmetry `declared_story_screen_dims`
+    /// applies to a live resize (SQ-0679). SQ-0589 originally refit both ways,
+    /// which is what re-manifested the garbled bar when an 80-column save met a
+    /// 60-column session (SQ-0681) — every coordinate the saved game baked in is
+    /// still legal inside a wider screen, and none of them are inside a narrower
+    /// one. In a pane too narrow the pane clips the right of the bar instead.
     #[test]
     fn a_restore_refits_the_upper_window_to_the_host_pane_not_the_saved_one() {
-        for (host_cols, label) in [(120u8, "wider host"), (60u8, "narrower host")] {
+        // (host pane, expected grid width, label)
+        for (host_cols, want_cols, label) in [
+            (120u8, 120u16, "wider host: the grid follows the pane"),
+            (60u8, 80u16, "narrower host: the grid holds the restored game's width"),
+        ] {
             let mut s = GameSession::new_with_trace(v5_stub_story(), false, false, None, false, Vec::new(), None, None, None)
                 .expect("v5 session");
             // The pane we are restoring INTO, as `post_restore_fixups` leaves it.
@@ -4357,18 +4444,20 @@ mod tests {
                 saved.upper.put(1, i as u16 + 1, ch, 0, ZColour::Default, ZColour::Default);
             }
 
-            restore_screen(&mut s.machine, saved);
+            restore_screen(&mut s, saved);
 
+            assert_eq!(s.machine.screen.upper.cols, want_cols, "{label}");
             assert_eq!(
-                s.machine.screen.upper.cols, host_cols as u16,
-                "{label}: the restored grid follows THIS terminal, not the saved one"
+                s.machine.mem.read_byte(0x21) as u16,
+                want_cols,
+                "{label}: and the header agrees with the grid"
             );
             assert_eq!(
                 s.machine.screen.upper_window_rows, 1,
                 "{label}: the game's split height is the game's — untouched"
             );
             let row = upper_row_text(&s.machine, 1);
-            assert_eq!(row.chars().count(), host_cols as usize, "{label}: the row spans the pane");
+            assert_eq!(row.chars().count(), want_cols as usize, "{label}: the row spans it");
             assert!(row.starts_with("West of House"), "{label}: content preserved: {row:?}");
         }
     }
@@ -4388,7 +4477,7 @@ mod tests {
         v6.windows[2].x_coord = 41;
         v6.windows[2].y_size = 96;
 
-        restore_screen(&mut s.machine, saved);
+        restore_screen(&mut s, saved);
 
         let v6 = s.machine.screen.v6.as_ref().expect("v6 window table");
         assert_eq!((v6.windows[0].x_size, v6.windows[0].y_size), (640, 400), "window 0 as archived");

@@ -92,6 +92,26 @@ the archive's map/transcript/screen around it. A bare `.qzl`/`.sav` carried in f
 another interpreter has no `meta.json` at all and takes the same descriptor path
 with nothing to reinstate — that interchange route is untouched.
 
+**A restore carries a layout width (SQ-0681).** A v4/v5 status routine lays its
+bar out ONCE, from header byte $21 as it stood at boot, and thereafter only
+re-cursors to the field columns it computed back then; declaring a narrower
+screen later makes those moves illegal (ZMSD §8.7.2.3) and the digits land on the
+room name. The app therefore floors the declared width at the width the running
+story was laid out for (`GameSession::boot_screen_cols`, SQ-0679/0680) — and a
+restore replaces the running story with one *another* session booted, at its own
+width. Every restore that brings a screen with it (`restore_screen`, so: host
+Save State resume, auto-resume at launch, and the in-game `@restore` of a
+`.babelmap`) raises that floor to the restored upper window's grid width, which
+is the saved session's own frame of reference; the floor only ever grows, so
+restoring a narrow save into a wide session changes nothing.
+`reconcile_restored_screen_size` applies the same floor, so the restored grid
+follows a *wider* pane and holds its own width in a narrower one, where the pane
+simply clips the right of the bar. A bare `.qzl`/`.sav` carries no screen and,
+per Quetzal, no usable header dimensions either, so its layout width is
+unknowable: that path assumes the conventional 80 columns
+(`note_bare_quetzal_width`) — wrong at worst by a clipped bar, versus a garbled
+one for assuming this session's width.
+
 **Every engine, the same deal (SQ-0556).** `@save` behaves identically wherever you
 meet it: it writes a `.babelmap`, the archive shows up in the saves manager, and it
 comes back through *both* the game's own `restore` and the host restore path.

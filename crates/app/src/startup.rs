@@ -535,7 +535,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
                         Ok(()) => {
                             if let Some(scr) = ac.screen.clone() {
                                 if let Some(zs) = zvm_session_opt_mut(&mut *session) {
-                                    app::session::restore_screen(&mut zs.machine, scr);
+                                    app::session::restore_screen(zs, scr);
                                 }
                             }
                             // The v6 screen: display list where the archive has one
