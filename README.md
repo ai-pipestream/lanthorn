@@ -44,6 +44,8 @@ roof; one engine-agnostic mapper that charts them all.
 
 ![A Glulx game using a multi-window Glk layout with story-set colours](docs/multi-window-layout.png)
 
+![The matrix map view: Colossal Cave's all-alike maze as a direction table — one row per room, every passage's true behaviour in its cell](docs/maze-grid.png)
+
 ![The built-in Z-machine debug inspector: live disassembly, call stack, and opcode hover help](docs/debug-inspector.png)
 
 ![A Scott Adams text adventure with its Blorb-bundled PNG artwork, playing beside its live map](docs/scott-adams-graphics.png)

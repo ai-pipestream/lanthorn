@@ -171,6 +171,8 @@ mesmerising.
 
 ## Mazes: the matrix view
 
+![The matrix view over Colossal Cave's all-alike maze: rows of rooms, columns of directions, footnotes naming the door in and the way out](../maze-grid.png)
+
 A compass map of a maze is a lie told carefully. In one real, half-explored
 mapping of Colossal Cave's "all alike" maze — twelve rooms, forty-seven passages —
 **two** passages come back the way you went. Eighteen come back by some other
