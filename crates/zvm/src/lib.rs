@@ -11,6 +11,7 @@ pub mod objects;
 pub mod quetzal;
 pub mod screen;
 pub mod text;
+pub mod world;
 
 pub use location::{current_location, detect_location, find_player_object, object_tree_view, Location, LocationMethod};
 pub use objects::ObjectSnapshot;

@@ -224,23 +224,39 @@ pub fn draw_room_info(
     Some(dr)
 }
 
-/// List the display names of all direct children of the room object `room_id`
-/// in the Z-machine object tree.
+/// List the display names of everything the player can see in room `room_id`.
 ///
-/// In Z-machine fiction, objects carried by or present in a room are children
-/// of the room object (or children of containers in the room). We list only the
-/// direct children here (one level deep), which covers visible items on the floor.
-pub(crate) fn list_room_objects(mem: &zvm::memory::Memory, room_id: RoomId) -> Vec<String> {
-    list_room_objects_excluding(mem, room_id, 0)
+/// Not simply the room object's direct children (SQ-0678). A Z-machine room
+/// holds three kinds of visible thing, and only the first is a child of it:
+///
+/// - things on the floor — direct children;
+/// - things on a supporter or inside an open container standing in the room —
+///   children of *that furniture*, so the sack and bottle on Zork I's kitchen
+///   table are two levels down, not one;
+/// - shared scenery named by the room but parked in a bucket object — the
+///   window at Behind House is never a child of any room.
+///
+/// `model` supplies the story-specific conventions needed to find the last two
+/// safely; see [`zvm::world`] for how they are inferred and for the guarantee
+/// that a closed container's contents never appear here.
+pub(crate) fn list_room_objects(
+    model: &zvm::world::WorldModel,
+    mem: &zvm::memory::Memory,
+    room_id: RoomId,
+) -> Vec<String> {
+    list_room_objects_excluding(model, mem, room_id, 0)
 }
 
-/// Same traversal as [`list_room_objects`], but skipping the child whose
-/// object id is `exclude` (0 excludes nothing — 0 is never a valid object
-/// id). Used to keep the player object out of the command band's "here"
-/// column (SQ-0667): filtering by id here, during the same walk that builds
-/// the names, is what makes the exclusion exact rather than a fragile
-/// name-match against whatever the player object happens to be called.
+/// Same traversal as [`list_room_objects`], but skipping the object whose
+/// id is `exclude` — and its whole subtree (0 excludes nothing: 0 is never a
+/// valid object id). Used to keep the player object out of the command band's
+/// "here" column (SQ-0667): filtering by id here, during the same walk that
+/// builds the names, is what makes the exclusion exact rather than a fragile
+/// name-match against whatever the player object happens to be called. Skipping
+/// the subtree matters more now that the walk nests — the player is a holder
+/// too, and their pockets are the *carried* column, never *here*.
 pub(crate) fn list_room_objects_excluding(
+    model: &zvm::world::WorldModel,
     mem: &zvm::memory::Memory,
     room_id: RoomId,
     exclude: u16,
@@ -250,19 +266,12 @@ pub(crate) fn list_room_objects_excluding(
     if crate::roomid::is_synthetic_room(room_id) {
         return Vec::new();
     }
-    use zvm::objects::{get_child, get_sibling, short_name};
-    let mut result = Vec::new();
-    let mut child = get_child(mem, room_id);
-    while child != 0 {
-        if child != exclude {
-            let name = short_name(mem, child);
-            if !name.is_empty() {
-                result.push(name);
-            }
-        }
-        child = get_sibling(mem, child);
-    }
-    result
+    model
+        .visible_room_objects(mem, room_id, exclude)
+        .into_iter()
+        .map(|o| zvm::objects::short_name(mem, o))
+        .filter(|n| !n.is_empty())
+        .collect()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -293,7 +302,8 @@ mod tests {
         buf[0x0040] = 0xba; // quit opcode
         let mem = zvm::memory::Memory::new(buf).unwrap();
         let synth = crate::roomid::SYNTHETIC_ROOM_FLAG | 0x0123;
-        assert!(list_room_objects(&mem, synth).is_empty());
+        let model = zvm::world::WorldModel::discover(&mem);
+        assert!(list_room_objects(&model, &mem, synth).is_empty());
     }
 
     fn make_dialog_style() -> DialogStyle<'static> {

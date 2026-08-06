@@ -181,6 +181,18 @@ know which side you're on).
   clearly-labelled **WHAT — seen** list scraped from recent output.) An
   empty *here*/*carried* column says so explicitly rather than sitting blank.
 
+  *Here* means **what you can see**, not "what the room object happens to
+  contain". It includes things resting on a supporter or sitting in an open
+  container — Zork I's kitchen lists the sack and the bottle on the table, both
+  of which are children of the *table* — and the shared scenery a room names but
+  does not own, like the window Behind House. It never lists the contents of a
+  closed container: the lunch and the garlic inside the brown sack stay hidden
+  until you open it, and the leaflet stays in the mailbox until you do. The
+  Z-machine gives attributes no fixed meaning, so which attribute means "open"
+  and which property lists a room's scenery are recovered per story from its own
+  object table; when a story cannot be read confidently, *here* falls back to
+  the room's direct contents rather than guessing.
+
   Composing happens directly on the real story input line — a pick appends
   its word there, merging with anything you already typed — so nothing ever
   fires a turn by itself except the quick actions below; everything else

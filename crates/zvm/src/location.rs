@@ -750,7 +750,7 @@ pub fn object_tree_view(machine: &Machine) -> Vec<ObjectSnapshot> {
 /// check had no such bound, so it walked straight into the property tables and
 /// over-counted, surfacing garbage objects with corrupt names.) Capped at 2000
 /// to guard against pathological data.
-fn max_object_number(mem: &crate::memory::Memory) -> u16 {
+pub fn max_object_number(mem: &crate::memory::Memory) -> u16 {
     let version = mem.version();
     let base = entries_base(mem);
     let esize = entry_size(version);

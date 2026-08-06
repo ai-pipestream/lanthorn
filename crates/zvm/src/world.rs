@@ -1,0 +1,821 @@
+//! What the player can SEE in a room — inferred conventions, never spec (SQ-0678).
+//!
+//! # Why this module has to guess
+//!
+//! The Z-Machine Standards Document assigns **no meaning whatsoever** to object
+//! attributes and properties (ZMSD §12.3, §12.4: "the interpreter is not
+//! interested in what they mean"). Every one of them is defined by the story's
+//! own compiler and source. So "is this container open?" and "which objects are
+//! visible in this room but not children of it?" are questions the spec cannot
+//! answer — they can only be *inferred* from the shape of the story's own data.
+//!
+//! Everything here is therefore a heuristic with an explicit failure mode, and
+//! every failure mode points the same way: **show less**. When an inference is
+//! not confident the model reports `None` and the caller falls back to the
+//! room's direct children, which is what babelmap listed before this module
+//! existed.
+//!
+//! # The two things it infers
+//!
+//! 1. **The openness attribute** — the bit a story sets on a container whose
+//!    contents are currently visible. Needed because a room's here-list must
+//!    include the sack and bottle sitting on the kitchen table (children of the
+//!    *table*, not of the room) while never revealing the lunch and garlic
+//!    inside the *closed* sack. Listing those would be cheating: the game has
+//!    not shown them to the player.
+//!
+//! 2. **The local-globals property** — in Infocom's ZIL, scenery shared by many
+//!    rooms (a window, a chimney, the forest) lives in one bucket object and
+//!    each room names the ones it can see in a property (`GLOBAL` in the ZIL
+//!    sources). Such an object is never a child of the room, so a
+//!    children-only walk misses the window at Behind House entirely.
+//!
+//! # How stable is any of this?
+//!
+//! Measured, not assumed. Attribute numbers are **not** portable between
+//! Infocom games — Zork I r52 marks openness with attribute 28 while Mini-Zork
+//! r34 uses attribute 10, and the container bit is 34 vs 9 respectively. The
+//! same holds for the local-globals property: 37 in Zork I, 12 in Mini-Zork and
+//! Zork II, 7 in Zork III, 17 in Enchanter, 41 in Planetfall. Nothing may be
+//! hard-coded; the numbers have to be recovered per story, at run time, from
+//! the story's own table.
+//!
+//! Inform-compiled stories are a different family: they have a fixed library
+//! attribute set (`container`, `open`, `openable`, `supporter`, `transparent`)
+//! and no local-globals concept at all — visibility of shared scenery is done
+//! with `found_in`, not a property listing object numbers. The local-globals
+//! walk is therefore switched off outright for stories that identify themselves
+//! as Inform-compiled, and the openness inference simply comes up empty on them
+//! more often than not (Inform's `openable` is as container-shaped as `open`,
+//! and there is no honest way to tell them apart from the table alone). That is
+//! the intended outcome: no nesting, direct children only.
+
+use crate::memory::Memory;
+use crate::objects::{
+    get_attr, get_child, get_next_prop, get_parent, get_prop_addr, get_prop_len, get_sibling,
+};
+
+/// Deepest the here-list walks below the room itself: room → child →
+/// grandchild → great-grandchild. A visible box on a visible table is real, but
+/// past three levels the payoff is nil and the blast radius of a mis-inferred
+/// openness bit grows with every level.
+const MAX_NEST_DEPTH: u8 = 3;
+
+/// Hard ceiling on one room's here-list. A corrupt or hostile tree can form a
+/// cycle; the depth cap alone would not stop a wide one.
+const MAX_ITEMS: usize = 64;
+
+/// Longest sibling chain the walker will follow before giving up on it.
+const MAX_SIBLINGS: usize = 256;
+
+/// Conventions recovered from one story's object table.
+///
+/// Cheap to hold, moderately expensive to build (a couple of passes over every
+/// object × every attribute), and **constant for the life of the story** — the
+/// numbers describe the compiler's layout, not the game state. Callers build it
+/// once and keep it; the live game state is read through it on every query, so
+/// a container that the game opens mid-turn becomes visible on the next refresh
+/// without rebuilding anything.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WorldModel {
+    /// Highest valid object number (`location::max_object_number`).
+    pub max_object: u16,
+    /// The object every room hangs off (0 when rooms are top-level, as in
+    /// Inform). Used only to tell rooms from things.
+    pub room_holder: u16,
+    /// The attribute that marks "this object can hold things", when one was
+    /// identified confidently.
+    pub container_attr: Option<u8>,
+    /// The attribute that marks "this holder's contents are visible right now".
+    /// `None` means *do not nest* — see the module docs.
+    pub open_attr: Option<u8>,
+    /// The property on a room that lists shared-scenery object numbers.
+    pub globals_prop: Option<u8>,
+    /// The bucket object those shared-scenery objects live in. Always `Some`
+    /// exactly when `globals_prop` is.
+    pub globals_holder: Option<u16>,
+}
+
+impl WorldModel {
+    /// Recover the model from the story's **pristine** object table.
+    ///
+    /// Always prefer this over [`Self::discover`] on a running machine. The
+    /// inference reads holder sets and attribute populations, and those drift as
+    /// the game is played — open a door, take a lamp, and an attribute that was
+    /// unique at boot is no longer unique. Deriving from the boot image makes
+    /// the answer a property of the *story* rather than of when the caller
+    /// happened to ask, which also means a save restored into a fresh session
+    /// gets exactly the same model.
+    pub fn discover_at_boot(machine: &crate::cpu::exec::Machine) -> Self {
+        let mut buf = machine.mem.raw_bytes().to_vec();
+        let n = machine.original_dynamic.len().min(buf.len());
+        buf[..n].copy_from_slice(&machine.original_dynamic[..n]);
+        match Memory::new(buf) {
+            Ok(pristine) => Self::discover(&pristine),
+            // A story image we cannot re-wrap is one we should not reason about
+            // from a half-known state either, but the live table is strictly
+            // better than nothing and every downstream guard still applies.
+            Err(_) => Self::discover(&machine.mem),
+        }
+    }
+
+    /// Recover the model from an object table as it stands right now. Public for
+    /// tests and for callers holding only a `Memory`; see
+    /// [`Self::discover_at_boot`] for why a running machine wants that instead.
+    pub fn discover(mem: &Memory) -> Self {
+        let max_object = crate::location::max_object_number(mem);
+        if max_object == 0 {
+            return Self::default();
+        }
+        let nattr = attr_count(mem);
+
+        // Parser dummy objects ("it", "that", "random object") carry nearly
+        // every attribute at once so that any `test_attr` on them answers yes.
+        // They are noise in every set below — one such object would make two
+        // unrelated attributes look like they overlap.
+        let real: Vec<u16> = (1..=max_object).filter(|&o| !is_wildcard(mem, o, nattr)).collect();
+
+        // Holder sets, one per attribute, over real objects only.
+        let sets: Vec<Vec<u16>> = (0..nattr)
+            .map(|a| real.iter().copied().filter(|&o| get_attr(mem, o, a)).collect())
+            .collect();
+
+        let room_holder = modal_parent(mem, &real);
+        let is_room = |o: u16| get_parent(mem, o) == room_holder;
+
+        // Things (not rooms) that actually hold something at this instant.
+        let holders: Vec<u16> =
+            real.iter().copied().filter(|&o| get_child(mem, o) != 0 && !is_room(o)).collect();
+
+        let container_attr = infer_container_attr(&sets, &holders);
+        let open_attr = container_attr.and_then(|c| infer_open_attr(&sets, c, real.len()));
+        let (globals_prop, globals_holder) =
+            infer_local_globals(mem, max_object, room_holder, &real);
+
+        Self { max_object, room_holder, container_attr, open_attr, globals_prop, globals_holder }
+    }
+
+    /// True when `obj`'s contents are visible to the player right now.
+    ///
+    /// Read live from the object table on every call, so opening a box shows
+    /// its contents on the very next refresh and closing it hides them again.
+    /// Answers `false` for every object when the openness bit was not
+    /// identified — the fail-toward-less default.
+    pub fn shows_contents(&self, mem: &Memory, obj: u16) -> bool {
+        match self.open_attr {
+            Some(a) => get_attr(mem, obj, a),
+            None => false,
+        }
+    }
+
+    /// The shared-scenery objects this room can see, in the order the story
+    /// lists them. Empty when no local-globals convention was identified.
+    pub fn local_globals(&self, mem: &Memory, room: u16) -> Vec<u16> {
+        let (Some(prop), Some(holder)) = (self.globals_prop, self.globals_holder) else {
+            return Vec::new();
+        };
+        object_list_prop(mem, room, prop, self.max_object)
+            .into_iter()
+            .filter(|&o| get_parent(mem, o) == holder)
+            .collect()
+    }
+
+    /// Everything the player can see in `room`, as object numbers, in reading
+    /// order: each direct child, followed immediately by the contents of any
+    /// child whose contents are visible (recursively, to [`MAX_NEST_DEPTH`]),
+    /// then the room's shared scenery.
+    ///
+    /// `exclude` (0 for none) is dropped along with its whole subtree — the
+    /// caller passes the player object, and the player's pockets are the
+    /// *carried* list, never the *here* list.
+    ///
+    /// # Leak safety
+    ///
+    /// The walk descends into a holder only when [`Self::shows_contents`] says
+    /// its contents are visible, and that is `false` for every object unless a
+    /// specific openness bit was identified for this story. So the two failure
+    /// modes are: the bit is unknown (nothing nests — the pre-SQ-0678
+    /// behaviour), or the bit is known and a closed container is skipped. There
+    /// is no path on which an unopened container's contents reach this list.
+    pub fn visible_room_objects(&self, mem: &Memory, room: u16, exclude: u16) -> Vec<u16> {
+        let mut out = Vec::new();
+        if room == 0 || room > self.max_object {
+            return out;
+        }
+        self.walk(mem, room, exclude, 0, &mut out);
+        for g in self.local_globals(mem, room) {
+            if out.len() >= MAX_ITEMS {
+                break;
+            }
+            if g != exclude && g != room && !out.contains(&g) {
+                out.push(g);
+            }
+        }
+        out
+    }
+
+    fn walk(&self, mem: &Memory, parent: u16, exclude: u16, depth: u8, out: &mut Vec<u16>) {
+        let mut child = get_child(mem, parent);
+        let mut guard = 0usize;
+        while child != 0 && out.len() < MAX_ITEMS && guard < MAX_SIBLINGS {
+            guard += 1;
+            if child != exclude && !out.contains(&child) {
+                out.push(child);
+                if depth + 1 < MAX_NEST_DEPTH && self.shows_contents(mem, child) {
+                    self.walk(mem, child, exclude, depth + 1, out);
+                }
+            }
+            child = get_sibling(mem, child);
+        }
+    }
+}
+
+// ── Attribute inference ──────────────────────────────────────────────────────
+
+fn attr_count(mem: &Memory) -> u8 {
+    if mem.version() <= 3 { 32 } else { 48 }
+}
+
+/// A parser dummy: 90% or more of every attribute set at once.
+fn is_wildcard(mem: &Memory, obj: u16, nattr: u8) -> bool {
+    let set = (0..nattr).filter(|&a| get_attr(mem, obj, a)).count();
+    set * 10 >= nattr as usize * 9
+}
+
+/// The object number that is the parent of the most objects — the "rooms"
+/// bucket in ZIL, and 0 (top level) in Inform.
+fn modal_parent(mem: &Memory, real: &[u16]) -> u16 {
+    let mut best = (0u16, 0usize);
+    let mut counts: Vec<(u16, usize)> = Vec::new();
+    for &o in real {
+        let p = get_parent(mem, o);
+        match counts.iter_mut().find(|(q, _)| *q == p) {
+            Some((_, n)) => *n += 1,
+            None => counts.push((p, 1)),
+        }
+    }
+    for (p, n) in counts {
+        if n > best.1 {
+            best = (p, n);
+        }
+    }
+    best.0
+}
+
+/// The container bit: the attribute set on the largest share of the objects
+/// that are currently holding something. Requires a majority — a story whose
+/// holders have no attribute in common has no container convention we can read,
+/// and everything downstream then stays `None`.
+fn infer_container_attr(sets: &[Vec<u16>], holders: &[u16]) -> Option<u8> {
+    if holders.len() < 4 {
+        return None;
+    }
+    let mut best: Option<(u8, usize)> = None;
+    for (a, set) in sets.iter().enumerate() {
+        let n = holders.iter().filter(|h| set.binary_search(h).is_ok()).count();
+        if best.is_none_or(|(_, b)| n > b) {
+            best = Some((a as u8, n));
+        }
+    }
+    match best {
+        Some((a, n)) if n * 2 >= holders.len() => Some(a),
+        _ => None,
+    }
+}
+
+/// The openness bit — the attribute a story sets on a holder whose contents are
+/// visible right now.
+///
+/// Five filters, calibrated against measured ground truth (Zork I r52: container
+/// 34, openness 28; Mini-Zork r34: container 9, openness 10 — established by
+/// diffing the whole attribute space across an `open mailbox` turn):
+///
+/// 1. **Container-shaped.** At least [`MIN_OPEN_CONTAINER_PCT`] of the objects
+///    carrying the bit also carry the container bit. Drops the bits meaning
+///    takeable, burnable, readable, weapon, edible, worn — all set on far more
+///    non-containers than containers. (Beyond Zork's "worn" bit reaches exactly
+///    50% and is refused here; trusting it would have spilled the pack.)
+/// 2. **Not a second name for "container".** A bit whose holder set nearly
+///    coincides with the container set is another containment *class* marker,
+///    not a state — Mini-Zork's attribute 18 covers the sack, the mailbox and
+///    the trophy case whether open or shut, and trusting it would spill the
+///    contents of every closed container in the game.
+/// 3. **A surface bit sits strictly inside it.** In ZIL a surface (table, altar,
+///    pedestal) is marked open as well, precisely so the describer lists what is
+///    on it — so the surface bit's holders are a proper subset of the openness
+///    bit's holders. The nested bit must itself look like a containment bit
+///    ([`MIN_SURFACE_SUBSET`] holders, [`MIN_SURFACE_CONTAINER_PCT`] of them
+///    containers), which is what separates openness (a state some containers are
+///    in) from flat classification bits that happen to overlap.
+/// 4. **Not near-universal.** A bit on more than a quarter of the story's
+///    objects is describing something else entirely.
+/// 5. **Unique.** If two attributes both survive 1–4, the story has told us
+///    nothing that distinguishes them and we decline to guess. This is the
+///    filter that does the most work: in the stories where the inference is
+///    right exactly one candidate survives, and in the stories where it would
+///    have been wrong several do (Anchorhead 4, Enchanter 2, Sorcerer 2,
+///    Sherlock 2 — every one of those returns `None` and nests nothing).
+///
+/// # Known failure mode
+///
+/// Filter 3 is a ZIL habit, not a law, so this finds an answer mainly in the
+/// Infocom family and comes up empty on Inform stories — whose `open` and
+/// `openable` are equally container-shaped and cannot be told apart from the
+/// table alone. Empty is the correct outcome there: no nesting, direct children
+/// only. The residual risk is a story that satisfies all five filters with an
+/// `openable`-style bit, which would list the contents of closed containers;
+/// that is why the acceptance tests pin the *negative* case (Zork I's closed
+/// sack and closed mailbox stay shut) and not merely the positive one.
+fn infer_open_attr(sets: &[Vec<u16>], cont: u8, total_objects: usize) -> Option<u8> {
+    let cont_set = &sets[cont as usize];
+    let container_pct = |set: &Vec<u16>| {
+        let inside = set.iter().filter(|o| cont_set.binary_search(o).is_ok()).count();
+        (inside, inside * 100 / set.len().max(1))
+    };
+
+    let mut survivors: Vec<u8> = Vec::new();
+    for (ai, set) in sets.iter().enumerate() {
+        let a = ai as u8;
+        if a == cont || set.len() < 2 || set.len() * 4 > total_objects {
+            continue;
+        }
+        // 1. container-shaped
+        let (inside, pct) = container_pct(set);
+        if pct < MIN_OPEN_CONTAINER_PCT {
+            continue;
+        }
+        // 2. not a restatement of the container set (Jaccard > 0.6)
+        let union = set.len() + cont_set.len() - inside;
+        if union > 0 && inside * 5 > union * 3 {
+            continue;
+        }
+        // 3. a surface-shaped bit nests strictly inside it
+        let nested = sets.iter().enumerate().any(|(bi, b)| {
+            bi as u8 != a
+                && bi as u8 != cont
+                && b.len() >= MIN_SURFACE_SUBSET
+                && b.len() < set.len()
+                && container_pct(b).1 >= MIN_SURFACE_CONTAINER_PCT
+                && b.iter().all(|o| set.binary_search(o).is_ok())
+        });
+        if !nested {
+            continue;
+        }
+        survivors.push(a);
+    }
+    // 5. unique or nothing
+    match survivors.as_slice() {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
+/// Minimum share of an openness candidate's holders that must also be
+/// containers.
+const MIN_OPEN_CONTAINER_PCT: usize = 65;
+/// Minimum holders for the nested surface-shaped bit that justifies a candidate.
+const MIN_SURFACE_SUBSET: usize = 3;
+/// Minimum share of that nested bit's holders that must be containers.
+const MIN_SURFACE_CONTAINER_PCT: usize = 75;
+
+// ── Local-globals inference ──────────────────────────────────────────────────
+
+/// Inform 6 stamps its own version as ASCII (`"6.15"`) into header bytes
+/// $3C–$3F, which every Infocom-era ZIL story leaves zeroed. This is a compiler
+/// convention rather than anything the Standards Document requires, so it is
+/// used in one direction only: a positive match switches the local-globals walk
+/// **off** (Inform has no such convention — it uses `found_in`). A story that
+/// does not match is not thereby claimed to be ZIL; it just goes on to the
+/// evidence-based vote below, which has its own confidence floor.
+fn looks_inform_compiled(mem: &Memory) -> bool {
+    let b: Vec<u8> = (0x3C..0x40).map(|a| mem.read_byte(a)).collect();
+    b[0].is_ascii_digit() && b[1] == b'.' && b[2].is_ascii_digit() && b[3].is_ascii_digit()
+}
+
+/// Decode property `prop` of `obj` as a list of object numbers. Object numbers
+/// are one byte in v1–v3 and two in v4+ (ZMSD §12.3), so the property's data
+/// length must be a whole number of them. Returns empty for anything that does
+/// not decode cleanly, including a list containing object 0.
+fn object_list_prop(mem: &Memory, obj: u16, prop: u8, max_object: u16) -> Vec<u16> {
+    let width: u32 = if mem.version() <= 3 { 1 } else { 2 };
+    let addr = get_prop_addr(mem, obj, prop);
+    if addr == 0 {
+        return Vec::new();
+    }
+    let len = get_prop_len(mem, addr) as u32;
+    if len < width || !len.is_multiple_of(width) {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for i in 0..(len / width) {
+        let v = if width == 1 {
+            mem.read_byte(addr as u32 + i) as u16
+        } else {
+            mem.read_word(addr as u32 + i * 2)
+        };
+        if v == 0 || v > max_object {
+            return Vec::new();
+        }
+        out.push(v);
+    }
+    out
+}
+
+/// Longest shared-scenery list we will believe. ZIL rooms name a handful.
+const MAX_GLOBALS_PER_ROOM: usize = 16;
+/// A bucket smaller than this is a coincidence (Hitchhiker's has a handbag with
+/// one item in it that otherwise fits the shape); bigger than this is not a
+/// scenery bucket but a second room list (A Mind Forever Voyaging parks 178
+/// rooms in one object).
+const MIN_GLOBALS_CHILDREN: usize = 4;
+const MAX_GLOBALS_CHILDREN: usize = 96;
+/// How many rooms must agree before the property is believed.
+const MIN_GLOBALS_VOTES: u32 = 4;
+
+/// Find the (property, bucket) pair that carries shared scenery.
+///
+/// The vote is joint on purpose: neither half is recognisable alone. A property
+/// number means nothing by itself, and the bucket object has no marker either —
+/// but "a property, present on many rooms, whose every entry is an object
+/// parented to one and the same non-room object" is a shape that essentially
+/// only the ZIL local-globals convention produces. Exit properties, which also
+/// hold object numbers, are excluded by it: a ZIL door exit is
+/// `[destination-room, door, flag]`, and both the room entry (parented to the
+/// rooms bucket) and the trailing zero break the pattern.
+fn infer_local_globals(
+    mem: &Memory,
+    max_object: u16,
+    room_holder: u16,
+    real: &[u16],
+) -> (Option<u8>, Option<u16>) {
+    if looks_inform_compiled(mem) {
+        return (None, None);
+    }
+    let rooms: Vec<u16> = real.iter().copied().filter(|&o| get_parent(mem, o) == room_holder).collect();
+    if rooms.len() < MIN_GLOBALS_VOTES as usize {
+        return (None, None);
+    }
+
+    let mut votes: Vec<((u8, u16), u32)> = Vec::new();
+    for &r in &rooms {
+        let mut p = get_next_prop(mem, r, 0);
+        let mut guard = 0;
+        while p != 0 && guard < 64 {
+            guard += 1;
+            if let Some(g) = common_scenery_parent(mem, r, p, max_object, room_holder) {
+                match votes.iter_mut().find(|((q, h), _)| *q == p && *h == g) {
+                    Some((_, n)) => *n += 1,
+                    None => votes.push(((p, g), 1)),
+                }
+            }
+            p = get_next_prop(mem, r, p);
+        }
+    }
+
+    let Some(&((prop, holder), n)) = votes.iter().max_by_key(|(_, n)| *n) else {
+        return (None, None);
+    };
+    if n < MIN_GLOBALS_VOTES {
+        return (None, None);
+    }
+
+    // The bucket must sit OUTSIDE the played world — never in a room and never
+    // inside something in a room. (It is not necessarily top-level: every
+    // Infocom story measured parks its local-globals bucket inside the parser's
+    // dummy pseudo-object — #50 in #65 for Zork I, #36 in #45 for Mini-Zork.)
+    // This is what stops a real container that happens to fit the shape from
+    // being mistaken for the bucket.
+    if !is_out_of_world(mem, holder, room_holder) {
+        return (None, None);
+    }
+    // …and it must hold a decent number of things that are themselves empty:
+    // shared scenery is scenery, and scenery holds nothing. A bucket full of
+    // objects that hold things is a second room list, not scenery (A Mind
+    // Forever Voyaging parks 178 rooms in one object).
+    let mut kids = 0usize;
+    let mut childless = 0usize;
+    let mut c = get_child(mem, holder);
+    let mut guard = 0;
+    while c != 0 && guard < MAX_SIBLINGS {
+        guard += 1;
+        kids += 1;
+        if get_child(mem, c) == 0 {
+            childless += 1;
+        }
+        c = get_sibling(mem, c);
+    }
+    if !(MIN_GLOBALS_CHILDREN..=MAX_GLOBALS_CHILDREN).contains(&kids) || childless * 4 < kids * 3 {
+        return (None, None);
+    }
+
+    // A property that non-rooms carry in the same shape is not room-scoped
+    // scenery — it is something else that happens to hold object numbers.
+    let non_room_uses = real
+        .iter()
+        .filter(|&&o| get_parent(mem, o) != room_holder)
+        .filter(|&&o| common_scenery_parent(mem, o, prop, max_object, room_holder) == Some(holder))
+        .count();
+    if non_room_uses as u32 * 2 > n {
+        return (None, None);
+    }
+
+    (Some(prop), Some(holder))
+}
+
+/// True when `obj`'s ancestor chain terminates at the null object without ever
+/// passing through a room. `room_holder == 0` means the story keeps rooms at
+/// top level (Inform), where "outside the world" is not expressible — every
+/// top-level object then qualifies, and the other guards carry the weight.
+fn is_out_of_world(mem: &Memory, obj: u16, room_holder: u16) -> bool {
+    let mut a = obj;
+    for _ in 0..8 {
+        if a == 0 {
+            return true;
+        }
+        if room_holder != 0 && get_parent(mem, a) == room_holder {
+            return false; // `a` is a room, so `obj` is somewhere in the world
+        }
+        a = get_parent(mem, a);
+    }
+    false // a cycle, or a chain too deep to be a pseudo-object
+}
+
+/// `Some(bucket)` when `prop` of `obj` decodes to a short, non-empty list of
+/// objects that all share one parent, and that parent is neither the null
+/// object nor the rooms bucket.
+fn common_scenery_parent(
+    mem: &Memory,
+    obj: u16,
+    prop: u8,
+    max_object: u16,
+    room_holder: u16,
+) -> Option<u16> {
+    let list = object_list_prop(mem, obj, prop, max_object);
+    if list.is_empty() || list.len() > MAX_GLOBALS_PER_ROOM {
+        return None;
+    }
+    let mut parent = None;
+    for o in list {
+        let p = get_parent(mem, o);
+        if p == 0 || p == room_holder {
+            return None;
+        }
+        match parent {
+            None => parent = Some(p),
+            Some(q) if q == p => {}
+            _ => return None,
+        }
+    }
+    parent
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::text::encode::encode_word;
+
+    // A synthetic v3 story shaped like a ZIL game, so every inference below is
+    // exercised against a table whose ground truth we WROTE rather than guessed.
+    //
+    //   #1  rooms bucket   ── #3..#8 the rooms
+    //   #2  scenery bucket ── #9 window, #10 chimny, #11 forest, #12 stairs
+    //   #3  kitchn (room)  ── #13 table ── #15 sack ── #17 lunch, #18 garlic
+    //                                  └─ #16 bottle
+    //                      └─ #14 player
+    //   #4  behind (room)  ── #23 mailbx ── #24 leafle
+    //
+    // Attributes: 10 = container, 12 = open, 14 = surface. The sack, mailbox
+    // and chest are containers WITHOUT the open bit — they are the leak the
+    // walker must never spring.
+    const CONT: u8 = 10;
+    const OPEN: u8 = 12;
+    const SURFACE: u8 = 14;
+
+    const ROOMS: u16 = 1;
+    const SCENERY: u16 = 2;
+    const KITCHEN: u16 = 3;
+    const BEHIND: u16 = 4;
+    const WINDOW: u16 = 9;
+    const TABLE: u16 = 13;
+    const PLAYER: u16 = 14;
+    const SACK: u16 = 15;
+    const BOTTLE: u16 = 16;
+    const LUNCH: u16 = 17;
+    const GARLIC: u16 = 18;
+    const MAILBOX: u16 = 23;
+    const LEAFLET: u16 = 24;
+
+    /// The room property that lists shared scenery, mirroring ZIL's `GLOBAL`.
+    const GLOBAL_PROP: u8 = 20;
+
+    struct Obj {
+        name: &'static str,
+        parent: u16,
+        sibling: u16,
+        child: u16,
+        attrs: &'static [u8],
+        globals: &'static [u8],
+    }
+
+    const fn o(
+        name: &'static str,
+        parent: u16,
+        sibling: u16,
+        child: u16,
+        attrs: &'static [u8],
+        globals: &'static [u8],
+    ) -> Obj {
+        Obj { name, parent, sibling, child, attrs, globals }
+    }
+
+    fn objects() -> Vec<Obj> {
+        vec![
+            o("rooms", 0, 0, KITCHEN, &[], &[]),
+            o("lgbkt", 0, 0, WINDOW, &[], &[]),
+            // rooms
+            o("kitchn", ROOMS, BEHIND, TABLE, &[], &[9, 10, 12]),
+            o("behind", ROOMS, 5, MAILBOX, &[], &[9, 11]),
+            o("cellar", ROOMS, 6, 19, &[], &[10]),
+            o("attic", ROOMS, 7, 20, &[], &[12]),
+            o("hall", ROOMS, 8, 21, &[], &[11]),
+            o("study", ROOMS, 0, 25, &[], &[9]),
+            // shared scenery
+            o("window", SCENERY, 10, 0, &[], &[]),
+            o("chimny", SCENERY, 11, 0, &[], &[]),
+            o("forest", SCENERY, 12, 0, &[], &[]),
+            o("stairs", SCENERY, 0, 0, &[], &[]),
+            // kitchen contents
+            o("table", KITCHEN, PLAYER, SACK, &[CONT, OPEN, SURFACE], &[]),
+            o("player", KITCHEN, 0, 0, &[], &[]),
+            o("sack", TABLE, BOTTLE, LUNCH, &[CONT], &[]),
+            o("bottle", TABLE, 0, 0, &[CONT], &[]),
+            o("lunch", SACK, GARLIC, 0, &[], &[]),
+            o("garlic", SACK, 0, 0, &[], &[]),
+            // elsewhere
+            o("altar", 5, 0, 0, &[CONT, OPEN, SURFACE], &[]),
+            o("pedest", 6, 0, 0, &[CONT, OPEN, SURFACE], &[]),
+            o("basket", 7, 0, 22, &[CONT, OPEN], &[]),
+            o("pebble", 21, 0, 0, &[], &[]),
+            o("mailbx", BEHIND, 0, LEAFLET, &[CONT], &[]),
+            o("leafle", MAILBOX, 0, 0, &[], &[]),
+            o("chest", 8, 0, 0, &[CONT], &[]),
+        ]
+    }
+
+    const OBJ_TABLE: usize = 0x0100;
+    const ENTRIES: usize = OBJ_TABLE + 31 * 2; // v3: 31 default words
+    const PROPS: usize = 0x0400;
+
+    fn build() -> Memory {
+        let objs = objects();
+        let mut buf = vec![0u8; 0x1000];
+        buf[0x00] = 3;
+        buf[0x04] = 0x08; // high memory
+        buf[0x06] = 0x00;
+        buf[0x07] = 0x40; // initial PC
+        buf[0x08] = 0x08;
+        buf[0x0A] = (OBJ_TABLE >> 8) as u8;
+        buf[0x0B] = OBJ_TABLE as u8;
+        buf[0x0C] = 0x03; // globals
+        buf[0x0E] = 0x08; // static memory
+        buf[0x40] = 0xba; // quit
+
+        let mut prop_at = PROPS;
+        for (i, ob) in objs.iter().enumerate() {
+            let e = ENTRIES + i * 9;
+            for &a in ob.attrs {
+                buf[e + (a / 8) as usize] |= 1 << (7 - (a % 8));
+            }
+            buf[e + 4] = ob.parent as u8;
+            buf[e + 5] = ob.sibling as u8;
+            buf[e + 6] = ob.child as u8;
+            buf[e + 7] = (prop_at >> 8) as u8;
+            buf[e + 8] = prop_at as u8;
+
+            // Property table: short name, then the GLOBAL property, then the
+            // 0 terminator.
+            let encoded = encode_word(ob.name, 3);
+            buf[prop_at] = (encoded.len() / 2) as u8;
+            buf[prop_at + 1..prop_at + 1 + encoded.len()].copy_from_slice(&encoded);
+            let mut p = prop_at + 1 + encoded.len();
+            if !ob.globals.is_empty() {
+                // v3 property header: 32 * (len - 1) + number (ZMSD §12.4.1)
+                buf[p] = 32 * (ob.globals.len() as u8 - 1) + GLOBAL_PROP;
+                p += 1;
+                buf[p..p + ob.globals.len()].copy_from_slice(ob.globals);
+                p += ob.globals.len();
+            }
+            buf[p] = 0;
+            prop_at = p + 1;
+        }
+        Memory::new(buf).expect("synthetic story")
+    }
+
+    fn names(mem: &Memory, ids: &[u16]) -> Vec<String> {
+        ids.iter().map(|&o| crate::objects::short_name(mem, o)).collect()
+    }
+
+    #[test]
+    fn the_builder_lays_the_table_out_as_intended() {
+        // Guard: tells a builder bug apart from an inference bug below.
+        let mem = build();
+        assert_eq!(crate::objects::short_name(&mem, TABLE), "table");
+        assert_eq!(get_parent(&mem, SACK), TABLE);
+        assert_eq!(get_parent(&mem, LUNCH), SACK);
+        assert!(get_attr(&mem, TABLE, OPEN), "the table is open");
+        assert!(!get_attr(&mem, SACK, OPEN), "the sack is shut");
+        assert_eq!(crate::location::max_object_number(&mem), objects().len() as u16);
+    }
+
+    #[test]
+    fn discovery_recovers_the_conventions_the_story_was_written_with() {
+        let m = WorldModel::discover(&build());
+        assert_eq!(m.room_holder, ROOMS, "rooms hang off #1");
+        assert_eq!(m.container_attr, Some(CONT));
+        assert_eq!(m.open_attr, Some(OPEN), "openness must not be confused with the surface bit");
+        assert_eq!(m.globals_prop, Some(GLOBAL_PROP));
+        assert_eq!(m.globals_holder, Some(SCENERY));
+    }
+
+    /// The local-globals walk: a room's shared scenery is named by a property
+    /// and lives in a bucket, so it is never reachable by walking children.
+    #[test]
+    fn local_globals_come_from_the_room_property_not_the_child_chain() {
+        let mem = build();
+        let m = WorldModel::discover(&mem);
+        assert_eq!(names(&mem, &m.local_globals(&mem, KITCHEN)), ["window", "chimny", "stairs"]);
+        assert_eq!(names(&mem, &m.local_globals(&mem, BEHIND)), ["window", "forest"]);
+        // …and none of them is a child of the room.
+        assert!(m.local_globals(&mem, BEHIND).iter().all(|&g| get_parent(&mem, g) != BEHIND));
+    }
+
+    /// The whole point: the sack and bottle ON the table are visible, the lunch
+    /// and garlic IN the shut sack are not.
+    #[test]
+    fn the_here_list_nests_through_open_holders_and_stops_at_shut_ones() {
+        let mem = build();
+        let m = WorldModel::discover(&mem);
+        let here = names(&mem, &m.visible_room_objects(&mem, KITCHEN, PLAYER));
+        assert_eq!(here, ["table", "sack", "bottle", "window", "chimny", "stairs"]);
+        assert!(!here.contains(&"lunch".to_string()), "a shut container must not leak: {here:?}");
+        assert!(!here.contains(&"garlic".to_string()), "a shut container must not leak: {here:?}");
+        assert!(!here.contains(&"player".to_string()), "the player is the CARRIED column");
+    }
+
+    #[test]
+    fn opening_a_container_reveals_it_and_closing_it_hides_it_again() {
+        let mut mem = build();
+        let m = WorldModel::discover(&mem);
+        let here = |mem: &Memory| names(mem, &m.visible_room_objects(mem, BEHIND, PLAYER));
+        assert_eq!(here(&mem), ["mailbx", "window", "forest"]);
+
+        crate::objects::set_attr(&mut mem, MAILBOX, OPEN);
+        assert_eq!(here(&mem), ["mailbx", "leafle", "window", "forest"], "opened, live");
+
+        crate::objects::clear_attr(&mut mem, MAILBOX, OPEN);
+        assert_eq!(here(&mem), ["mailbx", "window", "forest"], "shut again, live");
+    }
+
+    /// The fail-toward-less contract: with no openness bit identified, the walk
+    /// degrades to direct children and cannot leak anything at all.
+    #[test]
+    fn an_unidentified_openness_bit_disables_nesting_entirely() {
+        let mem = build();
+        let mut m = WorldModel::discover(&mem);
+        m.open_attr = None;
+        let here = names(&mem, &m.visible_room_objects(&mem, KITCHEN, PLAYER));
+        assert_eq!(here, ["table", "window", "chimny", "stairs"], "children + scenery only");
+    }
+
+    #[test]
+    fn a_cycle_in_the_tree_cannot_hang_or_flood_the_walk() {
+        let mut mem = build();
+        // Point the sack's contents back at the table and prop both open.
+        crate::objects::set_attr(&mut mem, SACK, OPEN);
+        crate::objects::set_child(&mut mem, SACK, TABLE);
+        let m = WorldModel::discover(&mem);
+        let here = m.visible_room_objects(&mem, KITCHEN, PLAYER);
+        assert!(here.len() <= MAX_ITEMS);
+        let mut sorted = here.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), here.len(), "no object may be listed twice");
+    }
+
+    /// Inform-compiled stories have no local-globals convention; the header
+    /// marker switches the walk off rather than letting it find a lookalike.
+    #[test]
+    fn an_inform_marker_switches_the_local_globals_walk_off() {
+        let mem = build();
+        assert!(!looks_inform_compiled(&mem));
+        let mut buf = mem.raw_bytes().to_vec();
+        buf[0x3C..0x40].copy_from_slice(b"6.15");
+        let inform = Memory::new(buf).unwrap();
+        assert!(looks_inform_compiled(&inform));
+        let m = WorldModel::discover(&inform);
+        assert_eq!(m.globals_prop, None, "no ZIL scenery walk on an Inform story");
+        assert!(m.local_globals(&inform, KITCHEN).is_empty());
+    }
+}

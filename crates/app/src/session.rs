@@ -504,6 +504,17 @@ pub struct GameSession {
     /// `RefCell` because the Debugger read-path is `&self`; consistent with the
     /// existing `mem_fault` interior-mutability pattern.
     disasm_cache: std::cell::RefCell<Option<zvm::cpu::disasm_cache::DisasmCache>>,
+    /// Object-table conventions this story uses — which attribute means "open",
+    /// which property lists a room's shared scenery (SQ-0678). Recovered from
+    /// the story's own table, which is why it is inferred once and kept: the
+    /// numbers describe the compiler's layout and never change. The live game
+    /// state is read *through* it on every query, so a container the game opens
+    /// mid-turn shows its contents on the next refresh with no rebuild.
+    ///
+    /// `OnceCell` rather than a constructor field: `GameSession` is built at
+    /// nine sites (boot, restore, reset, …) and the model is identical at all
+    /// of them, so it is derived on first use instead of nine times over.
+    world: std::cell::OnceCell<zvm::world::WorldModel>,
     /// PC at which the disasm cache was last runtime-confirmed; the per-turn
     /// fold is skipped while the VM is parked at the same PC (nav/scroll calls).
     last_confirmed_pc: std::cell::Cell<Option<u32>>,
@@ -651,6 +662,7 @@ impl GameSession {
         Ok(GameSession {
             machine, quit, pending, strip_prompt: true,
             disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -3103,6 +3115,13 @@ impl Engine for GameSession {
     }
 }
 
+impl GameSession {
+    /// The story's inferred object-table conventions, derived on first use.
+    pub fn world_model(&self) -> &zvm::world::WorldModel {
+        self.world.get_or_init(|| zvm::world::WorldModel::discover_at_boot(&self.machine))
+    }
+}
+
 impl Introspect for GameSession {
     fn vocabulary(&self) -> Vec<String> {
         zvm::dictionary::load(&self.machine.mem).words(&self.machine.mem)
@@ -3113,11 +3132,16 @@ impl Introspect for GameSession {
     }
 
     fn room_objects(&self, room: u16) -> Vec<String> {
-        crate::render::room_info::list_room_objects(&self.machine.mem, room)
+        crate::render::room_info::list_room_objects(self.world_model(), &self.machine.mem, room)
     }
 
     fn room_objects_excluding(&self, room: u16, exclude: Option<u16>) -> Vec<String> {
-        crate::render::room_info::list_room_objects_excluding(&self.machine.mem, room, exclude.unwrap_or(0))
+        crate::render::room_info::list_room_objects_excluding(
+            self.world_model(),
+            &self.machine.mem,
+            room,
+            exclude.unwrap_or(0),
+        )
     }
 
     fn children_of(&self, parent: u16) -> std::collections::BTreeSet<u16> {
@@ -4953,6 +4977,7 @@ mod tests {
         let mut sess = GameSession {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true,
             disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -5007,6 +5032,7 @@ mod tests {
         let mut sess = GameSession {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true,
             disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -5053,6 +5079,7 @@ mod tests {
         let mut sess = GameSession {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true,
             disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -5115,6 +5142,7 @@ mod tests {
         let mut sess = GameSession {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true,
             disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -5150,6 +5178,7 @@ mod tests {
         let mut sess = GameSession {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true,
             disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -5198,6 +5227,7 @@ mod tests {
         let mut sess = GameSession {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true,
             disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -5288,6 +5318,7 @@ mod tests {
         let mut sess = GameSession {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true,
             disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
@@ -5333,6 +5364,7 @@ mod tests {
         let mut sess = GameSession {
             machine, quit: false, pending: InputKind::Line, strip_prompt: true,
             disasm_cache: std::cell::RefCell::new(None),
+            world: std::cell::OnceCell::new(),
             last_confirmed_pc: std::cell::Cell::new(None),
             pict_source: None,
             pictures_canvas: std::collections::HashMap::new(),
