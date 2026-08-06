@@ -236,10 +236,19 @@ struct ParsedPhrase {
 /// keyboard now: typing always reaches the story prompt, and `picks` is
 /// re-derived from what is typed there ([`CommandBandState::sync_from_input`])
 /// rather than only from clicks. There is therefore no type-to-filter state
-/// and no story-focus flag left — the band is a REACTIVE suggestion surface:
-/// it highlights the nearest match for the word under construction
-/// ([`CommandBandState::nearest_match`]) and holds one armable quick-word
-/// selection (`quick_sel`) that the arrow keys drive.
+/// and no story-focus flag left.
+///
+/// **SQ-0677 (2026-08-05) replaced the SQ-0676 arrow scheme.** A current
+/// column (`focus`) always exists while the band is open; `Tab`/`Shift-Tab`
+/// move it across the reachable columns, `↑`/`↓` highlight a row within it
+/// (`row_sel`), and typing drives a passive nearest-match highlight in that
+/// SAME column ([`CommandBandState::nearest_match`], now scoped to `focus`
+/// rather than hunting every grammatically-live column). `Tab` unifies the
+/// two: with a row highlighted (explicit or typed) it picks that row and
+/// advances, exactly like a click; with nothing highlighted it is pure
+/// column movement. The quick block (rose + flowing words, and the flat-row
+/// fallback) lost its keyboard entirely in the same amendment — it is
+/// mouse-click-only now, with `quick_hover` its one transient highlight.
 #[derive(Debug, Clone, Default)]
 pub struct CommandBandState {
     /// The verb table in force (built-ins, or the config's replacement/extras).
@@ -248,19 +257,24 @@ pub struct CommandBandState {
     pub quick: Vec<String>,
     /// Tokens picked so far, in order.
     pub picks: Vec<BandPick>,
-    /// The column the band is currently pointing at: the one holding the
-    /// nearest match, else the first column the grammar expects next. Kept in
-    /// step by `sync_from_input`; the keyboard no longer moves it (SQ-0676).
+    /// The column the band currently points at. `Tab`/`Shift-Tab` step it
+    /// across [`Self::focus_stops`] ([`Self::step_column`]); typing re-points
+    /// it only when the grammar no longer expects the current column
+    /// ([`Self::sync_from_input`]) — so a manual Tab survives further typing
+    /// in the same slot.
     pub focus: usize,
-    /// The armed quick-word selection: an index into `quick`, or `None` when
-    /// the highlight is disarmed. Arrow keys arm and move it; ANY change to
-    /// the typed line disarms it (SQ-0676's "the last gesture decides").
-    pub quick_sel: Option<usize>,
-    /// Which quick layout was drawn last: `true` = the narrow flat row (linear
-    /// arrow navigation), `false` = the compass-rose block (spatial). Written
-    /// by the renderer, read by the arrow-key handler — the same
-    /// render-informs-input pattern `AppState::input_text_origin` uses.
-    pub quick_flat: std::cell::Cell<bool>,
+    /// The row explicitly highlighted within `focus` by `↑`/`↓`
+    /// ([`Self::step_row`]) — distinct from the passive nearest-match
+    /// highlight typing drives. `None` when nothing is explicitly selected,
+    /// in which case [`Self::highlighted_row`] falls back to the typed match.
+    /// Cleared by any change to the typed line and by moving `focus`.
+    pub row_sel: Option<usize>,
+    /// The quick word (a rose cell, a flowing word, or a flat-row entry) the
+    /// mouse currently sits over, as an index into `quick` — `None` off the
+    /// block. Purely a hover cosmetic (SQ-0677): quick is mouse-click-only,
+    /// so hover is its only transient highlight and plays no role in what a
+    /// click fires.
+    pub quick_hover: Option<usize>,
     /// Per-column selection + animated scroll.
     pub scroll: [crate::list_scroll::ListScroll; BAND_COLS],
     /// Objects in the current room, refreshed every frame from the engine.
@@ -511,11 +525,17 @@ impl CommandBandState {
     pub fn sync_from_input(&mut self, input: &str) {
         let parsed = self.parse_phrase(input);
         self.picks = parsed.picks;
-        self.focus = self
-            .nearest_match(input)
-            .map(|(col, _)| col)
-            .or_else(|| parsed.expected.first().copied())
-            .unwrap_or(COL_VERB);
+        // SQ-0677: `focus` is now Tab/Shift-Tab-driven and persists across
+        // typing — only re-pointed when the grammar no longer expects the
+        // column it is currently on (a verb just got typed, the preposition
+        // just got typed, …), mirroring what `advance()` already does for a
+        // click/pick. A manual Tab survives further typing in the same slot;
+        // `row_sel` is dropped alongside it since a stale row index would
+        // belong to the column focus is leaving.
+        if !parsed.expected.contains(&self.focus) {
+            self.focus = parsed.expected.first().copied().unwrap_or(COL_VERB);
+            self.row_sel = None;
+        }
     }
 
     /// The columns the grammar expects the next word to come from: VERB for the
@@ -526,29 +546,25 @@ impl CommandBandState {
         self.parse_phrase(input).expected
     }
 
-    /// The nearest match for the word being typed, as `(column, index)`:
+    /// The nearest match for the word being typed, as `(focus, index)`:
     /// prefix first, then a prefix on any word of a multi-word name, then a
-    /// substring — searching only the columns [`Self::expected_cols`] says are
-    /// live, earliest column and earliest row winning ties. `None` when nothing
-    /// matches (no highlight, and Tab does nothing).
+    /// substring — searching ONLY `self.focus`'s items (SQ-0677: the current
+    /// column, not every grammatically-live one), earliest row winning ties.
+    /// `None` when nothing is typed, `focus` isn't reachable, or nothing in
+    /// it matches (no highlight, and Tab is pure column movement).
     pub fn nearest_match(&self, input: &str) -> Option<(usize, usize)> {
         let token = band_typed_token(input).to_lowercase();
-        if token.is_empty() {
+        if token.is_empty() || !self.col_reachable(self.focus) {
             return None;
         }
-        // (rank, column order, row index, column) — ordered exactly by the
-        // tie-break the doc promises.
-        let mut best: Option<(u8, usize, usize, usize)> = None;
-        for (order, &col) in self.expected_cols(input).iter().enumerate() {
-            for (idx, item) in self.items(col).iter().enumerate() {
-                let Some(rank) = band_match_rank(item, &token) else { continue };
-                let cand = (rank, order, idx, col);
-                if best.is_none_or(|b| cand < b) {
-                    best = Some(cand);
-                }
+        let mut best: Option<(u8, usize)> = None;
+        for (idx, item) in self.items(self.focus).iter().enumerate() {
+            let Some(rank) = band_match_rank(item, &token) else { continue };
+            if best.is_none_or(|(r, _)| rank < r) {
+                best = Some((rank, idx));
             }
         }
-        best.map(|(_, _, idx, col)| (col, idx))
+        best.map(|(_, idx)| (self.focus, idx))
     }
 
     /// The text of [`Self::nearest_match`] — what Tab completes the current
@@ -558,21 +574,64 @@ impl CommandBandState {
         self.items(col).get(idx).cloned()
     }
 
+    /// The row highlighted in `focus` right now: an explicit `↑`/`↓`
+    /// selection if there is one, else the passive typed nearest match
+    /// (SQ-0677 unifies the two — Tab picks whichever of these is showing).
+    /// `None` when neither applies.
+    pub fn highlighted_row(&self, input: &str) -> Option<usize> {
+        self.row_sel.or_else(|| self.nearest_match(input).map(|(_, idx)| idx))
+    }
+
     // ── Focus ────────────────────────────────────────────────────────────────
 
-    /// Every reachable column, left to right. Once the ring the arrow keys
-    /// walked (retired with the keyboard by SQ-0676 — the arrows drive the
-    /// quick block now); still what `advance` clamps against, so the band never
-    /// points at a column `col_reachable` disagrees with.
+    /// Every reachable column, left to right — what `Tab`/`Shift-Tab`
+    /// ([`Self::step_column`]) step across, and what `advance` clamps
+    /// against, so the band never points at a column `col_reachable`
+    /// disagrees with.
     pub fn focus_stops(&self) -> Vec<usize> {
         (0..BAND_COLS).filter(|&c| self.col_reachable(c)).collect()
+    }
+
+    /// Step `focus` by one stop (`+1` = Tab, `-1` = Shift-Tab) along
+    /// [`Self::focus_stops`], clamped rather than wrapped — a left-to-right
+    /// grammar has a real first and last column. Clears `row_sel`: a row
+    /// highlight belongs to the column it was raised in, not wherever focus
+    /// lands next.
+    pub fn step_column(&mut self, delta: i32) {
+        let stops = self.focus_stops();
+        let cur = stops.iter().position(|&s| s == self.focus).unwrap_or(0) as i32;
+        let next = (cur + delta).clamp(0, stops.len() as i32 - 1) as usize;
+        if let Some(&stop) = stops.get(next) {
+            self.focus = stop;
+        }
+        self.row_sel = None;
+    }
+
+    /// Move (or start) the explicit row highlight within `focus` by `delta`
+    /// (`-1` = Up, `+1` = Down), clamped at the list's ends — never wraps.
+    /// The FIRST press starts the highlight — at the typed nearest match if
+    /// there is one, else row 0 — WITHOUT moving further, mirroring the old
+    /// quick-row "arm on the first press" rule, now applied to columns.
+    pub fn step_row(&mut self, input: &str, delta: i32) {
+        let len = self.items(self.focus).len();
+        if len == 0 {
+            return;
+        }
+        let Some(cur) = self.row_sel else {
+            self.row_sel = Some(self.nearest_match(input).map(|(_, idx)| idx).unwrap_or(0));
+            return;
+        };
+        let next = (cur as i32 + delta).clamp(0, len as i32 - 1) as usize;
+        self.row_sel = Some(next);
     }
 
     /// Move focus to the next reachable UNFILLED column, or — when there is
     /// nothing left to pick — the last reachable column, so the cursor never
     /// parks somewhere `col_reachable` no longer agrees with (e.g. picking a
-    /// Solo verb collapses the ring back down to just VERB).
+    /// Solo verb collapses the ring back down to just VERB). Always clears
+    /// `row_sel`, whether or not `focus` actually moved.
     pub fn advance(&mut self) {
+        self.row_sel = None;
         for c in 0..BAND_COLS {
             if self.col_reachable(c) && !self.col_filled(c) {
                 self.focus = c;
@@ -619,6 +678,7 @@ impl CommandBandState {
     pub fn clear_phrase(&mut self) {
         self.picks.clear();
         self.focus = COL_VERB;
+        self.row_sel = None;
     }
 
     /// Whether any of the band's per-column scrolls is animating.

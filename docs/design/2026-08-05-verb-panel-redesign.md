@@ -309,6 +309,13 @@ they get their own dated subsection rather than being folded into it.
 
 ### Amendments (2026-08-05, SQ-0676 — typing always wins)
 
+**Its gesture table (arrows drive the quick block; there is no keyboard path
+into the columns) is SUPERSEDED by Amendment SQ-0677 further down** — kept
+here for the history of what changed and why "typing always wins" itself
+does NOT change again: SQ-0677 keeps every rule below about text keys,
+Ctrl/Alt chords, and the leader prefix, and only replaces what the ARROW keys
+and Tab/Enter do once the band is open.
+
 **The focus model inverts.** Decision 4 above ("the band owns the keyboard
 while open") is RETIRED, and with it every key the band took from the story
 prompt. The band is now a **reactive suggestion surface**: it never owns a
@@ -391,6 +398,173 @@ Everything else follows from that table:
    Adams) answer "I don't understand", exactly as they would to the same word
    typed by hand — no gating on the engine, which would be a lie about what the
    parser accepts.
+
+### Amendments (2026-08-05, SQ-0677 — a current column, replacing the arrow-drives-quick scheme)
+
+**Supersedes the SQ-0676 gesture table above wholesale.** Feedback on the
+shipped SQ-0676 band converged on the same complaint from several directions:
+the arrows only ever drove the quick block, so command history (`↑`/`↓`)
+disappeared while the band was open, and there was no keyboard path into the
+object columns at all — mouse only. This amendment gives the columns a
+keyboard back, WITHOUT reopening the door SQ-0676 closed (the band owning
+text keys): typing still always reaches the prompt, but arrows and Tab now
+navigate the columns instead of the quick block, and Ctrl+↑/↓ restores
+history access.
+
+**The gesture table, as shipped.** The band is open throughout.
+
+| Key | Effect |
+|---|---|
+| any printable char, Backspace, paste | types/edits the prompt, exactly as with the band closed |
+| `↑`/`↓` (plain) | move (or start) the row highlight within the CURRENT column |
+| `Tab`, nothing highlighted | move the current column forward (pure movement) |
+| `Tab`, a row highlighted (explicit `↑`/`↓`, or the typed nearest match) | pick that row and advance — exactly like a click |
+| `Shift-Tab` | move the current column back — ALWAYS pure movement, even with a row highlighted |
+| `←`/`→` (plain) | cursor movement on the edit line — the band claims neither |
+| `Enter` | NEVER picks; always submits the prompt exactly as typed |
+| `Esc` | clear an EXPLICIT row highlight, else close the band |
+| `Ctrl+↑`/`Ctrl+↓` | command history (`HistoryPrev`/`HistoryNext`) — restored under a modifier now that plain `↑`/`↓` belong to row navigation |
+| Shift+Arrow | pans the map, unchanged |
+| Ctrl/Alt chords, the leader prefix | fall through, unchanged |
+| mouse | click still picks a row (and advances the current column — see below); the quick block (rose + words, and the flat-row fallback) is now MOUSE-ONLY, with hover its one transient highlight; wheel still scrolls a column |
+
+Everything else follows from that table:
+
+1. **A current column always exists** (`CommandBandState::focus`) while the
+   band is open — `Tab`/`Shift-Tab` (`CommandBandState::step_column`) move it
+   across the reachable columns, clamped rather than wrapped. Its visible
+   hint is `band.column_header:active` on the header row, now keyed to
+   `focus == col` rather than the grammar's expected-columns set. VERB has no
+   header row to carry that selector (SQ-0675 reclaimed it as a list row) —
+   its hint is an UNDERLINE on the top list row instead, composed on top of
+   whatever that row's own style already is (picked over a gutter mark, which
+   would have collided with the `▸` selected-row marker already living in
+   that column).
+2. **`↑`/`↓` highlight a row within the current column**
+   (`CommandBandState::step_row`, `row_sel`) — the first press only starts
+   the highlight (mirrors the old quick-row "arm on the first press" rule,
+   now applied to columns), clamped at the list's ends.
+3. **Typing drives a passive nearest-match highlight in the current column
+   only** (`CommandBandState::nearest_match`, now scoped to `self.focus`
+   rather than hunting every grammatically-live column the way SQ-0676's did
+   — the current column IS the search scope now). `focus` itself only moves
+   on its own when the grammar no longer expects the column it's currently
+   on (a verb just got typed, a preposition just got typed) — mirroring what
+   `advance()` already did for a click, now applied to the typed path too
+   (`CommandBandState::sync_from_input`) — so a manual Tab survives further
+   typing in the same slot instead of being overridden by the old
+   best-match-wins search.
+4. **Tab unifies completion and column flow.** `CommandBandState::
+   highlighted_row` is the row_sel-or-nearest-match value Tab acts on: with
+   one present, Tab picks it (`Action::BandTabPick`) and advances, exactly
+   like a click; the typed word `ta` highlighting `take` and Tab landing
+   `take` on the prompt (not `ta take`) is the headline pin. `BandTabPick`
+   strips the partial word under construction FIRST, but only when nothing
+   has been picked yet (`phrase_text()` empty) — completing a SECOND word
+   (an object, once the verb is already typed and recognized) is already
+   counted toward `phrase_text()` by `parse_phrase` ("the word still under
+   construction counts as a token"), so `Action::BandClickRow`'s ordinary
+   tail-diff compose already replaces it correctly; pre-stripping
+   unconditionally there too double-strips and produces `take take door`
+   instead of `take door` — a regression caught by
+   `tab_completing_the_second_word_does_not_double_the_verb` (unit) and
+   `typing_at_the_prompt_completes_from_the_live_object_columns`
+   (integration, against a real object list) after the first, over-eager
+   version of this fix shipped briefly.
+5. **Enter never picks.** The SQ-0676 "armed Enter fires the quick word"
+   rule is gone outright — Enter always submits the prompt exactly as typed,
+   full stop, whether or not a row is highlighted. `Action::BandComplete` is
+   retired along with it (Tab now does what it did, plus advances).
+6. **The quick block loses ALL keyboard navigation.** `Action::BandQuickNav`,
+   `QuickDir`, `quick_nav`, `quick_block_cells`, and `CommandBandState::
+   quick_sel`/`quick_flat` are gone outright — rose, words, and the flat-row
+   fallback are mouse-click-only now. `CommandBandState::quick_hover`
+   replaces `quick_sel` as the block's only transient state, set by `Moved`
+   mouse events (`main::band_update_quick_hover`, mirroring `pane_drag::
+   on_mouse`'s own `Moved` handling) and read only by the renderer — it plays
+   no role in what a click fires. Hover renders REVERSED (`band.quick:hover`,
+   a new selector — genuinely unavoidable per CLAUDE.md's styleable-element
+   rule, since nothing existing carries a hover-only look): the column rows'
+   `dialog.list_selected` is a fg/bg swap, not a REVERSED modifier, so the
+   two states can never be visually confused even though both can show at
+   once (hover in the block, a row highlight in a column).
+7. **A click still picks AND advances the current column — symmetric with
+   Tab.** This mostly already worked: `Action::BandClickRow`'s handler sets
+   `focus = col` before picking, and `CommandBandState::pick`'s own
+   `advance()` call moves `focus` again afterward to the next reachable
+   column — clicking a row in a column that wasn't current already made it
+   current first, then advanced past it, with no changes needed. `band_pick_
+   row` is the shared core both `Action::BandClickRow` (click) and
+   `Action::BandTabPick` (Tab) call into.
+8. **The Esc bug fix.** A build shipped between the SQ-0676 and this
+   amendment had a defect: Esc's first rung checked whatever the band was
+   VISIBLY highlighting, which included the passive typed nearest-match
+   highlight — Esc doesn't change the typed text, so that highlight just
+   recomputed right back the instant it was "cleared," making the close rung
+   unreachable (the band wouldn't close). The fix scopes the check to
+   `row_sel` specifically — explicit-only, set ONLY by `↑`/`↓`, never by
+   typing — so two Escs close the band from every reachable state,
+   guaranteed (`esc_esc_closes_the_band_from_every_state` pins all three:
+   neutral, typed-with-a-passive-match, and explicitly armed).
+9. **`open-command-band`/F2 is now a TOGGLE.** A second press while the band
+   is already open (`band_dock.open`) closes it — the same path
+   `Action::BandClose` uses — so the band always has a one-key exit
+   independent of Esc, shipped alongside the Esc fix as the other half of the
+   same "must always be able to get out" guarantee.
+
+### Amendments (2026-08-05, SQ-0677 — the quick block stacks, gets dividers)
+
+**The quick block stacks: rose on top, words below it — not beside it.** The
+SQ-0675 block packed the non-compass words into the SAME 3 rows the rose
+occupied, beside it; that meant the block's width was `rose + gap + words`
+regardless of how few or many words there were, eating horizontal space the
+columns could have used. SQ-0677 restacks it:
+
+```text
+ NW  N  NE
+  W  ·  E
+ SW  S  SE
+ up   down
+ in    out
+ look   inv
+ wait again
+```
+
+Rose and words now share the same left edge; the block's width is
+`max(rose width, widest packed word row)` — "as narrow as the widest word
+row" — computed by the same `word_flow_width` search SQ-0675 used, just
+against a fixed row BUDGET (`WORD_ROW_BUDGET = 3`) rather than the whole
+block's total row count, since word rows are no longer competing with the
+rose for the same 3 rows.
+
+**Height interplay.** The block's natural height (3 rose rows + however many
+word rows the budget needs — 6 for the default quick list) can exceed the
+band's actual configured height (5 rows by default). Of the three options on
+the table — cap the block at the band's height and clip the rest; wrap
+overflow words into an extra COLUMN of the block; raise the band's effective
+minimum height whenever the block is shown — the first was implemented:
+`block_area.height = content.height.min(layout.height)`, and the renderer
+silently stops drawing (and registering hits for) any row past the bottom,
+same as the pre-amendment renderer already did at a fixed 3 rows. This costs
+nothing elsewhere: the columns still always get the band's full height,
+`MIN_BAND_ROWS`/`DEFAULT_BAND_ROWS` stay untouched, and a taller band (one
+resize away) shows every word row at once for anyone who wants that.
+
+**Single-cell `│` dividers** now separate the quick block from VERB and every
+column from its neighbour, full band height — reusing `panel.border`'s style
+(the same family the band's resize-mode highlight already borrows a colour
+from) rather than adding a new selector for a plain rule glyph. `column_rects`
+reserves one divider-width gap between each pair of adjacent columns
+(`MIN_COLS_WIDTH` grew to match); a divider cell is never part of either
+neighbour's returned rect, so a click landing exactly on the line hits
+neither column.
+
+**Style.** One new selector, `band.quick:hover` (parent `band.quick`,
+`reversed = true`) — the ONE addition CLAUDE.md's "no new selector unless
+genuinely unavoidable" rule allows here, since nothing existing carries a
+hover-only look. The dividers and the VERB current-column underline reuse
+existing selectors (`panel.border`, and `band.column_header:active`'s own
+modifiers respectively) on purpose.
 
 ## Grammar: the arity table
 
@@ -552,6 +726,16 @@ the inert centre dot — that selector already existed for exactly this
 "unexplored/inert, dimmed out of the way" role on the map's own matrix view.
 Nothing new was added to the theme registry or template.
 
+**One new selector for SQ-0677 (2026-08-05):** `band.quick:hover` (parent
+`band.quick`, `reversed = true`) for the quick block's mouse-hover highlight
+— the one addition the CLAUDE.md "no new selector unless genuinely
+unavoidable" rule allows, since nothing existing carries a hover-only look
+distinct from the column rows' `dialog.list_selected`. The dividers between
+the quick block/columns reuse `panel.border`'s style, and the VERB
+current-column hint reuses `band.column_header:active`'s own modifiers
+(applied as an underline on a list row instead of a header row) — neither
+needed a new selector.
+
 ## Testing
 
 - Unit: arity table → column reachability; filter; backspace un-pick ladder;
@@ -618,6 +802,34 @@ Nothing new was added to the theme registry or template.
   a real object's name, Tab, get its full multi-word name on the prompt). The
   default quick list's four new diagonals are pinned in the rose (all eight
   cells occupied) and in the submission lookup (`ne` → `northeast`).
+
+- **Added 2026-08-05 (SQ-0677, the current-column amendments above):** Tab
+  moves the current column without picking when nothing is highlighted;
+  typing highlights the nearest match in the current column and Tab picks +
+  advances (the headline unify pin, `tab_picks_the_typed_nearest_match_and_
+  advances`), including the "don't double the verb" regression pin for a
+  SECOND word (`tab_completing_the_second_word_does_not_double_the_verb`,
+  unit, plus the live-object-tree integration test in
+  `tests/command_band.rs`); `↑`/`↓` start and move an explicit row highlight,
+  clamped, first press only arms; `Shift-Tab` never picks even with a
+  highlight; Enter never picks — always submits, armed or not; `←`/`→` fall
+  through to `CursorLeft`/`CursorRight`; the active-column header hint
+  follows Tab, and VERB's underline hint shows only while VERB is current;
+  `Ctrl+↑`/`Ctrl+↓` resolve to history with the band open; the Esc bug fix is
+  pinned from three starting states (neutral, typed-with-a-passive-match,
+  explicitly armed) and F2's toggle-closed is pinned separately; the stacked
+  quick-block geometry (words start at `ROSE_ROWS`, block width is
+  `max(rose, widest word row)`, a short band clips word rows but keeps the
+  rose in full); the dividers render at the expected positions and are
+  excluded from both neighbouring columns' hit rects; hover sets/clears from
+  synthetic `Moved` events and renders REVERSED, distinguishable from the
+  column-row selected style (a fg/bg swap, not REVERSED) even when both show
+  at once; the flat-row fallback hovers too. Every pin was revert-verified
+  the same way as the earlier batches: temporarily undoing the corresponding
+  source change and confirming the pin fails with the originally reported
+  symptom first — including two live regressions caught this way after an
+  initial fix shipped too eagerly (the double-verb Tab bug above, and the
+  Esc-never-closes bug the two amendment sections above describe).
 
 ## Out of scope (this redesign)
 

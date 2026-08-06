@@ -196,37 +196,42 @@ know which side you're on).
   Composing happens directly on the real story input line — a pick appends
   its word there, merging with anything you already typed — so nothing ever
   fires a turn by itself except the quick actions below; everything else
-  sends the ordinary way, with **Enter** on that line.
+  sends the ordinary way, with **Enter** on that line, which NEVER picks a
+  row — it always sends exactly what you typed.
 
-  **Typing always wins.** The band never takes the keyboard: letters,
+  **Typing always wins.** The band never takes the keyboard for text: letters,
   Backspace and paste go to the story prompt exactly as they do with the band
-  closed, and **Enter** sends what you typed. The band just *watches* — as you
-  type a word it highlights the closest match in whichever column the phrase
-  expects next (the verb column for the first word, *here*/*carried* after a
-  verb, the **WITH…** column once you've typed the preposition), matching a
-  later word of a name too, so `do` finds `iron door`. **Tab** completes the
-  word you're typing to that highlight; with nothing to match, it does nothing.
-  While the band is open its suggestion is what Tab completes from — the
-  story-dictionary autocomplete below is what you get with the band closed.
+  closed. What the band DOES claim is column navigation: there is always a
+  **current column** — its header lights up (VERB, which has no header row,
+  underlines its top entry instead) — and **Tab**/**Shift-Tab** step it across
+  whichever columns are reachable. As you type, the closest match in the
+  *current* column highlights (matching a later word of a name too, so `do`
+  finds `iron door` once *here*/*carried* is current); **↑**/**↓** highlight a
+  row within it directly, the first press only arming the highlight without
+  moving it. **Tab** unifies the two: with nothing highlighted it just moves
+  to the next column, but with a row highlighted — typed or arrowed — it picks
+  that row and advances, exactly like a click. **Shift-Tab** always just
+  moves, even with something highlighted. **←**/**→** are the ordinary caret
+  keys on the prompt; the band doesn't claim them. **Esc** clears an armed
+  **↑**/**↓** highlight first, then closes the band — and **F2**/
+  `open-command-band` is a toggle, so it always closes the band too, Esc ladder
+  or not.
 
   The one-click quick actions (`n`/`s`/`e`/`w`/`ne`/`nw`/`se`/`sw`,
   `up`/`down`/`in`/`out`, `look`, `inventory`, `wait`, `again` by default) are
   the one exception: a click submits AT ONCE, no Enter, and never disturbs a
   phrase you're mid-composing. When the band is wide enough they draw as a
-  compass rose anchored to its left edge — the eight points around an inert
-  centre dot — with everything else in the quick list flowing beside it; a
+  block on its left edge — the compass rose (eight points around an inert
+  centre dot) on top, with everything else in the quick list flowing in as
+  many rows as it needs BELOW the rose, only as wide as its widest row; a
   narrower band falls back to the older single-line row along the bottom
-  instead. Either way every point and word is its own click target.
-
-  The quick words are also the band's only keyboard surface: the **arrow keys**
-  move a highlight around them — spatially through the rose, so ↓ from *N*
-  lands on *W*/*E* and ↓ again on the bottom row — and the first arrow press
-  simply arms it. Once armed, **Enter** *or* **Tab** fires the highlighted word
-  at once. Typing anything disarms it again, so Enter goes straight back to
-  sending your line: the last thing you pressed decides. **Esc** clears the
-  highlight, and closes the band when there is none. (Because the arrows belong
-  to the band while it is open, ↑/↓ command history is only there with the band
-  closed.)
+  instead. Either way every point and word is its own click target, and the
+  quick block is **mouse-only** — hovering one (with either layout) reverses
+  it, distinct from a picked column row's own highlight, but no keyboard
+  gesture reaches it; command history (**Ctrl+↑**/**Ctrl+↓**, or plain
+  **↑**/**↓** with the band closed) is always available instead. Single-cell
+  `│` dividers separate the quick block from the columns and every column from
+  its neighbour.
 
   It is a dock, not a modal: the story prompt stays live underneath, paste keeps
   working, and graphical v6 keeps its artwork. Everything visible is clickable
@@ -237,7 +242,10 @@ know which side you're on).
   Its height, its verb grammar and its quick list are all configurable under
   `[command_band]` in `config.toml`; resize mode targets its height. The
   compass-rose/flat-row choice is not configurable — it is computed from the
-  band's actual width every frame.
+  band's actual width every frame. A band shorter than the quick block's full
+  height (rose plus every word row) still draws the whole rose and simply
+  clips the word rows it has no room for; resize the band taller to see them
+  all.
 - **Tab autocomplete** from the story's own dictionary plus the nouns mentioned
   in the current room, shown the way your shell shows it: the rest of the word
   appears in dim ghost text right under the caret as you type. **Tab** cycles
@@ -255,8 +263,11 @@ know which side you're on).
   Give it a border with the `suggestion_line` style selector to float it as a
   boxed popup.
 - **Command history** — press **↑**/**↓** at the prompt to recall and re-run
-  earlier commands, shell-style. History persists across sessions inside the
-  `.babelmap` archive; turn recording off with `record_history = false`.
+  earlier commands, shell-style (**Ctrl+↑**/**Ctrl+↓** work too, and are the
+  only way to reach it while the command band is open, since plain **↑**/**↓**
+  belong to the band's own row navigation there). History persists across
+  sessions inside the `.babelmap` archive; turn recording off with
+  `record_history = false`.
 - **Readline-style line editing** at the story prompt: `Ctrl+A`/`Ctrl+E` jump to
   the start/end of the line, `Ctrl+U` clears back to the start, `Ctrl+K` clears
   forward to the end, and `Ctrl+W` deletes the word behind the caret — the same

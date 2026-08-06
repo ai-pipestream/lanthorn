@@ -919,10 +919,12 @@ fn draw_frame(
         let help_text = if state.overlays.config_screen.is_some() {
             "\u{2191}\u{2193} move  \u{2190}\u{2192}/Space change  s save  Esc cancel".to_string()
         } else if state.overlays.command_band.is_some() && !state.resize_mode {
-            // SQ-0676 (2026-08-05): typing always wins — the band owns no text
-            // keys, the arrows arm the quick block, and the last gesture decides
-            // what Enter/Tab mean (fire the armed word, else submit / complete).
-            "Command Band | type: goes to the prompt | arrows: pick a quick word | Enter/Tab: fire it | else Tab: complete, Enter: send | Esc: close"
+            // SQ-0677 (2026-08-05): typing always wins — the band owns no text
+            // keys. Tab/Shift-Tab move the current column; a highlighted row
+            // (arrowed or the typed nearest match) makes Tab pick it and
+            // advance instead. Enter never picks — it always sends the
+            // prompt. Quick (rose/words) is mouse-only; F2 re-closes.
+            "Command Band | type: goes to the prompt | \u{2191}\u{2193}: highlight | Tab: move col. (pick if highlighted) | Shift-Tab: move col. | Ctrl+\u{2191}\u{2193}: history | Enter: send | Esc: close | F2: close"
                 .to_string()
         } else if state.overlays.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
             "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc: cancel".to_string()
@@ -1096,6 +1098,47 @@ fn band_mouse_action(
         }
         // Drag/Up inside the band must not start a story-pane text selection.
         _ => Some(Action::None),
+    }
+}
+
+/// Update the command band's quick-block hover highlight from a `Moved`
+/// mouse event (SQ-0677) — the quick block (rose + flowing words, and the
+/// flat-row fallback) is mouse-click-only now, so hover is its only
+/// transient highlight. Mirrors `pane_drag::on_mouse`'s own `Moved` handling:
+/// runs unconditionally (not gated on `band_mouse_action`'s `hits.area`
+/// check), never claims the event, and clears the hover — rather than
+/// leaving a stale one lit — the moment the pointer sits over anything else
+/// in the band, leaves the band's rect, or a modal opens over it. Reads
+/// `panes.command_band` — the SAME hit rects the click path
+/// (`band_mouse_action`) hit-tests — so hover and click always agree about
+/// which cell is under the pointer.
+fn band_update_quick_hover(state: &mut AppState, panes: &PaneRects, event: &Event) {
+    use crossterm::event::MouseEventKind;
+    let Event::Mouse(m) = event else { return };
+    if m.kind != MouseEventKind::Moved || state.overlays.command_band.is_none() {
+        return;
+    }
+    let hover = if state.any_modal_overlay_open() {
+        None
+    } else {
+        panes
+            .command_band
+            .quick
+            .iter()
+            .find(|(_, r)| {
+                r.width > 0
+                    && r.height > 0
+                    && m.column >= r.x
+                    && m.column < r.right()
+                    && m.row >= r.y
+                    && m.row < r.bottom()
+            })
+            .map(|(i, _)| *i)
+    };
+    if let Some(band) = state.overlays.command_band.as_mut() {
+        if band.quick_hover != hover {
+            band.quick_hover = hover;
+        }
     }
 }
 
@@ -1802,6 +1845,17 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
         } else if app::pane_drag::interrupt(&mut state) {
             lifecycle::flush_pending_config_write(&mut state);
         }
+
+        // ── Command-band quick-block hover (SQ-0677) ───────────────────────────
+        // Mirrors `pane_drag::on_mouse`'s own Moved handling just above: pointer
+        // motion with no button held just lights up whichever quick cell (rose
+        // point, flowing word, or flat-row entry) is under it, using LAST
+        // FRAME's hit rects (`last_panes.command_band`, the same ones the click
+        // path hit-tests). Never claims the event — quick is mouse-click-only
+        // now (SQ-0677), so hover is purely cosmetic and must not pre-empt
+        // anything else a `Moved` event might still need to do (the debug
+        // panel's own hover tooltips, in particular).
+        band_update_quick_hover(&mut state, &last_panes, &event);
 
         // ── Common-dialog overlay intercept ladder (SQ-0307) ──────────────────
         // The aux / reset / save-name / text-entry / confirm-delete / quit /

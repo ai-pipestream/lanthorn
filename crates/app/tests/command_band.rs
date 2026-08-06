@@ -203,7 +203,7 @@ fn typing_at_the_prompt_completes_from_the_live_object_columns() {
     assert_eq!(band.items(col)[idx], target, "the nearest match is the object typed toward");
 
     let a = key_to_action(&state, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    assert_eq!(a, Action::BandComplete, "the open band owns Tab completion");
+    assert_eq!(a, Action::BandTabPick(col, idx), "the open band owns Tab completion");
     apply_action(a, &mut state, &mut mapper);
     assert_eq!(
         state.input.value,

@@ -400,6 +400,11 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     row("band.column_header:active", Section::Elements, Kind::Style, Some("accent"), mods(true, false, false, false)),
     // The one-click quick-action row along the bottom of the band.
     row("band.quick", Section::Elements, Kind::Style, Some("muted"), Delta::EMPTY),
+    // The quick block's hover highlight (SQ-0677): reversed video, since the
+    // quick block lost its arrow-armed keyboard state (armed columns reuse
+    // `dialog.list_selected` instead, a fg/bg swap, not REVERSED) and hover is
+    // now its only transient highlight — the two must never look the same.
+    row("band.quick:hover", Section::Elements, Kind::Style, Some("band.quick"), mods(false, false, false, true)),
     // In-column group labels and the "(nothing visible)" placeholder.
     row("band.group_label", Section::Elements, Kind::Style, Some("heading"), Delta::EMPTY),
     // The file browser's current-directory row and unselected directory entries.
@@ -583,6 +588,7 @@ mod tests {
         "band.column_header",
         "band.column_header:active",
         "band.quick",
+        "band.quick:hover",
         "band.group_label",
         "file_browser_cwd",
         "file_browser_dir",

@@ -270,19 +270,25 @@ pub enum Action {
     /// Open the bottom command band (its object columns fill from the engine's
     /// live object tree on the next tick).
     OpenCommandBand,
-    /// An arrow key while the band is open: move (and ARM) the quick-word
-    /// highlight — spatially in the compass-rose block, linearly in the flat
-    /// fallback row. SQ-0676 (2026-08-05) gave every arrow to the quick block;
-    /// the column focus ring it replaced is retired, and command history is
-    /// only reachable with the band closed.
-    BandQuickNav(crate::render::command_band::QuickDir),
-    /// Tab while the band is open and the highlight is NOT armed: complete the
-    /// word being typed to the band's nearest match (SQ-0676). While the band
-    /// is open its suggestion IS the completion source — this takes precedence
-    /// over the dictionary autocomplete; with no match, Tab does nothing.
-    BandComplete,
+    /// `Tab` (`+1`) / `Shift-Tab` (`-1`) while the band is open and nothing is
+    /// highlighted in the current column: step `focus` across the reachable
+    /// columns (SQ-0677, 2026-08-05 — supersedes SQ-0676's arrow-drives-quick
+    /// scheme). Pure movement, never a pick — see `Action::BandClickRow` for
+    /// what Tab does INSTEAD when a row IS highlighted.
+    BandColumnStep(i32),
+    /// `↑` (`-1`) / `↓` (`+1`) while the band is open: move (or start) the
+    /// explicit row highlight within the current column (SQ-0677).
+    BandRowNav(i32),
     /// Pick the row at `(column, index)` directly (mouse click on a row).
     BandClickRow(usize, usize),
+    /// `Tab` with a row highlighted in the current column (SQ-0677): pick
+    /// `(column, index)` exactly like `Action::BandClickRow`, but FIRST strip
+    /// the partial word under construction at the prompt (mirroring
+    /// `apply_completion`'s word-replace) — so completing `ta` to `take`
+    /// lands as `take`, not `ta take`. A mouse click has no "word under
+    /// construction" relationship to what it picks, so it keeps the plain
+    /// `BandClickRow` compose with no stripping.
+    BandTabPick(usize, usize),
     /// Point the band at the given column (mouse click on its header).
     BandFocusCol(usize),
     /// Wheel over a column: scroll it by `delta` rows.
@@ -552,6 +558,14 @@ pub fn key_to_command(state: &AppState, key: KeyEvent) -> KeyResolve {
             KeyCode::Char('u') => return KeyResolve::Action(Action::DeleteToStart),
             KeyCode::Char('k') => return KeyResolve::Action(Action::DeleteToEnd),
             KeyCode::Char('w') => return KeyResolve::Action(Action::DeleteWordBack),
+            // Ctrl+↑/↓ recall command history (SQ-0677): plain ↑/↓ moved to
+            // the command band's row navigation while it's open, so history
+            // needs a modifier'd alias to stay reachable there too. With the
+            // band CLOSED this is simply an alias for the plain arrows below
+            // (`game_key_to_action`'s `KeyCode::Up/Down if modifiers ==
+            // NONE`) — harmless, and one less thing to remember.
+            KeyCode::Up => return KeyResolve::Action(Action::HistoryPrev),
+            KeyCode::Down => return KeyResolve::Action(Action::HistoryNext),
             _ => {}
         }
     }
@@ -1269,23 +1283,27 @@ fn filebrowser_key_to_action(key: KeyEvent) -> Action {
 /// handful of keys the band consumes, else `None` — the key falls through and
 /// is handled by the always-live story input.
 ///
-/// **SQ-0676 (2026-08-05): typing always wins.** The band owns no text keys at
-/// all now — printable characters and Backspace edit the real prompt exactly as
-/// they do with the band closed, which is the whole point of the inversion (`w`
-/// then Enter sends `w` to the game with the band wide open). What is left is
-/// four arrow keys plus two keys whose meaning the LAST GESTURE decides:
+/// **SQ-0677 (2026-08-05) — supersedes SQ-0676's arrow-drives-quick scheme.**
+/// The band still owns no text keys — printable characters and Backspace edit
+/// the real prompt exactly as they do with the band closed. What it claims
+/// instead:
 ///
-/// | gesture | Enter | Tab |
-/// |---|---|---|
-/// | armed (an arrow was the last thing pressed) | fire the highlighted quick word | fire it too |
-/// | typing (any text change disarms) | submit the prompt as typed (falls through) | complete the word to the band's nearest match |
+/// | key | effect |
+/// |---|---|
+/// | `↑`/`↓` (plain) | move (or start) the row highlight within the current column |
+/// | `Tab`, nothing highlighted | move the current column forward (pure movement) |
+/// | `Tab`, a row highlighted (explicit or the typed nearest match) | pick that row and advance — exactly like a click |
+/// | `Shift-Tab` | move the current column back — ALWAYS pure movement, even with a row highlighted |
+/// | `Esc` | clear an explicit row highlight, else close the band |
+/// | `Enter` | NOT claimed — always falls through to the ordinary prompt submit |
+/// | `←`/`→` | NOT claimed — plain cursor movement on the edit line |
+/// | Ctrl/Alt chords, the leader prefix | fall through, unchanged (Ctrl+↑/↓ reaches command history — see `key_to_command`'s readline-shortcuts step) |
 ///
-/// Unmatched Tab is a consumed no-op: while the band is open its suggestion is
-/// the completion source, so there is no silent fallback to the dictionary
-/// autocomplete behind it.
+/// Tab unifies completion and column flow: the typed nearest-match highlight
+/// counts as "a row highlighted" too, so typing `ta` then Tab picks `take` and
+/// advances to the next column in one gesture — there is no separate
+/// "complete the word" action left (`Action::BandComplete` retired with it).
 fn command_band_intercept(key: KeyEvent, state: &AppState) -> Option<Action> {
-    use crate::render::command_band::QuickDir;
-
     // The hotkey-dialog leader prefix is never swallowed: it must fall through
     // so the player can open the leader palette (and the '/' command palette,
     // home of resize-panes and the rest of the long tail) while the band is up
@@ -1295,28 +1313,22 @@ fn command_band_intercept(key: KeyEvent, state: &AppState) -> Option<Action> {
         return None;
     }
     let band = state.overlays.command_band.as_ref()?;
-    // App chords (Ctrl+S, Alt+…) always fall through, and Shift+Arrow still
-    // pans the map — the band claims PLAIN arrows only.
+    // App chords (Ctrl+S, Alt+…) always fall through — including Ctrl+↑/↓,
+    // which reach command history instead (SQ-0677 restored it once plain
+    // ↑/↓ moved to column row navigation here).
     if key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) {
         return None;
     }
     let plain = key.modifiers == KeyModifiers::NONE;
 
     match key.code {
-        KeyCode::Up if plain => Some(Action::BandQuickNav(QuickDir::Up)),
-        KeyCode::Down if plain => Some(Action::BandQuickNav(QuickDir::Down)),
-        KeyCode::Left if plain => Some(Action::BandQuickNav(QuickDir::Left)),
-        KeyCode::Right if plain => Some(Action::BandQuickNav(QuickDir::Right)),
+        KeyCode::Up if plain => Some(Action::BandRowNav(-1)),
+        KeyCode::Down if plain => Some(Action::BandRowNav(1)),
         KeyCode::Esc => Some(Action::BandEscape),
-        // Armed: Enter fires the quick word. Unarmed: Enter is the ordinary
-        // prompt Enter, so it must NOT be consumed here.
-        KeyCode::Enter => band.quick_sel.map(Action::BandQuickPick),
-        KeyCode::Tab | KeyCode::BackTab => Some(match band.quick_sel {
-            Some(i) => Action::BandQuickPick(i),
-            None if band.nearest_match(&state.input.value).is_some() => Action::BandComplete,
-            // Nothing to complete to: consumed, deliberately doing nothing
-            // rather than guessing from the dictionary behind the band.
-            None => Action::None,
+        KeyCode::BackTab => Some(Action::BandColumnStep(-1)),
+        KeyCode::Tab => Some(match band.highlighted_row(&state.input.value) {
+            Some(idx) => Action::BandTabPick(band.focus, idx),
+            None => Action::BandColumnStep(1),
         }),
         _ => None,
     }
@@ -1358,6 +1370,30 @@ fn strip_band_tail(input: &mut crate::text_field::TextField, old_text: &str) {
         let mut v = input.value.clone();
         v.truncate(v.len() - old_text.len());
         input.set(v, true);
+    }
+}
+
+/// Pick row `idx` of `col` and compose it onto the prompt — the shared core
+/// of a mouse click (`Action::BandClickRow`) and a Tab-with-highlight pick
+/// (`Action::BandTabPick`, which truncates the partial word first and then
+/// calls this exactly the same way). `col` becomes the current column; `pick`
+/// then advances it again to the NEXT reachable one (SQ-0677: a pick — click
+/// or Tab — always moves the current column forward, symmetric with typing
+/// a verb/prep advancing it).
+fn band_pick_row(state: &mut AppState, col: usize, idx: usize) {
+    let vp = state.modal_list_viewport;
+    let anim = state.config.animation.clone();
+    if let Some(b) = &mut state.overlays.command_band {
+        b.focus = col;
+        let len = b.items(col).len();
+        b.scroll[col].len(len);
+        b.scroll[col].select(idx, vp, &anim);
+        let old = b.phrase_text();
+        b.pick(col, idx);
+        let new = b.phrase_text();
+        if new != old {
+            sync_band_phrase_to_input(&mut state.input, &old, &new);
+        }
     }
 }
 
@@ -1569,11 +1605,12 @@ pub fn apply_action(action: Action, state: &mut AppState, mapper: &mut Mapper) {
     }
 }
 
-/// Re-point the band at the (just-changed) story input line: disarm the quick
-/// highlight (a text change means the last gesture was TYPING, so Enter must
-/// submit the prompt rather than fire a stale quick word), re-derive the
-/// phrase state from what is typed, and scroll the matching column so the
-/// nearest match is actually on screen.
+/// Re-point the band at the (just-changed) story input line: clear the
+/// explicit row highlight (a text change means the last gesture was TYPING,
+/// not `↑`/`↓` — SQ-0677's "the last gesture decides", same rule the retired
+/// `quick_sel` used to follow), re-derive the phrase state from what is
+/// typed, and scroll the current column so its nearest match is actually on
+/// screen.
 ///
 /// `apply_action` and `apply_paste` call this for themselves. It is public for
 /// the run loop's submit arm, which empties the line through
@@ -1584,7 +1621,7 @@ pub fn band_react_to_input(state: &mut AppState) {
     let vp = state.modal_list_viewport;
     let anim = state.config.animation.clone();
     let Some(b) = state.overlays.command_band.as_mut() else { return };
-    b.quick_sel = None;
+    b.row_sel = None;
     b.sync_from_input(&input);
     if let Some((col, idx)) = b.nearest_match(&input) {
         let len = b.items(col).len();
@@ -2463,78 +2500,94 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
 
         Action::OpenCommandBand => {
             state.overlays.hotkey_dialog = false;
-            if state.overlays.command_band.is_none() {
-                let (verbs, warnings) = state.config.command_band.resolve_verbs();
-                for w in warnings {
-                    state.push_transcript_kind(&w, crate::state::TranscriptKind::Warning);
+            // F2 / `/open-command-band` is a TOGGLE (bug fix, SQ-0677): with
+            // the band already open (its dock target is `open`, whether or
+            // not the slide has settled), the SAME key/command closes it —
+            // Esc's ladder must never be the only one-key way out. `is_none`
+            // still guards the fresh-open branch below so a re-press while
+            // the band is mid-CLOSE (dock target `false`, content still
+            // alive for the slide-out) reopens it rather than double-firing
+            // a close, exactly as it always has.
+            if state.overlays.command_band.is_some() && state.band_dock.open {
+                apply_action(Action::BandClose, state, mapper);
+            } else {
+                if state.overlays.command_band.is_none() {
+                    let (verbs, warnings) = state.config.command_band.resolve_verbs();
+                    for w in warnings {
+                        state.push_transcript_kind(&w, crate::state::TranscriptKind::Warning);
+                    }
+                    let mut band = crate::state::CommandBandState::new(
+                        verbs,
+                        state.config.command_band.resolve_quick(),
+                    );
+                    // The band opens reading whatever is ALREADY on the prompt
+                    // (SQ-0676): its phrase state follows the typed line, so a
+                    // half-typed `take ` must light the object columns the
+                    // moment the band appears, not one keystroke later. Object
+                    // columns fill from the engine on the next tick.
+                    band.sync_from_input(&state.input.value);
+                    state.overlays.command_band = Some(band);
                 }
-                let mut band = crate::state::CommandBandState::new(
-                    verbs,
-                    state.config.command_band.resolve_quick(),
-                );
-                // The band opens reading whatever is ALREADY on the prompt
-                // (SQ-0676): its phrase state follows the typed line, so a
-                // half-typed `take ` must light the object columns the moment
-                // the band appears, not one keystroke later. Object columns
-                // fill from the engine on the next tick.
-                band.sync_from_input(&state.input.value);
-                state.overlays.command_band = Some(band);
+                state.band_dock.toggle_to(true, false);
+                state.band_dock.arm(&state.config.animation);
             }
-            state.band_dock.toggle_to(true, false);
-            state.band_dock.arm(&state.config.animation);
         }
 
-        Action::BandQuickNav(dir) => {
-            // Every arrow drives the quick block now (SQ-0676), and the first
-            // press ARMS the highlight. The block's layout — rose or the narrow
-            // flat row — is whatever the renderer last drew.
+        Action::BandColumnStep(delta) => {
+            // Tab/Shift-Tab move the current column (SQ-0677) — pure
+            // movement; a pick happens through `Action::BandClickRow`
+            // instead, which `command_band_intercept` reaches for on its own
+            // when Tab finds a row highlighted.
             if let Some(b) = &mut state.overlays.command_band {
-                let flat = b.quick_flat.get();
-                b.quick_sel =
-                    crate::render::command_band::quick_nav(&b.quick, flat, b.quick_sel, dir);
+                b.step_column(delta);
             }
         }
 
-        Action::BandComplete => {
-            // The band's nearest match IS the completion source while it is
-            // open (SQ-0676). Nothing to complete to → nothing happens; the
-            // dictionary autocomplete behind it is deliberately not consulted.
-            let hit = state
+        Action::BandRowNav(delta) => {
+            // ↑/↓ move (or start) the explicit row highlight within the
+            // current column (SQ-0677).
+            if let Some(b) = &mut state.overlays.command_band {
+                let input = state.input.value.clone();
+                b.step_row(&input, delta);
+            }
+        }
+
+        Action::BandClickRow(col, idx) => band_pick_row(state, col, idx),
+
+        Action::BandTabPick(col, idx) => {
+            // Strip the word under construction FIRST, but ONLY when NOTHING
+            // has been picked yet (`phrase_text()` empty) — e.g. completing
+            // the very first word, `unl` → `unlock`, where the partial verb
+            // isn't a recognized token yet so `parse_phrase` doesn't count it
+            // toward `phrase_text()` at all, leaving `band_pick_row`'s own
+            // tail-diff (`old_text = ""`) nothing to strip on its own
+            // (mirrors `apply_completion`'s truncate-then-insert for that
+            // case). Once at least one slot IS picked, the partial word for
+            // whatever comes next (an object, a second object) already
+            // counts toward `phrase_text()` — see `CommandBandState::
+            // parse_phrase`'s doc, "the word still under construction counts
+            // as a token" — so `band_pick_row`'s existing diff replaces it
+            // correctly on its own; pre-stripping here TOO would double-strip
+            // and leave a stray duplicate (`take take door`, the falsified
+            // symptom — see `typing_at_the_prompt_completes_from_the_live_
+            // object_columns` in tests/command_band.rs).
+            let old_is_empty = state
                 .overlays
                 .command_band
                 .as_ref()
-                .and_then(|b| b.nearest_match_text(&state.input.value));
-            if let Some(word) = hit {
-                apply_completion(state, &word);
-                if state.focus == Focus::Game {
-                    recompute_suggestions(state);
-                    state.suggestion_idx = 0;
-                    state.suggestion_active = false;
-                }
+                .is_some_and(|b| b.phrase_text().is_empty());
+            if old_is_empty {
+                let keep = state.input.char_len() - state.current_partial().chars().count();
+                state.input.truncate_chars(keep);
             }
-        }
-
-        Action::BandClickRow(col, idx) => {
-            let vp = state.modal_list_viewport;
-            let anim = state.config.animation.clone();
-            if let Some(b) = &mut state.overlays.command_band {
-                b.focus = col;
-                let len = b.items(col).len();
-                b.scroll[col].len(len);
-                b.scroll[col].select(idx, vp, &anim);
-                let old = b.phrase_text();
-                b.pick(col, idx);
-                let new = b.phrase_text();
-                if new != old {
-                    sync_band_phrase_to_input(&mut state.input, &old, &new);
-                }
-            }
+            band_pick_row(state, col, idx);
         }
 
         Action::BandFocusCol(col) => {
             if let Some(b) = &mut state.overlays.command_band {
                 if b.col_reachable(col) {
                     b.focus = col;
+                    b.row_sel = None;
                 }
             }
         }
@@ -2564,14 +2617,21 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
         }
 
         Action::BandEscape => {
-            // Two rungs (SQ-0676): disarm the quick highlight, then close. The
-            // old filter rung retired with type-to-filter, and the phrase rung
-            // with it — the phrase IS the prompt's text now, and Esc must never
-            // delete what the player typed.
+            // Two rungs (SQ-0677): clear an EXPLICIT row highlight, then
+            // close. This ladder MUST terminate — a bug fixed alongside this
+            // amendment had the first rung re-triggering on every press and
+            // making the close rung unreachable, because it checked whatever
+            // was VISIBLY highlighted, including the passive typed
+            // nearest-match highlight, which just recomputes right back the
+            // instant it's "cleared" (nothing about pressing Esc changes the
+            // typed text). `row_sel` is explicit-only — set ONLY by `↑`/`↓`
+            // (`Action::BandRowNav`), never by typing — so checking IT
+            // specifically is what makes two Escs from ANY state close the
+            // band, guaranteed.
             let mut close = false;
             if let Some(b) = &mut state.overlays.command_band {
-                if b.quick_sel.is_some() {
-                    b.quick_sel = None;
+                if b.row_sel.is_some() {
+                    b.row_sel = None;
                 } else {
                     close = true;
                 }
@@ -4645,11 +4705,15 @@ mod tests {
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('a'))), Action::CursorHome));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('e'))), Action::CursorEnd));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Char('p'))), Action::OpenHotkeyDialog));
-        // Ctrl+Arrows and F6-F9 are unbound (room nudging removed, SQ-0600).
+        // Ctrl+Left/Right and F6-F9 are unbound (room nudging removed,
+        // SQ-0600). Ctrl+Up/Down are the exception (SQ-0677): they recall
+        // command history, restoring the plain arrows' shell-style behaviour
+        // under a modifier now that the command band claims plain ↑/↓ for
+        // its own row navigation while open.
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Left)), Action::None));
         assert!(matches!(key_to_action(&s, ctrl(KeyCode::Right)), Action::None));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Up)), Action::None));
-        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Down)), Action::None));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Up)), Action::HistoryPrev));
+        assert!(matches!(key_to_action(&s, ctrl(KeyCode::Down)), Action::HistoryNext));
         for f in [6u8, 7, 8, 9] {
             assert!(matches!(key_to_action(&s, key(KeyCode::F(f))), Action::None));
         }
@@ -6295,29 +6359,85 @@ mod tests {
         assert_eq!(band(&s).phrase_text(), "unlock iron", "the phrase tracks the line");
     }
 
-    /// Esc's ladder is two rungs now (SQ-0676): disarm the quick highlight,
-    /// then close. The retired filter/phrase rungs are gone — in particular Esc
-    /// must NOT delete text from the prompt anymore, since that text is the
-    /// player's, however it got there.
+    /// Esc's ladder is two rungs (SQ-0677): clear an EXPLICIT row highlight,
+    /// then close. Esc must NOT delete text from the prompt, since that text
+    /// is the player's, however it got there.
     #[test]
-    fn escape_disarms_then_closes_and_never_eats_the_prompt() {
-        use crate::render::command_band::QuickDir;
+    fn escape_clears_the_row_highlight_then_closes_and_never_eats_the_prompt() {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_band(&mut s);
         type_text(&mut s, &mut mapper, "take");
 
-        apply_action(Action::BandQuickNav(QuickDir::Right), &mut s, &mut mapper);
-        assert!(band(&s).quick_sel.is_some(), "armed");
+        apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
+        assert!(band(&s).row_sel.is_some(), "an explicit row highlight");
 
         apply_action(Action::BandEscape, &mut s, &mut mapper);
-        assert_eq!(band(&s).quick_sel, None, "rung 1: the quick highlight");
+        assert_eq!(band(&s).row_sel, None, "rung 1: the row highlight");
         assert!(s.band_dock.open, "…and the band is still open");
         assert_eq!(s.input.value, "take", "…and the prompt is untouched");
 
         apply_action(Action::BandEscape, &mut s, &mut mapper);
         assert!(!s.band_dock.open, "rung 2: close");
         assert_eq!(s.input.value, "take", "closing never eats the typed line either");
+    }
+
+    /// Bug fix (SQ-0677, reported against the shipped build): Esc-Esc must
+    /// close the band from EVERY reachable state, not just the explicitly
+    /// armed one — the original defect checked whatever was VISIBLY
+    /// highlighted, including the passive typed nearest-match highlight,
+    /// which just recomputes right back the instant it's "cleared" (Esc
+    /// doesn't change the typed text), making rung 1 fire on every press and
+    /// the close rung unreachable. Pins all three starting states. Falsifies
+    /// against reverting `Action::BandEscape`'s check from `row_sel` back to
+    /// something derived from `highlighted_row` (which includes the typed
+    /// match).
+    #[test]
+    fn esc_esc_closes_the_band_from_every_state() {
+        // (a) Neutral: nothing typed, nothing highlighted.
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        apply_action(Action::BandEscape, &mut s, &mut mapper);
+        apply_action(Action::BandEscape, &mut s, &mut mapper);
+        assert!(!s.band_dock.open, "(a) neutral: two Escs close");
+
+        // (b) Typed, with a passive nearest-match highlight but no explicit
+        // row_sel — the exact state that triggered the reported bug.
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        type_text(&mut s, &mut mapper, "unl");
+        assert!(band(&s).nearest_match(&s.input.value).is_some(), "sanity: a passive match exists");
+        assert_eq!(band(&s).row_sel, None, "sanity: nothing explicitly armed");
+        apply_action(Action::BandEscape, &mut s, &mut mapper);
+        apply_action(Action::BandEscape, &mut s, &mut mapper);
+        assert!(!s.band_dock.open, "(b) typed-with-match: two Escs close");
+
+        // (c) An explicit row_sel highlight (the two-rung case).
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
+        assert!(band(&s).row_sel.is_some(), "sanity: armed");
+        apply_action(Action::BandEscape, &mut s, &mut mapper);
+        apply_action(Action::BandEscape, &mut s, &mut mapper);
+        assert!(!s.band_dock.open, "(c) armed: two Escs close");
+    }
+
+    /// The other half of the same bug fix: `open-command-band`/F2 is a
+    /// TOGGLE, so the band always has a one-key exit independent of Esc.
+    /// Falsifies against `Action::OpenCommandBand` always (re-)opening
+    /// regardless of the current state.
+    #[test]
+    fn open_command_band_toggles_closed_when_already_open() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        apply_action(Action::OpenCommandBand, &mut s, &mut mapper);
+        assert!(s.band_dock.open, "first press opens");
+        apply_action(Action::OpenCommandBand, &mut s, &mut mapper);
+        assert!(!s.band_dock.open, "second press closes");
+        assert!(s.overlays.command_band.is_some(), "content persists for the slide-out, same as BandClose");
     }
 
     /// Re-picking an earlier slot invalidates everything downstream of it —
@@ -6363,58 +6483,106 @@ mod tests {
         assert_eq!(s.input.value, "well, take mailbox", "closing the band does not clear it");
     }
 
-    /// SQ-0676 replaces `tab_swaps_focus_without_closing_the_band` (there is no
-    /// focus left to swap): Tab is decided by the LAST GESTURE. Armed by an
-    /// arrow, it fires the quick word; after typing, it completes the word to
-    /// the band's nearest match; with nothing to complete to, it is a consumed
-    /// no-op rather than a fallback to the dictionary autocomplete.
+    /// Tab with NOTHING highlighted is pure column movement (SQ-0677):
+    /// clamped at the last reachable stop, same as `Shift-Tab`'s own
+    /// movement. Falsifies against a Tab that still no-ops when nothing
+    /// matches (the retired SQ-0676 behaviour).
     #[test]
-    fn tab_fires_when_armed_completes_when_typing_and_no_ops_otherwise() {
-        use crate::render::command_band::QuickDir;
+    fn tab_moves_the_column_when_nothing_is_highlighted() {
+        use crate::render::command_band::{COL_CARRIED, COL_HERE, COL_VERB};
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_band(&mut s);
+        // Only VERB is reachable yet, so Tab clamps in place — but it is
+        // still `BandColumnStep`, not a consumed no-op.
+        assert_eq!(command_band_intercept(key(KeyCode::Tab), &s), Some(Action::BandColumnStep(1)));
+        apply_action(Action::BandColumnStep(1), &mut s, &mut mapper);
+        assert_eq!(band(&s).focus, COL_VERB, "clamped: nowhere else reachable yet");
 
-        // Nothing typed, nothing armed → consumed, does nothing.
-        assert_eq!(command_band_intercept(key(KeyCode::Tab), &s), Some(Action::None));
+        pick_text(&mut s, &mut mapper, COL_VERB, "unlock");
+        assert_eq!(band(&s).focus, COL_HERE, "picking advanced focus here");
+        assert_eq!(command_band_intercept(key(KeyCode::Tab), &s), Some(Action::BandColumnStep(1)));
+        apply_action(Action::BandColumnStep(1), &mut s, &mut mapper);
+        assert_eq!(band(&s).focus, COL_CARRIED, "Tab moved to the next reachable column");
+    }
 
-        // Typing → complete to the nearest match.
-        type_text(&mut s, &mut mapper, "unl");
-        assert_eq!(command_band_intercept(key(KeyCode::Tab), &s), Some(Action::BandComplete));
-        apply_action(Action::BandComplete, &mut s, &mut mapper);
-        assert_eq!(s.input.value, "unlock", "Tab completed the word being typed");
+    /// **The SQ-0677 headline pin.** Typing `ta` highlights `take` in the
+    /// current column (the passive nearest match); Tab picks it — composing
+    /// onto the prompt exactly like a click, replacing the partial word
+    /// rather than appending after it — AND advances focus, unifying
+    /// Tab-completion and column flow into one gesture.
+    #[test]
+    fn tab_picks_the_typed_nearest_match_and_advances() {
+        use crate::render::command_band::{COL_HERE, COL_VERB};
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        type_text(&mut s, &mut mapper, "ta");
+        let (col, idx) = band(&s).nearest_match(&s.input.value).expect("`ta` matches `take`");
+        assert_eq!(col, COL_VERB);
 
-        // Armed → fire, even with text on the line.
-        apply_action(Action::BandQuickNav(QuickDir::Right), &mut s, &mut mapper);
-        let sel = band(&s).quick_sel.expect("armed");
         assert_eq!(
             command_band_intercept(key(KeyCode::Tab), &s),
-            Some(Action::BandQuickPick(sel)),
-            "armed Tab fires the quick word, exactly like armed Enter"
+            Some(Action::BandTabPick(COL_VERB, idx))
         );
+        apply_action(Action::BandTabPick(COL_VERB, idx), &mut s, &mut mapper);
+        assert_eq!(s.input.value, "take", "the partial word was REPLACED, not appended to");
+        assert_eq!(band(&s).focus, COL_HERE, "…and focus advanced to the next column");
     }
 
-    /// A word with no match anywhere in the expected columns leaves Tab a
-    /// no-op: no highlight, nothing to complete to, and (deliberately) no
-    /// silent hand-off to the dictionary autocomplete behind the band.
+    /// Tab also picks an EXPLICIT row highlight (`↑`/`↓`), the same as the
+    /// typed nearest match — the two are the same "highlighted row"
+    /// mechanism (`CommandBandState::highlighted_row`), just armed
+    /// differently.
     #[test]
-    fn tab_is_a_no_op_when_nothing_matches() {
+    fn tab_picks_an_explicit_row_highlight_and_advances() {
+        use crate::render::command_band::{COL_HERE, COL_VERB};
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_band(&mut s);
-        type_text(&mut s, &mut mapper, "zzz");
-        assert_eq!(band(&s).nearest_match(&s.input.value), None, "nothing matches `zzz`");
-        assert_eq!(command_band_intercept(key(KeyCode::Tab), &s), Some(Action::None));
-        apply_action(Action::None, &mut s, &mut mapper);
-        assert_eq!(s.input.value, "zzz", "the line is untouched");
+        apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
+        let row = band(&s).row_sel.expect("armed on the first press");
+        assert_eq!(
+            command_band_intercept(key(KeyCode::Tab), &s),
+            Some(Action::BandTabPick(COL_VERB, row))
+        );
+        apply_action(Action::BandTabPick(COL_VERB, row), &mut s, &mut mapper);
+        assert!(!s.input.value.is_empty(), "the armed verb composed onto the prompt");
+        assert_eq!(band(&s).focus, COL_HERE, "…and focus advanced");
     }
 
-    /// The band's suggestion BEATS the dictionary autocomplete while the band
-    /// is open — and only while it is open. Falsifies against routing Tab to
-    /// `Action::Autocomplete` regardless, which would complete from the story
-    /// dictionary instead of the column the band is showing.
+    /// Tab-completing a SECOND word (an object, after the verb is already
+    /// typed and recognized) must not double the verb. Falsifies against
+    /// `Action::BandTabPick` always pre-stripping the partial word — the
+    /// verb's own typed text is already counted in `phrase_text()` at that
+    /// point (see `CommandBandState::parse_phrase`'s doc), so an
+    /// unconditional pre-strip fights `band_pick_row`'s own tail-diff and
+    /// produces `take take door` instead of `take door` (the bug this test
+    /// reproduces against a real object list; `tests/command_band.rs`'s
+    /// `typing_at_the_prompt_completes_from_the_live_object_columns` pins the
+    /// same fix against a live engine).
     #[test]
-    fn the_band_owns_tab_completion_while_it_is_open() {
+    fn tab_completing_the_second_word_does_not_double_the_verb() {
+        use crate::render::command_band::COL_HERE;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        type_text(&mut s, &mut mapper, "take mai");
+        let (col, idx) = band(&s).nearest_match(&s.input.value).expect("`mai` matches `mailbox`");
+        assert_eq!(col, COL_HERE);
+
+        let a = key_to_action(&s, key(KeyCode::Tab));
+        assert_eq!(a, Action::BandTabPick(COL_HERE, idx));
+        apply_action(a, &mut s, &mut mapper);
+        assert_eq!(s.input.value, "take mailbox", "not `take take mailbox`");
+    }
+
+    /// The band still OWNS Tab while it is open — beating the dictionary
+    /// autocomplete, exactly as under SQ-0676 — even though what Tab now
+    /// does (pick-and-advance vs. plain word completion) changed underneath.
+    /// Closed, Tab reverts to the ordinary dictionary autocomplete.
+    #[test]
+    fn the_band_still_owns_tab_while_it_is_open() {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         s.dict_words = vec!["unladen".to_string()];
@@ -6422,12 +6590,12 @@ mod tests {
         type_text(&mut s, &mut mapper, "unl");
         assert!(!s.suggestions.is_empty(), "the dictionary has a candidate too");
 
-        assert_eq!(
-            key_to_action(&s, key(KeyCode::Tab)),
-            Action::BandComplete,
-            "the open band's suggestion is the completion source"
+        let a = key_to_action(&s, key(KeyCode::Tab));
+        assert!(
+            matches!(a, Action::BandTabPick(..)),
+            "the open band claims Tab over the dictionary autocomplete: {a:?}"
         );
-        apply_action(Action::BandComplete, &mut s, &mut mapper);
+        apply_action(a, &mut s, &mut mapper);
         assert_eq!(s.input.value, "unlock", "…the band's word, not the dictionary's");
 
         // Closed, Tab is the dictionary autocomplete again — unchanged.
@@ -6439,87 +6607,101 @@ mod tests {
         assert_eq!(s.input.value, "unladen", "closed behaviour is untouched");
     }
 
-    /// SQ-0676: all four arrows drive the quick block, and the first press
-    /// ARMS the highlight. Flips the retired column focus-ring / column-scroll
-    /// tests (`focus_ring_skips_unreachable_columns`,
-    /// `up_down_move_the_active_column_selection`) — those keys belong to the
-    /// quick block now, and command history is only reachable with the band
-    /// closed.
+    /// `Shift-Tab` stays PURE movement even with a row highlighted — it never
+    /// picks, unlike `Tab`. Falsifies against a Shift-Tab that fires the
+    /// highlighted row the way Tab does.
     #[test]
-    fn arrows_arm_and_move_the_quick_highlight() {
-        use crate::render::command_band::QuickDir;
+    fn shift_tab_never_picks_even_with_a_highlight() {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_band(&mut s);
-        assert_eq!(band(&s).quick_sel, None, "the band opens disarmed");
-
-        // First arrow only arms.
-        apply_action(Action::BandQuickNav(QuickDir::Down), &mut s, &mut mapper);
-        assert_eq!(band(&s).quick_sel, Some(0), "armed on the first quick word");
-
-        // The default quick list draws as the compass rose, so movement is
-        // SPATIAL: NW N NE / W · E / SW S SE. Asserted by WORD, not index, so a
-        // reordered default list cannot silently retarget the pin.
-        let word = |s: &AppState| band(s).quick[band(s).quick_sel.expect("armed")].clone();
-        assert_eq!(word(&s), "n", "armed on the rose's N cell");
-        apply_action(Action::BandQuickNav(QuickDir::Left), &mut s, &mut mapper);
-        assert_eq!(word(&s), "nw", "← along the rose's top row");
-        apply_action(Action::BandQuickNav(QuickDir::Down), &mut s, &mut mapper);
-        assert_eq!(word(&s), "w", "↓ into the middle row, same column");
-        apply_action(Action::BandQuickNav(QuickDir::Right), &mut s, &mut mapper);
-        assert_eq!(word(&s), "e", "→ across the inert centre, which is never a target");
-        apply_action(Action::BandQuickNav(QuickDir::Down), &mut s, &mut mapper);
-        assert_eq!(word(&s), "se", "↓ into the bottom row, still under E");
+        type_text(&mut s, &mut mapper, "ta");
+        assert!(band(&s).nearest_match(&s.input.value).is_some(), "sanity: a match exists");
+        assert_eq!(
+            command_band_intercept(key(KeyCode::BackTab), &s),
+            Some(Action::BandColumnStep(-1)),
+            "Shift-Tab is movement regardless of any highlight"
+        );
+        apply_action(Action::BandColumnStep(-1), &mut s, &mut mapper);
+        assert_eq!(s.input.value, "ta", "…and nothing was picked — the typed text is untouched");
     }
 
-    /// Armed, Enter fires the quick word — the run loop's submit arm sees a
-    /// `BandQuickPick`, not a `SubmitCommand` of the typed line.
+    /// `Enter` NEVER picks (SQ-0677 supersedes the SQ-0676 armed-Enter-fires
+    /// rule): it always submits the prompt exactly as typed, whether or not
+    /// a row is highlighted. Falsifies against an Enter that still fires a
+    /// highlighted quick word or column row.
     #[test]
-    fn armed_enter_fires_the_quick_word() {
-        use crate::render::command_band::QuickDir;
+    fn enter_never_picks_always_submits() {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_band(&mut s);
         type_text(&mut s, &mut mapper, "take");
+        apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
+        assert!(band(&s).row_sel.is_some(), "sanity: a row is highlighted");
 
-        apply_action(Action::BandQuickNav(QuickDir::Right), &mut s, &mut mapper);
-        let sel = band(&s).quick_sel.expect("armed");
-        assert_eq!(band(&s).quick[sel], "n", "the first arrow arms the first quick word");
-        assert_eq!(key_to_action(&s, key(KeyCode::Enter)), Action::BandQuickPick(sel));
         assert_eq!(
-            band_quick_pick_command(&s, sel),
-            Some("north".to_string()),
-            "…resolving through the same spelled-out quick path a click uses"
+            key_to_action(&s, key(KeyCode::Enter)),
+            Action::SubmitCommand("take".to_string()),
+            "Enter always submits — the band never claims it"
         );
-        assert_eq!(s.input.value, "take", "the typed line is left alone by the interjection");
+        assert!(command_band_intercept(key(KeyCode::Enter), &s).is_none(), "not consumed by the band");
     }
 
-    /// Typing DISARMS: one keystroke after arming, Enter is the ordinary
-    /// prompt Enter again, so a stale highlight can never fire a command the
-    /// player has stopped looking at. Falsifies against an `arm` that survives
-    /// a text change.
+    /// Left/Right are plain cursor movement on the edit line (SQ-0677) — the
+    /// band claims neither, unlike SQ-0676 where every arrow drove the quick
+    /// block. Falsifies against the band still intercepting them.
     #[test]
-    fn typing_disarms_the_quick_highlight() {
-        use crate::render::command_band::QuickDir;
+    fn left_right_are_not_claimed_by_the_band() {
+        let mut s = AppState::default();
+        open_band(&mut s);
+        assert!(command_band_intercept(key(KeyCode::Left), &s).is_none(), "falls through to CursorLeft");
+        assert!(command_band_intercept(key(KeyCode::Right), &s).is_none(), "falls through to CursorRight");
+        assert_eq!(key_to_action(&s, key(KeyCode::Left)), Action::CursorLeft);
+        assert_eq!(key_to_action(&s, key(KeyCode::Right)), Action::CursorRight);
+    }
+
+    /// `↑`/`↓` move (or start) the row highlight within the CURRENT column —
+    /// clamped at the list's ends, never wrapping, mirroring every other list
+    /// in the app. The first press only starts it (mirrors the retired
+    /// quick-row "arm on the first press" rule, now applied to columns).
+    #[test]
+    fn up_down_move_the_row_highlight_within_the_current_column() {
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_band(&mut s);
-        apply_action(Action::BandQuickNav(QuickDir::Right), &mut s, &mut mapper);
-        assert!(band(&s).quick_sel.is_some(), "armed");
+        assert_eq!(band(&s).row_sel, None, "the band opens with nothing highlighted");
+
+        apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
+        assert_eq!(band(&s).row_sel, Some(0), "first press only starts the highlight");
+
+        apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
+        assert_eq!(band(&s).row_sel, Some(1), "second press actually moves it");
+
+        apply_action(Action::BandRowNav(-1), &mut s, &mut mapper);
+        apply_action(Action::BandRowNav(-1), &mut s, &mut mapper);
+        assert_eq!(band(&s).row_sel, Some(0), "clamped at the top, not wrapped");
+    }
+
+    /// Typing DISARMS the explicit row highlight (SQ-0677's "the last gesture
+    /// decides", same rule the retired `quick_sel` used to follow): one
+    /// keystroke after arming, the highlight the band shows reverts to
+    /// whatever the typed text passively matches (or nothing).
+    #[test]
+    fn typing_disarms_the_row_highlight() {
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        open_band(&mut s);
+        apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
+        assert!(band(&s).row_sel.is_some(), "armed");
 
         type_text(&mut s, &mut mapper, "x");
-        assert_eq!(band(&s).quick_sel, None, "typing disarmed it");
-        assert_eq!(
-            key_to_action(&s, key(KeyCode::Enter)),
-            Action::SubmitCommand("x".to_string()),
-            "Enter submits what was typed, not the stale quick word"
-        );
+        assert_eq!(band(&s).row_sel, None, "typing disarmed it");
 
         // Backspace is a text change too.
-        apply_action(Action::BandQuickNav(QuickDir::Right), &mut s, &mut mapper);
-        assert!(band(&s).quick_sel.is_some());
+        apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
+        assert!(band(&s).row_sel.is_some());
         apply_action(Action::Backspace, &mut s, &mut mapper);
-        assert_eq!(band(&s).quick_sel, None, "…and so is a deletion");
+        assert_eq!(band(&s).row_sel, None, "…and so is a deletion");
     }
 
     /// The wheel scrolls a column without stealing the keyboard from another.
@@ -6545,7 +6727,7 @@ mod tests {
         apply_action(Action::OpenCommandBand, &mut s, &mut mapper);
         assert!(s.band_dock.open, "armed toward open");
         assert!(s.overlays.command_band.is_some());
-        assert_eq!(band(&s).quick_sel, None, "the band opens disarmed — typing wins until an arrow");
+        assert_eq!(band(&s).row_sel, None, "the band opens with nothing highlighted");
 
         apply_action(Action::BandClose, &mut s, &mut mapper);
         assert!(!s.band_dock.open, "armed toward closed");
@@ -6558,16 +6740,27 @@ mod tests {
         assert!(s.overlays.command_band.is_none(), "cleared once the slide-out settles");
     }
 
-    /// Re-opening an already-open band keeps the phrase in progress.
+    /// `open-command-band`/F2 is now a TOGGLE (SQ-0677): re-invoking it while
+    /// still mid-close (the content hasn't settled to `None` yet) reopens the
+    /// band with its phrase intact, rather than starting fresh — the same
+    /// property `reopening_does_not_reset_the_phrase` pinned before the
+    /// toggle behaviour existed, now exercised through a close/reopen cycle
+    /// instead of a no-op double-open.
     #[test]
-    fn reopening_does_not_reset_the_phrase() {
+    fn reopening_before_the_close_settles_keeps_the_phrase() {
         use crate::render::command_band::COL_VERB;
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_band(&mut s);
         pick_text(&mut s, &mut mapper, COL_VERB, "take");
-        apply_action(Action::OpenCommandBand, &mut s, &mut mapper);
-        assert_eq!(band(&s).phrase_text(), "take");
+
+        apply_action(Action::OpenCommandBand, &mut s, &mut mapper); // toggle: closes
+        assert!(!s.band_dock.open);
+        assert!(s.overlays.command_band.is_some(), "content persists mid-slide-out");
+
+        apply_action(Action::OpenCommandBand, &mut s, &mut mapper); // toggle: reopens
+        assert!(s.band_dock.open);
+        assert_eq!(band(&s).phrase_text(), "take", "the phrase survived the close/reopen");
         assert_eq!(s.input.value, "take", "…and its mirror on the real prompt");
     }
 
@@ -6619,20 +6812,29 @@ mod tests {
     }
 
     /// Paste always reaches the story prompt with the band open (SQ-0676),
-    /// exactly like typing — flipping the retired "it lands in the active
-    /// column's filter" split, since there is no band-side text field left. The
-    /// band re-reads the pasted line afterwards, so the phrase state follows.
+    /// exactly like typing. The band re-reads the pasted line afterwards, so
+    /// the phrase state follows and the row highlight (SQ-0677: `row_sel`,
+    /// not the retired `quick_sel`) disarms just like any other text change.
     #[test]
     fn paste_reaches_the_prompt_with_the_band_open() {
-        use crate::render::command_band::{COL_CARRIED, QuickDir};
+        use crate::render::command_band::{COL_CARRIED, COL_HERE};
         let mut s = AppState::default();
         let mut mapper = Mapper::default();
         open_band(&mut s);
-        apply_action(Action::BandQuickNav(QuickDir::Right), &mut s, &mut mapper);
+        apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
 
         assert!(apply_paste(&mut s, "take lan"), "consumed");
         assert_eq!(s.input.value, "take lan", "the story input line takes it");
-        assert_eq!(band(&s).quick_sel, None, "a paste is a text change — it disarms too");
+        assert_eq!(band(&s).row_sel, None, "a paste is a text change — it disarms too");
+
+        // `take` opens the object columns; focus lands on HERE (the
+        // grammar's first expected column — SQ-0677 no longer auto-jumps to
+        // whichever column happens to match best). Tab to CARRIED to find
+        // `lantern` there, since the nearest match is scoped to the CURRENT
+        // column now.
+        assert_eq!(band(&s).focus, COL_HERE, "the first expected column, not a match-driven jump");
+        apply_action(Action::BandColumnStep(1), &mut s, &mut mapper);
+        assert_eq!(band(&s).focus, COL_CARRIED);
         let (col, idx) = band(&s).nearest_match(&s.input.value).expect("`lan` matches `lantern`");
         assert_eq!((col, band(&s).items(col)[idx].as_str()), (COL_CARRIED, "lantern"));
     }
@@ -6844,18 +7046,18 @@ mod tests {
         assert_eq!(s.resize_target, crate::state::ResizeTarget::StoryMap);
     }
 
-    /// Every plain arrow resolves to quick-block navigation while the band is
-    /// open (SQ-0676) — including ←/→, which used to walk the column ring.
-    /// Shift+Arrow still pans the map: the band claims PLAIN arrows only.
+    /// Plain `↑`/`↓` resolve to row navigation while the band is open
+    /// (SQ-0677) — `←`/`→` do NOT (they're cursor movement now, unlike
+    /// SQ-0676 where every arrow drove the quick block). Shift+Arrow still
+    /// pans the map either way.
     #[test]
-    fn arrows_resolve_to_quick_navigation() {
-        use crate::render::command_band::QuickDir;
+    fn plain_up_down_resolve_to_row_nav_left_right_do_not() {
         let mut s = AppState::default();
         open_band(&mut s);
-        assert_eq!(key_to_action(&s, key(KeyCode::Right)), Action::BandQuickNav(QuickDir::Right));
-        assert_eq!(key_to_action(&s, key(KeyCode::Left)), Action::BandQuickNav(QuickDir::Left));
-        assert_eq!(key_to_action(&s, key(KeyCode::Up)), Action::BandQuickNav(QuickDir::Up));
-        assert_eq!(key_to_action(&s, key(KeyCode::Down)), Action::BandQuickNav(QuickDir::Down));
+        assert_eq!(key_to_action(&s, key(KeyCode::Up)), Action::BandRowNav(-1));
+        assert_eq!(key_to_action(&s, key(KeyCode::Down)), Action::BandRowNav(1));
+        assert_eq!(key_to_action(&s, key(KeyCode::Left)), Action::CursorLeft, "← is cursor movement");
+        assert_eq!(key_to_action(&s, key(KeyCode::Right)), Action::CursorRight, "→ is cursor movement");
         assert!(matches!(key_to_action(&s, key(KeyCode::Esc)), Action::BandEscape));
 
         let shift_left = KeyEvent::new(KeyCode::Left, KeyModifiers::SHIFT);
@@ -8193,15 +8395,15 @@ mod tests {
     // ── Task 6: navigation panels — regression guard ──────────────────────────
 
     /// The band still CONSUMES Tab (it never falls through to the pane focus
-    /// toggle while open) — but SQ-0676 changed what it does with it: fire the
-    /// armed quick word, else complete, else nothing. Flipped from
-    /// `command_band_tab_still_swaps_focus`.
+    /// toggle while open) — SQ-0677 changed what it does with it: move the
+    /// current column when nothing is highlighted, pick-and-advance when
+    /// something is. Flipped from `command_band_tab_still_swaps_focus`.
     #[test]
     fn command_band_still_consumes_tab() {
         let mut s = AppState::default();
         open_band(&mut s);
         let a = command_band_intercept(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &s);
-        assert_eq!(a, Some(Action::None), "consumed, and with nothing typed it does nothing");
+        assert_eq!(a, Some(Action::BandColumnStep(1)), "consumed, and with nothing highlighted it moves the column");
     }
 
     // ── SQ-0237: resize-mode key routing ──────────────────────────────────────
@@ -8286,12 +8488,9 @@ mod tests {
         open_band(&mut s);
         assert!(command_band_intercept(prefix_key(&s), &s).is_none(), "prefix falls through");
         // …armed or not: the prefix is checked before anything else the band
-        // might claim (SQ-0238), and SQ-0676 kept that ordering.
-        apply_action(
-            Action::BandQuickNav(crate::render::command_band::QuickDir::Right),
-            &mut s,
-            &mut mapper,
-        );
+        // might claim (SQ-0238), and every gesture amendment since has kept
+        // that ordering.
+        apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
         assert!(command_band_intercept(prefix_key(&s), &s).is_none(), "…even armed");
 
         assert!(matches!(
@@ -8315,9 +8514,9 @@ mod tests {
         open_band(&mut s);
         assert!(!s.resize_mode);
         assert_eq!(
-            key_to_action(&s, key(KeyCode::Right)),
-            Action::BandQuickNav(crate::render::command_band::QuickDir::Right),
-            "→ drives the band's quick block when not resizing"
+            key_to_action(&s, key(KeyCode::Down)),
+            Action::BandRowNav(1),
+            "↓ drives the band's row highlight when not resizing"
         );
     }
 

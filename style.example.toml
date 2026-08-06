@@ -98,6 +98,7 @@ version = 1   # style schema version — do not remove; lets babelmap flag an ou
 # "band.column_header" = { parent = "muted" }
 # "band.column_header:active" = { parent = "accent", bold = true }
 # "band.quick" = { parent = "muted" }
+# "band.quick:hover" = { parent = "band.quick", reversed = true }
 # "band.group_label" = { parent = "heading" }
 # file_browser_cwd = { parent = "alert" }
 # file_browser_dir = { parent = "accent" }
