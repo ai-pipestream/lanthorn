@@ -379,6 +379,8 @@ pub enum Action {
     CloseRoomDock,
     /// Open the room dock in the Info view, or close it if already open.
     ToggleRoomDock,
+    /// Show a specific room-dock body — a click on one of its two view tabs.
+    SetRoomDockView(crate::state::RoomDockView),
     /// Begin a middle-button drag-pan gesture at terminal cell (col, row).
     BeginDragPan(u16, u16),
     /// Continue a middle-button drag-pan gesture at terminal cell (col, row).
@@ -723,6 +725,35 @@ fn room_at_screen(
 /// Test whether (col, row) is inside `rect`.
 fn hit(rect: ratatui::layout::Rect, col: u16, row: u16) -> bool {
     col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom()
+}
+
+/// Which room-dock action a mouse event inside the dock's rect means (SQ-0694).
+///
+/// The dock owns every event inside its own rect: it is carved OUT of the map pane, so a click
+/// there is neither a map click nor a story selection and must never fall through to either (nor
+/// to the v6 mouse-delivery path). A left-click on one of the two view tabs switches the body —
+/// the same gesture, on the same shared tab strip, that switches layers on the map pane's tabs;
+/// anything else inside the dock is claimed and does nothing.
+///
+/// Returns `None` when the event is not inside `dock`, which is the caller's cue to route it
+/// normally. `tabs` are the hit-rects `draw_room_dock` returned for the frame just drawn.
+pub fn room_dock_mouse_action(
+    dock: ratatui::layout::Rect,
+    tabs: &[(crate::state::RoomDockView, ratatui::layout::Rect)],
+    m: &crossterm::event::MouseEvent,
+) -> Option<Action> {
+    use crossterm::event::{MouseButton, MouseEventKind};
+    if dock.width == 0 || dock.height == 0 || !hit(dock, m.column, m.row) {
+        return None;
+    }
+    if matches!(m.kind, MouseEventKind::Down(MouseButton::Left)) {
+        if let Some(&(view, _)) = tabs.iter().find(|(_, r)| {
+            r.width > 0 && r.height > 0 && hit(*r, m.column, m.row)
+        }) {
+            return Some(Action::SetRoomDockView(view));
+        }
+    }
+    Some(Action::None)
 }
 
 /// Per-modal button-to-action mapping for the config screen.
@@ -2470,6 +2501,10 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
 
         Action::CloseRoomDock => {
             state.close_room_dock();
+        }
+
+        Action::SetRoomDockView(view) => {
+            state.room_dock_view = view;
         }
 
         Action::ToggleRoomDock => {
@@ -7415,10 +7450,10 @@ mod tests {
 
         assert_eq!(s.pane_sizes.room_dock_pct, crate::config::default_room_dock_pct());
         apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);
-        assert_eq!(s.pane_sizes.room_dock_pct, 43);
-        assert_eq!(s.config.room_dock_pct, 43, "config mirrors pane_sizes");
+        assert_eq!(s.pane_sizes.room_dock_pct, 36);
+        assert_eq!(s.config.room_dock_pct, 36, "config mirrors pane_sizes");
         apply_action(Action::ResizeNav(ResizeNavKind::Down), &mut s, &mut mapper);
-        assert_eq!(s.pane_sizes.room_dock_pct, 40);
+        assert_eq!(s.pane_sizes.room_dock_pct, 33);
 
         for _ in 0..40 {
             apply_action(Action::ResizeNav(ResizeNavKind::Up), &mut s, &mut mapper);

@@ -100,7 +100,9 @@ The map is a place you can move through, not just a picture.
   somewhere: where each leads, how it comes back, which you tried and found walled up (`×`), and
   which you have never tried at all (`·`). That is the map's answer to "where haven't I been?",
   one room at a time — and the dock follows you as you walk, so the card is about wherever you
-  are standing unless you pin it to a room by clicking one.
+  are standing unless you pin it to a room by clicking one. The twelve directions lay out in up
+  to three columns (cardinals, diagonals, portals) when the dock is wide enough, so the card
+  costs four rows rather than twelve.
 - **Room diagnostics** — `toggle-inspector` flips the same dock to its Diagnostics body: the
   room's id, name, layer, position, and the per-edge layout constraints, so you can see *why* a
   room landed where it did.

@@ -104,6 +104,89 @@ pub fn display_name(graph: &MapGraph, room_id: RoomId) -> String {
     graph.room(room_id).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{room_id}"))
 }
 
+// ── The exit card's column layout (SQ-0694) ──────────────────────────────────
+
+/// Display cells between two card columns. Two, not one: the card's lines end in a room name, and
+/// a single space would read as part of it.
+const CARD_GAP: usize = 2;
+
+/// The most columns the exit card will use, however wide the dock gets.
+///
+/// Not a width limit — a MEANING one. [`mapper::matrix::MATRIX_DIRS`] is three groups of four
+/// (N/S/E/W, NE/NW/SE/SW, Up/Down/In/Out), so a three-column column-major grid puts each group in
+/// its own column: the arrangement you would have drawn by hand. Letting the width alone decide
+/// gives six columns of two on a wide pane, which is more compact and reads worse — the groups
+/// shatter across columns and the eye has nothing to follow.
+const MAX_CARD_COLS: usize = 3;
+
+/// Where the exit card's columns sit: how many ROWS the grid is, and each column's `(x offset,
+/// width)` in display cells from the card's left edge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardLayout {
+    pub rows: usize,
+    pub cols: Vec<(usize, usize)>,
+}
+
+/// Lay `entry_widths` (in DISPLAY CELLS — measure with [`crate::textwidth::str_cells`], never a
+/// char count: a full-width destination name occupies two columns per glyph) into the widest grid
+/// that fits `width`, filled COLUMN-MAJOR.
+///
+/// The card is the Info body's height driver — twelve fixed lines — and a dock is far wider than
+/// one of those lines. Spending the width instead of the height is what lets the whole card, the
+/// objects and the header share a dock about a third the height the single column needed.
+///
+/// Column-major matters for more than tidiness: [`mapper::matrix::MATRIX_DIRS`] runs
+/// N/S/E/W, NE/NW/SE/SW, Up/Down/In/Out, so a three-column grid puts the cardinals, the diagonals
+/// and the portals each in their own column — the grouping you would have drawn by hand.
+///
+/// Fewest rows wins (the `ls` rule): try one row, then two, until the per-column widths plus the
+/// gaps fit. Falling all the way through means even ONE column is wider than `area` — the caller
+/// clips, and the rows that fit still read.
+pub fn layout_card(entry_widths: &[usize], width: u16) -> CardLayout {
+    let n = entry_widths.len();
+    if n == 0 {
+        return CardLayout { rows: 0, cols: Vec::new() };
+    }
+    let avail = width as usize;
+
+    let col_widths = |rows: usize| -> Vec<usize> {
+        (0..n.div_ceil(rows))
+            .map(|c| {
+                entry_widths[c * rows..((c + 1) * rows).min(n)]
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect()
+    };
+
+    // Start at the row count that yields at most MAX_CARD_COLS columns; fewer rows than that
+    // would only buy sparser columns.
+    let min_rows = n.div_ceil(MAX_CARD_COLS).max(1);
+    for rows in min_rows..=n {
+        let widths = col_widths(rows);
+        let total: usize = widths.iter().sum::<usize>() + CARD_GAP * (widths.len() - 1);
+        if total > avail {
+            continue;
+        }
+        // The rightmost column has nothing to its right, so hand it every leftover cell: a long
+        // destination name there is truncated only when the DOCK is too narrow, not because its
+        // neighbours in the same column happened to be short.
+        let mut cols = Vec::with_capacity(widths.len());
+        let mut x = 0usize;
+        for (i, w) in widths.iter().enumerate() {
+            let w = if i + 1 == widths.len() { avail.saturating_sub(x).max(*w) } else { *w };
+            cols.push((x, w));
+            x += w + CARD_GAP;
+        }
+        return CardLayout { rows, cols };
+    }
+
+    // Not even one column fits: one column, clipped to the area.
+    CardLayout { rows: n, cols: vec![(0, avail)] }
+}
+
 /// Draw the room-info body into `area` — no chrome, no borders: the caller (the room dock) owns
 /// those.
 ///
@@ -202,24 +285,48 @@ pub fn draw_room_info_body(
         }
     }
 
-    // Exits — the card. Untried and dead-end directions are dimmed with the same selector the
-    // matrix dims its frontier cells with, so the two surfaces read alike.
+    // Exits — the card, laid out in as many COLUMNS as the dock is wide enough for (SQ-0694).
+    // Untried and dead-end directions are dimmed with the same selector the matrix dims its
+    // frontier cells with, so the two surfaces read alike.
     let frontier_style = theme.get("map.matrix.cell:frontier").style;
     if row <= max_y {
         draw_str_clipped(buf, inner_x, row, "Exits:", section_style, clip);
         row += 1;
     }
-    for (dir, glyph, detail) in &card {
-        if row > max_y { break; }
-        let line = format!("  {:<3} {} {}", dir_label(*dir), glyph, detail);
-        let style = if detail.is_empty() || *glyph == "×" { frontier_style } else { value_style };
-        draw_str_clipped(buf, inner_x, row, line.trim_end(), style, clip);
-        row += 1;
-    }
-    for dest in &odd {
-        if row > max_y { break; }
-        draw_str_clipped(buf, inner_x, row, &format!("  ?   ⇢ {dest}"), value_style, clip);
-        row += 1;
+
+    // One entry per line of the card: the twelve travel directions, then the non-compass
+    // passages, which are card lines of the same shape and belong in the same grid.
+    let entries: Vec<(String, Style)> = card
+        .iter()
+        .map(|(dir, glyph, detail)| {
+            let line = format!("  {:<3} {} {}", dir_label(*dir), glyph, detail);
+            let style = if detail.is_empty() || *glyph == "×" { frontier_style } else { value_style };
+            (line.trim_end().to_string(), style)
+        })
+        .chain(odd.iter().map(|dest| (format!("  ?   ⇢ {dest}"), value_style)))
+        .collect();
+
+    let widths: Vec<usize> =
+        entries.iter().map(|(t, _)| crate::textwidth::str_cells(t)).collect();
+    let plan = layout_card(&widths, inner_w);
+    let card_top = row;
+    for (i, (text, style)) in entries.iter().enumerate() {
+        let (c, r) = (i / plan.rows.max(1), i % plan.rows.max(1));
+        let y = card_top + r as u16;
+        // A row past the bottom is simply not drawn: the grid degrades the way the single column
+        // did, and every row that fits still reads in full.
+        if y > max_y {
+            continue;
+        }
+        let Some(&(dx, w)) = plan.cols.get(c) else { continue };
+        draw_str_clipped(
+            buf,
+            inner_x + dx as u16,
+            y,
+            crate::textwidth::truncate_to_cols(text, w),
+            *style,
+            clip,
+        );
     }
 }
 
@@ -469,6 +576,149 @@ mod tests {
         let g = MapGraph::new();
         let text = render_body(&g, &[], 99, None, 60, 20);
         assert!(text.trim().is_empty(), "a room that is not in the graph draws nothing:\n{text}");
+    }
+
+    // ── The exit card's columns (SQ-0694) ────────────────────────────────────
+
+    /// The card spends WIDTH instead of height: the column count falls out of the available
+    /// width against the widest line, and a narrow dock still gets the single column it always
+    /// had. This is the whole point of the change — the card was a fixed thirteen rows and the
+    /// Info body's height driver.
+    #[test]
+    fn the_card_takes_more_columns_as_the_dock_widens_and_one_when_narrow() {
+        let w = vec![10usize; 12];
+
+        // Too narrow for two 10-cell columns plus the gap → one column, twelve rows.
+        let one = layout_card(&w, 15);
+        assert_eq!(one.cols.len(), 1, "a narrow dock keeps the single column");
+        assert_eq!(one.rows, 12);
+
+        // 10 + 2 + 10 = 22 fits → two columns of six.
+        let two = layout_card(&w, 22);
+        assert_eq!(two.cols.len(), 2);
+        assert_eq!(two.rows, 6);
+
+        // 10 + 2 + 10 + 2 + 10 = 34 fits → three columns of four…
+        let three = layout_card(&w, 34);
+        assert_eq!(three.cols.len(), 3);
+        assert_eq!(three.rows, 4);
+
+        // …and no wider, however much room there is: three is the cap.
+        let wide = layout_card(&w, 400);
+        assert_eq!(wide.cols.len(), MAX_CARD_COLS, "the card never fans past three columns");
+        assert_eq!(wide.rows, 4);
+    }
+
+    /// Column-major, and that is not merely tidiness: `MATRIX_DIRS` is three groups of four, so a
+    /// three-column grid puts the cardinals, the diagonals and the portals each in their own
+    /// column. Row-major would deal them across the grid like cards.
+    #[test]
+    fn three_columns_group_the_cardinals_the_diagonals_and_the_portals() {
+        use mapper::direction::Direction as D;
+        let plan = layout_card(&[10usize; 12], 40);
+        assert_eq!((plan.rows, plan.cols.len()), (4, 3));
+
+        // Entry i sits at column i / rows — read the direction back out of MATRIX_DIRS.
+        let column_of = |d: D| {
+            mapper::matrix::MATRIX_DIRS.iter().position(|&x| x == d).expect("a card direction")
+                / plan.rows
+        };
+        for d in [D::N, D::S, D::E, D::W] {
+            assert_eq!(column_of(d), 0, "{d:?} is a cardinal: first column");
+        }
+        for d in [D::NE, D::NW, D::SE, D::SW] {
+            assert_eq!(column_of(d), 1, "{d:?} is a diagonal: second column");
+        }
+        for d in [D::Up, D::Down, D::In, D::Out] {
+            assert_eq!(column_of(d), 2, "{d:?} is a portal: third column");
+        }
+    }
+
+    /// Widths are DISPLAY CELLS, not char counts. A full-width destination name occupies two
+    /// columns per glyph, so measuring it as one would lay a column over its neighbour.
+    #[test]
+    fn the_card_measures_full_width_names_in_cells_not_chars() {
+        // Six CJK ideographs: 6 chars, 12 cells.
+        let name = "\u{8ff7}\u{5bab}\u{306e}\u{90e8}\u{5c4b}\u{3067}";
+        assert_eq!(name.chars().count(), 6);
+        assert_eq!(crate::textwidth::str_cells(name), 12);
+
+        // Two entries, one of them that name: a 14-cell budget holds ONE 12-cell column, not two
+        // (which a char count would have called 6 + 2 + 6 = 14 and wrongly accepted).
+        let widths = vec![crate::textwidth::str_cells(name), 2];
+        assert_eq!(layout_card(&widths, 14).cols.len(), 1, "cells, not chars, decide the fit");
+        assert_eq!(layout_card(&widths, 16).cols.len(), 2, "…and 12 + 2 + 2 does fit");
+    }
+
+    /// The DRAWN card measures its lines in display cells too, not just the pure layout function.
+    /// A full-width destination name is twice as wide on screen as its char count claims, so a
+    /// card measured in chars packs a column too many and the columns overlap on screen.
+    #[test]
+    fn the_drawn_card_measures_its_own_lines_in_cells_not_chars() {
+        use mapper::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Start".into());
+        // Six CJK ideographs: 6 chars, 12 cells.
+        g.upsert_room(2, "\u{8ff7}\u{5bab}\u{306e}\u{90e8}\u{5c4b}\u{3067}".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+
+        // At 34 cells the honest measurement admits two columns of six; a char count would call
+        // the wide line 14 wide instead of 20 and squeeze in a third column of four.
+        let text = render_body(&g, &[], 1, None, 34, 14);
+        let card_rows = text.lines().filter(|l| l.contains('·') || l.contains('⇢')).count();
+        assert_eq!(
+            card_rows, 6,
+            "the wide name is measured in cells, so the card is two columns of six:\n{text}"
+        );
+    }
+
+    /// Nothing fits — one column is wider than the dock. The layout still reports one column, the
+    /// caller clips into it, and the rows that fit still read.
+    #[test]
+    fn an_over_wide_card_falls_back_to_one_clipped_column() {
+        let plan = layout_card(&[40, 40, 40], 10);
+        assert_eq!(plan.cols, vec![(0, 10)], "one column, clipped to the dock");
+        assert_eq!(plan.rows, 3);
+    }
+
+    #[test]
+    fn an_empty_card_lays_out_to_nothing() {
+        assert_eq!(layout_card(&[], 80), CardLayout { rows: 0, cols: Vec::new() });
+    }
+
+    /// The rendered card really is a grid: at a dock width a split-pane map actually has, three
+    /// directions from different groups share a row, and the whole card fits in four rows.
+    #[test]
+    fn the_rendered_card_puts_three_directions_on_one_row() {
+        let (g, room1, _) = make_graph_with_rooms();
+        let text = render_body(&g, &[], room1, None, 58, 12);
+        let card_row = text
+            .lines()
+            .find(|l| l.contains("N ") && l.contains("NE"))
+            .unwrap_or_else(|| panic!("a cardinal and a diagonal must share a row:\n{text}"));
+        assert!(card_row.contains("Up"), "…and a portal too: {card_row:?}");
+
+        // Four card rows, not twelve: every direction is drawn, in a quarter of the height.
+        let drawn = text.lines().filter(|l| l.contains('·') || l.contains('⇄')).count();
+        assert_eq!(drawn, 4, "the twelve directions occupy four rows:\n{text}");
+        for d in ["N ", "S ", "E ", "W ", "NE", "NW", "SE", "SW", "Up", "Dn", "In", "Out"] {
+            assert!(text.contains(d), "{d} is still on the card:\n{text}");
+        }
+    }
+
+    /// Graceful degradation survives the grid: a dock too short for every card row draws the rows
+    /// that fit, in full, rather than dropping the card or smearing it.
+    #[test]
+    fn a_short_dock_draws_the_card_rows_that_fit() {
+        let (g, room1, _) = make_graph_with_rooms();
+        // Two body rows total: "Exits:" plus ONE card row.
+        let text = render_body(&g, &[], room1, None, 58, 2);
+        assert!(text.contains("Exits:"), "the section label still draws:\n{text}");
+        assert!(text.contains("N "), "the first card row draws in full:\n{text}");
+        assert!(text.contains("NE"), "…all three of its columns:\n{text}");
+        assert!(!text.contains("S  "), "and the rows that do not fit are simply absent:\n{text}");
     }
 
     #[test]

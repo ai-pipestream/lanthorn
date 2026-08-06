@@ -28,9 +28,15 @@ identifies which beta it is without reading its git hash.
   `/toggle-room-dock` (leader `k`) opens and closes it; `/toggle-inspector` keeps
   its name and now opens — or flips to — the Diagnostics body, no longer needing
   a room to be selected first. Its top edge drags like every other pane boundary
-  (height persisted as `room_dock_pct`, default 40%), it joins the `F3` resize-mode Tab cycle,
+  (height persisted as `room_dock_pct`), it joins the `F3` resize-mode Tab cycle,
   it docks below the matrix view as happily as below the drawn map, and it is
   styleable through `room_dock`, `room_dock.header` and `room_dock.header:pinned`.
+  The exit card spends the dock's WIDTH rather than its height — the twelve
+  travel directions lay out in up to three columns (cardinals, diagonals,
+  portals, matching the matrix's own grouping), so the card is four rows on a
+  normal map pane instead of twelve, and falls back to the single column on a
+  narrow one. Its two view names are a real tab strip — the same component, the
+  same look and the same click as the map pane's layer tabs.
 - **Double-click submits, in the command band** — a second click on the same
   word row within the double-click window fires the composed prompt, so the
   last word of a phrase goes straight into the game: click `open`, double-click

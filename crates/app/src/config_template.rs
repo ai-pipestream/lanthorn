@@ -157,7 +157,7 @@ const INTERFACE: &[Row] = &[
     d("inv_dock_pct", "33", &["Inventory dock height cap, as a percentage of screen height."]),
     d(
         "room_dock_pct",
-        "40",
+        "33",
         &[
             "Room dock height, as a percentage of screen height. The dock docks at",
             "the bottom of the map pane and describes the room you are in (or the",

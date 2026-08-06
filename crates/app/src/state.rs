@@ -1715,7 +1715,7 @@ pub struct PaneSizes {
     pub band_height: u16,
     /// Inventory dock height cap as % of screen height (default 33).
     pub inv_dock_pct: u16,
-    /// Room dock height as % of screen height (default 40). Measured against the
+    /// Room dock height as % of screen height (default 33). Measured against the
     /// FRAME, like `inv_dock_pct`, even though the dock is carved out of the map
     /// pane — one unit for both docks, so `dock_pct_for_rows` inverts either.
     pub room_dock_pct: u16,
@@ -2554,7 +2554,7 @@ impl Default for AppState {
                 split_ratio: 50,
                 band_height: crate::render::command_band::DEFAULT_BAND_ROWS,
                 inv_dock_pct: 33,
-                room_dock_pct: 40,
+                room_dock_pct: 33,
             },
             pending_config_write: false,
             resize_mode: false,

@@ -26,7 +26,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 use super::draw_str_clipped;
-use super::paneframe::{InsetSegment, PaneGlyphs};
+use super::paneframe::InsetSegment;
 use crate::colors::ColorScheme;
 use crate::render::panel::{draw_panel, PanelSpec, PanelStrip};
 use crate::state::RoomDockView;
@@ -157,7 +157,10 @@ pub fn draw_room_dock(
         border_selector,
         border_color: Some(border_color),
         border_style: None,
-        glyphs: &PaneGlyphs::default(),
+        // The MAP pane's glyphs, not the default set: the dock is carved out of that pane and
+        // sits flush under it, so a user who restyles the map's border must not end up with two
+        // stacked panes drawn in two different hands (SQ-0694).
+        glyphs: &colors.map_border_glyphs,
         header_on: true,
         strip: Some(PanelStrip {
             segments: &segments,
@@ -337,6 +340,141 @@ mod tests {
         let text = buf_text(&buf);
         assert!(text.contains("nowhere yet"), "{text}");
         assert!(text.contains("not placed you in a room yet"), "{text}");
+    }
+
+    // ── The view tabs (SQ-0694) ──────────────────────────────────────────────
+
+    /// The tabs are the SHARED strip — the same `draw_panel` + `PanelStrip` the map pane's layer
+    /// tabs and the debug pane's section tabs use — so they come back as real hit-rects, one per
+    /// view, inside the dock's header row.
+    #[test]
+    fn the_dock_returns_a_hit_rect_for_each_view_tab() {
+        let g = graph_with_current();
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buf = Buffer::empty(area);
+        let tabs = draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area,
+            &ColorScheme::default(), false, &mut buf);
+
+        assert_eq!(tabs.len(), 2, "one rect per view");
+        assert_eq!(tabs[0].0, RoomDockView::Info);
+        assert_eq!(tabs[1].0, RoomDockView::Diagnostics);
+        for (view, r) in &tabs {
+            assert!(r.width > 0 && r.height > 0, "{view:?} has a clickable rect");
+            assert_eq!(r.y, area.y, "the strip sits on the panel's header row");
+            assert!(r.x >= area.x && r.right() <= area.right(), "…inside the dock");
+        }
+        assert!(tabs[0].1.right() <= tabs[1].1.x, "the two tabs do not overlap");
+    }
+
+    /// A click on each tab rect flips the dock to that view — driven through the SAME routing
+    /// function the run loop calls, on the SAME rects the draw returned, so this is the real
+    /// gesture and not a restatement of the router's `match`.
+    #[test]
+    fn clicking_each_tab_switches_the_body() {
+        use crate::input::{apply_action, room_dock_mouse_action, Action};
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+        let g = graph_with_current();
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buf = Buffer::empty(area);
+        let tabs = draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area,
+            &ColorScheme::default(), false, &mut buf);
+
+        let click = |col: u16, row: u16| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        let mut st = crate::state::AppState::default();
+        let mut m = mapper::mapper::Mapper::default();
+        st.room_dock.toggle_to(true, true);
+        assert_eq!(st.room_dock_view, RoomDockView::Info);
+
+        // Every cell of each tab is a target, not just its first column.
+        for (view, r) in &tabs {
+            for col in r.x..r.right() {
+                st.room_dock_view = view.flipped();
+                let action = room_dock_mouse_action(area, &tabs, &click(col, r.y))
+                    .unwrap_or_else(|| panic!("a click inside the dock is always claimed"));
+                assert_eq!(action, Action::SetRoomDockView(*view), "col {col} of the {view:?} tab");
+                apply_action(action, &mut st, &mut m);
+                assert_eq!(st.room_dock_view, *view, "clicking the {view:?} tab shows that body");
+            }
+        }
+
+        // A click in the dock's BODY is claimed but changes nothing — the dock owns its rect, so
+        // the click never falls through to the map or the story pane behind it.
+        st.room_dock_view = RoomDockView::Info;
+        let body = click(area.x + 3, area.bottom() - 2);
+        assert_eq!(room_dock_mouse_action(area, &tabs, &body), Some(Action::None));
+        assert_eq!(st.room_dock_view, RoomDockView::Info);
+
+        // A click OUTSIDE the dock is not the dock's business at all.
+        assert_eq!(
+            room_dock_mouse_action(area, &tabs, &click(area.x, area.bottom() + 1)),
+            None,
+            "an event outside the dock rect falls through to normal routing"
+        );
+    }
+
+    /// The strip is drawn by the shared component, so it wears the shared grammar: bracketed
+    /// terminator caps and a divider between the tabs, exactly like the map pane's layer strip —
+    /// and the active tab in `panel.tab:active`, the inactive one in `panel.tab`.
+    #[test]
+    fn the_tab_strip_matches_the_other_panes_strips() {
+        let g = graph_with_current();
+        let area = Rect::new(0, 0, 60, 12);
+        let parsed = crate::theme::toml_schema::parse(
+            "[panel]\ntab = { fg = \"blue\" }\n\"tab:active\" = { fg = \"green\" }\n",
+        )
+        .unwrap();
+        let mut colors = ColorScheme::default();
+        colors.theme = crate::theme::resolve::resolve_theme(
+            &crate::colors::GhosttyScheme::default(),
+            &parsed,
+        );
+
+        let mut buf = Buffer::empty(area);
+        let tabs = draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area,
+            &colors, false, &mut buf);
+
+        let top: String = (0..area.width).map(|x| buf.cell((x, 0)).unwrap().symbol()).collect();
+        assert!(top.contains("┤ Room "), "the shared left cap: {top:?}");
+        assert!(top.contains("│"), "the shared tab divider: {top:?}");
+        assert!(top.contains(" Diagnostics ├"), "the shared right cap: {top:?}");
+
+        let fg_at = |r: Rect| buf.cell((r.x + 1, r.y)).and_then(|c| c.style().fg);
+        assert_eq!(fg_at(tabs[0].1), Some(Color::Green), "the active view uses panel.tab:active");
+        assert_eq!(fg_at(tabs[1].1), Some(Color::Blue), "the inactive one uses panel.tab");
+
+        // …and it follows the view, not the tab order.
+        let mut buf = Buffer::empty(area);
+        let tabs = draw_room_dock(&g, Some(1), false, RoomDockView::Diagnostics, &[], Some(1), area,
+            &colors, false, &mut buf);
+        let fg_at = |r: Rect| buf.cell((r.x + 1, r.y)).and_then(|c| c.style().fg);
+        assert_eq!(fg_at(tabs[0].1), Some(Color::Blue));
+        assert_eq!(fg_at(tabs[1].1), Some(Color::Green));
+    }
+
+    /// The dock sits flush under the map pane and shares its columns, so it draws its frame in
+    /// the MAP pane's glyphs — restyle one and the other follows (SQ-0694).
+    #[test]
+    fn the_dock_frame_follows_the_map_panes_glyphs() {
+        let g = graph_with_current();
+        let area = Rect::new(0, 0, 60, 12);
+        let mut colors = ColorScheme::default();
+        colors.map_border_glyphs.tl = Some("\u{2554}".to_string()); // ╔
+
+        let mut buf = Buffer::empty(area);
+        draw_room_dock(&g, Some(1), false, RoomDockView::Info, &[], Some(1), area,
+            &colors, false, &mut buf);
+        assert_eq!(
+            buf.cell((0, 0)).unwrap().symbol(),
+            "\u{2554}",
+            "the dock takes the map pane's corner glyph, not the default set"
+        );
     }
 
     #[test]

@@ -423,13 +423,14 @@ pub const FALLBACK_SCREEN_COLS: u16 = 80;
 pub const FALLBACK_SCREEN_ROWS: u16 = 24;
 pub(crate) fn default_split_ratio() -> u16 { 50 }
 pub(crate) fn default_inv_dock_pct() -> u16 { 33 }
-/// The room dock's height as a percentage of the frame (SQ-0692).
+/// The room dock's height as a percentage of the frame (SQ-0692, retuned SQ-0694).
 ///
-/// Higher than `inv_dock_pct`'s 33 because the dock's content is not a list that
-/// shrinks to fit: the exit card is a fixed twelve rows, and with the header and
-/// two section labels the Info body wants ~16. On the 40-row terminal this is
-/// sized for, 40% is exactly that.
-pub(crate) fn default_room_dock_pct() -> u16 { 40 }
+/// Back to `inv_dock_pct`'s 33 now that the exit card spends COLUMNS instead of
+/// rows: at a typical split-pane map width the twelve directions lay out three
+/// across in four rows, so the whole Info body — header, objects, card — wants
+/// about eleven rows rather than the sixteen the single column needed. 33% of a
+/// 40-row terminal is thirteen, which admits all of it with room to spare.
+pub(crate) fn default_room_dock_pct() -> u16 { 33 }
 pub(crate) fn default_band_height() -> u16 {
     crate::render::command_band::DEFAULT_BAND_ROWS
 }

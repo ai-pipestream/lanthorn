@@ -38,12 +38,18 @@ inspecting the machine, and firing commands — without ever leaving the story.
   room, opened with `k` from the leader panel or `/toggle-room-dock`. It has two
   bodies:
   - **Room** — the room's notes, its [exit card](mapping.md#room-card) in the
-    matrix vocabulary, and the objects the engine can see there.
+    matrix vocabulary, and the objects the engine can see there. The card spends
+    the dock's WIDTH rather than its height: the twelve travel directions lay
+    out in up to three columns — cardinals, diagonals, portals — so the whole
+    card is four rows on a normal map pane and falls back to the single column
+    on a narrow one.
   - **Diagnostics** — id, layer, grid position, and the per-edge
     dropped-constraint flags, so you can see *why* the layout engine placed a
     room where it did. `/toggle-inspector` opens straight onto this body, and
-    flips back to Room when the dock is already up; clicking either name in the
-    dock's title strip switches too.
+    flips back to Room when the dock is already up.
+
+  The two names sit in the dock's tab strip — the same strip, and the same
+  click, as the map pane's layer tabs: click either name to switch bodies.
 
   **It follows you by default.** With nothing selected the dock describes the
   room you are standing in and updates every move — the header says `⌖ following`.

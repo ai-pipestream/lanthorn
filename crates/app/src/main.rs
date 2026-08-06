@@ -2791,23 +2791,14 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                 // carved out of the map pane and a click there is neither a map
                 // click nor a story selection — and must never reach the v6 mouse
                 // delivery path below.
-                {
-                    let d = last_panes.room_dock;
-                    let inside = d.width > 0 && d.height > 0
-                        && m.column >= d.x && m.column < d.right()
-                        && m.row >= d.y && m.row < d.bottom();
-                    if inside && !state.any_modal_overlay_open() {
-                        if let crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) = m.kind {
-                            let hit = last_panes.room_dock_tabs.iter().find(|(_, r)| {
-                                r.width > 0 && r.height > 0
-                                    && m.column >= r.x && m.column < r.right()
-                                    && m.row >= r.y && m.row < r.bottom()
-                            });
-                            // (`needs_redraw` was already set for this event above.)
-                            if let Some(&(view, _)) = hit {
-                                state.room_dock_view = view;
-                            }
-                        }
+                if !state.any_modal_overlay_open() {
+                    if let Some(action) = app::input::room_dock_mouse_action(
+                        last_panes.room_dock,
+                        &last_panes.room_dock_tabs,
+                        &m,
+                    ) {
+                        // (`needs_redraw` was already set for this event above.)
+                        apply_action(action, &mut state, &mut mapper);
                         continue 'event_loop;
                     }
                 }

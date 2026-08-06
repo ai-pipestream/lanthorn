@@ -239,6 +239,61 @@ fn the_dock_docks_below_the_matrix_view_too() {
     }
 }
 
+/// SQ-0694: the whole Info body — header, objects, the twelve-direction card — fits inside the
+/// dock at its SHIPPED default height, at the map width a split-pane layout actually gives it.
+///
+/// This is the test that sets `room_dock_pct`'s default. The card used to be a fixed thirteen
+/// rows, which no default a 40-row terminal could spare would admit; spending columns instead
+/// brings the natural body down to about nine, so the default went back to the inventory dock's
+/// 33 rather than the 40 it needed before.
+#[test]
+fn the_whole_info_body_fits_at_the_default_dock_height() {
+    let mut m = advent();
+    let here = id_of(&m.graph, "Inside Building");
+    m.graph.set_current(here);
+
+    let st = dock_state(true, RoomDockView::Info);
+    assert_eq!(
+        st.pane_sizes.room_dock_pct,
+        app::config::Config::default().room_dock_pct,
+        "this test is about the DEFAULT height"
+    );
+
+    let pl = compute_pane_layout(FRAME, &st, 0);
+    let mut buf = Buffer::empty(FRAME);
+    let objects = ["a brass lantern".to_string(), "a small mat".to_string()];
+    draw_room_dock(
+        &m.graph,
+        Some(here),
+        false,
+        RoomDockView::Info,
+        &objects,
+        Some(here),
+        pl.room_dock,
+        &st.colors,
+        false,
+        &mut buf,
+    );
+    let text = text_in(&buf, pl.room_dock);
+
+    assert!(text.contains("Inside Building"), "the header: {text}");
+    assert!(text.contains("Here:") && text.contains("a brass lantern"), "the objects: {text}");
+    assert!(text.contains("Exits:"), "the card's label: {text}");
+    for d in ["N ", "S ", "E ", "W ", "NE", "NW", "SE", "SW", "Up", "Dn", "In", "Out"] {
+        assert!(text.contains(d), "every direction is on screen at the default height; {d} is not:\n{text}");
+    }
+
+    // …and it is a GRID, not twelve rows: three directions from three different groups share one.
+    assert!(
+        text.lines().any(|l| l.contains("N ") && l.contains("NE") && l.contains("Up")),
+        "the card lays out three across at this width:\n{text}"
+    );
+
+    // Nothing spilled past the dock: the body ends inside its own rows.
+    let used = text.lines().filter(|l| !l.trim_matches(['│', ' ']).is_empty()).count();
+    assert!(used <= pl.room_dock.height as usize, "the body fits its rect");
+}
+
 // ── Real-game smoke (gitignored fixture; skips vacuously) ────────────────────
 
 /// The Info body's object list is LIVE, read from the running engine's object tree — not a
