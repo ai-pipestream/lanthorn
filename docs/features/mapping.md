@@ -137,11 +137,13 @@ and it understands the awkward cases:
   representative: a **reciprocal** pairing first — the two ends are exact opposites, so
   the line runs straight and each arrowhead points the way you really travel — and
   otherwise by direction priority, **N, S, E, W, NE, NW, SE, SW, up, down**. The line
-  that wins keeps its own arrowhead (or `↑`/`↓` if a staircase won), and the passages
-  that lost draw nothing at all. Lines carrying more than one passage are tinted with
-  the `shared_path` selector so you can see there is more to the story — and the room
-  inspector lists every exit with its direction and destination, so nothing is lost,
-  only unstacked.
+  that wins keeps its own arrowhead (or `↑`/`↓` if a staircase won), and each passage
+  that lost stamps its **own glyph beside the shared line's anchor** — a staircase that
+  lost to a compass edge shows its `↑` on the border of the room it climbs from, so a
+  known way back never disappears into the collapse. Lines carrying more than one
+  passage are also tinted with the `shared_path` selector — and the room inspector
+  lists every exit with its direction and destination, so nothing is lost, only
+  unstacked.
 
 Where two unrelated connectors still have to cross, the map says so rather than drawing a
 junction: the vertical run passes through unbroken and the horizontal one breaks for a single
@@ -292,8 +294,11 @@ the two are 0.96 and 0.82, which separates nothing.)
 ### Honest edges on the drawn map
 
 The same asymmetry shows up outside mazes, so the drawn view stopped pretending
-too. A **one-way** passage now carries an arrowhead where it *arrives*, pointing
-in — you can get there, and nothing known brings you back. One-way and
+too, under one rule: **every arrow on a room border is that room's own exit** —
+arrows are only ever outgoing. A two-way corridor wears each room's departure at
+its own end; a **one-way** passage wears exactly one, at its origin, and the line
+ending *bare* on the destination is the reading — you can get there, and nothing
+known brings you back. One-way and
 disagreeing-direction edges each have their own style selector (`map.edge:oneway`,
 `map.edge:asym`), both defaulting to the ordinary connector so nothing changes
 appearance until you choose to style it. A **self-loop** draws as a compact `↩w`

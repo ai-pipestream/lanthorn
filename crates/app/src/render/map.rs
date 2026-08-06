@@ -924,11 +924,11 @@ fn lane_pixel(
 /// How honest a drawn edge is about the trip back (SQ-0666).
 ///
 /// The drawn view used to say the same thing about all three: one arrow leaving the origin, and
-/// (for a collapsed reciprocal pair) one at the far end. A one-way passage and a passage whose
-/// return is a different direction entirely looked identical to a two-way corridor with an
-/// arrowhead spare. Now each gets its own selector — both defaulting to `map.connector`, so
-/// nothing changes appearance until someone chooses to style it — and a one-way edge gets an
-/// arrowhead at the END it arrives at, pointing in.
+/// (for a collapsed reciprocal pair) one at the far end. Each now gets its own selector — both
+/// defaulting to `map.connector`, so nothing changes appearance until someone chooses to style
+/// it. Arrows themselves follow one rule: an arrow on a room border is that room's own EXIT
+/// (SQ-0688), so a one-way edge draws no far-end glyph at all — the line ending bare on the
+/// destination IS the "no known way back" reading.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeKind {
     /// The compass inverse comes back: an ordinary two-way corridor.
@@ -977,20 +977,6 @@ fn edge_kinds(rm: &RenderMap) -> std::collections::HashMap<(RoomId, RoomId, Dire
             ((e.origin, e.dest, e.dir), kind)
         })
         .collect()
-}
-
-/// The arrow that points INTO a box arriving on `entry` — the mirror of [`arrow_for_departure`],
-/// which points out of it.
-fn arrow_into_arrival(entry: Side, arrows: &crate::symbols::Arrows) -> char {
-    arrow_for_departure(
-        match entry {
-            Side::Left => Side::Right,
-            Side::Right => Side::Left,
-            Side::Top => Side::Bottom,
-            Side::Bottom => Side::Top,
-        },
-        arrows,
-    )
 }
 
 /// The cells (in virtual space) one connector writes, each with the direction-bit mask it
@@ -1419,6 +1405,7 @@ fn render_lane_connectors(
         .flat_map(|(_, p)| p.cells.iter().map(|(c, _)| *c))
         .collect();
 
+    let mut pending_markers: Vec<PendingMarker> = Vec::new();
     for (ci, (conn, plot)) in plots.iter().enumerate() {
         let is_updown = matches!(conn.exit_dir, Direction::Up | Direction::Down);
         let has_secondary = !conn.secondary_exit.is_empty() || !conn.secondary_entry.is_empty();
@@ -1557,25 +1544,86 @@ fn render_lane_connectors(
                 shared: has_secondary,
                 kind,
             });
-        } else if kind == EdgeKind::OneWay && !conn.merge {
-            // SQ-0666: a ONE-WAY passage gets an arrowhead where it ARRIVES, pointing in. A
-            // reciprocal's far-end arrow points OUT (it is the back-edge's own departure); this
-            // one points the other way, which is exactly the fact worth showing — you can get in
-            // there, and nothing known brings you back. A merge stub ends on another connector's
-            // trunk rather than on the destination box, so it has no arrival border to sit on.
-            let arr_ch = arrow_into_arrival(conn.entry, arrows);
-            arrowheads.push(Arrowhead {
-                at: plot.arr_anchor,
-                glyph: arr_ch.to_string(),
-                distorted: conn.distorted,
-                is_portal: is_updown,
-                room: conn.dest,
-                shared: has_secondary,
-                kind,
-            });
+        }
+        // A ONE-WAY passage gets no glyph at its far end (SQ-0688, reversing the arrival arrow
+        // SQ-0666 added). Every arrow on a room border is that room's own EXIT — the map's one
+        // arrow rule — so an inbound arrow on the destination reads as an exit that does not
+        // exist (a NE arrival stamped its side-arrow `▶` on Deep Canyon's corner: "east leads
+        // out of here"). The line simply ends on the box: a connector with a departure arrow at
+        // one end and nothing at the other IS the one-way reading.
+
+        // SQ-0689: stamp the marker each collapsed secondary was always promised (see
+        // `RoutedConnector::secondary_exit`). The plan folds an extra same-pair passage into the
+        // winning connector instead of drawing a second line — correct, but the passage then
+        // vanished entirely: the shared line got a brighter colour and nothing else, and the
+        // portal-icon pass deliberately leaves up/down to the connector it assumes exists. A
+        // staircase that lost the pairing (Zork's Chasm: N wins the line, Up collapses) was
+        // invisible. Each secondary direction now queues its glyph beside the shared line's
+        // anchor, on the border of the room the collapsed edge DEPARTS from.
+        for (dirs, anchor, side, room) in [
+            (&conn.secondary_exit, plot.dep_anchor, conn.exit, conn.origin),
+            (&conn.secondary_entry, plot.arr_anchor, conn.entry, conn.dest),
+        ] {
+            for &dir in dirs.iter() {
+                pending_markers.push(PendingMarker {
+                    anchor,
+                    side,
+                    glyph: arrow_for_direction(dir, arrows, portal),
+                    is_portal: matches!(dir, Direction::Up | Direction::Down),
+                    distorted: conn.distorted,
+                    room,
+                    kind,
+                });
+            }
         }
     }
+
+    // Place the queued secondary markers where they collide with nothing already stamped: the
+    // anchor cell itself first — the marker sits ON the shared line, aligned with it — then the
+    // nearest free border cell stepping ±1, ±2 along the box edge. The anchor is free whenever
+    // this end carries no arrow of its own (every entry end except a reciprocal's, under the one
+    // arrow rule); a departure arrow or an earlier marker there pushes this one a step along.
+    // Placement runs after EVERY connector has queued its arrowheads, so a marker can never
+    // overwrite another connector's departure arrow that lands beside the same anchor.
+    let mut occupied: std::collections::HashSet<(i32, i32)> =
+        arrowheads.iter().map(|a| a.at).collect();
+    for m in pending_markers {
+        let along: fn((i32, i32), i32) -> (i32, i32) = match m.side {
+            Side::Top | Side::Bottom => |a, k| (a.0 + k, a.1),
+            Side::Left | Side::Right => |a, k| (a.0, a.1 + k),
+        };
+        let Some(at) = [0, 1, -1, 2, -2]
+            .into_iter()
+            .map(|k| along(m.anchor, k))
+            .find(|c| !occupied.contains(c))
+        else {
+            continue; // border full — the shared-path colour still marks the collapse
+        };
+        occupied.insert(at);
+        arrowheads.push(Arrowhead {
+            at,
+            glyph: m.glyph.to_string(),
+            distorted: m.distorted,
+            is_portal: m.is_portal,
+            room: m.room,
+            shared: true,
+            kind: m.kind,
+        });
+    }
     arrowheads
+}
+
+/// A secondary-passage marker queued by the connector loop for the collision-avoiding
+/// placement pass (SQ-0689). Markers are placed in queue order, so several at one anchor
+/// take successive free cells deterministically.
+struct PendingMarker {
+    anchor: (i32, i32),
+    side: Side,
+    glyph: char,
+    is_portal: bool,
+    distorted: bool,
+    room: RoomId,
+    kind: EdgeKind,
 }
 
 /// Draw the embedded-in-border arrowheads (from [`render_lane_connectors`]) on top of the rooms.
@@ -2928,7 +2976,9 @@ mod tests {
 
         let up = state.symbols.portal.up;
         let text: String = buf.content.iter().flat_map(|c| c.symbol().chars()).collect();
-        assert!(!text.contains(up), "the staircase draws nothing: it lost to N on priority");
+        // SQ-0689: the staircase loses the LINE to N on priority, but no longer vanishes — it
+        // stamps its ↑ beside the shared line's anchor. One line, both passages visible.
+        assert_eq!(text.matches(up).count(), 1, "the collapsed staircase stamps its glyph");
         assert!(text.contains(state.symbols.arrows.north), "the N passage keeps its own arrowhead");
     }
     #[test]
@@ -4979,8 +5029,74 @@ mod tests {
         render_map(&rm, &st, area, &mut buf);
         let dotted = buf.content.iter().filter(|c| matches!(c.symbol(), "\u{250a}" | "\u{2504}")).count();
         assert_eq!(dotted, 0, "no second, dotted line for the passage that lost");
+        // SQ-0689 flips the second half of this pin: the collapsed staircase used to leave no
+        // icon either ("an icon has no line to follow"), which made a real, known Up passage
+        // invisible — Zork's Chasm. It now stamps its portal glyph beside the shared line's
+        // anchor, ON the line it follows.
         let ups = buf.content.iter().filter(|c| c.symbol() == "\u{2191}").count();
-        assert_eq!(ups, 0, "and no icon for it either — an icon has no line to follow");
+        assert_eq!(ups, 1, "the collapsed staircase stamps its ↑ beside the shared line");
+    }
+
+    /// SQ-0689, the Zork1 Chasm shape exactly: the winning connector's origin is the OTHER room,
+    /// so the collapsed staircase lands in `secondary_entry` and its marker must sit on the
+    /// border of the room the staircase departs from — the connector's DESTINATION end.
+    #[test]
+    fn a_secondary_collapsed_at_the_entry_end_stamps_on_the_destination_room() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(112, "Chasm".into());
+        g.upsert_room(136, "Passage".into());
+        g.set_pos(112, (1, 0));
+        g.set_pos(136, (1, 1)); // due south of the Chasm
+        g.add_edge(136, Direction::N, 112); // the passage walks north into the Chasm…
+        g.add_edge(112, Direction::Up, 136); // …and the way back is Up, which loses the pairing
+        let rm = render(&g);
+        assert_eq!(rm.plan.connectors.len(), 1, "one line for the pair");
+        let c = &rm.plan.connectors[0];
+        assert_eq!((c.origin, c.exit_dir), (136, Direction::N), "N wins the line");
+        assert_eq!(c.secondary_entry, vec![Direction::Up], "Up collapses at the entry end");
+
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 120, 60);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let ups: Vec<(u16, u16)> = (0..area.height)
+            .flat_map(|y| (0..area.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buf.cell((x, y)).is_some_and(|c| c.symbol() == "\u{2191}"))
+            .collect();
+        assert_eq!(ups.len(), 1, "exactly one ↑ marker");
+        // The Chasm's box is the NORTH one; its bottom border row is where the marker belongs —
+        // the room Up departs from, not the passage the connector happens to originate at.
+        let corner_row = (0..area.height)
+            .find(|&y| (0..area.width).any(|x| buf.cell((x, y)).is_some_and(|c| c.symbol() == "\u{2570}")))
+            .expect("a box corner");
+        assert_eq!(ups[0].1, corner_row, "the ↑ sits on the Chasm's bottom border");
+    }
+
+    /// SQ-0688: arrows are only ever OUTGOING — an arrow on a room border is that room's own
+    /// exit. A one-way diagonal used to stamp a side-derived arrival arrow on the destination's
+    /// corner (`▶` on a SW corner), which read as an exit east out of a room with no such exit.
+    /// Now only the departure corner wears an arrow; the line ends bare on the destination.
+    #[test]
+    fn a_one_way_diagonal_wears_an_arrow_only_at_its_departure_corner() {
+        use mapper::graph::MapGraph;
+        let mut g = MapGraph::new();
+        g.upsert_room(183, "Passage".into());
+        g.upsert_room(170, "Canyon".into());
+        g.set_pos(183, (0, 1));
+        g.set_pos(170, (1, 0)); // NE of the passage
+        g.add_edge(183, Direction::NE, 170); // one-way: nothing comes back
+        let rm = render(&g);
+
+        let mut st = AppState::default();
+        st.scroll = rm.bounds.0;
+        let area = Rect::new(0, 0, 120, 60);
+        let mut buf = Buffer::empty(area);
+        render_map(&rm, &st, area, &mut buf);
+        let count = |s: &str| buf.content.iter().filter(|c| c.symbol() == s).count();
+        assert_eq!(count("\u{2197}"), 1, "exactly one ↗ — the departure corner");
+        assert_eq!(count("\u{25b6}"), 0, "no cardinal ▶ pretending the canyon has an east exit");
     }
     #[test]
     fn interlayer_badge_dest_label_appears_in_portal_view() {

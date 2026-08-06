@@ -25,6 +25,21 @@ identifies which beta it is without reading its git hash.
   free and take the nearest free cell where not; an unknown or ambiguous layer
   name refuses with a message and moves nothing.
 
+### Fixed
+
+- **The drawn map's one arrow rule: every arrow on a room border is that room's
+  own exit.** A one-way passage used to stamp an inbound arrow on its destination
+  (worst at a diagonal, where the side-derived `▶` landed on a box corner and read
+  as an exit that does not exist — Zork I's Deep Canyon). The far end of a one-way
+  line is now bare; the departure arrow and the line ending on the box carry the
+  reading.
+- **A passage collapsed into a shared line is stamped, not hidden.** When two
+  rooms are joined by both a compass edge and a staircase, one line is drawn and
+  the other passage used to vanish entirely — Zork I's Chasm knew its way back
+  (`up` to the East-West Passage) and the map showed nothing. Each collapsed
+  passage now stamps its own glyph (`↑`/`↓`, or its compass arrow) on the border
+  of the room it departs from, beside the line it shares.
+
 ### Changed
 
 - The matrix view's tried-but-pathless cell is `×` rather than `_` — a mark

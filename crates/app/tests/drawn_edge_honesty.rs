@@ -42,26 +42,27 @@ fn pair(reciprocal: bool) -> MapGraph {
     g
 }
 
-/// A one-way passage gets an arrowhead where it ARRIVES, pointing in — the fact that you can get
-/// there and nothing known brings you back. A reciprocal pair's far-end arrow points the other
-/// way (it is the back-edge's own departure), so the two are now told apart at a glance.
+/// Every arrow on a room border is that room's own EXIT — the map's one arrow rule (SQ-0688,
+/// reversing the arrival arrow SQ-0666 added: an inbound arrow on B's border read as an exit B
+/// does not have). A one-way passage therefore shows exactly one arrow, at its departure, and
+/// the line ending bare on B IS the "no known way back" reading; a reciprocal pair shows each
+/// room's own departure.
 #[test]
-fn a_one_way_passage_shows_an_arrow_arriving() {
+fn a_one_way_passage_shows_only_its_departure_arrow() {
     let arrows = AppState::default().symbols.arrows;
     let oneway = render(&pair(false));
     let both = render(&pair(true));
 
     // A→(east)→B. The departure arrow on A points east in both.
     assert!(oneway.contains(arrows.east), "the departure arrow is unchanged");
-    // B's border: one-way draws an INBOUND arrow (still east, since travel is left→right);
-    // the reciprocal draws B's own westward departure. So the reciprocal has a west arrow and
-    // the one-way does not.
+    // B's border: the reciprocal draws B's own westward departure; the one-way draws NOTHING —
+    // B has no exit along this line, so no arrow of any direction sits on it.
     assert!(both.contains(arrows.west), "a reciprocal pair shows B leaving west");
     assert!(!oneway.contains(arrows.west), "a one-way pair has no westward exit to show");
     assert_eq!(
         oneway.matches(arrows.east).count(),
-        2,
-        "one-way: an arrow leaving A and an arrow arriving at B\n{oneway}"
+        1,
+        "one-way: an arrow leaving A and a bare line end at B\n{oneway}"
     );
 }
 
