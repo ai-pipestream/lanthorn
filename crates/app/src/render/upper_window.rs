@@ -190,8 +190,17 @@ pub fn draw_grid(
     } else {
         0
     };
-    // Col viewport offset: scroll right so cursor col is visible.
-    let col_offset: u16 = if ccol >= content.width {
+    // Col viewport offset: scroll right so the cursor column is visible — but
+    // ONLY while the cursor is the player's (`show_cursor`: the game is waiting
+    // on a keypress in this grid, an in-place form). (SQ-0679)
+    //
+    // Otherwise the left of the row wins. A grid wider than the pane is almost
+    // always a status bar, and its content — the room name — starts at column 1
+    // while the cursor is parked wherever the game's last print left it, out to
+    // the right. Following that parked cursor scrolled the room name off the
+    // left edge and showed the score/moves fields floating alone. Nobody is
+    // typing there; there is no caret to keep on screen.
+    let col_offset: u16 = if show_cursor && ccol >= content.width {
         ccol.saturating_sub(content.width - 1)
     } else {
         0
@@ -712,6 +721,44 @@ mod tests {
         // 'A' is at grid row 5, displayed at terminal row 2 (0-based within content).
         // cols=5 centered in 10 (no border): x_off=(10-5)/2=2, so col 2.
         assert_eq!(buf.cell((2, 2)).unwrap().symbol(), "A");
+    }
+
+    /// SQ-0679: a grid WIDER than the pane renders from its first column when
+    /// nobody is typing in it — the room name at the left of a status bar must
+    /// not be scrolled away by a cursor the game parked out to the right after
+    /// painting. The horizontal follow is for a live caret only, so it comes
+    /// back the moment the grid is the input target.
+    #[test]
+    fn wide_grid_anchors_left_unless_the_cursor_is_the_players() {
+        let mut upper = GridWindow::default();
+        upper.resize(1, 20);
+        for (i, ch) in "ROOM NAME".chars().enumerate() {
+            upper.put(1, i as u16 + 1, ch, 0);
+        }
+        upper.put(1, 20, '#', 0); // the far right, where the cursor was left
+
+        let mut colors = make_colors();
+        colors.virtual_window_border = BorderStyle::None;
+        colors.upper_window_border_sides = crate::render::paneframe::PaneSides::all(BorderStyle::None);
+
+        // Pane narrower than the grid; cursor parked past its right edge.
+        let area = Rect::new(0, 0, 10, 2);
+        let row = |buf: &Buffer| -> String {
+            (0..10).map(|x| buf.cell((x, 0)).unwrap().symbol().to_string()).collect()
+        };
+
+        let mut buf = Buffer::empty(area);
+        draw_grid(&upper, 1, (1, 20), false, &colors, area, &mut buf, true, &mut Vec::new());
+        assert_eq!(row(&buf), "ROOM NAME ", "a parked cursor does not scroll the row");
+
+        // The same grid while the game awaits a keypress here: the caret wins.
+        let mut buf = Buffer::empty(area);
+        draw_grid(&upper, 1, (1, 20), true, &colors, area, &mut buf, true, &mut Vec::new());
+        assert_eq!(
+            row(&buf).chars().last(),
+            Some('#'),
+            "with a live caret the viewport follows it to the grid's last column"
+        );
     }
 
     #[test]

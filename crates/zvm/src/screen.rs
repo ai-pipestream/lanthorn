@@ -152,6 +152,43 @@ impl UpperWindow {
         self.rows = rows;
         self.cols = cols;
     }
+    /// [`resize_preserving`](Self::resize_preserving), but a WIDENING continues
+    /// each row's trailing appearance (style + colours, blanked to a space) into
+    /// the columns that appear — instead of leaving them at the interpreter
+    /// default. (SQ-0679)
+    ///
+    /// This is for a width change the HOST forces on the game (the screen grew
+    /// under it, `refit_upper_window_width`), never for one the game asked for.
+    /// A v4/v5 status line is painted once — a run of reverse-video spaces the
+    /// game fills at whatever width byte $21 held when it laid out — and the
+    /// fields are then updated in place, so nothing ever repaints the columns a
+    /// later widen adds. Defaulting them punched an unstyled hole in the game's
+    /// band from its old right edge to the new one: the reverse-video bar
+    /// stopped short of its own box. Continuing the row's own trailing cell is
+    /// the only extension that cannot introduce an appearance the game did not
+    /// already have on that row.
+    ///
+    /// Not an erase, so ZMSD §8.7.3.4 ("Even if the text style is Reverse Video
+    /// the new blank space should not have reversed colours") does not apply —
+    /// that rule governs `erase_window`/`erase_line`, where the GAME asked for
+    /// blank space. Here the game asked for nothing at all.
+    pub fn resize_continuing_row_style(&mut self, rows: u16, cols: u16) {
+        let old_cols = self.cols;
+        // The appearance each surviving row ends in, captured before the move.
+        let tail: Vec<Cell> = if cols > old_cols && old_cols > 0 {
+            (0..rows.min(self.rows))
+                .map(|r| Cell { ch: ' ', ..self.cell(r + 1, old_cols) })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        self.resize_preserving(rows, cols);
+        for (r, t) in tail.iter().enumerate() {
+            for c in old_cols..cols {
+                self.cells[r * cols as usize + c as usize] = *t;
+            }
+        }
+    }
     pub fn clear(&mut self) {
         self.clear_to(ZColour::Default);
     }
@@ -2035,5 +2072,41 @@ mod tests {
 
         assert_eq!(mem.read_word(table_addr), 6);
         assert_eq!(mem.read_word(0x30), 6 * V6_FONT_WIDTH);
+    }
+
+    /// SQ-0679: when the HOST widens the grid, the columns that appear continue
+    /// the appearance their row already ended in — so a status bar the game
+    /// painted as a run of reverse-video spaces reaches the new right edge
+    /// instead of stopping at the old one. Shrinking is still plain truncation,
+    /// and a row that ended in default cells is byte-identical to before.
+    #[test]
+    fn widening_continues_each_rows_trailing_appearance() {
+        let mut u = UpperWindow::default();
+        u.resize(2, 4);
+        // Row 1: a reverse-video bar with text in it, the whole row.
+        for (c, ch) in " Hi ".chars().enumerate() {
+            u.cells[c] = Cell { ch, style: 0x01, fg: ZColour::Default, bg: ZColour::Standard(4) };
+        }
+        // Row 2 is left entirely default.
+        u.resize_continuing_row_style(2, 7);
+
+        assert_eq!(u.cols, 7);
+        assert_eq!((1..=4).map(|c| u.cell(1, c).ch).collect::<String>(), " Hi ", "old columns verbatim");
+        for c in 5..=7 {
+            let cell = u.cell(1, c);
+            assert_eq!(cell.ch, ' ', "a grown column is blank space, never a copied glyph");
+            assert_eq!(cell.style, 0x01, "…carrying the row's trailing style (col {c})");
+            assert!(matches!(cell.bg, ZColour::Standard(4)), "…and its colours (col {c})");
+        }
+        for c in 5..=7 {
+            let cell = u.cell(2, c);
+            assert_eq!(cell.style, 0, "a default row grows default (col {c})");
+            assert!(matches!(cell.bg, ZColour::Default));
+        }
+
+        // A shrink truncates and continues nothing.
+        u.resize_continuing_row_style(2, 2);
+        assert_eq!(u.cols, 2);
+        assert_eq!((1..=2).map(|c| u.cell(1, c).ch).collect::<String>(), " H");
     }
 }

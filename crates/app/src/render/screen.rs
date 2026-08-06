@@ -366,6 +366,50 @@ pub fn story_screen_dims(area: Rect, state: &AppState) -> Option<(u16, u16)> {
     Some((rows.max(1), cols.max(1)))
 }
 
+/// The screen size actually DECLARED to a running story: [`story_screen_dims`]
+/// for the pane, floored at the width the story booted believing it had.
+///
+/// [`story_screen_dims`] measures the pane, and for the *height* that is the
+/// whole story — a game re-declares its upper window's height on every layout
+/// (`split_window`, ZMSD §8.7.2.1), so it always re-reads the screen it is given.
+///
+/// The WIDTH it never re-declares: byte $21 is ours alone, and a v4/v5 status
+/// routine reads it ONCE, when it lays the bar out, then updates the fields in
+/// place at the column numbers it computed back then. Zork 1 (r52) is the
+/// reference case — it paints the reverse-video bar at boot and thereafter only
+/// `set_cursor`s to the two field columns it derived from the boot width. Narrow
+/// the screen under it and those columns fall outside the window, where
+/// §8.7.2.3 makes the move illegal; the interpreter drops it, and the digits
+/// land wherever the cursor already was — column 1, on top of the room name.
+/// That is the garbled status bar of SQ-0679, and no amount of care in the
+/// renderer can undo it: by the time we draw, the game has already overwritten
+/// its own text.
+///
+/// So the declared width may GROW to follow a widened pane (SQ-0533 —
+/// Sherlock/Trinity, which do re-read $21, gain the columns; every coordinate
+/// computed at the old width is still inside the new screen) but never SHRINK
+/// below [`zvm::screen::DEFAULT_SCREEN_COLS`], the width every v4+ story is
+/// booted at. In a pane too narrow for that, the story keeps painting the
+/// 80-column bar it was designed for and the pane clips the right of it — the
+/// same thing every terminal interpreter shows in an 80-column game squeezed
+/// into a 60-column window, and a great deal better than a bar with its room
+/// name eaten.
+///
+/// Exempt: v1–3 (no such header fields — §8.4 starts at v4), v6 (its screen is
+/// the native pixel frame, scaled into the pane, never measured from it), and a
+/// user-pinned `virtual_screen_cols` (explicit intent wins over our floor).
+pub fn declared_story_screen_dims(
+    area: Rect,
+    state: &AppState,
+    version: u8,
+) -> Option<(u16, u16)> {
+    let (rows, cols) = story_screen_dims(area, state)?;
+    if version < 4 || version == 6 || state.config.virtual_screen_cols.is_some() {
+        return Some((rows, cols));
+    }
+    Some((rows, cols.max(zvm::screen::DEFAULT_SCREEN_COLS as u16)))
+}
+
 /// Reserve the configured text-window inner margin (SQ-0345) inside a
 /// text-buffer rect: paint the whole rect with `fill` so the reserved band reads
 /// as clean padding, then return the inset rect the transcript draws into.
@@ -4138,6 +4182,46 @@ mod tests {
         );
         state.config.virtual_screen_rows = Some(24);
         assert_eq!(story_screen_dims(Rect::new(0, 0, 132, 40), &state), Some((24, 80)));
+    }
+
+    /// SQ-0679: the width DECLARED to a v4+ story never drops below the 80
+    /// columns it booted at, because a v4/v5 status routine reads $21 once and
+    /// bakes its field columns in — narrow the screen under it and those columns
+    /// fall outside the window, where §8.7.2.3 makes the `set_cursor` illegal and
+    /// the digits land on the room name instead. Widening still follows the pane
+    /// (SQ-0533), and the HEIGHT always does: `split_window` re-declares it on
+    /// every layout.
+    #[test]
+    fn declared_width_never_drops_below_the_boot_width() {
+        let state = frameless_state();
+        let narrow = Rect::new(0, 0, 60, 20);
+        let wide = Rect::new(0, 0, 132, 40);
+        // The raw pane measurement is unchanged — it still measures the pane.
+        assert_eq!(story_screen_dims(narrow, &state), Some((20, 59)));
+
+        // v5: floored at 80 going down, free to follow the pane going up.
+        assert_eq!(
+            declared_story_screen_dims(narrow, &state, 5),
+            Some((20, 80)),
+            "a 59-column pane still declares the 80 columns the story booted with"
+        );
+        assert_eq!(
+            declared_story_screen_dims(wide, &state, 5),
+            Some((40, 131)),
+            "a wider pane is declared in full — every old coordinate is still inside it"
+        );
+        // The height follows the pane in both directions.
+        assert_eq!(declared_story_screen_dims(narrow, &state, 5).unwrap().0, 20);
+
+        // v3 has no such header fields, and v6's screen is its native pixel
+        // frame — neither is floored.
+        assert_eq!(declared_story_screen_dims(narrow, &state, 3), Some((20, 59)));
+        assert_eq!(declared_story_screen_dims(narrow, &state, 6), Some((20, 59)));
+
+        // An explicitly pinned width is the user's, not ours to floor.
+        let mut pinned = frameless_state();
+        pinned.config.virtual_screen_cols = Some(40);
+        assert_eq!(declared_story_screen_dims(narrow, &pinned, 5), Some((20, 40)));
     }
 
     /// SQ-0532/A-F1(c): the width the story is TOLD about, the width the upper

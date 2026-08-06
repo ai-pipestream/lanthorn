@@ -119,6 +119,13 @@ pub(crate) fn poll_glulx_resize(
 /// Skipped for v6, whose fixed 640×400 pixel screen is scaled into the pane
 /// rather than measured from it, and for v1–3, which have no such header fields.
 /// Returns `true` when the header changed (the upper window's width follows it).
+///
+/// What is declared is [`declared_story_screen_dims`], not the raw pane
+/// measurement: the width is floored at the 80 columns the story booted with, so
+/// narrowing the pane can never move a v4/v5 status routine's baked-in field
+/// columns outside the window (SQ-0679).
+///
+/// [`declared_story_screen_dims`]: app::render::screen::declared_story_screen_dims
 pub(crate) fn poll_zvm_screen_dims(
     session: &mut dyn Engine,
     state: &AppState,
@@ -131,7 +138,9 @@ pub(crate) fn poll_zvm_screen_dims(
     if version < 4 || version == 6 {
         return false;
     }
-    let Some((rows, cols)) = app::render::screen::story_screen_dims(last_panes.story, state) else {
+    let Some((rows, cols)) =
+        app::render::screen::declared_story_screen_dims(last_panes.story, state, version)
+    else {
         return false;
     };
     let current = (

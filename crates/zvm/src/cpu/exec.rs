@@ -611,7 +611,11 @@ impl Machine {
             return;
         }
         let rows = self.screen.upper.rows;
-        self.screen.upper.resize_preserving(rows, new_cols);
+        // A WIDEN continues each row's trailing appearance into the columns that
+        // appear (SQ-0679): the game never asked for them and will never paint
+        // them, so leaving them at the interpreter default cut the game's own
+        // status band short of its right edge. A shrink is plain truncation.
+        self.screen.upper.resize_continuing_row_style(rows, new_cols);
         if self.screen.cursor_col > new_cols {
             self.screen.cursor_col = new_cols;
         }
