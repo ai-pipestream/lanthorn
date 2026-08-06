@@ -1443,6 +1443,34 @@ pub fn band_quick_pick_command(state: &AppState, idx: usize) -> Option<String> {
     })
 }
 
+/// Double-click detection for the band's word columns (SQ-0690): a second click on the SAME
+/// row within [`BandClickTracker::WINDOW`] completes a double-click, which the run loop turns
+/// into a prompt submit — the pair's first click already picked the word, so the double is
+/// "pick, then fire", mirroring the story list's select-then-launch double-click.
+#[derive(Default)]
+pub struct BandClickTracker {
+    last: Option<(usize, usize, std::time::Instant)>,
+}
+
+impl BandClickTracker {
+    /// Same window as the story list's launch double-click.
+    pub const WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
+
+    /// Record a click on `(col, idx)`; `true` when it completes a double-click. A completed
+    /// double RESETS the tracker: the submit emptied the prompt, so the next click on that row
+    /// must read as a fresh pick, not a third beat of the same gesture.
+    pub fn observe(&mut self, col: usize, idx: usize, now: std::time::Instant) -> bool {
+        let double = self
+            .last
+            .take()
+            .is_some_and(|(lc, li, lt)| lc == col && li == idx && now.duration_since(lt) < Self::WINDOW);
+        if !double {
+            self.last = Some((col, idx, now));
+        }
+        double
+    }
+}
+
 /// The spelled-out command word for a direction, understood by every engine.
 fn full_direction_word(d: mapper::direction::Direction) -> Option<&'static str> {
     use mapper::direction::Direction::*;
@@ -7633,6 +7661,36 @@ mod tests {
         // Click outside → swallowed
         let a = mouse_to_action(&state, mouse_left_click(0, 0), map, story, room_rects, &dialog);
         assert!(matches!(a, Action::None), "outside filebrowser dialog should be swallowed, got {:?}", a);
+    }
+
+    /// SQ-0690: a second click on the same band row within the window is a double-click (the
+    /// run loop submits the prompt on it); a different row, a slow second click, or the click
+    /// AFTER a completed double are all fresh picks.
+    #[test]
+    fn band_double_click_fires_on_the_same_row_within_the_window_only() {
+        use std::time::{Duration, Instant};
+        let mut t = BandClickTracker::default();
+        let t0 = Instant::now();
+        let fast = Duration::from_millis(100);
+
+        assert!(!t.observe(1, 3, t0), "a first click is a pick");
+        assert!(t.observe(1, 3, t0 + fast), "the same row again, fast: double");
+        assert!(
+            !t.observe(1, 3, t0 + fast * 2),
+            "the click after a completed double is a FRESH pick — the submit emptied the prompt"
+        );
+
+        let mut t = BandClickTracker::default();
+        assert!(!t.observe(1, 3, t0));
+        assert!(!t.observe(1, 4, t0 + fast), "a different row is a pick, not a double");
+        assert!(!t.observe(2, 4, t0 + fast * 2), "a different column too");
+
+        let mut t = BandClickTracker::default();
+        assert!(!t.observe(1, 3, t0));
+        assert!(
+            !t.observe(1, 3, t0 + BandClickTracker::WINDOW),
+            "at/after the window the pair has expired"
+        );
     }
 
     #[test]

@@ -1484,6 +1484,10 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
     // Debounce counter for BackgroundTidy::Debounced mode.
     let mut bg_tidy_counter: u32 = 0;
 
+    // Double-click tracking for the command band's word columns (SQ-0690): a second click on
+    // the same row within the window submits the composed prompt.
+    let mut band_clicks = app::input::BandClickTracker::default();
+
     // Glulx re-arrange debounce (SQ-0201). The Glulx VM starts on a fixed virtual
     // screen; once the real story-pane size is known (and whenever it changes: a
     // terminal resize, a map/sidebar toggle) we report it and deliver a Glk
@@ -2629,6 +2633,19 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     // the word and touching the session is not something
                     // `apply_action` can do.
                     Some(pick @ Action::BandQuickPick(_)) => pick,
+                    // A DOUBLE-click on a word row submits the composed prompt
+                    // (SQ-0690). The pair's first click already picked the word
+                    // onto `state.input` and advanced the column, so the second
+                    // click routes to the shared submit arm exactly like Enter —
+                    // and must NOT pick again, or the word would land twice.
+                    Some(Action::BandClickRow(col, idx)) => {
+                        if band_clicks.observe(col, idx, std::time::Instant::now()) {
+                            Action::SubmitCommand(String::new()) // payload unused: submit takes state.input
+                        } else {
+                            apply_action(Action::BandClickRow(col, idx), &mut state, &mut mapper);
+                            continue 'event_loop;
+                        }
+                    }
                     Some(other) => {
                         apply_action(other, &mut state, &mut mapper);
                         continue 'event_loop;

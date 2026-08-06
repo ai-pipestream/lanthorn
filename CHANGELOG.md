@@ -16,6 +16,10 @@ identifies which beta it is without reading its git hash.
 
 ### Added
 
+- **Double-click submits, in the command band** — a second click on the same
+  word row within the double-click window fires the composed prompt, so the
+  last word of a phrase goes straight into the game: click `open`, double-click
+  `mailbox`. The first click of the pair picks the word as always.
 - **`merge-layer` takes a target** — `merge-layer <name>` folds the active layer
   into any named layer, not just the one it was peeled from (`merge-layer main`).
   This closes a real trap: a room discovered while exploring a maze layer is

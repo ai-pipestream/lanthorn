@@ -197,13 +197,17 @@ know which side you're on).
   its word there, merging with anything you already typed — so nothing ever
   fires a turn by itself except the quick actions below; everything else
   sends the ordinary way, with **Enter** on that line, which NEVER picks a
-  row — it always sends exactly what you typed.
+  row — it always sends exactly what you typed. A **double-click** on a word
+  row is pick-then-fire: the first click appends the word as usual, the
+  second (same row, within the double-click window) submits the composed
+  prompt — so the last word of a phrase can be click-clicked straight into
+  the game.
 
   **Typing always wins.** The band never takes the keyboard for text: letters,
   Backspace and paste go to the story prompt exactly as they do with the band
   closed. What the band DOES claim is column navigation: there is always a
-  **current column** — its header lights up (VERB, which has no header row,
-  underlines its top entry instead) — and **Tab**/**Shift-Tab** step it across
+  **current column** — the dividers flanking it carry the accent — and
+  **Tab**/**Shift-Tab** step it across
   whichever columns are reachable. As you type, the closest match in the
   *current* column highlights (matching a later word of a name too, so `do`
   finds `iron door` once *here*/*carried* is current); **↑**/**↓** highlight a
