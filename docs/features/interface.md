@@ -403,7 +403,9 @@ cover-gallery captions), and `story_info` (`:title`/`:label`/`:value`/`:blurb`/
   order — so there's something to explore before you type a word. Start typing
   a title or author and hit `Enter` to run a real search instead; the browse
   list stays visible while you type and is only replaced once your search
-  returns. babelmap queries IFDB's public search API (in the background — the
+  returns. **Tab**/**Shift-Tab** toggle focus between the `Search:` field and
+  the list — so a half-typed query can be parked while you go back to arrow
+  through the results, and picked up again where you left it. babelmap queries IFDB's public search API (in the background — the
   picker never freezes) and lists the matching games with their author,
   rating, and year. `↑`/`↓` (or `j`/`k`) move, and `Enter` on a game fetches
   its download links and opens a small chooser to pick one — including when

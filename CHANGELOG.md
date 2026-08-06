@@ -20,6 +20,11 @@ identifies which beta it is without reading its git hash.
   word row within the double-click window fires the composed prompt, so the
   last word of a phrase goes straight into the game: click `open`, double-click
   `mailbox`. The first click of the pair picks the word as always.
+- **Tab toggles focus in the IFDB search modal** — `Tab`/`Shift-Tab` hop
+  between the `Search:` field and the results list, keeping the half-typed
+  query and the list selection intact. Typing over the list already dropped
+  you into the query editor; this is the way back that isn't `Enter` (an
+  unwanted search) or `Esc` (leaves the modal / falls down its ladder).
 - **`merge-layer` takes a target** — `merge-layer <name>` folds the active layer
   into any named layer, not just the one it was peeled from (`merge-layer main`).
   This closes a real trap: a room discovered while exploring a maze layer is

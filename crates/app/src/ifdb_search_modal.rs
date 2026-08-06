@@ -262,6 +262,14 @@ impl SearchModal {
     fn input_key(&mut self, code: KeyCode) -> ModalAction {
         match code {
             KeyCode::Esc => ModalAction::Close,
+            // SQ-0691: Tab/Shift-Tab hop to the results list (when there is one) without
+            // running a search, keeping the half-typed query. Typing over the list already
+            // dropped you INTO the query editor; this is the way back out — the only exits
+            // used to be Enter (a search you didn't want yet) or Esc (closes the modal).
+            KeyCode::Tab | KeyCode::BackTab if !self.hits.is_empty() => {
+                self.view = View::Results;
+                ModalAction::None
+            }
             KeyCode::Enter => {
                 let q = self.query.as_str().trim().to_string();
                 if q.is_empty() {
@@ -333,6 +341,12 @@ impl SearchModal {
                 }
                 None => ModalAction::None,
             },
+            // SQ-0691: the mirror of the hop in `input_key` — focus the query field, list
+            // selection and query text both intact.
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.view = View::Input;
+                ModalAction::None
+            }
             // Fallback: open the game's IFDB page in a browser.
             KeyCode::Char('o') => {
                 match self.hits.get(self.hit_scroll.selected).and_then(|h| h.link.clone()) {
@@ -556,15 +570,19 @@ fn render_body(modal: &mut SearchModal, area: Rect, cs: &ColorScheme, buf: &mut 
     // on IFDB" label doubles as the browse-list's own header (reusing the
     // existing meta style — no new selector) and documents the Esc ladder.
     let hint = match modal.view {
+        // SQ-0691: the Tab hint only when there is a list to hop to.
+        View::Input if !modal.hits.is_empty() => {
+            "Type a title or author, Enter to search · Tab focus list."
+        }
         View::Input => "Type a title or author, Enter to search.",
         View::Results if modal.busy() => "Fetching download options…",
         View::Results if modal.showing_seed => {
-            "Popular on IFDB · ↑/↓ move · Enter download · o open page · Esc close"
+            "Popular on IFDB · ↑/↓ move · Enter download · o open page · Tab search · Esc close"
         }
         View::Results if !modal.seed_hits.is_empty() => {
-            "↑/↓ move · Enter download · o open page · Esc back to popular"
+            "↑/↓ move · Enter download · o open page · Tab search · Esc back to popular"
         }
-        View::Results => "↑/↓ move · Enter download · o open page · Esc edit query",
+        View::Results => "↑/↓ move · Enter download · o open page · Tab search · Esc edit query",
         View::Choosing => "↑/↓ move · Enter download this file · Esc back",
     };
     let busy_note = if modal.busy() && modal.view == View::Input { "Searching…" } else { hint };
@@ -883,6 +901,42 @@ mod tests {
     fn esc_from_input_closes() {
         let mut m = SearchModal::new();
         assert_eq!(m.on_key(KeyCode::Esc, &anim()), ModalAction::Close);
+    }
+
+    /// SQ-0691: Tab/Shift-Tab toggle focus between the query field and the results list —
+    /// keeping the query text and the list selection intact in both directions. Typing over
+    /// the list drops into the query editor; before this, the only exits were Enter (an
+    /// unwanted search) or Esc (closes the modal / falls down its ladder).
+    #[test]
+    fn tab_toggles_between_the_query_field_and_the_results_list() {
+        let mut m = SearchModal::new();
+        m.on_key(KeyCode::Char('z'), &anim());
+        m.on_key(KeyCode::Enter, &anim());
+        m.on_event(&SearchEvent::Results(vec![hit("aaa", "Alpha"), hit("bbb", "Beta")]));
+        m.on_key(KeyCode::Down, &anim());
+        assert_eq!(m.selected_hit_title(), Some("Beta"));
+
+        // Typing over the list starts a query edit; Tab hops back to the list…
+        m.on_key(KeyCode::Char('f'), &anim());
+        assert_eq!(m.view, View::Input, "typing focuses the query");
+        m.on_key(KeyCode::Tab, &anim());
+        assert_eq!(m.view, View::Results, "Tab returns to the list");
+        assert_eq!(m.selected_hit_title(), Some("Beta"), "…selection intact");
+
+        // …and Shift-Tab hops to the query field, text intact, no search dispatched.
+        assert_eq!(m.on_key(KeyCode::BackTab, &anim()), ModalAction::None);
+        assert_eq!(m.view, View::Input, "Shift-Tab focuses the query");
+        assert_eq!(m.query.as_str(), "zf", "the half-typed query survives the round trip");
+        assert!(!m.busy(), "no search ran");
+    }
+
+    /// With no results to focus, Tab in the query field goes nowhere — there is no list.
+    #[test]
+    fn tab_with_no_results_stays_in_the_query_field() {
+        let mut m = SearchModal::new();
+        m.on_key(KeyCode::Char('z'), &anim());
+        assert_eq!(m.on_key(KeyCode::Tab, &anim()), ModalAction::None);
+        assert_eq!(m.view, View::Input, "nowhere to go: focus stays put");
     }
 
     #[test]
