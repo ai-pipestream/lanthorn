@@ -278,8 +278,8 @@ The `audio` crate carries two default-on features: `playback` (real output via
 `--no-default-features` for a compile-time no-op backend (headless/CI); with
 `playback` on, a missing audio device degrades to silence rather than erroring.
 
-Cut a release by pushing a version tag (`git tag v0.1.0-beta.3 && git push origin
-v0.1.0-beta.3`) — the release workflow builds every platform and opens a draft
+Cut a release by pushing a version tag (`git tag v0.1.0-beta.4 && git push origin
+v0.1.0-beta.4`) — the release workflow builds every platform and opens a draft
 GitHub Release; a hyphenated suffix marks it a pre-release. The release body is
 assembled from that tag's [`CHANGELOG.md`](CHANGELOG.md) section, so write the
 entry *before* tagging — a tag with no matching section still releases, just
