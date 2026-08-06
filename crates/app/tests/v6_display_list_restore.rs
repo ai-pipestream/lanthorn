@@ -96,7 +96,7 @@ fn round_trip(session: &mut GameSession, tag: &str, with_display: bool) -> app::
 /// fresh source afterwards would silently drop that palette again.
 fn restore_into(fresh: &mut GameSession, ac: &app::archive::ArchiveContents) {
     Engine::restore_state(fresh, &ac.engine_save()).expect("restore");
-    app::session::restore_screen(&mut fresh.machine, ac.screen.clone().expect("screen"));
+    app::session::restore_screen(fresh, ac.screen.clone().expect("screen"));
     match &ac.display {
         Some(d) => fresh.load_display_list(d, &ac.pictures),
         None => fresh.load_pictures_png(&ac.pictures),

@@ -243,7 +243,7 @@ fn the_ring_is_still_placed_after_a_restore_and_a_move() {
 
     let mut fresh = boot().expect("fresh boot");
     app::engine::Engine::restore_state(&mut fresh, &ac.engine_save()).expect("restore");
-    app::session::restore_screen(&mut fresh.machine, ac.screen.clone().expect("screen"));
+    app::session::restore_screen(&mut fresh, ac.screen.clone().expect("screen"));
     fresh.load_pictures_png(&ac.pictures);
     fresh.set_pict_source(Some(picts()));
 

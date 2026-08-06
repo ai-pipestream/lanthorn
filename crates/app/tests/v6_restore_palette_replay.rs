@@ -115,7 +115,7 @@ fn a_restored_canvas_survives_the_next_palette_change() {
 
     let mut fresh = boot().expect("fresh boot");
     Engine::restore_state(&mut fresh, &ac.engine_save()).expect("restore");
-    app::session::restore_screen(&mut fresh.machine, ac.screen.clone().expect("screen"));
+    app::session::restore_screen(&mut fresh, ac.screen.clone().expect("screen"));
     fresh.load_pictures_png(&ac.pictures);
     fresh.set_pict_source(Some(picts()));
     let restored = art_bottom(&fresh);

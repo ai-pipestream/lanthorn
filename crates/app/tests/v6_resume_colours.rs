@@ -124,7 +124,7 @@ fn story_ink_survives_a_save_state_resume() {
     )
     .expect("fresh Zork0 boot");
     Engine::restore_state(&mut fresh, &ac.engine_save()).expect("restore_state");
-    app::session::restore_screen(&mut fresh.machine, persisted);
+    app::session::restore_screen(&mut fresh, persisted);
     fresh.load_pictures_png(&ac.pictures);
     fresh.set_pict_source(Some(fresh_picts()));
 
@@ -215,7 +215,7 @@ fn story_ink_survives_a_resume_without_a_v6_window_table() {
     let mut fresh =
         GameSession::new_with_trace(bytes, true, false, None, false, Vec::new(), None, None, None).expect("fresh boot");
     Engine::restore_state(&mut fresh, &ac.engine_save()).expect("restore_state");
-    app::session::restore_screen(&mut fresh.machine, ac.screen.clone().expect("persisted screen"));
+    app::session::restore_screen(&mut fresh, ac.screen.clone().expect("persisted screen"));
 
     assert_eq!(
         fresh.machine.screen.current_fg, live_fg,
