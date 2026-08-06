@@ -279,6 +279,17 @@ pub enum Action {
     /// `↑` (`-1`) / `↓` (`+1`) while the band is open: move (or start) the
     /// explicit row highlight within the current column (SQ-0677).
     BandRowNav(i32),
+    /// `PageUp` (`-1`) / `PageDown` (`+1`) while the band is open: page the
+    /// explicit row highlight within the current column by ~one viewport
+    /// (SQ-0682) — the band adopts the same PageUp/PageDown the story picker
+    /// and IFDB search modal already have.
+    BandRowPage(i32),
+    /// `Home` while the band is open: jump the explicit row highlight to the
+    /// first item of the current column (SQ-0682).
+    BandRowHome,
+    /// `End` while the band is open: jump the explicit row highlight to the
+    /// last item of the current column (SQ-0682).
+    BandRowEnd,
     /// Pick the row at `(column, index)` directly (mouse click on a row).
     BandClickRow(usize, usize),
     /// `Tab` with a row highlighted in the current column (SQ-0677): pick
@@ -1324,6 +1335,13 @@ fn command_band_intercept(key: KeyEvent, state: &AppState) -> Option<Action> {
     match key.code {
         KeyCode::Up if plain => Some(Action::BandRowNav(-1)),
         KeyCode::Down if plain => Some(Action::BandRowNav(1)),
+        // PageUp/PageDown/Home/End (SQ-0682): the same standard list-nav keys
+        // the story picker and IFDB search modal already bind, now on the
+        // band's current column too.
+        KeyCode::PageUp if plain => Some(Action::BandRowPage(-1)),
+        KeyCode::PageDown if plain => Some(Action::BandRowPage(1)),
+        KeyCode::Home if plain => Some(Action::BandRowHome),
+        KeyCode::End if plain => Some(Action::BandRowEnd),
         KeyCode::Esc => Some(Action::BandEscape),
         KeyCode::BackTab => Some(Action::BandColumnStep(-1)),
         KeyCode::Tab => Some(match band.highlighted_row(&state.input.value) {
@@ -2545,10 +2563,42 @@ fn apply_action_inner(action: Action, state: &mut AppState, mapper: &mut Mapper)
 
         Action::BandRowNav(delta) => {
             // ↑/↓ move (or start) the explicit row highlight within the
-            // current column (SQ-0677).
+            // current column (SQ-0677), scrolling it into view (SQ-0682).
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
             if let Some(b) = &mut state.overlays.command_band {
                 let input = state.input.value.clone();
-                b.step_row(&input, delta);
+                b.step_row(&input, delta, vp, &anim);
+            }
+        }
+
+        Action::BandRowPage(dir) => {
+            // PageUp/PageDown page the current column by ~one viewport
+            // (SQ-0682), the same standard the story picker and IFDB search
+            // modal already page their own lists with.
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(b) = &mut state.overlays.command_band {
+                let input = state.input.value.clone();
+                b.page_row(&input, dir, vp, &anim);
+            }
+        }
+
+        Action::BandRowHome => {
+            // Home jumps the current column's row highlight to the top (SQ-0682).
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(b) = &mut state.overlays.command_band {
+                b.home_row(vp, &anim);
+            }
+        }
+
+        Action::BandRowEnd => {
+            // End jumps the current column's row highlight to the bottom (SQ-0682).
+            let vp = state.modal_list_viewport;
+            let anim = state.config.animation.clone();
+            if let Some(b) = &mut state.overlays.command_band {
+                b.end_row(vp, &anim);
             }
         }
 
@@ -6680,6 +6730,145 @@ mod tests {
         apply_action(Action::BandRowNav(-1), &mut s, &mut mapper);
         apply_action(Action::BandRowNav(-1), &mut s, &mut mapper);
         assert_eq!(band(&s).row_sel, Some(0), "clamped at the top, not wrapped");
+    }
+
+    /// SQ-0682 (reported bug): stepping the row highlight past the visible
+    /// window with `↑`/`↓` must scroll it into view — before this fix,
+    /// `step_row` moved `row_sel` but never touched `scroll[focus]`, so the
+    /// highlight walked off the bottom of the column while the drawn window
+    /// (which windows off `scroll[col].display_offset()`, see
+    /// `render::command_band::draw_column`) stayed put. Falsifies: reverting
+    /// `step_row`'s `self.scroll[self.focus].select(...)` call reproduces the
+    /// original symptom — `target_offset()` stays `0` while `row_sel` walks
+    /// past the 3-row window.
+    #[test]
+    fn up_down_scrolls_the_selection_into_view() {
+        use crate::render::command_band::COL_HERE;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        s.modal_list_viewport = 3; // narrow enough that 5 items don't all fit
+        open_band(&mut s);
+        {
+            let b = s.overlays.command_band.as_mut().unwrap();
+            b.here = vec!["a".into(), "b".into(), "c".into(), "d".into(), "e".into()];
+            b.focus = COL_HERE;
+        }
+        assert_eq!(band(&s).scroll[COL_HERE].target_offset(), 0, "sanity: window starts at the top");
+
+        // Walk down past the 3-row window (first press only arms row 0 —
+        // SQ-0677 — so 5 presses reach row 4, the last item).
+        for _ in 0..5 {
+            apply_action(Action::BandRowNav(1), &mut s, &mut mapper);
+        }
+        assert_eq!(band(&s).row_sel, Some(4), "sanity: stepped to the last item");
+        let offset = band(&s).scroll[COL_HERE].target_offset();
+        assert!(
+            offset <= 4 && 4 < offset + 3,
+            "row 4 must be inside the [offset, offset+3) window, got offset {offset}"
+        );
+        assert!(offset > 0, "the window must have scrolled down from the top");
+
+        // And back up to the top scrolls the window back with it.
+        for _ in 0..5 {
+            apply_action(Action::BandRowNav(-1), &mut s, &mut mapper);
+        }
+        assert_eq!(band(&s).row_sel, Some(0));
+        assert_eq!(band(&s).scroll[COL_HERE].target_offset(), 0, "scrolled back to the top");
+    }
+
+    /// SQ-0682: PageUp/PageDown are new on the band (it previously had none
+    /// at all) — pages the current column's row highlight by ~one viewport,
+    /// same as `ListScroll::page` (the story picker and IFDB modal's own
+    /// mechanism).
+    #[test]
+    fn page_up_down_page_the_focused_column() {
+        use crate::render::command_band::COL_HERE;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        s.modal_list_viewport = 3;
+        open_band(&mut s);
+        {
+            let b = s.overlays.command_band.as_mut().unwrap();
+            b.here = (0..20).map(|i| format!("item{i}")).collect();
+            b.focus = COL_HERE;
+        }
+
+        assert_eq!(
+            key_to_action(&s, key(KeyCode::PageDown)),
+            Action::BandRowPage(1),
+            "PageDown must reach the band"
+        );
+        apply_action(Action::BandRowPage(1), &mut s, &mut mapper);
+        let after_one_page = band(&s).row_sel.expect("armed by the page");
+        assert!(after_one_page >= 1, "PageDown must advance roughly a viewport");
+        let offset = band(&s).scroll[COL_HERE].target_offset();
+        assert!(
+            offset <= after_one_page && after_one_page < offset + 3,
+            "the paged-to row must be inside the window"
+        );
+
+        assert_eq!(key_to_action(&s, key(KeyCode::PageUp)), Action::BandRowPage(-1));
+        apply_action(Action::BandRowPage(-1), &mut s, &mut mapper);
+        assert!(band(&s).row_sel.unwrap() < after_one_page, "PageUp must retreat");
+    }
+
+    /// SQ-0682: Home/End are new on the band — jump the current column's row
+    /// highlight to the first/last item, scrolling the window with it.
+    #[test]
+    fn home_end_jump_the_focused_column() {
+        use crate::render::command_band::COL_HERE;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        s.modal_list_viewport = 3;
+        open_band(&mut s);
+        {
+            let b = s.overlays.command_band.as_mut().unwrap();
+            b.here = (0..20).map(|i| format!("item{i}")).collect();
+            b.focus = COL_HERE;
+        }
+
+        assert_eq!(key_to_action(&s, key(KeyCode::End)), Action::BandRowEnd);
+        apply_action(Action::BandRowEnd, &mut s, &mut mapper);
+        assert_eq!(band(&s).row_sel, Some(19), "End jumps to the last item");
+        let offset = band(&s).scroll[COL_HERE].target_offset();
+        assert!(offset <= 19 && 19 < offset + 3, "the last row must be inside the window");
+
+        assert_eq!(key_to_action(&s, key(KeyCode::Home)), Action::BandRowHome);
+        apply_action(Action::BandRowHome, &mut s, &mut mapper);
+        assert_eq!(band(&s).row_sel, Some(0), "Home jumps back to the first item");
+        assert_eq!(band(&s).scroll[COL_HERE].target_offset(), 0, "…and the window follows to the top");
+    }
+
+    /// SQ-0682: the passive typed nearest-match highlight must scroll into
+    /// view too, not just an explicit `↑`/`↓` selection — `band_react_to_input`
+    /// already drove this before the fix (it's what this test pins), so it is
+    /// the one surface the fix must NOT regress.
+    #[test]
+    fn nearest_match_scrolls_into_view_when_typed() {
+        use crate::render::command_band::COL_VERB;
+        let mut s = AppState::default();
+        let mut mapper = Mapper::default();
+        s.modal_list_viewport = 3;
+        open_band(&mut s);
+        // `default_verbs()` is long; find a verb past a 3-row window from the
+        // top and type a PARTIAL prefix of it — a complete word with no
+        // trailing space is a chosen verb to `parse_phrase` (see its doc),
+        // which would advance focus off VERB before `nearest_match` ever ran.
+        let verbs = band(&s).items(COL_VERB);
+        let (idx, word) = verbs
+            .iter()
+            .enumerate()
+            .find(|(i, _)| *i >= 5)
+            .map(|(i, w)| (i, w.clone()))
+            .expect("default verb table has more than 5 entries");
+        let prefix = &word[..word.len() - 1];
+        type_text(&mut s, &mut mapper, prefix);
+        assert_eq!(band(&s).nearest_match(&s.input.value), Some((COL_VERB, idx)));
+        let offset = band(&s).scroll[COL_VERB].target_offset();
+        assert!(
+            offset <= idx && idx < offset + 3,
+            "the typed nearest match at row {idx} must be inside the window, got offset {offset}"
+        );
     }
 
     /// Typing DISARMS the explicit row highlight (SQ-0677's "the last gesture

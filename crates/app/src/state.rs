@@ -167,6 +167,7 @@ pub struct DragState {
 use crate::render::command_band::{
     Arity, VerbEntry, BAND_COLS, COL_CARRIED, COL_HERE, COL_SECOND, COL_VERB,
 };
+use crossterm::event::KeyCode;
 
 /// Which grammatical slot a picked token fills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -612,17 +613,82 @@ impl CommandBandState {
     /// The FIRST press starts the highlight — at the typed nearest match if
     /// there is one, else row 0 — WITHOUT moving further, mirroring the old
     /// quick-row "arm on the first press" rule, now applied to columns.
-    pub fn step_row(&mut self, input: &str, delta: i32) {
+    ///
+    /// Keeps `scroll[focus]`'s viewport following the highlight (SQ-0682):
+    /// every new `row_sel` is fed straight into [`ListScroll::select`] — the
+    /// same primitive the story picker and the IFDB search modal drive their
+    /// own lists with — so a selection that steps past the visible window
+    /// scrolls into view instead of walking off it. The arm-on-first-press
+    /// clamp math itself stays bespoke to the band (neither of the other two
+    /// consumers has a "first press only arms" rule), which is why this
+    /// isn't just a call to `list_scroll::nav_key`.
+    pub fn step_row(&mut self, input: &str, delta: i32, viewport: usize, anim: &crate::config::AnimationConfig) {
         let len = self.items(self.focus).len();
         if len == 0 {
             return;
         }
-        let Some(cur) = self.row_sel else {
-            self.row_sel = Some(self.nearest_match(input).map(|(_, idx)| idx).unwrap_or(0));
-            return;
+        let idx = match self.row_sel {
+            None => self.nearest_match(input).map(|(_, idx)| idx).unwrap_or(0),
+            Some(cur) => (cur as i32 + delta).clamp(0, len as i32 - 1) as usize,
         };
-        let next = (cur as i32 + delta).clamp(0, len as i32 - 1) as usize;
-        self.row_sel = Some(next);
+        self.row_sel = Some(idx);
+        self.scroll[self.focus].len(len);
+        self.scroll[self.focus].select(idx, viewport, anim);
+    }
+
+    /// Seed `scroll[focus]`'s selection from whatever is currently
+    /// highlighted — the explicit `row_sel` if there is one, else the typed
+    /// nearest match, else row 0 — before a page/home/end jump. Without this,
+    /// paging would start from wherever `scroll[focus]` last happened to
+    /// land (e.g. a mouse-wheel pan, which deliberately does NOT move
+    /// `row_sel` — see `Action::BandWheel`'s doc), rather than from the row
+    /// actually wearing the `▸` marker.
+    fn seed_scroll_selection(&mut self, input: &str) {
+        let idx = self
+            .row_sel
+            .or_else(|| self.nearest_match(input).map(|(_, idx)| idx))
+            .unwrap_or(0);
+        self.scroll[self.focus].selected = idx;
+    }
+
+    /// Page the explicit row highlight within `focus` by ~one viewport
+    /// (`dir > 0` = PageDown), scrolling it into view. Routes through the
+    /// same shared [`crate::list_scroll::nav_key`] the story picker and IFDB
+    /// modal page with (SQ-0682) — the band adopts standard PageUp/PageDown
+    /// here, where it previously had none at all.
+    pub fn page_row(&mut self, input: &str, dir: i32, viewport: usize, anim: &crate::config::AnimationConfig) {
+        let len = self.items(self.focus).len();
+        if len == 0 {
+            return;
+        }
+        self.seed_scroll_selection(input);
+        let code = if dir > 0 { KeyCode::PageDown } else { KeyCode::PageUp };
+        crate::list_scroll::nav_key(&mut self.scroll[self.focus], code, len, viewport, anim);
+        self.row_sel = Some(self.scroll[self.focus].selected);
+    }
+
+    /// Jump the explicit row highlight within `focus` to the first item
+    /// (SQ-0682) — the band adopts standard Home, same as the other two
+    /// `list_scroll::nav_key` consumers.
+    pub fn home_row(&mut self, viewport: usize, anim: &crate::config::AnimationConfig) {
+        let len = self.items(self.focus).len();
+        if len == 0 {
+            return;
+        }
+        crate::list_scroll::nav_key(&mut self.scroll[self.focus], KeyCode::Home, len, viewport, anim);
+        self.row_sel = Some(0);
+    }
+
+    /// Jump the explicit row highlight within `focus` to the last item
+    /// (SQ-0682) — the band adopts standard End, same as the other two
+    /// `list_scroll::nav_key` consumers.
+    pub fn end_row(&mut self, viewport: usize, anim: &crate::config::AnimationConfig) {
+        let len = self.items(self.focus).len();
+        if len == 0 {
+            return;
+        }
+        crate::list_scroll::nav_key(&mut self.scroll[self.focus], KeyCode::End, len, viewport, anim);
+        self.row_sel = Some(len - 1);
     }
 
     /// Move focus to the next reachable UNFILLED column, or — when there is

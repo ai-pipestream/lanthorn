@@ -6,6 +6,8 @@
 //!
 //! [`ScrollAnim`]: crate::state::ScrollAnim
 
+use crossterm::event::KeyCode;
+
 use crate::config::AnimationConfig;
 use crate::state::ScrollAnim;
 
@@ -144,6 +146,36 @@ impl ListScroll {
     }
 }
 
+/// Apply a standard list-navigation key — arrows, `j`/`k`, `PageUp`/
+/// `PageDown`, `Home`/`End` — to `scroll`, re-recording `total` first (the
+/// list a key lands on may have been replaced wholesale since the last
+/// keystroke, e.g. a fresh search's results). Returns whether `code` was a
+/// nav key at all, so a caller with other bindings on the same keys (a
+/// type-to-search fallback, gallery grid movement) can tell a handled key
+/// from one it must still dispatch itself.
+///
+/// THE shared navigation mechanism (SQ-0682): the story picker's list view,
+/// the IFDB search modal's hit/option lists, and the command band's per-
+/// column `PageUp`/`PageDown`/`Home`/`End` all route through this one
+/// function rather than each hand-rolling the same six-key dispatch. (The
+/// band's `Up`/`Down` stay bespoke — a first press only arms the highlight
+/// without moving, a deliberate quirk this plain step-by-one dispatch
+/// doesn't have — but still finish by driving [`ListScroll::select`], the
+/// same primitive this function uses, so the viewport follows there too.)
+pub fn nav_key(scroll: &mut ListScroll, code: KeyCode, total: usize, viewport: usize, anim: &AnimationConfig) -> bool {
+    scroll.len(total);
+    match code {
+        KeyCode::Up | KeyCode::Char('k') => scroll.move_by(-1, viewport, anim),
+        KeyCode::Down | KeyCode::Char('j') => scroll.move_by(1, viewport, anim),
+        KeyCode::PageUp => scroll.page(-1, viewport, anim),
+        KeyCode::PageDown => scroll.page(1, viewport, anim),
+        KeyCode::Home => scroll.home(viewport, anim),
+        KeyCode::End => scroll.end(total, viewport, anim),
+        _ => return false,
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +251,54 @@ mod tests {
         l.move_by(40, 10, &anim_off());
         assert_eq!(l.display_offset(), l.target_offset(), "no easing when disabled");
         assert!(!l.has_active_animation());
+    }
+
+    // ── `nav_key` (SQ-0682): the shared dispatch every keyboard-driven list
+    // surface routes through — the story picker's list view, the IFDB search
+    // modal's hit/option lists, and the command band's PageUp/PageDown/Home/
+    // End. ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn nav_key_dispatches_every_bound_key_and_reports_unbound_ones() {
+        let mut l = ListScroll::new();
+        l.len(20);
+
+        assert!(nav_key(&mut l, KeyCode::Down, 20, 5, &anim_off()));
+        assert_eq!(l.selected, 1, "Down moves by one");
+        assert!(nav_key(&mut l, KeyCode::Char('j'), 20, 5, &anim_off()));
+        assert_eq!(l.selected, 2, "`j` is a Down alias");
+        assert!(nav_key(&mut l, KeyCode::Up, 20, 5, &anim_off()));
+        assert_eq!(l.selected, 1, "Up moves back by one");
+        assert!(nav_key(&mut l, KeyCode::Char('k'), 20, 5, &anim_off()));
+        assert_eq!(l.selected, 0, "`k` is an Up alias");
+
+        assert!(nav_key(&mut l, KeyCode::PageDown, 20, 5, &anim_off()));
+        assert!(l.selected >= 4, "PageDown pages ~a viewport");
+        assert!(nav_key(&mut l, KeyCode::PageUp, 20, 5, &anim_off()));
+        assert!(l.selected < 4, "PageUp pages back");
+
+        assert!(nav_key(&mut l, KeyCode::End, 20, 5, &anim_off()));
+        assert_eq!(l.selected, 19, "End jumps to the last item");
+        assert!(nav_key(&mut l, KeyCode::Home, 20, 5, &anim_off()));
+        assert_eq!(l.selected, 0, "Home jumps to the first item");
+
+        assert!(!nav_key(&mut l, KeyCode::Char('x'), 20, 5, &anim_off()), "an unbound key reports false");
+        assert!(!nav_key(&mut l, KeyCode::Left, 20, 5, &anim_off()), "…and leaves the selection untouched");
+        assert_eq!(l.selected, 0);
+    }
+
+    #[test]
+    fn nav_key_re_records_total_so_a_replaced_list_reclamps() {
+        // Mirrors the IFDB modal's own note: a fresh search reply replaces
+        // the list wholesale, and a scroll still clamping against the
+        // previous (longer) list would let the selection run off the end of
+        // the new, shorter one.
+        let mut l = ListScroll::new();
+        l.len(50);
+        l.select(45, 5, &anim_off());
+        assert_eq!(l.selected, 45);
+
+        nav_key(&mut l, KeyCode::Down, 10, 5, &anim_off());
+        assert_eq!(l.selected, 9, "clamped into the new, shorter list before moving");
     }
 }

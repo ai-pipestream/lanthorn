@@ -1071,12 +1071,18 @@ pub(crate) fn run_story_picker(
                             panel_scroll = 0;
                             list.select(gm(list.selected, 1, 0), viewport, anim);
                         }
+                        // Non-gallery (list view) movement is the shared
+                        // `list_scroll::nav_key` (SQ-0682) — the same
+                        // mechanism the IFDB search modal's lists and the
+                        // command band's columns navigate with. The gallery
+                        // grid stays bespoke: it's a 2D cursor, not a plain
+                        // list index.
                         Up | Char('k') => {
                             panel_scroll = 0;
                             if gallery {
                                 list.select(gm(list.selected, 0, -1), viewport, anim);
                             } else {
-                                list.move_by(-1, viewport, anim);
+                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
                             }
                         }
                         Down | Char('j') => {
@@ -1084,7 +1090,7 @@ pub(crate) fn run_story_picker(
                             if gallery {
                                 list.select(gm(list.selected, 0, 1), viewport, anim);
                             } else {
-                                list.move_by(1, viewport, anim);
+                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
                             }
                         }
                         PageUp => {
@@ -1092,7 +1098,7 @@ pub(crate) fn run_story_picker(
                             if gallery {
                                 list.select(gm(list.selected, 0, -(gallery_vis as isize)), viewport, anim);
                             } else {
-                                list.page(-1, viewport, anim);
+                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
                             }
                         }
                         PageDown => {
@@ -1100,7 +1106,7 @@ pub(crate) fn run_story_picker(
                             if gallery {
                                 list.select(gm(list.selected, 0, gallery_vis as isize), viewport, anim);
                             } else {
-                                list.page(1, viewport, anim);
+                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
                             }
                         }
                         Home => {
@@ -1108,7 +1114,7 @@ pub(crate) fn run_story_picker(
                             if gallery {
                                 list.select(0, viewport, anim);
                             } else {
-                                list.home(viewport, anim);
+                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
                             }
                         }
                         End => {
@@ -1116,7 +1122,7 @@ pub(crate) fn run_story_picker(
                             if gallery {
                                 list.select(stories.len().saturating_sub(1), viewport, anim);
                             } else {
-                                list.end(stories.len(), viewport, anim);
+                                app::list_scroll::nav_key(&mut list, k.code, stories.len(), viewport, anim);
                             }
                         }
                         // `.get`, not indexing (SQ-0659): Enter on an empty

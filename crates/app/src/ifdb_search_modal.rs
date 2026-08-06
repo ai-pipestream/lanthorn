@@ -251,29 +251,12 @@ impl SearchModal {
 
     /// Apply a list-navigation key to `scroll`, or report that it wasn't one.
     /// Shared by both list views so they navigate identically — and identically
-    /// to the story picker, which drives the same [`ListScroll`] methods.
-    ///
-    /// Re-records `total` on every keystroke: the lists are replaced wholesale
-    /// when a reply lands, and a scroll still clamping against the previous
-    /// list's length would let the selection run off the end of the new one.
-    fn nav_key(
-        scroll: &mut ListScroll,
-        code: KeyCode,
-        total: usize,
-        rows: usize,
-        anim: &AnimationConfig,
-    ) -> bool {
-        scroll.len(total);
-        match code {
-            KeyCode::Up | KeyCode::Char('k') => scroll.move_by(-1, rows, anim),
-            KeyCode::Down | KeyCode::Char('j') => scroll.move_by(1, rows, anim),
-            KeyCode::PageUp => scroll.page(-1, rows, anim),
-            KeyCode::PageDown => scroll.page(1, rows, anim),
-            KeyCode::Home => scroll.home(rows, anim),
-            KeyCode::End => scroll.end(total, rows, anim),
-            _ => return false,
-        }
-        true
+    /// to the story picker's list view and the command band's `PageUp`/
+    /// `PageDown`/`Home`/`End`, which all drive the same [`list_scroll::nav_key`]
+    /// (SQ-0682: promoted here from a private helper local to this modal so it
+    /// really is one mechanism, not three near-identical copies).
+    fn nav_key(scroll: &mut ListScroll, code: KeyCode, total: usize, rows: usize, anim: &AnimationConfig) -> bool {
+        crate::list_scroll::nav_key(scroll, code, total, rows, anim)
     }
 
     fn input_key(&mut self, code: KeyCode) -> ModalAction {
