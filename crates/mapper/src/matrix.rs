@@ -10,7 +10,7 @@
 //! Everything here is derived; nothing is stored. Row order, numbering and tags are all functions
 //! of the graph, so they survive a save/load round-trip without a single new persisted field.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use crate::direction::{opposite, Direction};
 use crate::graph::{MapGraph, RoomId};
@@ -333,8 +333,13 @@ pub fn build(graph: &MapGraph, layer: LayerId) -> Matrix {
 
 // ── Tangle detection ──────────────────────────────────────────────────────────
 
-/// A connected cluster of rooms whose passages mostly do NOT come back the way they went — the
-/// shape of a maze (SQ-0666).
+/// A cluster of rooms whose passages mostly do NOT come back the way they went — the shape of a
+/// maze (SQ-0666).
+///
+/// `rooms` is the MAZE, not the connected component it sits in (SQ-0683): a maze embedded in
+/// ordinary geography — Zork's maze hanging off the Troll Room, on the same layer as the Cellar
+/// and the Gallery — is one component with the tidy rooms, and averaging the two together buries
+/// the maze. See [`tangles_with`] for how the cluster is grown.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tangle {
     pub layer: LayerId,
@@ -358,21 +363,36 @@ impl Tangle {
 /// The share of KNOWN round trips that must disagree with the compass before a cluster is called a
 /// tangle.
 ///
-/// Measured against the reference map (a real, partial mapping of Colossal Cave): the all-alike
-/// maze scores 0.90 (18 of 20 round trips return by another direction) and the ordinary cave
-/// overworld beside it scores 0.56. 0.75 sits with clear air on both sides.
+/// Calibrated on two real, partial player maps, and every number below was measured from the
+/// fixtures rather than argued: `unit_tests/advent_maze_map.json` (Colossal Cave, maze hand-peeled
+/// onto its own layer) and `unit_tests/zork1_maze_map.json` (Zork I, maze still sharing the Cellar
+/// layer with ordinary geography — the case SQ-0683 fixed).
+///
+/// | dataset / layer | cluster | rooms | round trips | asymmetry |
+/// |---|---|---:|---:|---:|
+/// | Advent, maze layer | the maze | 6 | 12 | 1.00 |
+/// | Advent, overworld | biggest | 3 | 5 | 0.60 |
+/// | Zork I, Cellar layer | the maze | 7 | 12 | 0.83 |
+/// | Zork I, Main layer | biggest (the house ring) | 4 | 8 | 1.00 |
+///
+/// 0.75 has clear air under both mazes. The house ring is the instructive miss: circling a Zork
+/// house really is all-asymmetric geography (north from West of House arrives North of House, and
+/// the way back is west), so asymmetry alone cannot disqualify it — [`TANGLE_MIN_ROOMS`] is what
+/// holds it off, at 4 rooms against a bar of 6.
 ///
 /// Note the denominator. "Non-reciprocal share over ALL edges" — the obvious reading — does not
-/// separate the two at all: it is 0.96 for the maze and 0.82 for the overworld, because a passage
-/// nobody has walked BACK through yet says nothing about geometry, only about how far exploration
-/// has got. Only passages walked both ways are evidence.
+/// separate maze from overworld at all: it is 0.96 for the Advent maze and 0.82 for the overworld,
+/// because a passage nobody has walked BACK through yet says nothing about geometry, only about how
+/// far exploration has got. Only passages walked both ways are evidence.
 pub const TANGLE_ASYMMETRY: f32 = 0.75;
 
 /// A cluster smaller than this is not worth offering to peel — two rooms that disagree are a
-/// quirk, not a maze.
+/// quirk, not a maze. Also the only bar that stops a small ring of ordinary rooms whose returns
+/// all disagree with the compass (see [`TANGLE_ASYMMETRY`]'s table).
 pub const TANGLE_MIN_ROOMS: usize = 6;
 
 /// Below this many known round trips the ratio is noise: three out of three proves nothing.
+/// Counted per END, so a passage walked both ways contributes 2 — eight is four round trips.
 pub const TANGLE_MIN_RETURNS: usize = 8;
 
 /// Clusters within `layer` that look like mazes, using the shipped thresholds.
@@ -381,6 +401,28 @@ pub fn tangles(graph: &MapGraph, layer: LayerId) -> Vec<Tangle> {
 }
 
 /// [`tangles`] with the thresholds spelled out — the form the tests pin.
+///
+/// Clusters are grown through EVIDENCE, not through adjacency (SQ-0683). Two rooms join a cluster
+/// when a walked round trip between them disagreed with the compass — go west, come back north.
+/// Growing by plain adjacency instead makes the whole connected component the unit, and a maze
+/// hanging off ordinary geography then dilutes into it and can never fire: the user's Zork I
+/// Cellar layer is one 12-room component scoring 0.45, while the 7 maze rooms inside it score
+/// 0.83. Only a layer whose maze has already been peeled onto a layer of its own — the Advent
+/// fixture — ever fired under component clustering, which is exactly the case that needs no offer.
+///
+/// A cluster then ABSORBS any room whose every in-layer passage leads into it: a dead end reachable
+/// only from the maze is part of the maze, however tidily its one passage reciprocates (Zork I's
+/// second Dead End). Absorption cannot reach past the tangle into a tidy region, because a room
+/// with one foot outside keeps its whole region out — and if it ever did, the ratio would tell on
+/// it, since the stats below are measured over the FINAL room set.
+///
+/// Stats count every round trip among cluster members, reciprocal ones included: the denominator
+/// is what keeps the ratio honest, and a maze that turns out to be half-reciprocal should stop
+/// looking like a maze. A passage walked one way only is no evidence either way and counts in
+/// neither column. Both ends of a walked passage count, so a round trip contributes 2.
+///
+/// Clusters are disjoint (seeds are disjoint, and an absorbed room's neighbours all lie in one
+/// seed's cluster) and returned in ascending order of their lowest room id.
 pub fn tangles_with(
     graph: &MapGraph,
     layer: LayerId,
@@ -391,32 +433,45 @@ pub fn tangles_with(
     let ids = graph.rooms_in_layer(layer);
     let in_layer: BTreeSet<RoomId> = ids.iter().copied().collect();
 
-    // Connected clusters over in-layer passages, treated as undirected. Self-loops and Unknown
-    // edges connect nothing.
-    let mut adjacency: BTreeMap<RoomId, Vec<RoomId>> = ids.iter().map(|&i| (i, Vec::new())).collect();
-    for c in graph.connections() {
-        if c.is_self_loop()
-            || c.dir == Direction::Unknown
-            || !in_layer.contains(&c.origin)
-            || !in_layer.contains(&c.dest)
-        {
+    // In-layer passages only. Self-loops and Unknown edges say nothing about geometry.
+    let edges: Vec<(RoomId, Direction, RoomId)> = graph
+        .connections()
+        .iter()
+        .filter(|c| {
+            !c.is_self_loop()
+                && c.dir != Direction::Unknown
+                && in_layer.contains(&c.origin)
+                && in_layer.contains(&c.dest)
+        })
+        .map(|c| (c.origin, c.dir, c.dest))
+        .collect();
+    let directed: HashSet<(RoomId, Direction, RoomId)> = edges.iter().copied().collect();
+    // Ordered pairs with a passage: `walked.contains(&(b, a))` is "the way back is known".
+    let walked: HashSet<(RoomId, RoomId)> = edges.iter().map(|&(o, _, d)| (o, d)).collect();
+
+    let mut neighbours: BTreeMap<RoomId, BTreeSet<RoomId>> = BTreeMap::new();
+    // Seed links: the round trip was walked AND came back by some other direction.
+    let mut seeded: BTreeMap<RoomId, BTreeSet<RoomId>> = BTreeMap::new();
+    for &(origin, dir, dest) in &edges {
+        neighbours.entry(origin).or_default().insert(dest);
+        neighbours.entry(dest).or_default().insert(origin);
+        if !walked.contains(&(dest, origin)) || directed.contains(&(dest, opposite(dir), origin)) {
             continue;
         }
-        adjacency.entry(c.origin).or_default().push(c.dest);
-        adjacency.entry(c.dest).or_default().push(c.origin);
+        seeded.entry(origin).or_default().insert(dest);
+        seeded.entry(dest).or_default().insert(origin);
     }
 
     let mut seen: BTreeSet<RoomId> = BTreeSet::new();
     let mut out = Vec::new();
     for &start in &ids {
-        if !seen.insert(start) {
+        if !seeded.contains_key(&start) || !seen.insert(start) {
             continue;
         }
-        let mut cluster = BTreeSet::new();
-        cluster.insert(start);
+        let mut cluster = BTreeSet::from([start]);
         let mut q = VecDeque::from([start]);
         while let Some(cur) = q.pop_front() {
-            for &next in adjacency.get(&cur).map(Vec::as_slice).unwrap_or(&[]) {
+            for &next in seeded.get(&cur).into_iter().flatten() {
                 if seen.insert(next) {
                     cluster.insert(next);
                     q.push_back(next);
@@ -424,29 +479,33 @@ pub fn tangles_with(
             }
         }
 
+        // Absorb the rooms that hang off it, to a fixed point (a dead end behind a dead end).
+        loop {
+            let pendants: Vec<RoomId> = ids
+                .iter()
+                .copied()
+                .filter(|id| !cluster.contains(id))
+                .filter(|id| {
+                    neighbours.get(id).is_some_and(|n| !n.is_empty() && n.is_subset(&cluster))
+                })
+                .collect();
+            if pendants.is_empty() {
+                break;
+            }
+            cluster.extend(pendants);
+        }
+
         let mut known_returns = 0usize;
         let mut asymmetric = 0usize;
-        for c in graph.connections() {
-            if c.is_self_loop()
-                || c.dir == Direction::Unknown
-                || !cluster.contains(&c.origin)
-                || !cluster.contains(&c.dest)
-            {
+        for &(origin, dir, dest) in &edges {
+            if !cluster.contains(&origin) || !cluster.contains(&dest) {
                 continue;
             }
-            let returns = graph
-                .connections()
-                .iter()
-                .any(|b| b.origin == c.dest && b.dest == c.origin && b.dir != Direction::Unknown);
-            if !returns {
+            if !walked.contains(&(dest, origin)) {
                 continue; // no round trip walked yet — no evidence either way
             }
             known_returns += 1;
-            let inverse = graph
-                .connections()
-                .iter()
-                .any(|b| b.origin == c.dest && b.dir == opposite(c.dir) && b.dest == c.origin);
-            if !inverse {
+            if !directed.contains(&(dest, opposite(dir), origin)) {
                 asymmetric += 1;
             }
         }
@@ -626,17 +685,60 @@ mod tests {
         g
     }
 
+    /// A tidy region of `n` rooms in a chain, ids from `first`, every passage reciprocal.
+    fn tidy(g: &mut MapGraph, first: u16, n: u16) {
+        for i in first..first + n {
+            g.upsert_room(i, format!("Tidy{i}"));
+        }
+        for i in first..first + n - 1 {
+            g.add_edge(i, Direction::E, i + 1);
+            g.add_edge(i + 1, Direction::W, i);
+        }
+    }
+
+    /// Round trips among `rooms` and how many disagreed with the compass, computed independently
+    /// of [`tangles_with`] so a test can ask what a room set WOULD have scored.
+    fn stats(g: &MapGraph, rooms: &[RoomId]) -> (usize, usize) {
+        let (mut known, mut asym) = (0, 0);
+        for c in g.connections() {
+            if c.is_self_loop() || !rooms.contains(&c.origin) || !rooms.contains(&c.dest) {
+                continue;
+            }
+            if !g.connections().iter().any(|b| b.origin == c.dest && b.dest == c.origin) {
+                continue;
+            }
+            known += 1;
+            if !g
+                .connections()
+                .iter()
+                .any(|b| b.origin == c.dest && b.dir == opposite(c.dir) && b.dest == c.origin)
+            {
+                asym += 1;
+            }
+        }
+        (known, asym)
+    }
+
     #[test]
     fn a_tangle_needs_a_high_asymmetry_a_real_size_and_a_real_sample() {
         // 10 rooms, 9 of 10 round trips disagree with the compass → 0.9 ≥ 0.75.
         let g = ring(10, 9);
         let t = tangles(&g, MAIN_LAYER);
         assert_eq!(t.len(), 1, "the ring is one cluster and it is a tangle: {t:?}");
+        assert_eq!(t[0].rooms.len(), 10);
         assert_eq!(t[0].known_returns, 20, "each passage is counted from both ends");
         assert!(t[0].asymmetry() > 0.75);
 
-        // Same size, mostly reciprocal → not a tangle.
+        // Mostly reciprocal: the asymmetric evidence chains four rooms and stops there.
         assert!(tangles(&ring(10, 3), MAIN_LAYER).is_empty(), "0.3 asymmetry is an ordinary map");
+        assert_eq!(
+            tangles_with(&ring(10, 3), MAIN_LAYER, 0.0, 2, 0)
+                .iter()
+                .map(|t| t.rooms.len())
+                .collect::<Vec<_>>(),
+            vec![4],
+            "and the cluster it does form is nowhere near maze size"
+        );
 
         // Wholly asymmetric but too small to be worth peeling.
         assert!(tangles(&ring(4, 4), MAIN_LAYER).is_empty(), "4 rooms is a quirk, not a maze");
@@ -656,30 +758,90 @@ mod tests {
         );
     }
 
-    /// The threshold must sit between the two real numbers it was calibrated on, or it is just a
-    /// number: 0.90 for the reference maze, 0.56 for the ordinary cave layer beside it.
+    /// The seed links say where the cluster REACHES; the ratio is still judged over every round
+    /// trip inside it. A cluster strung together by asymmetric passages but shot through with
+    /// reciprocal ones is ordinary geography with a few oddities, and must not fire.
     #[test]
-    fn the_threshold_separates_the_two_real_layers_it_was_calibrated_on() {
-        // Measured off `unit_tests/advent_maze_map.json`; see `TANGLE_ASYMMETRY`'s doc and
-        // `tests/advent_maze.rs`, which recomputes both from the file itself.
-        let (reference_maze, reference_overworld) = (0.90f32, 0.56f32);
-        assert!(TANGLE_ASYMMETRY < reference_maze, "the reference maze must clear it");
-        assert!(TANGLE_ASYMMETRY > reference_overworld, "the reference overworld must not");
+    fn reciprocal_round_trips_inside_a_cluster_still_count_against_it() {
+        let mut g = ring(10, 9);
+        for i in 1u16..=5 {
+            // Extra passages between rooms already in the cluster, all agreeing with the compass.
+            g.add_edge(i, Direction::Up, i + 5);
+            g.add_edge(i + 5, Direction::Down, i);
+        }
+        let all = tangles_with(&g, MAIN_LAYER, 0.0, 2, 0);
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].rooms.len(), all[0].known_returns, all[0].asymmetric), (10, 30, 18));
+        assert!(all[0].asymmetry() < TANGLE_ASYMMETRY, "0.60: {}", all[0].asymmetry());
+        assert!(tangles(&g, MAIN_LAYER).is_empty(), "so it is not offered as a maze");
     }
 
+    /// The bug SQ-0683 fixed, in miniature: a maze wired into ordinary geography by one tidy
+    /// passage. Clustered by connected component the two average together and NOTHING fires —
+    /// which was the shipped behaviour, and why a real Zork I maze could never be detected.
     #[test]
-    fn detection_is_per_cluster_not_per_layer() {
-        // One layer holding a tangle AND a tidy region: only the tangle is reported.
+    fn a_maze_embedded_in_ordinary_geography_is_found_without_its_surroundings() {
         let mut g = ring(10, 9);
-        for i in 100u16..110 {
-            g.upsert_room(i, format!("Tidy{i}"));
-        }
-        for i in 100u16..109 {
-            g.add_edge(i, Direction::E, i + 1);
-            g.add_edge(i + 1, Direction::W, i);
-        }
+        tidy(&mut g, 100, 10);
+        g.add_edge(1, Direction::S, 100); // the door between them, and it reciprocates
+        g.add_edge(100, Direction::N, 1);
+
+        let everything: Vec<RoomId> = g.rooms_in_layer(MAIN_LAYER);
+        assert_eq!(everything.len(), 20, "one layer, one connected component");
+        let (known, asym) = stats(&g, &everything);
+        assert!(
+            (asym as f32 / known as f32) < TANGLE_ASYMMETRY,
+            "the component as a whole is under the bar ({asym}/{known}) — the old unit was wrong"
+        );
+
+        let t = tangles(&g, MAIN_LAYER);
+        assert_eq!(t.len(), 1, "the maze inside it is still found: {t:?}");
+        assert_eq!(t[0].rooms, (1..=10).collect::<BTreeSet<RoomId>>(), "and it is exactly the maze");
+        assert_eq!((t[0].known_returns, t[0].asymmetric), (20, 18));
+    }
+
+    /// What the cluster takes with it. A dead end whose only passage reciprocates has no
+    /// asymmetric evidence at all, but it hangs off the maze and nowhere else, so it belongs to it
+    /// — a peel that left it behind would strand it. A room with a foot in the tidy region keeps
+    /// its whole region out.
+    #[test]
+    fn a_room_that_hangs_off_the_tangle_is_absorbed_and_one_with_a_foot_outside_is_not() {
+        let mut g = ring(10, 9);
+        g.upsert_room(200, "Dead End".into());
+        g.add_edge(1, Direction::Up, 200);
+        g.add_edge(200, Direction::Down, 1);
+        tidy(&mut g, 100, 3);
+        g.add_edge(1, Direction::S, 100);
+        g.add_edge(100, Direction::N, 1);
+
         let t = tangles(&g, MAIN_LAYER);
         assert_eq!(t.len(), 1);
-        assert!(t[0].rooms.contains(&1) && !t[0].rooms.contains(&100));
+        assert!(t[0].rooms.contains(&200), "the dead end comes along: {:?}", t[0].rooms);
+        assert!(!t[0].rooms.contains(&100), "the door into the tidy region does not");
+        assert!(!t[0].rooms.contains(&101), "nor anything behind it");
+        assert_eq!(
+            (t[0].known_returns, t[0].asymmetric),
+            (22, 18),
+            "and the absorbed room's tidy round trip is counted honestly, against the ratio"
+        );
+    }
+
+    /// The thresholds must sit clear of the real numbers they were calibrated on, or they are just
+    /// numbers. Measured off `unit_tests/advent_maze_map.json` and `unit_tests/zork1_maze_map.json`
+    /// — see `TANGLE_ASYMMETRY`'s table, and `tests/advent_maze.rs` / `tests/zork1_maze.rs`, which
+    /// recompute every one of these from the files themselves.
+    #[test]
+    fn the_thresholds_sit_clear_of_the_real_clusters_they_were_calibrated_on() {
+        let (advent_maze, zork_maze) = (1.00f32, 0.83f32);
+        assert!(TANGLE_ASYMMETRY < zork_maze && TANGLE_ASYMMETRY < advent_maze, "both mazes fire");
+
+        let advent_overworld = 0.60f32;
+        assert!(TANGLE_ASYMMETRY > advent_overworld, "the cave beside the maze does not");
+
+        // Zork's overworld is the one asymmetry cannot rule out: circling the white house really
+        // does come back another way. Its size is the whole margin.
+        let (zork_house_ring, zork_house_rooms) = (1.00f32, 4usize);
+        assert!(zork_house_ring > TANGLE_ASYMMETRY, "which is why the size bar exists");
+        assert!(zork_house_rooms < TANGLE_MIN_ROOMS, "and why it is above four");
     }
 }

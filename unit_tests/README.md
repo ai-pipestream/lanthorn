@@ -103,7 +103,18 @@ data, freely redistributable, and the calibration set behind the matrix view and
 its tangle threshold (SQ-0666): 2 of the 47 edges are reciprocal, 18 return by a
 different direction, 27 have no known return, and 29 are marked distorted.
 
-It is committed as-is rather than regenerated, because the point of it is that
-it is real: it is an actual snapshot of what a player knew mid-game, and no
+`zork1_maze_map.json` — the same thing for Zork I (`zork1-invclues-r52-s871125.z5`),
+and the counter-case: nothing here is hand-peeled. 31 rooms across two layers;
+layer 2 ("Cellar", NOT flagged a maze) holds the maze *and* the ordinary rooms
+around it — 5 "Maze", 2 "Dead End", plus Cellar, The Troll Room, Gallery, Studio
+and East of Chasm, all one connected component. That is the shape that defeated
+component-based tangle detection (SQ-0683): the component scores 0.45 asymmetry
+while the 7 maze rooms inside it score 0.83. The above-ground layer 0 (19 rooms)
+is the negative control, and its ring of rooms around the white house is the
+closest a real overworld comes to a maze — 4 rooms, 1.00 asymmetry, held off by
+the room-count bar alone. Loaded by `crates/mapper/tests/zork1_maze.rs`.
+
+Both are committed as-is rather than regenerated, because the point of them is
+that they are real: an actual snapshot of what a player knew mid-game, and no
 synthetic graph reproduces the particular mess. Loaded by
 `crates/app/tests/matrix_view.rs` and `crates/mapper/tests/advent_maze.rs`.
