@@ -61,6 +61,25 @@ identifies which beta it is without reading its git hash.
 - **`--show-status`** — narrate the status line whenever the story updates it.
   Off under `--screen-reader`, because a Z-machine v3 status line carries a move counter
   and so changes on every single turn.
+- **Menus read as menus in `--screen-reader` mode.** A menu is a rectangle the
+  game repaints, so linearised it used to re-read itself in full on every
+  keypress — sixteen lines a press at Planetfall's InvisiClues menu, twenty-three
+  at Arthur's, fifteen at Counterfeit Monkey's `ABOUT` — to say that a `>` had
+  moved down one row. `zvm-cli` and `gvm-cli` now read a menu out **once**,
+  host-numbered under a `[menu — type a number to jump, Enter to select]` line,
+  and announce each move as `>3. THE DORMITORY (3 of 12)`. Typing a number jumps
+  to that item: the host walks the menu with the game's own keys (`n`/`p` when
+  the legend names them, else Down/Up), steering by where the marker actually
+  landed rather than by a press count, because Arthur's `N` steps over its
+  section headings. **`/menu`** re-reads the open menu on demand — at a menu's
+  own prompt as well as a line prompt, since screen-reader mode leaves the
+  terminal cooked and a keypress there is a whole line. Detection is a
+  mechanical diff: only a block that differs from the last one *solely* in
+  marker position is treated as navigation, so a status line that changed, a
+  menu that scrolled, or a form that gained a field is still emitted in full.
+  Nothing outside `--screen-reader` changes — piped and terminal output are
+  byte-identical, verified across 13 Z-machine and 9 Glulx stories.
+  → [interpreter](docs/features/interpreter.md)
 
 ### Changed
 

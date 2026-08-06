@@ -19,7 +19,7 @@
 
 use std::io::{self, Write};
 
-use gvm::glk::{GlkBackend, GlkStyle, Rect, StyleAttrs, StyleColour, WinTree, WinType};
+use gvm::glk::{GlkBackend, GlkStyle, Rect, StyleAttrs, StyleColour, WinTree, WinType, keycode};
 
 // ── word-wrap helper ──────────────────────────────────────────────────────────
 
@@ -487,6 +487,10 @@ fn detect_size() -> (u32, u32) {
     }
 }
 
+/// The story stream is a menu source too, and needs an id no Glk window can
+/// ever have — window ids are assigned from 1 upwards.
+const STORY_SOURCE: u32 = u32::MAX;
+
 // ── TerminalBackend ───────────────────────────────────────────────────────────
 
 /// A terminal display backend.
@@ -546,6 +550,35 @@ pub struct TerminalBackend {
     /// inline instead, and a status line that says the same thing this turn as
     /// last turn is not worth repeating (SQ-0607).
     last_grid_plain: Vec<(u32, String)>,
+    /// Screen-reader mode: recognise a repainted menu — in a grid, or in the
+    /// story stream — and announce the marker move rather than reading the whole
+    /// block out again (SQ-0609). Off on a TTY (the menu is painted in place, so
+    /// nothing repeats) and off on a plain pipe (a transcript that must stay
+    /// byte-identical).
+    menus: bool,
+    /// The menu state behind `menus`, across every source this backend has.
+    menu: cli_host::MenuTracker,
+    /// Story-window text written since the last input stop, held back so a
+    /// repainted menu can be recognised before it is emitted.
+    ///
+    /// Only ever non-empty in screen-reader mode. Counterfeit Monkey draws its
+    /// `ABOUT` menu into the story window rather than a grid — the grid holds
+    /// only the title and the `N = Next` legend — so the noisy half of SQ-0609
+    /// is not reachable from [`emit_grids_plain`](Self::emit_grids_plain) at
+    /// all. And a diff cannot un-print text: the block has to be in hand before
+    /// it goes out, which means holding a turn's worth. Off a TTY that costs
+    /// nothing — there is no cursor to keep live, and every writer drains this
+    /// first, so ordering is unchanged.
+    story_pending: String,
+    /// Did the last thing actually written to the sink leave it mid-line?
+    ///
+    /// Only meaningful — and only maintained — while `menus` holds back story
+    /// text, where `LineHold`'s answer stops being the sink's answer: the hold
+    /// tracks what the *game* wrote, and with a turn's worth withheld the two
+    /// disagree exactly when it matters. In practice only `release_hold` leaves
+    /// the sink mid-line (the prompt), and a host line replacing the story text
+    /// that would have continued it has to start a line of its own.
+    sink_mid_line: bool,
     /// Graphics windows as `(id, rect)`, drawn as bordered placeholder boxes.
     graphics: Vec<(u32, Rect)>,
     /// Every tracked TextBuffer window. Only consulted in *windowed* mode — see
@@ -616,6 +649,10 @@ impl TerminalBackend {
             story_only: false,
             quiet_status_line: false,
             last_grid_plain: Vec::new(),
+            menus: false,
+            menu: cli_host::MenuTracker::new(),
+            story_pending: String::new(),
+            sink_mid_line: false,
             graphics: Vec::new(),
             buffers: Vec::new(),
             active_buffer: None,
@@ -647,6 +684,35 @@ impl TerminalBackend {
     pub fn set_paging(&mut self, on: bool, interactive: bool) {
         self.pager = cli_host::Pager::new(on, cli_host::Pager::height_for(self.rows as u16));
         self.interactive = interactive;
+    }
+
+    /// Turn menu recognition on (screen-reader mode only — SQ-0609).
+    pub fn set_menus(&mut self, on: bool) {
+        self.menus = on;
+    }
+
+    /// The open menu re-listed on demand (`/menu`), or `None` when none is open.
+    pub fn menu_listing(&self) -> Option<String> {
+        self.menu.listing()
+    }
+
+    /// What a line typed at a char prompt means to the open menu.
+    ///
+    /// The legend is every grid's text *plus* the menu block itself, because the
+    /// two need not be the same window: Counterfeit Monkey's items are story
+    /// text while its `N = Next / P = Previous` legend is a grid.
+    pub fn typed_at_menu(&mut self, line: &str) -> cli_host::Typed {
+        let legend = self.grids_plain_now();
+        self.menu.typed(line, &legend)
+    }
+
+    /// The next synthesized navigation keystroke, as a Glk character code.
+    pub fn next_menu_key(&mut self) -> Option<u32> {
+        self.menu.next_key().map(|k| match k {
+            cli_host::NavKey::Char(c) => c as u32,
+            cli_host::NavKey::Up => keycode::UP,
+            cli_host::NavKey::Down => keycode::DOWN,
+        })
     }
 
     /// Show only the story window — suppress every grid (SQ-0613).
@@ -682,6 +748,10 @@ impl TerminalBackend {
             story_only: false,
             quiet_status_line: false,
             last_grid_plain: Vec::new(),
+            menus: false,
+            menu: cli_host::MenuTracker::new(),
+            story_pending: String::new(),
+            sink_mid_line: false,
             graphics: Vec::new(),
             buffers: Vec::new(),
             active_buffer: None,
@@ -843,6 +913,9 @@ impl TerminalBackend {
         if !self.pending_word.is_empty() {
             self.flush_pending_word();
         }
+        // Screen-reader mode holds a turn's story text so a repainted menu can
+        // be recognised before it goes out; a no-op everywhere else (SQ-0609).
+        self.flush_story_plain();
         self.emit_grids_plain();
         // The player has caught up: a count carried across would pause partway
         // through the next turn for no reason.
@@ -850,13 +923,63 @@ impl TerminalBackend {
         let _ = self.out.flush();
     }
 
+    /// Write the story text held since the last stop, verbatim.
+    ///
+    /// Every writer that is not the menu-aware stop calls this first, so nothing
+    /// can overtake the story stream. A no-op outside screen-reader mode, where
+    /// story text goes straight out as it always did.
+    fn drain_story(&mut self) {
+        if self.story_pending.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.story_pending);
+        self.write_sink(&text);
+    }
+
+    /// Emit the story text held since the last stop, recognising a repainted
+    /// menu in it (SQ-0609).
+    fn flush_story_plain(&mut self) {
+        if self.story_pending.is_empty() {
+            return;
+        }
+        let text = std::mem::take(&mut self.story_pending);
+        match self.menu.observe(STORY_SOURCE, &text) {
+            // Not a menu: byte-for-byte what the game wrote, continuing the
+            // line it was continuing.
+            cli_host::Emission::Block(b) if b == text => self.write_sink(&b),
+            cli_host::Emission::Block(b) => self.write_host_block(&b),
+            cli_host::Emission::Line(l) => self.write_host_block(&format!("{l}\n")),
+            cli_host::Emission::Nothing => {}
+        }
+    }
+
+    /// Write host-composed text (a numbered menu, a marker announcement) on a
+    /// line of its own: the story text it replaces would have continued the
+    /// prompt's line, and this must not.
+    fn write_host_block(&mut self, text: &str) {
+        if self.sink_mid_line {
+            self.write_sink("\n");
+        }
+        self.write_sink(text);
+    }
+
+    /// Write to the sink, remembering whether it is left mid-line.
+    fn write_sink(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let _ = self.out.write_all(text.as_bytes());
+        self.sink_mid_line = !text.ends_with('\n');
+    }
+
     /// Release the held prompt (plain mode) so it is the last thing before the
     /// cursor. Must run before blocking for input, or the prompt never arrives;
     /// a no-op when nothing is held (every non-plain mode).
     pub fn release_hold(&mut self) {
+        self.drain_story();
         let held = self.hold.release();
         if !held.is_empty() {
-            let _ = self.out.write_all(held.as_bytes());
+            self.write_sink(&held);
             let _ = self.out.flush();
         }
     }
@@ -883,26 +1006,28 @@ impl TerminalBackend {
     /// before input, between the status and the prompt, so the held tail follows
     /// naturally (SQ-0616).
     pub fn write_host_line(&mut self, text: &str) {
+        self.drain_story();
         let mut out = String::new();
-        if !self.hold.at_line_start() {
+        if !self.hold.at_line_start() || (self.menus && self.sink_mid_line) {
             out.push('\n');
         }
         out.push_str(text);
         out.push('\n');
-        let _ = self.out.write_all(out.as_bytes());
+        self.write_sink(&out);
     }
 
     /// Write a host answer (`/status`) mid-turn: start a fresh line, print it,
     /// then put the prompt back so the player can see it is still their turn.
     pub fn write_host_answer(&mut self, text: &str) {
+        self.drain_story();
         let mut out = String::new();
-        if !self.hold.at_line_start() {
+        if !self.hold.at_line_start() || (self.menus && self.sink_mid_line) {
             out.push('\n');
         }
         out.push_str(text);
         out.push('\n');
         out.push_str(self.hold.last_prompt());
-        let _ = self.out.write_all(out.as_bytes());
+        self.write_sink(&out);
         let _ = self.out.flush();
     }
 
@@ -925,6 +1050,7 @@ impl TerminalBackend {
         if self.is_tty {
             return;
         }
+        self.drain_story();
         for i in 0..self.grids.len() {
             if self.story_only {
                 break;
@@ -939,22 +1065,46 @@ impl TerminalBackend {
             if text.is_empty() {
                 continue;
             }
-            match self.last_grid_plain.iter_mut().find(|(gid, _)| *gid == id) {
-                Some((_, last)) if *last == text => continue,
-                Some((_, last)) => *last = text.clone(),
-                None => self.last_grid_plain.push((id, text.clone())),
-            }
+            let fresh = match self.last_grid_plain.iter_mut().find(|(gid, _)| *gid == id) {
+                Some((_, last)) if *last == text => false,
+                Some((_, last)) => {
+                    *last = text.clone();
+                    true
+                }
+                None => {
+                    self.last_grid_plain.push((id, text.clone()));
+                    true
+                }
+            };
+            // Screen-reader mode: a grid that repeats itself with the marker one
+            // row down is one line of news, not a whole menu (SQ-0609).
+            let text = match (self.menus, fresh) {
+                (false, false) => continue,
+                (false, true) => text,
+                (true, true) => match self.menu.observe(id, &text) {
+                    cli_host::Emission::Block(b) => b,
+                    cli_host::Emission::Line(l) => l,
+                    cli_host::Emission::Nothing => continue,
+                },
+                // Unchanged — still an event if a number jump just landed on the
+                // item it started from.
+                (true, false) => match self.menu.unchanged(id) {
+                    cli_host::Emission::Line(l) => l,
+                    _ => continue,
+                },
+            };
+            let text = text.trim_end_matches('\n');
             // Start on a fresh line. The game has just written its prompt, so
             // the stream is mid-line more often than not, and a status bar
             // welded to the end of `>` is worse than a bare prompt above it.
             // Not holding (a plain pipe): the prompt is already out, so break
             // the line first. Holding (plain mode): the prompt has not left, so
             // we are genuinely at a line start and the status goes above it.
-            if !self.hold.at_line_start() {
-                let _ = self.out.write_all(b"\n");
+            if !self.hold.at_line_start() || (self.menus && self.sink_mid_line) {
+                self.write_sink("\n");
             }
-            let _ = self.out.write_all(text.as_bytes());
-            let _ = self.out.write_all(b"\n");
+            self.write_sink(text);
+            self.write_sink("\n");
         }
         // The held prompt is NOT released here: that is `release_hold`'s job,
         // sequenced by the caller so a host announcement can still go above it.
@@ -972,6 +1122,7 @@ impl TerminalBackend {
     /// Echo `cmd` in the Input style followed by a newline — the library echo a
     /// game expects when it does not reprint the command itself.
     fn emit_library_echo(&mut self, cmd: &str) {
+        self.drain_story();
         let text = style_wrap(cmd, GlkStyle::Input, StyleColour::default(), StyleAttrs::default(), self.honor, self.is_tty);
         let _ = self.out.write_all(text.as_bytes());
         self.story_newline();
@@ -1379,6 +1530,12 @@ impl GlkBackend for TerminalBackend {
             // here; `hold` tracks the line position instead, and in plain mode
             // withholds the trailing prompt (SQ-0607/0611).
             let out = self.hold.feed(s);
+            if self.menus {
+                // Held one turn so a repainted menu can be diffed before it is
+                // emitted; drained by every writer below (SQ-0609).
+                self.story_pending.push_str(&out);
+                return;
+            }
             let _ = self.out.write_all(out.as_bytes());
             return;
         }
@@ -1473,6 +1630,9 @@ impl GlkBackend for TerminalBackend {
     }
 
     fn flush(&mut self) {
+        // The last thing a quitting game printed is still held in screen-reader
+        // mode; nothing will ask for input again, so this is where it goes out.
+        self.drain_story();
         // Emit any word still pending in the char-stream buffer before tearing
         // down the scroll region, so text that precedes glk_select is visible.
         if !self.pending_word.is_empty() {
@@ -1885,11 +2045,11 @@ mod tests {
     }
 
     #[test]
-    fn piped_menu_grid_is_re_emitted_when_the_selection_moves() {
-        // SQ-0609: Counterfeit Monkey's status line doubles as its hint menu,
-        // resized from one row to four and reprinted on every keypress. Off a
-        // TTY the whole block comes through as text and repeats whenever it
-        // changes, so a listener hears where the marker went.
+    fn a_piped_transcript_still_repeats_the_whole_menu_grid() {
+        // A plain pipe is a transcript, not a reading: SQ-0607 made a grid-drawn
+        // menu come through as text at all, and it repeats whenever it changes
+        // so the transcript records where the marker went. Menu recognition is
+        // screen-reader mode only, and this is what it must NOT change.
         let (mut b, buf) = backend(false);
         status_layout(&mut b, 4);
         b.grid_put(2, 0, 0, GlkStyle::Normal, "> Introduction");
@@ -1907,6 +2067,125 @@ mod tests {
         let after = out_string(&buf);
         assert_eq!(after.matches("> Instructions").count(), 1, "new selection announced: {after:?}");
         assert_eq!(after.matches("> Introduction").count(), 1, "old marker not repeated: {after:?}");
+    }
+
+    /// A screen-reader backend: plain mode holds the prompt and recognises menus.
+    fn reader_backend() -> (TerminalBackend, Rc<RefCell<Vec<u8>>>) {
+        let (mut b, buf) = holding_backend();
+        b.set_menus(true);
+        (b, buf)
+    }
+
+    /// SQ-0609. The pin above, in screen-reader mode, deliberately flipped: what
+    /// was a whole grid re-read on every keypress is now one line.
+    #[test]
+    fn screen_reader_mode_announces_the_move_instead_of_the_menu_grid() {
+        let (mut b, buf) = reader_backend();
+        status_layout(&mut b, 4);
+        let draw = |b: &mut TerminalBackend, sel: u32| {
+            for (row, item) in ["Introduction", "Instructions", "Credits"].iter().enumerate() {
+                let mark = if row as u32 == sel { ">" } else { " " };
+                b.grid_put(2, 0, row as u32, GlkStyle::Normal, &format!("{mark} {item}"));
+            }
+            b.grid_put(2, 0, 3, GlkStyle::Normal, "N = Next   P = Previous   Q = Quit Menu");
+        };
+        draw(&mut b, 0);
+        b.flush_out();
+        let first = out_string(&buf);
+        assert!(first.contains(cli_host::menu::MENU_HINT), "opens host-numbered: {first:?}");
+        assert!(first.contains(">1. Introduction"), "{first:?}");
+        assert!(first.contains(" 3. Credits"), "{first:?}");
+        assert!(first.contains("N = Next"), "the legend survives, unnumbered: {first:?}");
+        assert!(!first.contains("4. N = Next"), "{first:?}");
+
+        buf.borrow_mut().clear();
+        draw(&mut b, 1);
+        b.flush_out();
+        assert_eq!(out_string(&buf).trim_end(), ">2. Instructions (2 of 3)", "one line, not four");
+
+        // A number jump walks the menu with the key its own legend names.
+        assert_eq!(b.typed_at_menu("3"), cli_host::Typed::Jump);
+        assert_eq!(b.next_menu_key(), Some('N' as u32), "the legend says N, not Down");
+        buf.borrow_mut().clear();
+        draw(&mut b, 2);
+        b.flush_out();
+        assert_eq!(out_string(&buf).trim_end(), ">3. Credits (3 of 3)");
+        assert_eq!(b.next_menu_key(), None, "arrived");
+
+        // ...and `/menu` re-lists it on demand.
+        let listing = b.menu_listing().expect("a menu is open");
+        assert!(listing.contains(">3. Credits"), "{listing:?}");
+    }
+
+    /// SQ-0609. Counterfeit Monkey's `ABOUT` menu is *story* text — the grid
+    /// holds only the title and the `N = Next` legend — and it redraws the whole
+    /// item list twice per keypress. Measured before this: fifteen lines a press.
+    #[test]
+    fn screen_reader_mode_recognises_a_menu_drawn_in_the_story_window() {
+        let (mut b, buf) = reader_backend();
+        status_layout(&mut b, 4);
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Instructions");
+        b.grid_put(2, 0, 2, GlkStyle::Normal, "N = Next    Q = Quit Menu");
+        b.grid_put(2, 0, 3, GlkStyle::Normal, "P = Previous    ENTER = Select");
+        // The game draws the list twice, exactly as Counterfeit Monkey does.
+        let draw = |b: &mut TerminalBackend, sel: usize| {
+            let mut s = String::from("\n");
+            for _ in 0..2 {
+                for (i, item) in ["Introduction", "Instructions", "Hints"].iter().enumerate() {
+                    s.push_str(if i == sel { " > " } else { "   " });
+                    s.push_str(item);
+                    s.push('\n');
+                }
+            }
+            b.put_text(1, GlkStyle::Normal, &s);
+        };
+        draw(&mut b, 0);
+        b.flush_out();
+        let first = out_string(&buf);
+        assert!(first.contains(cli_host::menu::MENU_HINT), "{first:?}");
+        assert_eq!(first.matches("Introduction").count(), 1, "the repaint is not six items: {first:?}");
+        assert!(first.contains(">1. Introduction"), "{first:?}");
+        assert!(first.contains(" 3. Hints"), "{first:?}");
+
+        buf.borrow_mut().clear();
+        draw(&mut b, 1);
+        b.flush_out();
+        assert_eq!(out_string(&buf).trim_end(), ">2. Instructions (2 of 3)", "one line, not fifteen");
+
+        // The legend lives in the grid, not the block — the jump still finds it.
+        assert_eq!(b.typed_at_menu("3"), cli_host::Typed::Jump);
+        assert_eq!(b.next_menu_key(), Some('N' as u32));
+    }
+
+    /// SQ-0609. The guard that makes all of the above safe.
+    #[test]
+    fn screen_reader_mode_does_not_eat_a_grid_that_really_changed() {
+        let (mut b, buf) = reader_backend();
+        b.set_quiet_status_line(true);
+        status_layout(&mut b, 4);
+        // A four-row status panel — Counterfeit Monkey's own, during normal play.
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Back Alley, noon");
+        b.grid_put(2, 0, 1, GlkStyle::Normal, "Goals: 1");
+        b.grid_put(2, 0, 2, GlkStyle::Normal, "Score: 0");
+        b.flush_out();
+        assert!(out_string(&buf).contains("Back Alley, noon"));
+
+        buf.borrow_mut().clear();
+        b.grid_put(2, 0, 0, GlkStyle::Normal, "Sigil Street, noon");
+        b.grid_put(2, 0, 2, GlkStyle::Normal, "Score: 5      ");
+        b.flush_out();
+        let out = out_string(&buf);
+        assert!(out.contains("Sigil Street, noon"), "a changed status is emitted whole: {out:?}");
+        assert!(out.contains("Score: 5"), "{out:?}");
+        assert!(!out.contains(cli_host::menu::MENU_HINT), "and is never numbered: {out:?}");
+        assert!(b.menu_listing().is_none(), "/menu has nothing to re-read");
+        assert_eq!(b.typed_at_menu("2"), cli_host::Typed::Passthrough, "digits reach the game");
+
+        // Story prose that repeats itself verbatim is prose.
+        buf.borrow_mut().clear();
+        b.put_text(1, GlkStyle::Normal, "It is pitch black.\nYou are likely to be eaten.\n");
+        b.flush_out();
+        assert!(out_string(&buf).contains("pitch black"));
     }
 
     #[test]

@@ -169,12 +169,7 @@ characters and the user's familiar editing keys work.
 What would otherwise be spatial arrives in reading order instead: the Z-machine
 status line and upper window come through as ordinary lines, and Glk TextGrid
 windows stream inline, deduped so an unchanged status bar doesn't repeat every
-turn. That covers **menus** too — Arthur's, and Counterfeit Monkey's hint menu,
-whose status line doubles as the menu — since a block that changes is re-sent in
-full, so a listener hears where the selection went. It is noisy for a long menu;
-a numbered-list convention would be quieter, but that changes the interaction
-model and is the kind of thing worth designing *with* someone who uses a reader
-rather than guessing at.
+turn. **Menus** get more than that — see below.
 
 **The status line is not narrated every turn.** A Z-machine v3 status line
 carries a move counter, so it differs on every single turn and no amount of
@@ -206,6 +201,84 @@ answers the same way, and puts the prompt back after itself.
 boundary a real Scott terminal drew between its two windows, and a reader either
 announces thirty-odd em-dashes one at a time or swallows the line — neither of
 which conveys a boundary.
+
+### Menus are numbered, and a move is one line
+
+A menu is a rectangle the game repaints: a list with a `>` parked on the current
+item and a legend saying which keys move it. Sighted, the marker jumps and
+nothing else happens. Linearised, *every repaint is a fresh block of text* —
+measured, `N` at Planetfall's InvisiClues menu read out sixteen lines, and
+Arthur's read out twenty-three, on every single press, to say that a `>` had
+moved down one row. Followable, but not usable.
+
+So in screen-reader mode the host recognises the repaint. A menu is read out
+**once**, host-numbered:
+
+```
+                               INVISICLUES (tm)
+ N = Next                                                     P = Previous
+ RETURN = See hint                                        Q = Resume story
+
+[menu — type a number to jump, Enter to select]
+>1. THE FEINSTEIN
+ 2. THE POD TRIP
+ 3. THE DORMITORY
+ …
+```
+
+and after that a marker move is announced in one line:
+
+```
+>3. THE DORMITORY (3 of 12)
+```
+
+**Detection is a mechanical diff, not a guess about content.** The host keeps the
+last block emitted from each source (the Z-machine upper window; each Glk grid;
+the Glk story stream) and compares. If two blocks differ *only* in where the
+marker sits — same items, same headers, same legend — that is navigation. Any
+other difference is content and is emitted in full, unchanged. A status line
+whose text changed, a menu that scrolled, a form that gained a field: all differ
+somewhere other than the marker column, so none of them is ever swallowed. This
+is the whole safety argument, and it is pinned by tests on both engines.
+
+**Which lines get numbers** is decided by shape: an item is a non-blank line
+whose text begins at the same column as the marked line's, with nothing but
+blanks and marker characters in front of it. That is exactly the items in all
+three measured menus and none of their furniture — Arthur's centred title
+(column 20), its `N = next item` legend (column 1) and its `(more)` pagination
+hint (column 4) are all left unnumbered, as are Planetfall's title and two
+legend rows. The rule errs towards numbering more lines rather than fewer: an
+over-numbered header is an annoyance, an unreachable item is a dead end. (The
+alternative — numbering only the lines the marker has been seen on — renumbers
+the menu under the player as they explore it.) A list the game repaints twice
+into one block, as Counterfeit Monkey's does, counts once.
+
+**Typing a number jumps to that item.** The host cannot teleport the marker — the
+game owns it — so it walks the menu with the game's own keys: `n`/`p` when the
+legend names them (`N = Next`, `P = previous item`), else Down/Up (ZSCII 129/130
+for the Z-machine, `keycode_Up`/`keycode_Down` for Glk). It steers rather than
+counting: press, read where the marker actually landed, decide again — because
+Arthur's `N` steps straight over its unselectable section headings, and a
+press-count worked out in advance would sail past the item you asked for. The
+landing is announced in the move format; the intermediate steps are silent; and
+an ordinal the marker will not stop on gives up and reports where it ended
+instead of pressing forever.
+
+Numbers are only intercepted while a menu is open, and only for an ordinal the
+menu actually has. Everything else — `n`, `p`, Enter, `q`, a digit at an ordinary
+prompt — reaches the game untouched.
+
+**`/menu`** re-reads the open menu, numbered, on demand, and says
+`[no menu is open]` when there isn't one. It is the `/status` precedent, and
+because screen-reader mode leaves the terminal cooked, a menu "keypress" is
+really a whole line terminated by Enter — so `/menu` and multi-digit jumps work
+at a menu's own prompt, not just at a line prompt. (That termination rule is not
+a choice: it is the shape of the read. Raw mode would deliver `1` then `2` with
+no way to tell `12` from item 1 followed by item 2.)
+
+None of this applies outside `--screen-reader`. On a terminal the menu is painted
+in place and nothing repeats; on a plain pipe the output is a transcript that
+stays byte-identical.
 
 ### Score changes are announced
 
@@ -252,7 +325,8 @@ the game never sees the command. The leading slash is what makes intercepting it
 safe: no interactive-fiction parser gives `/` a meaning, so no game verb is
 shadowed, and babelmap's own TUI already spells host commands that way. (A `char`
 prompt — "press any key" — takes the keypress as itself; `/status` is a line
-command.)
+command. `/menu` is the exception, because a menu *is* a char prompt and a
+command that could not be typed at one would be useless.)
 
 This is the same output path piped/redirected use has always taken — kept honest
 by the test harnesses that read it — so `--screen-reader` mostly makes it *selectable*

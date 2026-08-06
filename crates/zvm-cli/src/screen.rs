@@ -206,6 +206,10 @@ pub fn leave_region() -> String {
 
 use zvm::cpu::exec::Machine;
 
+/// The one block source zvm-cli has: the upper window (or the v1–v3 status
+/// line, which is the same region by another name).
+const SOURCE_UPPER: u32 = 0;
+
 /// Tracks the pinned top-region state and produces the bytes to emit before an
 /// input prompt: an ANSI scroll-region update on a TTY, or a deduped inline
 /// plain-text block when piped.
@@ -233,6 +237,16 @@ pub struct ScreenView {
     /// Measured on Ballyhoo, that is a status line narrated on four turns out of
     /// four. `/status` still answers on demand.
     quiet_status_line: bool,
+    /// Screen-reader mode: recognise a repainted menu in the inline block and
+    /// announce the marker move instead of reading the block out again
+    /// (SQ-0609). Off everywhere else — on a TTY the block is painted in place
+    /// and nothing is repeated, and a plain pipe is a transcript that must stay
+    /// byte-identical.
+    menus: bool,
+    /// The menu state behind `menus`. Owned here because this is the only place
+    /// that sees the inline block; `main` reaches it through
+    /// [`ScreenView::menu`](Self::menu) and friends for `/menu` and number jumps.
+    menu: cli_host::MenuTracker,
     term_rows: u16,
     /// Tracked terminal width, kept current on resize. The v3 status bar is
     /// padded to exactly this: hard-coding `DEFAULT_COLS` made the reverse-video
@@ -260,6 +274,8 @@ impl ScreenView {
             is_tty,
             story_only,
             quiet_status_line,
+            menus: false,
+            menu: cli_host::MenuTracker::new(),
             term_rows,
             term_cols,
             active_rows: 0,
@@ -267,6 +283,35 @@ impl ScreenView {
             pending_erase_shift: false,
         }
     }
+
+    /// Turn menu recognition on (screen-reader mode only — SQ-0609).
+    pub fn set_menus(&mut self, on: bool) {
+        self.menus = on;
+    }
+
+    /// The open menu re-listed on demand (`/menu`), or `None` when none is open.
+    pub fn menu_listing(&self) -> Option<String> {
+        self.menu.listing()
+    }
+
+    /// What a line typed at a char prompt means to the open menu.
+    pub fn typed_at_menu(&mut self, line: &str) -> cli_host::Typed {
+        // The legend lives in the block itself — the same rows the items do — so
+        // the menu's own text is the legend text.
+        let legend = self.last_block.clone().unwrap_or_default();
+        self.menu.typed(line, &legend)
+    }
+
+    /// The next synthesized navigation keystroke, as a ZSCII code (ZMSD §3.8:
+    /// cursor up 129, cursor down 130).
+    pub fn next_menu_key(&mut self) -> Option<u8> {
+        self.menu.next_key().map(|k| match k {
+            cli_host::NavKey::Char(c) => c as u8,
+            cli_host::NavKey::Up => 129,
+            cli_host::NavKey::Down => 130,
+        })
+    }
+
 
     /// Number of pinned top rows for the current machine state.
     fn top_rows(machine: &Machine) -> u16 {
@@ -414,10 +459,27 @@ impl ScreenView {
                 }
             };
             if block.is_empty() || self.last_block.as_deref() == Some(block.as_str()) {
-                return String::new();
+                // Unchanged. Still an event when a number jump has just landed
+                // on the item it started from (SQ-0609).
+                return match self.menus {
+                    true => match self.menu.unchanged(SOURCE_UPPER) {
+                        cli_host::Emission::Line(l) => format!("{l}\n"),
+                        _ => String::new(),
+                    },
+                    false => String::new(),
+                };
             }
             self.last_block = Some(block.clone());
-            block
+            if !self.menus {
+                return block;
+            }
+            // SOURCE_UPPER: the Z-machine has exactly one place a menu can be
+            // drawn from this path — the upper window — so one source id.
+            match self.menu.observe(SOURCE_UPPER, &block) {
+                cli_host::Emission::Block(b) => b,
+                cli_host::Emission::Line(l) => format!("{l}\n"),
+                cli_host::Emission::Nothing => String::new(),
+            }
         }
     }
 
@@ -582,12 +644,13 @@ mod view_tests {
     }
 
     #[test]
-    fn piped_menu_is_re_emitted_when_the_selection_moves() {
-        // SQ-0609: a game whose UI is a grid redrawn in place (Arthur's menus,
-        // Shogun's startup menu) is spatial by construction. Off a TTY it comes
-        // through as text, and the whole block repeats whenever anything in it
-        // changes — so a listener hears where the marker went. Noisy for a long
-        // menu, but followable, which the pinned-region path is not.
+    fn a_piped_transcript_still_repeats_the_whole_menu() {
+        // A plain pipe is a transcript, not a reading. SQ-0607 and zvm-cli's
+        // inline block made a grid-drawn menu (Arthur's, Shogun's startup menu)
+        // come through as text at all, and it repeats whenever anything in it
+        // changes — so the transcript records where the marker went. Menu
+        // recognition is screen-reader mode only, and this is what it must NOT
+        // change.
         let mut v = ScreenView::new(false, false, false, 24, 80);
         let first = menu_rows(0);
         let out = v.render(4, &first, &first, "");
@@ -602,6 +665,58 @@ mod view_tests {
         let moved = v.render(4, &second, &second, "");
         assert!(moved.contains("> Documentation"), "new selection announced: {moved:?}");
         assert!(!moved.contains("> Credits"), "old selection is gone: {moved:?}");
+    }
+
+    /// SQ-0609. The pin above, in screen-reader mode, deliberately flipped: what
+    /// was a whole block re-read on every keypress is now one line.
+    ///
+    /// Measured before this, `n` at Planetfall's InvisiClues menu read out
+    /// sixteen lines and Arthur's read out twenty-three, every single press.
+    #[test]
+    fn screen_reader_mode_announces_the_move_instead_of_the_menu() {
+        let mut v = ScreenView::new(false, false, true, 24, 80);
+        v.set_menus(true);
+        let first = menu_rows(0);
+        let out = v.render(4, &first, &first, "");
+        assert!(out.contains(cli_host::menu::MENU_HINT), "opens host-numbered: {out:?}");
+        assert!(out.contains(">1. Credits"), "the marked item keeps its marker: {out:?}");
+        assert!(out.contains(" 2. Documentation"), "and the rest are numbered: {out:?}");
+        assert!(
+            out.contains(" N = next item    P = previous item"),
+            "the legend is not an item and is not numbered: {out:?}"
+        );
+
+        // The move: one line, and none of the other fifteen.
+        let moved = v.render(4, &menu_rows(1), &menu_rows(1), "");
+        assert_eq!(moved, ">2. Documentation (2 of 3)\n");
+        assert_eq!(v.render(4, &menu_rows(2), &menu_rows(2), ""), ">3. Sample Transcript (3 of 3)\n");
+        // Unchanged is still silence.
+        assert_eq!(v.render(4, &menu_rows(2), &menu_rows(2), ""), "");
+    }
+
+    /// SQ-0609. The guard that makes the above safe: a region that changes for
+    /// any reason other than the marker is content, and content is emitted.
+    #[test]
+    fn screen_reader_mode_does_not_eat_a_region_that_really_changed() {
+        let mut v = ScreenView::new(false, false, true, 24, 80);
+        v.set_menus(true);
+        v.render(4, &menu_rows(0), &menu_rows(0), "");
+
+        // An item's text changed — the menu scrolled, or it is a different menu.
+        let renamed: Vec<String> =
+            menu_rows(1).iter().map(|r| r.replace("Documentation", "Manual")).collect();
+        let out = v.render(4, &renamed, &renamed, "");
+        assert!(out.contains("Manual"), "a changed item is read out, not announced: {out:?}");
+        assert!(out.contains("Sample Transcript"), "with the rest of the block: {out:?}");
+
+        // A status line is not a menu at all and never was.
+        let (p, a) = v3_rows();
+        let mut v = ScreenView::new(false, false, false, 24, 80);
+        v.set_menus(true);
+        let out = v.render(1, &p, &a, "");
+        assert!(out.contains("West of House"), "verbatim: {out:?}");
+        assert!(!out.contains(cli_host::menu::MENU_HINT), "and not numbered: {out:?}");
+        assert!(v.menu_listing().is_none(), "/menu has nothing to re-read");
     }
 
     #[test]

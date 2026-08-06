@@ -164,6 +164,15 @@ struct StdoutOutput {
     /// Outside plain mode it holds nothing: the status is painted in a pinned
     /// region and never enters the text flow at all.
     hold: cli_host::LineHold,
+    /// Did the last thing actually written to stdout — by the game *or* by the
+    /// host — leave the cursor mid-line?
+    ///
+    /// `LineHold` answers this for the game's stream only, and that stops being
+    /// the sink's answer as soon as the host writes something itself: a menu
+    /// announcement replacing a block the game repainted (SQ-0609) is a whole
+    /// line, but the hold never sees it, so the next announcement would insert a
+    /// second newline and read as a blank line between every keypress.
+    sink_mid_line: bool,
 }
 
 impl StdoutOutput {
@@ -183,6 +192,7 @@ impl StdoutOutput {
             buffer_mode: false,
             honor_game_colours,
             hold: cli_host::LineHold::new(hold_partial),
+            sink_mid_line: false,
         }
     }
 
@@ -190,7 +200,22 @@ impl StdoutOutput {
     /// this sink is holding. A complete line always goes straight out.
     fn emit_char(&mut self, ch: char) {
         let mut buf = [0u8; 4];
-        print!("{}", self.hold.feed(ch.encode_utf8(&mut buf)));
+        let out = self.hold.feed(ch.encode_utf8(&mut buf));
+        print!("{out}");
+        self.note_sink(&out);
+    }
+
+    /// Record what `text` did to the cursor's line position. Every write to
+    /// stdout must pass through here or [`Self::sink_mid_line`] goes stale.
+    fn note_sink(&mut self, text: &str) {
+        if !text.is_empty() {
+            self.sink_mid_line = !text.ends_with('\n');
+        }
+    }
+
+    /// Would host text written now begin its own line?
+    fn sink_at_line_start(&self) -> bool {
+        !self.sink_mid_line
     }
 
     /// Release the held prompt.
@@ -202,6 +227,7 @@ impl StdoutOutput {
         let held = self.hold.release();
         if !held.is_empty() {
             print!("{held}");
+            self.note_sink(&held);
             let _ = io::stdout().flush();
         }
     }
@@ -300,6 +326,9 @@ fn announce_score(machine: &mut Machine, watch: &mut cli_host::ScoreWatch, on: b
     }
     if let Some(line) = watch.update(current_score(machine)) {
         println!("{line}");
+        if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+            o.note_sink("\n");
+        }
     }
 }
 
@@ -311,7 +340,7 @@ fn announce_score(machine: &mut Machine, watch: &mut cli_host::ScoreWatch, on: b
 /// still their turn.
 fn print_host_answer(machine: &mut Machine, text: &str) {
     let (at_line_start, prompt) = match machine.out.as_any().downcast_ref::<StdoutOutput>() {
-        Some(o) => (o.hold.at_line_start(), o.hold.last_prompt().to_string()),
+        Some(o) => (o.sink_at_line_start(), o.hold.last_prompt().to_string()),
         None => (true, String::new()),
     };
     if !at_line_start {
@@ -319,6 +348,9 @@ fn print_host_answer(machine: &mut Machine, text: &str) {
     }
     println!("{text}");
     print!("{prompt}");
+    if let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() {
+        o.note_sink(&format!("\n{prompt}"));
+    }
     let _ = io::stdout().flush();
 }
 
@@ -580,6 +612,78 @@ fn read_char_input(
     let _ = terminal::disable_raw_mode();
     result
 }
+
+/// Print a pinned-region block, starting a fresh line when the story stream is
+/// mid-line.
+///
+/// Plain mode normally holds the game's unterminated prompt back so the block
+/// lands above it (SQ-0611), but two paths put text on the line before the block
+/// is due: a prompt already released at an earlier stop with nothing new written
+/// since (Arthur redraws its menu under a standing `[Press any key]`), and a
+/// host answer that reprints the prompt after itself (`/status`, `/menu`).
+/// Either way the block would be welded to the end of a prompt, which reads as
+/// though the prompt were showing it to you — the same defect `LineHold` exists
+/// to prevent. Plain mode only: elsewhere `frame` is cursor-addressed ANSI and a
+/// newline in it would be a stray blank row.
+fn print_frame(machine: &mut Machine, plain: bool, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    let Some(o) = machine.out.as_any_mut().downcast_mut::<StdoutOutput>() else {
+        print!("{text}");
+        return;
+    };
+    if plain && !o.sink_at_line_start() {
+        println!();
+        o.note_sink("\n");
+    }
+    print!("{text}");
+    if !o.is_tty {
+        // On a TTY the block is cursor-addressed inside DECSC/DECRC and the
+        // cursor comes back where it was; there is nothing to record.
+        o.note_sink(text);
+    }
+}
+
+/// Read a keypress in screen-reader mode, where the terminal is cooked and a
+/// "keypress" therefore arrives as a whole line.
+///
+/// Plain mode hands line editing back to the kernel (`HostMode::raw_input` is
+/// false), so this path was already reading a line and throwing all but its
+/// first byte away. Keeping the line is what makes the menu commands possible:
+/// `/menu` is a word, and a jump to item 12 is two digits that only a
+/// Enter-terminated read can tell from item 1 followed by item 2 (SQ-0609).
+///
+/// Everything else still hands the game the first byte, so `n`, `p`, Enter and
+/// `q` reach the menu untouched.
+fn read_cooked_char(machine: &mut Machine, view: &mut screen::ScreenView) -> u8 {
+    loop {
+        let Some(line) = cli_host::read_line_stdin() else {
+            cli_host::input::exit_at_eof(&screen::leave_region())
+        };
+        if cli_host::is_menu_request(&line) {
+            let text = view.menu_listing().unwrap_or_else(|| NO_MENU.to_string());
+            print_host_answer(machine, text.trim_end());
+            continue;
+        }
+        match view.typed_at_menu(&line) {
+            cli_host::Typed::Jump => {
+                if let Some(key) = view.next_menu_key() {
+                    return key;
+                }
+            }
+            cli_host::Typed::Here(said) => {
+                print_host_answer(machine, &said);
+                continue;
+            }
+            cli_host::Typed::Passthrough => {}
+        }
+        return line.bytes().next().unwrap_or(b'\n');
+    }
+}
+
+/// The answer to `/menu` when nothing is open.
+const NO_MENU: &str = "[no menu is open]";
 
 // ── aux ("global state") persistence ──────────────────────────────────────────
 
@@ -894,8 +998,12 @@ Arguments:
                         Graphical v6 stories are not supported — play those
                         with babelmap.
 
-Host commands (typed at any line prompt, never passed to the game):
+Host commands (never passed to the game):
   /status               Repeat the current status line / upper window
+  /menu                 Re-read the open menu, host-numbered. In --screen-reader
+                        mode a menu keypress is a whole typed line, so /menu —
+                        and a bare item number, which jumps to that item — work
+                        at a menu's own prompt as well as at a line prompt.
 
 Options:
       --screen-reader   Linear plain text (alias: --plain; also selected by
@@ -905,6 +1013,8 @@ Options:
                         turns off the [MORE] pager. The status line is not
                         narrated every turn (see --show-status); menus and forms
                         still are. Ask for the status any time with /status.
+                        A menu that repaints as its marker moves is announced in
+                        one line rather than re-read (see /menu above).
       --story-only      Show only the story text: suppress the whole upper
                         window, menus and forms included. Stronger than what
                         --screen-reader does to the status line, and independent
@@ -1053,6 +1163,11 @@ fn main() {
         term_rows,
         term_cols,
     );
+    // Screen-reader mode only, and for the same reason: on a TTY the menu is
+    // painted in place and nothing repeats, and a plain pipe is a transcript
+    // that must stay byte-identical (SQ-0609).
+    let plain_menus = mode.plain() && !args.story_only;
+    view.set_menus(plain_menus);
     // Screen-reader mode only: elsewhere the status line is on screen the whole
     // time, so announcing what it already says would be noise (SQ-0616).
     let mut score_watch = cli_host::ScoreWatch::new();
@@ -1157,7 +1272,8 @@ fn main() {
                 // Poll for terminal resize before line input (crossterm returns
                 // current size; on piped stdout this is a no-op via is_tty guard).
                 maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
-                print!("{}", view.frame(&machine));
+                let frame = view.frame(&machine);
+                print_frame(&mut machine, mode.plain(), &frame);
                 // Between the status and the held prompt: the announcement is
                 // about the turn that just ended, so it belongs with it rather
                 // than after the prompt (SQ-0611/0616).
@@ -1192,12 +1308,25 @@ fn main() {
                 // run and the game is owed its answer.
                 let (line, terminator, resize, aborted) = loop {
                     let r = read_line_raw(stdin_is_tty, echo, &mut machine, &mut view, timeout, &mut sound);
-                    if r.3 || !cli_host::input::is_status_request(&r.0) {
+                    if r.3 {
                         break r;
                     }
-                    let status = screen::ScreenView::status_now(&machine);
-                    let text = if status.is_empty() { "[no status]".to_string() } else { status };
-                    print_host_answer(&mut machine, &text);
+                    if cli_host::input::is_status_request(&r.0) {
+                        let status = screen::ScreenView::status_now(&machine);
+                        let text = if status.is_empty() { "[no status]".to_string() } else { status };
+                        print_host_answer(&mut machine, &text);
+                        continue;
+                    }
+                    // `/menu` re-reads the open menu, on the `/status` precedent
+                    // (SQ-0609/0610). Menus are char-driven, so this arm mostly
+                    // answers the polite refusal; the useful one is the cooked
+                    // char reader.
+                    if cli_host::is_menu_request(&r.0) {
+                        let text = view.menu_listing().unwrap_or_else(|| NO_MENU.to_string());
+                        print_host_answer(&mut machine, text.trim_end());
+                        continue;
+                    }
+                    break r;
                 };
                 if let Some((new_cols, new_rows)) = resize {
                     apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,
@@ -1217,7 +1346,8 @@ fn main() {
             StepResult::NeedChar => {
                 // Poll for terminal resize before char input.
                 maybe_resize(both_tty, &mut term_rows, &mut term_cols, &mut page_height, &mut machine, &mut view);
-                print!("{}", view.frame(&machine));
+                let frame = view.frame(&machine);
+                print_frame(&mut machine, mode.plain(), &frame);
                 // Between the status and the held prompt: the announcement is
                 // about the turn that just ended, so it belongs with it rather
                 // than after the prompt (SQ-0611/0616).
@@ -1235,7 +1365,19 @@ fn main() {
                     last_page_bg = cur_bg;
                 }
                 let timeout = if timed { machine.pending_timeout() } else { None };
-                let (ch, resize, aborted) = read_char_input(stdin_is_tty, &mut machine, &mut view, timeout, &mut sound);
+                // A host-driven menu walk feeds the game its own navigation keys
+                // instead of reading stdin, so a typed number lands on the item
+                // the player named (SQ-0609).
+                // Asked after the frame above, so the walk steers from where the
+                // marker actually landed rather than from a count made before
+                // the first press (SQ-0609).
+                let (ch, resize, aborted) = match view.next_menu_key() {
+                    Some(key) => (key, None, false),
+                    None if plain_menus => (read_cooked_char(&mut machine, &mut view), None, false),
+                    None => {
+                        read_char_input(stdin_is_tty, &mut machine, &mut view, timeout, &mut sound)
+                    }
+                };
                 // Handle any resize that happened DURING the char read.
                 if let Some((new_cols, new_rows)) = resize {
                     apply_resize(new_rows, new_cols, &mut term_rows, &mut term_cols,

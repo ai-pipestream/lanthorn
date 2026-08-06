@@ -228,19 +228,27 @@ fn read_line_raw(is_tty: bool, echo: LineEcho) -> (String, u32) {
 /// then restore cooked mode. Resize events during the wait are silently
 /// discarded (they will be caught by the next `before_input` poll). Piped
 /// stdin: return the first byte of the next line.
-fn read_char_input(stdin_is_tty: bool) -> u32 {
+/// Read one keypress, and hand back the line it came from.
+///
+/// The line is empty in raw mode, and is the whole cooked line off a TTY —
+/// screen-reader mode hands line editing to the kernel, so a "keypress" there
+/// really is a line terminated by Enter. That is what lets the host recognise
+/// `/menu` and a multi-digit menu jump without inventing a termination rule of
+/// its own (SQ-0609); everything else still reaches the game as its first byte.
+fn read_char_input(stdin_is_tty: bool) -> (u32, String) {
     if !stdin_is_tty {
         // Same EOF rule as the line path: a char request at end of input has
         // nothing left to answer with (SQ-0604).
         let Some(line) = cli_host::read_line_stdin() else { exit_on_eof() };
         let byte = line.bytes().next().unwrap_or(b'\n');
-        return match byte {
+        let key = match byte {
             b'\n' | b'\r' => keycode::RETURN,
             0x7f | 0x08 => keycode::DELETE,
             b'\t' => keycode::TAB,
             0x1b => keycode::ESCAPE,
             b => b as u32,
         };
+        return (key, line);
     }
     let _ = terminal::enable_raw_mode();
     let key = loop {
@@ -267,7 +275,7 @@ fn read_char_input(stdin_is_tty: bool) -> u32 {
         }
     };
     let _ = terminal::disable_raw_mode();
-    key
+    (key, String::new())
 }
 
 // ── drive loop ────────────────────────────────────────────────────────────────
@@ -323,6 +331,21 @@ fn announce_score(machine: &mut Machine, watch: &mut cli_host::ScoreWatch, on: b
     }
 }
 
+/// The answer to `/menu` when nothing is open.
+const NO_MENU: &str = "[no menu is open]";
+
+/// The terminal backend behind `machine`, when there is one (there is not, in
+/// the tests that drive a scripted backend).
+fn backend(machine: &mut Machine) -> Option<&mut TerminalBackend> {
+    machine.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>()
+}
+
+/// [`backend`], with `f` applied — the borrow-friendly spelling for the one-line
+/// queries the drive loop makes.
+fn with_backend<T>(machine: &mut Machine, f: impl FnOnce(&mut TerminalBackend) -> T) -> Option<T> {
+    backend(machine).map(f)
+}
+
 /// Let go of the prompt the backend is holding back (plain mode — SQ-0611).
 ///
 /// `before_input` flushes with the hold kept, so the score announcement can
@@ -344,7 +367,7 @@ fn drive(
     announce_scores: bool,
     mut before_input: impl FnMut(&mut Machine),
     mut read_line: impl FnMut(LineEcho) -> (String, u32),
-    mut read_char: impl FnMut() -> u32,
+    mut read_char: impl FnMut() -> (u32, String),
 ) {
     // Page background: reflect the game's Normal-style bg onto the terminal's
     // default background (OSC 11), honor-gated and TTY-only. Checked only when
@@ -419,20 +442,32 @@ fn drive(
                 // so loop until a real command arrives (SQ-0610).
                 let (line, terminator) = loop {
                     let r = read_line(LineEcho::EraseOnEnter(echo_sgr.clone()));
-                    if !cli_host::input::is_status_request(&r.0) {
-                        break r;
+                    // The prompt has already gone out by now, so a host answer
+                    // must start a fresh line and put the prompt back after
+                    // itself — otherwise it lands on the prompt line, the very
+                    // thing SQ-0611 fixed one layer down.
+                    if cli_host::input::is_status_request(&r.0) {
+                        if let Some(t) = backend(machine) {
+                            let status = t.grids_plain_now();
+                            let text = if status.is_empty() { "[no status]" } else { &status };
+                            t.write_host_answer(text);
+                        }
+                        continue;
                     }
-                    // The prompt has already gone out by now, so the answer must
-                    // start a fresh line and put the prompt back after itself —
-                    // otherwise it lands on the prompt line, the very thing
-                    // SQ-0611 fixed one layer down.
-                    if let Some(t) =
-                        machine.backend_mut().as_any_mut().downcast_mut::<TerminalBackend>()
-                    {
-                        let status = t.grids_plain_now();
-                        let text = if status.is_empty() { "[no status]" } else { &status };
-                        t.write_host_answer(text);
+                    // `/menu` re-reads the open menu, on the `/status` precedent
+                    // (SQ-0609/0610). Menus are char-driven, so this arm mostly
+                    // answers the polite refusal; the useful one is at the char
+                    // prompt below.
+                    if cli_host::is_menu_request(&r.0) {
+                        let text = with_backend(machine, |t| t.menu_listing())
+                            .flatten()
+                            .unwrap_or_else(|| NO_MENU.to_string());
+                        if let Some(t) = backend(machine) {
+                            t.write_host_answer(text.trim_end());
+                        }
+                        continue;
                     }
+                    break r;
                 };
                 let cmd = line.trim_end_matches(['\n', '\r']);
                 if let Some(t) =
@@ -447,7 +482,38 @@ fn drive(
                 emit_page_bg(machine, honor, stdout_is_tty, &mut last_page_bg);
                 before_input(machine);
                 release_prompt(machine);
-                let key = read_char();
+                // A menu walk feeds the game its own navigation keys instead of
+                // reading stdin, and steers from where the marker actually
+                // landed — asked here, after `before_input` observed the frame
+                // (SQ-0609).
+                let key = loop {
+                    if let Some(k) = with_backend(machine, |t| t.next_menu_key()).flatten() {
+                        break k;
+                    }
+                    let (key, line) = read_char();
+                    if line.is_empty() {
+                        break key; // raw mode: a keystroke, not a line
+                    }
+                    if cli_host::is_menu_request(&line) {
+                        let text = with_backend(machine, |t| t.menu_listing())
+                            .flatten()
+                            .unwrap_or_else(|| NO_MENU.to_string());
+                        if let Some(t) = backend(machine) {
+                            t.write_host_answer(text.trim_end());
+                        }
+                        continue;
+                    }
+                    match with_backend(machine, |t| t.typed_at_menu(&line)) {
+                        Some(cli_host::Typed::Jump) => continue,
+                        Some(cli_host::Typed::Here(said)) => {
+                            if let Some(t) = backend(machine) {
+                                t.write_host_answer(&said);
+                            }
+                            continue;
+                        }
+                        _ => break key,
+                    }
+                };
                 machine.supply_char(key);
             }
             // Game create_by_prompt: ask the user for a filename (blank = cancel).
@@ -586,8 +652,12 @@ Usage: gvm-cli [OPTIONS] <story>
 Arguments:
   <story>               Glulx story (.ulx) or Blorb (.gblorb)
 
-Host commands (typed at any line prompt, never passed to the game):
+Host commands (never passed to the game):
   /status           Repeat the current Glk grid windows (status line)
+  /menu             Re-read the open menu, host-numbered. In --screen-reader
+                    mode a menu keypress is a whole typed line, so /menu — and a
+                    bare item number, which jumps to that item — work at a menu's
+                    own prompt as well as at a line prompt.
 
 Options:
       --screen-reader   Linear plain text (alias: --plain; also selected by
@@ -597,7 +667,9 @@ Options:
                         windows stream inline as text instead of being painted
                         in place. The status bar is not narrated every turn (see
                         --show-status); menus still are. Ask for the status any
-                        time with /status.
+                        time with /status. A menu that repaints as its marker
+                        moves is announced in one line rather than re-read (see
+                        /menu above).
       --story-only      Show only the story window: suppress every grid window,
                         menus and forms included. Stronger than what
                         --screen-reader does to the status bar, and independent
@@ -687,6 +759,10 @@ fn main() {
     // (SQ-0612); taller grids — menus, forms — always come through.
     backend.set_quiet_status_line(mode.plain() && !m.has("--show-status"));
     backend.set_story_only(m.has("--story-only"));
+    // Screen-reader mode only: on a TTY the menu is painted in place and nothing
+    // repeats, and a plain pipe is a transcript that must stay byte-identical
+    // (SQ-0609).
+    backend.set_menus(mode.plain() && !m.has("--story-only"));
     // Paging needs both ends to be a terminal (a pipe would never answer the
     // prompt) and is off in screen-reader mode by choice — a blocking prompt
     // hiding the rest of the output is the worst shape for a reader (SQ-0617).
@@ -1122,7 +1198,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut keys = vec![b'Z' as u32].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glkvfs"), true, false, false, |_| {}, |_echo| (String::new(), 0), move || keys.next().unwrap_or(keycode::RETURN));
+        drive(&mut m, std::path::Path::new("unused.glkvfs"), true, false, false, |_| {}, |_echo| (String::new(), 0), move || (keys.next().unwrap_or(keycode::RETURN), String::new()));
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Z", "the typed key was supplied, stored, and echoed");
     }
@@ -1146,7 +1222,7 @@ mod tests {
 
         let mut m = build_machine(image_for(body), Box::new(TestBackend::new())).unwrap();
         let mut lines = vec!["hello".to_string()].into_iter();
-        drive(&mut m, std::path::Path::new("unused.glkvfs"), true, false, false, |_| {}, move |_echo| (lines.next().unwrap_or_default(), 0), || keycode::RETURN);
+        drive(&mut m, std::path::Path::new("unused.glkvfs"), true, false, false, |_| {}, move |_echo| (lines.next().unwrap_or_default(), 0), || (keycode::RETURN, String::new()));
         let text = m.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "hello", "the typed line was supplied into the buffer and printed");
     }
@@ -1248,7 +1324,7 @@ mod tests {
         // Run 1: a game writes "Hi" into a Glk file, then quits. drive's in-loop,
         // dirty-gated flush should persist the VFS to the sidecar.
         let mut m = build_machine(vfs_image(write_hi_program(), 2), Box::new(TestBackend::new())).unwrap();
-        drive(&mut m, &vfs_path, true, false, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
+        drive(&mut m, &vfs_path, true, false, false, |_| {}, |_echo| (String::new(), 0), || (keycode::RETURN, String::new()));
 
         assert!(vfs_path.exists(), "the .glkvfs sidecar is written to disk");
         let blob = fs::read(&vfs_path).unwrap();
@@ -1261,7 +1337,7 @@ mod tests {
         let mut m2 = build_machine(vfs_image(read_hi_program(), 4), Box::new(TestBackend::new())).unwrap();
         m2.load_vfs(&fs::read(&vfs_path).unwrap());
         m2.clear_vfs_dirty();
-        drive(&mut m2, &vfs_path, true, false, false, |_| {}, |_echo| (String::new(), 0), || keycode::RETURN);
+        drive(&mut m2, &vfs_path, true, false, false, |_| {}, |_echo| (String::new(), 0), || (keycode::RETURN, String::new()));
         let text = m2.backend_mut().as_any_mut().downcast_mut::<TestBackend>().unwrap().all_text();
         assert_eq!(text, "Hi", "the persisted bytes are readable after load_vfs");
 
@@ -1342,7 +1418,7 @@ mod tests {
         let mut m =
             build_machine(vfs_image(save_restore_by_prompt_program(), 4), Box::new(TestBackend::new())).unwrap();
         drive(&mut m, &vfs_path, true, false, false, |_| {}, move |_echo| (save_path_str.clone(), 0), || {
-            keycode::RETURN
+            (keycode::RETURN, String::new())
         });
 
         let bytes = fs::read(&save_path).expect("the prompted filename was written by SaveRequest");
