@@ -39,7 +39,7 @@ fn arthur_at_churchyard(honor_game_colours: bool) -> Option<GameSession> {
     let picture_dims = picts.all_pict_dims();
     let std_window = picts.std_window();
     let mut session = GameSession::new_with_trace(
-        story_bytes, honor_game_colours, false, None, false, picture_dims, std_window, None,
+        story_bytes, honor_game_colours, false, None, false, picture_dims, std_window, None, None
     )
     .expect("Arthur (v6) should load and boot without a ZError");
     session.set_pict_source(Some(picts));

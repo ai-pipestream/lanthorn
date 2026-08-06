@@ -46,7 +46,7 @@ fn smoke_v6_title(title: &str, story_path: &PathBuf) {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None, None)
             .unwrap_or_else(|e| panic!("{title} should load and boot without a ZError, got {e:?}"));
 
     assert!(!session.quit, "{title} quit during boot (fault or premature quit), before reaching the first prompt");

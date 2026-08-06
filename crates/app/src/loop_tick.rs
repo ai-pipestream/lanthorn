@@ -121,9 +121,11 @@ pub(crate) fn poll_glulx_resize(
 /// Returns `true` when the header changed (the upper window's width follows it).
 ///
 /// What is declared is [`declared_story_screen_dims`], not the raw pane
-/// measurement: the width is floored at the 80 columns the story booted with, so
-/// narrowing the pane can never move a v4/v5 status routine's baked-in field
-/// columns outside the window (SQ-0679).
+/// measurement: the width is floored at the columns the story booted with
+/// (SQ-0679) — whatever `GameSession::boot_screen_cols` says THIS session
+/// actually booted at, 80 by default or a narrower/wider pre-boot-seeded pane
+/// (SQ-0680) — so narrowing the pane can never move a v4/v5 status routine's
+/// baked-in field columns outside the window.
 ///
 /// [`declared_story_screen_dims`]: app::render::screen::declared_story_screen_dims
 pub(crate) fn poll_zvm_screen_dims(
@@ -138,9 +140,12 @@ pub(crate) fn poll_zvm_screen_dims(
     if version < 4 || version == 6 {
         return false;
     }
-    let Some((rows, cols)) =
-        app::render::screen::declared_story_screen_dims(last_panes.story, state, version)
-    else {
+    let Some((rows, cols)) = app::render::screen::declared_story_screen_dims(
+        last_panes.story,
+        state,
+        version,
+        gs.boot_screen_cols,
+    ) else {
         return false;
     };
     let current = (

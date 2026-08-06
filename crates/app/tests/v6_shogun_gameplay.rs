@@ -46,7 +46,7 @@ fn shogun_boots_plays_and_emits_no_control_chars() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot without a ZError");
     assert!(!session.quit, "Shogun quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Shogun faulted during boot");
@@ -148,7 +148,7 @@ fn shogun_opening_is_a_right_margin_float() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -228,7 +228,7 @@ fn shogun_boot_menu_items_paint_horizontally_and_splash_clears() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot without a ZError");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -280,7 +280,7 @@ fn shogun_frameless_boot_menu_paints_items_and_caret() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -340,7 +340,7 @@ fn shogun_hybrid_boot_menu_is_coherent_text_with_solid_reverse_bar() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -403,7 +403,7 @@ fn shogun_frameless_status_band_fills_row_background() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -460,7 +460,7 @@ fn shogun_hybrid_status_band_floods_game_background() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -538,7 +538,7 @@ fn shogun_input_caret_sits_on_the_prompt_row_beside_a_tall_float() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -627,7 +627,7 @@ fn shogun_hybrid_status_band_rows_stay_adjacent_at_a_large_pane() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -691,7 +691,7 @@ fn shogun_hybrid_tall_pane_frame_reclaim() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -747,7 +747,7 @@ fn shogun_frameless_status_band_anchors_left_center_right() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -812,7 +812,7 @@ fn shogun_raster_status_band_floods_game_white() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -900,7 +900,7 @@ fn shogun_prose_emphasis_reaches_the_raster_faces() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();

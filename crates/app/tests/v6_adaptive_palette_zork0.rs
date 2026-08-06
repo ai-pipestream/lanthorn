@@ -52,7 +52,7 @@ fn zork0_compass_overlay_decodes_with_the_base_game_palette() {
     assert!(!blorb2.is_adaptive_picture(5), "base Pict 5 must NOT be adaptive");
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, false, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit && session.machine.fault_trace.is_none(), "Zork0 booted cleanly");
 

@@ -36,7 +36,7 @@ fn boot(file: &str) -> Option<GameSession> {
         return None;
     };
     Some(
-        GameSession::new_with_trace(bytes, true, false, None, false, Vec::new(), None, Some((2, 9)))
+        GameSession::new_with_trace(bytes, true, false, None, false, Vec::new(), None, Some((2, 9)), None)
             .expect("story should load and boot without a ZError"),
     )
 }
@@ -213,7 +213,7 @@ fn split_once_v5_story() -> Vec<u8> {
 #[test]
 fn synthetic_v5_upper_grid_follows_the_pane_without_a_re_split() {
     let mut s = GameSession::new_with_trace(
-        split_once_v5_story(), true, false, None, false, Vec::new(), None, Some((2, 9)),
+        split_once_v5_story(), true, false, None, false, Vec::new(), None, Some((2, 9)), None
     )
     .expect("the synthetic v5 story should boot");
     assert!(!s.quit, "the synthetic story parks on `read`, it does not quit");

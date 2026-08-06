@@ -42,7 +42,7 @@ fn advent_in_play(honor: bool) -> Option<GameSession> {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, honor, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, honor, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("advent.z6 (v6) should load and boot without a ZError");
     assert!(!session.quit, "quit during boot");
     session.set_pict_source(Some(picts));
@@ -369,7 +369,7 @@ fn the_boot_popup_does_not_blank_the_rows_behind_it() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(bytes, true, true, None, false, dims, picts.std_window(), None)
+        GameSession::new_with_trace(bytes, true, true, None, false, dims, picts.std_window(), None, None)
             .expect("boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();

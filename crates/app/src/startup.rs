@@ -17,6 +17,7 @@ use crossterm::execute;
 use crossterm::terminal::{enable_raw_mode, EnterAlternateScreen};
 use mapper::mapper::Mapper;
 use ratatui::backend::CrosstermBackend;
+use ratatui::layout::Rect;
 use ratatui::Terminal;
 
 use clap::Parser;
@@ -143,6 +144,52 @@ pub(crate) fn resolve_launch() -> LaunchCtx {
     };
 
     LaunchCtx { cli, cfg, data_base, library_dir, single_file }
+}
+
+/// The real story-pane `(rows, cols)` a v1–8 Z-machine session should be BOOTED
+/// with — measured BEFORE the engine exists, so a v4/v5 story's boot-time
+/// status-bar layout (Zork 1: paints its reverse bar once, at whatever width
+/// header byte $21 held at that moment, then only re-cursors to the two field
+/// columns it derived from it) already targets the real pane instead of the
+/// zvm 80×24 fallback `init_caps` seeds absent a hint (SQ-0679/SQ-0680).
+///
+/// Runs the SAME split this frame's [`compute_pane_layout`]/[`story_screen_dims`]
+/// would, against a throwaway [`AppState`] carrying only what those two
+/// functions read: the resolved theme (border sides, for the upper-window
+/// frame `story_screen_dims` insets), the resolved config (margins, the
+/// `virtual_screen_cols`/`rows` pin — pinned wins here exactly as it wins in
+/// the live pane measurement, since this reuses the very same call), the
+/// garglk.ini margin overlay, and the pane-split sizes. Command band / inventory
+/// dock are left at their true boot-time state — closed; both open only after
+/// this session already exists (`band_auto_open`, further down) — and neither
+/// affects the WIDTH this seeds anyway, only rows, which the SQ-0679 floor
+/// never gates.
+///
+/// `None` when the terminal size can't be queried (piped/non-terminal stdout,
+/// e.g. some test harnesses) or the query reports a zero-area frame; the
+/// constructor then falls back to the 80×24 boot default exactly as before this
+/// change.
+fn pre_boot_host_screen(
+    cfg: &Config,
+    cs: &app::colors::ColorScheme,
+    garglk_overlay: &Option<app::garglk_ini::GarglkOverlay>,
+) -> Option<(u16, u16)> {
+    let (term_cols, term_rows) = crossterm::terminal::size().ok()?;
+    let frame = Rect::new(0, 0, term_cols, term_rows);
+    if frame.width == 0 || frame.height == 0 {
+        return None;
+    }
+    let mut boot_state = AppState::default();
+    boot_state.colors = cs.clone();
+    boot_state.config = cfg.clone();
+    boot_state.garglk_overlay = garglk_overlay.clone();
+    boot_state.pane_sizes = app::state::PaneSizes {
+        split_ratio: cfg.split_ratio,
+        band_height: cfg.command_band.height,
+        inv_dock_pct: cfg.inv_dock_pct,
+    };
+    let pane_layout = app::layout::compute_pane_layout(frame, &boot_state, 0);
+    app::render::screen::story_screen_dims(pane_layout.story, &boot_state)
 }
 
 /// Build the per-story engine + mapper + UI state + terminal for `story_path`,
@@ -311,6 +358,11 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
     } else {
         None
     };
+    // SQ-0679/SQ-0680: the real story-pane `(rows, cols)`, measured before the
+    // engine exists, so a v4/v5 story's boot-time status-bar layout already
+    // targets it instead of the zvm 80×24 fallback. `None` (size query failed,
+    // or a zero-area frame) leaves the constructor's existing fallback in place.
+    let host_screen = pre_boot_host_screen(&cfg, &cs, &garglk_overlay);
 
     // Build the engine: a Z-machine GameSession for Z-code, a GlulxSession for
     // Glulx — both boxed behind the neutral Engine trait. Z-machine-specific
@@ -338,7 +390,7 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
 
             // `--debug` (SQ-0449): trace from the first boot instruction so the
             // game's initialisation code is captured (a later `/debug` can't).
-            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number, cli.debug, picture_dims, v6_screen_px, host_default_colours) {
+            let mut s = match GameSession::new_with_trace(bytes, cfg.honor_game_colours, cfg.enable_sound, cfg.interpreter_number, cli.debug, picture_dims, v6_screen_px, host_default_colours, host_screen) {
                 Ok(s) => s,
                 Err(e) => {
                     use zvm::error::ZError;
@@ -364,10 +416,14 @@ pub(crate) fn boot_story(ctx: &LaunchCtx, story_path: std::path::PathBuf) -> Boo
             // shows the boot graphics instead of a blank window.
             s.flush_boot_pictures();
             // Pinned virtual screen dimensions, if the user set either key.
-            // `init_caps` (inside the constructor) seeded the fallback; a set key
-            // overrides it here, and an UNSET key is left for the story pane's real
-            // measurement to fill in at the first frame (`poll_zvm_resize`,
-            // ZMSD §8.4 — SQ-0532/A-F1).
+            // `pre_boot_host_screen` above already resolves this pin (it's what
+            // `story_screen_dims` reads first) and passed it into the constructor,
+            // so a v4/v5 story that lays its status bar out at boot already saw the
+            // pinned width. This re-write is now a safety net only — it still fires
+            // when `host_screen` came back `None` (no terminal to query), and is a
+            // harmless no-op re-write of the same value otherwise. An UNSET key is
+            // left for the story pane's real measurement to keep following at every
+            // later frame (`poll_zvm_resize`, ZMSD §8.4 — SQ-0532/A-F1).
             // v6 stories run at their NATIVE picture resolution (advertised before
             // boot in new_with_trace); the virtual screen is a v1–5 concern, so
             // leave the v6 native dims untouched here (SQ-0186).

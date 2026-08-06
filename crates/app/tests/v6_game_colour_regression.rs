@@ -102,7 +102,7 @@ fn boot_v6(file: &str, colours: bool) -> Option<GameSession> {
     };
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&path).map(|(b, _)| b));
     let dims = picts.all_pict_dims();
-    let mut s = GameSession::new_with_trace(bytes, colours, false, None, false, dims, picts.std_window(), Some((2, 9)))
+    let mut s = GameSession::new_with_trace(bytes, colours, false, None, false, dims, picts.std_window(), Some((2, 9)), None)
         .expect("v6 story boots");
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();

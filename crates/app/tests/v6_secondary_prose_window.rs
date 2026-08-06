@@ -34,7 +34,7 @@ fn boot() -> Option<GameSession> {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("advent.z6 should load and boot without a ZError");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -81,7 +81,7 @@ fn the_boot_banner_still_reaches_the_transcript() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let dims = picts.all_pict_dims();
     let mut fresh =
-        GameSession::new_with_trace(bytes, true, false, None, false, dims, picts.std_window(), None)
+        GameSession::new_with_trace(bytes, true, false, None, false, dims, picts.std_window(), None, None)
             .expect("boot");
     fresh.set_pict_source(Some(picts));
     fresh.flush_boot_pictures();

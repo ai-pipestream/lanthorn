@@ -43,7 +43,7 @@ fn boot(file: &str) -> Option<GameSession> {
         return None;
     };
     Some(
-        GameSession::new_with_trace(bytes, false, false, None, false, Default::default(), None, None)
+        GameSession::new_with_trace(bytes, false, false, None, false, Default::default(), None, None, None)
             .expect("story boots"),
     )
 }
@@ -58,7 +58,7 @@ fn boot_v6(file: &str) -> Option<GameSession> {
     let mut picts = app::graphics::PictSource::new(blorb::resolve_resource_blorb(&path).map(|(b, _)| b));
     let dims = picts.all_pict_dims();
     let std_win = picts.std_window();
-    let mut s = GameSession::new_with_trace(bytes, true, false, None, false, dims, std_win, Some((2, 9)))
+    let mut s = GameSession::new_with_trace(bytes, true, false, None, false, dims, std_win, Some((2, 9)), None)
         .expect("v6 story boots");
     s.set_pict_source(Some(picts));
     s.flush_boot_pictures();

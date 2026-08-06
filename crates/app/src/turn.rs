@@ -1089,7 +1089,7 @@ mod tests {
                 PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
             let dims = picts.all_pict_dims();
             let mut s = GameSession::new_with_trace(
-                bytes, false, false, None, false, dims, picts.std_window(), None,
+                bytes, false, false, None, false, dims, picts.std_window(), None, None
             )
             .expect("Zork0 (v6) boots");
             s.set_pict_source(Some(picts));

@@ -33,7 +33,7 @@ fn boot_shogun() -> Option<GameSession> {
         false,
         picture_dims,
         picts.std_window(),
-        None,
+        None, None
     )
     .expect("Shogun (v6) should load and boot");
     session.set_pict_source(Some(picts));

@@ -388,12 +388,19 @@ pub fn story_screen_dims(area: Rect, state: &AppState) -> Option<(u16, u16)> {
 /// So the declared width may GROW to follow a widened pane (SQ-0533 —
 /// Sherlock/Trinity, which do re-read $21, gain the columns; every coordinate
 /// computed at the old width is still inside the new screen) but never SHRINK
-/// below [`zvm::screen::DEFAULT_SCREEN_COLS`], the width every v4+ story is
-/// booted at. In a pane too narrow for that, the story keeps painting the
-/// 80-column bar it was designed for and the pane clips the right of it — the
-/// same thing every terminal interpreter shows in an 80-column game squeezed
-/// into a 60-column window, and a great deal better than a bar with its room
-/// name eaten.
+/// below `boot_cols`, the width THIS session actually booted at. In a pane too
+/// narrow for that, the story keeps painting the bar it was laid out for and
+/// the pane clips the right of it — the same thing every terminal interpreter
+/// shows in an 80-column game squeezed into a 60-column window, and a great
+/// deal better than a bar with its room name eaten.
+///
+/// `boot_cols` is [`GameSession::boot_screen_cols`](crate::session::GameSession::boot_screen_cols):
+/// [`zvm::screen::DEFAULT_SCREEN_COLS`] (80) for a session booted without a
+/// pre-boot pane seed (SQ-0679's original assumption — every v4+ story used to
+/// boot at the fixed default), or the real seeded column count (SQ-0680) when
+/// one was given. Flooring at a fixed 80 regardless of what the session
+/// actually booted at would silently overwrite a correctly narrow pre-boot
+/// seed back up to 80 on the very next poll.
 ///
 /// Exempt: v1–3 (no such header fields — §8.4 starts at v4), v6 (its screen is
 /// the native pixel frame, scaled into the pane, never measured from it), and a
@@ -402,12 +409,13 @@ pub fn declared_story_screen_dims(
     area: Rect,
     state: &AppState,
     version: u8,
+    boot_cols: u16,
 ) -> Option<(u16, u16)> {
     let (rows, cols) = story_screen_dims(area, state)?;
     if version < 4 || version == 6 || state.config.virtual_screen_cols.is_some() {
         return Some((rows, cols));
     }
-    Some((rows, cols.max(zvm::screen::DEFAULT_SCREEN_COLS as u16)))
+    Some((rows, cols.max(boot_cols)))
 }
 
 /// Reserve the configured text-window inner margin (SQ-0345) inside a
@@ -3716,7 +3724,7 @@ mod tests {
         let mut picts = crate::graphics::PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
         let dims = picts.all_pict_dims();
         let mut session =
-            crate::session::GameSession::new_with_trace(bytes, false, false, None, false, dims, picts.std_window(), None)
+            crate::session::GameSession::new_with_trace(bytes, false, false, None, false, dims, picts.std_window(), None, None)
                 .expect("Zork0 (v6) loads and boots");
         session.set_pict_source(Some(picts));
         session.flush_boot_pictures();
@@ -4184,44 +4192,63 @@ mod tests {
         assert_eq!(story_screen_dims(Rect::new(0, 0, 132, 40), &state), Some((24, 80)));
     }
 
-    /// SQ-0679: the width DECLARED to a v4+ story never drops below the 80
-    /// columns it booted at, because a v4/v5 status routine reads $21 once and
-    /// bakes its field columns in — narrow the screen under it and those columns
+    /// SQ-0679: the width DECLARED to a v4+ story never drops below the width
+    /// it booted at, because a v4/v5 status routine reads $21 once and bakes
+    /// its field columns in — narrow the screen under it and those columns
     /// fall outside the window, where §8.7.2.3 makes the `set_cursor` illegal and
     /// the digits land on the room name instead. Widening still follows the pane
     /// (SQ-0533), and the HEIGHT always does: `split_window` re-declares it on
     /// every layout.
+    ///
+    /// SQ-0680: the floor is `boot_cols`, THIS session's actual boot width —
+    /// `zvm::screen::DEFAULT_SCREEN_COLS` (80) unseeded, matching the original
+    /// SQ-0679 assumption, or whatever narrower/wider pane the caller pre-boot
+    /// seeded (`GameSession::boot_screen_cols`).
     #[test]
     fn declared_width_never_drops_below_the_boot_width() {
         let state = frameless_state();
         let narrow = Rect::new(0, 0, 60, 20);
         let wide = Rect::new(0, 0, 132, 40);
+        let boot_80 = zvm::screen::DEFAULT_SCREEN_COLS as u16;
         // The raw pane measurement is unchanged — it still measures the pane.
         assert_eq!(story_screen_dims(narrow, &state), Some((20, 59)));
 
-        // v5: floored at 80 going down, free to follow the pane going up.
+        // v5: floored at the boot width going down, free to follow the pane up.
         assert_eq!(
-            declared_story_screen_dims(narrow, &state, 5),
+            declared_story_screen_dims(narrow, &state, 5, boot_80),
             Some((20, 80)),
             "a 59-column pane still declares the 80 columns the story booted with"
         );
         assert_eq!(
-            declared_story_screen_dims(wide, &state, 5),
+            declared_story_screen_dims(wide, &state, 5, boot_80),
             Some((40, 131)),
             "a wider pane is declared in full — every old coordinate is still inside it"
         );
         // The height follows the pane in both directions.
-        assert_eq!(declared_story_screen_dims(narrow, &state, 5).unwrap().0, 20);
+        assert_eq!(declared_story_screen_dims(narrow, &state, 5, boot_80).unwrap().0, 20);
 
         // v3 has no such header fields, and v6's screen is its native pixel
         // frame — neither is floored.
-        assert_eq!(declared_story_screen_dims(narrow, &state, 3), Some((20, 59)));
-        assert_eq!(declared_story_screen_dims(narrow, &state, 6), Some((20, 59)));
+        assert_eq!(declared_story_screen_dims(narrow, &state, 3, boot_80), Some((20, 59)));
+        assert_eq!(declared_story_screen_dims(narrow, &state, 6, boot_80), Some((20, 59)));
 
         // An explicitly pinned width is the user's, not ours to floor.
         let mut pinned = frameless_state();
         pinned.config.virtual_screen_cols = Some(40);
-        assert_eq!(declared_story_screen_dims(narrow, &pinned, 5), Some((20, 40)));
+        assert_eq!(declared_story_screen_dims(narrow, &pinned, 5, boot_80), Some((20, 40)));
+
+        // SQ-0680: a session pre-boot-seeded to a NARROWER pane floors at ITS
+        // own boot width, not the fixed 80 default — a 60-column pane that
+        // booted at 60 must not be forced back up to 80 on the next poll,
+        // which would silently undo the whole point of seeding it.
+        assert_eq!(
+            declared_story_screen_dims(narrow, &state, 5, 60),
+            Some((20, 60)),
+            "a 59-column pane under a 60-column boot floors at the boot width, not 80"
+        );
+        // …and a pane exactly at (or wider than) that boot width is reported
+        // as-measured, same as always.
+        assert_eq!(declared_story_screen_dims(wide, &state, 5, 60), Some((40, 131)));
     }
 
     /// SQ-0532/A-F1(c): the width the story is TOLD about, the width the upper

@@ -39,7 +39,7 @@ fn boot() -> Option<GameSession> {
     let bytes = std::fs::read(&p).ok()?;
     let mut pic = picts();
     let dims = pic.all_pict_dims();
-    let mut s = GameSession::new_with_trace(bytes, true, false, None, false, dims, pic.std_window(), None)
+    let mut s = GameSession::new_with_trace(bytes, true, false, None, false, dims, pic.std_window(), None, None)
         .expect("Arthur (v6) boots");
     s.set_pict_source(Some(pic));
     s.flush_boot_pictures();

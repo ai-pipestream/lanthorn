@@ -576,6 +576,20 @@ pub struct GameSession {
     /// that never existed. They keep the pre-SQ-0567 behaviour: stale palette, right
     /// layering.
     unreplayable: std::collections::HashSet<u8>,
+    /// The width (in columns) actually declared to this story at boot — the
+    /// `host_screen` column seeded into `new_with_trace` (SQ-0680), or
+    /// [`zvm::screen::DEFAULT_SCREEN_COLS`] when boot was unseeded (`None`, or
+    /// a construction path that bypasses `new_with_trace` entirely).
+    ///
+    /// [`declared_story_screen_dims`]'s floor used to assume every v4+ story
+    /// booted at the fixed 80-column default; now that boot itself can be
+    /// seeded with the real pane, the floor has to track whatever THIS session
+    /// actually booted at instead, or a pane narrower than 80 would have its
+    /// correct pre-boot seed silently overwritten back to 80 on the very next
+    /// poll (`loop_tick::poll_zvm_screen_dims`).
+    ///
+    /// [`declared_story_screen_dims`]: crate::render::screen::declared_story_screen_dims
+    pub boot_screen_cols: u16,
 }
 
 // ── GameSession impl ──────────────────────────────────────────────────────────
@@ -588,7 +602,7 @@ impl GameSession {
     /// game's opening text into the sink.  The sink is NOT drained here; the
     /// caller can call `take_transcript` to retrieve the banner/intro text.
     pub fn new(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>) -> Result<GameSession, ZError> {
-        Self::new_with_trace(story, honor_game_colours, sound_available, interpreter_number, false, Vec::new(), None, None)
+        Self::new_with_trace(story, honor_game_colours, sound_available, interpreter_number, false, Vec::new(), None, None, None)
     }
 
     /// Like [`new`](Self::new) but enables execution tracing BEFORE the VM runs to
@@ -610,7 +624,21 @@ impl GameSession {
     /// default pair while booting (Beyond Zork picks its colour scheme there)
     /// must already see the host's real page/ink. `None` leaves the VM's own
     /// §8.3.2 black-on-white seed. (SQ-0532/A-F2)
-    pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, default_colours: Option<(u8, u8)>) -> Result<GameSession, ZError> {
+    ///
+    /// `host_screen` is the real `(rows, cols)` of the story pane the caller is
+    /// about to render into, measured BEFORE this call — not the pane-measured
+    /// dims applied a frame after boot, which is one turn too late for a v4/v5
+    /// story whose status-bar routine lays itself out ONCE, at boot, and never
+    /// re-reads header byte $21 (SQ-0679/SQ-0680). Seeding the real pane here
+    /// means that boot-time layout already targets it, so the SQ-0679 floor
+    /// (which never lets a v4+ declared width shrink below the BOOT width) now
+    /// only ever guards a genuine mid-session narrowing, instead of permanently
+    /// pinning every story to the zvm 80×24 fallback it would otherwise have
+    /// booted at. `None` (non-TUI callers, most tests) leaves that 80×24 fallback
+    /// in place, matching prior behaviour exactly. Ignored for v6, whose screen
+    /// is the native pixel frame seeded from `v6_screen_px` above, never the host
+    /// cell pane.
+    pub fn new_with_trace(story: Vec<u8>, honor_game_colours: bool, sound_available: bool, interpreter_number: Option<u8>, trace_from_boot: bool, picture_dims: Vec<(u16, u16, u16)>, v6_screen_px: Option<(u16, u16)>, default_colours: Option<(u8, u8)>, host_screen: Option<(u16, u16)>) -> Result<GameSession, ZError> {
         let mem = Memory::new(story)?;
         let sink = Box::new(CaptureSink::new());
         let mut machine = Machine::with_output(mem, sink);
@@ -649,7 +677,22 @@ impl GameSession {
             let cols = (w / zvm::screen::V6_FONT_WIDTH).clamp(1, 255) as u8;
             let rows = (h / zvm::screen::V6_FONT_HEIGHT).clamp(1, 255) as u8;
             machine.set_screen_dims(rows, cols);
+        } else if let Some((r, c)) = host_screen {
+            // SQ-0680: seed the REAL host pane before boot, so a v4/v5 status
+            // routine that lays itself out once at boot (Zork 1) bakes in field
+            // columns that are already correct for this pane, rather than the
+            // zvm 80×24 fallback `init_caps` just seeded a few lines above.
+            machine.set_screen_dims(r.clamp(1, 255) as u8, c.clamp(1, 255) as u8);
         }
+        // SQ-0680: the width actually declared to the story at boot — the
+        // seeded pane column count, or the zvm fallback `init_caps` used absent
+        // a seed. `declared_story_screen_dims`'s floor reads this back so it
+        // never re-widens a correctly-seeded narrow boot to the old hardcoded
+        // default.
+        let boot_screen_cols = host_screen
+            .filter(|_| machine.mem.version() != 6)
+            .map(|(_, c)| c.clamp(1, 255))
+            .unwrap_or(zvm::screen::DEFAULT_SCREEN_COLS as u16);
         // Trace from the very first instruction when requested, so the opening
         // run below records boot PCs into `ever_exec_pcs`. Also capture screen
         // opcodes from boot — a v6 game does its whole window/margin/picture
@@ -672,6 +715,7 @@ impl GameSession {
             last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols,
         })
     }
 
@@ -4166,7 +4210,7 @@ mod tests {
         // cumulative set is non-empty even before any player turn — capturing the
         // boot/init code a mid-game /debug can never see.
         let story = read_char_story_v5();
-        let traced = GameSession::new_with_trace(story.clone(), false, false, None, true, Vec::new(), None, None)
+        let traced = GameSession::new_with_trace(story.clone(), false, false, None, true, Vec::new(), None, None, None)
             .expect("traced session");
         assert!(!traced.machine.ever_exec_pcs.is_empty(),
             "boot PCs must be captured when tracing from boot");
@@ -4210,7 +4254,7 @@ mod tests {
         // space by V6_ART_SCALE (SQ-0479): `picture_data` reports the doubled
         // sizes the game lays out on the 640×400 screen with.
         let dims = vec![(5u16, 100u16, 60u16), (9u16, 20u16, 30u16)];
-        let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone(), None, None)
+        let session = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, dims.clone(), None, None, None)
             .expect("v6 session");
         assert_eq!(session.machine.picture_dims, vec![(5, 200, 120), (9, 40, 60)]);
     }
@@ -4250,7 +4294,7 @@ mod tests {
     /// whatever pane it has, so the pane feed must not touch it.
     #[test]
     fn set_screen_dims_leaves_the_v6_pixel_screen_alone() {
-        let mut s = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, Vec::new(), None, None)
+        let mut s = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, Vec::new(), None, None, None)
             .expect("v6 session");
         let before = (
             s.machine.mem.read_byte(0x20),
@@ -4300,7 +4344,7 @@ mod tests {
     #[test]
     fn a_restore_refits_the_upper_window_to_the_host_pane_not_the_saved_one() {
         for (host_cols, label) in [(120u8, "wider host"), (60u8, "narrower host")] {
-            let mut s = GameSession::new_with_trace(v5_stub_story(), false, false, None, false, Vec::new(), None, None)
+            let mut s = GameSession::new_with_trace(v5_stub_story(), false, false, None, false, Vec::new(), None, None, None)
                 .expect("v5 session");
             // The pane we are restoring INTO, as `post_restore_fixups` leaves it.
             s.machine.set_screen_dims(40, host_cols);
@@ -4335,7 +4379,7 @@ mod tests {
     /// window 0/1 from a terminal cell count.
     #[test]
     fn a_v6_restore_keeps_the_archived_window_geometry() {
-        let mut s = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, Vec::new(), None, None)
+        let mut s = GameSession::new_with_trace(v6_boot_stub_story(), false, false, None, false, Vec::new(), None, None, None)
             .expect("v6 session");
         let mut saved = s.machine.screen.clone();
         let v6 = saved.v6.as_mut().expect("v6 window table");
@@ -4362,7 +4406,7 @@ mod tests {
         let dark = Style::new().fg(Color::Rgb(238, 238, 238)).bg(Color::Rgb(12, 12, 16));
         let (bg, fg) = crate::colors::host_default_colour_pair(dark, None, None).expect("resolved");
         assert_eq!((bg, fg), (2, 9));
-        let s = GameSession::new_with_trace(read_char_story_v5(), true, false, None, false, Vec::new(), None, Some((bg, fg)))
+        let s = GameSession::new_with_trace(read_char_story_v5(), true, false, None, false, Vec::new(), None, Some((bg, fg)), None)
             .expect("v5 session");
         assert_eq!(s.machine.mem.read_byte(0x2C), 2, "$2C = default background");
         assert_eq!(s.machine.mem.read_byte(0x2D), 9, "$2D = default foreground");
@@ -4987,6 +5031,7 @@ mod tests {
             last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -5042,6 +5087,7 @@ mod tests {
             last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -5089,6 +5135,7 @@ mod tests {
             last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -5152,6 +5199,7 @@ mod tests {
             last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -5188,6 +5236,7 @@ mod tests {
             last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
         };
         sess.set_pict_source(Some(crate::graphics::PictSource::new(Some(blorb))));
 
@@ -5237,6 +5286,7 @@ mod tests {
             last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
         };
         // Window 7 has a rendered picture (a canvas sized to its pixel dims).
         sess.pictures_canvas.insert(7, crate::graphics::Canvas::new(64, 48));
@@ -5328,6 +5378,7 @@ mod tests {
             last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
         };
         let mut canvas = crate::graphics::Canvas::new(64, 48);
         canvas.z_seq = 42;
@@ -5374,6 +5425,7 @@ mod tests {
             last_content_pic: std::collections::HashMap::new(),
             display_ops: std::collections::HashMap::new(),
             unreplayable: std::collections::HashSet::new(),
+            boot_screen_cols: zvm::screen::DEFAULT_SCREEN_COLS as u16,
         };
         // The erase path allocates the canvas even without a resolved image.
         // (number != 0: a real erase_picture — number 0 is the erase_window

@@ -39,7 +39,7 @@ fn zork0_at_prompt() -> Option<(Vec<u8>, GameSession)> {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path()).map(|(b, _)| b));
     let dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes.clone(), true, false, None, false, dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes.clone(), true, false, None, false, dims, picts.std_window(), None, None)
             .expect("Zork0 (v6) boots without a ZError");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -120,7 +120,7 @@ fn story_ink_survives_a_save_state_resume() {
 
     // Resume exactly as startup.rs does: fresh boot, restore_state, restore_screen.
     let mut fresh = GameSession::new_with_trace(
-        story_bytes, true, false, None, false, fresh_picts().all_pict_dims(), fresh_picts().std_window(), None,
+        story_bytes, true, false, None, false, fresh_picts().all_pict_dims(), fresh_picts().std_window(), None, None
     )
     .expect("fresh Zork0 boot");
     Engine::restore_state(&mut fresh, &ac.engine_save()).expect("restore_state");
@@ -168,7 +168,7 @@ fn story_ink_survives_a_resume_without_a_v6_window_table() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&path).map(|(b, _)| b));
     let dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(bytes.clone(), true, false, None, false, dims, picts.std_window(), None)
+        GameSession::new_with_trace(bytes.clone(), true, false, None, false, dims, picts.std_window(), None, None)
             .expect("Photopia (v5) boots");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -213,7 +213,7 @@ fn story_ink_survives_a_resume_without_a_v6_window_table() {
     let _ = std::fs::remove_file(&arc);
 
     let mut fresh =
-        GameSession::new_with_trace(bytes, true, false, None, false, Vec::new(), None, None).expect("fresh boot");
+        GameSession::new_with_trace(bytes, true, false, None, false, Vec::new(), None, None, None).expect("fresh boot");
     Engine::restore_state(&mut fresh, &ac.engine_save()).expect("restore_state");
     app::session::restore_screen(&mut fresh.machine, ac.screen.clone().expect("persisted screen"));
 

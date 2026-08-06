@@ -62,7 +62,7 @@ fn zork0_v6_windows_smoke() {
     eprintln!("resolved {} Pict dimension entries from the sidecar", picture_dims.len());
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Zork0 (v6) should load and boot without a ZError");
 
     // (a) No fault/panic during boot.
@@ -200,7 +200,7 @@ fn v6_positioned_windows_carry_game_pixel_rects() {
     let picture_dims = picts.all_pict_dims();
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit, "Zork0 quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
@@ -239,7 +239,7 @@ fn zork0_v6_pixel_canvas_is_nonempty() {
     let picture_dims = picts.all_pict_dims();
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit, "Zork0 quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");
@@ -299,7 +299,7 @@ fn zork0_v6_story_classified_and_clear_interior_inside_frame() {
     let picture_dims = picts.all_pict_dims();
 
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit, "Zork0 quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");

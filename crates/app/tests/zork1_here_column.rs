@@ -39,7 +39,7 @@ fn boot(file: &str) -> Option<GameSession> {
     let dims = picts.all_pict_dims();
     let std_window = picts.std_window();
     let mut session =
-        GameSession::new_with_trace(bytes, true, false, None, false, dims, std_window, None)
+        GameSession::new_with_trace(bytes, true, false, None, false, dims, std_window, None, None)
             .expect("story should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();

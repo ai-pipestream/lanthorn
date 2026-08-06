@@ -36,7 +36,7 @@ fn boot_zork0() -> Option<GameSession> {
     let picture_dims = picts.all_pict_dims();
     let std_window = picts.std_window();
     let mut session = GameSession::new_with_trace(
-        story_bytes, false, false, None, true, picture_dims, std_window, None,
+        story_bytes, false, false, None, true, picture_dims, std_window, None, None
     )
     .expect("Zork0 (v6) should load and boot without a ZError");
     session.set_pict_source(Some(picts));
@@ -60,7 +60,7 @@ fn zork0_v6_compass_click_maps_writes_header_and_does_not_fault() {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, false, false, None, true, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, false, false, None, true, picture_dims, picts.std_window(), None, None)
             .expect("Zork0 (v6) should load and boot without a ZError");
     assert!(!session.quit, "Zork0 quit during boot");
     assert!(session.machine.fault_trace.is_none(), "Zork0 faulted during boot");

@@ -67,7 +67,7 @@ pub(crate) fn reset_game(
                 state.persist_debug_trace,
                 picture_dims,
                 v6_screen_px,
-                host_default_colours,
+                host_default_colours, None
             )
             .map_err(|e| format!("{e:?}"))
             .map(|mut new_session| {
@@ -247,7 +247,7 @@ mod tests {
         let dims = picts.all_pict_dims();
         let std_window = picts.std_window();
         let mut s = app::session::GameSession::new_with_trace(
-            bytes.clone(), true, false, None, false, dims, std_window, None,
+            bytes.clone(), true, false, None, false, dims, std_window, None, None
         )
         .expect("Shogun boots");
         s.set_pict_source(Some(picts));

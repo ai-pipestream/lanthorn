@@ -54,7 +54,7 @@ fn boot_zmachine(file: &str) -> Option<GameSession> {
     let dims = picts.all_pict_dims();
     let std_window = picts.std_window();
     let mut session =
-        GameSession::new_with_trace(bytes, true, false, None, false, dims, std_window, None)
+        GameSession::new_with_trace(bytes, true, false, None, false, dims, std_window, None, None)
             .expect("story should load and boot");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
@@ -291,7 +291,7 @@ fn v6_keeps_the_pixel_path_while_the_band_is_open() {
         let picture_dims = picts.all_pict_dims();
         let std_window = picts.std_window();
         let mut session = GameSession::new_with_trace(
-            story_bytes, honor, false, None, false, picture_dims, std_window, None,
+            story_bytes, honor, false, None, false, picture_dims, std_window, None, None
         )
         .expect("Zork0 (v6) should load and boot");
         session.set_pict_source(Some(picts));

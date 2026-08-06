@@ -49,7 +49,7 @@ fn boot_v6(file: &str, colours: bool, trace: bool) -> Option<GameSession> {
     };
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&path).map(|(b, _)| b));
     let dims = picts.all_pict_dims();
-    let mut s = GameSession::new_with_trace(bytes, colours, false, None, trace, dims, picts.std_window(), Some((2, 9)))
+    let mut s = GameSession::new_with_trace(bytes, colours, false, None, trace, dims, picts.std_window(), Some((2, 9)), None)
         .expect("v6 story should load and boot without a ZError");
     assert!(!s.quit, "{file} quit during boot");
     assert!(s.machine.fault_trace.is_none(), "{file} faulted during boot: {:?}", s.machine.fault_trace);
@@ -65,7 +65,7 @@ fn boot_z(file: &str, default_colours: (u8, u8), trace: bool) -> Option<GameSess
         return None;
     };
     Some(
-        GameSession::new_with_trace(bytes, true, false, None, trace, Vec::new(), None, Some(default_colours))
+        GameSession::new_with_trace(bytes, true, false, None, trace, Vec::new(), None, Some(default_colours), None)
             .expect("story should load and boot without a ZError"),
     )
 }

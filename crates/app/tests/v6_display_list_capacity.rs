@@ -42,7 +42,7 @@ fn boot(file: &str) -> Option<GameSession> {
     let mut pic = PictSource::new(blorb::resolve_resource_blorb(&p).map(|(b, _)| b));
     let dims = pic.all_pict_dims();
     let mut s =
-        GameSession::new_with_trace(bytes, true, false, None, false, dims, pic.std_window(), None).ok()?;
+        GameSession::new_with_trace(bytes, true, false, None, false, dims, pic.std_window(), None, None).ok()?;
     s.set_pict_source(Some(pic));
     s.flush_boot_pictures();
     let _ = s.take_transcript();

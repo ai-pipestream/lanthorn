@@ -48,7 +48,7 @@ fn journey_at_menu() -> Option<GameSession> {
     let mut picts = PictSource::new(blorb::resolve_resource_blorb(&story_path).map(|(b, _)| b));
     let picture_dims = picts.all_pict_dims();
     let mut session =
-        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None)
+        GameSession::new_with_trace(story_bytes, true, false, None, false, picture_dims, picts.std_window(), None, None)
             .expect("Journey (v6) should load and boot without a ZError");
     session.set_pict_source(Some(picts));
     session.flush_boot_pictures();
