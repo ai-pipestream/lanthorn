@@ -127,7 +127,7 @@ pub(crate) fn finish_command_turn(
     apply_turn(mapper, cmd, &result, &mut state.death_watch);
 
     // A move that killed the player proved nothing about the passage, so its `tried` record is
-    // taken back and the direction stays untried (`·`, not `_`). Fires for the turn that
+    // taken back and the direction stays untried (`·`, not `×`). Fires for the turn that
     // CONTAINED the fatal move even when the death is only admitted a turn later, after the
     // player answers a resurrection prompt. (SQ-0671)
     app::session::rollback_tried_on_death(

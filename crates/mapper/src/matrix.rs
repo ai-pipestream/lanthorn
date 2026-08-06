@@ -42,7 +42,7 @@ pub const MATRIX_DIRS: [Direction; 12] = [
 
 /// What the map knows about ONE room's ONE direction.
 ///
-/// The renderer maps these to glyphs (`⇄` / `→5⇠w` / `⇢9` / `↩` / `⇱out` / `_` / `·`); the
+/// The renderer maps these to glyphs (`⇄` / `→5⇠w` / `⇢9` / `↩` / `⇱out` / `×` / `·`); the
 /// distinctions themselves are graph facts and belong here, where they can be tested against a
 /// real map without a terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +80,7 @@ impl MatrixCell {
         }
     }
 
-    /// True for the two cells that mark unexplored ground (`_` and `·`) — what the frontier style
+    /// True for the two cells that mark unexplored ground (`×` and `·`) — what the frontier style
     /// dims.
     pub fn is_frontier(&self) -> bool {
         matches!(self, MatrixCell::Probed | MatrixCell::Untried)

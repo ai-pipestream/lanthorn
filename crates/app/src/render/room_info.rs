@@ -62,7 +62,7 @@ fn card_detail(
             let raw = graph.room(dest).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{dest}"));
             ("⇱", format!("{} · {}", raw, graph.layer_name(graph.layer_of(dest))))
         }
-        C::Probed => ("_", "tried, no way through".to_string()),
+        C::Probed => ("×", "tried, no way through".to_string()),
         C::Untried => ("·", String::new()),
     }
 }
@@ -230,7 +230,7 @@ pub fn draw_room_info(
     for (dir, glyph, detail) in &card {
         if row > max_y { break; }
         let line = format!("  {:<3} {} {}", dir_label(*dir), glyph, detail);
-        let style = if detail.is_empty() || *glyph == "_" { frontier_style } else { value_style };
+        let style = if detail.is_empty() || *glyph == "×" { frontier_style } else { value_style };
         draw_str_clipped(buf, inner_x, row, line.trim_end(), style, clip);
         row += 1;
     }
@@ -409,7 +409,7 @@ mod tests {
         assert!(text.contains("⇄ Forest Path"), "east is reciprocal, and names where it goes:\n{text}");
         assert!(text.contains("→ Cellar"), "south reaches the Cellar:\n{text}");
         assert!(text.contains("back: NE"), "…and the way back is spelled out, not left as `⇠ne`");
-        assert!(text.contains("W   _ tried, no way through"), "west was typed and refused:\n{text}");
+        assert!(text.contains("W   × tried, no way through"), "west was typed and refused:\n{text}");
         assert!(text.contains("NE  ·"), "and an untried direction is still listed:\n{text}");
         for d in ["N ", "S ", "E ", "W ", "NE", "NW", "SE", "SW", "Up", "Dn", "In", "Out"] {
             assert!(text.contains(d), "the card lists every travel direction; {d} is missing:\n{text}");

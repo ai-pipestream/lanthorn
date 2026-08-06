@@ -94,10 +94,10 @@ fn the_cells_the_spec_names_are_on_screen_in_both_colour_modes() {
             assert!(header.contains(d), "column {d} missing from header {header:?} (honor={honor})");
         }
 
-        // `_` — east was typed in the Dead End and there is no path that way.
+        // `×` — east was typed in the Dead End and there is no path that way.
         let dead_end = row_for(&buf, WIDE, "Dead End");
         let cells: Vec<&str> = dead_end.split_whitespace().skip(2).collect();
-        assert_eq!(cells[2], "_", "Dead End's E cell is `_`: {dead_end:?} (honor={honor})");
+        assert_eq!(cells[2], "×", "Dead End's E cell is `×`: {dead_end:?} (honor={honor})");
         assert!(cells[0].starts_with('⇄'), "and its N cell is reciprocal: {dead_end:?}");
 
         // The other end of the same passage — the layer's only other reciprocal cell.

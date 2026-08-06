@@ -84,7 +84,7 @@ fn cell_width(m: &Matrix, with_return: bool) -> u16 {
 /// | `⇢9`   | one-way — no return known                      |
 /// | `↩`    | self-loop — this direction leads back here     |
 /// | `⇱out` | leaves the layer; the destination is footnoted |
-/// | `_`    | tried, and there is no path that way           |
+/// | `×`    | tried, and there is no path that way           |
 /// | `·`    | untried — the exploration frontier             |
 pub fn cell_text(m: &Matrix, cell: &MatrixCell, with_return: bool) -> String {
     let tag = |id: RoomId| m.labels.tag_of(id).to_string();
@@ -105,7 +105,7 @@ pub fn cell_text(m: &Matrix, cell: &MatrixCell, with_return: bool) -> String {
         MatrixCell::LeavesLayer { .. } => {
             if with_return { "⇱out".to_string() } else { "⇱".to_string() }
         }
-        MatrixCell::Probed => "_".to_string(),
+        MatrixCell::Probed => "×".to_string(),
         MatrixCell::Untried => "·".to_string(),
     }
 }
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(t(1, Direction::N, true), "→2⇠w", "goes to 2; west comes back");
         assert_eq!(t(1, Direction::N, false), "→2", "compact drops the return, not the destination");
         assert_eq!(t(2, Direction::S, true), "⇄DE", "reciprocal, pointing at an initials tag");
-        assert_eq!(t(3, Direction::E, true), "_", "tried, no path");
+        assert_eq!(t(3, Direction::E, true), "×", "tried, no path");
         assert_eq!(t(3, Direction::W, true), "·", "untried");
         assert_eq!(t(1, Direction::S, true), "·");
     }

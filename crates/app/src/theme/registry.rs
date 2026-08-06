@@ -270,7 +270,7 @@ pub static REGISTRY: std::sync::LazyLock<Vec<RegRow>> = std::sync::LazyLock::new
     // ── The matrix view (SQ-0666). Defaults reproduce the design's mockup: a heading row,
     // the standing-in room reversed like a selected room, the selected row accented, its
     // entrances elsewhere BOLD (the cross-highlight is style, never a glyph, so the table's
-    // vocabulary stays one glyph per fact), and the `·`/`_` frontier dimmed out of the way.
+    // vocabulary stays one glyph per fact), and the `·`/`×` frontier dimmed out of the way.
     row("map.matrix.header", Section::Map, Kind::Style, Some("heading"), Delta::EMPTY),
     row("map.matrix.row:here", Section::Map, Kind::Style, Some("accent"), mods(false, false, false, true)),
     row("map.matrix.row:selected", Section::Map, Kind::Style, Some("accent"), Delta::EMPTY),

@@ -90,7 +90,7 @@ The map is a place you can move through, not just a picture.
   so a maze can stay a table while everything around it stays a map.
 - **Room card** — a room's info panel (left-click a room) lists **every** travel direction, not
   just the ones that go somewhere: where each leads, how it comes back, which you tried and
-  found walled up (`_`), and which you have never tried at all (`·`). That is the map's answer
+  found walled up (`×`), and which you have never tried at all (`·`). That is the map's answer
   to "where haven't I been?", one room at a time.
 - **Room inspector** — `toggle-inspector` opens an overlay for the selected room:
   its id, name, layer, position, and the per-edge layout constraints, so you can
@@ -211,10 +211,10 @@ hidden however empty the column looks.
 | `⇢9`   | one-way — no return known |
 | `↩`    | self-loop — this direction leads back into this very room |
 | `⇱out` | leaves the layer; the destination is footnoted below the table |
-| `_`    | tried, and there is no path that way |
+| `×`    | tried, and there is no path that way |
 | `·`    | untried — the exploration frontier |
 
-A move that got you *killed* leaves no `_` behind. Dying says nothing about whether
+A move that got you *killed* leaves no `×` behind. Dying says nothing about whether
 the passage is open, so the attempt is taken back and the cell stays `·`, still on
 the frontier — including when the game asks whether to reincarnate you before it
 admits the death, in which case the move that caused it is the one rolled back.
@@ -315,7 +315,7 @@ touching a line of code:
 The matrix view has its own selectors beside the map's colours:
 `map.matrix.header`, `map.matrix.row:here`, `map.matrix.row:selected`,
 `map.matrix.cell:entrance` (the bold cross-highlight), `map.matrix.cell:frontier`
-(the dimmed `·`/`_` cells) and `map.matrix.footnote`; `map.trail` colours the
+(the dimmed `·`/`×` cells) and `map.matrix.footnote`; `map.trail` colours the
 maze breadcrumb.
 
 Individual glyphs can be overridden one at a time in `[map.overrides]`, and

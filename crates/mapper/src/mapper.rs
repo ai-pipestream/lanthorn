@@ -32,7 +32,7 @@ impl Mapper {
     /// When the room they arrived in is the room they left, that is a self-loop — Adventure's
     /// maze is full of them, and the old code threw the fact away because it could not tell a
     /// loop from a wall. It still cannot, which is why the proof has to come from the caller: a
-    /// direction that bounced off a wall reaches [`Mapper::observe`] and stays a probe (`_`),
+    /// direction that bounced off a wall reaches [`Mapper::observe`] and stays a probe (`×`),
     /// while an observed arrival reaches this and mints the loop (`↩`).
     pub fn observe_moved(&mut self, location: RoomId, name: &str, via: Option<Direction>) {
         self.observe_inner(location, name, via, true);

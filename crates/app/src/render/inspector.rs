@@ -92,7 +92,7 @@ pub fn room_diagnostics(graph: &MapGraph, id: RoomId) -> Option<RoomDiagnostics>
 /// Returns `Some(DialogRects)` when drawn (for mouse hit-testing).
 ///
 /// It no longer draws a compass rose (SQ-0666): per-direction exploration is one fact, and the
-/// room-info card and the matrix view's `_`/`·` cells both say it, in a form that also names where
+/// room-info card and the matrix view's `×`/`·` cells both say it, in a form that also names where
 /// each direction goes. The rose was the third dialect for the same knowledge and the least
 /// informative of the three.
 pub fn draw_inspector(diag: &RoomDiagnostics, map_area: Rect, buf: &mut Buffer, dialog_style: &DialogStyle) -> Option<DialogRects> {
@@ -407,7 +407,7 @@ mod tests {
     /// SQ-0391's compass rose was retired by SQ-0666, and this is the test that used to pin
     /// it — flipped rather than deleted, because the FACT it covered is still displayed, just
     /// somewhere better. "Which ways out of this room have I explored?" is now answered by the
-    /// room-info card and the matrix's `_`/`·` cells, both of which also say where each direction
+    /// room-info card and the matrix's `×`/`·` cells, both of which also say where each direction
     /// goes; the rose said only "some letter is capitalised". Three dialects for one fact was two
     /// too many, so the inspector no longer draws it and no longer takes the portal glyph set it
     /// existed to consume.

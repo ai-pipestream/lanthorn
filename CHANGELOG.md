@@ -12,6 +12,16 @@ identifies which beta it is without reading its git hash.
 
 ---
 
+## Unreleased
+
+### Changed
+
+- The matrix view's tried-but-pathless cell is `×` rather than `_` — a mark
+  centered in the cell instead of one hugging the baseline, where it read as
+  an empty cell with an underline artifact. `·` (untried) is unchanged.
+
+---
+
 ## v0.1.0-beta.4 — 2026-08-05
 
 ### Added

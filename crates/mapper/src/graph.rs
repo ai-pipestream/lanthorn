@@ -423,7 +423,7 @@ impl MapGraph {
 
     /// Undo a [`MapGraph::mark_tried`] — `dir` was never really tried from `id` after all
     /// (SQ-0671). The one caller is the fatal move: the player typed a direction, the game killed
-    /// them for it, and no passage was found either way. Recording it as tried would draw a `_`
+    /// them for it, and no passage was found either way. Recording it as tried would draw a `×`
     /// ("tried, and there is no path that way") over a direction nobody has any knowledge about,
     /// which is the map asserting something false.
     ///

@@ -5413,7 +5413,7 @@ mod tests {
         assert_eq!(
             classify(&m.graph, 1, Direction::N),
             MatrixCell::Probed,
-            "the cell becomes `_` on the same turn — nothing waits for the geometry to change"
+            "the cell becomes `×` on the same turn — nothing waits for the geometry to change"
         );
     }
 

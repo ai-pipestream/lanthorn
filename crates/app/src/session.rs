@@ -2254,7 +2254,7 @@ fn offers_revival(transcript: &str) -> bool {
 ///
 /// A move that kills the player finds no passage: the game prints its death text, no room heading
 /// is reprinted, no edge is minted — and yet the direction landed in the room's `tried` list,
-/// where the matrix draws it as `_`, "tried, and there is no path that way". That is a claim about
+/// where the matrix draws it as `×`, "tried, and there is no path that way". That is a claim about
 /// the map nobody made. Dying tells you nothing about whether the way is open, so the record goes
 /// back to `·` (untried) and the direction stays on the exploration frontier.
 ///
