@@ -100,6 +100,43 @@ fn the_fixture_is_a_maze_sharing_a_layer_with_ordinary_rooms() {
     assert_eq!(matrix::labels(&g, CELLAR_LAYER).row_of(here), "Maze 3");
 }
 
+/// SQ-0685: `zork1_maze_map.json` predates the persisted discovery sequence too — no room in it
+/// carries a `seq`. On load the backfill assigns each room's seq from its POSITION IN THE FILE'S
+/// `rooms` ARRAY, and numbering follows that array order rather than ascending room id. Computed
+/// straight off the raw file so this pins the mechanism, not today's numbers.
+#[test]
+fn seq_backfill_numbers_maze_rooms_in_the_files_own_array_order() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../unit_tests/zork1_maze_map.json");
+    let json = std::fs::read_to_string(&path).unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&json).expect("fixture is valid JSON");
+    let rooms = raw["rooms"].as_array().expect("rooms is an array");
+    assert!(
+        rooms.iter().all(|r| r.get("seq").is_none()),
+        "fixture predates SQ-0685 and must carry no `seq` field, or this test proves nothing"
+    );
+    let expected: Vec<RoomId> = rooms
+        .iter()
+        .filter(|r| r["name"] == "Maze" && r["layer"].as_u64() == Some(CELLAR_LAYER as u64))
+        .map(|r| r["id"].as_u64().unwrap() as RoomId)
+        .collect();
+    assert_eq!(expected.len(), 5, "sanity: five Maze rooms in the file, all on the Cellar layer");
+
+    let g = zork1();
+    let lbl = matrix::labels(&g, CELLAR_LAYER);
+    let mut numbered: Vec<(u32, RoomId)> = lbl
+        .row
+        .iter()
+        .filter_map(|(&id, row)| row.strip_prefix("Maze ").and_then(|n| n.parse().ok()).map(|n| (n, id)))
+        .collect();
+    numbered.sort();
+    let actual: Vec<RoomId> = numbered.into_iter().map(|(_, id)| id).collect();
+    assert_eq!(
+        actual, expected,
+        "numbering must equal the array order of the same-named rooms in the file, not ascending id"
+    );
+}
+
 /// The bug, as a number. The Cellar layer is ONE connected component — the maze hangs off the
 /// Troll Room, which reciprocates tidily with the Cellar — so clustering by component averages
 /// seven maze rooms together with five ordinary ones and lands under the bar. This is the

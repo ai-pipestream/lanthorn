@@ -234,9 +234,18 @@ from *outside* the layer leads into — a doorway into the maze, listed in a foo
 (`⇲ in:  <origin room> —<direction>→ <target>`) alongside where `⇱out` cells lead.
 A room that is both here and a doorway shows `▸`: you are standing there, and the
 entrance fact still reads in the footnote. Rooms sharing a display name are
-numbered in row order ("Maze 1…11") — display-only; identity is still the room's
-own id, so the numbers are the same tomorrow and after a reload. Names too long
-for the label column are abbreviated and spelled out in a footnote.
+numbered in the order you *found* them — "Maze 1" is whichever one you walked
+into first, not whichever has the lowest id. That matters because the id is often
+the story's own object number, which has nothing to do with when you found the
+room: a number is minted the moment a room is first discovered and never changes
+again, so finding a "new" duplicate that happens to have a lower id never
+renumbers the ones you already know. Rows are in that same order, so a row's
+position and its own number always agree. The numbering is otherwise
+display-only — identity is still the room's own id — and it is stable across a
+reload; a save from before this was tracked settles its numbers, once, to your
+true visit order (each room's position in the save file), the first time it
+reloads. Names too long for the label column are abbreviated and spelled out in a
+footnote.
 
 **Selection** moves with ↑/↓ (or Home/End, PageUp/PageDown) when the map pane has
 focus, or by clicking a row. Clicking a *destination cell* jumps the selection to

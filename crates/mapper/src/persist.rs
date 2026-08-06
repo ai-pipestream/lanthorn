@@ -17,6 +17,11 @@ pub struct PersistState {
     /// which loads as though nothing had ever been visited on any layer.
     #[serde(default)]
     pub last_visited: BTreeMap<LayerId, RoomId>,
+    /// The next room-discovery ordinal to mint (SQ-0685). Absent from a file written before
+    /// discovery order was tracked, which loads as 0 — harmless, since [`MapGraph::from_parts`]
+    /// resumes it past whatever it backfills onto the rooms in that case anyway.
+    #[serde(default)]
+    pub next_seq: u64,
 }
 
 pub fn to_json(mapper: &Mapper) -> String {
@@ -28,6 +33,7 @@ pub fn to_json(mapper: &Mapper) -> String {
         layers: mapper.graph.layers().clone(),
         next_layer_id: mapper.graph.next_layer_id(),
         last_visited: mapper.graph.last_visited_map().clone(),
+        next_seq: mapper.graph.next_seq(),
     };
     serde_json::to_string_pretty(&state).expect("PersistState is always serializable")
 }
@@ -36,7 +42,7 @@ pub fn from_json(s: &str) -> Result<Mapper, serde_json::Error> {
     let state: PersistState = serde_json::from_str(s)?;
     let mut graph = MapGraph::from_parts(
         state.rooms, state.connections, state.current, state.layers, state.next_layer_id,
-        state.last_visited,
+        state.last_visited, state.next_seq,
     );
     // Collapse `?` stubs that a real directional edge already covers, so existing saved maps
     // clean up on load. (SQ-0220)
@@ -229,6 +235,30 @@ mod tests {
         let m = from_json(json).unwrap();
         assert_eq!(m.graph.layer_of(1), 0);
         assert_eq!(m.graph.layer_name(0), "Main");
+    }
+
+    /// SQ-0685: a room's discovery sequence must survive the round trip AND go on protecting its
+    /// number afterward — a lower-id duplicate discovered only AFTER a reload must still land
+    /// behind everything found before it, on either side of the save file.
+    #[test]
+    fn seq_round_trips_and_still_protects_numbering_after_reload() {
+        let mut m = Mapper::default();
+        m.observe(5, "Maze", None);
+        m.observe(7, "Maze", Some(Direction::N));
+        assert_eq!(m.graph.room(5).unwrap().seq, 0);
+        assert_eq!(m.graph.room(7).unwrap().seq, 1);
+        assert_eq!(m.graph.next_seq(), 2);
+
+        let mut m2 = from_json(&to_json(&m)).unwrap();
+        assert_eq!(m2.graph.room(5).unwrap().seq, 0, "seq survives the round trip");
+        assert_eq!(m2.graph.room(7).unwrap().seq, 1);
+        assert_eq!(m2.graph.next_seq(), 2, "next_seq resumes exactly where it left off");
+
+        m2.observe(2, "Maze", Some(Direction::S)); // a lower id, discovered only after the reload
+        let lbl = crate::matrix::labels(&m2.graph, crate::layer::MAIN_LAYER);
+        assert_eq!(lbl.row_of(5), "Maze 1", "the room found before the save keeps its number");
+        assert_eq!(lbl.row_of(7), "Maze 2", "so does the second one found before the save");
+        assert_eq!(lbl.row_of(2), "Maze 3", "the newcomer is numbered after both, not before");
     }
 
     #[test]

@@ -5,6 +5,17 @@ use crate::layer::{LayerId, LayerMeta, MapView, MAIN_LAYER};
 
 pub type RoomId = u16;
 
+/// Sentinel used only on the wire: a room whose save predates SQ-0685 has no `seq` field at all,
+/// and deserializes to this rather than a real ordinal. [`MapGraph::from_parts`] recognises it and
+/// backfills the room's true seq from its position in the persisted rooms array before anything
+/// else ever reads the field — no in-memory `Room` should carry this value once construction is
+/// done. Practically unreachable as a REAL sequence number (it would take 2^64 discoveries).
+pub(crate) const ROOM_SEQ_MISSING: u64 = u64::MAX;
+
+fn room_seq_missing() -> u64 {
+    ROOM_SEQ_MISSING
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Room {
     pub id: RoomId,
@@ -30,6 +41,17 @@ pub struct Room {
     /// at most eight long. Absent from older map files, hence `serde(default)`.
     #[serde(default)]
     pub tried: Vec<Direction>,
+    /// Monotonic discovery order, stamped once by [`MapGraph::upsert_room`] the first time this
+    /// room is minted and never touched again (SQ-0685). This — not the room id, which for a
+    /// Z-machine game is the story's own object number and has nothing to do with when the player
+    /// found the room — is what maze numbering ("Maze 3") is ordered by, so finding a low-id
+    /// duplicate late never renumbers the ones found earlier.
+    ///
+    /// `#[serde(default = "room_seq_missing")]` rather than `0`: a save written before this field
+    /// existed must be distinguishable from a legitimately-first room, or the backfill in
+    /// [`MapGraph::from_parts`] could not tell "missing" from "really seq 0".
+    #[serde(default = "room_seq_missing")]
+    pub seq: u64,
 }
 
 impl Room {
@@ -67,6 +89,10 @@ pub struct MapGraph {
     current: Option<RoomId>,
     layers: BTreeMap<LayerId, LayerMeta>,
     next_layer_id: LayerId,
+    /// The next discovery ordinal [`MapGraph::upsert_room`] will stamp on a newly-minted room
+    /// (SQ-0685). Persisted so numbering stays stable across a save/load round trip; on a save
+    /// from before this existed, [`MapGraph::from_parts`] resumes it past the backfilled max.
+    next_seq: u64,
     /// The last room the player stood in on each layer (SQ-0672), keyed by that room's layer AT
     /// THE MOMENT of the visit. Updated by [`MapGraph::set_current`] — the one place the current
     /// room ever changes — so every path that moves the player (a walked step, a relocation, a
@@ -87,6 +113,7 @@ impl Default for MapGraph {
             current: None,
             layers,
             next_layer_id: 1,
+            next_seq: 0,
             last_visited: BTreeMap::new(),
         }
     }
@@ -104,6 +131,13 @@ impl MapGraph {
     /// smuggle phantom ids into layout components (`connected_components` adjacency-inserts
     /// every connection endpoint), permanently wasting a grid cell and flagging a stray
     /// distorted edge (SQ-0632).
+    ///
+    /// `seq` back-compat (SQ-0685): a save written before discovery order was tracked has every
+    /// room's `seq` at [`ROOM_SEQ_MISSING`] (the wire sentinel `Room::seq` deserializes to when
+    /// the field is absent). Those are backfilled from the room's POSITION IN `rooms` — the array
+    /// is insertion-ordered, i.e. the true historical first-visit order, so this settles a maze's
+    /// numbering to real visit order the first time such a save loads. `next_seq` then resumes
+    /// past the highest seq now in play (backfilled or persisted), whichever is greater.
     pub fn from_parts(
         rooms: Vec<Room>,
         connections: Vec<Connection>,
@@ -111,7 +145,15 @@ impl MapGraph {
         layers: BTreeMap<LayerId, LayerMeta>,
         next_layer_id: LayerId,
         last_visited: BTreeMap<LayerId, RoomId>,
+        next_seq: u64,
     ) -> Self {
+        let mut rooms = rooms;
+        for (i, r) in rooms.iter_mut().enumerate() {
+            if r.seq == ROOM_SEQ_MISSING {
+                r.seq = i as u64;
+            }
+        }
+        let next_seq = rooms.iter().map(|r| r.seq).max().map_or(next_seq, |m| next_seq.max(m + 1));
         let rooms: BTreeMap<RoomId, Room> = rooms.into_iter().map(|r| (r.id, r)).collect();
         let conns: Vec<Connection> = connections
             .into_iter()
@@ -130,7 +172,7 @@ impl MapGraph {
             .into_iter()
             .filter(|(_, room)| rooms.contains_key(room))
             .collect();
-        Self { rooms, conns, current, layers, next_layer_id, last_visited }
+        Self { rooms, conns, current, layers, next_layer_id, next_seq, last_visited }
     }
 
     pub fn room(&self, id: RoomId) -> Option<&Room> {
@@ -218,6 +260,10 @@ impl MapGraph {
 
     pub fn next_layer_id(&self) -> LayerId { self.next_layer_id }
 
+    /// The discovery ordinal [`MapGraph::upsert_room`] will stamp on the NEXT newly-minted room
+    /// (SQ-0685). Exposed for persistence; nothing else should need it.
+    pub fn next_seq(&self) -> u64 { self.next_seq }
+
     pub fn upsert_room(&mut self, id: RoomId, name: String) -> &mut Room {
         use std::collections::btree_map::Entry;
         match self.rooms.entry(id) {
@@ -225,6 +271,8 @@ impl MapGraph {
                 e.into_mut().name = name;
             }
             Entry::Vacant(e) => {
+                let seq = self.next_seq;
+                self.next_seq += 1;
                 e.insert(Room {
                     id,
                     name,
@@ -234,6 +282,7 @@ impl MapGraph {
                     layer: MAIN_LAYER,
                     loc_method: None,
                     tried: Vec::new(),
+                    seq,
                 });
             }
         }
@@ -517,7 +566,19 @@ impl MapGraph {
         let current = self.current.filter(|id| in_layer.contains(id));
         let mut layers = BTreeMap::new();
         layers.insert(MAIN_LAYER, LayerMeta::main());
-        MapGraph { rooms, conns, current, layers, next_layer_id: 1, last_visited: BTreeMap::new() }
+        // `next_seq` carries over from the parent rather than restarting at 0: the subgraph's
+        // rooms keep the real seqs they were cloned with, and a caller that mints a NEW room on
+        // the subgraph (layout scratch graphs do) must not hand out a seq that collides with one
+        // already in play back on the parent.
+        MapGraph {
+            rooms,
+            conns,
+            current,
+            layers,
+            next_layer_id: 1,
+            next_seq: self.next_seq,
+            last_visited: BTreeMap::new(),
+        }
     }
 
     /// Change the direction of the edge keyed (origin, old) to (origin, new).
@@ -791,5 +852,80 @@ mod tests {
         let removed = g.collapse_unknown_edges();
         assert_eq!(removed, 0);
         assert_eq!(g.connections().len(), 2);
+    }
+
+    // ── SQ-0685: discovery sequence ──────────────────────────────────────────
+
+    /// `upsert_room` stamps `seq` only on first discovery. A revisit (the Occupied-entry branch,
+    /// used to update a room's name when a light comes on etc.) must never re-mint it — that would
+    /// silently move a room's place in the discovery order every time its name changed.
+    #[test]
+    fn upsert_room_stamps_seq_once_and_a_revisit_never_rewrites_it() {
+        let mut g = MapGraph::new();
+        g.upsert_room(10, "Dark Room".into());
+        g.upsert_room(20, "Forest".into());
+        assert_eq!(g.room(10).unwrap().seq, 0, "the first room minted gets seq 0");
+        assert_eq!(g.room(20).unwrap().seq, 1);
+        assert_eq!(g.next_seq(), 2);
+
+        g.upsert_room(10, "Lit Room".into()); // revisit: name changes, identity does not
+        assert_eq!(g.room(10).unwrap().seq, 0, "a revisit must not re-stamp the ordinal");
+        assert_eq!(g.next_seq(), 2, "and must not consume a fresh one either");
+    }
+
+    /// The back-compat mechanism itself (SQ-0685): a save written before `seq` existed has every
+    /// room at the wire sentinel [`ROOM_SEQ_MISSING`] (what `Room::seq` deserializes to when the
+    /// field is absent — see `room_seq_missing`). `from_parts` must backfill from each room's
+    /// POSITION IN THE ARRAY, not from its id — the array is deliberately built here so the two
+    /// orders disagree (ids 5, 2, 9; array position 0, 1, 2), which is exactly the shape a save
+    /// where a lower-id room was discovered LATER produces.
+    #[test]
+    fn from_parts_backfills_missing_seq_from_array_position_not_room_id() {
+        let mk = |id: RoomId| Room {
+            id,
+            name: "Maze".into(),
+            label_override: None,
+            notes: String::new(),
+            pos: None,
+            layer: MAIN_LAYER,
+            loc_method: None,
+            tried: Vec::new(),
+            seq: ROOM_SEQ_MISSING,
+        };
+        let rooms = vec![mk(5), mk(2), mk(9)];
+        let g = MapGraph::from_parts(rooms, Vec::new(), None, BTreeMap::new(), 1, BTreeMap::new(), 0);
+        assert_eq!(g.room(5).unwrap().seq, 0, "array position 0, despite being the highest id");
+        assert_eq!(g.room(2).unwrap().seq, 1, "array position 1, despite being the lowest id");
+        assert_eq!(g.room(9).unwrap().seq, 2, "array position 2");
+        assert_eq!(g.next_seq(), 3, "resumes past the backfilled max");
+
+        // A room minted after loading must land after everything backfilled, never colliding.
+        let mut g = g;
+        g.upsert_room(99, "New".into());
+        assert_eq!(g.room(99).unwrap().seq, 3);
+    }
+
+    /// A save written by a version that HAS `seq` carries real values and a real `next_seq`;
+    /// `from_parts` must leave both alone rather than re-deriving them from array position.
+    #[test]
+    fn from_parts_leaves_real_persisted_seqs_and_next_seq_alone() {
+        let room = |id: RoomId, seq: u64| Room {
+            id,
+            name: "R".into(),
+            label_override: None,
+            notes: String::new(),
+            pos: None,
+            layer: MAIN_LAYER,
+            loc_method: None,
+            tried: Vec::new(),
+            seq,
+        };
+        // Array order (2, 1) deliberately disagrees with seq order (1, 0): if the backfill fired
+        // here by mistake it would silently overwrite these with array positions instead.
+        let rooms = vec![room(2, 1), room(1, 0)];
+        let g = MapGraph::from_parts(rooms, Vec::new(), None, BTreeMap::new(), 1, BTreeMap::new(), 2);
+        assert_eq!(g.room(2).unwrap().seq, 1, "the real seq is untouched");
+        assert_eq!(g.room(1).unwrap().seq, 0);
+        assert_eq!(g.next_seq(), 2, "the persisted next_seq is honoured as-is");
     }
 }

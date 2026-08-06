@@ -147,6 +147,44 @@ fn the_numbering_is_identical_after_a_save_and_load() {
     assert_eq!(matrix::labels(&m2.graph, MAZE_LAYER), before);
 }
 
+/// SQ-0685: `advent_maze_map.json` predates the persisted discovery sequence entirely — no room in
+/// it carries a `seq` field. On load, [`mapper::graph::MapGraph::from_parts`] backfills each room's
+/// seq from its POSITION IN THE FILE'S `rooms` ARRAY (insertion order, i.e. the true historical
+/// first-visit order), and numbering follows that. The expectation here is computed straight off
+/// the raw file, not hardcoded, so this pins the mechanism rather than today's numbers.
+#[test]
+fn seq_backfill_numbers_maze_rooms_in_the_files_own_array_order() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../unit_tests/advent_maze_map.json");
+    let json = std::fs::read_to_string(&path).unwrap();
+    let raw: serde_json::Value = serde_json::from_str(&json).expect("fixture is valid JSON");
+    let rooms = raw["rooms"].as_array().expect("rooms is an array");
+    assert!(
+        rooms.iter().all(|r| r.get("seq").is_none()),
+        "fixture predates SQ-0685 and must carry no `seq` field, or this test proves nothing"
+    );
+    let expected: Vec<RoomId> = rooms
+        .iter()
+        .filter(|r| r["name"] == "Maze")
+        .map(|r| r["id"].as_u64().unwrap() as RoomId)
+        .collect();
+    assert_eq!(expected.len(), 11, "sanity: eleven Maze rooms in the file");
+
+    let g = advent();
+    let lbl = matrix::labels(&g, MAZE_LAYER);
+    let mut numbered: Vec<(u32, RoomId)> = lbl
+        .row
+        .iter()
+        .filter_map(|(&id, row)| row.strip_prefix("Maze ").and_then(|n| n.parse().ok()).map(|n| (n, id)))
+        .collect();
+    numbered.sort();
+    let actual: Vec<RoomId> = numbered.into_iter().map(|(_, id)| id).collect();
+    assert_eq!(
+        actual, expected,
+        "numbering must equal the array order of the same-named rooms in the file, not ascending id"
+    );
+}
+
 /// "How do I get back to Maze 4?" — the set the matrix bolds when a row is selected.
 #[test]
 fn entrances_to_a_room_are_every_cell_that_arrives_at_it() {

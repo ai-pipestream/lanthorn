@@ -19,16 +19,36 @@ use ratatui::style::Style;
 use super::dialog::{DialogRects, DialogSpec, DialogStyle, Placement, draw_dialog};
 use super::draw_str_clipped;
 
+/// A destination's display name, agreeing with whatever the matrix table itself would print for
+/// it (SQ-0685): the NUMBERED row label ("Maze 4") when the destination shares `labels`' layer —
+/// every cell `card_detail` handles except `LeavesLayer` names one of those — falling back to the
+/// room's bare name for a destination outside it, which has no row in `labels` to number. Numbers
+/// are minted by discovery order, not room id, but that is `labels`' concern entirely; naming here
+/// only has to keep asking the one function that knows, so the card and the matrix can never
+/// disagree about what a room is called.
+fn dest_name(graph: &MapGraph, labels: &mapper::matrix::MatrixLabels, layer: mapper::layer::LayerId, id: RoomId) -> String {
+    if graph.layer_of(id) == layer {
+        let row = labels.row_of(id);
+        if !row.is_empty() {
+            return row.to_string();
+        }
+    }
+    graph.room(id).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{id}"))
+}
+
 /// One card line for a direction: the glyph, and what it means spelled out.
 ///
 /// Deliberately more verbose than the matrix cell it mirrors. The matrix is a table you scan
 /// across twelve columns; the card is one room you are reading about, so there is room to say
 /// "Maze 4" instead of "4" and "back: W" instead of "⇠w".
-fn card_detail(graph: &MapGraph, cell: mapper::matrix::MatrixCell) -> (&'static str, String) {
+fn card_detail(
+    graph: &MapGraph,
+    labels: &mapper::matrix::MatrixLabels,
+    layer: mapper::layer::LayerId,
+    cell: mapper::matrix::MatrixCell,
+) -> (&'static str, String) {
     use mapper::matrix::MatrixCell as C;
-    let name = |id: RoomId| {
-        graph.room(id).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{id}"))
-    };
+    let name = |id: RoomId| dest_name(graph, labels, layer, id);
     match cell {
         C::Reciprocal { dest } => ("⇄", name(dest)),
         C::ReturnBy { dest, back } => {
@@ -37,7 +57,10 @@ fn card_detail(graph: &MapGraph, cell: mapper::matrix::MatrixCell) -> (&'static 
         C::OneWay { dest } => ("⇢", name(dest)),
         C::SelfLoop => ("↩", "leads back here".to_string()),
         C::LeavesLayer { dest } => {
-            ("⇱", format!("{} · {}", name(dest), graph.layer_name(graph.layer_of(dest))))
+            // Cross-layer: `dest` has no row in THIS layer's `labels` to number it with, exactly
+            // like the matrix's own `⇱out` footnote, which names the same way.
+            let raw = graph.room(dest).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{dest}"));
+            ("⇱", format!("{} · {}", raw, graph.layer_name(graph.layer_of(dest))))
         }
         C::Probed => ("_", "tried, no way through".to_string()),
         C::Untried => ("·", String::new()),
@@ -84,6 +107,11 @@ pub fn draw_room_info(
     dialog_style: &DialogStyle,
 ) -> Option<DialogRects> {
     let room = graph.room(room_id)?;
+    // Computed once and threaded through every name in this panel, so the card can never disagree
+    // with the matrix table or its `⇲`/`⇱out` footnotes about what a room is numbered (SQ-0685):
+    // both ultimately read the same `labels`.
+    let layer = graph.layer_of(room_id);
+    let labels = mapper::matrix::labels(graph, layer);
 
     // The exit card: every one of the twelve travel directions, classified exactly as the matrix
     // view classifies it. All twelve, including the untried ones — "where haven't I been?" is the
@@ -92,20 +120,20 @@ pub fn draw_room_info(
     let card: Vec<(Direction, &'static str, String)> = mapper::matrix::MATRIX_DIRS
         .iter()
         .map(|&d| {
-            let (glyph, detail) = card_detail(graph, mapper::matrix::classify(graph, room_id, d));
+            let (glyph, detail) =
+                card_detail(graph, &labels, layer, mapper::matrix::classify(graph, room_id, d));
             (d, glyph, detail)
         })
         .collect();
     // Non-compass passages (xyzzy, pray) have no column in the twelve and would otherwise vanish
     // from the card entirely.
-    let odd: Vec<String> = graph
-        .connections()
-        .iter()
-        .filter(|c| c.origin == room_id && c.dir == Direction::Unknown)
-        .map(|c| {
-            graph.room(c.dest).map(|r| r.label().to_owned()).unwrap_or_else(|| format!("#{}", c.dest))
-        })
-        .collect();
+    let odd: Vec<String> =
+        graph
+            .connections()
+            .iter()
+            .filter(|c| c.origin == room_id && c.dir == Direction::Unknown)
+            .map(|c| dest_name(graph, &labels, layer, c.dest))
+            .collect();
 
     // Show objects only when this is the current room.
     let objects: Vec<String> = if current_room == Some(room_id) {
@@ -172,9 +200,12 @@ pub fn draw_room_info(
     let mut row = content.y;
     let max_y = content.bottom().saturating_sub(1);
 
-    // Room name.
+    // Room name — the numbered form ("Maze 4") when this room shares its name with others on the
+    // layer, agreeing with the row the matrix table draws it on (SQ-0685).
     if row <= max_y {
-        draw_str_clipped(buf, inner_x, row, room.label(), label_style, clip);
+        let title = labels.row_of(room_id);
+        let title = if title.is_empty() { room.label() } else { title };
+        draw_str_clipped(buf, inner_x, row, title, label_style, clip);
         row += 1;
     }
 
@@ -383,6 +414,75 @@ mod tests {
         for d in ["N ", "S ", "E ", "W ", "NE", "NW", "SE", "SW", "Up", "Dn", "In", "Out"] {
             assert!(text.contains(d), "the card lists every travel direction; {d} is missing:\n{text}");
         }
+    }
+
+    /// SQ-0685: when a destination shares its bare name with other rooms on the layer, the card
+    /// must name it the same way the matrix table's rows and its `⇲`/`⇱out` footnotes do — the
+    /// NUMBERED form ("Maze 2"), not the bare, undisambiguating room name every one of those rooms
+    /// shares. Both surfaces read the numbering off the same `mapper::matrix::labels`, so they
+    /// cannot disagree about what to call the same room.
+    #[test]
+    fn the_exit_card_names_a_same_named_destination_by_its_matrix_number() {
+        use mapper::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Maze".into());
+        g.upsert_room(2, "Maze".into());
+        g.set_pos(1, (0, 0));
+        g.set_pos(2, (1, 0));
+        g.add_edge(1, Direction::E, 2);
+        g.add_edge(2, Direction::W, 1);
+
+        // Independently computed, exactly as the matrix view itself would compute it.
+        let expect_room1 = mapper::matrix::labels(&g, mapper::layer::MAIN_LAYER).row_of(1).to_string();
+        let expect_room2 = mapper::matrix::labels(&g, mapper::layer::MAIN_LAYER).row_of(2).to_string();
+        assert_eq!(expect_room1, "Maze 1");
+        assert_eq!(expect_room2, "Maze 2");
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
+        terminal.draw(|f| {
+            let area = f.area();
+            draw_room_info(&g, &[], 1, None, area, f.buffer_mut(), &ds);
+        })
+        .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        assert!(buf_contains(&buf, &expect_room1), "the panel's own title is numbered too");
+        assert!(
+            buf_contains(&buf, &expect_room2),
+            "the exit card names its destination the way the matrix would"
+        );
+    }
+
+    /// SQ-0685: a destination that LEAVES the layer has no row in this room's `labels` to number
+    /// it with — same as the matrix table's own `⇱out` footnote — so it keeps its bare name rather
+    /// than showing an empty or wrong number.
+    #[test]
+    fn a_cross_layer_destination_keeps_its_bare_name_not_a_number_from_the_wrong_layer() {
+        use mapper::direction::Direction;
+        let mut g = MapGraph::new();
+        g.upsert_room(1, "Maze".into());
+        g.set_pos(1, (0, 0));
+        g.upsert_room(2, "Maze".into()); // same bare name, but on ANOTHER layer
+        g.set_pos(2, (0, 0));
+        let other = g.new_layer(Some(mapper::layer::MAIN_LAYER), "Elsewhere".into());
+        g.set_room_layer(2, other);
+        g.add_edge(1, Direction::Down, 2);
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let ds = make_dialog_style();
+        terminal.draw(|f| {
+            let area = f.area();
+            draw_room_info(&g, &[], 1, None, area, f.buffer_mut(), &ds);
+        })
+        .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Room 1 is alone on Main, so it keeps its own bare name (no siblings to number against).
+        assert!(buf_contains(&buf, "Maze"), "room 1's own title");
+        assert!(!buf_contains(&buf, "Maze 1"), "room 1 has no same-named sibling on its OWN layer");
+        assert!(!buf_contains(&buf, "Maze 2"), "the cross-layer dest must not borrow a number that means nothing here");
+        assert!(buf_contains(&buf, "Elsewhere"), "the crossing still names the destination layer");
     }
 
     /// SQ-0638: a room note packed with multibyte chars (each '€' is 3 bytes)

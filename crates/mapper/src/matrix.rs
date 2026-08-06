@@ -7,8 +7,12 @@
 //! is. This module turns the graph into the table, leaving every glyph, colour and column width to
 //! the renderer — the mapper crate stays pure.
 //!
-//! Everything here is derived; nothing is stored. Row order, numbering and tags are all functions
-//! of the graph, so they survive a save/load round-trip without a single new persisted field.
+//! Everything here is derived — row order, numbering and tags are all functions of the graph, so
+//! nothing in this module itself needs a save format — but numbering does lean on one small fact
+//! the graph persists: each room's discovery sequence (SQ-0685), stamped once at first upsert. A
+//! room's *id* is not usable for this — for a Z-machine game it is the story's own object number,
+//! unrelated to when the player found the room — so without a persisted visit order, numbering
+//! that used id order instead would renumber every "Maze" room behind a newly-found low-id one.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
@@ -145,12 +149,13 @@ pub fn entrances(graph: &MapGraph, target: RoomId) -> Vec<(RoomId, Direction)> {
 /// origin has a row to sit on); an inbound edge's origin has no row here at all, so it can only
 /// ever be a footnote — this is the query that footnote is built from.
 ///
-/// Ordered by the entering room's row position (ascending room id, [`build`]'s row order), then by
-/// [`MATRIX_DIRS`] column order, then by origin id: deterministic however the edges were minted,
-/// so the block a caller builds from this is stable across a save/load round trip.
+/// Ordered by the entering room's row position ([`build`]'s row order — discovery-sequence order,
+/// SQ-0685, not room id), then by [`MATRIX_DIRS`] column order, then by origin id: deterministic
+/// however the edges were minted, so the block a caller builds from this is stable across a
+/// save/load round trip.
 pub fn inbound_border_edges(graph: &MapGraph, layer: LayerId) -> Vec<(RoomId, Direction, RoomId)> {
     let row_of: BTreeMap<RoomId, usize> =
-        graph.rooms_in_layer(layer).into_iter().enumerate().map(|(i, id)| (id, i)).collect();
+        rooms_by_seq(graph, layer).into_iter().enumerate().map(|(i, id)| (id, i)).collect();
     let col_of = |d: Direction| MATRIX_DIRS.iter().position(|&x| x == d).unwrap_or(usize::MAX);
 
     let mut out: Vec<(RoomId, Direction, RoomId)> = graph
@@ -167,6 +172,20 @@ pub fn inbound_border_edges(graph: &MapGraph, layer: LayerId) -> Vec<(RoomId, Di
         (row_of.get(&dest).copied().unwrap_or(usize::MAX), col_of(dir), origin)
     });
     out
+}
+
+/// `layer`'s rooms in DISCOVERY order (SQ-0685): ascending [`crate::graph::Room::seq`], the true
+/// first-visit order, rather than [`MapGraph::rooms_in_layer`]'s ascending room id — for a
+/// Z-machine game the id is the story's own object number and has no relationship to when the
+/// player found the room. This is the row order [`build`] draws and the order [`labels`] numbers
+/// same-named rooms in, so a room's number never moves when a lower-id duplicate is found later.
+///
+/// Starts from [`MapGraph::rooms_in_layer`] (ascending id) purely to seed a deterministic sort;
+/// every room's `seq` is unique in practice, so that seed order never actually shows through.
+fn rooms_by_seq(graph: &MapGraph, layer: LayerId) -> Vec<RoomId> {
+    let mut ids = graph.rooms_in_layer(layer);
+    ids.sort_by_key(|&id| graph.room(id).map(|r| r.seq).unwrap_or(u64::MAX));
+    ids
 }
 
 // ── Display naming ────────────────────────────────────────────────────────────
@@ -219,15 +238,19 @@ fn initials(name: &str) -> String {
 
 /// Number the rooms of `layer` for display.
 ///
-/// Rooms that SHARE a display name are numbered in row order — eleven rooms called "Maze" become
-/// "Maze 1".."Maze 11" — because eleven identical rows is exactly the problem the matrix exists to
-/// solve. The numbering is display-only: identity stays the room id, which never changes, so the
-/// numbers are the same after a save/load and a room never renumbers under the player.
+/// Rooms that SHARE a display name are numbered in DISCOVERY order (SQ-0685) — eleven rooms called
+/// "Maze" become "Maze 1".."Maze 11" in the order the player first walked into each of them —
+/// because eleven identical rows is exactly the problem the matrix exists to solve, and the
+/// player's own mental numbering is built while exploring, not sorted by the story's object table.
+/// A number is minted the moment a room is first discovered and never changes afterward: finding a
+/// LOWER-id duplicate later does not renumber the ones already found, because numbering was never
+/// keyed on id in the first place. The numbering is otherwise display-only — identity stays the
+/// room id — so it is stable across a save/load round trip exactly as before.
 ///
 /// A uniquely-named room gets its initials instead of a number, so cells can point at it without
 /// stealing a number from the numbered group.
 pub fn labels(graph: &MapGraph, layer: LayerId) -> MatrixLabels {
-    let ids = graph.rooms_in_layer(layer);
+    let ids = rooms_by_seq(graph, layer);
     let name_of = |id: RoomId| graph.room(id).map(|r| r.label().to_string()).unwrap_or_default();
 
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -311,14 +334,14 @@ impl Matrix {
 
 /// Build the direction table for `layer`.
 ///
-/// Rows are in the graph's stable room order (ascending room id). That order is a deliberate
-/// stand-in for visit order: the map persists no visit counter, and a number that shuffled when a
-/// map was reloaded would be worse than useless on a table whose whole job is to let the player
-/// say "the one I called 7".
+/// Rows are in DISCOVERY order (SQ-0685): ascending [`crate::graph::Room::seq`], the same order
+/// [`labels`] numbers same-named rooms in, so a row's position and the number in its own label
+/// always agree — row 1 really is "Maze 1". That order is persisted (each room's `seq`, stamped
+/// once at first upsert, plus the graph's `next_seq` counter), so a map reload draws the rows in
+/// exactly the same order and a player's "the one I called 7" keeps meaning the same room.
 pub fn build(graph: &MapGraph, layer: LayerId) -> Matrix {
     let labels = labels(graph, layer);
-    let rows = graph
-        .rooms_in_layer(layer)
+    let rows = rooms_by_seq(graph, layer)
         .into_iter()
         .map(|id| MatrixRow {
             room: id,
@@ -584,6 +607,49 @@ mod tests {
         assert_eq!(lbl.tag_of(3), "3", "one repeating name → bare numbers");
         assert_eq!(lbl.row_of(4), "Dead End, near Vending Machine");
         assert_eq!(lbl.tag_of(4), "DE", "initials of the part before the comma, filler dropped");
+    }
+
+    /// SQ-0685: the reported bug, reproduced directly. Numbering by ascending room id renumbers
+    /// EVERY duplicate behind a newly-found lower-id one — for a Z-machine game the id is the
+    /// story's own object number and has nothing to do with when the player found the room.
+    /// Falsified against HEAD: reverting the `rooms_by_seq` ordering in `labels`/`build` back to
+    /// plain `rooms_in_layer` makes `after.row_of(5)` come back `"Maze 2"` here, reproducing the
+    /// exact symptom reported.
+    #[test]
+    fn a_lower_id_duplicate_discovered_later_does_not_renumber_earlier_rooms() {
+        let mut g = MapGraph::new();
+        // Two "Maze" rooms first, both with ids HIGHER than the one found later.
+        g.upsert_room(5, "Maze".into()); // seq 0
+        g.upsert_room(7, "Maze".into()); // seq 1
+        let before = labels(&g, MAIN_LAYER);
+        assert_eq!(before.row_of(5), "Maze 1");
+        assert_eq!(before.row_of(7), "Maze 2");
+
+        g.upsert_room(2, "Maze".into()); // a LOWER id than both, discovered third → seq 2
+        let after = labels(&g, MAIN_LAYER);
+        assert_eq!(after.row_of(5), "Maze 1", "room 5 keeps its number: id 2 arriving later must not move it");
+        assert_eq!(after.row_of(7), "Maze 2", "nor must it move room 7");
+        assert_eq!(after.row_of(2), "Maze 3", "the newcomer takes the next ordinal, whatever its id");
+
+        // A revisit (upsert on an already-known room) must not re-mint its ordinal either.
+        g.upsert_room(5, "Maze".into());
+        assert_eq!(labels(&g, MAIN_LAYER).row_of(5), "Maze 1", "a revisit does not renumber");
+    }
+
+    /// `build`'s row order and `labels`' numbering have to agree — row 1 really is "Maze 1" — so
+    /// both must be driven by the same discovery-sequence order, not room id (SQ-0685).
+    #[test]
+    fn build_row_order_follows_discovery_order_not_room_id() {
+        let mut g = MapGraph::new();
+        g.upsert_room(5, "E".into());
+        g.upsert_room(2, "B".into());
+        g.upsert_room(9, "I".into());
+        let m = build(&g, MAIN_LAYER);
+        assert_eq!(
+            m.rows.iter().map(|r| r.room).collect::<Vec<_>>(),
+            vec![5, 2, 9],
+            "rows are in the order the rooms were discovered, not ascending id"
+        );
     }
 
     /// The numbering is display-only and derived, so it must be identical after a round trip
