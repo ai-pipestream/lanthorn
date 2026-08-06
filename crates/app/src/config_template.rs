@@ -319,9 +319,11 @@ const COMMAND_BAND: &[Row] = &[
     ),
     ex(
         "quick",
-        "[\"n\", \"s\", \"e\", \"w\", \"up\", \"down\", \"in\", \"out\", \"look\", \"inventory\", \"wait\", \"again\"]",
+        "[\"n\", \"s\", \"e\", \"w\", \"ne\", \"nw\", \"se\", \"sw\", \"up\", \"down\", \"in\", \"out\", \"look\", \"inventory\", \"wait\", \"again\"]",
         &[
-            "The one-click quick-action row along the bottom of the band. The value",
+            "The one-click quick-action words. The compass words draw as a rose;",
+            "the rest flow beside it (a narrow band falls back to a single row).",
+            "The value",
             "shown is the built-in row; unset the key to keep it. Picking one SENDS",
             "it AT ONCE - no Enter, unlike every other pick in the band (which",
             "composes onto the story input line and waits for Enter, same as",

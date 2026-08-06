@@ -31,8 +31,7 @@ fn stories_dir() -> PathBuf {
 }
 
 fn open_band(state: &mut AppState) {
-    let mut band = CommandBandState::new(default_verbs(), default_quick());
-    band.story_focused = false;
+    let band = CommandBandState::new(default_verbs(), default_quick());
     state.overlays.command_band = Some(band);
     state.band_dock.toggle_to(true, true);
 }
@@ -157,6 +156,60 @@ fn the_player_object_is_excluded_from_here() {
     );
     let extra: Vec<&String> = unfiltered.iter().filter(|o| !here.contains(o)).collect();
     assert_eq!(extra.len(), 1, "one object — the player's own — is missing from `here`");
+}
+
+/// SQ-0676 end to end, against a REAL object tree: with the band open, typing
+/// goes to the story prompt, the band highlights the nearest live object, and
+/// Tab completes the word to that object's full (often multi-word) name. The
+/// unit tests use a hand-made object list; this pins the same behaviour on
+/// names the engine actually produces.
+///
+/// Falsifies against the pre-SQ-0676 band, where those keystrokes never reached
+/// `state.input` at all (they filtered a column) and Tab swapped focus.
+#[test]
+fn typing_at_the_prompt_completes_from_the_live_object_columns() {
+    use app::input::{apply_action, key_to_action, Action};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let Some(mut session) = boot_zmachine("minizork-r34-s871124.z3") else { return };
+    let mut state = AppState::default();
+    let mut mapper = mapper::mapper::Mapper::default();
+    open_band(&mut state);
+    session.submit("look");
+    seed_player_obj(&mut state, &session);
+    refresh_objects(&mut state, &session);
+
+    // Pick a real object from the room and type the first three characters of
+    // its first word — whatever the story happens to call it.
+    let here = state.overlays.command_band.as_ref().unwrap().here.clone();
+    let target = here
+        .iter()
+        .find(|o| o.split_whitespace().next().is_some_and(|w| w.chars().count() > 3))
+        .cloned()
+        .unwrap_or_else(|| here[0].clone());
+    let first_word = target.split_whitespace().next().unwrap().to_string();
+    let typed: String = first_word.chars().take(3).collect();
+
+    for c in format!("take {typed}").chars() {
+        let a = key_to_action(&state, KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        assert_eq!(a, Action::InputChar(c), "`{c}` must reach the story prompt");
+        apply_action(a, &mut state, &mut mapper);
+    }
+    assert_eq!(state.input.value, format!("take {typed}"));
+
+    let band = state.overlays.command_band.as_ref().unwrap();
+    let (col, idx) = band.nearest_match(&state.input.value).expect("a live object matches");
+    assert!(col == COL_HERE || col == COL_CARRIED, "after a verb, the object columns match");
+    assert_eq!(band.items(col)[idx], target, "the nearest match is the object typed toward");
+
+    let a = key_to_action(&state, KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(a, Action::BandComplete, "the open band owns Tab completion");
+    apply_action(a, &mut state, &mut mapper);
+    assert_eq!(
+        state.input.value,
+        format!("take {target}"),
+        "Tab completed to the live object's full name"
+    );
 }
 
 /// A closed band costs nothing: the refresh is a no-op that never touches the

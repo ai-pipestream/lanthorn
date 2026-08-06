@@ -502,8 +502,8 @@ struct PaneRects {
     pub launch_dialog: Option<app::render::launch_dialog::LaunchDialogRects>,
     /// Hit-rects for the hints panel (when open).
     pub hints_panel: Option<HintsPanelRects>,
-    /// Hit-rects for the command band (when open): its own rect, the phrase
-    /// line, column headers, item rows and the quick row.
+    /// Hit-rects for the command band (when open): its own rect, the column
+    /// headers, the item rows and the quick words (rose block or flat row).
     pub command_band: app::render::command_band::CommandBandHits,
     /// Hit-rects for the command palette's candidate rows, as `(cmd_index, rect)`;
     /// the mouse handler hit-tests these to execute a command on click. (SQ-0419)
@@ -919,11 +919,10 @@ fn draw_frame(
         let help_text = if state.overlays.config_screen.is_some() {
             "\u{2191}\u{2193} move  \u{2190}\u{2192}/Space change  s save  Esc cancel".to_string()
         } else if state.overlays.command_band.is_some() && !state.resize_mode {
-            // SQ-0667 (2026-08-05): Enter only ever PICKS now — the band's own
-            // phrase line (and its "Enter sends when armed" branch) is retired;
-            // sending is the ordinary Enter on the real prompt after Tab. Quick
-            // words are the one exception, firing at once, no Enter.
-            "Command Band | \u{2190}\u{2192}: column | \u{2191}\u{2193}: row | type: filter | Enter: pick | quick row: sends at once | Tab: story, Enter to send | Esc: back"
+            // SQ-0676 (2026-08-05): typing always wins — the band owns no text
+            // keys, the arrows arm the quick block, and the last gesture decides
+            // what Enter/Tab mean (fire the armed word, else submit / complete).
+            "Command Band | type: goes to the prompt | arrows: pick a quick word | Enter/Tab: fire it | else Tab: complete, Enter: send | Esc: close"
                 .to_string()
         } else if state.overlays.file_browser.as_ref().map(|fb| fb.mode == FbMode::PickFile).unwrap_or(false) {
             "Import Save | \u{2191}\u{2193}: move | Enter: open/import | Esc: cancel".to_string()
@@ -1044,10 +1043,12 @@ fn draw_frame(
 ///
 /// Everything visible in the band is clickable: a row picks and advances (and
 /// composes onto the real story input line — SQ-0667, 2026-08-05), a header
-/// focuses its column, and a quick word fires its command AT ONCE (the one
-/// exception to "picks compose, they don't submit"). The wheel scrolls
+/// points the band at its column, and a quick word fires its command AT ONCE
+/// (the one exception to "picks compose, they don't submit"). The wheel scrolls
 /// whichever column is under the pointer. There is no more phrase line to
 /// click — sending is just the ordinary Enter on the real input line now.
+/// SQ-0676 left all of this UNCHANGED: the mouse contract was never the
+/// problem the keyboard inversion was solving.
 fn band_mouse_action(
     state: &AppState,
     panes: &PaneRects,
@@ -1088,8 +1089,10 @@ fn band_mouse_action(
             if let Some((col, _)) = hits.headers.iter().find(|(_, r)| inside(r)).copied() {
                 return Some(Action::BandFocusCol(col));
             }
-            // Anywhere else inside the band: take the keyboard, do nothing else.
-            Some(Action::BandFocusBand)
+            // Anywhere else inside the band: claimed (so it never reaches the
+            // game behind it) but does nothing. There is no keyboard for it to
+            // take anymore — SQ-0676 gave typing back to the prompt for good.
+            Some(Action::None)
         }
         // Drag/Up inside the band must not start a story-pane text selection.
         _ => Some(Action::None),
@@ -2902,6 +2905,11 @@ fn run_event_loop(boot: startup::BootResult, launched_from_library: bool) -> Run
                     }
                     _ => state.take_input(),
                 };
+                // The line just emptied (or, for a quick pick, did not change):
+                // re-point the open band at it, so it is not still showing the
+                // object columns of a phrase already on its way to the game
+                // (SQ-0676 — this path bypasses `apply_action`'s own hook).
+                app::input::band_react_to_input(&mut state);
 
                 // An empty cmd (Enter on a blank line) is still submitted to the
                 // game, which decides what a blank line means (re-prompt / "I beg

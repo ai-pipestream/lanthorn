@@ -183,6 +183,44 @@ pub struct BandPick {
     pub text: String,
 }
 
+/// The token still under construction at the end of `input`: its trailing
+/// whitespace-delimited word, or `""` when the line ends in whitespace (the
+/// player finished that word, so the band should be looking at the NEXT slot
+/// rather than still matching the last one).
+pub fn band_typed_token(input: &str) -> &str {
+    if input.ends_with(char::is_whitespace) {
+        return "";
+    }
+    input.split_whitespace().next_back().unwrap_or("")
+}
+
+/// How well `item` matches the word being typed (already lowercased):
+/// `0` = the item starts with it, `1` = one of the item's words starts with it
+/// (so `do` finds `iron door`), `2` = it appears anywhere. `None` = no match at
+/// all, which is what makes Tab a no-op rather than a wrong guess.
+fn band_match_rank(item: &str, token_lower: &str) -> Option<u8> {
+    let lower = item.to_lowercase();
+    if lower.starts_with(token_lower) {
+        return Some(0);
+    }
+    if lower.split_whitespace().any(|w| w.starts_with(token_lower)) {
+        return Some(1);
+    }
+    if lower.contains(token_lower) {
+        return Some(2);
+    }
+    None
+}
+
+/// One parse of the real input line into the band's grammar state.
+struct ParsedPhrase {
+    picks: Vec<BandPick>,
+    /// The columns the grammar expects the NEXT word to come from — where the
+    /// nearest-match highlight looks. Empty when nothing more is expected (a
+    /// solo verb).
+    expected: Vec<usize>,
+}
+
 /// The command band's whole state. `None` in `OverlayState.command_band` means
 /// the band is closed.
 ///
@@ -192,9 +230,16 @@ pub struct BandPick {
 /// 2026-08-05, SQ-0667): every successful pick mirrors onto `state.input`'s
 /// tail (see `input::sync_band_phrase_to_input`, called from `apply_action`,
 /// which is why that mirroring isn't done here — this type has no sibling
-/// field access to `state.input`). That is also why "always confirm" no
-/// longer needs a dedicated armed/send affordance: Enter on the real prompt
-/// IS the confirm, exactly like typing a command by hand.
+/// field access to `state.input`).
+///
+/// **SQ-0676 (2026-08-05) inverted the focus model.** The band never owns the
+/// keyboard now: typing always reaches the story prompt, and `picks` is
+/// re-derived from what is typed there ([`CommandBandState::sync_from_input`])
+/// rather than only from clicks. There is therefore no type-to-filter state
+/// and no story-focus flag left — the band is a REACTIVE suggestion surface:
+/// it highlights the nearest match for the word under construction
+/// ([`CommandBandState::nearest_match`]) and holds one armable quick-word
+/// selection (`quick_sel`) that the arrow keys drive.
 #[derive(Debug, Clone, Default)]
 pub struct CommandBandState {
     /// The verb table in force (built-ins, or the config's replacement/extras).
@@ -203,16 +248,21 @@ pub struct CommandBandState {
     pub quick: Vec<String>,
     /// Tokens picked so far, in order.
     pub picks: Vec<BandPick>,
-    /// The active column (always a valid index — there is no longer a
-    /// trailing "phrase line" ring stop to land on; see the struct doc).
+    /// The column the band is currently pointing at: the one holding the
+    /// nearest match, else the first column the grammar expects next. Kept in
+    /// step by `sync_from_input`; the keyboard no longer moves it (SQ-0676).
     pub focus: usize,
-    /// Incremental type-to-filter for the active column.
-    pub filter: String,
+    /// The armed quick-word selection: an index into `quick`, or `None` when
+    /// the highlight is disarmed. Arrow keys arm and move it; ANY change to
+    /// the typed line disarms it (SQ-0676's "the last gesture decides").
+    pub quick_sel: Option<usize>,
+    /// Which quick layout was drawn last: `true` = the narrow flat row (linear
+    /// arrow navigation), `false` = the compass-rose block (spatial). Written
+    /// by the renderer, read by the arrow-key handler — the same
+    /// render-informs-input pattern `AppState::input_text_origin` uses.
+    pub quick_flat: std::cell::Cell<bool>,
     /// Per-column selection + animated scroll.
     pub scroll: [crate::list_scroll::ListScroll; BAND_COLS],
-    /// true = the keyboard belongs to the story input; the band stays visible
-    /// but dimmed (Tab toggles).
-    pub story_focused: bool,
     /// Objects in the current room, refreshed every frame from the engine.
     pub here: Vec<String>,
     /// Objects the player carries, refreshed every frame from the engine.
@@ -234,10 +284,16 @@ impl CommandBandState {
         self.picks.iter().find(|p| p.slot == slot).map(|p| p.text.as_str())
     }
 
+    /// The table entry for `word`, matched case-insensitively (the player types
+    /// the prompt now, and `Take` is the same verb as `take`).
+    pub fn verb_by_word(&self, word: &str) -> Option<&VerbEntry> {
+        self.verbs.iter().find(|v| v.word.eq_ignore_ascii_case(word))
+    }
+
     /// The picked verb's table entry (grammar for everything downstream).
     pub fn verb_entry(&self) -> Option<&VerbEntry> {
         let w = self.slot_text(BandSlot::Verb)?;
-        self.verbs.iter().find(|v| v.word == w)
+        self.verb_by_word(w)
     }
 
     /// The picked verb's arity, if a verb is picked.
@@ -249,7 +305,7 @@ impl CommandBandState {
     /// which spells it `north`) could never arm.
     pub fn arity(&self) -> Option<Arity> {
         let word = self.slot_text(BandSlot::Verb)?;
-        Some(self.verbs.iter().find(|v| v.word == word).map_or(Arity::Solo, |v| v.arity))
+        Some(self.verb_by_word(word).map_or(Arity::Solo, |v| v.arity))
     }
 
     /// The preposition joining the two objects of the picked pair verb.
@@ -391,42 +447,125 @@ impl CommandBandState {
         }
     }
 
-    /// The column's items as displayed: the incremental type-to-filter applies
-    /// to the ACTIVE column only.
-    pub fn filtered_items(&self, col: usize) -> Vec<String> {
-        let items = self.items(col);
-        if self.filter.is_empty() || self.focus != col {
-            return items;
+    // ── Reading the typed line (SQ-0676) ─────────────────────────────────────
+
+    /// Parse the real input line into the band's grammar state.
+    ///
+    /// The phrase is anchored on the FIRST typed token that is a table verb;
+    /// anything before it is free text the player wrote (`well, take mailbox`)
+    /// and is deliberately ignored rather than mistaken for a verb. Everything
+    /// after it fills the object slot — split at the pair verb's preposition
+    /// when one has been typed — which is also why the parse never counts
+    /// tokens: object names are routinely multi-word (`iron door`).
+    ///
+    /// The word still under construction counts as a token here, unlike in
+    /// [`Self::nearest_match`]: a bare `take` with no trailing space is a
+    /// chosen verb (it is exactly what a click on the VERB column leaves on the
+    /// prompt), so the object columns must open on it rather than waiting for a
+    /// space that a mouse-only player would never type.
+    fn parse_phrase(&self, input: &str) -> ParsedPhrase {
+        let toks: Vec<&str> = input.split_whitespace().collect();
+        let Some(vi) = toks.iter().position(|t| self.verb_by_word(t).is_some()) else {
+            return ParsedPhrase { picks: Vec::new(), expected: vec![COL_VERB] };
+        };
+        let entry = self.verb_by_word(toks[vi]).expect("just matched");
+        let (arity, prep) = (entry.arity, entry.prep.clone());
+        // Store the TABLE's spelling, so downstream lookups (`arity`, `prep`)
+        // and `phrase_text` are canonical regardless of how it was typed.
+        let mut picks = vec![BandPick { slot: BandSlot::Verb, text: entry.word.clone() }];
+        let rest = &toks[vi + 1..];
+        let push = |picks: &mut Vec<BandPick>, slot, text: String| {
+            if !text.is_empty() {
+                picks.push(BandPick { slot, text });
+            }
+        };
+        let expected = match arity {
+            Arity::Solo => Vec::new(),
+            Arity::Object | Arity::ObjectOpt => {
+                push(&mut picks, BandSlot::Object, rest.join(" "));
+                vec![COL_HERE, COL_CARRIED]
+            }
+            Arity::Pair => {
+                let p = prep.unwrap_or_default();
+                match rest.iter().position(|t| t.eq_ignore_ascii_case(&p)) {
+                    Some(j) => {
+                        push(&mut picks, BandSlot::Object, rest[..j].join(" "));
+                        push(&mut picks, BandSlot::Second, rest[j + 1..].join(" "));
+                        vec![COL_SECOND]
+                    }
+                    None => {
+                        push(&mut picks, BandSlot::Object, rest.join(" "));
+                        vec![COL_HERE, COL_CARRIED]
+                    }
+                }
+            }
+        };
+        ParsedPhrase { picks, expected }
+    }
+
+    /// Re-derive the phrase state from the real input line and point the band
+    /// at whatever it should be suggesting (SQ-0676). Called after every change
+    /// to `state.input`, so the columns follow typing exactly as they follow
+    /// clicking — a click composes onto the prompt, and the prompt is what this
+    /// reads back.
+    pub fn sync_from_input(&mut self, input: &str) {
+        let parsed = self.parse_phrase(input);
+        self.picks = parsed.picks;
+        self.focus = self
+            .nearest_match(input)
+            .map(|(col, _)| col)
+            .or_else(|| parsed.expected.first().copied())
+            .unwrap_or(COL_VERB);
+    }
+
+    /// The columns the grammar expects the next word to come from: VERB for the
+    /// first word, the object columns after an object/pair verb, the
+    /// prepositional column once that verb's preposition has been typed. Empty
+    /// once nothing more is expected (a solo verb).
+    pub fn expected_cols(&self, input: &str) -> Vec<usize> {
+        self.parse_phrase(input).expected
+    }
+
+    /// The nearest match for the word being typed, as `(column, index)`:
+    /// prefix first, then a prefix on any word of a multi-word name, then a
+    /// substring — searching only the columns [`Self::expected_cols`] says are
+    /// live, earliest column and earliest row winning ties. `None` when nothing
+    /// matches (no highlight, and Tab does nothing).
+    pub fn nearest_match(&self, input: &str) -> Option<(usize, usize)> {
+        let token = band_typed_token(input).to_lowercase();
+        if token.is_empty() {
+            return None;
         }
-        let f = self.filter.to_lowercase();
-        items.into_iter().filter(|i| i.to_lowercase().contains(&f)).collect()
+        // (rank, column order, row index, column) — ordered exactly by the
+        // tie-break the doc promises.
+        let mut best: Option<(u8, usize, usize, usize)> = None;
+        for (order, &col) in self.expected_cols(input).iter().enumerate() {
+            for (idx, item) in self.items(col).iter().enumerate() {
+                let Some(rank) = band_match_rank(item, &token) else { continue };
+                let cand = (rank, order, idx, col);
+                if best.is_none_or(|b| cand < b) {
+                    best = Some(cand);
+                }
+            }
+        }
+        best.map(|(_, _, idx, col)| (col, idx))
+    }
+
+    /// The text of [`Self::nearest_match`] — what Tab completes the current
+    /// word to while the band is open.
+    pub fn nearest_match_text(&self, input: &str) -> Option<String> {
+        let (col, idx) = self.nearest_match(input)?;
+        self.items(col).get(idx).cloned()
     }
 
     // ── Focus ────────────────────────────────────────────────────────────────
 
-    /// The left-to-right focus ring: every reachable column. (Before SQ-0667
-    /// this ring had a trailing "phrase line" stop; sending is now just
-    /// Enter on the real prompt, so there is nothing band-side left to land
-    /// on once nothing more is pickable — `advance` below clamps at the last
-    /// reachable column instead.) `←`/`→` step through this; unreachable
-    /// columns are skipped.
+    /// Every reachable column, left to right. Once the ring the arrow keys
+    /// walked (retired with the keyboard by SQ-0676 — the arrows drive the
+    /// quick block now); still what `advance` clamps against, so the band never
+    /// points at a column `col_reachable` disagrees with.
     pub fn focus_stops(&self) -> Vec<usize> {
         (0..BAND_COLS).filter(|&c| self.col_reachable(c)).collect()
-    }
-
-    /// Step the focus by `delta` stops along the ring (clamped, not wrapped —
-    /// the ring has a real left and right end, which is the point of a
-    /// left-to-right narrowing).
-    pub fn move_focus(&mut self, delta: i32) {
-        let stops = self.focus_stops();
-        let cur = stops.iter().position(|&s| s == self.focus).unwrap_or(0) as i32;
-        let next = (cur + delta).clamp(0, stops.len() as i32 - 1) as usize;
-        if let Some(&stop) = stops.get(next) {
-            if stop != self.focus {
-                self.focus = stop;
-                self.filter.clear();
-            }
-        }
     }
 
     /// Move focus to the next reachable UNFILLED column, or — when there is
@@ -434,7 +573,6 @@ impl CommandBandState {
     /// parks somewhere `col_reachable` no longer agrees with (e.g. picking a
     /// Solo verb collapses the ring back down to just VERB).
     pub fn advance(&mut self) {
-        self.filter.clear();
         for c in 0..BAND_COLS {
             if self.col_reachable(c) && !self.col_filled(c) {
                 self.focus = c;
@@ -455,13 +593,13 @@ impl CommandBandState {
         self.picks.push(BandPick { slot, text });
     }
 
-    /// Pick row `idx` of the (filtered) column `col`. No-op when the column is
-    /// unreachable or the index is out of range.
+    /// Pick row `idx` of column `col`. No-op when the column is unreachable or
+    /// the index is out of range.
     pub fn pick(&mut self, col: usize, idx: usize) {
         if !self.col_reachable(col) {
             return;
         }
-        let Some(text) = self.filtered_items(col).get(idx).cloned() else { return };
+        let Some(text) = self.items(col).get(idx).cloned() else { return };
         self.set_slot(Self::col_slot(col), text);
         self.advance();
     }
@@ -474,32 +612,13 @@ impl CommandBandState {
         self.advance();
     }
 
-    /// Un-pick the most recent token and step the cursor back to its column.
-    /// Returns false when there was nothing to un-pick.
-    pub fn unpick(&mut self) -> bool {
-        let Some(p) = self.picks.pop() else { return false };
-        self.filter.clear();
-        self.focus = match p.slot {
-            BandSlot::Verb => COL_VERB,
-            BandSlot::Object => COL_HERE,
-            BandSlot::Second => COL_SECOND,
-        };
-        true
-    }
-
-    /// Drop the whole phrase and return to the verb column.
+    /// Drop the whole phrase and return to the verb column. (Backspace's
+    /// un-pick ladder retired with the band's keyboard ownership — SQ-0676:
+    /// Backspace edits the real prompt, and `sync_from_input` re-derives the
+    /// phrase from what is left there.)
     pub fn clear_phrase(&mut self) {
         self.picks.clear();
-        self.filter.clear();
         self.focus = COL_VERB;
-    }
-
-    /// The active column index. Always `Some` post-SQ-0667 (there is no
-    /// longer a focus stop off the columns) — kept `Option`-shaped so the
-    /// handful of call sites written as `if let Some(col) = ...` don't need
-    /// to change.
-    pub fn active_col(&self) -> Option<usize> {
-        Some(self.focus)
     }
 
     /// Whether any of the band's per-column scrolls is animating.

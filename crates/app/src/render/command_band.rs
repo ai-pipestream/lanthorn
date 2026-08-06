@@ -21,6 +21,12 @@
 //!   itself — Enter on the real prompt is the confirm, same as anything
 //!   typed by hand. The ONE exception is the quick row: a quick pick fires
 //!   at once, no Enter (the immediate-fire half of the same amendment).
+//! * **Typing always wins** (SQ-0676, 2026-08-05): the band never owns the
+//!   keyboard. It READS the prompt — the word under construction there
+//!   highlights the nearest match in whichever column the grammar expects
+//!   next, and Tab completes to it — while the arrow keys drive one armable
+//!   quick-word highlight that Enter or Tab fires. Type-to-filter and the
+//!   column focus ring retired with that inversion.
 //!
 //! ```text
 //!                  WHAT — here        WHAT — carried       WITH…
@@ -132,8 +138,15 @@ const BUILTIN_VERBS: &[(&str, Arity, Option<&str>)] = &[
 ];
 
 /// The default one-click quick-action row.
+///
+/// The four diagonals sit with the rest of the compass (SQ-0676): the rose
+/// draws all eight points, and leaving `ne`/`nw`/`se`/`sw` out left four of its
+/// cells permanently empty. A game with no diagonal vocabulary (classic Scott
+/// Adams) simply answers "I don't understand", exactly as it would to the same
+/// word typed by hand — nothing here needs gating on the engine.
 pub const DEFAULT_QUICK: &[&str] = &[
-    "n", "s", "e", "w", "up", "down", "in", "out", "look", "inventory", "wait", "again",
+    "n", "s", "e", "w", "ne", "nw", "se", "sw", "up", "down", "in", "out", "look", "inventory",
+    "wait", "again",
 ];
 
 /// The built-in verb table as owned entries (the runtime form).
@@ -346,6 +359,10 @@ pub fn draw_command_band(
     let min_cols_width = BAND_COLS as u16 * 6;
     let use_block =
         quick_layout.as_ref().is_some_and(|l| content.width >= l.width.saturating_add(min_cols_width));
+    // Tell the arrow keys which layout they are steering (SQ-0676): the block
+    // navigates spatially, the flat row linearly. Same render-informs-input
+    // handshake `AppState::input_text_origin` uses for the caret.
+    band.quick_flat.set(!use_block);
 
     let mut cols_area = content;
     if use_block {
@@ -376,18 +393,119 @@ pub fn draw_command_band(
         *vp_out = 0;
         return;
     }
+    // The band reads the real prompt (SQ-0676): the word under construction
+    // there picks out the nearest match to highlight, and the grammar of what
+    // has been typed so far says which columns are live.
+    let typed = state.input.value.as_str();
+    let hit = band.nearest_match(typed);
+    let expected = band.expected_cols(typed);
+
     let rects = column_rects(cols_area);
     if rects.is_empty() {
         // Too narrow for four columns: show only the active one, full width.
-        draw_column(state, band, band.focus, cols_area, buf, base, vp_out, hits);
+        draw_column(state, band, band.focus, cols_area, buf, base, hit, &expected, vp_out, hits);
         return;
     }
 
     *vp_out = 0;
     for (col, rect) in rects.iter().enumerate() {
         hits.columns.push((col, *rect));
-        draw_column(state, band, col, *rect, buf, base, vp_out, hits);
+        draw_column(state, band, col, *rect, buf, base, hit, &expected, vp_out, hits);
     }
+}
+
+// ── Quick-block navigation (SQ-0676) ────────────────────────────────────────
+
+/// A direction for [`quick_nav`] — the four arrow keys, which are the band's
+/// only keyboard navigation now that typing goes to the prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickDir {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Move the armed quick selection one step in `dir`, returning the new index
+/// into `quick`.
+///
+/// `sel = None` is the disarmed state: any arrow ARMS the highlight on the
+/// first quick word without moving further, which is what makes "arrow, then
+/// Enter" a two-keystroke `n`. Movement CLAMPS rather than wraps — the rose is
+/// a spatial diagram, and wrapping off its west edge to its east one would
+/// contradict what it draws.
+///
+/// `flat = true` (the narrow band's one-line fallback) navigates linearly:
+/// Left/Up back, Right/Down forward. Otherwise the compass-rose block's real
+/// geometry drives it — the same [`quick_block_layout`] the renderer drew, so
+/// ← from the rose's `E` lands on `·`'s neighbour to the west, and → off the
+/// rose's east edge lands on the words flowing beside it in the same row.
+pub fn quick_nav(quick: &[String], flat: bool, sel: Option<usize>, dir: QuickDir) -> Option<usize> {
+    if quick.is_empty() {
+        return None;
+    }
+    let Some(cur) = sel else { return Some(0) };
+    if flat {
+        let step: i32 = match dir {
+            QuickDir::Left | QuickDir::Up => -1,
+            QuickDir::Right | QuickDir::Down => 1,
+        };
+        let next = (cur as i32 + step).clamp(0, quick.len() as i32 - 1) as usize;
+        return Some(next);
+    }
+
+    let cells = quick_block_cells(quick);
+    let Some(&(_, row, x)) = cells.iter().find(|(i, _, _)| *i == cur) else { return Some(cur) };
+    let pick = match dir {
+        // Same row, nearest cell to the west / east.
+        QuickDir::Left => cells
+            .iter()
+            .filter(|(_, r, cx)| *r == row && *cx < x)
+            .max_by_key(|(_, _, cx)| *cx),
+        QuickDir::Right => cells
+            .iter()
+            .filter(|(_, r, cx)| *r == row && *cx > x)
+            .min_by_key(|(_, _, cx)| *cx),
+        // Nearest row above / below that has any cell, then the closest column
+        // within it — a cell is never skipped just because it is not aligned.
+        QuickDir::Up | QuickDir::Down => {
+            let up = dir == QuickDir::Up;
+            let target = cells
+                .iter()
+                .filter(|(_, r, _)| if up { *r < row } else { *r > row })
+                .map(|(_, r, _)| *r)
+                .reduce(|a, b| if up { a.max(b) } else { a.min(b) });
+            target.and_then(|tr| {
+                cells
+                    .iter()
+                    .filter(|(_, r, _)| *r == tr)
+                    .min_by_key(|(_, _, cx)| cx.abs_diff(x))
+            })
+        }
+    };
+    Some(pick.map_or(cur, |(i, _, _)| *i))
+}
+
+/// Every quick word's drawn position in the compass-rose block, as
+/// `(index into quick, row, x-offset)` — the geometry [`quick_nav`] steers by,
+/// taken from the very layout the renderer uses so the two can never disagree.
+fn quick_block_cells(quick: &[String]) -> Vec<(usize, u16, u16)> {
+    let layout = quick_block_layout(quick);
+    let mut cells = Vec::new();
+    if layout.has_rose {
+        for (cell, qi) in layout.rose.iter().enumerate() {
+            let Some(qi) = *qi else { continue };
+            let grid = if cell < 4 { cell } else { cell + 1 };
+            let (row, gcol) = ((grid / 3) as u16, (grid % 3) as u16);
+            cells.push((qi, row, layout.rose_x + gcol * (ROSE_CELL_W + ROSE_GAP)));
+        }
+    }
+    for (row_i, row) in layout.word_rows.iter().enumerate() {
+        for &(qi, x_off) in row {
+            cells.push((qi, row_i as u16, layout.words_x + x_off));
+        }
+    }
+    cells
 }
 
 // ── Compass-rose quick block (SQ-0675) ──────────────────────────────────────
@@ -585,6 +703,10 @@ fn draw_quick_block(
     // The centre is always inert decoration — never a pick target — styled
     // like the map matrix's own frontier dot rather than a new selector.
     let dim = base.patch(theme.get("map.matrix.cell:frontier").style);
+    // The armed quick word (SQ-0676) wears the same selected style a column
+    // row does — it is the thing Enter/Tab would fire.
+    let sel_style = theme.get("dialog.list_selected").style;
+    let cell_style = |qi: usize| if band.quick_sel == Some(qi) { sel_style } else { style };
 
     if layout.has_rose {
         for (cell, label) in ROSE_LABELS.iter().enumerate() {
@@ -601,7 +723,15 @@ fn draw_quick_block(
             let cell_area = Rect { x, y, width: ROSE_CELL_W, height: 1 };
             let Some(qi) = layout.rose[cell] else { continue };
             let lx = x + ROSE_CELL_W.saturating_sub(label.chars().count() as u16);
-            crate::render::draw_str_clipped(buf, lx, y, label, style, cell_area);
+            let st = cell_style(qi);
+            if band.quick_sel == Some(qi) {
+                for cx in cell_area.x..cell_area.right() {
+                    if let Some(c) = buf.cell_mut((cx, y)) {
+                        c.set_symbol(" ").set_style(st);
+                    }
+                }
+            }
+            crate::render::draw_str_clipped(buf, lx, y, label, st, cell_area);
             hits.push((qi, cell_area));
         }
         // The centre dot, row 1 / col 1 of the grid.
@@ -627,7 +757,7 @@ fn draw_quick_block(
             }
             let w = (word.chars().count() as u16).min(area.right() - x);
             let r = Rect { x, y, width: w, height: 1 };
-            crate::render::draw_str_clipped(buf, x, y, word, style, area);
+            crate::render::draw_str_clipped(buf, x, y, word, cell_style(qi), area);
             hits.push((qi, r));
         }
     }
@@ -645,6 +775,7 @@ fn draw_quick_row(
     hits: &mut Vec<(usize, Rect)>,
 ) {
     let style = base.patch(theme.get("band.quick").style);
+    let sel_style = theme.get("dialog.list_selected").style;
     for x in area.x..area.right() {
         if let Some(cell) = buf.cell_mut((x, area.y)) {
             cell.set_symbol(" ").set_style(style);
@@ -657,13 +788,23 @@ fn draw_quick_row(
             break;
         }
         let r = Rect { x, y: area.y, width: w, height: 1 };
-        crate::render::draw_str_clipped(buf, x, area.y, word, style, area);
+        // The armed word (SQ-0676) reads as selected here too — same style the
+        // rose block and the column rows use.
+        let st = if band.quick_sel == Some(i) { sel_style } else { style };
+        crate::render::draw_str_clipped(buf, x, area.y, word, st, area);
         hits.push((i, r));
         x += w + 1;
     }
 }
 
-/// One column: its header row plus the (filtered, scrolled) item list.
+/// One column: its header row plus the (scrolled) item list.
+///
+/// `hit` is the band's nearest match for the word being typed at the prompt
+/// (SQ-0676) — the ONE row that highlights, and only in the column that owns
+/// it. `expected` is the set of columns the grammar is currently looking at,
+/// which is what lights a header. Neither is a keyboard focus: the band has no
+/// keyboard focus anymore, it reacts to the prompt.
+#[allow(clippy::too_many_arguments)]
 fn draw_column(
     state: &AppState,
     band: &crate::state::CommandBandState,
@@ -671,6 +812,8 @@ fn draw_column(
     area: Rect,
     buf: &mut Buffer,
     base: Style,
+    hit: Option<(usize, usize)>,
+    expected: &[usize],
     vp_out: &mut usize,
     hits: &mut CommandBandHits,
 ) {
@@ -679,7 +822,8 @@ fn draw_column(
     }
     let theme = &state.colors.theme;
     let reachable = band.col_reachable(col);
-    let active = !band.story_focused && band.focus == col;
+    let active = expected.contains(&col);
+    let highlight = hit.filter(|(c, _)| *c == col).map(|(_, idx)| idx);
 
     // SQ-0675: the VERB column's header row carried no text at all (SQ-0667
     // dropped the "VERB" label, leaving the row visually blank) — pure
@@ -713,7 +857,7 @@ fn draw_column(
     }
 
     let list_h = area.height.saturating_sub(header_h);
-    if active {
+    if band.focus == col {
         *vp_out = list_h as usize;
     }
     if list_h == 0 {
@@ -727,7 +871,7 @@ fn draw_column(
         return;
     }
 
-    let items = band.filtered_items(col);
+    let items = band.items(col);
     let label_style = base.patch(theme.get("band.group_label").style);
     if items.is_empty() {
         // Column-specific wording (SQ-0667, following the SQ-0668 data fix
@@ -749,7 +893,10 @@ fn draw_column(
     let scroll = &band.scroll[col];
     let visible = list_area.height as usize;
     let total = items.len();
-    let selected = scroll.selected.min(total.saturating_sub(1));
+    // Only the nearest match highlights (SQ-0676). `usize::MAX` = nothing in
+    // this column matches, so no row wears the marker at all — an unmatched
+    // column must not look like it is offering a pick.
+    let selected = highlight.unwrap_or(usize::MAX);
     let scrollbar_visible =
         crate::render::scroll::needs_scrollbar(total, visible) && list_area.width >= 2;
     let row_w = if scrollbar_visible { list_area.width.saturating_sub(1) } else { list_area.width };
@@ -762,12 +909,8 @@ fn draw_column(
             break;
         }
         let is_selected = idx == selected;
-        let style = if is_selected && active {
-            theme.get("dialog.list_selected").style
-        } else {
-            base
-        };
-        let marker = if is_selected && active { "▸" } else { " " };
+        let style = if is_selected { theme.get("dialog.list_selected").style } else { base };
+        let marker = if is_selected { "▸" } else { " " };
         let line = format!("{}{}", marker, items[idx]);
         let row_area = Rect::new(list_area.x, y, row_w, 1);
         hits.rows.push((col, idx, row_area));
@@ -812,7 +955,6 @@ mod tests {
         let mut band = CommandBandState::new(default_verbs(), default_quick());
         band.here = vec!["iron door".to_string(), "mailbox".to_string()];
         band.carried = vec!["brass key".to_string(), "lantern".to_string()];
-        band.story_focused = false;
         s.overlays.command_band = Some(band);
         s
     }
@@ -1073,6 +1215,109 @@ mod tests {
         let out = dump(&buf);
         assert!(!out.contains('·'), "no rose -> no inert centre dot either: {out}");
         assert_eq!(hits.quick.len(), 3, "just the three words: {:?}", hits.quick);
+    }
+
+    /// SQ-0676 added the four diagonals to the built-in quick list, so the
+    /// default rose has no empty cells left. Falsifies against the pre-SQ-0676
+    /// `DEFAULT_QUICK`, where NW/NE/SW/SE were blank.
+    #[test]
+    fn the_default_quick_list_fills_all_eight_rose_cells() {
+        let quick = default_quick();
+        let layout = quick_block_layout(&quick);
+        assert!(layout.rose.iter().all(Option::is_some), "every compass point has a word");
+
+        let mut s = AppState::default();
+        s.overlays.command_band = Some(CommandBandState::new(default_verbs(), quick.clone()));
+        let area = Rect { x: 0, y: 0, width: 120, height: 6 };
+        let mut buf = Buffer::empty(area);
+        let mut hits = CommandBandHits::default();
+        draw_command_band(&s, area, &mut buf, &mut 0, &mut hits);
+        let out = dump(&buf);
+        for label in ["NW", "NE", "SW", "SE"] {
+            assert!(out.contains(label), "the rose draws {label}: {out}");
+        }
+        // …and a diagonal submits spelled out, like every other direction.
+        let ne = quick.iter().position(|q| q == "ne").expect("ne is in the default quick list");
+        assert_eq!(crate::input::band_quick_pick_command(&s, ne), Some("northeast".to_string()));
+    }
+
+    /// SQ-0676: the word being typed at the PROMPT highlights the nearest match
+    /// — the band reads the input line rather than owning a filter of its own.
+    /// Falsifies against a band that highlights `scroll.selected` regardless of
+    /// what is typed (the pre-SQ-0676 behaviour), which marked row 0 of the
+    /// focused column no matter what.
+    #[test]
+    fn the_typed_word_highlights_the_nearest_match() {
+        let mut s = state_with_band();
+        let mut buf = Buffer::empty(BAND);
+        draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
+        assert!(!dump(&buf).contains('▸'), "nothing typed -> nothing highlighted");
+
+        // `examine` heads the VERB column, so it is on screen without relying
+        // on the scroll-to-match `apply_action` does for the live app.
+        s.input.set("exa".to_string(), true);
+        s.overlays.command_band.as_mut().unwrap().sync_from_input(&s.input.value);
+        let mut buf = Buffer::empty(BAND);
+        draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
+        assert!(dump(&buf).contains("▸examine"), "the nearest verb wears the marker");
+
+        s.input.set("zzzz".to_string(), true);
+        s.overlays.command_band.as_mut().unwrap().sync_from_input(&s.input.value);
+        let mut buf = Buffer::empty(BAND);
+        draw_command_band(&s, BAND, &mut buf, &mut 0, &mut CommandBandHits::default());
+        assert!(!dump(&buf).contains('▸'), "no match -> no highlight at all");
+    }
+
+    /// The armed quick word is visibly selected (SQ-0676) — otherwise "Enter
+    /// fires the highlighted word" would be firing something invisible.
+    /// Falsifies against drawing every quick cell in the same `band.quick`
+    /// style regardless of `quick_sel`.
+    #[test]
+    fn the_armed_quick_word_is_drawn_selected() {
+        let s_plain = state_with_band();
+        let mut buf_plain = Buffer::empty(BAND);
+        draw_command_band(&s_plain, BAND, &mut buf_plain, &mut 0, &mut CommandBandHits::default());
+
+        let mut s_armed = state_with_band();
+        s_armed.overlays.command_band.as_mut().unwrap().quick_sel = Some(0);
+        let mut buf_armed = Buffer::empty(BAND);
+        draw_command_band(&s_armed, BAND, &mut buf_armed, &mut 0, &mut CommandBandHits::default());
+
+        assert_ne!(
+            buf_plain.content(),
+            buf_armed.content(),
+            "arming a quick word must show somewhere on screen"
+        );
+    }
+
+    /// Arrow navigation in the narrow band's flat fallback row is LINEAR (there
+    /// is no spatial diagram to steer by), and clamps at both ends.
+    #[test]
+    fn quick_nav_is_linear_in_the_flat_row() {
+        let quick = default_quick();
+        assert_eq!(quick_nav(&quick, true, None, QuickDir::Left), Some(0), "any arrow arms first");
+        assert_eq!(quick_nav(&quick, true, Some(0), QuickDir::Right), Some(1));
+        assert_eq!(quick_nav(&quick, true, Some(1), QuickDir::Up), Some(0));
+        assert_eq!(quick_nav(&quick, true, Some(0), QuickDir::Left), Some(0), "clamped at the start");
+        let last = quick.len() - 1;
+        assert_eq!(quick_nav(&quick, true, Some(last), QuickDir::Down), Some(last), "…and at the end");
+        assert_eq!(quick_nav(&[], true, None, QuickDir::Right), None, "an empty quick list arms nothing");
+    }
+
+    /// Spatial navigation crosses from the rose into the words flowing beside
+    /// it, in the same row — the block is one navigable surface, not two.
+    #[test]
+    fn quick_nav_crosses_from_the_rose_into_the_word_flow() {
+        let quick = default_quick();
+        let ne = quick.iter().position(|q| q == "ne").expect("ne");
+        let moved = quick_nav(&quick, false, Some(ne), QuickDir::Right).expect("moved");
+        assert_ne!(moved, ne, "→ off the rose's east edge goes somewhere");
+        let landed = &quick[moved];
+        assert!(
+            mapper::direction::parse_direction(landed)
+                .is_none_or(|d| !ROSE_ORDER.contains(&d)),
+            "…and that somewhere is the word flow, not another rose point: {landed}"
+        );
     }
 
     #[test]

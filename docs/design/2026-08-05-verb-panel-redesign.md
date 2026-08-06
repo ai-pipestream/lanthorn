@@ -135,9 +135,15 @@ the narrow-band fallback.
    composition step, so the phrase is exactly as it was once the quick
    command returns.
 3. **Configurable grammar: yes.** A `[command_band]` config section (below).
-4. **Focus: the band owns the keyboard while open.** Letters type-to-filter
-   the active column, Tab jumps to the story input for free typing (the band
-   stays visible), Esc clears the phrase first and closes when empty.
+4. **~~Focus: the band owns the keyboard while open.~~** ~~Letters
+   type-to-filter the active column, Tab jumps to the story input for free
+   typing (the band stays visible), Esc clears the phrase first and closes when
+   empty.~~ **RETIRED by SQ-0676** (2026-08-05, third feedback round of the same
+   day) — the model inverted: typing ALWAYS reaches the story prompt and the
+   band reads it back. Struck through rather than deleted because it is what
+   every "while the band is focused…" sentence below was written against; see
+   "Amendments (SQ-0676 — typing always wins)" for the gesture table that
+   replaced it.
 5. **The VERB column excludes quick words** (2026-08-05 amendment, same
    feedback round as decision 2). Showing `look`/`wait`/`again`/etc. in both
    places is redundant — the VERB column filters out any word present in the
@@ -301,6 +307,91 @@ they get their own dated subsection rather than being folded into it.
      still isn't — it is a mouse/one-click surface only, exactly as the flat
      row always was.
 
+### Amendments (2026-08-05, SQ-0676 — typing always wins)
+
+**The focus model inverts.** Decision 4 above ("the band owns the keyboard
+while open") is RETIRED, and with it every key the band took from the story
+prompt. The band is now a **reactive suggestion surface**: it never owns a
+keystroke that could be text, it READS the prompt, and it offers one armable
+quick selection for the keys that are left. This was the third feedback round
+of the same day, and it came from the plainest possible symptom — with the
+band open, typing `w` and pressing Enter did nothing at all: the letter went
+into a column filter and Enter picked a row. A band you cannot type past is a
+band you close.
+
+**The gesture table, as shipped.** The band is open throughout; "armed" means
+the last thing pressed was an arrow, "typing" means the last thing pressed
+changed the text on the prompt (a character, Backspace, a delete, a paste, a
+completion).
+
+| Key | Armed | Typing / neutral |
+|---|---|---|
+| any printable char | types at the prompt (and DISARMS) | types at the prompt |
+| Backspace / Ctrl+W / … | edits the prompt (and DISARMS) | edits the prompt |
+| paste | inserts at the prompt (and DISARMS) | inserts at the prompt |
+| `↑` `↓` `←` `→` (plain) | move the quick highlight — spatially in the rose+word block, linearly in the flat fallback | ARM the highlight on the first quick word |
+| Shift+`←`/`→`/`↑`/`↓` | pans the map, unchanged | pans the map, unchanged |
+| Enter | fires the highlighted quick word (immediate submit, direction spelled out) | submits the prompt **exactly as typed** |
+| Tab / Shift-Tab | fires the highlighted quick word | completes the current word to the band's nearest match; consumed no-op when nothing matches |
+| Esc | disarms the highlight | closes the band |
+| Ctrl/Alt chords, the leader prefix | fall through, unchanged | fall through, unchanged |
+| mouse | unchanged (click picks / advances / fires quick; wheel scrolls a column) | unchanged |
+
+Everything else follows from that table:
+
+1. **Type-to-filter is retired.** The columns never narrow. The filter it
+   replaced is now the word being typed AT THE PROMPT, applied as a passive
+   **nearest-match highlight** (`CommandBandState::nearest_match`): prefix
+   match first, then a prefix on any word of a multi-word name (`do` finds
+   `iron door`), then a substring; earliest expected column and earliest row
+   break ties. No match ⇒ no highlight, and Tab does nothing.
+2. **The phrase state is fed by the typed line**
+   (`CommandBandState::sync_from_input`, called from `apply_action`'s wrapper
+   whenever `state.input` changed). The parse anchors on the FIRST typed token
+   that is a table verb — text before it is the player's own (`well, take
+   mailbox`) — and everything after fills the object slot, split at the pair
+   verb's preposition once that is typed. It never counts tokens: object names
+   are routinely multi-word. The word still under construction counts as a
+   token for the GRAMMAR (a bare `take` is a chosen verb — it is exactly what a
+   click leaves on the prompt) but not for the highlight, which is what that
+   word is matching against. So `take ` opens the object columns whether it was
+   typed or clicked, and `unlock door with ` moves the expectation to WITH…
+3. **Every arrow drives the quick block**, which is why command history (plain
+   `↑`/`↓`) is reachable only with the band CLOSED — a deliberate trade, and
+   the one thing this amendment takes away. Arrowing arms; movement clamps
+   rather than wraps (the rose is a diagram, and wrapping off its west edge to
+   its east one would contradict what it draws); the flat fallback row
+   navigates linearly. The renderer tells the input layer which of the two it
+   drew (`CommandBandState::quick_flat`, the same render-informs-input
+   handshake `input_text_origin` uses for the caret).
+4. **Tab reconciliation with the dictionary autocomplete:** while the band is
+   open, the band's suggestion IS the completion source, full stop. It takes
+   precedence over `Action::Autocomplete`, and when the band has no match Tab
+   is a consumed no-op rather than a silent hand-off to the dictionary — one
+   completion source at a time is the only version of this that a player can
+   predict. Closed, Tab is unchanged in every respect (dictionary
+   autocomplete, then ToggleFocus). The visible consequence: slash-name
+   completion (`/sav`+Tab) wants the band closed.
+5. **The Esc ladder loses two rungs**: the filter rung retired with the filter,
+   and the phrase rung retired because the phrase is now the player's own typed
+   line — Esc must never delete text from the prompt. Disarm, then close.
+6. **The column focus ring is retired** (`←`/`→` across columns, `↑`/`↓`
+   within, PgUp/PgDn/Home/End, and `Action::BandEnter`'s "pick the highlighted
+   row"). There is no keyboard column focus left to draw either: a column
+   header lights when the GRAMMAR expects it, and exactly one row — the nearest
+   match — wears the `▸` marker. `story_focused` and `Action::BandToggle
+   StoryFocus` are gone; so are `BandNav`/`BandFilterChar`/`BandBackspace`/
+   `BandFocusBand`. Clicking a column row still composes onto the prompt
+   exactly as before.
+7. **The mouse contract is untouched.** It was never the problem the inversion
+   was solving.
+8. **The four diagonals join the default quick list** (`ne`/`nw`/`se`/`sw`,
+   between `w` and `up`), so the rose the SQ-0675 amendment drew has no
+   permanently empty cells. Games with no diagonal vocabulary (classic Scott
+   Adams) answer "I don't understand", exactly as they would to the same word
+   typed by hand — no gating on the engine, which would be a lie about what the
+   parser accepts.
+
 ## Grammar: the arity table
 
 Progressive disclosure needs each verb to declare its shape. A small internal
@@ -339,29 +430,37 @@ Opening: the existing `open-command-band` slash command (renamed from `open-verb
 additionally a **direct default keybinding** (`F2`, rebindable — keys bind to
 command strings) because leader-only is why nobody finds it.
 
-While open (band focused):
-- `←`/`→` move between columns (only across reachable ones — Amendment 3/4
+While open — **superseded by SQ-0676's gesture table above**; the bullets below
+describe the pre-inversion band and are kept for the history of what each key
+used to mean:
+
+- ~~`←`/`→` move between columns (only across reachable ones — Amendment 3/4
   retired the trailing phrase-line ring stop, so the ring now clamps at the
   last reachable column instead of continuing on to a send state), `↑`/`↓`
-  within, PgUp/PgDn/Home/End as in every list.
-- Printable characters filter the active column incrementally; Backspace with
+  within, PgUp/PgDn/Home/End as in every list.~~ Every plain arrow drives the
+  quick block now; the column ring is gone.
+- ~~Printable characters filter the active column incrementally; Backspace with
   a filter clears it first, then un-picks tokens — which, since Amendment 4,
   also removes that token's own contribution from the tail of the real story
   input line (falling back to an ordinary single-character backspace if that
   tail has since diverged, e.g. the player free-typed past it after Tab-ing
-  over).
-- Enter on a row picks it and advances — ALWAYS, unconditionally, per
-  Amendment 4 (there is no more "Enter on the phrase line sends" branch).
-  Composing appends the picked token onto the real story input line
-  (`state.input`), merging with whatever free text was already there rather
-  than overwriting it; sending is the ordinary Enter on THAT line once the
-  player Tabs to it — same `SubmitCommand` path a typed command takes, the
-  phrase is plain text and the game parses it exactly as if typed.
-- Tab moves focus to the story input (band stays, dimmed header); Tab or a
-  story-pane click returns... clicking any band row refocuses the band.
-- Esc: clear filter → clear phrase (Amendment 4: also strips that phrase's
+  over).~~ Both edit the prompt now, exactly as with the band closed; the
+  phrase state re-derives from the line afterwards, which is what replaced the
+  un-pick ladder.
+- ~~Enter on a row picks it and advances — ALWAYS, unconditionally, per
+  Amendment 4~~ Enter fires the armed quick word, or submits the prompt as
+  typed. Composing by MOUSE is unchanged: a click appends the picked token onto
+  the real story input line (`state.input`), merging with whatever free text
+  was already there rather than overwriting it; sending is the ordinary Enter
+  on THAT line — same `SubmitCommand` path a typed command takes, the phrase is
+  plain text and the game parses it exactly as if typed.
+- ~~Tab moves focus to the story input (band stays, dimmed header); Tab or a
+  story-pane click returns... clicking any band row refocuses the band.~~ Tab
+  fires the armed quick word, else completes the current word to the band's
+  nearest match. There is no focus to move anymore.
+- ~~Esc: clear filter → clear phrase (Amendment 4: also strips that phrase's
   contribution back out of the real input line, if the tail still matches
-  unmodified) → close, one level per press.
+  unmodified) → close, one level per press.~~ Esc: disarm → close.
 
 Mouse: single click picks a row (and advances the column, composing onto the
 real input line per Amendment 4); the quick-action row is one click to SEND —
@@ -420,7 +519,7 @@ The band is a dock, not dialog chrome:
 #   { word = "polish", arity = "object" },
 # ]
 # extra_verbs = [...]   # additive form; same entry shape
-# quick = ["n","s","e","w","up","down","in","out","look","inventory","wait","again"]
+# quick = ["n","s","e","w","ne","nw","se","sw","up","down","in","out","look","inventory","wait","again"]
 ```
 
 `height`'s default moved from 8 to 5 (Amendment 3/4: the frame and the phrase
@@ -496,6 +595,29 @@ Nothing new was added to the theme registry or template.
   pin was revert-verified the same way as the SQ-0667 batch: temporarily
   undoing the corresponding source change and confirming the pin fails
   first.
+
+- **Added 2026-08-05 (SQ-0676, the focus inversion above):** the headline pin
+  is that typing `w` at an open band puts `w` on the story prompt and Enter
+  submits it (it fails against HEAD, where the intercept ate both); plus
+  arrows arm and move the quick highlight spatially through the rose, armed
+  Enter and armed Tab both fire the highlighted quick word, typing disarms so
+  Enter submits the text rather than a stale highlight, Tab after typing
+  completes to the nearest match AND beats the dictionary autocomplete while
+  the band is open (with closed behaviour re-pinned in the same test), an
+  unmatched Tab is a no-op, Esc disarms then closes and never eats the prompt,
+  a mouse click still picks, a paste still reaches the prompt, and the typed
+  word's highlight renders on exactly one row (none when nothing matches). The
+  retired-mode tests were FLIPPED, not deleted — `typing_filters_the_active_
+  column`, `backspace_clears_the_filter_then_unpicks`, `escape_ladder_filter_
+  then_phrase_then_close`, `tab_swaps_focus_without_closing_the_band`,
+  `focus_ring_skips_unreachable_columns`, `up_down_move_the_active_column_
+  selection`, `letters_filter_when_the_band_is_focused_and_type_when_it_is_
+  not`, `command_band_tab_still_swaps_focus` and the paste split each became
+  the pin for the behaviour that replaced it. An integration test drives the
+  whole path against a real story's live object tree (type three characters of
+  a real object's name, Tab, get its full multi-word name on the prompt). The
+  default quick list's four new diagonals are pinned in the rose (all eight
+  cells occupied) and in the submission lookup (`ne` → `northeast`).
 
 ## Out of scope (this redesign)
 

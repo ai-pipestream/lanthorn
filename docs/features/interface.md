@@ -164,7 +164,9 @@ know which side you're on).
   `[MORE]` suppression (Zork Zero's demo mode) gets it. The bar is themeable
   via `more_prompt`.
 - **The command band** (**F2**, or `/open-command-band`) — a Journey-style
-  bottom dock that builds a command by pointing, never typing a word. It is a
+  bottom dock that builds a command by pointing, and suggests one as you type
+  (it never takes the keyboard from the prompt — see "typing always wins"
+  below). It is a
   borderless strip, not a framed panel: columns fill in left to right as the
   phrase narrows — **VERB** (its column is unlabelled — self-evident, and its
   list starts right on the row the label would have used, so it shows one
@@ -182,7 +184,18 @@ know which side you're on).
   Composing happens directly on the real story input line — a pick appends
   its word there, merging with anything you already typed — so nothing ever
   fires a turn by itself except the quick actions below; everything else
-  sends the ordinary way, with **Enter** on that line once you Tab over to it.
+  sends the ordinary way, with **Enter** on that line.
+
+  **Typing always wins.** The band never takes the keyboard: letters,
+  Backspace and paste go to the story prompt exactly as they do with the band
+  closed, and **Enter** sends what you typed. The band just *watches* — as you
+  type a word it highlights the closest match in whichever column the phrase
+  expects next (the verb column for the first word, *here*/*carried* after a
+  verb, the **WITH…** column once you've typed the preposition), matching a
+  later word of a name too, so `do` finds `iron door`. **Tab** completes the
+  word you're typing to that highlight; with nothing to match, it does nothing.
+  While the band is open its suggestion is what Tab completes from — the
+  story-dictionary autocomplete below is what you get with the band closed.
 
   The one-click quick actions (`n`/`s`/`e`/`w`/`ne`/`nw`/`se`/`sw`,
   `up`/`down`/`in`/`out`, `look`, `inventory`, `wait`, `again` by default) are
@@ -191,20 +204,23 @@ know which side you're on).
   compass rose anchored to its left edge — the eight points around an inert
   centre dot — with everything else in the quick list flowing beside it; a
   narrower band falls back to the older single-line row along the bottom
-  instead. Either way every point and word is its own click target, and a
-  quick word never joins the column keyboard ring below — it's mouse
-  territory, same as the row it can replace.
+  instead. Either way every point and word is its own click target.
+
+  The quick words are also the band's only keyboard surface: the **arrow keys**
+  move a highlight around them — spatially through the rose, so ↓ from *N*
+  lands on *W*/*E* and ↓ again on the bottom row — and the first arrow press
+  simply arms it. Once armed, **Enter** *or* **Tab** fires the highlighted word
+  at once. Typing anything disarms it again, so Enter goes straight back to
+  sending your line: the last thing you pressed decides. **Esc** clears the
+  highlight, and closes the band when there is none. (Because the arrows belong
+  to the band while it is open, ↑/↓ command history is only there with the band
+  closed.)
 
   It is a dock, not a modal: the story prompt stays live underneath, paste keeps
-  working, and graphical v6 keeps its artwork. **Tab** hands the keyboard to the
-  story input for free typing with the band still on screen, and back. While the
-  band has the keyboard, **←/→** move between columns, **↑/↓** within one,
-  typing filters the active column, **Backspace** clears a filter character and
-  then un-picks the last token (removing its contribution from the input line
-  too), and **Esc** steps back one level per press (filter → phrase → close).
-  Everything visible is clickable and the wheel scrolls whichever column is
-  under the pointer. While it is open it subsumes the inventory dock — the
-  *carried* column IS your inventory — which returns when you close it.
+  working, and graphical v6 keeps its artwork. Everything visible is clickable
+  and the wheel scrolls whichever column is under the pointer. While it is open
+  it subsumes the inventory dock — the *carried* column IS your inventory —
+  which returns when you close it.
 
   Its height, its verb grammar and its quick list are all configurable under
   `[command_band]` in `config.toml`; resize mode targets its height. The
@@ -214,7 +230,9 @@ know which side you're on).
   in the current room, shown the way your shell shows it: the rest of the word
   appears in dim ghost text right under the caret as you type. **Tab** cycles
   forward through the candidates, **Shift-Tab** back, and **→** at the end of the
-  line takes the one on offer. Because the hint lives on the prompt row itself,
+  line takes the one on offer. (With the command band open, Tab completes from
+  the *band's* highlight instead — one completion source at a time.) Because the
+  hint lives on the prompt row itself,
   nothing shifts when a completion appears or vanishes — the prompt stays put
   even when it is the very last line in the pane.
 - **The command palette** (type `/`) keeps its own presentation: a bracketed

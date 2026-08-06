@@ -171,13 +171,13 @@ switches that make babelmap feel like yours without opening the whole registry.
   command name), `palette_match` (the fuzzy-matched characters, accent + bold by
   default), `palette_desc` (the one-line help), and `palette_selected` (the
   highlighted row). Its frame reuses the shared `[dialog]` chrome.
-- **Command band** — the band's own parts theme via six `[elements]` selectors:
-  `band.phrase` and `band.phrase:armed` (the phrase line, plain while
-  incomplete and accented + bold once it can be sent), `band.column_header` /
-  `band.column_header:active`, `band.quick` (the one-click row) and
-  `band.group_label` (in-column labels and the `(nothing visible)` placeholder).
-  Its rows reuse `dialog.list_selected` and its frame the shared
-  `panel.border` / `panel.border:active`.
+- **Command band** — the band's own parts theme via three `[elements]`
+  selectors: `band.column_header` / `band.column_header:active`, `band.quick`
+  (the one-click words, rose or flat row) and `band.group_label` (in-column
+  labels and the `(nothing visible)` placeholder). Its rows — and the armed
+  quick word — reuse `dialog.list_selected`; it draws no frame, and borrows
+  `panel.border:active`'s colour for its whole fill while resize mode is
+  targeting it.
 - **Decorated panes** — configurable per-pane borders (`none`/`single`/`double`/
   `thick`/`rounded`) via the shared `[panel]` chrome above: unfocused panels use
   `panel.border`, the focused one uses `panel.border:active`. The map's top
@@ -305,8 +305,9 @@ re-seed the new template, or hand-write the new shape from
 - **Command band** — the `[command_band]` section configures the point-and-click
   phrase builder (see [Interface](interface.md#playing-aids); not to be confused
   with the unrelated top-level `command_bar` boolean, which moves the *typed*
-  prompt into a persistent bar). `height` (default 8) is the band's rows
-  including its frame, clamped to 5–14 and to whatever the screen can spare;
+  prompt into a persistent bar). `height` (default 5) is the band's rows — it
+  draws no frame, so every one of them is content — clamped to 3–11 and to
+  whatever the screen can spare;
   resize mode writes this key. `auto_open` (default false) opens the band with
   the story. `verbs` REPLACES the built-in verb table and `extra_verbs` adds to
   whichever table is in force — same entry shape either way,
