@@ -112,6 +112,36 @@ pairing as a Blorb is. See [Graphical v6](v6-graphics.md#where-the-pictures-come
   | 1 DECSystem-20 | 4 Amiga | 7 Commodore 128 | 10 Apple IIgs |
   | 2 Apple IIe | 5 Atari ST | 8 Commodore 64 | 11 Tandy Color |
   | 3 Macintosh | 6 IBM PC | 9 Apple IIc | |
+- **Interpreter profiles — the whole machine, not one byte.** Byte `0x1E` is not
+  the only thing that makes a machine. A Version 6 game that reads it goes on to
+  ask about the screen it has, the colours the interpreter calls default, and what
+  "red" looks like here — and answering one of those as an Amiga while answering
+  the rest as an IBM PC produces a machine that never existed. So the answers
+  travel together as a named **profile**.
+
+  **IBM PC** is the default and is simply what babelmap has always done: the
+  Frotz interpreter-number rule above, the resource file's own declared art
+  resolution, your terminal's colours reported as the interpreter defaults, and
+  ZMSD §8.3.1's colour table.
+
+  **Amiga** is the sibling, and it selects itself: a story booted straight out of
+  an `.adf` release floppy came off an Amiga, so babelmap presents one — 
+  interpreter number 4, the Amiga's 320×200 standard window (which is what makes
+  the artwork in a native `Pic.data` archive scale onto the 640×400 screen, since
+  that format has no `Reso` chunk to declare it), a medium grey page and white ink
+  reported as the interpreter's defaults, and the palette Infocom's own Amiga
+  interpreter loaded — a slightly darker green and blue than the standard's, and
+  its own three Version 6 greys. Setting `interpreter_number` yourself names the
+  machine outright and outranks the medium, so `interpreter_number = 4` gets you
+  the whole Amiga rather than just the byte — which is the point: a number that
+  changed what games did without changing the machine it implied was never a
+  useful thing to be able to set.
+
+  Authenticity can cost readability — *Zork Zero* under an Amiga picks a colour
+  scheme that was easy on a 1989 monitor and is merely adequate in a modern
+  terminal. There is no separate switch for that on purpose: `honor_game_colours`
+  already decides whether the game's colour choices are honoured at all, so
+  turning it off hands the screen back to your theme, profile or no profile.
 - **v6 graphical stories** — babelmap boots and plays graphical v6 titles,
   verified against *Zork Zero*'s full frame. On an image-capable terminal
   (Kitty / iTerm2 / Sixel) the game's chrome — the decorative frame, status

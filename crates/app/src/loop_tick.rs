@@ -176,6 +176,13 @@ pub(crate) fn poll_zvm_default_colours(session: &mut dyn Engine, state: &AppStat
     if !state.config.honor_game_colours {
         return;
     }
+    // SQ-0719: …and nothing to do when the interpreter profile pins the pair.
+    // The Amiga profile reports the Amiga's default page and ink, which is the
+    // whole point of claiming to be one; letting a style reload overwrite them
+    // with the user's terminal colours would undo it on the next tick.
+    if state.config.interpreter_profile.default_colours().is_some() {
+        return;
+    }
     let Some(gs) = session.as_any().downcast_ref::<app::session::GameSession>() else {
         return;
     };

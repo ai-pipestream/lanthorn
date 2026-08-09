@@ -36,6 +36,7 @@ pub mod ifdb_search_modal;
 pub mod ifiction;
 pub mod ifid;
 pub mod input;
+pub mod interpreter;
 pub mod keymap;
 pub mod layout;
 pub mod list_scroll;

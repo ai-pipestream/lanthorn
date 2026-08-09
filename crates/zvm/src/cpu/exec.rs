@@ -878,8 +878,9 @@ impl Machine {
     /// No-op below V5, where $2C/$2D are not colour bytes.
     pub fn set_default_colours(&mut self, bg: u8, fg: u8) {
         use crate::screen::{clamp_default_colour, DEFAULT_BG_COLOUR, DEFAULT_FG_COLOUR};
-        self.default_bg_colour = clamp_default_colour(bg, DEFAULT_BG_COLOUR);
-        self.default_fg_colour = clamp_default_colour(fg, DEFAULT_FG_COLOUR);
+        let version = self.mem.version();
+        self.default_bg_colour = clamp_default_colour(bg, DEFAULT_BG_COLOUR, version);
+        self.default_fg_colour = clamp_default_colour(fg, DEFAULT_FG_COLOUR, version);
         write_default_colours(&mut self.mem, self.default_bg_colour, self.default_fg_colour);
     }
 

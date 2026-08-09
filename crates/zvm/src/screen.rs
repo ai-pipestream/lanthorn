@@ -87,18 +87,19 @@ pub fn rgb15_to_888(v: u16) -> (u8, u8, u8) {
     (exp(v & 0x1F), exp((v >> 5) & 0x1F), exp((v >> 10) & 0x1F))
 }
 
-/// Fixed RGB for the v6 greys (Standard 10/11/12). Defined once here so both
+/// RGB for the v6 greys (Standard 10/11/12). Defined once here so both
 /// renderers agree. Any other value falls back to dark grey (12).
 ///
 /// ZMSD §8.3.1 gives the true-colour values for these three entries —
 /// 10 = light grey ($5AD6), 11 = medium grey ($4631), 12 = dark grey ($2D6B) —
 /// so they are just [`rgb15_to_888`] of the spec table, not an invented ramp.
+/// Under [`Palette::Amiga`] they come from Infocom's Amiga table instead
+/// ([`amiga_true_colour`]), which is the one place the greys genuinely differ.
 pub fn grey_rgb(n: u8) -> (u8, u8, u8) {
-    match n {
-        10 => rgb15_to_888(0x5AD6), // light grey  → #B5B5B5
-        11 => rgb15_to_888(0x4631), // medium grey → #8C8C8C
-        _ => rgb15_to_888(0x2D6B),  // dark grey   → #5A5A5A
-    }
+    // Anything outside the three grey numbers reads as dark grey, as it always
+    // has — the callers guard on 10..=12, so this is belt and braces.
+    let n = if matches!(n, 10 | 11) { n } else { 12 };
+    rgb15_to_888(standard_true_colour(n).unwrap_or(0x2D6B))
 }
 
 /// One character cell in the upper window.
@@ -1211,6 +1212,62 @@ pub fn init_header_caps(mem: &mut Memory, honor_game_colours: bool, sound_availa
     advertise_sound(mem, sound_available);
 }
 
+/// The palette a standard colour NUMBER resolves to actual colour through.
+///
+/// ZMSD §8.3.1.1 makes this an interpreter choice, not a fixed law: "The
+/// equivalences between the colour numbers and true colours are *recommended*.
+/// The interpreter may allow the user to change the mapping, but the given
+/// values should be the default." A colour number is a name for "whatever this
+/// machine shows for red", so a host claiming to *be* a particular machine owes
+/// the game that machine's colours.
+///
+/// [`Palette::Standard`] is the §8.3.1 table verbatim and the default — it is
+/// what every babelmap session has always used. [`Palette::Amiga`] is the
+/// sibling, for the Amiga interpreter profile (SQ-0719).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Palette {
+    /// ZMSD §8.3.1's recommended true-colour table.
+    #[default]
+    Standard,
+    /// The palette Infocom's own Amiga interpreter loaded.
+    Amiga,
+}
+
+/// The active palette, as a raw discriminant for [`ACTIVE_PALETTE`].
+const PALETTE_STANDARD: u8 = 0;
+const PALETTE_AMIGA: u8 = 1;
+
+/// The process-wide active palette.
+///
+/// Deliberately global rather than threaded through: the palette is a property
+/// of *the machine babelmap is pretending to be*, and there is exactly one of
+/// those per run. Every consumer — the VM's own `true_value` (window properties
+/// 17/18), the terminal cell renderer, the v6 pixel renderer and the CLI's SGR
+/// path — must agree on it or one game colour would look like two different
+/// colours on the same screen, so a single source beats four parameters
+/// threaded through four unrelated call chains. Set once at boot from the
+/// interpreter profile (`app::interpreter`), and re-asserted on every story
+/// boot so a picker→play loop cannot carry one story's machine into the next.
+static ACTIVE_PALETTE: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(PALETTE_STANDARD);
+
+/// Select the palette standard colour numbers resolve through, process-wide.
+pub fn set_palette(p: Palette) {
+    let v = match p {
+        Palette::Standard => PALETTE_STANDARD,
+        Palette::Amiga => PALETTE_AMIGA,
+    };
+    ACTIVE_PALETTE.store(v, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// The palette standard colour numbers currently resolve through.
+pub fn palette() -> Palette {
+    match ACTIVE_PALETTE.load(core::sync::atomic::Ordering::Relaxed) {
+        PALETTE_AMIGA => Palette::Amiga,
+        _ => Palette::Standard,
+    }
+}
+
 /// Interpreter default background colour written to header $2C when the host
 /// never says otherwise: 2 = black (ZMSD §8.3.1).
 pub const DEFAULT_BG_COLOUR: u8 = 2;
@@ -1218,14 +1275,22 @@ pub const DEFAULT_BG_COLOUR: u8 = 2;
 /// never says otherwise: 9 = white (ZMSD §8.3.1).
 pub const DEFAULT_FG_COLOUR: u8 = 9;
 
-/// Clamp a host-supplied default colour to a standard colour number.
+/// Clamp a host-supplied default colour to a standard colour number a machine
+/// of this `version` could actually have as its own default.
 ///
 /// ZMSD §8.3.1 defines 2..=9 as the true colour names; 0/1 are the "current"/
-/// "default" sentinels, 10–12 are V6-only greys, 13–14 reserved and 15
-/// transparent — none of which are meaningful as *the interpreter's own*
-/// default, so anything outside 2..=9 falls back to `fallback`.
-pub(crate) fn clamp_default_colour(c: u8, fallback: u8) -> u8 {
-    if (2..=9).contains(&c) { c } else { fallback }
+/// "default" sentinels, 13–14 reserved and 15 transparent — none of which are
+/// meaningful as *the interpreter's own* default, so they fall back.
+///
+/// The greys 10–12 exist "only in Version 6", and there they are perfectly
+/// meaningful defaults: Infocom's own Amiga Version 6 interpreter booted with
+/// `DEF_BACK 11` — medium grey — as its default page (`amiga/yzip.h`). So they
+/// are accepted for Version 6 and rejected everywhere else, which is exactly
+/// what the spec's "only in Version 6" says. (SQ-0719; before that nothing ever
+/// offered a grey here, so no existing session's answer moves.)
+pub(crate) fn clamp_default_colour(c: u8, fallback: u8, version: u8) -> u8 {
+    let ok = (2..=9).contains(&c) || (version == 6 && (10..=12).contains(&c));
+    if ok { c } else { fallback }
 }
 
 /// Write the interpreter's default background/foreground colours into header
@@ -1240,21 +1305,84 @@ pub fn write_default_colours(mem: &mut Memory, bg: u8, fg: u8) {
     if mem.version() < 5 {
         return;
     }
-    let bg = clamp_default_colour(bg, DEFAULT_BG_COLOUR);
-    let fg = clamp_default_colour(fg, DEFAULT_FG_COLOUR);
+    let bg = clamp_default_colour(bg, DEFAULT_BG_COLOUR, mem.version());
+    let fg = clamp_default_colour(fg, DEFAULT_FG_COLOUR, mem.version());
     mem.write_byte(0x2C, bg);
     mem.write_byte(0x2D, fg);
     write_header_ext_colours(mem, bg, fg);
 }
 
-/// The ZMSD §8.3.1 true-colour equivalent of standard colour number `n`
-/// (2..=12), as a 15-bit RGB value. `None` for the sentinels (0 current,
-/// 1 default, -1 pixel-under-cursor), the reserved 13/14 and 15 (transparent,
-/// which §8.3.7 gives the special value -4 rather than an RGB triple).
+/// The true-colour equivalent of standard colour number `n` (2..=12), as a
+/// 15-bit RGB value. `None` for the sentinels (0 current, 1 default, -1
+/// pixel-under-cursor), the reserved 13/14 and 15 (transparent, which §8.3.7
+/// gives the special value -4 rather than an RGB triple).
 ///
-/// This is the spec's own table, transcribed verbatim; §8.3.1.1 calls these
-/// equivalences "recommended" and the interpreter default.
+/// Resolved through the [`palette`] the host has selected: [`Palette::Standard`]
+/// (the default) is the spec table below verbatim; [`Palette::Amiga`] is the
+/// palette Infocom's own Amiga interpreter loaded, which §8.3.1.1 explicitly
+/// permits an interpreter to substitute.
 pub fn standard_true_colour(n: u8) -> Option<u16> {
+    match palette() {
+        Palette::Standard => zmsd_true_colour(n),
+        Palette::Amiga => amiga_true_colour(n),
+    }
+}
+
+/// The Amiga palette for standard colour numbers 2..=12, as 15-bit RGB.
+///
+/// Source: Infocom's own Amiga YZIP (Version 6) interpreter, `amiga/yzip1.c` in
+/// the released historical interpreter sources — `colortable[]` ("Amiga RGB
+/// values for the 8 XZIP colors … The values were determined empirically") read
+/// through `colormap[]`, which maps a Z-machine colour number to a table slot.
+/// The Amiga's `SetRGB4` takes 4 bits per channel, so the raw entries are
+/// `0x0RGB`; they are widened to the Z-machine's 5-bit channels by bit
+/// replication (`n << 1 | n >> 3`), the expansion that keeps `$F` at full
+/// intensity and `$0` at zero.
+///
+/// ```text
+/// colour        yzip1.c slot   raw     → 15-bit
+/// 2  black      colortable[2]  $0000     $0000
+/// 3  red        colortable[4]  $0E00     $001D
+/// 4  green      colortable[3]  $00C0     $0320
+/// 5  yellow     colortable[5]  $0EE0     $03BD
+/// 6  blue       colortable[0]  $005A     $5540
+/// 7  magenta    colortable[6]  $0F0F     $7C1F
+/// 8  cyan       colortable[7]  $00EE     $77A0
+/// 9  white      colortable[1]  $0FFF     $7FFF
+/// 10 light grey colortable[8]  $0AAA     $56B5
+/// 11 medium     colortable[9]  $x777     $39CE
+/// 12 dark grey  colortable[10] $0444     $2108
+/// ```
+///
+/// (Slot 9 is written `0x7777` in the original; `SetRGB4` uses only the low 12
+/// bits, so the stray high nibble never reached the hardware.)
+///
+/// Six of the eleven entries — black, red, yellow, magenta, cyan, white — come
+/// out bit-for-bit identical to ZMSD §8.3.1's table, which is a strong sign the
+/// standard's "recommended" values were themselves read off an Amiga. Green,
+/// blue and the three greys are where the two genuinely differ.
+pub fn amiga_true_colour(n: u8) -> Option<u16> {
+    Some(match n {
+        2 => 0x0000,  // black       $000
+        3 => 0x001D,  // red         $E00
+        4 => 0x0320,  // green       $0C0
+        5 => 0x03BD,  // yellow      $EE0
+        6 => 0x5540,  // blue        $05A
+        7 => 0x7C1F,  // magenta     $F0F
+        8 => 0x77A0,  // cyan        $0EE
+        9 => 0x7FFF,  // white       $FFF
+        10 => 0x56B5, // light grey  $AAA [V6 only]
+        11 => 0x39CE, // medium grey $777 [V6 only]
+        12 => 0x2108, // dark grey   $444 [V6 only]
+        _ => return None,
+    })
+}
+
+/// ZMSD §8.3.1's true-colour table for standard colour numbers 2..=12, as
+/// 15-bit RGB. The spec's own table, transcribed verbatim; §8.3.1.1 calls these
+/// equivalences "recommended" and the interpreter default, and they are
+/// babelmap's default too ([`Palette::Standard`]).
+pub fn zmsd_true_colour(n: u8) -> Option<u16> {
     Some(match n {
         2 => 0x0000,  // black
         3 => 0x001D,  // red

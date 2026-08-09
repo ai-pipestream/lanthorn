@@ -48,14 +48,23 @@ pub(crate) fn reset_game(
             } else {
                 app::graphics::PictSource::new(None)
             };
+            // SQ-0719: a restart re-runs the same story on the same machine, so
+            // the interpreter profile resolved at boot supplies the same three
+            // answers it did there — the standard window a native Amiga archive
+            // has no chunk to declare, the machine's own default colours, and its
+            // interpreter number. IBM PC (every Blorb-sourced story) supplies
+            // none of them and this is the prior code exactly.
+            let profile = state.config.interpreter_profile;
             let picture_dims = picts.all_pict_dims();
-            let v6_screen_px = picts.std_window();
+            let v6_screen_px = picts.std_window().or_else(|| profile.std_window());
             let host_default_colours = if state.config.honor_game_colours {
-                app::colors::host_default_colour_pair(
-                    state.colors.theme.get("transcript").style,
-                    state.term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
-                    state.term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
-                )
+                profile.default_colours().or_else(|| {
+                    app::colors::host_default_colour_pair(
+                        state.colors.theme.get("transcript").style,
+                        state.term_default_colors.fg.map(|c| (c.0[0], c.0[1], c.0[2])),
+                        state.term_default_colors.bg.map(|c| (c.0[0], c.0[1], c.0[2])),
+                    )
+                })
             } else {
                 None
             };
@@ -63,7 +72,7 @@ pub(crate) fn reset_game(
                 bytes,
                 state.config.honor_game_colours,
                 state.config.enable_sound,
-                state.config.interpreter_number,
+                state.config.interpreter_number.or_else(|| profile.interpreter_number()),
                 // Keep boot tracing across a restart in a `--debug` session, as
                 // the Glulx arm below does.
                 state.persist_debug_trace,
